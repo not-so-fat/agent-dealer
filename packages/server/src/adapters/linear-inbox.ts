@@ -1,5 +1,5 @@
 import type { LinearCandidate, LinearIntakeConfig } from "@agent-dealer/shared";
-import { findActiveByExternalId, listRuns } from "../repository/runs.js";
+import { findActiveByExternalId, listRunsReadyForPlanReview } from "../repository/runs.js";
 import { getLinearIntakeConfig } from "../repository/intake-settings.js";
 
 const LINEAR_API = "https://api.linear.app/graphql";
@@ -148,7 +148,7 @@ export async function getLinearIssue(issueId: string): Promise<LinearCandidate |
   return nodeToCandidate(data.issue);
 }
 
-/** Runs awaiting plan review (Intake list). */
+/** Runs with a plan ready for human review. */
 export function listAwaitingPlanReview() {
-  return listRuns("plan_pending");
+  return listRunsReadyForPlanReview();
 }

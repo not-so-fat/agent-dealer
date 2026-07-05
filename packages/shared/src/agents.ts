@@ -19,6 +19,10 @@ export const AgentProfile = z.object({
   deckId: z.string().uuid().nullable(),
   deckName: z.string().nullable(),
   playbookId: z.string().nullable(),
+  /** CLI model id for planning; null = runtime default */
+  defaultPlanModel: z.string().nullable(),
+  /** CLI model id for execution; null = runtime default */
+  defaultExecuteModel: z.string().nullable(),
   isBuiltin: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -37,6 +41,8 @@ export const CreateAgentInput = z.object({
   workspaceRoot: z.string().min(1),
   deckId: z.string().uuid().optional(),
   playbookId: z.string().optional(),
+  defaultPlanModel: z.string().nullable().optional(),
+  defaultExecuteModel: z.string().nullable().optional(),
 });
 export type CreateAgentInput = z.infer<typeof CreateAgentInput>;
 
@@ -46,6 +52,8 @@ export const UpdateAgentInput = z.object({
   workspaceRoot: z.string().nullable().optional(),
   deckId: z.string().uuid().nullable().optional(),
   playbookId: z.string().nullable().optional(),
+  defaultPlanModel: z.string().nullable().optional(),
+  defaultExecuteModel: z.string().nullable().optional(),
 });
 export type UpdateAgentInput = z.infer<typeof UpdateAgentInput>;
 

@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import type { Run } from "@agent-dealer/shared";
+import { useCallback } from "react";
+import type { AgentWithHealth, Run } from "@agent-dealer/shared";
 import {
   categoryLabel,
   deckLabel,
@@ -15,6 +15,7 @@ import DoneReviewPanel from "./DoneReviewPanel";
 import ExecutionPanel from "./ExecutionPanel";
 import PlanReviewPanel from "./PlanReviewPanel";
 import ResultReviewPanel from "./ResultReviewPanel";
+import ReviewDrawer from "./ReviewDrawer";
 
 type QueueNav = {
   runs: Run[];
@@ -25,6 +26,7 @@ type QueueNav = {
 
 type Props = {
   run: Run;
+  agents: AgentWithHealth[];
   onClose: () => void;
   onRefresh: () => void;
   onApproved?: () => void;
@@ -36,6 +38,7 @@ type Props = {
 
 export default function RunDrawer({
   run,
+  agents,
   onClose,
   onRefresh,
   onApproved,
@@ -47,13 +50,8 @@ export default function RunDrawer({
   const meta = statusMeta(run.status);
   const deck = deckLabel(run);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-        return;
-      }
+  const onKeyDown = useCallback(
+    (e: KeyboardEvent) => {
       if (!queueNav) return;
       if (e.key === "ArrowLeft" && queueNav.index > 0) {
         e.preventDefault();
@@ -63,25 +61,15 @@ export default function RunDrawer({
         e.preventDefault();
         queueNav.onNext();
       }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [queueNav, onClose]);
+    },
+    [queueNav],
+  );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6">
-      <button
-        type="button"
-        className="absolute inset-0 bg-black/65 backdrop-blur-[2px]"
-        onClick={onClose}
-        aria-label="Close review"
-      />
-      <div
-        role="dialog"
-        aria-modal="true"
-        className="relative w-[min(1200px,96vw)] h-[min(92vh,960px)] panel-surface flex flex-col text-[#E8F6F4] rounded-2xl overflow-hidden"
-      >
-      <div className="p-4 border-b border-white/10 space-y-3 shrink-0">
+    <ReviewDrawer
+      onClose={onClose}
+      onKeyDown={onKeyDown}
+      header={
         <div className="flex justify-between items-start gap-3">
           <div className="min-w-0 flex-1 space-y-2">
             <div className="flex flex-wrap items-center gap-1.5">
@@ -114,34 +102,33 @@ export default function RunDrawer({
             </button>
           </div>
         </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-5">
-        {(run.status === "plan_pending" || run.status === "queued") && (
-          <PlanReviewPanel
-            run={run}
-            onRefresh={onRefresh}
-            onApproved={onApproved}
-            onApprovedAndNext={onApprovedAndNext}
-          />
-        )}
-        {(run.status === "plan_approved" || run.status === "running") && (
-          <ExecutionPanel run={run} onRefresh={onRefresh} />
-        )}
-        {(run.status === "review" || run.status === "failed") && (
-          <ResultReviewPanel
-            run={run}
-            onRefresh={onRefresh}
-            onRetry={onRetry}
-            onDoneAndNext={onDoneAndNext}
-          />
-        )}
-        {run.status === "done" && <DoneReviewPanel run={run} />}
-        {run.status === "cancelled" && (
-          <p className="text-sm text-white/50">This task was removed from Operations.</p>
-        )}
-      </div>
-    </div>
-    </div>
+      }
+    >
+      {(run.status === "plan_pending" || run.status === "queued") && (
+        <PlanReviewPanel
+          run={run}
+          agents={agents}
+          onRefresh={onRefresh}
+          onApproved={onApproved}
+          onApprovedAndNext={onApprovedAndNext}
+        />
+      )}
+      {(run.status === "plan_approved" || run.status === "running") && (
+        <ExecutionPanel run={run} agents={agents} onRefresh={onRefresh} />
+      )}
+      {(run.status === "review" || run.status === "failed") && (
+        <ResultReviewPanel
+          run={run}
+          agents={agents}
+          onRefresh={onRefresh}
+          onRetry={onRetry}
+          onDoneAndNext={onDoneAndNext}
+        />
+      )}
+      {run.status === "done" && <DoneReviewPanel run={run} />}
+      {run.status === "cancelled" && (
+        <p className="text-sm text-white/50">This task was removed from Operations.</p>
+      )}
+    </ReviewDrawer>
   );
 }

@@ -9,7 +9,7 @@ import type {
 import { canTransition } from "@agent-dealer/shared";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
-import { resolveAgent } from "./agents.js";
+import { resolveAgent, getAgent } from "./agents.js";
 
 interface RunRow {
   id: string;
@@ -27,6 +27,8 @@ interface RunRow {
   deck_name: string | null;
   playbook_id: string | null;
   runtime: string | null;
+  plan_model: string | null;
+  execute_model: string | null;
   status: string;
   lineage_id: string | null;
   acceptance_criteria: string | null;
@@ -53,6 +55,8 @@ function rowToRun(row: RunRow): Run {
     deckName: row.deck_name,
     playbookId: row.playbook_id,
     runtime: row.runtime as Run["runtime"],
+    planModel: row.plan_model,
+    executeModel: row.execute_model,
     status: row.status as RunStatus,
     lineageId: row.lineage_id,
     acceptanceCriteria: row.acceptance_criteria,
@@ -94,6 +98,8 @@ export function createRun(input: CreateRunInput, opts?: {
     deck_name: agent.deckName ?? opts?.deckName ?? null,
     playbook_id: agent.playbookId ?? null,
     runtime: agent.runtime,
+    plan_model: input.planModel ?? null,
+    execute_model: input.executeModel ?? null,
     status: input.status,
     lineage_id: opts?.lineageId ?? null,
     acceptance_criteria: input.acceptanceCriteria ?? null,
@@ -112,12 +118,14 @@ export function createRun(input: CreateRunInput, opts?: {
   db.prepare(`
     INSERT INTO runs (
       id, source, external_id, external_label, task_category, title, description, repo,
-      artifact_workspace, agent_id, agent_name, deck_id, deck_name, playbook_id, runtime, status,
+      artifact_workspace, agent_id, agent_name, deck_id, deck_name, playbook_id, runtime,
+      plan_model, execute_model, status,
       lineage_id, acceptance_criteria, approval_gates_json, budget_json,
       created_at, updated_at
     ) VALUES (
       @id, @source, @external_id, @external_label, @task_category, @title, @description, @repo,
-      @artifact_workspace, @agent_id, @agent_name, @deck_id, @deck_name, @playbook_id, @runtime, @status,
+      @artifact_workspace, @agent_id, @agent_name, @deck_id, @deck_name, @playbook_id, @runtime,
+      @plan_model, @execute_model, @status,
       @lineage_id, @acceptance_criteria, @approval_gates_json, @budget_json,
       @created_at, @updated_at
     )
@@ -169,30 +177,76 @@ export function findActiveByExternalId(source: string, externalId: string): Run 
   return row ? rowToRun(row) : null;
 }
 
-export function updateRunFields(
-  id: string,
-  patch: Partial<{ deck_id: string | null; deck_name: string | null; playbook_id: string | null; runtime: string | null }>
-): Run {
+/** plan_pending runs where the agent (or human) has written a plan — ready for review. */
+export function listRunsReadyForPlanReview(): Run[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT DISTINCT r.* FROM runs r
+       INNER JOIN artifacts a ON a.run_id = r.id AND a.kind = 'draft_plan'
+       WHERE r.status = 'plan_pending'
+       ORDER BY r.updated_at ASC`
+    )
+    .all() as RunRow[];
+  return rows.map(rowToRun);
+}
+
+export function resolveModelForPhase(run: Run, phase: "plan" | "execute"): string | undefined {
+  const agent = run.agentId ? getAgent(run.agentId) : null;
+  const raw =
+    phase === "plan"
+      ? (run.planModel ?? agent?.defaultPlanModel ?? null)
+      : (run.executeModel ?? agent?.defaultExecuteModel ?? null);
+  const trimmed = raw?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+type RunFieldPatch = Partial<{
+  deck_id: string | null;
+  deck_name: string | null;
+  playbook_id: string | null;
+  runtime: string | null;
+  plan_model: string | null;
+  execute_model: string | null;
+}>;
+
+function applyRunFieldPatch(current: RunRow, patch: RunFieldPatch): RunRow {
+  return {
+    ...current,
+    deck_id: patch.deck_id !== undefined ? patch.deck_id : current.deck_id,
+    deck_name: patch.deck_name !== undefined ? patch.deck_name : current.deck_name,
+    playbook_id: patch.playbook_id !== undefined ? patch.playbook_id : current.playbook_id,
+    runtime: patch.runtime !== undefined ? patch.runtime : current.runtime,
+    plan_model: patch.plan_model !== undefined ? patch.plan_model : current.plan_model,
+    execute_model: patch.execute_model !== undefined ? patch.execute_model : current.execute_model,
+  };
+}
+
+export function updateRunFields(id: string, patch: RunFieldPatch): Run {
   const run = getRun(id);
   if (!run) throw new Error(`Run not found: ${id}`);
   const now = new Date().toISOString();
   const db = getDb();
   const current = db.prepare("SELECT * FROM runs WHERE id = ?").get(id) as RunRow;
+  const next = applyRunFieldPatch(current, patch);
   db.prepare(`
     UPDATE runs SET
       updated_at = @updated_at,
       deck_id = @deck_id,
       deck_name = @deck_name,
       playbook_id = @playbook_id,
-      runtime = @runtime
+      runtime = @runtime,
+      plan_model = @plan_model,
+      execute_model = @execute_model
     WHERE id = @id
   `).run({
     id,
     updated_at: now,
-    deck_id: patch.deck_id !== undefined ? patch.deck_id : current.deck_id,
-    deck_name: patch.deck_name !== undefined ? patch.deck_name : current.deck_name,
-    playbook_id: patch.playbook_id !== undefined ? patch.playbook_id : current.playbook_id,
-    runtime: patch.runtime !== undefined ? patch.runtime : current.runtime,
+    deck_id: next.deck_id,
+    deck_name: next.deck_name,
+    playbook_id: next.playbook_id,
+    runtime: next.runtime,
+    plan_model: next.plan_model,
+    execute_model: next.execute_model,
   });
   const updated = getRun(id);
   if (!updated) throw new Error(`Run vanished: ${id}`);
@@ -202,7 +256,7 @@ export function updateRunFields(
 export function transitionRun(
   id: string,
   to: RunStatus,
-  patch?: Partial<{ deck_id: string | null; deck_name: string | null; playbook_id: string | null; runtime: string | null }>
+  patch?: RunFieldPatch
 ): Run {
   const run = getRun(id);
   if (!run) throw new Error(`Run not found: ${id}`);
@@ -212,6 +266,7 @@ export function transitionRun(
   const now = new Date().toISOString();
   const db = getDb();
   const current = db.prepare("SELECT * FROM runs WHERE id = ?").get(id) as RunRow;
+  const next = applyRunFieldPatch(current, patch ?? {});
   db.prepare(`
     UPDATE runs SET
       status = @status,
@@ -219,16 +274,20 @@ export function transitionRun(
       deck_id = @deck_id,
       deck_name = @deck_name,
       playbook_id = @playbook_id,
-      runtime = @runtime
+      runtime = @runtime,
+      plan_model = @plan_model,
+      execute_model = @execute_model
     WHERE id = @id
   `).run({
     id,
     status: to,
     updated_at: now,
-    deck_id: patch?.deck_id !== undefined ? patch.deck_id : current.deck_id,
-    deck_name: patch?.deck_name !== undefined ? patch.deck_name : current.deck_name,
-    playbook_id: patch?.playbook_id !== undefined ? patch.playbook_id : current.playbook_id,
-    runtime: patch?.runtime !== undefined ? patch.runtime : current.runtime,
+    deck_id: next.deck_id,
+    deck_name: next.deck_name,
+    playbook_id: next.playbook_id,
+    runtime: next.runtime,
+    plan_model: next.plan_model,
+    execute_model: next.execute_model,
   });
   appendEvent(id, "run.status_changed", { from: run.status, to });
   const updated = getRun(id);

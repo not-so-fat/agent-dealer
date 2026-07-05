@@ -1,4 +1,7 @@
 import type {
+  AgentDeckConfig,
+  AgentDeckConfigPatch,
+  AgentDeckStatus,
   AgentWithHealth,
   Artifact,
   CreateAgentInput,
@@ -8,12 +11,15 @@ import type {
   LinearConnectionStatus,
   LinearIntakeConfig,
   LinearIntakeConfigPatch,
+  LinearIntakeConfigView,
   QueueSnapshot,
+  RuntimeModelsResponse,
   Run,
   StreamTraceContent,
   UpdateAgentInput,
   UsageContent,
 } from "@agent-dealer/shared";
+import { clearCachedRuntimeModels, fetchRuntimeModelsDeduped } from "./lib/runtimeModelsCache";
 
 const API = "";
 
@@ -45,13 +51,13 @@ export async function fetchLinearStatus(): Promise<LinearConnectionStatus> {
   return res.json();
 }
 
-export async function fetchLinearConfig(): Promise<LinearIntakeConfig> {
+export async function fetchLinearConfig(): Promise<LinearIntakeConfigView> {
   const res = await fetch(`${API}/api/intake/linear/config`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function patchLinearConfig(patch: LinearIntakeConfigPatch): Promise<LinearIntakeConfig> {
+export async function patchLinearConfig(patch: LinearIntakeConfigPatch): Promise<LinearIntakeConfigView> {
   const res = await fetch(`${API}/api/intake/linear/config`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -63,7 +69,7 @@ export async function patchLinearConfig(patch: LinearIntakeConfigPatch): Promise
 
 export async function promoteLinearIssue(
   issueId: string,
-  body: { agentId?: string; autoAgent?: boolean }
+  body: { agentId?: string; autoAgent?: boolean; planModel?: string | null }
 ): Promise<Run> {
   const res = await fetch(`${API}/api/intake/linear/${issueId}/promote`, {
     method: "POST",
@@ -129,6 +135,8 @@ export async function createRun(body: {
   artifactWorkspace?: string;
   acceptanceCriteria?: string;
   agentId: string;
+  planModel?: string | null;
+  executeModel?: string | null;
 }): Promise<Run> {
   const res = await fetch(`${API}/api/runs`, {
     method: "POST",
@@ -139,18 +147,31 @@ export async function createRun(body: {
   return res.json();
 }
 
-export async function updatePlan(id: string, planMarkdown: string, approve: boolean): Promise<Run> {
+export async function updatePlan(
+  id: string,
+  planMarkdown: string,
+  approve: boolean,
+  executeModel?: string | null
+): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/plan`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ planMarkdown, approve }),
+    body: JSON.stringify({
+      planMarkdown,
+      approve,
+      ...(approve && executeModel !== undefined ? { executeModel } : {}),
+    }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function draftPlan(id: string): Promise<Run> {
-  const res = await fetch(`${API}/api/runs/${id}/draft-plan`, { method: "POST" });
+export async function draftPlan(id: string, planModel?: string | null): Promise<Run> {
+  const res = await fetch(`${API}/api/runs/${id}/draft-plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(planModel !== undefined ? { planModel } : {}),
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -168,11 +189,11 @@ export async function configureAgent(
   return res.json();
 }
 
-export async function kickRun(id: string): Promise<Run> {
+export async function kickRun(id: string, executeModel?: string | null): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/kick`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify(executeModel !== undefined ? { executeModel } : {}),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -184,11 +205,53 @@ export async function approveRun(id: string): Promise<Run> {
   return res.json();
 }
 
-export async function retryRun(id: string, feedback: string): Promise<Run> {
+export async function retryRun(
+  id: string,
+  feedback: string,
+  planModel?: string | null
+): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/retry`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ feedback }),
+    body: JSON.stringify({
+      feedback,
+      ...(planModel !== undefined ? { planModel } : {}),
+    }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function fetchRuntimeModels(
+  runtime: string,
+  opts?: { refresh?: boolean }
+): Promise<RuntimeModelsResponse> {
+  const qs = opts?.refresh ? "?refresh=1" : "";
+  if (opts?.refresh) clearCachedRuntimeModels(runtime);
+  return fetchRuntimeModelsDeduped(runtime, async () => {
+    const res = await fetch(`${API}/api/runtimes/${runtime}/models${qs}`);
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  });
+}
+
+export async function fetchAgentDeckStatus(): Promise<AgentDeckStatus> {
+  const res = await fetch(`${API}/api/agent-deck/status`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function fetchAgentDeckConfig(): Promise<AgentDeckConfig> {
+  const res = await fetch(`${API}/api/agent-deck/config`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function patchAgentDeckConfig(patch: AgentDeckConfigPatch): Promise<AgentDeckConfig> {
+  const res = await fetch(`${API}/api/agent-deck/config`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();

@@ -5,11 +5,13 @@ import {
   getLatestArtifact,
   getRun,
   listRuns,
+  listRunsReadyForPlanReview,
   transitionRun,
 } from "../repository/runs.js";
 import { runAgent } from "../runners/claude.js";
 import { persistRunOutput } from "../runners/persist.js";
-import { checkAgentDeckHealth, pollLinearIssues } from "../adapters/external.js";
+import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
+import { pollLinearIssues } from "../adapters/external.js";
 import { syncLinearForRun } from "../adapters/linear-sync.js";
 import { listAgentsWithHealth } from "../adapters/agent-health.js";
 import { listAgents } from "../repository/agents.js";
@@ -72,7 +74,7 @@ export function getSnapshot(): QueueSnapshotInternal {
     .filter((r) => r.status === "done")
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, 10);
-  const awaitingPlanReview = sortQueueFifo(all.filter((r) => r.status === "plan_pending"));
+  const awaitingPlanReview = sortQueueFifo(listRunsReadyForPlanReview());
 
   return {
     running: runningRuns.length,
@@ -210,6 +212,13 @@ export async function draftPlan(run: Run, opts?: { replace?: boolean }): Promise
       rawTranscript: result.transcript,
     });
 
+    const after = getRun(run.id);
+    if (!after || (after.status !== "plan_pending" && after.status !== "queued")) {
+      // Human approved or run moved on while agent was still planning — ignore late result.
+      await notify();
+      return after ?? updated;
+    }
+
     if (persisted.planMarkdown) {
       addArtifact(
         updated.id,
@@ -219,16 +228,20 @@ export async function draftPlan(run: Run, opts?: { replace?: boolean }): Promise
         result.logPath
       );
     } else if (!opts?.replace) {
-      addArtifact(updated.id, "feedback", { error: "Plan draft returned no markdown" }, "system");
+      addArtifact(updated.id, "feedback", { error: "Agent did not return a plan" }, "system");
     }
 
-    if (result.exitCode !== 0) {
+    const planFailed = !persisted.planMarkdown && result.exitCode !== 0;
+    if (planFailed) {
       transitionRun(run.id, "failed");
-      addArtifact(run.id, "feedback", { error: "Plan draft failed", exitCode: result.exitCode }, "system");
+      addArtifact(run.id, "feedback", { error: "Planning failed", exitCode: result.exitCode }, "system");
     }
   } catch (err) {
-    transitionRun(run.id, "failed");
-    addArtifact(run.id, "feedback", { error: String(err) }, "system");
+    const after = getRun(run.id);
+    if (after && (after.status === "plan_pending" || after.status === "queued")) {
+      transitionRun(run.id, "failed");
+      addArtifact(run.id, "feedback", { error: String(err) }, "system");
+    }
   }
 
   await notify();

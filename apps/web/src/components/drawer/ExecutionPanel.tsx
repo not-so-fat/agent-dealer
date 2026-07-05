@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Artifact, Run } from "@agent-dealer/shared";
+import type { AgentWithHealth, Artifact, Run } from "@agent-dealer/shared";
 import { agentSummary } from "../../AgentConfigFields";
+import ModelSelect from "../agents/ModelSelect";
 import {
   cancelRun,
   fetchLogTail,
@@ -14,13 +15,18 @@ import { TracePanel, UsagePanel } from "../panels/TraceUsage";
 
 type Props = {
   run: Run;
+  agents: AgentWithHealth[];
   onRefresh: () => void;
 };
 
-export default function ExecutionPanel({ run, onRefresh }: Props) {
+export default function ExecutionPanel({ run, agents, onRefresh }: Props) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [transcriptText, setTranscriptText] = useState("");
+  const [executeModel, setExecuteModel] = useState("");
   const [busy, setBusy] = useState(false);
+
+  const agent = agents.find((a) => a.id === run.agentId);
+  const runtime = run.runtime ?? agent?.runtime ?? "claude_code";
 
   const load = useCallback(async () => {
     const detail = await fetchRunDetail(run.id);
@@ -35,6 +41,10 @@ export default function ExecutionPanel({ run, onRefresh }: Props) {
   useEffect(() => {
     load().catch(console.error);
   }, [load]);
+
+  useEffect(() => {
+    setExecuteModel(run.executeModel ?? "");
+  }, [run.id, run.executeModel]);
 
   useEffect(() => {
     if (!isRunning && !isWaiting) return;
@@ -74,14 +84,24 @@ export default function ExecutionPanel({ run, onRefresh }: Props) {
       </section>
 
       {isWaiting && (
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => act(() => kickRun(run.id))}
-          className="btn-ghost px-3 py-2 w-full"
-        >
-          Run now (skip queue wait)
-        </button>
+        <>
+          <ModelSelect
+            runtime={runtime}
+            label="Execution model"
+            value={executeModel}
+            onChange={setExecuteModel}
+            defaultModelId={agent?.defaultExecuteModel}
+            disabled={busy}
+          />
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => act(() => kickRun(run.id, executeModel || null))}
+            className="btn-ghost px-3 py-2 w-full"
+          >
+            Run now (skip queue wait)
+          </button>
+        </>
       )}
 
       {traceExec && <TracePanel trace={traceExec} label="Live trace" />}

@@ -1,4 +1,7 @@
-import "dotenv/config";
+import {
+  formatEnvStartupLine,
+  loadAgentDealerEnv,
+} from "./config/load-env.js";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { enrichPathForCliTools } from "./cli-env.js";
@@ -6,7 +9,10 @@ import { migrate } from "./db/index.js";
 import { registerRoutes } from "./routes/index.js";
 import { startQueue } from "./queue/dispatcher.js";
 
-const port = Number(process.env.PORT ?? 8765);
+const { mode, envFile } = loadAgentDealerEnv();
+console.log(formatEnvStartupLine(mode, envFile));
+
+const port = Number(process.env.PORT ?? 2221);
 
 async function main(): Promise<void> {
   enrichPathForCliTools();

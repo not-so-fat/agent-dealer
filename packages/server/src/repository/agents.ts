@@ -10,6 +10,8 @@ interface AgentRow {
   deck_name: string | null;
   playbook_id: string | null;
   workspace_root: string | null;
+  default_plan_model: string | null;
+  default_execute_model: string | null;
   is_builtin: number;
   created_at: string;
   updated_at: string;
@@ -24,6 +26,8 @@ function rowToAgent(row: AgentRow): AgentProfile {
     deckId: row.deck_id,
     deckName: row.deck_name,
     playbookId: row.playbook_id,
+    defaultPlanModel: row.default_plan_model,
+    defaultExecuteModel: row.default_execute_model,
     isBuiltin: row.is_builtin === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -32,7 +36,7 @@ function rowToAgent(row: AgentRow): AgentProfile {
 
 export function listAgents(): AgentProfile[] {
   const rows = getDb()
-    .prepare("SELECT * FROM agents ORDER BY is_builtin DESC, name ASC")
+    .prepare("SELECT * FROM agents ORDER BY name ASC")
     .all() as AgentRow[];
   return rows.map(rowToAgent);
 }
@@ -47,8 +51,8 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
   const now = new Date().toISOString();
   const id = uuid();
   db.prepare(`
-    INSERT INTO agents (id, name, runtime, deck_id, deck_name, playbook_id, workspace_root, is_builtin, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    INSERT INTO agents (id, name, runtime, deck_id, deck_name, playbook_id, workspace_root, default_plan_model, default_execute_model, is_builtin, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
   `).run(
     id,
     input.name.trim(),
@@ -57,6 +61,8 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
     deckName ?? null,
     input.playbookId ?? null,
     input.workspaceRoot.trim(),
+    input.defaultPlanModel ?? null,
+    input.defaultExecuteModel ?? null,
     now,
     now
   );
@@ -74,22 +80,38 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
     input.workspaceRoot !== undefined ? input.workspaceRoot?.trim() || null : existing.workspaceRoot;
   const deckId = input.deckId !== undefined ? input.deckId : existing.deckId;
   const playbookId = input.playbookId !== undefined ? input.playbookId : existing.playbookId;
+  const defaultPlanModel =
+    input.defaultPlanModel !== undefined ? input.defaultPlanModel : existing.defaultPlanModel;
+  const defaultExecuteModel =
+    input.defaultExecuteModel !== undefined ? input.defaultExecuteModel : existing.defaultExecuteModel;
   const resolvedDeckName =
     input.deckId !== undefined ? (input.deckId ? (deckName ?? null) : null) : existing.deckName;
 
   getDb()
     .prepare(`
-      UPDATE agents SET name = ?, runtime = ?, deck_id = ?, deck_name = ?, playbook_id = ?, workspace_root = ?, updated_at = ?
+      UPDATE agents SET name = ?, runtime = ?, deck_id = ?, deck_name = ?, playbook_id = ?, workspace_root = ?,
+        default_plan_model = ?, default_execute_model = ?, updated_at = ?
       WHERE id = ?
     `)
-    .run(name, runtime, deckId, resolvedDeckName, playbookId, workspaceRoot, now, id);
+    .run(
+      name,
+      runtime,
+      deckId,
+      resolvedDeckName,
+      playbookId,
+      workspaceRoot,
+      defaultPlanModel,
+      defaultExecuteModel,
+      now,
+      id
+    );
 
   return getAgent(id);
 }
 
 export function deleteAgent(id: string): boolean {
   const agent = getAgent(id);
-  if (!agent || agent.isBuiltin) return false;
+  if (!agent) return false;
   getDb().prepare("DELETE FROM agents WHERE id = ?").run(id);
   return true;
 }

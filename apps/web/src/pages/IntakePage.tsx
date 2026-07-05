@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AgentWithHealth, LinearCandidate } from "@agent-dealer/shared";
+import type { AgentWithHealth, LinearCandidate, LinearIntakeConfigView } from "@agent-dealer/shared";
 import InboxCandidateCard from "../components/intake/InboxCandidateCard";
 import InboxPanel from "../components/intake/InboxPanel";
+import IntakeIssueDrawer from "../components/intake/IntakeIssueDrawer";
 import LinearImportPanel from "../components/intake/LinearImportPanel";
-import LinearIssuePanel from "../components/intake/LinearIssuePanel";
 import ManualTaskForm from "../components/intake/ManualTaskForm";
-import { fetchLinearInbox } from "../api";
+import { fetchLinearConfig, fetchLinearInbox, fetchLinearStatus } from "../api";
+import { nextInQueue, queueIndex } from "../lib/reviewQueue";
 
 type PanelMode = "issue" | "import" | "manual" | null;
 
@@ -22,13 +23,17 @@ export default function IntakePage({ agents, onRefresh, onGoOperations, onManage
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [panel, setPanel] = useState<PanelMode>(null);
+  const [linearConfig, setLinearConfig] = useState<LinearIntakeConfigView | null>(null);
+  const [linearConnected, setLinearConnected] = useState(false);
 
   const refreshInbox = useCallback(() => {
     setLoading(true);
     setError(null);
-    return fetchLinearInbox()
-      .then((items) => {
+    return Promise.all([fetchLinearInbox(), fetchLinearConfig(), fetchLinearStatus()])
+      .then(([items, cfg, status]) => {
         setCandidates(items);
+        setLinearConfig(cfg);
+        setLinearConnected(status.connected);
         return items;
       })
       .catch((e) => {
@@ -44,8 +49,45 @@ export default function IntakePage({ agents, onRefresh, onGoOperations, onManage
   }, [refreshInbox]);
 
   const selected = candidates.find((c) => c.id === selectedId) ?? null;
+  const inboxIndex = selectedId ? queueIndex(candidates, selectedId) : -1;
 
-  const afterKick = () => {
+  const goToInboxAt = useCallback((index: number) => {
+    const candidate = candidates[index];
+    if (candidate) {
+      setSelectedId(candidate.id);
+      setPanel("issue");
+    }
+  }, [candidates]);
+
+  const advanceAfterKick = useCallback(
+    async (currentId: string) => {
+      const next = nextInQueue(candidates, currentId);
+      onRefresh();
+      const items = await refreshInbox();
+      if (!next) {
+        setPanel(null);
+        setSelectedId(null);
+        return;
+      }
+      const stillThere = items.find((c) => c.id === next.id);
+      if (stillThere) {
+        setSelectedId(stillThere.id);
+        setPanel("issue");
+        return;
+      }
+      const fallback = nextInQueue(items, currentId);
+      if (fallback) {
+        setSelectedId(fallback.id);
+        setPanel("issue");
+      } else {
+        setPanel(null);
+        setSelectedId(null);
+      }
+    },
+    [candidates, onRefresh, refreshInbox],
+  );
+
+  const afterManualCreated = () => {
     onRefresh();
     setPanel(null);
     setSelectedId(null);
@@ -70,6 +112,7 @@ export default function IntakePage({ agents, onRefresh, onGoOperations, onManage
 
   const closePanel = () => {
     setPanel(null);
+    setSelectedId(null);
   };
 
   return (
@@ -110,9 +153,18 @@ export default function IntakePage({ agents, onRefresh, onGoOperations, onManage
             {candidates.length === 0 && !loading ? (
               <div className="py-12 text-center space-y-3">
                 <p className="text-sm text-white/45">No tasks in inbox</p>
+                {linearConnected && linearConfig && (
+                  <p className="text-xs text-white/40 max-w-md mx-auto">
+                    Filtering Linear: {linearConfig.stateFilter.join(", ")}
+                    {linearConfig.assigneeMe ? " · assigned to you" : ""}
+                    {linearConfig.envOverrides.stateFilter || linearConfig.envOverrides.teamId
+                      ? " · some filters from env"
+                      : ""}
+                  </p>
+                )}
                 <div className="flex justify-center gap-2">
                   <button type="button" onClick={openImport} className="btn-ghost px-3 py-1.5 text-sm">
-                    Linear Import
+                    Linear settings
                   </button>
                   <button type="button" onClick={openManual} className="btn-gold px-3 py-1.5 text-sm">
                     + Manual Task
@@ -132,21 +184,6 @@ export default function IntakePage({ agents, onRefresh, onGoOperations, onManage
           </div>
         </div>
 
-        {panel === "issue" && selected && (
-          <InboxPanel
-            title={selected.identifier}
-            subtitle={selected.title}
-            onClose={closePanel}
-          >
-            <LinearIssuePanel
-              issue={selected}
-              agents={agents}
-              onPromoted={afterKick}
-              onManageAgents={onManageAgents}
-            />
-          </InboxPanel>
-        )}
-
         {panel === "import" && (
           <InboxPanel title="Linear Import" subtitle="Fetch issues assigned to you" onClose={closePanel}>
             <LinearImportPanel
@@ -163,13 +200,33 @@ export default function IntakePage({ agents, onRefresh, onGoOperations, onManage
           <InboxPanel title="Manual Task" subtitle="For testing — not the main path" onClose={closePanel}>
             <ManualTaskForm
               agents={agents}
-              onCreated={afterKick}
+              onCreated={afterManualCreated}
               onManageAgents={onManageAgents}
               embedded
             />
           </InboxPanel>
         )}
       </div>
+
+      {panel === "issue" && selected && (
+        <IntakeIssueDrawer
+          issue={selected}
+          agents={agents}
+          onClose={closePanel}
+          onPromoted={() => advanceAfterKick(selected.id)}
+          onManageAgents={onManageAgents}
+          queueNav={
+            candidates.length > 1
+              ? {
+                  index: inboxIndex,
+                  total: candidates.length,
+                  onPrev: () => goToInboxAt(inboxIndex - 1),
+                  onNext: () => goToInboxAt(inboxIndex + 1),
+                }
+              : undefined
+          }
+        />
+      )}
     </div>
   );
 }

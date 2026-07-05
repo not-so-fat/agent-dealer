@@ -36,27 +36,27 @@ flowchart TB
 | **Intake** | Human or agent promotes issues — no server auto-cron enqueue |
 | **Linear read** | Server GraphQL (`linear-inbox.ts`) — not Agent Deck MCP for the queue |
 | **API key** | `LINEAR_API_KEY` env-only — never stored in SQLite |
-| **Settings** | Filters, assignee, default agent, sync toggle in `intake_settings` |
+| **Settings** | Filters in SQLite; editable in Inbox → Linear settings. `LINEAR_STATE_FILTER` / `LINEAR_TEAM_ID` env override saved values when set |
 | **Automation** | REST API first; orchestrator agents call promote/resolve-agent |
 | **Write-back** | Non-blocking comments + status at plan / review / done milestones |
 
 ## Configuration
 
-### Environment (secrets + seed defaults)
+### Environment (secrets + live filter overrides)
 
 | Variable | Role |
 |----------|------|
 | `LINEAR_API_KEY` | Required for Linear API (Personal API key) |
-| `LINEAR_STATE_FILTER` | Seed default for state filter if DB empty (comma-separated) |
-| `LINEAR_TEAM_ID` | Seed default team filter if DB empty |
-| `AGENT_DEALER_WEB_URL` | Optional — links in Linear comments (default `http://localhost:5173`) |
+| `LINEAR_STATE_FILTER` | **Live override** when set — inbox uses this instead of saved filter |
+| `LINEAR_TEAM_ID` | **Live override** when set — inbox uses this instead of saved team |
+| `AGENT_DEALER_WEB_URL` | Optional — links in Linear comments (dev default `http://localhost:3222`, prod `http://localhost:2222`) |
 
 ### Persisted settings (`intake_settings`)
 
 | Key | Default | Notes |
 |-----|---------|-------|
-| `linear.stateFilter` | `["Todo"]` | Issue states to show in Inbox |
-| `linear.teamId` | null | Optional team UUID |
+| `linear.stateFilter` | `["Todo"]` | Saved filter; overridden by `LINEAR_STATE_FILTER` env when set |
+| `linear.teamId` | null | Saved team; overridden by `LINEAR_TEAM_ID` env when set |
 | `linear.assigneeMe` | true | Filter to API key owner |
 | `linear.defaultAgentId` | null | Pre-select in Inbox UI |
 | `linear.syncEnabled` | true | Master toggle for write-back |
@@ -76,19 +76,19 @@ Promote is blocked (409) if an active run already exists for the same Linear iss
 
 ## REST API (orchestrator agents)
 
-Base URL: `http://127.0.0.1:8765` (local dev).
+Base URL: `http://127.0.0.1:3221` (development) or `http://127.0.0.1:2221` (production). See [PROD_SETUP.md](PROD_SETUP.md).
 
 ### Connection & config
 
 ```bash
 # Connection test (viewer from API key)
-curl -s http://127.0.0.1:8765/api/intake/linear/status | jq
+curl -s http://127.0.0.1:2221/api/intake/linear/status | jq
 
 # Read config (non-secret)
-curl -s http://127.0.0.1:8765/api/intake/linear/config | jq
+curl -s http://127.0.0.1:2221/api/intake/linear/config | jq
 
 # Update filters
-curl -s -X PATCH http://127.0.0.1:8765/api/intake/linear/config \
+curl -s -X PATCH http://127.0.0.1:2221/api/intake/linear/config \
   -H 'Content-Type: application/json' \
   -d '{"stateFilter":["Todo","Backlog"],"assigneeMe":true,"syncEnabled":true}' | jq
 ```
@@ -96,13 +96,13 @@ curl -s -X PATCH http://127.0.0.1:8765/api/intake/linear/config \
 ### List inbox
 
 ```bash
-curl -s http://127.0.0.1:8765/api/intake/linear | jq '.candidates[] | {id, identifier, title}'
+curl -s http://127.0.0.1:2221/api/intake/linear | jq '.candidates[] | {id, identifier, title}'
 ```
 
 ### Resolve agent (preview routing)
 
 ```bash
-curl -s -X POST http://127.0.0.1:8765/api/intake/linear/ISSUE_UUID/resolve-agent | jq
+curl -s -X POST http://127.0.0.1:2221/api/intake/linear/ISSUE_UUID/resolve-agent | jq
 # → { "agentId": "...", "reason": "label:content → Notes agent" }
 ```
 
@@ -112,12 +112,12 @@ Routing order: explicit `agentId` on promote → label rules → `defaultAgentId
 
 ```bash
 # Explicit agent
-curl -s -X POST http://127.0.0.1:8765/api/intake/linear/ISSUE_UUID/promote \
+curl -s -X POST http://127.0.0.1:2221/api/intake/linear/ISSUE_UUID/promote \
   -H 'Content-Type: application/json' \
   -d '{"agentId":"AGENT_UUID"}' | jq
 
 # Auto-resolve agent
-curl -s -X POST http://127.0.0.1:8765/api/intake/linear/ISSUE_UUID/promote \
+curl -s -X POST http://127.0.0.1:2221/api/intake/linear/ISSUE_UUID/promote \
   -H 'Content-Type: application/json' \
   -d '{"autoAgent":true}' | jq
 ```

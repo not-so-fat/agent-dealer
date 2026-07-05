@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS agents (
   deck_name TEXT,
   playbook_id TEXT,
   workspace_root TEXT,
+  default_plan_model TEXT,
+  default_execute_model TEXT,
   is_builtin INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -29,6 +31,8 @@ CREATE TABLE IF NOT EXISTS runs (
   deck_name TEXT,
   playbook_id TEXT,
   runtime TEXT,
+  plan_model TEXT,
+  execute_model TEXT,
   status TEXT NOT NULL,
   lineage_id TEXT,
   acceptance_criteria TEXT,

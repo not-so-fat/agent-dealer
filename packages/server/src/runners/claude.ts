@@ -5,6 +5,7 @@ import type { Run } from "@agent-dealer/shared";
 import { buildExecutionPrompt, buildPlanPrompt, workspaceForRun } from "./prompts.js";
 import { getTemporalLogsDir, getTemporalOutputDir } from "../paths.js";
 import { resolveClaudeBin, resolveCursorBin } from "../cli-env.js";
+import { resolveModelForPhase } from "../repository/runs.js";
 
 export interface RunnerResult {
   exitCode: number;
@@ -36,7 +37,11 @@ function logPathFor(run: Run, mode: "plan" | "execute"): string {
   return path.join(logDir, `${run.id}-${mode}-${Date.now()}.ndjson`);
 }
 
-export async function runClaude(run: Run, mode: "execute" | "plan" = "execute"): Promise<RunnerResult> {
+export async function runClaude(
+  run: Run,
+  mode: "execute" | "plan" = "execute",
+  model?: string
+): Promise<RunnerResult> {
   const mcpConfig =
     process.env.CLAUDE_MCP_CONFIG ?? path.join(process.env.HOME ?? "", ".claude.json");
   if (!fs.existsSync(mcpConfig)) {
@@ -55,6 +60,7 @@ export async function runClaude(run: Run, mode: "execute" | "plan" = "execute"):
   const args = [
     "-p",
     prompt,
+    ...(model ? ["--model", model] : []),
     "--mcp-config",
     mcpConfig,
     "--max-turns",
@@ -85,7 +91,11 @@ export async function runClaude(run: Run, mode: "execute" | "plan" = "execute"):
   return { exitCode, transcript, logPath };
 }
 
-export async function runCursor(run: Run, mode: "execute" | "plan" = "execute"): Promise<RunnerResult> {
+export async function runCursor(
+  run: Run,
+  mode: "execute" | "plan" = "execute",
+  model?: string
+): Promise<RunnerResult> {
   const prompt = mode === "plan" ? buildPlanPrompt(run) : buildExecutionPrompt(run);
   const logPath = logPathFor(run, mode);
 
@@ -96,6 +106,7 @@ export async function runCursor(run: Run, mode: "execute" | "plan" = "execute"):
     "--output-format",
     "stream-json",
     "--stream-partial-output",
+    ...(model ? ["--model", model] : []),
     prompt,
   ];
 
@@ -108,8 +119,9 @@ export async function runAgent(
   run: Run,
   mode: "execute" | "plan" = "execute"
 ): Promise<RunnerResult> {
-  if (run.runtime === "cursor_local") return runCursor(run, mode);
-  return runClaude(run, mode);
+  const model = resolveModelForPhase(run, mode);
+  if (run.runtime === "cursor_local") return runCursor(run, mode, model);
+  return runClaude(run, mode, model);
 }
 
 /** @deprecated use stream-json extractPlanMarkdown via persistRunOutput */

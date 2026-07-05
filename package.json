@@ -8,9 +8,11 @@
     "apps/*"
   ],
   "scripts": {
-    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @agent-dealer/server\" \"npm run dev -w @agent-dealer/web\"",
+    "dev": "AGENT_DEALER_ENV=development concurrently -n server,web -c cyan,magenta \"npm run dev -w @agent-dealer/server\" \"npm run dev -w @agent-dealer/web\"",
+    "start": "AGENT_DEALER_ENV=production npm run start -w @agent-dealer/server",
     "build": "npm run build -w @agent-dealer/shared && npm run build -w @agent-dealer/server && npm run build -w @agent-dealer/web",
-    "db:migrate": "npm run db:migrate -w @agent-dealer/server",
+    "db:migrate": "AGENT_DEALER_ENV=development npm run db:migrate -w @agent-dealer/server",
+    "db:migrate:prod": "AGENT_DEALER_ENV=production npm run db:migrate -w @agent-dealer/server",
     "p0": "tsx .temporal/scripts/p0-linear-batch.ts",
     "flow:verify": "tsx .temporal/scripts/flow-verify.ts",
     "flow:doc": "tsx .temporal/scripts/flow-doc.ts",

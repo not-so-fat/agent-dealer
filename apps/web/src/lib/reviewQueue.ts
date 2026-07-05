@@ -18,15 +18,15 @@ export function reviewQueueForRun(run: Run, snapshot: QueueSnapshot, view: "ops"
   return [];
 }
 
-export function queueIndex(queue: Run[], runId: string): number {
-  return queue.findIndex((r) => r.id === runId);
+export function queueIndex<T extends { id: string }>(queue: T[], id: string): number {
+  return queue.findIndex((item) => item.id === id);
 }
 
 /** After an item leaves the queue, pick the next sibling at the same index (or last). */
-export function nextInQueue(queue: Run[], currentId: string): Run | null {
+export function nextInQueue<T extends { id: string }>(queue: T[], currentId: string): T | null {
   const idx = queueIndex(queue, currentId);
   if (idx < 0) return queue[0] ?? null;
-  const remaining = queue.filter((r) => r.id !== currentId);
+  const remaining = queue.filter((item) => item.id !== currentId);
   if (remaining.length === 0) return null;
   return remaining[Math.min(idx, remaining.length - 1)] ?? null;
 }

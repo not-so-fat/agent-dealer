@@ -69,8 +69,8 @@ export function statusMeta(status: RunStatus, context?: "intake" | "ops"): Statu
   switch (status) {
     case "plan_pending":
       return {
-        label: "Drafting plan",
-        hint: context === "intake" ? "Agent is writing the plan" : undefined,
+        label: context === "ops" ? "Review plan" : "Planning",
+        hint: context === "ops" ? "Your sign-off required" : "Agent is writing the plan",
         tone: "bg-cyber-violet/15 text-cyber-violet-light border-cyber-violet/35",
         accent: "border-l-cyber-violet",
       };

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AgentWithHealth, LinearIntakeConfig } from "@agent-dealer/shared";
+import type { AgentWithHealth, LinearIntakeConfigView } from "@agent-dealer/shared";
 import {
   fetchLinearConfig,
   fetchLinearStatus,
@@ -13,7 +13,7 @@ type Props = {
 
 export default function LinearConfigPanel({ agents, onSaved }: Props) {
   const [open, setOpen] = useState(false);
-  const [config, setConfig] = useState<LinearIntakeConfig | null>(null);
+  const [view, setView] = useState<LinearIntakeConfigView | null>(null);
   const [connected, setConnected] = useState<boolean | null>(null);
   const [viewerName, setViewerName] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -25,18 +25,21 @@ export default function LinearConfigPanel({ agents, onSaved }: Props) {
   const [busy, setBusy] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
+  const envOverrides = view?.envOverrides;
+  const hasEnvOverride = Boolean(envOverrides?.stateFilter || envOverrides?.teamId);
+
   const load = async () => {
     try {
       const [status, cfg] = await Promise.all([fetchLinearStatus(), fetchLinearConfig()]);
       setConnected(status.connected);
       setViewerName(status.viewer?.name ?? null);
       setStatusError(status.error ?? null);
-      setConfig(cfg);
-      setStateFilterText(cfg.stateFilter.join(", "));
-      setTeamId(cfg.teamId ?? "");
-      setAssigneeMe(cfg.assigneeMe);
-      setDefaultAgentId(cfg.defaultAgentId ?? "");
-      setSyncEnabled(cfg.syncEnabled);
+      setView(cfg);
+      setStateFilterText(cfg.persisted.stateFilter.join(", "));
+      setTeamId(cfg.persisted.teamId ?? "");
+      setAssigneeMe(cfg.persisted.assigneeMe);
+      setDefaultAgentId(cfg.persisted.defaultAgentId ?? "");
+      setSyncEnabled(cfg.persisted.syncEnabled);
     } catch (e) {
       setStatusError(String(e));
     }
@@ -77,8 +80,8 @@ export default function LinearConfigPanel({ agents, onSaved }: Props) {
         defaultAgentId: defaultAgentId || null,
         syncEnabled,
       });
-      setConfig(updated);
-      setSaveMsg("Saved");
+      setView(updated);
+      setSaveMsg(hasEnvOverride ? "Saved locally — env still overrides filters (see note below)" : "Saved");
       onSaved?.();
     } catch (e) {
       setSaveMsg(String(e));
@@ -118,11 +121,25 @@ export default function LinearConfigPanel({ agents, onSaved }: Props) {
           {statusError && connected === false && (
             <p className="text-red-400/90 text-xs">{statusError}</p>
           )}
+          {view && (
+            <p className="text-xs text-white/50 rounded-lg bg-black/20 border border-white/10 px-2 py-1.5">
+              <span className="text-white/70">Inbox uses:</span> {view.stateFilter.join(", ")}
+              {view.assigneeMe ? " · assigned to me" : ""}
+              {view.teamId ? ` · team ${view.teamId.slice(0, 8)}…` : ""}
+            </p>
+          )}
+          {hasEnvOverride && (
+            <p className="text-xs text-amber-200/90 rounded-lg bg-amber-500/10 border border-amber-400/20 px-2 py-1.5">
+              <code className="text-amber-100/90">LINEAR_STATE_FILTER</code> or{" "}
+              <code className="text-amber-100/90">LINEAR_TEAM_ID</code> in env override saved filters.
+              Remove from <code className="text-white/55">~/.agent-dealer-dev/.env</code> to use the values below.
+            </p>
+          )}
           <p className="text-xs text-white/45">
             API key stays in <code className="text-white/60">LINEAR_API_KEY</code> env — not stored here.
           </p>
           <label className="block space-y-1">
-            <span className="text-xs uppercase tracking-wide text-white/45">State filter</span>
+            <span className="text-xs uppercase tracking-wide text-white/45">State filter (saved)</span>
             <input
               type="text"
               value={stateFilterText}
@@ -132,7 +149,7 @@ export default function LinearConfigPanel({ agents, onSaved }: Props) {
             />
           </label>
           <label className="block space-y-1">
-            <span className="text-xs uppercase tracking-wide text-white/45">Team ID (optional)</span>
+            <span className="text-xs uppercase tracking-wide text-white/45">Team ID (optional, saved)</span>
             <input
               type="text"
               value={teamId}
@@ -184,12 +201,6 @@ export default function LinearConfigPanel({ agents, onSaved }: Props) {
             </button>
           </div>
           {saveMsg && <p className="text-xs text-white/50">{saveMsg}</p>}
-          {config && (
-            <p className="text-[10px] text-white/30">
-              Active: {config.stateFilter.join(", ")}
-              {config.assigneeMe ? " · assignee=me" : ""}
-            </p>
-          )}
         </div>
       )}
     </div>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Artifact, Run } from "@agent-dealer/shared";
+import type { AgentWithHealth, Artifact, Run } from "@agent-dealer/shared";
 import { agentSummary } from "../../AgentConfigFields";
+import ModelSelect from "../agents/ModelSelect";
 import {
   artifactMarkdown,
   cancelRun,
@@ -16,27 +17,33 @@ import RemoveFromOpsAction from "./RemoveFromOpsAction";
 
 type Props = {
   run: Run;
+  agents: AgentWithHealth[];
   onRefresh: () => void;
   onApproved?: () => void;
   onApprovedAndNext?: () => void;
 };
 
-export default function PlanReviewPanel({ run, onRefresh, onApproved, onApprovedAndNext }: Props) {
+export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, onApprovedAndNext }: Props) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [planText, setPlanText] = useState("");
+  const [planModel, setPlanModel] = useState("");
+  const [executeModel, setExecuteModel] = useState("");
   const [busy, setBusy] = useState(false);
+
+  const agent = agents.find((a) => a.id === run.agentId);
+  const runtime = run.runtime ?? agent?.runtime ?? "claude_code";
 
   const load = useCallback(async () => {
     const detail = await fetchRunDetail(run.id);
     setArtifacts(detail.artifacts);
     const approved = detail.artifacts.find((a) => a.kind === "approved_plan");
-    const draft = detail.artifacts.find((a) => a.kind === "draft_plan");
-    const src = approved ?? draft;
+  const agentPlan = detail.artifacts.find((a) => a.kind === "draft_plan");
+    const src = approved ?? agentPlan;
     if (src) setPlanText(artifactMarkdown(src));
   }, [run.id]);
 
-  const hasAgentPlan = artifacts.some((a) => a.kind === "draft_plan");
-  const planDrafting = run.status === "plan_pending" && !hasAgentPlan;
+  const hasPlan = artifacts.some((a) => a.kind === "draft_plan");
+  const agentPlanning = run.status === "plan_pending" && !hasPlan;
   const tracePlan = latestByPhase<StreamTraceContent>(artifacts, "stream_trace", "plan");
   const usagePlan = latestByPhase<UsageContent>(artifacts, "usage", "plan");
 
@@ -45,10 +52,15 @@ export default function PlanReviewPanel({ run, onRefresh, onApproved, onApproved
   }, [load]);
 
   useEffect(() => {
-    if (!planDrafting) return;
+    setPlanModel(run.planModel ?? "");
+    setExecuteModel(run.executeModel ?? "");
+  }, [run.id, run.planModel, run.executeModel]);
+
+  useEffect(() => {
+    if (!agentPlanning) return;
     const t = setInterval(() => load().catch(console.error), 3000);
     return () => clearInterval(t);
-  }, [planDrafting, load]);
+  }, [agentPlanning, load]);
 
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -71,28 +83,38 @@ export default function PlanReviewPanel({ run, onRefresh, onApproved, onApproved
       </section>
 
       <section className="space-y-2">
-        <div className="heading-section">Review Plan</div>
-        {planDrafting && (
-          <p className="text-sm text-[#92E4DD] animate-pulse">Agent is drafting a plan…</p>
+        <div className="heading-section">Plan</div>
+        {agentPlanning && (
+          <p className="text-sm text-[#92E4DD] animate-pulse">Agent is writing the plan…</p>
         )}
-        {hasAgentPlan && (
+        {hasPlan && (
           <button
             type="button"
-            disabled={busy || planDrafting}
-            onClick={() => act(() => draftPlan(run.id))}
+            disabled={busy || agentPlanning}
+            onClick={() => act(() => draftPlan(run.id, planModel || null))}
             className="btn-ghost px-3 py-1.5 disabled:opacity-40"
           >
-            Ask agent to re-draft
+            Ask agent to replan
           </button>
         )}
+        <ModelSelect
+          runtime={runtime}
+          label="Planning model"
+          value={planModel}
+          onChange={setPlanModel}
+          defaultModelId={agent?.defaultPlanModel}
+          disabled={busy || agentPlanning}
+        />
         <textarea
           className="field-mono min-h-[min(420px,45vh)] resize-y leading-relaxed"
           value={planText}
-          readOnly={planDrafting}
-          onChange={!planDrafting ? (e) => setPlanText(e.target.value) : undefined}
-          placeholder={planDrafting ? "Waiting for agent plan…" : "Edit the plan, then approve or save revisions"}
+          readOnly={agentPlanning}
+          onChange={!agentPlanning ? (e) => setPlanText(e.target.value) : undefined}
+          placeholder={
+            agentPlanning ? "Plan will appear here when the agent finishes…" : "Edit if needed, then approve"
+          }
         />
-        {hasAgentPlan && !planDrafting && (
+        {hasPlan && !agentPlanning && (
           <div className="flex gap-2 flex-wrap">
             <button
               type="button"
@@ -100,19 +122,27 @@ export default function PlanReviewPanel({ run, onRefresh, onApproved, onApproved
               onClick={() => act(() => updatePlan(run.id, planText, false))}
               className="btn-ghost px-4 py-2 disabled:opacity-40"
             >
-              Save revisions
+              Save edits
             </button>
+            <ModelSelect
+              runtime={runtime}
+              label="Execution model"
+              value={executeModel}
+              onChange={setExecuteModel}
+              defaultModelId={agent?.defaultExecuteModel}
+              disabled={busy}
+            />
             <button
               type="button"
               disabled={busy || !planText.trim()}
               onClick={() =>
                 act(async () => {
-                  await updatePlan(run.id, planText, true);
+                  await updatePlan(run.id, planText, true, executeModel || null);
                   onApproved?.();
                   onApprovedAndNext?.();
                 })
               }
-              className="btn-gold px-4 py-2 disabled:opacity-40"
+              className="btn-gold px-4 py-2 disabled:opacity-40 w-full sm:w-auto"
             >
               Approve & next →
             </button>

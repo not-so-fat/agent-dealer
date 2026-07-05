@@ -16,7 +16,7 @@ const STATE_BY_EVENT: Record<LinearSyncEvent, string> = {
 const workflowStateCache = new Map<string, Map<string, string>>();
 
 function webBaseUrl(): string {
-  return process.env.AGENT_DEALER_WEB_URL ?? "http://localhost:5173";
+  return process.env.AGENT_DEALER_WEB_URL ?? "http://localhost:2222";
 }
 
 async function linearMutate(query: string, variables?: Record<string, unknown>): Promise<unknown> {

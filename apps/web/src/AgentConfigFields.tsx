@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import type { Runtime } from "@agent-dealer/shared";
 import { fetchDeckPlaybooks, fetchDecks } from "./api";
+import ModelSelect from "./components/agents/ModelSelect";
 
 export type AgentConfigValue = {
   runtime: Runtime;
   deckId: string;
   playbookId: string;
+  defaultPlanModel: string;
+  defaultExecuteModel: string;
 };
 
 type Deck = { id: string; name: string };
@@ -46,11 +49,31 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
         className="field"
         disabled={disabled}
         value={value.runtime}
-        onChange={(e) => set({ runtime: e.target.value as Runtime })}
+        onChange={(e) =>
+          set({
+            runtime: e.target.value as Runtime,
+            defaultPlanModel: "",
+            defaultExecuteModel: "",
+          })
+        }
       >
         <option value="claude_code">Claude Code (claude -p)</option>
         <option value="cursor_local">Cursor local (cursor agent -p)</option>
       </select>
+      <ModelSelect
+        runtime={value.runtime}
+        label="Default planning model"
+        value={value.defaultPlanModel}
+        onChange={(defaultPlanModel) => set({ defaultPlanModel })}
+        disabled={disabled}
+      />
+      <ModelSelect
+        runtime={value.runtime}
+        label="Default execution model"
+        value={value.defaultExecuteModel}
+        onChange={(defaultExecuteModel) => set({ defaultExecuteModel })}
+        disabled={disabled}
+      />
       <label className="text-xs text-[#A8C4C0] uppercase">Agent Deck (optional)</label>
       <select
         className="field"
@@ -100,14 +123,20 @@ export function agentSummary(run: {
   deckName: string | null;
   deckId: string | null;
   playbookId: string | null;
+  planModel?: string | null;
+  executeModel?: string | null;
 }): string {
   if (run.agentName) {
     const parts = [run.agentName];
     if (run.deckName || run.deckId) parts.push(`◆ ${run.deckName ?? run.deckId}`);
+    if (run.planModel) parts.push(`plan:${run.planModel}`);
+    if (run.executeModel) parts.push(`exec:${run.executeModel}`);
     return parts.join(" · ");
   }
   const parts = [run.runtime ?? "no runtime"];
   if (run.deckName || run.deckId) parts.push(`◆ ${run.deckName ?? run.deckId}`);
   if (run.playbookId) parts.push(`pb:${run.playbookId.slice(0, 8)}…`);
+  if (run.planModel) parts.push(`plan:${run.planModel}`);
+  if (run.executeModel) parts.push(`exec:${run.executeModel}`);
   return parts.join(" · ");
 }

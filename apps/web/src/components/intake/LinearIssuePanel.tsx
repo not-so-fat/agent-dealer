@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AgentWithHealth, LinearCandidate } from "@agent-dealer/shared";
 import AgentPicker from "../agents/AgentPicker";
+import ModelSelect from "../agents/ModelSelect";
 import { fetchLinearConfig, promoteLinearIssue } from "../../api";
 
 type Props = {
@@ -12,6 +13,7 @@ type Props = {
 
 export default function LinearIssuePanel({ issue, agents, onPromoted, onManageAgents }: Props) {
   const [agentId, setAgentId] = useState("");
+  const [planModel, setPlanModel] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -31,13 +33,20 @@ export default function LinearIssuePanel({ issue, agents, onPromoted, onManageAg
     }
   }, [agents, agentId]);
 
+  useEffect(() => {
+    setPlanModel("");
+  }, [issue.id, agentId]);
+
   const selectedAgent = agents.find((a) => a.id === agentId);
 
   const kickPlan = async () => {
     if (!agentId) return;
     setBusy(true);
     try {
-      await promoteLinearIssue(issue.id, { agentId });
+      await promoteLinearIssue(issue.id, {
+        agentId,
+        planModel: planModel || null,
+      });
       onPromoted();
     } catch (e) {
       alert(String(e));
@@ -49,7 +58,7 @@ export default function LinearIssuePanel({ issue, agents, onPromoted, onManageAg
   return (
     <>
       {issue.description && (
-        <div className="rounded-xl p-3 glass-plate text-sm text-white/60 leading-relaxed whitespace-pre-wrap">
+        <div className="rounded-xl p-4 glass-plate font-mono text-sm text-white/70 leading-relaxed whitespace-pre-wrap">
           {issue.description}
         </div>
       )}
@@ -70,13 +79,23 @@ export default function LinearIssuePanel({ issue, agents, onPromoted, onManageAg
         onManage={onManageAgents}
         requireHealthy
       />
+      {selectedAgent && (
+        <ModelSelect
+          runtime={selectedAgent.runtime}
+          label="Planning model"
+          value={planModel}
+          onChange={setPlanModel}
+          defaultModelId={selectedAgent.defaultPlanModel}
+          disabled={busy}
+        />
+      )}
       <button
         type="button"
         disabled={busy || !agentId || !(selectedAgent?.healthy ?? false)}
         onClick={kickPlan}
         className="btn-gold w-full py-2"
       >
-        {busy ? "Starting…" : "Kick plan"}
+        {busy ? "Starting…" : "Kick plan & next →"}
       </button>
     </>
   );

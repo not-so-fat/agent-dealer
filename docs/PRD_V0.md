@@ -414,26 +414,26 @@ Agent Deck = **task clock only** (one bound session per run).
 
 | Runtime | Work (Claude) | Personal (Cursor) | Agent Deck? | Notes |
 |---------|---------------|-------------------|-------------|-------|
-| **Claude Code `claude -p`** | ✓ Primary | — | **Yes — HTTP MCP** | `--mcp-config` with `http://127.0.0.1:11112/mcp`; same Agent Deck endpoint as Cursor |
-| **Claude Agent SDK** | ✓ Primary | — | Yes | `mcpServers` HTTP transport → `11112` |
-| **Cursor SDK local** | — | ✓ Primary | Yes | Inline MCP → `http://127.0.0.1:11112/mcp` |
+| **Claude Code `claude -p`** | ✓ Primary | — | **Yes — HTTP MCP** | `--mcp-config` with `http://127.0.0.1:1110/mcp`; same Agent Deck endpoint as Cursor |
+| **Claude Agent SDK** | ✓ Primary | — | Yes | `mcpServers` HTTP transport → `1110` |
+| **Cursor SDK local** | — | ✓ Primary | Yes | Inline MCP → `http://127.0.0.1:1110/mcp` |
 | **Cursor SDK cloud** | — | Fallback | **No** | VM can't reach local hub / Keychain |
 | **Cursor Linear delegate** | — | Easy | **No** | Cloud agent; no local Agent Deck |
 
 **v0 default:** local runners only. Cloud documented as non-goal until Agent Deck remote story exists.
 
-**Practical split:** work = Claude Code; personal = Cursor SDK **local**. Both reach Agent Deck on the **same HTTP MCP port** when using CLI/npx (`agent-deck start` → `:11112`; dev monorepo → `:3001`).
+**Practical split:** work = Claude Code; personal = Cursor SDK **local**. Both reach Agent Deck on the **same HTTP MCP port** when using CLI/npx (`agent-deck start` → `:1110`; dev monorepo → `:3001`).
 
 ### Claude Code + Agent Deck HTTP MCP
 
-Yes — `claude -p` connects to `localhost:11112` the same way as Cursor, via **HTTP MCP transport** in the MCP config (not stdio-only). Agent Deck documents this in [SETUP.md](../agent_deck/docs/SETUP.md):
+Yes — `claude -p` connects to `localhost:1110` the same way as Cursor, via **HTTP MCP transport** in the MCP config (not stdio-only). Agent Deck documents this in [SETUP.md](../agent_deck/docs/SETUP.md):
 
 ```json
 {
   "mcpServers": {
     "agent-deck": {
       "type": "http",
-      "url": "http://127.0.0.1:11112/mcp"
+      "url": "http://127.0.0.1:1110/mcp"
     }
   }
 }
@@ -442,12 +442,12 @@ Yes — `claude -p` connects to `localhost:11112` the same way as Cursor, via **
 Register once:
 
 ```bash
-claude mcp add --scope user --transport http agent-deck http://127.0.0.1:11112/mcp
+claude mcp add --scope user --transport http agent-deck http://127.0.0.1:1110/mcp
 ```
 
 Requirements:
 
-- `agent-deck start` running (backend + MCP on `:11112`)
+- `agent-deck start` running (backend + MCP on `:1110`)
 - Pass `--mcp-config` to `claude -p` (or use `~/.claude.json` with the entry above)
 - Use `--bare` only with explicit `--mcp-config` (skips auto-discovery)
 - Allow tools: `mcp__agent-deck__*` in `--allowedTools`
@@ -500,7 +500,7 @@ budget:
 
 | Option | Mechanism |
 |--------|-----------|
-| **HTTP MCP** | `http://127.0.0.1:11112/mcp` — backend must run |
+| **HTTP MCP** | `http://127.0.0.1:1110/mcp` — backend must run |
 | **stdio MCP** | `agent-deck mcp` subprocess |
 | **Env defaults** | `AGENT_DECK_DECK_ID` + `AGENT_DECK_WORKSPACE` |
 | **Prompt contract** | `bind_workspace({ deckId, workspaceRoot })` → `get_playbook` |
@@ -510,7 +510,7 @@ Health check before spawn: ping Agent Deck MCP; warn in dashboard if down. Run p
 ### Claude headless example
 
 ```bash
-# Requires agent-deck start and claude mcp add (HTTP → :11112)
+# Requires agent-deck start and claude mcp add (HTTP → :1110)
 claude -p "Work LIN-123. bind_workspace deckId=… Use playbook pb_…" \
   --mcp-config ~/.claude.json \
   --allowedTools "Read,Edit,Bash(...),mcp__agent-deck__*,mcp__slack__*" \
@@ -525,7 +525,7 @@ Example `~/.claude.json` fragment:
   "mcpServers": {
     "agent-deck": {
       "type": "http",
-      "url": "http://127.0.0.1:11112/mcp"
+      "url": "http://127.0.0.1:1110/mcp"
     }
   }
 }
@@ -961,4 +961,4 @@ That pairing is **not** part of agent-dealer product requirements. Users of agen
 | User discussion 2026-07-04 | Business users, concurrency 2, ThreadKeeper, Monaco |
 | Authoring playbooks (doc only) | `pb_ai_codegen_prd`, `pb_product_principle` — not product defaults |
 | Autoship, Symphony, Maestro, ThreadKeeper | §11 competitive borrow/reject |
-| Agent Deck SETUP.md | Claude HTTP MCP `:11112` |
+| Agent Deck SETUP.md | Claude HTTP MCP `:1110` |

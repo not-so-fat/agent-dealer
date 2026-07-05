@@ -7,7 +7,7 @@ import {
   resolveClaudeBin,
   resolveCursorBin,
 } from "../cli-env.js";
-import { checkAgentDeckHealth } from "./external.js";
+import { checkAgentDeckHealth } from "./agent-deck.js";
 
 const RUNTIME_CACHE_MS = 60_000;
 const runtimeIssueCache = new Map<Runtime, { at: number; issues: AgentHealthIssue[] }>();

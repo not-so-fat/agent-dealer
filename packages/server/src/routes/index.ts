@@ -3,12 +3,15 @@ import fs from "node:fs";
 import {
   CreateRunInput,
   AgentConfigInput,
+  AgentDeckConfigPatch,
   CreateAgentInput,
   UpdateAgentInput,
+  DraftPlanInput,
   KickRunInput,
   LinearIntakeConfigPatch,
   PromoteLinearInput,
   RetryRunInput,
+  Runtime,
   UpdatePlanInput,
   BUILTIN_AGENT_CLAUDE_ID,
 } from "@agent-dealer/shared";
@@ -39,7 +42,8 @@ import {
   schedulePlanDraft,
   subscribe,
 } from "../queue/dispatcher.js";
-import { fetchAgentDeckDecks } from "../adapters/external.js";
+import { fetchAgentDeckDecks } from "../adapters/agent-deck.js";
+import { testAgentDeckConnection } from "../adapters/agent-deck.js";
 import {
   getLinearIssue,
   listLinearCandidates,
@@ -48,9 +52,13 @@ import {
 import { syncLinearForRun } from "../adapters/linear-sync.js";
 import {
   getLinearIntakeConfig,
+  getLinearIntakeConfigView,
   patchLinearIntakeConfig,
+  getAgentDeckConfig,
+  patchAgentDeckConfig,
 } from "../repository/intake-settings.js";
 import { resolveAgentForIssue } from "../intake/agent-routing.js";
+import { listRuntimeModels } from "../runners/models.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
   if (!deckId) return null;
@@ -72,6 +80,19 @@ function assertAgentConfigured(run: NonNullable<ReturnType<typeof getRun>>): voi
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => ({ ok: true }));
+
+  app.get<{ Params: { runtime: string }; Querystring: { refresh?: string } }>(
+    "/api/runtimes/:runtime/models",
+    async (req, reply) => {
+      const parsed = Runtime.safeParse(req.params.runtime);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid runtime" });
+      }
+      const refresh = req.query.refresh === "1" || req.query.refresh === "true";
+      const { models, source } = await listRuntimeModels(parsed.data, { refresh });
+      return { runtime: parsed.data, models, source };
+    }
+  );
 
   app.get("/api/runs", async (req) => {
     const status = (req.query as { status?: string }).status;
@@ -113,7 +134,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/api/intake/linear/status", async () => testLinearConnection());
 
-  app.get("/api/intake/linear/config", async () => getLinearIntakeConfig());
+  app.get("/api/intake/linear/config", async () => getLinearIntakeConfigView());
 
   app.patch("/api/intake/linear/config", async (req, reply) => {
     try {
@@ -194,6 +215,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           taskCategory: "code",
           status: "plan_pending",
           agentId,
+          planModel: input.planModel ?? undefined,
         },
         { source: "linear", externalId: issue.id, externalLabel: issue.identifier }
       );
@@ -275,6 +297,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       deck_id: input.deckId ?? null,
       deck_name: deckName,
       playbook_id: input.playbookId ?? null,
+      plan_model: input.planModel !== undefined ? input.planModel : undefined,
+      execute_model: input.executeModel !== undefined ? input.executeModel : undefined,
     });
     return updated;
   });
@@ -286,9 +310,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!["plan_pending", "queued"].includes(run.status)) {
       return reply.status(400).send({ error: "Re-draft only in plan_pending" });
     }
+    const input = DraftPlanInput.parse(req.body ?? {});
+    if (input.planModel !== undefined) {
+      updateRunFields(id, { plan_model: input.planModel });
+    }
     try {
-      assertAgentConfigured(run);
-      const updated = await redraftPlan(run);
+      assertAgentConfigured(getRun(id)!);
+      const updated = await redraftPlan(getRun(id)!);
       return updated;
     } catch (e) {
       return reply.status(400).send({ error: String(e) });
@@ -305,7 +333,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     addArtifact(id, kind, { markdown: input.planMarkdown }, "human");
 
     if (input.approve) {
+      const hasPlan =
+        listArtifacts(id).some((a) => a.kind === "draft_plan") ||
+        input.planMarkdown.trim().length > 0;
+      if (!hasPlan) {
+        return reply.status(400).send({ error: "Plan not ready — wait for the agent to finish planning" });
+      }
       assertAgentConfigured(run);
+      if (input.executeModel !== undefined) {
+        updateRunFields(id, { execute_model: input.executeModel });
+      }
       const updated = transitionRun(id, "plan_approved");
       syncLinearForRun(updated, "plan_approved").catch((e) =>
         console.error("[linear-sync] plan_approved:", e)
@@ -339,6 +376,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       deck_name: deckName ?? null,
       playbook_id: playbookId ?? null,
       runtime,
+      execute_model: input.executeModel !== undefined ? input.executeModel : undefined,
     };
 
     if (run.status === "plan_pending") {
@@ -384,6 +422,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         acceptanceCriteria: run.acceptanceCriteria ?? undefined,
         status: "plan_pending",
         agentId: run.agentId ?? BUILTIN_AGENT_CLAUDE_ID,
+        planModel: input.planModel ?? undefined,
       },
       { source: run.source, externalId: run.externalId ?? undefined, lineageId: run.lineageId ?? run.id }
     );
@@ -430,8 +469,22 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.delete("/api/agents/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     const ok = deleteAgent(id);
-    if (!ok) return reply.status(400).send({ error: "Cannot delete built-in or missing agent" });
+    if (!ok) return reply.status(404).send({ error: "Agent not found" });
     return { ok: true };
+  });
+
+  app.get("/api/agent-deck/status", async () => testAgentDeckConnection());
+
+  app.get("/api/agent-deck/config", async () => getAgentDeckConfig());
+
+  app.patch("/api/agent-deck/config", async (req, reply) => {
+    try {
+      const patch = AgentDeckConfigPatch.parse(req.body);
+      const config = patchAgentDeckConfig(patch);
+      return config;
+    } catch (e) {
+      return reply.status(400).send({ error: String(e) });
+    }
   });
 
   app.get("/api/agent-deck/decks", async (_req, reply) => {
@@ -444,7 +497,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/api/agent-deck/decks/:deckId/playbooks", async (req, reply) => {
     const { deckId } = req.params as { deckId: string };
-    const base = process.env.AGENT_DECK_API_URL ?? "http://127.0.0.1:11111";
+    const { getAgentDeckApiUrl } = await import("../adapters/agent-deck.js");
+    const base = getAgentDeckApiUrl();
     try {
       const res = await fetch(`${base}/api/decks/${deckId}/playbooks`, {
         signal: AbortSignal.timeout(5000),

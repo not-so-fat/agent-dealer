@@ -8,7 +8,7 @@ Human control plane for agent execution — queue, plan approval, agent runs, an
 
 - Node.js 20+
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude` on PATH) for execution
-- [Agent Deck](https://github.com/not-so-fat/agent_deck) optional — `agent-deck start` for deck picker + MCP at `:11111` / `:11112`
+- [Agent Deck](https://github.com/not-so-fat/agent_deck) optional — `agent-deck start` for UI at `:1111` and MCP at `:1110`
 - `LINEAR_API_KEY` optional — for Linear Inbox; manual tasks work without it
 
 See [docs/LINEAR_INTEGRATION.md](docs/LINEAR_INTEGRATION.md) for Inbox config, write-back sync, and REST automation.
@@ -16,13 +16,17 @@ See [docs/LINEAR_INTEGRATION.md](docs/LINEAR_INTEGRATION.md) for Inbox config, w
 ## Quick start
 
 ```bash
-cp .env.example .env
+mkdir -p ~/.agent-dealer-dev
+cp scripts/templates/dev.env.example ~/.agent-dealer-dev/.env
+# Edit ~/.agent-dealer-dev/.env — add LINEAR_API_KEY, etc.
 npm install
 npm run db:migrate
 npm run dev
 ```
 
-Open **http://localhost:5173** (dashboard). API: **http://127.0.0.1:8765**
+Open **http://localhost:3222** (dev dashboard). API: **http://127.0.0.1:3221**
+
+Production: see [docs/PROD_SETUP.md](docs/PROD_SETUP.md) — config at `~/.agent-dealer/.env`, API **2221**.
 
 ## Workflow (SC-1)
 
@@ -51,26 +55,34 @@ Logs: `.temporal/logs/<issue>-<timestamp>.ndjson`
 
 ## Ports
 
-| Service | Port |
-|---------|------|
-| agent-dealer API | 8765 |
-| agent-dealer dashboard | 5173 |
-| Agent Deck API | 11111 |
-| Agent Deck MCP | 11112 |
+| Service | Dev | Prod |
+|---------|-----|------|
+| agent-dealer API | 3221 | 2221 |
+| agent-dealer dashboard | 3222 | 2222 |
+| Agent Deck MCP | 1110 | 1110 |
+| Agent Deck UI | 1111 | 1111 |
+
+## Data
+
+| Mode | SQLite path |
+|------|-------------|
+| Development | `~/.agent-dealer-dev/dealer.db` |
+| Production | `~/.agent-dealer/dealer.db` |
+
+Override with `AGENT_DEALER_HOME` in the env file for that mode.
 
 ## Scripts
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | API + dashboard |
-| `npm run db:migrate` | Apply SQLite schema |
+| `npm run dev` | Dev API + dashboard (`AGENT_DEALER_ENV=development`) |
+| `npm run start` | Prod API only (`AGENT_DEALER_ENV=production`) |
+| `npm run db:migrate` | Apply schema to dev DB |
+| `npm run db:migrate:prod` | Apply schema to prod DB |
 | `npm run p0` | P0 Linear batch script |
 | `npm run build` | Build all packages |
 
-## Data
-
-SQLite: `~/.agent-dealer/dealer.db` (override with `AGENT_DEALER_HOME`)
-
 ## Environment
 
-See [.env.example](.env.example).
+- **Dev:** [`scripts/templates/dev.env.example`](scripts/templates/dev.env.example) → `~/.agent-dealer-dev/.env`
+- **Prod:** [`scripts/templates/prod.env.example`](scripts/templates/prod.env.example) → `~/.agent-dealer/.env`

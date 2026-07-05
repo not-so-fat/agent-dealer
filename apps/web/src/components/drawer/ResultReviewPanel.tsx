@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Artifact, Run } from "@agent-dealer/shared";
+import type { AgentWithHealth, Artifact, Run } from "@agent-dealer/shared";
 import { agentSummary } from "../../AgentConfigFields";
+import ModelSelect from "../agents/ModelSelect";
 import {
   approveRun,
   artifactMarkdown,
@@ -21,16 +22,21 @@ import RemoveFromOpsAction from "./RemoveFromOpsAction";
 
 type Props = {
   run: Run;
+  agents: AgentWithHealth[];
   onRefresh: () => void;
   onRetry?: (newRun: Run) => void;
   onDoneAndNext?: () => void;
 };
 
-export default function ResultReviewPanel({ run, onRefresh, onRetry, onDoneAndNext }: Props) {
+export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onDoneAndNext }: Props) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [feedback, setFeedback] = useState("");
+  const [planModel, setPlanModel] = useState("");
   const [busy, setBusy] = useState(false);
   const [prefilledRetry, setPrefilledRetry] = useState(false);
+
+  const agent = agents.find((a) => a.id === run.agentId);
+  const runtime = run.runtime ?? agent?.runtime ?? "claude_code";
 
   const load = useCallback(async () => {
     const detail = await fetchRunDetail(run.id);
@@ -53,6 +59,7 @@ export default function ResultReviewPanel({ run, onRefresh, onRetry, onDoneAndNe
   useEffect(() => {
     setPrefilledRetry(false);
     setFeedback("");
+    setPlanModel("");
   }, [run.id]);
 
   useEffect(() => {
@@ -162,12 +169,20 @@ export default function ResultReviewPanel({ run, onRefresh, onRetry, onDoneAndNe
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
           />
+          <ModelSelect
+            runtime={runtime}
+            label="Planning model (retry)"
+            value={planModel}
+            onChange={setPlanModel}
+            defaultModelId={agent?.defaultPlanModel}
+            disabled={busy}
+          />
           <button
             type="button"
             disabled={busy || !canRetry}
             onClick={() =>
               act(async () => {
-                const newRun = await retryRun(run.id, feedback);
+                const newRun = await retryRun(run.id, feedback, planModel || null);
                 setFeedback("");
                 onRetry?.(newRun);
               })

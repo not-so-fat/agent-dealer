@@ -123,7 +123,7 @@ export default function App() {
                   {planReviewCount > 0 && (
                     <span
                       className="text-xs leading-none bg-cyber-violet/20 text-cyber-violet-light px-1.5 py-0.5 rounded tabular-nums border border-cyber-violet/35"
-                      title={`${planReviewCount} plan${planReviewCount === 1 ? "" : "s"} to approve`}
+                      title={`${planReviewCount} plan${planReviewCount === 1 ? "" : "s"} ready to review`}
                     >
                       {planReviewCount}
                     </span>
@@ -213,6 +213,7 @@ export default function App() {
       {selectedRun && (
         <RunDrawer
           run={selectedRun}
+          agents={snapshot?.agents ?? []}
           onClose={() => setSelectedRun(null)}
           onRefresh={refresh}
           onApproved={refresh}

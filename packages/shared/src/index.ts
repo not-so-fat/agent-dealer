@@ -140,6 +140,10 @@ export const Run = z.object({
   deckName: z.string().nullable(),
   playbookId: z.string().nullable(),
   runtime: Runtime.nullable(),
+  /** Task override for planning; null = agent default */
+  planModel: z.string().nullable(),
+  /** Task override for execution; null = agent default */
+  executeModel: z.string().nullable(),
   status: RunStatus,
   lineageId: z.string().uuid().nullable(),
   acceptanceCriteria: z.string().nullable(),
@@ -180,6 +184,8 @@ export const CreateRunInput = z.object({
   status: z.enum(["queued", "plan_pending"]).default("plan_pending"),
   /** Saved agent profile — runtime/deck/playbook resolved from agent record. */
   agentId: z.string().uuid(),
+  planModel: z.string().nullable().optional(),
+  executeModel: z.string().nullable().optional(),
 });
 export type CreateRunInput = z.infer<typeof CreateRunInput>;
 
@@ -187,12 +193,15 @@ export const AgentConfigInput = z.object({
   runtime: Runtime,
   deckId: z.string().uuid().optional(),
   playbookId: z.string().optional(),
+  planModel: z.string().nullable().optional(),
+  executeModel: z.string().nullable().optional(),
 });
 export type AgentConfigInput = z.infer<typeof AgentConfigInput>;
 
 export const UpdatePlanInput = z.object({
   planMarkdown: z.string(),
   approve: z.boolean().default(false),
+  executeModel: z.string().nullable().optional(),
 });
 export type UpdatePlanInput = z.infer<typeof UpdatePlanInput>;
 
@@ -201,11 +210,13 @@ export const KickRunInput = z.object({
   runtime: Runtime.optional(),
   deckId: z.string().uuid().optional(),
   playbookId: z.string().optional(),
+  executeModel: z.string().nullable().optional(),
 });
 export type KickRunInput = z.infer<typeof KickRunInput>;
 
 export const RetryRunInput = z.object({
   feedback: z.string().min(1),
+  planModel: z.string().nullable().optional(),
 });
 export type RetryRunInput = z.infer<typeof RetryRunInput>;
 
@@ -237,6 +248,16 @@ export const LinearIntakeConfig = z.object({
 });
 export type LinearIntakeConfig = z.infer<typeof LinearIntakeConfig>;
 
+/** GET /api/intake/linear/config — effective config plus persistence hints for the UI */
+export const LinearIntakeConfigView = LinearIntakeConfig.extend({
+  persisted: LinearIntakeConfig,
+  envOverrides: z.object({
+    stateFilter: z.boolean(),
+    teamId: z.boolean(),
+  }),
+});
+export type LinearIntakeConfigView = z.infer<typeof LinearIntakeConfigView>;
+
 export const LinearIntakeConfigPatch = LinearIntakeConfig.partial();
 export type LinearIntakeConfigPatch = z.infer<typeof LinearIntakeConfigPatch>;
 
@@ -259,15 +280,57 @@ export const ResolveAgentResult = z.object({
 });
 export type ResolveAgentResult = z.infer<typeof ResolveAgentResult>;
 
+export const AgentDeckConfig = z.object({
+  host: z.string(),
+  port: z.number().int().min(1).max(65535),
+  envOverride: z.boolean(),
+});
+export type AgentDeckConfig = z.infer<typeof AgentDeckConfig>;
+
+export const AgentDeckConfigPatch = z.object({
+  host: z.string().min(1).optional(),
+  port: z.number().int().min(1).max(65535).optional(),
+});
+export type AgentDeckConfigPatch = z.infer<typeof AgentDeckConfigPatch>;
+
+export const AgentDeckStatus = z.object({
+  connected: z.boolean(),
+  apiUrl: z.string(),
+  mcpUrl: z.string(),
+  deckCount: z.number().optional(),
+  envOverride: z.boolean(),
+  error: z.string().optional(),
+});
+export type AgentDeckStatus = z.infer<typeof AgentDeckStatus>;
+
 export const PromoteLinearInput = z
   .object({
     agentId: z.string().uuid().optional(),
     autoAgent: z.boolean().optional(),
+    planModel: z.string().nullable().optional(),
   })
   .refine((v) => v.agentId !== undefined || v.autoAgent === true, {
     message: "Provide agentId or autoAgent: true",
   });
 export type PromoteLinearInput = z.infer<typeof PromoteLinearInput>;
+
+export const DraftPlanInput = z.object({
+  planModel: z.string().nullable().optional(),
+});
+export type DraftPlanInput = z.infer<typeof DraftPlanInput>;
+
+export const RuntimeModelOption = z.object({
+  id: z.string(),
+  label: z.string(),
+});
+export type RuntimeModelOption = z.infer<typeof RuntimeModelOption>;
+
+export const RuntimeModelsResponse = z.object({
+  runtime: Runtime,
+  models: z.array(RuntimeModelOption),
+  source: z.enum(["live", "fallback"]),
+});
+export type RuntimeModelsResponse = z.infer<typeof RuntimeModelsResponse>;
 
 export const QueueSnapshot = z.object({
   running: z.number(),

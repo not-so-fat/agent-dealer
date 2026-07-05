@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { AgentWithHealth } from "@agent-dealer/shared";
 import { BUILTIN_AGENT_CLAUDE_ID } from "@agent-dealer/shared";
 import AgentPicker from "../agents/AgentPicker";
+import ModelSelect from "../agents/ModelSelect";
 import { createRun } from "../../api";
 
 const SAMPLE = {
@@ -24,6 +25,7 @@ export default function ManualTaskForm({ agents, onCreated, onManageAgents, embe
   const [category, setCategory] = useState("other");
   const [repo, setRepo] = useState("");
   const [agentId, setAgentId] = useState(BUILTIN_AGENT_CLAUDE_ID);
+  const [planModel, setPlanModel] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -37,6 +39,10 @@ export default function ManualTaskForm({ agents, onCreated, onManageAgents, embe
     setDescription(SAMPLE.description);
     setCategory(SAMPLE.taskCategory);
   };
+
+  useEffect(() => {
+    setPlanModel("");
+  }, [agentId]);
 
   const selectedAgent = agents.find((a) => a.id === agentId);
   const canKick =
@@ -55,6 +61,7 @@ export default function ManualTaskForm({ agents, onCreated, onManageAgents, embe
         taskCategory: category,
         repo: repo.trim() || undefined,
         agentId,
+        planModel: planModel || null,
       });
       setTitle("");
       setDescription("");
@@ -75,6 +82,16 @@ export default function ManualTaskForm({ agents, onCreated, onManageAgents, embe
         onSelect={setAgentId}
         onManage={onManageAgents}
       />
+      {selectedAgent && (
+        <ModelSelect
+          runtime={selectedAgent.runtime}
+          label="Planning model"
+          value={planModel}
+          onChange={setPlanModel}
+          defaultModelId={selectedAgent.defaultPlanModel}
+          disabled={loading}
+        />
+      )}
       <input className="field" placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
       <textarea
         className="field-mono h-16 resize-y"
