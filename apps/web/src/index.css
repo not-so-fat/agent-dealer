@@ -1,0 +1,290 @@
+@import url("https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@300;400;600;700;800&display=swap");
+@import "tailwindcss";
+
+/*
+ * Match agent-deck: Monaco is the primary UI face (body + mono), not just code blocks.
+ * Serve Monaco.ttf so Chrome loads the real face (see vite-monaco-font.ts).
+ */
+@font-face {
+  font-family: "Monaco";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("/fonts/Monaco.ttf") format("truetype");
+}
+
+@theme {
+  --font-sans: Monaco, "Nunito Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: Monaco, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --color-cyber-gold: #c4b643;
+  --color-cyber-teal: #92e4dd;
+  --color-cyber-violet: #a78bfa;
+  --color-cyber-violet-light: #d4bcff;
+  --color-cyber-dark: #0a0a07;
+  --color-panel: #0f0f0c;
+  --color-panel-elevated: #161612;
+  --color-text-muted: #a8c4c0;
+
+  --glass-blur: 14px;
+  --glass-bg: rgba(255, 255, 255, 0.028);
+  --glass-bg-hover: rgba(255, 255, 255, 0.048);
+  --glass-bg-selected: rgba(146, 228, 221, 0.07);
+  --glass-border: rgba(255, 255, 255, 0.075);
+  --glass-border-hover: rgba(255, 255, 255, 0.11);
+  --glass-highlight: rgba(255, 255, 255, 0.04);
+}
+
+:root {
+  --font-sans: Monaco, "Nunito Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: Monaco, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+html {
+  font-size: 17px;
+}
+
+html,
+body {
+  font-family: var(--font-sans);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-size: 1rem;
+  line-height: 1.5;
+  color: #92e4dd;
+  background-color: #0a0a07;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Ambient blur orbs — drift + breathe (visible through heavy blur) */
+@keyframes ambient-drift-a {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(28px, -22px) scale(1.06);
+    opacity: 0.72;
+  }
+}
+
+@keyframes ambient-drift-b {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(-24px, 18px) scale(1.05);
+    opacity: 0.75;
+  }
+}
+
+@keyframes ambient-drift-c {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(16px, 20px) scale(0.96);
+    opacity: 0.68;
+  }
+}
+
+.ambient-orb {
+  will-change: transform, opacity;
+}
+
+.ambient-orb-a {
+  animation: ambient-drift-a 14s ease-in-out infinite;
+}
+
+.ambient-orb-b {
+  animation: ambient-drift-b 17s ease-in-out infinite;
+  animation-delay: -6s;
+}
+
+.ambient-orb-c {
+  animation: ambient-drift-c 20s ease-in-out infinite;
+  animation-delay: -11s;
+}
+
+/* agent-deck glass plate — subtle frosted panels */
+.glass-plate {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+
+.glass-plate-hover:hover {
+  background: var(--glass-bg-hover);
+  border-color: var(--glass-border-hover);
+}
+
+.glass-plate-selected {
+  background: var(--glass-bg-selected);
+  border-color: rgba(146, 228, 221, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(146, 228, 221, 0.07),
+    0 0 0 1px rgba(146, 228, 221, 0.1);
+}
+
+.glass-header {
+  background: rgba(10, 10, 7, 0.72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.glass-column {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border-left: 1px solid var(--glass-border);
+  border-right: 1px solid var(--glass-border);
+  border-bottom: 1px solid var(--glass-border);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+
+/* agent-deck field primitives */
+.field {
+  @apply w-full rounded border border-white/10 bg-white/[0.03] text-[#E8F6F4] px-3 py-2 text-base backdrop-blur-sm;
+}
+
+.field-mono {
+  @apply w-full rounded border border-white/10 bg-white/[0.03] text-[#E8F6F4] px-3 py-2 text-base font-mono backdrop-blur-sm;
+}
+
+.panel {
+  @apply rounded-2xl p-4;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+
+.panel-surface {
+  @apply rounded-2xl shadow-2xl;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--glass-border);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+
+.btn-gold {
+  @apply rounded py-2 text-base font-medium text-[#0A0A07];
+  background: #c4b643;
+}
+
+.btn-gold:hover {
+  background: #d4c760;
+}
+
+.btn-ghost {
+  @apply rounded py-2 text-base border border-white/20 text-[#E8F6F4];
+}
+
+.btn-ghost-danger {
+  @apply rounded py-2 text-base font-medium border border-red-500/75 text-red-400 bg-red-950/20;
+}
+
+.btn-ghost-danger:hover:not(:disabled) {
+  @apply border-red-400 text-red-300 bg-red-950/40;
+}
+
+.btn-retry {
+  @apply rounded py-2 text-base border border-dashed border-white/25 text-white/40 bg-transparent;
+}
+
+.btn-retry-ready {
+  @apply rounded py-2 text-base font-medium border border-solid border-cyber-violet/55 text-cyber-violet-light bg-cyber-violet/20;
+}
+
+.btn-retry-ready:hover:not(:disabled) {
+  @apply border-cyber-violet/70 bg-cyber-violet/30;
+}
+
+/* Task cards — frosted glass plates; left accent from status (border-l-* utilities) */
+.task-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border-top: 1px solid var(--glass-border);
+  border-right: 1px solid var(--glass-border);
+  border-bottom: 1px solid var(--glass-border);
+  border-left-width: 3px;
+  border-left-style: solid;
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+
+.task-card:hover {
+  background: var(--glass-bg-hover);
+  border-top-color: var(--glass-border-hover);
+  border-right-color: var(--glass-border-hover);
+  border-bottom-color: var(--glass-border-hover);
+}
+
+.task-card.glass-plate-selected {
+  background: var(--glass-bg-selected);
+  border-top-color: rgba(146, 228, 221, 0.28);
+  border-right-color: rgba(146, 228, 221, 0.28);
+  border-bottom-color: rgba(146, 228, 221, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(146, 228, 221, 0.07),
+    0 0 0 1px rgba(146, 228, 221, 0.1);
+}
+
+.task-card:focus-visible {
+  outline: 2px solid rgba(146, 228, 221, 0.45);
+  outline-offset: 2px;
+}
+
+.heading-page {
+  @apply text-2xl font-semibold text-[#C4B643];
+}
+
+.heading-column {
+  @apply text-lg font-semibold text-[#E8F6F4];
+}
+
+.heading-panel {
+  @apply text-lg font-semibold text-[#92E4DD];
+}
+
+.heading-section {
+  @apply text-base font-semibold uppercase tracking-wide text-[#92E4DD];
+}
+
+.text-caption {
+  @apply text-sm text-white/45 leading-snug;
+}
+
+.text-body {
+  @apply text-base text-white/70 leading-relaxed;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.5);
+}

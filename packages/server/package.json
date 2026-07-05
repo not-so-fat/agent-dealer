@@ -1,0 +1,26 @@
+{
+  "name": "@agent-dealer/server",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agent-dealer/shared": "*",
+    "@fastify/cors": "^11.0.1",
+    "better-sqlite3": "^11.9.1",
+    "dotenv": "^16.5.0",
+    "fastify": "^5.3.3",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  }
+}

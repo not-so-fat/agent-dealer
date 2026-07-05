@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.temporal/
+.cursor/
+apps/web/public/fonts/
+*.db
+*.db-journal
+.DS_Store
+*.tsbuildinfo

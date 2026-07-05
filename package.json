@@ -1,0 +1,26 @@
+{
+  "name": "agent-dealer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Human control plane for agent execution — queue, plan approval, audit treasure",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @agent-dealer/server\" \"npm run dev -w @agent-dealer/web\"",
+    "build": "npm run build -w @agent-dealer/shared && npm run build -w @agent-dealer/server && npm run build -w @agent-dealer/web",
+    "db:migrate": "npm run db:migrate -w @agent-dealer/server",
+    "p0": "tsx .temporal/scripts/p0-linear-batch.ts",
+    "flow:verify": "tsx .temporal/scripts/flow-verify.ts",
+    "flow:doc": "tsx .temporal/scripts/flow-doc.ts",
+    "poc:integration": "tsx .temporal/scripts/poc/run-all.ts",
+    "poc:deep": "tsx .temporal/scripts/poc/claude-runner-probe.ts && tsx .temporal/scripts/poc/cursor-agent-probe.ts",
+    "typecheck": "npm run typecheck -w @agent-dealer/shared && npm run typecheck -w @agent-dealer/server && npm run typecheck -w @agent-dealer/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  }
+}
