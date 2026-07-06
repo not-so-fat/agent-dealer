@@ -1,6 +1,6 @@
 ---
-description: agent-dealer release — versioning (human-agreed), git tags, npm pointer, dev deck bind, pre-ship gates. Repo-specific.
-globs: CHANGELOG.md,package.json,package-lock.json,apps/*/package.json,packages/*/package.json,docs/PROD_SETUP.md,docs/PUBLISHING.md,scripts/npm-package/**,README.md
+description: agent-dealer release — versioning (human-agreed), git tags, dev deck bind, pre-ship gates. Repo-specific.
+globs: CHANGELOG.md,package.json,package-lock.json,apps/*/package.json,packages/*/package.json,docs/PROD_SETUP.md,docs/PUBLISHING.md,README.md
 alwaysApply: false
 ---
 
@@ -25,7 +25,7 @@ alwaysApply: false
 |---------|--------|-------|
 | Repo `package.json` (all workspaces) | `X.Y.Z` | Source of truth after human agrees |
 | Git tag / GitHub Release | `vX.Y.Z` | Annotated; points at Ship commit |
-| npm `agent-dealer` | `X.Y.Z` | Pointer package in `scripts/npm-package/` — same semver as git |
+| npm `agent-dealer@0.0.0` | Frozen | Name hold only — **do not** empty-publish per release |
 
 **Semver:** `0.1.x` patches · `0.2.0` features (pre-1.0) · `1.0.0` production-stable (later).
 
@@ -35,25 +35,24 @@ npm version X.Y.Z --workspaces --include-workspace-root --no-git-tag-version
 
 ## Distribution
 
-- **App:** git clone + tag checkout + `npm ci` + `npm run build` (`docs/PROD_SETUP.md`). Root stays `"private": true`.
-- **npm:** publish only `scripts/npm-package/` — README points at git tag; not a full app install.
+- **Ship:** git tag → GitHub Release → clone + `npm ci` + `npm run build` (`docs/PROD_SETUP.md`).
+- Root stays `"private": true` until a real installable npm surface exists (CLI/bin, not README stub).
 - **Never** wipe `~/.agent-dealer-dev/dealer.db` as release prep.
+- **Never** recommend empty `npm publish` (pointer tarballs) as a release step.
 
-## Release order (agent completes unless blocked)
+## Release order (agent completes)
 
 1. Agree version with human.
 2. Sync workspace versions + `CHANGELOG.md`.
-3. Bump `scripts/npm-package/package.json` (+ README checkout line).
-4. Gates (log `.temporal/logs/`): `npm run build` · `npm run flow:verify` · `poc:integration` when integrations changed.
-5. Commit: `Ship X.Y.Z: <why>.`
-6. Tag: `git tag -a vX.Y.Z -m "agent-dealer X.Y.Z"`
-7. **Push:** `git push origin main && git push origin vX.Y.Z`
-8. **GitHub Release:** `gh release create vX.Y.Z --title "X.Y.Z" --notes-file .temporal/logs/release-notes-X.Y.Z.md`
-9. **npm:** `cd scripts/npm-package && npm publish --access public` (human handles `npm login` / `--otp=…` if 2FA blocks)
+3. Gates (log `.temporal/logs/`): `npm run build` · `npm run flow:verify` · `poc:integration` when integrations changed.
+4. Commit: `Ship X.Y.Z: <why>.`
+5. Tag: `git tag -a vX.Y.Z -m "agent-dealer X.Y.Z"`
+6. Push: `git push origin main && git push origin vX.Y.Z`
+7. GitHub Release: `gh release create vX.Y.Z --title "X.Y.Z" --notes-file .temporal/logs/release-notes-X.Y.Z.md`
 
 ## Agent behavior
 
-- **Do** push, tag, and `gh release create` when shipping — do not hand off with “still on you.”
-- **Do** run `npm publish` from `scripts/npm-package/` after push; if auth/OTP fails, give the exact command for the human to rerun.
+- **Do** push, tag, and `gh release create` when shipping.
+- **Do not** empty-publish to npm for app releases.
 - **Do not** tag without human-agreed version and CHANGELOG entry.
 - **Do** claim only what gates proved in release notes.
