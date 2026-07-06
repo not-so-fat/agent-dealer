@@ -1,15 +1,9 @@
 import { useEffect, useState } from "react";
 import type { AgentWithHealth } from "@agent-dealer/shared";
-import { BUILTIN_AGENT_CLAUDE_ID } from "@agent-dealer/shared";
+import { BUILTIN_AGENT_CLAUDE_ID, CURSOR_DEFAULT_MODEL } from "@agent-dealer/shared";
 import AgentPicker from "../agents/AgentPicker";
 import ModelSelect from "../agents/ModelSelect";
 import { createRun } from "../../api";
-
-const SAMPLE = {
-  title: "Write a random facts sheet",
-  description: "Generate a short markdown document with 5 random fun facts about coffee. Keep it under 30 lines.",
-  taskCategory: "content" as const,
-};
 
 type Props = {
   agents: AgentWithHealth[];
@@ -34,15 +28,17 @@ export default function ManualTaskForm({ agents, onCreated, onManageAgents, embe
     }
   }, [agents, agentId]);
 
-  const fillSample = () => {
-    setTitle(SAMPLE.title);
-    setDescription(SAMPLE.description);
-    setCategory(SAMPLE.taskCategory);
-  };
-
   useEffect(() => {
-    setPlanModel("");
-  }, [agentId]);
+    const agent = agents.find((a) => a.id === agentId);
+    if (!agent) {
+      setPlanModel("");
+      return;
+    }
+    setPlanModel(
+      agent.defaultPlanModel ??
+        (agent.runtime === "cursor_local" ? CURSOR_DEFAULT_MODEL : "")
+    );
+  }, [agentId, agents]);
 
   const selectedAgent = agents.find((a) => a.id === agentId);
   const canKick =
@@ -117,9 +113,6 @@ export default function ManualTaskForm({ agents, onCreated, onManageAgents, embe
       <p className="text-xs text-white/40 -mt-1">
         Uses agent workspace by default. Override here for a one-off path.
       </p>
-      <button type="button" onClick={fillSample} className="btn-ghost text-xs px-2 py-1 w-full">
-        Sample: random document
-      </button>
       <button type="submit" disabled={loading || !canKick} className="btn-gold w-full py-2">
         {loading ? "Starting…" : "Kick plan"}
       </button>

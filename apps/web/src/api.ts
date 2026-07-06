@@ -151,7 +151,7 @@ export async function updatePlan(
   id: string,
   planMarkdown: string,
   approve: boolean,
-  executeModel?: string | null
+  opts?: { executeModel?: string | null; planModel?: string | null }
 ): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/plan`, {
     method: "PATCH",
@@ -159,7 +159,8 @@ export async function updatePlan(
     body: JSON.stringify({
       planMarkdown,
       approve,
-      ...(approve && executeModel !== undefined ? { executeModel } : {}),
+      ...(opts?.planModel !== undefined ? { planModel: opts.planModel } : {}),
+      ...(opts?.executeModel !== undefined ? { executeModel: opts.executeModel } : {}),
     }),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -193,7 +194,7 @@ export async function kickRun(id: string, executeModel?: string | null): Promise
   const res = await fetch(`${API}/api/runs/${id}/kick`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(executeModel !== undefined ? { executeModel } : {}),
+    body: JSON.stringify(executeModel?.trim() ? { executeModel: executeModel.trim() } : {}),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -218,6 +219,18 @@ export async function retryRun(
       ...(planModel !== undefined ? { planModel } : {}),
     }),
   });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function applyPlaybookPatch(id: string): Promise<unknown> {
+  const res = await fetch(`${API}/api/runs/${id}/playbook-patch/apply`, { method: "POST" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function dismissPlaybookPatch(id: string): Promise<unknown> {
+  const res = await fetch(`${API}/api/runs/${id}/playbook-patch/dismiss`, { method: "POST" });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

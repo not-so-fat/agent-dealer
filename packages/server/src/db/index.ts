@@ -4,7 +4,11 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } from "@agent-dealer/shared";
+import {
+  BUILTIN_AGENT_CLAUDE_ID,
+  BUILTIN_AGENT_CURSOR_ID,
+  CURSOR_DEFAULT_MODEL,
+} from "@agent-dealer/shared";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -130,4 +134,12 @@ function seedBuiltinAgents(db: Database.Database): void {
   `);
   insert.run(BUILTIN_AGENT_CLAUDE_ID, "Claude", "claude_code", now, now);
   insert.run(BUILTIN_AGENT_CURSOR_ID, "Cursor", "cursor_local", now, now);
+
+  db.prepare(
+    `UPDATE agents SET
+      default_plan_model = COALESCE(default_plan_model, ?),
+      default_execute_model = COALESCE(default_execute_model, ?),
+      updated_at = ?
+     WHERE id = ? AND runtime = 'cursor_local'`
+  ).run(CURSOR_DEFAULT_MODEL, CURSOR_DEFAULT_MODEL, now, BUILTIN_AGENT_CURSOR_ID);
 }

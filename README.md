@@ -2,7 +2,7 @@
 
 Human control plane for agent execution — queue, plan approval, agent runs, and audit treasure.
 
-**Spec:** [docs/PRD_V0.md](docs/PRD_V0.md)
+**Spec:** [docs/PRD_V0.md](docs/PRD_V0.md) · **Direction (cross-product):** [agent_deck/docs/DIRECTION.md](https://github.com/not-so-fat/agent_deck/blob/main/docs/DIRECTION.md)
 
 ## Prerequisites
 

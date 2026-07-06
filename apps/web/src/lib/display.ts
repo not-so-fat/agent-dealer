@@ -69,7 +69,7 @@ export function statusMeta(status: RunStatus, context?: "intake" | "ops"): Statu
   switch (status) {
     case "plan_pending":
       return {
-        label: context === "ops" ? "Review plan" : "Planning",
+        label: context === "ops" ? "Review Plan" : "Planning",
         hint: context === "ops" ? "Your sign-off required" : "Agent is writing the plan",
         tone: "bg-cyber-violet/15 text-cyber-violet-light border-cyber-violet/35",
         accent: "border-l-cyber-violet",
@@ -96,7 +96,7 @@ export function statusMeta(status: RunStatus, context?: "intake" | "ops"): Statu
       };
     case "review":
       return {
-        label: "Needs review",
+        label: "Needs Review",
         hint: "Your sign-off required",
         tone: "bg-[#C4B643]/20 text-[#E8DC7A] border-[#C4B643]/40",
         accent: "border-l-[#C4B643]",

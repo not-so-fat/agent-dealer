@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Runtime } from "@agent-dealer/shared";
+import { CURSOR_DEFAULT_MODEL } from "@agent-dealer/shared";
 import { fetchDeckPlaybooks, fetchDecks } from "./api";
 import ModelSelect from "./components/agents/ModelSelect";
 
@@ -49,13 +50,14 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
         className="field"
         disabled={disabled}
         value={value.runtime}
-        onChange={(e) =>
-          set({
-            runtime: e.target.value as Runtime,
-            defaultPlanModel: "",
-            defaultExecuteModel: "",
-          })
-        }
+        onChange={(e) => {
+          const runtime = e.target.value as Runtime;
+          const cursorDefaults =
+            runtime === "cursor_local"
+              ? { defaultPlanModel: CURSOR_DEFAULT_MODEL, defaultExecuteModel: CURSOR_DEFAULT_MODEL }
+              : { defaultPlanModel: "", defaultExecuteModel: "" };
+          set({ runtime, ...cursorDefaults });
+        }}
       >
         <option value="claude_code">Claude Code (claude -p)</option>
         <option value="cursor_local">Cursor local (cursor agent -p)</option>

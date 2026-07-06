@@ -12,7 +12,7 @@ type Props = {
 export default function PlanApprovalColumn({ runs, selectedId, onSelect }: Props) {
   return (
     <KanbanColumn
-      title="Review plan"
+      title="Review Plan"
       count={runs.length}
       accent="border-t-cyber-violet"
       titleAccent="text-cyber-violet-light"

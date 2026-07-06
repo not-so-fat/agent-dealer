@@ -15,6 +15,7 @@ import { pollLinearIssues } from "../adapters/external.js";
 import { syncLinearForRun } from "../adapters/linear-sync.js";
 import { listAgentsWithHealth } from "../adapters/agent-health.js";
 import { listAgents } from "../repository/agents.js";
+import { runReflect, type ReflectOpts } from "../runners/reflect.js";
 import type { AgentWithHealth } from "@agent-dealer/shared";
 
 type SnapshotListener = (snapshot: QueueSnapshotInternal) => void;
@@ -39,6 +40,7 @@ export interface QueueSnapshotInternal {
 
 const activeRuns = new Map<string, Promise<void>>();
 const activePlanDrafts = new Set<string>();
+const activeReflects = new Set<string>();
 let listeners: SnapshotListener[] = [];
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let dispatchTimer: ReturnType<typeof setInterval> | null = null;
@@ -143,7 +145,33 @@ export function stopQueue(): void {
 /** Fire-and-forget: agent drafts plan after task intake. */
 export function schedulePlanDraft(run: Run): void {
   if (!needsPlanDraft(run)) return;
-  void draftPlan(run).catch((e) => console.error("[plan-draft]", run.id, e));
+  if (activePlanDrafts.has(run.id)) return;
+  activePlanDrafts.add(run.id);
+  void draftPlan(run)
+    .catch((e) => console.error("[plan-draft]", run.id, e))
+    .finally(() => {
+      activePlanDrafts.delete(run.id);
+      notify().catch(console.error);
+    });
+}
+
+/** Fire-and-forget: post-review playbook reflect (D3 learning loop). */
+export function scheduleReflect(run: Run, opts: ReflectOpts): void {
+  if (!run.playbookId || !run.deckId) return;
+  if (activeReflects.has(run.id)) return;
+  void (async () => {
+    const online = await checkAgentDeckHealth();
+    if (!online) return;
+    activeReflects.add(run.id);
+    try {
+      await runReflect(run, opts);
+    } catch (e) {
+      console.error("[reflect]", run.id, e);
+    } finally {
+      activeReflects.delete(run.id);
+      notify().catch(console.error);
+    }
+  })();
 }
 
 async function dispatchPlanDrafts(): Promise<void> {
@@ -248,7 +276,23 @@ export async function draftPlan(run: Run, opts?: { replace?: boolean }): Promise
   return getRun(run.id)!;
 }
 
-/** Human requested a new agent plan (replaces draft). */
+/** Fire-and-forget: human requested a new agent plan (replaces draft). */
+export function scheduleRedraft(run: Run): boolean {
+  if (activePlanDrafts.has(run.id)) return false;
+  if (run.status !== "plan_pending" && run.status !== "queued") return false;
+  if (!run.runtime) return false;
+
+  activePlanDrafts.add(run.id);
+  void draftPlan(run, { replace: true })
+    .catch((e) => console.error("[plan-redraft]", run.id, e))
+    .finally(() => {
+      activePlanDrafts.delete(run.id);
+      notify().catch(console.error);
+    });
+  return true;
+}
+
+/** Human requested a new agent plan (replaces draft). @deprecated prefer scheduleRedraft */
 export async function redraftPlan(run: Run): Promise<Run> {
   return draftPlan(run, { replace: true });
 }

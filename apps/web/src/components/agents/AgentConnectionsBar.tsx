@@ -41,6 +41,9 @@ export default function AgentConnectionsBar({ agents, agentDeckOnline }: Props) 
 
   const claude = runtimeCliStatus(agents, "claude_code");
   const cursor = runtimeCliStatus(agents, "cursor_local");
+  const mcpIssue = agents
+    .flatMap((a) => a.issues)
+    .find((i) => i.code === "mcp_not_registered");
 
   return (
     <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1.5 text-xs text-white/45">
@@ -55,12 +58,16 @@ export default function AgentConnectionsBar({ agents, agentDeckOnline }: Props) 
       </span>
       <span
         className="inline-flex items-center gap-1.5"
-        title={mcpUrl ? `MCP ${mcpUrl}` : "Agent Deck optional"}
+        title={mcpIssue?.message ?? (mcpUrl ? `MCP ${mcpUrl}` : "Agent Deck optional")}
       >
-        <StatusDot ok={agentDeckOnline} />
-        <span className={agentDeckOnline ? "text-[#92E4DD]/80" : "text-white/35"}>
+        <StatusDot ok={agentDeckOnline && !mcpIssue} />
+        <span
+          className={
+            agentDeckOnline && !mcpIssue ? "text-[#92E4DD]/80" : mcpIssue ? "text-amber-200/90" : "text-white/35"
+          }
+        >
           Agent Deck MCP
-          {agentDeckOnline ? "" : " (optional)"}
+          {agentDeckOnline ? (mcpIssue ? " (setup needed)" : "") : " (optional)"}
         </span>
       </span>
     </div>

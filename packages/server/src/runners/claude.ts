@@ -2,10 +2,10 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { Run } from "@agent-dealer/shared";
-import { buildExecutionPrompt, buildPlanPrompt, workspaceForRun } from "./prompts.js";
+import { buildExecutionPrompt, buildPlanPrompt, buildReflectPrompt, workspaceForRun } from "./prompts.js";
 import { getTemporalLogsDir, getTemporalOutputDir } from "../paths.js";
 import { resolveClaudeBin, resolveCursorBin } from "../cli-env.js";
-import { resolveModelForPhase } from "../repository/runs.js";
+import { resolveModelForPhase, getRun } from "../repository/runs.js";
 
 export interface RunnerResult {
   exitCode: number;
@@ -32,15 +32,16 @@ async function spawnCli(
   });
 }
 
-function logPathFor(run: Run, mode: "plan" | "execute"): string {
+function logPathFor(run: Run, mode: "plan" | "execute" | "reflect"): string {
   const logDir = getTemporalLogsDir();
   return path.join(logDir, `${run.id}-${mode}-${Date.now()}.ndjson`);
 }
 
 export async function runClaude(
   run: Run,
-  mode: "execute" | "plan" = "execute",
-  model?: string
+  mode: "execute" | "plan" | "reflect" = "execute",
+  model?: string,
+  promptOverride?: string
 ): Promise<RunnerResult> {
   const mcpConfig =
     process.env.CLAUDE_MCP_CONFIG ?? path.join(process.env.HOME ?? "", ".claude.json");
@@ -51,16 +52,22 @@ export async function runClaude(
   const budget = run.budgetJson
     ? (JSON.parse(run.budgetJson) as { maxTurns?: number; maxBudgetUsd?: number })
     : {};
-  const maxTurns = mode === "plan" ? 5 : (budget.maxTurns ?? 30);
-  const maxBudget = mode === "plan" ? 0.5 : (budget.maxBudgetUsd ?? 5);
+  const maxTurns = mode === "plan" ? 5 : mode === "reflect" ? 3 : (budget.maxTurns ?? 30);
+  const maxBudget = mode === "plan" ? 0.5 : mode === "reflect" ? 0.25 : (budget.maxBudgetUsd ?? 5);
 
-  const prompt = mode === "plan" ? buildPlanPrompt(run) : buildExecutionPrompt(run);
-  const logPath = logPathFor(run, mode);
+  const prompt =
+    promptOverride ??
+    (mode === "plan"
+      ? buildPlanPrompt(run)
+      : mode === "reflect"
+        ? buildReflectPrompt(run, { trigger: "retry" })
+        : buildExecutionPrompt(run));
+  const logPath = logPathFor(run, mode === "reflect" ? "reflect" : mode);
 
   const args = [
+    ...(model ? ["--model", model] : []),
     "-p",
     prompt,
-    ...(model ? ["--model", model] : []),
     "--mcp-config",
     mcpConfig,
     "--max-turns",
@@ -73,6 +80,11 @@ export async function runClaude(
   ];
 
   if (mode === "plan") {
+    args.push(
+      "--allowedTools",
+      "Read,Glob,Grep,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace"
+    );
+  } else if (mode === "reflect") {
     args.push(
       "--allowedTools",
       "Read,Glob,Grep,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace"
@@ -119,9 +131,10 @@ export async function runAgent(
   run: Run,
   mode: "execute" | "plan" = "execute"
 ): Promise<RunnerResult> {
-  const model = resolveModelForPhase(run, mode);
-  if (run.runtime === "cursor_local") return runCursor(run, mode, model);
-  return runClaude(run, mode, model);
+  const fresh = getRun(run.id) ?? run;
+  const model = resolveModelForPhase(fresh, mode);
+  if (fresh.runtime === "cursor_local") return runCursor(fresh, mode, model);
+  return runClaude(fresh, mode, model);
 }
 
 /** @deprecated use stream-json extractPlanMarkdown via persistRunOutput */

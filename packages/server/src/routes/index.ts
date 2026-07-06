@@ -13,6 +13,7 @@ import {
   RetryRunInput,
   Runtime,
   UpdatePlanInput,
+  PlaybookPatchContent,
   BUILTIN_AGENT_CLAUDE_ID,
 } from "@agent-dealer/shared";
 import {
@@ -24,7 +25,9 @@ import {
   listEvents,
   listRuns,
   updateRunFields,
+  updateArtifactContent,
   transitionRun,
+  getLatestArtifact,
 } from "../repository/runs.js";
 import {
   createAgent,
@@ -38,11 +41,12 @@ import {
   forceDispatch,
   getSnapshotAsync,
   kickRun,
-  redraftPlan,
   schedulePlanDraft,
+  scheduleRedraft,
+  scheduleReflect,
   subscribe,
 } from "../queue/dispatcher.js";
-import { fetchAgentDeckDecks } from "../adapters/agent-deck.js";
+import { fetchAgentDeckDecks, updatePlaybookBody } from "../adapters/agent-deck.js";
 import { testAgentDeckConnection } from "../adapters/agent-deck.js";
 import {
   getLinearIssue,
@@ -316,8 +320,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     try {
       assertAgentConfigured(getRun(id)!);
-      const updated = await redraftPlan(getRun(id)!);
-      return updated;
+      const scheduled = scheduleRedraft(getRun(id)!);
+      if (!scheduled) {
+        return reply.status(409).send({ error: "Plan draft already in progress" });
+      }
+      return reply.status(202).send(getRun(id)!);
     } catch (e) {
       return reply.status(400).send({ error: String(e) });
     }
@@ -340,8 +347,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: "Plan not ready — wait for the agent to finish planning" });
       }
       assertAgentConfigured(run);
-      if (input.executeModel !== undefined) {
-        updateRunFields(id, { execute_model: input.executeModel });
+      const patch: {
+        plan_model?: string | null;
+        execute_model?: string | null;
+      } = {};
+      if (input.planModel !== undefined) {
+        patch.plan_model = input.planModel;
+      }
+      // null/empty = "Default" — do not wipe a seeded execute_model; only set explicit picks
+      if (input.executeModel?.trim()) {
+        patch.execute_model = input.executeModel.trim();
+      } else if (input.planModel?.trim()) {
+        patch.execute_model = input.planModel.trim();
+      }
+      if (Object.keys(patch).length > 0) {
+        updateRunFields(id, patch);
       }
       const updated = transitionRun(id, "plan_approved");
       syncLinearForRun(updated, "plan_approved").catch((e) =>
@@ -371,13 +391,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const playbookId = input.playbookId ?? run.playbookId ?? undefined;
     const deckName = deckId ? await resolveDeckName(deckId) : run.deckName;
 
-    const patch = {
+    const patch: {
+      deck_id: string | null;
+      deck_name: string | null;
+      playbook_id: string | null;
+      runtime: string;
+      execute_model?: string | null;
+    } = {
       deck_id: deckId ?? null,
       deck_name: deckName ?? null,
       playbook_id: playbookId ?? null,
       runtime,
-      execute_model: input.executeModel !== undefined ? input.executeModel : undefined,
     };
+    if (input.executeModel?.trim()) {
+      patch.execute_model = input.executeModel.trim();
+    }
 
     if (run.status === "plan_pending") {
       return reply.status(400).send({ error: "Approve the plan before starting execution" });
@@ -402,6 +430,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     const updated = transitionRun(id, "done");
     syncLinearForRun(updated, "done").catch((e) => console.error("[linear-sync] done:", e));
+    scheduleReflect(updated, { trigger: "approve" });
     return updated;
   });
 
@@ -426,9 +455,56 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       },
       { source: run.source, externalId: run.externalId ?? undefined, lineageId: run.lineageId ?? run.id }
     );
+    updateRunFields(retry.id, {
+      deck_id: run.deckId,
+      deck_name: run.deckName,
+      playbook_id: run.playbookId,
+      runtime: run.runtime,
+      execute_model: run.executeModel,
+    });
     addArtifact(retry.id, "feedback", { markdown: input.feedback }, "human");
-    schedulePlanDraft(retry);
-    return reply.status(201).send(retry);
+    schedulePlanDraft(getRun(retry.id)!);
+    scheduleReflect(run, { trigger: "retry", feedback: input.feedback });
+    return reply.status(201).send(getRun(retry.id));
+  });
+
+  app.post("/api/runs/:id/playbook-patch/apply", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const run = getRun(id);
+    if (!run) return reply.status(404).send({ error: "Not found" });
+    const art = getLatestArtifact(id, "playbook_patch");
+    if (!art?.contentJson) return reply.status(404).send({ error: "No playbook patch" });
+    const patch = PlaybookPatchContent.parse(JSON.parse(art.contentJson));
+    if (patch.status !== "proposed") {
+      return reply.status(400).send({ error: `Patch already ${patch.status}` });
+    }
+    try {
+      await updatePlaybookBody(patch.playbookId, patch.proposedBody);
+      const applied: PlaybookPatchContent = {
+        ...patch,
+        status: "applied",
+        appliedAt: new Date().toISOString(),
+      };
+      updateArtifactContent(art.id, applied);
+      return applied;
+    } catch (e) {
+      return reply.status(502).send({ error: String(e) });
+    }
+  });
+
+  app.post("/api/runs/:id/playbook-patch/dismiss", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const run = getRun(id);
+    if (!run) return reply.status(404).send({ error: "Not found" });
+    const art = getLatestArtifact(id, "playbook_patch");
+    if (!art?.contentJson) return reply.status(404).send({ error: "No playbook patch" });
+    const patch = PlaybookPatchContent.parse(JSON.parse(art.contentJson));
+    if (patch.status !== "proposed") {
+      return reply.status(400).send({ error: `Patch already ${patch.status}` });
+    }
+    const dismissed: PlaybookPatchContent = { ...patch, status: "dismissed" };
+    updateArtifactContent(art.id, dismissed);
+    return dismissed;
   });
 
   app.post("/api/runs/:id/cancel", async (req, reply) => {

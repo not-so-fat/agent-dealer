@@ -136,55 +136,54 @@ export default function IntakePage({ agents, onRefresh, onGoOperations, onManage
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col lg:flex-row min-h-0 max-w-6xl mx-auto w-full">
-        <div className="flex-1 flex flex-col min-h-0 min-w-0 px-6 py-4">
-          {error && <p className="text-sm text-red-400/90 mb-3">{error}</p>}
+      <div className="flex-1 flex flex-col min-h-0 max-w-6xl mx-auto w-full px-6 py-4">
+        {error && <p className="text-sm text-red-400/90 mb-3">{error}</p>}
 
-          <div className="flex items-center justify-between gap-2 mb-3">
-            <p className="text-sm text-white/45">
-              {loading ? "Loading…" : `${candidates.length} task${candidates.length === 1 ? "" : "s"}`}
-            </p>
-            <button type="button" onClick={() => refreshInbox()} disabled={loading} className="btn-ghost px-2 py-1 text-xs">
-              Refresh
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto space-y-2 min-h-0">
-            {candidates.length === 0 && !loading ? (
-              <div className="py-12 text-center space-y-3">
-                <p className="text-sm text-white/45">No tasks in inbox</p>
-                {linearConnected && linearConfig && (
-                  <p className="text-xs text-white/40 max-w-md mx-auto">
-                    Filtering Linear: {linearConfig.stateFilter.join(", ")}
-                    {linearConfig.assigneeMe ? " · assigned to you" : ""}
-                    {linearConfig.envOverrides.stateFilter || linearConfig.envOverrides.teamId
-                      ? " · some filters from env"
-                      : ""}
-                  </p>
-                )}
-                <div className="flex justify-center gap-2">
-                  <button type="button" onClick={openImport} className="btn-ghost px-3 py-1.5 text-sm">
-                    Linear settings
-                  </button>
-                  <button type="button" onClick={openManual} className="btn-gold px-3 py-1.5 text-sm">
-                    + Manual Task
-                  </button>
-                </div>
-              </div>
-            ) : (
-              candidates.map((c) => (
-                <InboxCandidateCard
-                  key={c.id}
-                  candidate={c}
-                  selected={selectedId === c.id && panel === "issue"}
-                  onSelect={() => selectIssue(c.id)}
-                />
-              ))
-            )}
-          </div>
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <p className="text-sm text-white/45">
+            {loading ? "Loading…" : `${candidates.length} task${candidates.length === 1 ? "" : "s"}`}
+          </p>
+          <button type="button" onClick={() => refreshInbox()} disabled={loading} className="btn-ghost px-2 py-1 text-xs">
+            Refresh
+          </button>
         </div>
 
-        {panel === "import" && (
+        <div className="flex-1 overflow-y-auto space-y-2 min-h-0">
+          {candidates.length === 0 && !loading ? (
+            <div className="py-12 text-center space-y-3">
+              <p className="text-sm text-white/45">No tasks in inbox</p>
+              {linearConnected && linearConfig && (
+                <p className="text-xs text-white/40 max-w-md mx-auto">
+                  Filtering Linear: {linearConfig.stateFilter.join(", ")}
+                  {linearConfig.assigneeMe ? " · assigned to you" : ""}
+                  {linearConfig.envOverrides.stateFilter || linearConfig.envOverrides.teamId
+                    ? " · some filters from env"
+                    : ""}
+                </p>
+              )}
+              <div className="flex justify-center gap-2">
+                <button type="button" onClick={openImport} className="btn-ghost px-3 py-1.5 text-sm">
+                  Linear settings
+                </button>
+                <button type="button" onClick={openManual} className="btn-gold px-3 py-1.5 text-sm">
+                  + Manual Task
+                </button>
+              </div>
+            </div>
+          ) : (
+            candidates.map((c) => (
+              <InboxCandidateCard
+                key={c.id}
+                candidate={c}
+                selected={selectedId === c.id && panel === "issue"}
+                onSelect={() => selectIssue(c.id)}
+              />
+            ))
+          )}
+        </div>
+      </div>
+
+      {panel === "import" && (
           <InboxPanel title="Linear Import" subtitle="Fetch issues assigned to you" onClose={closePanel}>
             <LinearImportPanel
               agents={agents}
@@ -197,7 +196,7 @@ export default function IntakePage({ agents, onRefresh, onGoOperations, onManage
         )}
 
         {panel === "manual" && (
-          <InboxPanel title="Manual Task" subtitle="For testing — not the main path" onClose={closePanel}>
+          <InboxPanel title="Manual Task" subtitle="Add work that isn't in Linear yet" onClose={closePanel}>
             <ManualTaskForm
               agents={agents}
               onCreated={afterManualCreated}
@@ -206,7 +205,6 @@ export default function IntakePage({ agents, onRefresh, onGoOperations, onManage
             />
           </InboxPanel>
         )}
-      </div>
 
       {panel === "issue" && selected && (
         <IntakeIssueDrawer

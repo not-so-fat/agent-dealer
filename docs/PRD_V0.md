@@ -279,12 +279,14 @@ Stories are grouped by the four primary dashboard CTAs.
 
 **As a** human operator **I want** to trigger a playbook update from run feedback **so that** Agent Deck knowledge improves.
 
+> **Implemented (2026-07-05)** per [DIRECTION D3](https://github.com/not-so-fat/agent_deck/blob/main/docs/DIRECTION.md): post-run reflect after retry/approve, propose-confirm apply in review drawer.
+
 **Acceptance:**
 
-- [ ] Post-approve action: "Update playbook" (requires `deckId` + `playbookId`)
-- [ ] Reflect turn uses agent-deck MCP → `update_playbook`
-- [ ] `playbook_patch` artifact links to change + rationale
-- [ ] Skipped when Agent Deck not configured
+- [x] Post-review reflect when `deckId` + `playbookId` present (retry feedback first, then approve)
+- [x] Reflect turn uses agent-deck MCP read tools → `playbook_patch` artifact
+- [x] Human applies via review drawer → Agent Deck REST `PUT /api/playbooks/:id`
+- [x] Skipped when Agent Deck not configured or Cursor runtime
 
 *v0 · P3*
 

@@ -47,12 +47,38 @@ export const ArtifactKind = z.enum([
   "deliverable",
   "feedback",
   "playbook_patch",
+  "reflect_status",
   "linear_sync",
 ]);
 export type ArtifactKind = z.infer<typeof ArtifactKind>;
 
-export const RunPhase = z.enum(["plan", "execute"]);
+export const RunPhase = z.enum(["plan", "execute", "reflect"]);
 export type RunPhase = z.infer<typeof RunPhase>;
+
+export const PlaybookPatchStatus = z.enum(["proposed", "applied", "dismissed"]);
+export type PlaybookPatchStatus = z.infer<typeof PlaybookPatchStatus>;
+
+export const PlaybookPatchTrigger = z.enum(["retry", "approve"]);
+export type PlaybookPatchTrigger = z.infer<typeof PlaybookPatchTrigger>;
+
+export const PlaybookPatchContent = z.object({
+  playbookId: z.string(),
+  playbookTitle: z.string().optional(),
+  previousBody: z.string(),
+  proposedBody: z.string(),
+  rationale: z.string(),
+  status: PlaybookPatchStatus,
+  trigger: PlaybookPatchTrigger,
+  appliedAt: z.string().optional(),
+});
+export type PlaybookPatchContent = z.infer<typeof PlaybookPatchContent>;
+
+export const ReflectStatusContent = z.object({
+  status: z.enum(["pending", "completed", "failed", "skipped"]),
+  trigger: PlaybookPatchTrigger,
+  error: z.string().optional(),
+});
+export type ReflectStatusContent = z.infer<typeof ReflectStatusContent>;
 
 /** Human-readable timeline derived from NDJSON (thinking, tools, assistant text). */
 export const StreamTraceEntry = z.object({
@@ -201,6 +227,7 @@ export type AgentConfigInput = z.infer<typeof AgentConfigInput>;
 export const UpdatePlanInput = z.object({
   planMarkdown: z.string(),
   approve: z.boolean().default(false),
+  planModel: z.string().nullable().optional(),
   executeModel: z.string().nullable().optional(),
 });
 export type UpdatePlanInput = z.infer<typeof UpdatePlanInput>;

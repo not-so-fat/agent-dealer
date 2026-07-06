@@ -1,6 +1,15 @@
 import { spawnSync } from "node:child_process";
 import type { Runtime, RuntimeModelOption } from "@agent-dealer/shared";
+import { CURSOR_DEFAULT_MODEL, CURSOR_SUBSCRIPTION_MODEL_IDS } from "@agent-dealer/shared";
 import { resolveCursorBin } from "../cli-env.js";
+
+const CURSOR_PINNED: RuntimeModelOption[] = [
+  { id: CURSOR_DEFAULT_MODEL, label: "Auto (subscription pool)" },
+  { id: "composer-2.5", label: "Composer 2.5 (subscription pool)" },
+  { id: "composer-2.5-fast", label: "Composer 2.5 Fast (subscription pool)" },
+];
+
+const CURSOR_FALLBACK: RuntimeModelOption[] = [...CURSOR_PINNED];
 
 const CLAUDE_FALLBACK: RuntimeModelOption[] = [
   { id: "sonnet", label: "Sonnet (latest alias)" },
@@ -22,6 +31,33 @@ const FALLBACK_CACHE_MS = Number(process.env.RUNTIME_MODELS_FALLBACK_CACHE_MS ??
 
 const cache = new Map<Runtime, CacheEntry>();
 
+function subscriptionPoolLabel(id: string, label: string): string {
+  if ((CURSOR_SUBSCRIPTION_MODEL_IDS as readonly string[]).includes(id)) {
+    if (label.toLowerCase().includes("subscription")) return label;
+    return `${label} (subscription pool)`;
+  }
+  return label;
+}
+
+function mergeCursorModels(live: RuntimeModelOption[]): RuntimeModelOption[] {
+  const byId = new Map<string, RuntimeModelOption>();
+  for (const pinned of CURSOR_PINNED) {
+    byId.set(pinned.id, pinned);
+  }
+  for (const m of live) {
+    if (m.id === CURSOR_DEFAULT_MODEL || (CURSOR_SUBSCRIPTION_MODEL_IDS as readonly string[]).includes(m.id)) {
+      byId.set(m.id, { id: m.id, label: subscriptionPoolLabel(m.id, m.label) });
+    } else {
+      byId.set(m.id, m);
+    }
+  }
+  const pinnedIds = new Set(CURSOR_PINNED.map((m) => m.id));
+  const pinned = CURSOR_PINNED.map((m) => byId.get(m.id)!);
+  const rest = [...byId.values()].filter((m) => !pinnedIds.has(m.id));
+  rest.sort((a, b) => a.label.localeCompare(b.label));
+  return [...pinned, ...rest];
+}
+
 function parseCursorModelsOutput(text: string): RuntimeModelOption[] {
   const models: RuntimeModelOption[] = [];
   for (const line of text.split("\n")) {
@@ -29,7 +65,7 @@ function parseCursorModelsOutput(text: string): RuntimeModelOption[] {
     if (!m) continue;
     models.push({ id: m[1]!, label: m[2]!.trim() });
   }
-  return models;
+  return mergeCursorModels(models);
 }
 
 async function tryAnthropicModelsApi(): Promise<RuntimeModelOption[]> {
@@ -60,7 +96,7 @@ function listCursorModels(): ModelsResult {
     const models = parseCursorModelsOutput(result.stdout);
     if (models.length > 0) return { models, source: "live" };
   }
-  return { models: [], source: "fallback" };
+  return { models: CURSOR_FALLBACK, source: "fallback" };
 }
 
 async function fetchRuntimeModelsFresh(runtime: Runtime): Promise<ModelsResult> {

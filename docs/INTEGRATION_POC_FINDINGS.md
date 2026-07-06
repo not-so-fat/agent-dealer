@@ -127,7 +127,7 @@ Report: `.temporal/logs/poc-cursor-probe-report.json`
 | `transcript` | `{ excerpt }` + `blob_path` → full NDJSON |
 | `cursor_session` | `{ sessionId }` from init |
 | `usage` | token counts from `result.usage` |
-| `feedback` | human retry text — inject into execute prompt (**not wired yet**) |
+| `feedback` | human retry text — inject into execute prompt via `buildExecutionPrompt()` |
 
 ### Thought process / outcomes in UI
 
@@ -188,7 +188,7 @@ PoC: plan exit 0 (real markdown), execute exit 0 (`EXEC_POC_OK`).
 | `transcript` | excerpt + NDJSON blob |
 | `claude_session` (optional) | `session_id` if we add `--resume` later |
 | `usage` | `total_cost_usd`, tokens, `rate_limit_event` snapshot |
-| `feedback` | inject on retry (**gap**) |
+| `feedback` | inject on retry via `buildExecutionPrompt()` |
 
 ### Thought process / outcomes in UI
 
@@ -225,7 +225,7 @@ Surface in run drawer: estimated cost, limit warnings, link to `/usage` equivale
 
 1. ~~Unblock Claude~~ — done via `claude login`
 2. **Cursor runner** — mirror `claude.ts`, `--trust`, store `session_id`, optional `--resume`
-3. **Inject feedback** into both runners' execute prompts
+3. ~~**Inject feedback** into both runners' execute prompts~~ — done (`buildExecutionPrompt`)
 4. **Persist usage** from stream-json `result` on each run
 5. **Intake screen** — Linear inbox → promote (not auto-create)
 6. **Transcript viewer** — Cursor `thinking`/`tool_call`, Claude `thinking`/`tool_use`

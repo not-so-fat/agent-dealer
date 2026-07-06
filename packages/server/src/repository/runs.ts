@@ -6,6 +6,7 @@ import type {
   RunEvent,
   RunStatus,
 } from "@agent-dealer/shared";
+import { CURSOR_DEFAULT_MODEL } from "@agent-dealer/shared";
 import { canTransition } from "@agent-dealer/shared";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
@@ -78,6 +79,14 @@ export function createRun(input: CreateRunInput, opts?: {
   const now = new Date().toISOString();
   const id = uuid();
   const agent = resolveAgent(input.agentId);
+  const agentProfile = getAgent(input.agentId);
+  const isCursor = agent.runtime === "cursor_local";
+  const planModel =
+    input.planModel ??
+    agentProfile?.defaultPlanModel ??
+    (isCursor ? CURSOR_DEFAULT_MODEL : null);
+  const executeModel =
+    input.executeModel ?? input.planModel ?? agentProfile?.defaultExecuteModel ?? planModel;
   const repo = input.repo ?? agent.workspaceRoot ?? null;
   if (!repo) {
     throw new Error("Agent workspace not configured — set workspace on Agents page or provide repo override");
@@ -98,8 +107,8 @@ export function createRun(input: CreateRunInput, opts?: {
     deck_name: agent.deckName ?? opts?.deckName ?? null,
     playbook_id: agent.playbookId ?? null,
     runtime: agent.runtime,
-    plan_model: input.planModel ?? null,
-    execute_model: input.executeModel ?? null,
+    plan_model: planModel,
+    execute_model: executeModel,
     status: input.status,
     lineage_id: opts?.lineageId ?? null,
     acceptance_criteria: input.acceptanceCriteria ?? null,
@@ -192,12 +201,15 @@ export function listRunsReadyForPlanReview(): Run[] {
 
 export function resolveModelForPhase(run: Run, phase: "plan" | "execute"): string | undefined {
   const agent = run.agentId ? getAgent(run.agentId) : null;
+  const isCursor = run.runtime === "cursor_local";
   const raw =
     phase === "plan"
       ? (run.planModel ?? agent?.defaultPlanModel ?? null)
-      : (run.executeModel ?? agent?.defaultExecuteModel ?? null);
+      : (run.executeModel ?? agent?.defaultExecuteModel ?? run.planModel ?? agent?.defaultPlanModel ?? null);
   const trimmed = raw?.trim();
-  return trimmed ? trimmed : undefined;
+  if (trimmed) return trimmed;
+  if (isCursor) return CURSOR_DEFAULT_MODEL;
+  return undefined;
 }
 
 type RunFieldPatch = Partial<{
@@ -376,6 +388,33 @@ export function listEvents(runId: string): RunEvent[] {
     payloadJson: r.payload_json,
     ts: r.ts,
   }));
+}
+
+export function updateArtifactContent(artifactId: string, content: unknown): Artifact {
+  const contentJson = JSON.stringify(content);
+  getDb()
+    .prepare("UPDATE artifacts SET content_json = ? WHERE id = ?")
+    .run(contentJson, artifactId);
+  const row = getDb()
+    .prepare("SELECT * FROM artifacts WHERE id = ?")
+    .get(artifactId) as {
+    id: string;
+    run_id: string;
+    kind: string;
+    content_json: string | null;
+    blob_path: string | null;
+    author: string;
+    created_at: string;
+  };
+  return {
+    id: row.id,
+    runId: row.run_id,
+    kind: row.kind as ArtifactKind,
+    contentJson: row.content_json,
+    blobPath: row.blob_path,
+    author: row.author as Artifact["author"],
+    createdAt: row.created_at,
+  };
 }
 
 export function getLatestArtifact(runId: string, kind: ArtifactKind): Artifact | null {

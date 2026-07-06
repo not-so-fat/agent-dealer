@@ -7,7 +7,7 @@ import {
   resolveClaudeBin,
   resolveCursorBin,
 } from "../cli-env.js";
-import { checkAgentDeckHealth } from "./agent-deck.js";
+import { checkAgentDeckHealth, isAgentDeckMcpRegistered } from "./agent-deck.js";
 
 const RUNTIME_CACHE_MS = 60_000;
 const runtimeIssueCache = new Map<Runtime, { at: number; issues: AgentHealthIssue[] }>();
@@ -76,7 +76,11 @@ async function runtimeIssues(runtime: Runtime): Promise<AgentHealthIssue[]> {
   return issues;
 }
 
-function agentSpecificIssues(agent: AgentProfile, agentDeckOnline: boolean): AgentHealthIssue[] {
+function agentSpecificIssues(
+  agent: AgentProfile,
+  agentDeckOnline: boolean,
+  mcpRegistered: boolean
+): AgentHealthIssue[] {
   const issues: AgentHealthIssue[] = [];
   if (!agent.workspaceRoot) {
     issues.push({ code: "workspace_missing", message: "Set workspace on Agents page" });
@@ -89,19 +93,30 @@ function agentSpecificIssues(agent: AgentProfile, agentDeckOnline: boolean): Age
   if (agent.deckId && !agentDeckOnline) {
     issues.push({ code: "deck_offline", message: "Agent Deck offline — deck MCP unavailable" });
   }
+  if (agent.deckId && agent.runtime === "claude_code" && agentDeckOnline && !mcpRegistered) {
+    issues.push({
+      code: "mcp_not_registered",
+      message: "Run agent-deck setup --client claude --start (Claude MCP not registered)",
+    });
+  }
   return issues;
 }
 
 export async function healthForAgent(
   agent: AgentProfile,
   agentDeckOnline: boolean,
-  runtimeIssuesByRuntime?: Map<Runtime, AgentHealthIssue[]>
+  runtimeIssuesByRuntime?: Map<Runtime, AgentHealthIssue[]>,
+  mcpRegistered?: boolean
 ): Promise<AgentWithHealth> {
   const runtime =
     runtimeIssuesByRuntime !== undefined
       ? (runtimeIssuesByRuntime.get(agent.runtime) ?? [])
       : await runtimeIssues(agent.runtime);
-  const issues: AgentHealthIssue[] = [...runtime, ...agentSpecificIssues(agent, agentDeckOnline)];
+  const deckMcpOk = mcpRegistered ?? isAgentDeckMcpRegistered();
+  const issues: AgentHealthIssue[] = [
+    ...runtime,
+    ...agentSpecificIssues(agent, agentDeckOnline, deckMcpOk),
+  ];
   return {
     ...agent,
     healthy: issues.length === 0,
@@ -111,6 +126,7 @@ export async function healthForAgent(
 
 export async function listAgentsWithHealth(agents: AgentProfile[]): Promise<AgentWithHealth[]> {
   const agentDeckOnline = await checkAgentDeckHealth();
+  const mcpRegistered = isAgentDeckMcpRegistered();
   const runtimes = [...new Set(agents.map((a) => a.runtime))];
   const runtimeIssuesByRuntime = new Map<Runtime, AgentHealthIssue[]>();
   await Promise.all(
@@ -119,6 +135,6 @@ export async function listAgentsWithHealth(agents: AgentProfile[]): Promise<Agen
     })
   );
   return Promise.all(
-    agents.map((a) => healthForAgent(a, agentDeckOnline, runtimeIssuesByRuntime))
+    agents.map((a) => healthForAgent(a, agentDeckOnline, runtimeIssuesByRuntime, mcpRegistered))
   );
 }

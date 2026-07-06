@@ -7,6 +7,7 @@ import {
   cancelRun,
   draftPlan,
   fetchRunDetail,
+  latestArtifact,
   latestByPhase,
   updatePlan,
   type StreamTraceContent,
@@ -29,6 +30,7 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
   const [planModel, setPlanModel] = useState("");
   const [executeModel, setExecuteModel] = useState("");
   const [busy, setBusy] = useState(false);
+  const [replanning, setReplanning] = useState(false);
 
   const agent = agents.find((a) => a.id === run.agentId);
   const runtime = run.runtime ?? agent?.runtime ?? "claude_code";
@@ -36,14 +38,15 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
   const load = useCallback(async () => {
     const detail = await fetchRunDetail(run.id);
     setArtifacts(detail.artifacts);
-    const approved = detail.artifacts.find((a) => a.kind === "approved_plan");
-  const agentPlan = detail.artifacts.find((a) => a.kind === "draft_plan");
+    const approved = latestArtifact(detail.artifacts, "approved_plan");
+    const agentPlan = latestArtifact(detail.artifacts, "draft_plan");
     const src = approved ?? agentPlan;
     if (src) setPlanText(artifactMarkdown(src));
   }, [run.id]);
 
   const hasPlan = artifacts.some((a) => a.kind === "draft_plan");
   const agentPlanning = run.status === "plan_pending" && !hasPlan;
+  const planning = agentPlanning || replanning;
   const tracePlan = latestByPhase<StreamTraceContent>(artifacts, "stream_trace", "plan");
   const usagePlan = latestByPhase<UsageContent>(artifacts, "usage", "plan");
 
@@ -54,13 +57,43 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
   useEffect(() => {
     setPlanModel(run.planModel ?? "");
     setExecuteModel(run.executeModel ?? "");
+    setReplanning(false);
   }, [run.id, run.planModel, run.executeModel]);
 
   useEffect(() => {
-    if (!agentPlanning) return;
-    const t = setInterval(() => load().catch(console.error), 3000);
+    if (!planning) return;
+    const t = setInterval(() => {
+      load().catch(console.error);
+      onRefresh();
+    }, 3000);
     return () => clearInterval(t);
-  }, [agentPlanning, load]);
+  }, [planning, load, onRefresh]);
+
+  const requestReplan = async () => {
+    const before = latestArtifact(artifacts, "draft_plan")?.createdAt;
+    setReplanning(true);
+    setBusy(true);
+    try {
+      await draftPlan(run.id, planModel || null);
+      const deadline = Date.now() + 120_000;
+      while (Date.now() < deadline) {
+        const detail = await fetchRunDetail(run.id);
+        setArtifacts(detail.artifacts);
+        const latest = latestArtifact(detail.artifacts, "draft_plan");
+        if (latest && latest.createdAt !== before) {
+          setPlanText(artifactMarkdown(latest));
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      onRefresh();
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setReplanning(false);
+      setBusy(false);
+    }
+  };
 
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -84,18 +117,10 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
 
       <section className="space-y-2">
         <div className="heading-section">Plan</div>
-        {agentPlanning && (
-          <p className="text-sm text-[#92E4DD] animate-pulse">Agent is writing the plan…</p>
-        )}
-        {hasPlan && (
-          <button
-            type="button"
-            disabled={busy || agentPlanning}
-            onClick={() => act(() => draftPlan(run.id, planModel || null))}
-            className="btn-ghost px-3 py-1.5 disabled:opacity-40"
-          >
-            Ask agent to replan
-          </button>
+        {planning && (
+          <p className="text-sm text-[#92E4DD] animate-pulse">
+            {replanning ? "Agent is replanning…" : "Agent is writing the plan…"}
+          </p>
         )}
         <ModelSelect
           runtime={runtime}
@@ -103,50 +128,70 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
           value={planModel}
           onChange={setPlanModel}
           defaultModelId={agent?.defaultPlanModel}
-          disabled={busy || agentPlanning}
+          disabled={busy || planning}
         />
         <textarea
           className="field-mono min-h-[min(420px,45vh)] resize-y leading-relaxed"
           value={planText}
-          readOnly={agentPlanning}
-          onChange={!agentPlanning ? (e) => setPlanText(e.target.value) : undefined}
+          readOnly={planning}
+          onChange={!planning ? (e) => setPlanText(e.target.value) : undefined}
           placeholder={
-            agentPlanning ? "Plan will appear here when the agent finishes…" : "Edit if needed, then approve"
+            planning ? "Plan will appear here when the agent finishes…" : "Edit if needed, then approve"
           }
         />
-        {hasPlan && !agentPlanning && (
-          <div className="flex gap-2 flex-wrap">
+        {hasPlan && !planning && (
+          <div className="flex flex-wrap items-center justify-between gap-2 -mt-1">
             <button
               type="button"
               disabled={busy || !planText.trim()}
               onClick={() => act(() => updatePlan(run.id, planText, false))}
-              className="btn-ghost px-4 py-2 disabled:opacity-40"
+              className="btn-ghost text-xs px-2 py-1 disabled:opacity-40"
             >
               Save edits
             </button>
-            <ModelSelect
-              runtime={runtime}
-              label="Execution model"
-              value={executeModel}
-              onChange={setExecuteModel}
-              defaultModelId={agent?.defaultExecuteModel}
-              disabled={busy}
-            />
             <button
               type="button"
-              disabled={busy || !planText.trim()}
-              onClick={() =>
-                act(async () => {
-                  await updatePlan(run.id, planText, true, executeModel || null);
-                  onApproved?.();
-                  onApprovedAndNext?.();
-                })
-              }
-              className="btn-gold px-4 py-2 disabled:opacity-40 w-full sm:w-auto"
+              disabled={busy}
+              onClick={() => requestReplan()}
+              className="btn-ghost text-xs px-2 py-1 disabled:opacity-40"
             >
-              Approve & next →
+              Ask agent to replan
             </button>
           </div>
+        )}
+        {hasPlan && !planning && (
+          <section className="space-y-2 pt-3 border-t border-white/10">
+            <div className="heading-section">Your Decision</div>
+            <div className="flex flex-col sm:flex-row sm:items-end gap-2">
+              <div className="flex-1 min-w-0">
+                <ModelSelect
+                  runtime={runtime}
+                  label="Execution model"
+                  value={executeModel}
+                  onChange={setExecuteModel}
+                  defaultModelId={agent?.defaultExecuteModel}
+                  disabled={busy}
+                />
+              </div>
+              <button
+                type="button"
+                disabled={busy || !planText.trim()}
+                onClick={() =>
+                  act(async () => {
+                    await updatePlan(run.id, planText, true, {
+                      planModel: planModel || null,
+                      executeModel: executeModel || null,
+                    });
+                    onApproved?.();
+                    onApprovedAndNext?.();
+                  })
+                }
+                className="btn-gold px-5 py-2 disabled:opacity-40 shrink-0 sm:min-w-[11rem]"
+              >
+                Approve & next →
+              </button>
+            </div>
+          </section>
         )}
       </section>
 

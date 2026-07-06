@@ -5,8 +5,14 @@ import { Runtime } from "./runtime.js";
 export const BUILTIN_AGENT_CLAUDE_ID = "00000000-0000-4000-a000-000000000001";
 export const BUILTIN_AGENT_CURSOR_ID = "00000000-0000-4000-a000-000000000002";
 
+/** Cursor CLI model id for Auto + Composer subscription pool (not IDE default). */
+export const CURSOR_DEFAULT_MODEL = "auto";
+
+/** Cursor models that draw from the Auto + Composer pool on individual Pro plans. */
+export const CURSOR_SUBSCRIPTION_MODEL_IDS = ["auto", "composer-2.5", "composer-2.5-fast"] as const;
+
 export const AgentHealthIssue = z.object({
-  code: z.enum(["cli_missing", "runtime_auth", "deck_offline", "workspace_missing"]),
+  code: z.enum(["cli_missing", "runtime_auth", "deck_offline", "workspace_missing", "mcp_not_registered"]),
   message: z.string(),
 });
 export type AgentHealthIssue = z.infer<typeof AgentHealthIssue>;

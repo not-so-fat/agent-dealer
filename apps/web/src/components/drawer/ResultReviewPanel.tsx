@@ -18,6 +18,7 @@ import {
 } from "../../api";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
 import { ExecutionOutcomeSection, executionHasBlocker } from "./ExecutionOutcomeSection";
+import PlaybookLearningPanel from "./PlaybookLearningPanel";
 import RemoveFromOpsAction from "./RemoveFromOpsAction";
 
 type Props = {
@@ -55,6 +56,23 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
   useEffect(() => {
     load().catch(console.error);
   }, [load]);
+
+  const reflectPending = artifacts.some((a) => {
+    if (a.kind !== "reflect_status" || !a.contentJson) return false;
+    try {
+      return (JSON.parse(a.contentJson) as { status?: string }).status === "pending";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    if (!reflectPending) return;
+    const timer = setInterval(() => {
+      load().catch(console.error);
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [reflectPending, load]);
 
   useEffect(() => {
     setPrefilledRetry(false);
@@ -116,6 +134,8 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
 
       {traceExec && <TracePanel trace={traceExec} />}
       {usageExec && <UsagePanel usage={usageExec} />}
+
+      <PlaybookLearningPanel run={run} artifacts={artifacts} busy={busy} act={act} />
 
       <section className="space-y-4">
         <div className="heading-section">Your Decision</div>

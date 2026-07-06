@@ -14,6 +14,7 @@ import {
 } from "../../api";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
 import { ExecutionOutcomeSection } from "./ExecutionOutcomeSection";
+import PlaybookLearningPanel from "./PlaybookLearningPanel";
 
 type Props = {
   run: Run;
@@ -21,11 +22,24 @@ type Props = {
 
 export default function DoneReviewPanel({ run }: Props) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     const detail = await fetchRunDetail(run.id);
     setArtifacts(detail.artifacts);
   }, [run.id]);
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await fn();
+      await load();
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const execResult = latestByPhase<ExecutionResultContent>(artifacts, "execution_result", "execute");
   const traceExec = latestByPhase<StreamTraceContent>(artifacts, "stream_trace", "execute");
@@ -60,6 +74,8 @@ export default function DoneReviewPanel({ run }: Props) {
       )}
 
       {execResult && <ExecutionOutcomeSection execResult={execResult} />}
+
+      <PlaybookLearningPanel run={run} artifacts={artifacts} busy={busy} act={act} />
 
       {usageExec && <UsagePanel usage={usageExec} />}
       {traceExec && <TracePanel trace={traceExec} label="Execution trace" />}

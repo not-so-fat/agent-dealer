@@ -65,6 +65,9 @@ Compact timeline for UI — full detail remains in NDJSON at `blob_path`.
 
 Injected into execute prompt via `buildExecutionPrompt()`. Copied to retry runs.
 
+| `playbook_patch` | `{ playbookId, previousBody, proposedBody, rationale, status, trigger }` — post-run reflect proposal |
+| `reflect_status` | `{ status: pending \| completed \| failed \| skipped, trigger, error? }` |
+
 ### Linear sync (debug)
 
 | Kind | `content_json` |

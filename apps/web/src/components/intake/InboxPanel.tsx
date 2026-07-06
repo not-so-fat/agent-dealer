@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import ReviewDrawer from "../drawer/ReviewDrawer";
 
 type Props = {
   title: string;
@@ -7,25 +8,29 @@ type Props = {
   children: ReactNode;
 };
 
-/** Narrow utility column for inbox import / manual forms — not primary reading. */
+/** Centered overlay for inbox import / manual forms — same shell as issue detail. */
 export default function InboxPanel({ title, subtitle, onClose, children }: Props) {
   return (
-    <aside className="w-full lg:w-96 shrink-0 flex flex-col min-h-0 glass-column border-t lg:border-t-0 lg:border-l border-white/10">
-      <header className="px-4 py-3 border-b border-white/[0.06] flex items-start justify-between gap-3 shrink-0">
-        <div className="min-w-0">
-          <h2 className="heading-panel truncate">{title}</h2>
-          {subtitle && <p className="text-caption mt-0.5">{subtitle}</p>}
+    <ReviewDrawer
+      onClose={onClose}
+      header={
+        <div className="flex justify-between items-start gap-3">
+          <div className="min-w-0 flex-1 space-y-1">
+            <h2 className="font-semibold text-2xl leading-snug">{title}</h2>
+            {subtitle && <p className="text-sm text-white/55 leading-snug">{subtitle}</p>}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-white/60 hover:text-white px-1 shrink-0"
+            aria-label="Close"
+          >
+            ✕
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="btn-ghost px-2 py-1 text-sm shrink-0"
-          aria-label="Close panel"
-        >
-          ✕
-        </button>
-      </header>
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">{children}</div>
-    </aside>
+      }
+    >
+      <div className="space-y-4">{children}</div>
+    </ReviewDrawer>
   );
 }
