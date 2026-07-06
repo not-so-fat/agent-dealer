@@ -54,6 +54,8 @@ import {
   testLinearConnection,
 } from "../adapters/linear-inbox.js";
 import { syncLinearForRun } from "../adapters/linear-sync.js";
+import { buildLineageUsageSummary } from "../usage-summary.js";
+import { buildLineageTraceSummary } from "../trace-summary.js";
 import {
   getLinearIntakeConfig,
   getLinearIntakeConfigView,
@@ -113,6 +115,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       run,
       artifacts: listArtifacts(id),
       events: listEvents(id),
+      usageSummary: buildLineageUsageSummary(run),
+      traceSummary: buildLineageTraceSummary(run),
     };
   });
 
@@ -487,6 +491,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
     }
     addArtifact(retry.id, "feedback", { markdown: input.feedback }, "human");
+
+    const parentDoc = getLatestArtifact(id, "document");
+    if (parentDoc?.contentJson) {
+      try {
+        addArtifact(retry.id, "document", JSON.parse(parentDoc.contentJson), "system");
+      } catch {
+        /* deliverable will be seeded at execution if needed */
+      }
+    }
+
     const retryRun = getRun(retry.id)!;
     addArtifact(id, "feedback", { supersededBy: retry.id, note: "Retry — replaced by new run" }, "system");
     transitionRun(id, "cancelled");

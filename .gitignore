@@ -2,7 +2,9 @@ node_modules/
 dist/
 .env
 .temporal/
-.cursor/
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 apps/web/public/fonts/
 *.db
 *.db-journal

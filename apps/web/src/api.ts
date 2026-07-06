@@ -18,6 +18,7 @@ import type {
   StreamTraceContent,
   UpdateAgentInput,
   UsageContent,
+  UsageSummary,
 } from "@agent-dealer/shared";
 import { clearCachedRuntimeModels, fetchRuntimeModelsDeduped } from "./lib/runtimeModelsCache";
 
@@ -32,6 +33,8 @@ export async function fetchSnapshot(): Promise<QueueSnapshot> {
 export async function fetchRunDetail(id: string): Promise<{
   run: Run;
   artifacts: Artifact[];
+  usageSummary?: UsageSummary;
+  traceSummary?: StreamTraceContent;
 }> {
   const res = await fetch(`${API}/api/runs/${id}`);
   if (!res.ok) throw new Error("Not found");
@@ -358,4 +361,4 @@ export function latestByPhase<T extends { phase?: string }>(
   return last ? parseArtifact<T>(last) : null;
 }
 
-export type { StreamTraceContent, UsageContent, ExecutionResultContent, DocumentContent, LinearCandidate };
+export type { StreamTraceContent, UsageContent, UsageSummary, ExecutionResultContent, DocumentContent, LinearCandidate };

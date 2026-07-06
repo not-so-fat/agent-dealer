@@ -14,7 +14,7 @@ import {
   type DocumentContent,
   type ExecutionResultContent,
   type StreamTraceContent,
-  type UsageContent,
+  type UsageSummary,
 } from "../../api";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
 import MarkdownBody from "../ui/MarkdownBody";
@@ -32,6 +32,8 @@ type Props = {
 
 export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onDoneAndNext }: Props) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
+  const [traceSummary, setTraceSummary] = useState<StreamTraceContent | null>(null);
   const [feedback, setFeedback] = useState("");
   const [executeModel, setExecuteModel] = useState("");
   const [busy, setBusy] = useState(false);
@@ -43,11 +45,11 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
   const load = useCallback(async () => {
     const detail = await fetchRunDetail(run.id);
     setArtifacts(detail.artifacts);
+    setUsageSummary(detail.usageSummary ?? null);
+    setTraceSummary(detail.traceSummary ?? null);
   }, [run.id]);
 
   const execResult = latestByPhase<ExecutionResultContent>(artifacts, "execution_result", "execute");
-  const traceExec = latestByPhase<StreamTraceContent>(artifacts, "stream_trace", "execute");
-  const usageExec = latestByPhase<UsageContent>(artifacts, "usage", "execute");
   const documentArtifact = latestArtifact(artifacts, "document");
   const document = documentArtifact ? parseArtifact<DocumentContent>(documentArtifact) : null;
   const approvedPlan = artifacts.find((a) => a.kind === "approved_plan");
@@ -135,8 +137,8 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
         </section>
       )}
 
-      {traceExec && <TracePanel trace={traceExec} />}
-      {usageExec && <UsagePanel usage={usageExec} />}
+      {traceSummary && <TracePanel trace={traceSummary} />}
+      {usageSummary && <UsagePanel summary={usageSummary} />}
 
       <PlaybookLearningPanel run={run} artifacts={artifacts} busy={busy} act={act} />
 

@@ -7,9 +7,8 @@ import {
   fetchLogTail,
   fetchRunDetail,
   kickRun,
-  latestByPhase,
   type StreamTraceContent,
-  type UsageContent,
+  type UsageSummary,
 } from "../../api";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
 
@@ -21,6 +20,8 @@ type Props = {
 
 export default function ExecutionPanel({ run, agents, onRefresh }: Props) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
+  const [traceSummary, setTraceSummary] = useState<StreamTraceContent | null>(null);
   const [transcriptText, setTranscriptText] = useState("");
   const [executeModel, setExecuteModel] = useState("");
   const [busy, setBusy] = useState(false);
@@ -31,10 +32,10 @@ export default function ExecutionPanel({ run, agents, onRefresh }: Props) {
   const load = useCallback(async () => {
     const detail = await fetchRunDetail(run.id);
     setArtifacts(detail.artifacts);
+    setUsageSummary(detail.usageSummary ?? null);
+    setTraceSummary(detail.traceSummary ?? null);
   }, [run.id]);
 
-  const traceExec = latestByPhase<StreamTraceContent>(artifacts, "stream_trace", "execute");
-  const usageExec = latestByPhase<UsageContent>(artifacts, "usage", "execute");
   const isRunning = run.status === "running";
   const isWaiting = run.status === "plan_approved";
 
@@ -104,8 +105,8 @@ export default function ExecutionPanel({ run, agents, onRefresh }: Props) {
         </>
       )}
 
-      {traceExec && <TracePanel trace={traceExec} label="Live trace" />}
-      {usageExec && <UsagePanel usage={usageExec} />}
+      {traceSummary && <TracePanel trace={traceSummary} />}
+      {usageSummary && <UsagePanel summary={usageSummary} />}
 
       {transcriptText && (
         <section className="space-y-2">

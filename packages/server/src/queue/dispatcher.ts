@@ -8,7 +8,7 @@ import {
   transitionRun,
 } from "../repository/runs.js";
 import { runAgent } from "../runners/claude.js";
-import { persistRunOutput } from "../runners/persist.js";
+import { persistRunOutput, seedDeliverableFromParent } from "../runners/persist.js";
 import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
 import { pollLinearIssues } from "../adapters/external.js";
 import { syncLinearForRun } from "../adapters/linear-sync.js";
@@ -324,6 +324,7 @@ export async function redraftPlan(run: Run): Promise<Run> {
 async function executeRun(run: Run): Promise<void> {
   const rt = runtimeFor(run);
   try {
+    seedDeliverableFromParent(run);
     transitionRun(run.id, "running");
     await notify();
 

@@ -10,7 +10,7 @@ import {
   type DocumentContent,
   type ExecutionResultContent,
   type StreamTraceContent,
-  type UsageContent,
+  type UsageSummary,
 } from "../../api";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
 import MarkdownBody from "../ui/MarkdownBody";
@@ -23,11 +23,15 @@ type Props = {
 
 export default function DoneReviewPanel({ run }: Props) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
+  const [traceSummary, setTraceSummary] = useState<StreamTraceContent | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     const detail = await fetchRunDetail(run.id);
     setArtifacts(detail.artifacts);
+    setUsageSummary(detail.usageSummary ?? null);
+    setTraceSummary(detail.traceSummary ?? null);
   }, [run.id]);
 
   const act = async (fn: () => Promise<unknown>) => {
@@ -43,8 +47,6 @@ export default function DoneReviewPanel({ run }: Props) {
   };
 
   const execResult = latestByPhase<ExecutionResultContent>(artifacts, "execution_result", "execute");
-  const traceExec = latestByPhase<StreamTraceContent>(artifacts, "stream_trace", "execute");
-  const usageExec = latestByPhase<UsageContent>(artifacts, "usage", "execute");
   const documentArtifact = latestArtifact(artifacts, "document");
   const document = documentArtifact ? parseArtifact<DocumentContent>(documentArtifact) : null;
   const approvedPlan = artifacts.find((a) => a.kind === "approved_plan");
@@ -80,8 +82,8 @@ export default function DoneReviewPanel({ run }: Props) {
 
       <PlaybookLearningPanel run={run} artifacts={artifacts} busy={busy} act={act} />
 
-      {usageExec && <UsagePanel usage={usageExec} />}
-      {traceExec && <TracePanel trace={traceExec} label="Execution trace" />}
+      {usageSummary && <UsagePanel summary={usageSummary} />}
+      {traceSummary && <TracePanel trace={traceSummary} />}
     </div>
   );
 }

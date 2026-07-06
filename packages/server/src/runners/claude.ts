@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { Run } from "@agent-dealer/shared";
-import { buildExecutionPrompt, buildPlanPrompt, buildReflectPrompt, workspaceForRun } from "./prompts.js";
+import { buildExecutionPrompt, buildExecutionContinuationPrompt, buildPlanPrompt, buildReflectPrompt, workspaceForRun } from "./prompts.js";
+import { humanFeedbackText, lineageParentExecuteSessionId } from "./run-context.js";
 import { getTemporalLogsDir, getTemporalOutputDir } from "../paths.js";
 import { resolveClaudeBin, resolveCursorBin } from "../cli-env.js";
 import { resolveModelForPhase, getRun } from "../repository/runs.js";
@@ -55,17 +56,23 @@ export async function runClaude(
   const maxTurns = mode === "plan" ? 5 : mode === "reflect" ? 3 : (budget.maxTurns ?? 30);
   const maxBudget = mode === "plan" ? 0.5 : mode === "reflect" ? 0.25 : (budget.maxBudgetUsd ?? 5);
 
+  const resumeSessionId =
+    mode === "execute" && humanFeedbackText(run) ? lineageParentExecuteSessionId(run) : null;
+
   const prompt =
     promptOverride ??
     (mode === "plan"
       ? buildPlanPrompt(run)
       : mode === "reflect"
         ? buildReflectPrompt(run, { trigger: "retry" })
-        : buildExecutionPrompt(run));
+        : resumeSessionId
+          ? buildExecutionContinuationPrompt(run)
+          : buildExecutionPrompt(run));
   const logPath = logPathFor(run, mode === "reflect" ? "reflect" : mode);
 
   const args = [
     ...(model ? ["--model", model] : []),
+    ...(resumeSessionId ? ["--resume", resumeSessionId] : []),
     "-p",
     prompt,
     "--mcp-config",

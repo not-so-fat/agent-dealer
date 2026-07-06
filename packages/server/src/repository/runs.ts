@@ -437,6 +437,21 @@ export function getLineageParentRun(run: Run): Run | null {
   return row ? rowToRun(row) : null;
 }
 
+/** All runs in a lineage (root first), including cancelled retries. */
+export function listLineageRuns(run: Run): Run[] {
+  const lineageId = run.lineageId ?? run.id;
+  const rows = getDb()
+    .prepare(
+      `
+      SELECT * FROM runs
+      WHERE lineage_id = @lineage_id OR id = @lineage_id
+      ORDER BY created_at ASC
+    `
+    )
+    .all({ lineage_id: lineageId }) as RunRow[];
+  return rows.map(rowToRun);
+}
+
 export function getLatestArtifact(runId: string, kind: ArtifactKind): Artifact | null {
   const row = getDb()
     .prepare(

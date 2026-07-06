@@ -1,0 +1,43 @@
+---
+description: agent-dealer product UX, UI, and repo-specific conventions
+alwaysApply: true
+---
+
+# agent-dealer (this repo)
+
+**Spec:** `docs/PRD_V0.md` · **Sibling UI:** Agent Deck (`agent_deck/apps/agent-deck`) — match palette and Monaco-on-body typography, not `@monaco-editor/react`.
+
+## Product IA (direction)
+
+- **Operations (home):** what is running now + columns that need human gates (plan / in progress / review). Not the intake form.
+- **Intake (separate screen):** ticket inbox (Linear → candidates) + promote to run + manual add. User fills tickets elsewhere, promotes here.
+- **Agent binding first:** runtime required at task create; deck/playbook optional. Plan mode and execution use the same binding — do not re-pick at kick.
+
+## UI / typography (this repo only)
+
+- Body font: Monaco stack like Agent Deck (`index.css` — serve `/fonts/Monaco.ttf` for Chrome).
+- Plans/transcripts: monospace textareas (playbook-modal style), not IDE widgets.
+- Tokens: `#0A0A07` background, `#92E4DD` teal, `#C4B643` gold, `#0F0F0C` panels.
+
+## Layout (reading surfaces)
+
+- **Reading surfaces use the review drawer** — same centered overlay as `RunDrawer` (`ReviewDrawer`, `min(1200px, 96vw)`). Ops, Done, and Inbox issue detail all open the drawer; do not invent inline split-pane detail columns.
+- **Utility chrome stays narrow:** Inbox import / manual forms may use a compact side column (`lg:w-96`).
+
+**Canonical rule:** Agent Deck playbook `pb_product_principle` → **Layout (reading surfaces)**. Repo rule here is agent-dealer tokens and IA only.
+
+## Before asking the human to test
+
+1. Run `npm run flow:verify` (API gates).
+2. Run `npm run poc:integration` (external integrations).
+3. Walk one browser session or report exact gap.
+
+Repo-specific lessons stay here — not in Agent Deck playbooks.
+
+## Release & versioning
+
+Repo-specific ship process, dev deck bind, and version policy: **`.cursor/rules/agent-dealer-release.mdc`** (human agrees version before tag; not npm `0.0.0` stub).
+
+## Temporal scripts
+
+One-off PoCs and logs under `.temporal/` only. Recurring npm scripts may wrap `.temporal/scripts/`.

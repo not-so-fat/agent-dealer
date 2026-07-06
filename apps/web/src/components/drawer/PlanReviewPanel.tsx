@@ -8,10 +8,9 @@ import {
   draftPlan,
   fetchRunDetail,
   latestArtifact,
-  latestByPhase,
   updatePlan,
   type StreamTraceContent,
-  type UsageContent,
+  type UsageSummary,
 } from "../../api";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
 import MarkdownBody from "../ui/MarkdownBody";
@@ -27,6 +26,8 @@ type Props = {
 
 export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, onApprovedAndNext }: Props) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
+  const [traceSummary, setTraceSummary] = useState<StreamTraceContent | null>(null);
   const [planText, setPlanText] = useState("");
   const [planModel, setPlanModel] = useState("");
   const [executeModel, setExecuteModel] = useState("");
@@ -40,6 +41,8 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
   const load = useCallback(async () => {
     const detail = await fetchRunDetail(run.id);
     setArtifacts(detail.artifacts);
+    setUsageSummary(detail.usageSummary ?? null);
+    setTraceSummary(detail.traceSummary ?? null);
     const approved = latestArtifact(detail.artifacts, "approved_plan");
     const agentPlan = latestArtifact(detail.artifacts, "draft_plan");
     const src = approved ?? agentPlan;
@@ -49,8 +52,6 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
   const hasPlan = artifacts.some((a) => a.kind === "draft_plan");
   const agentPlanning = run.status === "plan_pending" && !hasPlan;
   const planning = agentPlanning || replanning;
-  const tracePlan = latestByPhase<StreamTraceContent>(artifacts, "stream_trace", "plan");
-  const usagePlan = latestByPhase<UsageContent>(artifacts, "usage", "plan");
 
   useEffect(() => {
     load().catch(console.error);
@@ -217,8 +218,8 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
         )}
       </section>
 
-      {tracePlan && <TracePanel trace={tracePlan} />}
-      {usagePlan && <UsagePanel usage={usagePlan} />}
+      {traceSummary && <TracePanel trace={traceSummary} />}
+      {usageSummary && <UsagePanel summary={usageSummary} />}
 
       <RemoveFromOpsAction
         busy={busy}

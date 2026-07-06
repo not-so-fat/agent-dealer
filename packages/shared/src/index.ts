@@ -109,6 +109,23 @@ export const UsageContent = z.object({
 });
 export type UsageContent = z.infer<typeof UsageContent>;
 
+export const UsageLineItem = z.object({
+  label: z.string(),
+  usage: UsageContent,
+});
+export type UsageLineItem = z.infer<typeof UsageLineItem>;
+
+export const UsageSummary = z.object({
+  lines: z.array(UsageLineItem),
+  total: z.object({
+    totalCostUsd: z.number(),
+    inputTokens: z.number(),
+    outputTokens: z.number(),
+    durationMs: z.number(),
+  }),
+});
+export type UsageSummary = z.infer<typeof UsageSummary>;
+
 export const AgentSessionContent = z.object({
   phase: RunPhase,
   runtime: Runtime,

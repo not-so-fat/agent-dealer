@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Run, RunPhase, Runtime } from "@agent-dealer/shared";
 import { detectExecutionBlocker } from "@agent-dealer/shared";
-import { addArtifact } from "../repository/runs.js";
+import { addArtifact, getLatestArtifact, getLineageParentRun } from "../repository/runs.js";
 import { getTemporalOutputDir } from "../paths.js";
 import {
   buildStreamTrace,
@@ -13,7 +13,44 @@ import {
   extractUsage,
   parseNdjson,
 } from "./stream-json.js";
-import { planTracePrefix, executeTracePrefix } from "./run-context.js";
+import { humanFeedbackText } from "./run-context.js";
+
+export function seedDeliverableFromParent(run: Run): void {
+  const parent = getLineageParentRun(run);
+  if (!parent || !humanFeedbackText(run)) return;
+
+  const newPath = expectedDocPath(run);
+  if (fs.existsSync(newPath)) return;
+
+  const parentDoc = getLatestArtifact(parent.id, "document");
+  if (parentDoc?.contentJson) {
+    try {
+      const parsed = JSON.parse(parentDoc.contentJson) as { markdown?: string; title?: string; path?: string };
+      const markdown = parsed.markdown ?? "";
+      if (markdown) {
+        fs.mkdirSync(path.dirname(newPath), { recursive: true });
+        fs.writeFileSync(newPath, markdown, "utf8");
+        addArtifact(
+          run.id,
+          "document",
+          { path: newPath, title: parsed.title ?? run.title, markdown },
+          "system"
+        );
+        return;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+
+  const parentPath = expectedDocPath(parent);
+  if (fs.existsSync(parentPath)) {
+    fs.mkdirSync(path.dirname(newPath), { recursive: true });
+    fs.copyFileSync(parentPath, newPath);
+    const markdown = fs.readFileSync(newPath, "utf8");
+    addArtifact(run.id, "document", { path: newPath, title: run.title, markdown }, "system");
+  }
+}
 
 export interface PersistRunOutputInput {
   run: Run;
@@ -45,12 +82,7 @@ export function persistRunOutput(input: PersistRunOutputInput): {
   const blocker = detectExecutionBlocker(resultText);
   const isError = exitCode !== 0 || streamError || blocker.detected;
   const usage = extractUsage(events, phase, runtime);
-  const trace =
-    phase === "plan"
-      ? [...planTracePrefix(run), ...buildStreamTrace(events)]
-      : phase === "execute"
-        ? [...executeTracePrefix(run), ...buildStreamTrace(events)]
-        : buildStreamTrace(events);
+  const trace = buildStreamTrace(events);
 
   if (sessionId) {
     addArtifact(run.id, "agent_session", { phase, runtime, sessionId }, "agent");

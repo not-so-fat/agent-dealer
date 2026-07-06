@@ -1,7 +1,12 @@
 import type { ArtifactKind, Run } from "@agent-dealer/shared";
 import { getLatestArtifact } from "../repository/runs.js";
 import { documentOutputHint } from "./persist.js";
-import { humanFeedbackText, appendPlanRetrySections, planRetryContext } from "./run-context.js";
+import {
+  humanFeedbackText,
+  appendPlanRetrySections,
+  appendExecutionRetrySections,
+  retryContext,
+} from "./run-context.js";
 
 export function workspaceForRun(run: Run): string {
   return run.repo ?? run.artifactWorkspace ?? process.cwd();
@@ -36,24 +41,69 @@ function artifactMarkdown(kind: ArtifactKind, runId: string): string {
   }
 }
 
+export function buildExecutionContinuationPrompt(run: Run): string {
+  const ctx = retryContext(run);
+  const parts = [
+    `Continue this approved task from your previous session.`,
+    `Apply human feedback and build on work already completed — do not restart from scratch.`,
+    ``,
+    `## Task`,
+    taskText(run),
+    ``,
+  ];
+
+  if (ctx) {
+    appendExecutionRetrySections(parts, ctx);
+  } else {
+    const feedback = feedbackText(run);
+    if (feedback) {
+      parts.push(`## Human feedback`, feedback, ``);
+    }
+  }
+
+  if (run.deckId) {
+    parts.push(
+      `Use Agent Deck: bind_workspace({ deckId: "${run.deckId}", workspaceRoot: "${workspaceForRun(run)}" })`
+    );
+    if (run.playbookId) {
+      parts.push(`Then get_playbook("${run.playbookId}") and follow it.`);
+    }
+  }
+
+  return parts.join("\n");
+}
+
 export function buildExecutionPrompt(run: Run): string {
   const plan = getLatestArtifact(run.id, "approved_plan");
   const planBody = plan?.contentJson
     ? (JSON.parse(plan.contentJson) as { markdown?: string }).markdown ?? ""
     : "";
 
-  const parts = [`Execute this approved task.`, ``, `## Task`, taskText(run), ``];
+  const ctx = retryContext(run);
+  const parts = [
+    ctx
+      ? `Continue this approved task — build on the prior attempt below.`
+      : `Execute this approved task.`,
+    ``,
+    `## Task`,
+    taskText(run),
+    ``,
+  ];
 
   if (run.acceptanceCriteria) {
     parts.push(`## Acceptance criteria`, run.acceptanceCriteria, ``);
   }
-  if (planBody) {
-    parts.push(`## Approved plan`, planBody, ``);
-  }
 
-  const feedback = feedbackText(run);
-  if (feedback) {
-    parts.push(`## Human feedback`, feedback, ``);
+  if (ctx) {
+    appendExecutionRetrySections(parts, ctx);
+  } else {
+    if (planBody) {
+      parts.push(`## Approved plan`, planBody, ``);
+    }
+    const feedback = feedbackText(run);
+    if (feedback) {
+      parts.push(`## Human feedback`, feedback, ``);
+    }
   }
 
   if (run.taskCategory === "content" || run.taskCategory === "research") {
@@ -147,7 +197,7 @@ export function buildPlanPrompt(run: Run): string {
     parts.push(`## Acceptance criteria`, run.acceptanceCriteria, ``);
   }
 
-  const retryCtx = planRetryContext(run);
+  const retryCtx = retryContext(run);
   if (retryCtx) {
     appendPlanRetrySections(parts, retryCtx);
   }
