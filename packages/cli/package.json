@@ -34,10 +34,12 @@
   },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node ./dist/postinstall.js"
   },
   "dependencies": {
-    "@agent-dealer/server": "0.1.0"
+    "@agent-dealer/server": "0.1.0",
+    "@agent-dealer/shared": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",

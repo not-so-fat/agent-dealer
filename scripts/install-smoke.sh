@@ -27,19 +27,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[install-smoke] packing to $PACK_DIR"
-(cd "$ROOT/packages/shared" && npm pack --pack-destination "$PACK_DIR")
-(cd "$ROOT/packages/server" && npm pack --pack-destination "$PACK_DIR")
-(cd "$ROOT/packages/cli" && npm pack --pack-destination "$PACK_DIR")
+echo "[install-smoke] stage npm package"
+node "$ROOT/scripts/stage-npm-package.mjs"
 
-SHARED_TGZ="$(ls "$PACK_DIR"/agent-dealer-shared-*.tgz | head -1)"
-SERVER_TGZ="$(ls "$PACK_DIR"/agent-dealer-server-*.tgz | head -1)"
-CLI_TGZ="$(ls "$PACK_DIR"/agent-dealer-*.tgz | grep -v shared | grep -v server | head -1)"
+echo "[install-smoke] pack staged CLI"
+(cd "$ROOT/.temporal/npm-stage/agent-dealer" && npm pack --pack-destination "$PACK_DIR")
+CLI_TGZ="$(ls "$PACK_DIR"/agent-dealer-*.tgz | head -1)"
 
 echo "[install-smoke] install in $INSTALL_DIR"
 cd "$INSTALL_DIR"
 npm init -y >/dev/null
-npm install "$SHARED_TGZ" "$SERVER_TGZ" "$CLI_TGZ"
+npm install "$CLI_TGZ"
 
 export PATH="$INSTALL_DIR/node_modules/.bin:$PATH"
 

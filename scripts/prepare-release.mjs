@@ -27,4 +27,4 @@ console.log(`[prepare-release] Copying UI → ${serverStatic}`);
 fs.rmSync(serverStatic, { recursive: true, force: true });
 fs.cpSync(webDist, serverStatic, { recursive: true });
 
-console.log("[prepare-release] Done. Publish order: @agent-dealer/shared → @agent-dealer/server → agent-dealer");
+console.log("[prepare-release] Done. Publish: npm publish -w agent-dealer --access public");

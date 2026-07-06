@@ -2,15 +2,13 @@
 
 > **Cursor:** `.cursor/rules/agent-dealer-release.mdc`
 
-## npm packages
+## npm package
 
 | npm package | Purpose |
 |-------------|---------|
-| `@agent-dealer/shared` | Types and schemas |
-| `@agent-dealer/server` | API, queue, SQLite, bundled dashboard (`static-ui/`) |
-| `agent-dealer` | CLI — `setup`, `start`, `doctor` (bin: `agent-dealer`) |
+| `agent-dealer` | CLI (`setup`, `start`, `doctor`) + bundled `@agent-dealer/server` and `@agent-dealer/shared` |
 
-Publish **in order**: shared → server → cli.
+One install — no scoped org required on npm.
 
 ## Friend install path
 
@@ -39,7 +37,7 @@ Dashboard + API: **http://localhost:2221** (single port when UI is bundled).
 7. Gates: `npm run flow:verify` when API changes need it.
 8. Commit: `Ship X.Y.Z: <why>.`
 9. Tag + push + `gh release create`.
-10. `npm run publish:packages` (human logged in).
+10. `npm run publish:packages` — stages self-contained tarball then publishes `agent-dealer` (human logged in).
 
 ## Dev monorepo
 
