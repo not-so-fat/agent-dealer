@@ -1,6 +1,6 @@
 # Changelog
 
-Repo releases use **git tags** (`vX.Y.Z`). The npm package `agent-dealer@0.0.0` is a name-reservation stub only — not this app.
+Repo releases use **git tags** (`vX.Y.Z`) and **npm** `agent-dealer@X.Y.Z` (pointer package in `scripts/npm-package/`). Install the app from git — see `docs/PUBLISHING.md`.
 
 ## 0.1.0 — 2026-07-06
 
