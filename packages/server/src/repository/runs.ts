@@ -417,6 +417,26 @@ export function updateArtifactContent(artifactId: string, content: unknown): Art
   };
 }
 
+/** Most recent run in the same lineage before `run` (retry parent). */
+export function getLineageParentRun(run: Run): Run | null {
+  const lineageId = run.lineageId;
+  if (!lineageId) return null;
+
+  const row = getDb()
+    .prepare(
+      `
+      SELECT * FROM runs
+      WHERE (lineage_id = @lineage_id OR id = @lineage_id)
+        AND id != @run_id
+      ORDER BY created_at DESC
+      LIMIT 1
+    `
+    )
+    .get({ lineage_id: lineageId, run_id: run.id }) as RunRow | undefined;
+
+  return row ? rowToRun(row) : null;
+}
+
 export function getLatestArtifact(runId: string, kind: ArtifactKind): Artifact | null {
   const row = getDb()
     .prepare(

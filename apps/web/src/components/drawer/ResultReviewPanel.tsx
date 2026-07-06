@@ -17,6 +17,7 @@ import {
   type UsageContent,
 } from "../../api";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
+import MarkdownBody from "../ui/MarkdownBody";
 import { ExecutionOutcomeSection, executionHasBlocker } from "./ExecutionOutcomeSection";
 import PlaybookLearningPanel from "./PlaybookLearningPanel";
 import RemoveFromOpsAction from "./RemoveFromOpsAction";
@@ -32,7 +33,7 @@ type Props = {
 export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onDoneAndNext }: Props) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [feedback, setFeedback] = useState("");
-  const [planModel, setPlanModel] = useState("");
+  const [executeModel, setExecuteModel] = useState("");
   const [busy, setBusy] = useState(false);
   const [prefilledRetry, setPrefilledRetry] = useState(false);
 
@@ -77,7 +78,7 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
   useEffect(() => {
     setPrefilledRetry(false);
     setFeedback("");
-    setPlanModel("");
+    setExecuteModel("");
   }, [run.id]);
 
   useEffect(() => {
@@ -128,7 +129,9 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
       {approvedPlan && (
         <section className="space-y-2">
           <div className="heading-section">Approved Plan</div>
-          <textarea className="field-mono min-h-[120px] resize-y text-sm" value={artifactMarkdown(approvedPlan)} readOnly />
+          <div className="markdown-body-panel markdown-body-panel--short">
+            <MarkdownBody source={artifactMarkdown(approvedPlan)} />
+          </div>
         </section>
       )}
 
@@ -173,7 +176,7 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
 
         <div className="space-y-2">
           {(blocked || run.status === "failed") && (
-            <p className="text-sm text-white/45">Add instructions and retry — starts a new plan cycle.</p>
+            <p className="text-sm text-white/45">Add instructions and retry — re-runs execution with the same approved plan.</p>
           )}
           <label htmlFor={`retry-${run.id}`} className="text-xs text-white/40 uppercase tracking-wide">
             Retry instructions
@@ -191,10 +194,10 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
           />
           <ModelSelect
             runtime={runtime}
-            label="Planning model (retry)"
-            value={planModel}
-            onChange={setPlanModel}
-            defaultModelId={agent?.defaultPlanModel}
+            label="Execution model (retry)"
+            value={executeModel}
+            onChange={setExecuteModel}
+            defaultModelId={agent?.defaultExecuteModel}
             disabled={busy}
           />
           <button
@@ -202,7 +205,7 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
             disabled={busy || !canRetry}
             onClick={() =>
               act(async () => {
-                const newRun = await retryRun(run.id, feedback, planModel || null);
+                const newRun = await retryRun(run.id, feedback, executeModel || null);
                 setFeedback("");
                 onRetry?.(newRun);
               })

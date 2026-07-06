@@ -5,11 +5,14 @@ import { getLinearIssue } from "./linear-inbox.js";
 
 const LINEAR_API = "https://api.linear.app/graphql";
 
-export type LinearSyncEvent = "plan_approved" | "review" | "done";
+export type LinearSyncEvent = "planning_started" | "plan_approved" | "review" | "retry" | "done";
 
 const STATE_BY_EVENT: Record<LinearSyncEvent, string> = {
+  // TODO(P2): configurable per team — see docs/LINEAR_INTEGRATION.md
+  planning_started: "Todo",
   plan_approved: "In Progress",
   review: "In Review",
+  retry: "In Progress",
   done: "Done",
 };
 
@@ -113,6 +116,16 @@ function buildComment(run: Run, event: LinearSyncEvent): string {
   const label = run.externalLabel ?? run.externalId ?? run.id;
   const link = `${webBaseUrl()}/?run=${run.id}`;
 
+  if (event === "planning_started") {
+    return [
+      `**agent-dealer** — planning started for ${label}`,
+      ``,
+      `_Agent is drafting a plan._`,
+      ``,
+      `[Open run](${link})`,
+    ].join("\n");
+  }
+
   if (event === "plan_approved") {
     const excerpt = planExcerpt(run);
     return [
@@ -132,6 +145,16 @@ function buildComment(run: Run, event: LinearSyncEvent): string {
       excerpt ? excerpt : `_Result ready for human review._`,
       ``,
       `[Review run](${link})`,
+    ].join("\n");
+  }
+
+  if (event === "retry") {
+    return [
+      `**agent-dealer** — retry requested for ${label}`,
+      ``,
+      `_Re-executing with human feedback._`,
+      ``,
+      `[Open run](${link})`,
     ].join("\n");
   }
 
@@ -156,10 +179,26 @@ function recordSyncAttempt(
   );
 }
 
+function hasSuccessfulSync(runId: string, event: LinearSyncEvent): boolean {
+  return listArtifacts(runId).some((a) => {
+    if (a.kind !== "linear_sync" || !a.contentJson) return false;
+    try {
+      const parsed = JSON.parse(a.contentJson) as { event?: string; ok?: boolean };
+      return parsed.event === event && parsed.ok === true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 /** Non-blocking Linear write-back — callers should `.catch()` and never fail the human action. */
 export async function syncLinearForRun(run: Run, event: LinearSyncEvent): Promise<void> {
   const settings = getLinearIntakeConfig();
   if (!settings.syncEnabled || !process.env.LINEAR_API_KEY || !run.externalId) {
+    return;
+  }
+
+  if (event === "planning_started" && hasSuccessfulSync(run.id, event)) {
     return;
   }
 

@@ -66,11 +66,25 @@ Configure via **Inbox → Linear settings** or `PATCH /api/intake/linear/config`
 
 ## Workflow
 
+Linear issue status write-back (when `syncEnabled`):
+
+| agent-dealer event | Linear status |
+|--------------------|---------------|
+| Agent starts planning | **Todo** (e.g. Backlog → Todo) |
+| Plan approved | **In Progress** |
+| Execution complete (review gate) | **In Review** |
+| Retry with feedback | **In Progress** |
+| Human approves done | **Done** |
+
+> **TODO (P2):** Make this event → Linear status mapping **configurable per team** (Inbox settings or `linear.statusMap` in intake config). v0 hardcodes names in `packages/server/src/adapters/linear-sync.ts` (`STATE_BY_EVENT`) and resolves workflow states case-insensitively against the issue’s Linear team.
+
 1. **Inbox** — Issues matching filters (default: Todo, assigned to me) appear as candidates.
 2. **Promote** — Pick agent → **Kick plan** → run enters Operations at `plan_pending`.
-3. **Plan gate** — Review draft → **Approve plan** → Linear comment + status **In Progress**.
-4. **Execute** — Agent runs → transitions to **review** → Linear comment + status **In Review**.
-5. **Done** — **Approve done** → Linear comment + status **Done**.
+3. **Planning** — When the agent actually starts drafting → Linear comment + status **Todo**.
+4. **Plan gate** — Review draft → **Approve plan** → Linear comment + status **In Progress**.
+5. **Execute** — Agent runs → transitions to **review** → Linear comment + status **In Review**.
+6. **Done** — **Approve done** → Linear comment + status **Done**.
+7. **Retry** — Re-executes with feedback (same approved plan) → Linear comment + status **In Progress** → **Review Result** when done.
 
 Promote is blocked (409) if an active run already exists for the same Linear issue (`source=linear`, `external_id=issue.id`).
 

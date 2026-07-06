@@ -26,6 +26,21 @@ export function formatElapsed(iso: string, now = Date.now()): string {
   return `${sec}s`;
 }
 
+/** Wall-clock duration from usage artifacts — minutes when ≥60s. */
+export function formatDurationMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const totalSec = Math.round(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (min >= 60) {
+    const hr = Math.floor(min / 60);
+    const remMin = min % 60;
+    return remMin > 0 ? `${hr}h ${remMin}m` : `${hr}h`;
+  }
+  if (min > 0) return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
+  return `${sec}s`;
+}
+
 export function runtimeLabel(runtime: Runtime | null | undefined): string {
   if (runtime === "claude_code") return "Claude";
   if (runtime === "cursor_local") return "Cursor";

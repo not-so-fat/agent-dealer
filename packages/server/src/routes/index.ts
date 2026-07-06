@@ -438,6 +438,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const run = getRun(id);
     if (!run) return reply.status(404).send({ error: "Not found" });
+    if (run.status !== "review" && run.status !== "failed") {
+      return reply.status(400).send({ error: "Retry only from review or failed" });
+    }
+
+    const approvedPlan = getLatestArtifact(id, "approved_plan");
+    if (!approvedPlan?.contentJson) {
+      return reply.status(400).send({ error: "No approved plan — cannot retry execution" });
+    }
+
     const input = RetryRunInput.parse(req.body);
     addArtifact(id, "feedback", { markdown: input.feedback }, "human");
 
@@ -449,23 +458,42 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         repo: run.repo ?? undefined,
         artifactWorkspace: run.artifactWorkspace ?? undefined,
         acceptanceCriteria: run.acceptanceCriteria ?? undefined,
-        status: "plan_pending",
+        status: "plan_approved",
         agentId: run.agentId ?? BUILTIN_AGENT_CLAUDE_ID,
-        planModel: input.planModel ?? undefined,
+        planModel: run.planModel ?? undefined,
       },
-      { source: run.source, externalId: run.externalId ?? undefined, lineageId: run.lineageId ?? run.id }
+      { source: run.source, externalId: run.externalId ?? undefined, externalLabel: run.externalLabel ?? undefined, lineageId: run.lineageId ?? run.id }
     );
     updateRunFields(retry.id, {
       deck_id: run.deckId,
       deck_name: run.deckName,
       playbook_id: run.playbookId,
       runtime: run.runtime,
-      execute_model: run.executeModel,
+      execute_model: input.executeModel ?? input.planModel ?? run.executeModel,
     });
+
+    try {
+      addArtifact(retry.id, "approved_plan", JSON.parse(approvedPlan.contentJson), approvedPlan.author);
+    } catch {
+      return reply.status(500).send({ error: "Failed to copy approved plan" });
+    }
+
+    const parentSnap = getLatestArtifact(id, "task_snapshot");
+    if (parentSnap?.contentJson) {
+      try {
+        addArtifact(retry.id, "task_snapshot", JSON.parse(parentSnap.contentJson), "system");
+      } catch {
+        /* keep retry run usable without snapshot */
+      }
+    }
     addArtifact(retry.id, "feedback", { markdown: input.feedback }, "human");
-    schedulePlanDraft(getRun(retry.id)!);
+    const retryRun = getRun(retry.id)!;
+    addArtifact(id, "feedback", { supersededBy: retry.id, note: "Retry — replaced by new run" }, "system");
+    transitionRun(id, "cancelled");
+    syncLinearForRun(retryRun, "retry").catch((e) => console.error("[linear-sync] retry:", e));
     scheduleReflect(run, { trigger: "retry", feedback: input.feedback });
-    return reply.status(201).send(getRun(retry.id));
+    await forceDispatch();
+    return reply.status(201).send(retryRun);
   });
 
   app.post("/api/runs/:id/playbook-patch/apply", async (req, reply) => {

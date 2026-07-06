@@ -5,7 +5,6 @@ import {
   getLatestArtifact,
   getRun,
   listRuns,
-  listRunsReadyForPlanReview,
   transitionRun,
 } from "../repository/runs.js";
 import { runAgent } from "../runners/claude.js";
@@ -21,12 +20,11 @@ import type { AgentWithHealth } from "@agent-dealer/shared";
 type SnapshotListener = (snapshot: QueueSnapshotInternal) => void;
 
 export interface QueueSnapshotInternal {
-  running: number;
-  queued: number;
-  planPending: number;
-  review: number;
-  runningCount: number;
+  planReviewCount: number;
+  resultReviewCount: number;
   maxConcurrent: number;
+  planningActiveRuns: Run[];
+  planningQueuedRuns: Run[];
   runningRuns: Run[];
   waitingExecution: Run[];
   resultReviewRuns: Run[];
@@ -65,6 +63,21 @@ function sortQueueFifo(runs: Run[]): Run[] {
   return [...runs].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+function listPlanningPhaseRuns(): Run[] {
+  return sortQueueFifo(
+    listRuns("queued" as RunStatus).concat(listRuns("plan_pending" as RunStatus))
+  );
+}
+
+/** Plan written and idle — human review lane (excludes active re-draft). */
+function isReadyForPlanReview(run: Run): boolean {
+  return (
+    run.status === "plan_pending" &&
+    !!getLatestArtifact(run.id, "draft_plan") &&
+    !activePlanDrafts.has(run.id)
+  );
+}
+
 export function getSnapshot(): QueueSnapshotInternal {
   const all = listRuns();
   const runningRuns = all.filter((r) => r.status === "running");
@@ -76,15 +89,20 @@ export function getSnapshot(): QueueSnapshotInternal {
     .filter((r) => r.status === "done")
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, 10);
-  const awaitingPlanReview = sortQueueFifo(listRunsReadyForPlanReview());
+
+  const planningPhase = listPlanningPhaseRuns();
+  const awaitingPlanReview = planningPhase.filter(isReadyForPlanReview);
+  const planningActiveRuns = planningPhase.filter((r) => activePlanDrafts.has(r.id));
+  const planningQueuedRuns = planningPhase.filter(
+    (r) => !activePlanDrafts.has(r.id) && !isReadyForPlanReview(r)
+  );
 
   return {
-    running: runningRuns.length,
-    queued: countByStatus("queued") + waitingExecution.length,
-    planPending: awaitingPlanReview.length,
-    review: resultReviewRuns.length,
-    runningCount: runningRuns.length,
+    planReviewCount: awaitingPlanReview.length,
+    resultReviewCount: resultReviewRuns.length,
     maxConcurrent: maxConcurrent(),
+    planningActiveRuns,
+    planningQueuedRuns,
     runningRuns,
     waitingExecution,
     resultReviewRuns,
@@ -225,6 +243,12 @@ export async function draftPlan(run: Run, opts?: { replace?: boolean }): Promise
   const updated = getRun(run.id)!;
   if (!updated.runtime) {
     throw new Error("Select an agent runtime before planning");
+  }
+
+  if (!opts?.replace) {
+    syncLinearForRun(updated, "planning_started").catch((e) =>
+      console.error("[linear-sync] planning_started:", e)
+    );
   }
 
   const rt = runtimeFor(updated);

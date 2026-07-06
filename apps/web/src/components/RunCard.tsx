@@ -20,8 +20,10 @@ export type RunCardProps = {
   /** Show updated vs created timestamp */
   timeField?: "updated" | "created";
   compact?: boolean;
-  /** Execution queue position badge (merged in-progress column) */
-  queueBadge?: "running" | "waiting";
+  /** Execution / planning queue position badge */
+  queueBadge?: "active" | "queued" | "running" | "waiting";
+  queueActiveLabel?: string;
+  queueQueuedLabel?: string;
   /** Hide status chip when column context already implies it */
   hideStatusBadge?: boolean;
 };
@@ -34,6 +36,8 @@ export default function RunCard({
   timeField = "updated",
   compact = false,
   queueBadge,
+  queueActiveLabel = "Running",
+  queueQueuedLabel = "In queue",
   hideStatusBadge = false,
 }: RunCardProps) {
   const status = statusOverride ?? run.status;
@@ -42,11 +46,13 @@ export default function RunCard({
   const deck = deckLabel(run);
 
   const queueTone =
-    queueBadge === "running"
+    queueBadge === "active" || queueBadge === "running"
       ? "bg-[#92E4DD]/15 text-[#92E4DD] border-[#92E4DD]/35"
-      : queueBadge === "waiting"
+      : queueBadge === "queued" || queueBadge === "waiting"
         ? "bg-sky-500/15 text-sky-200 border-sky-400/30"
         : null;
+
+  const isActiveBadge = queueBadge === "active" || queueBadge === "running";
 
   return (
     <button
@@ -103,10 +109,10 @@ export default function RunCard({
           )}
           {queueBadge ? (
             <Badge className={`${queueTone} ml-auto`}>
-              {queueBadge === "running" && (
+              {isActiveBadge && (
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#92E4DD] animate-pulse mr-0.5" />
               )}
-              {queueBadge === "running" ? "Running" : "Waiting"}
+              {isActiveBadge ? queueActiveLabel : queueQueuedLabel}
             </Badge>
           ) : !hideStatusBadge ? (
             <Badge className={`${meta.tone} ml-auto`} title={meta.hint}>

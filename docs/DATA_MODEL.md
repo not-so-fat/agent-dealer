@@ -72,7 +72,7 @@ Injected into execute prompt via `buildExecutionPrompt()`. Copied to retry runs.
 
 | Kind | `content_json` |
 |------|----------------|
-| `linear_sync` | `{ event, ok, at, state?, error? }` |
+| `linear_sync` | `{ event, ok, at, state?, error? }` — events: `planning_started`, `plan_approved`, `review`, `retry`, `done` |
 
 Non-blocking write-back attempts at plan approved / review / done. See `docs/LINEAR_INTEGRATION.md`.
 
@@ -84,6 +84,8 @@ Intake (Feed): user picks agent + task → POST /api/runs
 Plan review: agent draft_plan appears → human edits / approves
   → plan_approved → dispatcher executes
 Review → done
+
+Retry from review/failed: `POST …/retry` creates a new `plan_approved` run (copies `approved_plan`, same `lineage_id` / `external_id`) and **cancels** the superseded run so it leaves Operations. Dispatcher picks up execution immediately.
 ```
 
 Human does **not** initiate planning — agent drafts on intake. `POST …/draft-plan` is **re-draft only**.

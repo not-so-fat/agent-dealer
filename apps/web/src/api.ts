@@ -209,14 +209,14 @@ export async function approveRun(id: string): Promise<Run> {
 export async function retryRun(
   id: string,
   feedback: string,
-  planModel?: string | null
+  executeModel?: string | null
 ): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/retry`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       feedback,
-      ...(planModel !== undefined ? { planModel } : {}),
+      ...(executeModel !== undefined ? { executeModel } : {}),
     }),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -329,6 +329,19 @@ export function artifactMarkdown(a: Artifact): string {
 
 export function latestArtifact(artifacts: Artifact[], kind: Artifact["kind"]): Artifact | undefined {
   return [...artifacts].reverse().find((a) => a.kind === kind);
+}
+
+/** Linear issue URL from task_snapshot (set at promote). */
+export function linearUrlFromArtifacts(artifacts: Artifact[]): string | null {
+  const snap = latestArtifact(artifacts, "task_snapshot");
+  if (!snap?.contentJson) return null;
+  try {
+    const parsed = JSON.parse(snap.contentJson) as { url?: string };
+    const url = parsed.url?.trim();
+    return url?.startsWith("http") ? url : null;
+  } catch {
+    return null;
+  }
 }
 
 export function latestByPhase<T extends { phase?: string }>(

@@ -13,6 +13,7 @@ import {
   type UsageContent,
 } from "../../api";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
+import MarkdownBody from "../ui/MarkdownBody";
 import { ExecutionOutcomeSection } from "./ExecutionOutcomeSection";
 import PlaybookLearningPanel from "./PlaybookLearningPanel";
 
@@ -62,7 +63,9 @@ export default function DoneReviewPanel({ run }: Props) {
       {approvedPlan && (
         <section className="space-y-2">
           <div className="heading-section">Approved Plan</div>
-          <textarea className="field-mono min-h-[140px] resize-y text-sm" value={artifactMarkdown(approvedPlan)} readOnly />
+          <div className="markdown-body-panel markdown-body-panel--short">
+            <MarkdownBody source={artifactMarkdown(approvedPlan)} />
+          </div>
         </section>
       )}
 

@@ -13,6 +13,7 @@ import {
   extractUsage,
   parseNdjson,
 } from "./stream-json.js";
+import { planTracePrefix, executeTracePrefix } from "./run-context.js";
 
 export interface PersistRunOutputInput {
   run: Run;
@@ -44,7 +45,12 @@ export function persistRunOutput(input: PersistRunOutputInput): {
   const blocker = detectExecutionBlocker(resultText);
   const isError = exitCode !== 0 || streamError || blocker.detected;
   const usage = extractUsage(events, phase, runtime);
-  const trace = buildStreamTrace(events);
+  const trace =
+    phase === "plan"
+      ? [...planTracePrefix(run), ...buildStreamTrace(events)]
+      : phase === "execute"
+        ? [...executeTracePrefix(run), ...buildStreamTrace(events)]
+        : buildStreamTrace(events);
 
   if (sessionId) {
     addArtifact(run.id, "agent_session", { phase, runtime, sessionId }, "agent");

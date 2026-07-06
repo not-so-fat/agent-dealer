@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@300;400;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Nixie+One&family=Nunito+Sans:wght@300;400;600;700;800&display=swap");
 @import "tailwindcss";
 
 /*
@@ -269,6 +269,219 @@ body {
 
 .text-body {
   @apply text-base text-white/70 leading-relaxed;
+}
+
+/* Rendered markdown (plan review, artifacts) */
+.markdown-body {
+  @apply text-base text-white/75 leading-relaxed;
+  word-break: break-word;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body h1 {
+  @apply text-xl font-semibold text-[#E8DC7A] mt-6 mb-3 leading-snug;
+}
+
+.markdown-body h2 {
+  @apply text-lg font-semibold text-[#92E4DD] mt-5 mb-2 leading-snug;
+}
+
+.markdown-body h3 {
+  @apply text-base font-semibold text-[#E8F6F4] mt-4 mb-2;
+}
+
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  @apply text-sm font-semibold text-white/80 mt-3 mb-1;
+}
+
+.markdown-body p {
+  @apply my-3;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  @apply my-3 pl-5 space-y-1;
+}
+
+.markdown-body ul {
+  @apply list-disc;
+}
+
+.markdown-body ol {
+  @apply list-decimal;
+}
+
+.markdown-body li {
+  @apply pl-1;
+}
+
+.markdown-body blockquote {
+  @apply my-3 pl-3 border-l-2 border-[#92E4DD]/35 text-white/55 italic;
+}
+
+.markdown-body hr {
+  @apply my-5 border-white/10;
+}
+
+.markdown-body a {
+  @apply text-[#92E4DD] underline underline-offset-2 hover:text-[#B8F0EA];
+}
+
+.markdown-body code {
+  font-family: ui-monospace, Monaco, "Cascadia Code", monospace;
+  @apply text-[0.9em] text-[#E8DC7A] bg-white/[0.06] px-1 py-0.5 rounded;
+}
+
+.markdown-body pre {
+  @apply my-3 p-3 rounded-lg bg-black/40 border border-white/10 overflow-x-auto;
+}
+
+.markdown-body pre code {
+  @apply bg-transparent p-0 text-[#E8F6F4] text-sm leading-relaxed;
+}
+
+.markdown-body table {
+  @apply my-3 w-full text-sm border-collapse;
+}
+
+.markdown-body th,
+.markdown-body td {
+  @apply border border-white/10 px-2 py-1.5 text-left align-top;
+}
+
+.markdown-body th {
+  @apply bg-white/[0.04] text-[#92E4DD] font-medium;
+}
+
+.markdown-body-panel {
+  @apply rounded border border-white/10 bg-white/[0.03] px-4 py-3 min-h-[min(420px,45vh)] max-h-[min(560px,55vh)] overflow-y-auto;
+}
+
+.markdown-body-panel--compact {
+  @apply min-h-0 max-h-48 py-2.5;
+}
+
+.markdown-body-panel--short {
+  @apply min-h-0 max-h-[min(280px,35vh)] py-2.5;
+}
+
+/* Nixie tube counter (pipeline observability columns) — Nixie One + orange-red glow */
+.nixie-display-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 0.25rem 0 0;
+}
+
+.nixie-stack-toggle {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.nixie-stack-toggle:hover {
+  opacity: 0.92;
+}
+
+.nixie-housing {
+  display: inline-flex;
+  gap: 5px;
+  padding: 6px 7px 7px;
+  border-radius: 7px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, transparent 22%),
+    linear-gradient(0deg, #1c1610 0%, #0e0c09 55%, #18140f 100%);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow:
+    inset 0 2px 12px rgba(0, 0, 0, 0.9),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.04),
+    0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.nixie-tube {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.85rem;
+  height: 2.65rem;
+  border-radius: 5px;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 80% 55% at 50% 18%, rgba(255, 120, 40, 0.07), transparent 70%),
+    linear-gradient(180deg, #221c14 0%, #100e0b 48%, #1a1510 100%);
+  border: 1px solid rgba(80, 50, 30, 0.55);
+  box-shadow:
+    inset 0 3px 14px rgba(0, 0, 0, 0.95),
+    inset 0 -1px 0 rgba(255, 180, 100, 0.04);
+}
+
+.nixie-tube::before {
+  content: "";
+  position: absolute;
+  inset: 3px 4px auto;
+  height: 32%;
+  border-radius: 3px 3px 50% 50%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.09), transparent);
+  pointer-events: none;
+}
+
+.nixie-tube::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.14) 2px,
+    rgba(0, 0, 0, 0.14) 3px
+  );
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.nixie-tube-ghost,
+.nixie-tube-digit {
+  position: relative;
+  z-index: 1;
+  font-family: "Nixie One", "Times New Roman", serif;
+  font-size: 2rem;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.nixie-tube-ghost {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 0;
+  color: rgba(160, 55, 20, 0.14);
+  text-shadow: none;
+}
+
+.nixie-tube-digit {
+  color: #ff6a28;
+  text-shadow:
+    0 0 1px #ffd4b8,
+    0 0 4px #ff7722,
+    0 0 10px #ff5500,
+    0 0 18px rgba(255, 69, 0, 0.85),
+    0 0 32px rgba(255, 69, 0, 0.45),
+    0 0 52px rgba(255, 60, 0, 0.22);
 }
 
 ::-webkit-scrollbar {

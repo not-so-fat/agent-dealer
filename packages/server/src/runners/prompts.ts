@@ -1,6 +1,7 @@
 import type { ArtifactKind, Run } from "@agent-dealer/shared";
 import { getLatestArtifact } from "../repository/runs.js";
 import { documentOutputHint } from "./persist.js";
+import { humanFeedbackText, appendPlanRetrySections, planRetryContext } from "./run-context.js";
 
 export function workspaceForRun(run: Run): string {
   return run.repo ?? run.artifactWorkspace ?? process.cwd();
@@ -21,14 +22,7 @@ function taskText(run: Run): string {
 }
 
 function feedbackText(run: Run): string {
-  const fb = getLatestArtifact(run.id, "feedback");
-  if (!fb?.contentJson) return "";
-  try {
-    const parsed = JSON.parse(fb.contentJson) as { markdown?: string };
-    return parsed.markdown?.trim() ?? "";
-  } catch {
-    return "";
-  }
+  return humanFeedbackText(run);
 }
 
 function artifactMarkdown(kind: ArtifactKind, runId: string): string {
@@ -151,6 +145,11 @@ export function buildPlanPrompt(run: Run): string {
 
   if (run.acceptanceCriteria) {
     parts.push(`## Acceptance criteria`, run.acceptanceCriteria, ``);
+  }
+
+  const retryCtx = planRetryContext(run);
+  if (retryCtx) {
+    appendPlanRetrySections(parts, retryCtx);
   }
 
   if (run.taskCategory === "content" || run.taskCategory === "research") {

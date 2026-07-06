@@ -14,6 +14,7 @@ import {
   type UsageContent,
 } from "../../api";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
+import MarkdownBody from "../ui/MarkdownBody";
 import RemoveFromOpsAction from "./RemoveFromOpsAction";
 
 type Props = {
@@ -31,6 +32,7 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
   const [executeModel, setExecuteModel] = useState("");
   const [busy, setBusy] = useState(false);
   const [replanning, setReplanning] = useState(false);
+  const [editing, setEditing] = useState(false);
 
   const agent = agents.find((a) => a.id === run.agentId);
   const runtime = run.runtime ?? agent?.runtime ?? "claude_code";
@@ -58,6 +60,7 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
     setPlanModel(run.planModel ?? "");
     setExecuteModel(run.executeModel ?? "");
     setReplanning(false);
+    setEditing(false);
   }, [run.id, run.planModel, run.executeModel]);
 
   useEffect(() => {
@@ -130,25 +133,44 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
           defaultModelId={agent?.defaultPlanModel}
           disabled={busy || planning}
         />
-        <textarea
-          className="field-mono min-h-[min(420px,45vh)] resize-y leading-relaxed"
-          value={planText}
-          readOnly={planning}
-          onChange={!planning ? (e) => setPlanText(e.target.value) : undefined}
-          placeholder={
-            planning ? "Plan will appear here when the agent finishes…" : "Edit if needed, then approve"
-          }
-        />
+        {planning ? (
+          <div className="field-mono min-h-[min(420px,45vh)] flex items-center justify-center text-sm text-white/40">
+            Plan will appear here when the agent finishes…
+          </div>
+        ) : editing || !planText.trim() ? (
+          <textarea
+            className="field-mono min-h-[min(420px,45vh)] resize-y leading-relaxed"
+            value={planText}
+            onChange={(e) => setPlanText(e.target.value)}
+            placeholder="Edit if needed, then approve"
+          />
+        ) : (
+          <div className="markdown-body-panel">
+            <MarkdownBody source={planText} />
+          </div>
+        )}
         {hasPlan && !planning && (
           <div className="flex flex-wrap items-center justify-between gap-2 -mt-1">
-            <button
-              type="button"
-              disabled={busy || !planText.trim()}
-              onClick={() => act(() => updatePlan(run.id, planText, false))}
-              className="btn-ghost text-xs px-2 py-1 disabled:opacity-40"
-            >
-              Save edits
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setEditing((e) => !e)}
+                className="btn-ghost text-xs px-2 py-1 disabled:opacity-40"
+              >
+                {editing ? "Show preview" : "Edit markdown"}
+              </button>
+              {editing && (
+                <button
+                  type="button"
+                  disabled={busy || !planText.trim()}
+                  onClick={() => act(() => updatePlan(run.id, planText, false))}
+                  className="btn-ghost text-xs px-2 py-1 disabled:opacity-40"
+                >
+                  Save edits
+                </button>
+              )}
+            </div>
             <button
               type="button"
               disabled={busy}

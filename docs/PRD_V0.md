@@ -120,7 +120,7 @@ dealer.start(runId, repo?, artifactWorkspace?, deckId?, playbookId?)
 | **Developer (personal)** | Same flow via Cursor SDK local | Same dashboard |
 | **Business / ops user** | Delegate Slack, email, research, presentations with send-gates | Same dashboard; task category templates |
 | **Knowledge worker** | Batch research and content tasks without opening an IDE | Manual feed + plan approval + review |
-| **Human operator** | Approve plans, monitor queue, approve/retry results | Four dashboard CTAs (see §9) |
+| **Human operator** | Approve plans, monitor queue, approve/retry results | Operations pipeline (§9) + Intake |
 | **Future: team lead** | Audit run history, tune approval templates | Run detail timeline (read-only in v0) |
 
 **Task category** (`code` | `communication` | `email` | `research` | `content` | `other`) is stored on each run. It drives default approval gates — not deck or playbook selection (user picks those per run).
@@ -131,7 +131,7 @@ dealer.start(runId, repo?, artifactWorkspace?, deckId?, playbookId?)
 
 ## 3. User stories (testable)
 
-Stories are grouped by the four primary dashboard CTAs.
+Stories are grouped by the Operations pipeline gates (Intake is a separate screen).
 
 ### A. New task feed
 
@@ -746,47 +746,56 @@ Typography and non-monospace component primitives should align with Agent Deck (
 
 ### Layout: pipeline board + run drawer
 
-Four columns map to primary CTAs:
+**Intake** (separate screen) is where tickets enter — Linear poll, manual add, promote to run. **Operations** is the execution pipeline only.
+
+Four columns on Operations — two narrow observability lanes, two wide human-gate lanes:
 
 ```text
-┌──────────┬───────────────┬─────────────┬────────────────┐
-│  Feed    │ Plan approval │ In progress │ Review results │
-│          │               │             │                │
-│  new +   │  plan_pending │  running    │  review        │
-│  queued  │               │  slot 1–2   │                │
-└──────────┴───────────────┴─────────────┴────────────────┘
+┌─────────────┬──────────────────┬─────────────┬──────────────────┐
+│ In Planning │   Review Plan    │ In Progress │  Review Result   │
+│  (narrow)   │     (wide)       │  (narrow)   │     (wide)       │
+│ N planning  │  plan_pending    │ N running   │  review / failed │
+│ M in queue  │  + draft_plan    │ M in queue  │                  │
+│  click →    │  human sign-off  │  click →    │  human sign-off  │
+│  ticket list│                  │  ticket list│                  │
+└─────────────┴──────────────────┴─────────────┴──────────────────┘
                               │
-                    click run → right drawer
+                    click run → review drawer
                               │
                     timeline + artifacts + actions
 ```
 
+**Narrow columns (In Planning, In Progress):** show active slot count + in-queue count only. Click to expand the ticket list. No draft-plan or artifact state surfaced — users only need to know work landed and how busy the agent is. Re-draft / retry shows in **In Planning** while the agent works, not in Review Plan.
+
+**Wide columns (Review Plan, Review Result):** full run cards; these are the attention lanes.
+
+Planning and execution each use the same `maxConcurrentRuns` slot model (FIFO queue).
+
 **Global header:**
 
-- Queue summary: N running, M queued, next up title
+- Action badges: Review Plan count + Review Result count only (not planning/in-progress)
 - Cost today (USD estimate)
 - Agent Deck connection status (optional): connected / offline / not configured
 
-**Feed column actions:**
+**Intake screen actions** (not on Operations board):
 
 - Configure Linear poll
 - Add manual task
-- Draft plan (plan mode)
+- Promote issue → agent drafts plan (`queued` / `plan_pending`)
 
-**Plan approval column actions:**
+**Review Plan column actions:**
 
 - Edit plan markdown
-- Approve & kick (runtime + deck picker)
-- Reject
+- Approve plan (→ execution queue)
+- Re-draft / retry planning
 
-**In progress column:**
+**In Progress column:**
 
-- Live status per slot (Slot 1 / Slot 2 when `maxConcurrentRuns: 2`)
-- Runtime, deck, task category badge per slot
-- Cancel run
-- View log tail (Monaco read-only viewer)
+- Observability only — expand to see which runs are executing vs waiting for a slot
+- Cancel run (from drawer)
+- View log tail (from drawer)
 
-**Review results column:**
+**Review Result column actions:**
 
 - Approve done
 - Retry with feedback
@@ -895,6 +904,7 @@ References:
 | Lific vs Docket for v0.1? | **Lific first** | P3 planning |
 | Email tasks in v0? | **Draft-only** in artifact workspace; no send without gate | P2 |
 | Email MCP for v0.1? | TBD — Gmail/Outlook on execution deck | P3 planning |
+| Linear status mapping per run event? | **Hardcoded** Todo / In Progress / In Review / Done — see `LINEAR_INTEGRATION.md` | P2 (configurable map) |
 
 ---
 

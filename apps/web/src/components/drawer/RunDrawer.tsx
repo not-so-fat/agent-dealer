@@ -1,5 +1,6 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AgentWithHealth, Run } from "@agent-dealer/shared";
+import { fetchRunDetail, linearUrlFromArtifacts } from "../../api";
 import {
   categoryLabel,
   deckLabel,
@@ -47,8 +48,19 @@ export default function RunDrawer({
   onRetry,
   queueNav,
 }: Props) {
+  const [linearUrl, setLinearUrl] = useState<string | null>(null);
   const meta = statusMeta(run.status);
   const deck = deckLabel(run);
+
+  useEffect(() => {
+    if (run.source !== "linear") {
+      setLinearUrl(null);
+      return;
+    }
+    fetchRunDetail(run.id)
+      .then((detail) => setLinearUrl(linearUrlFromArtifacts(detail.artifacts)))
+      .catch(() => setLinearUrl(null));
+  }, [run.id, run.source]);
 
   const onKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -73,7 +85,21 @@ export default function RunDrawer({
         <div className="flex justify-between items-start gap-3">
           <div className="min-w-0 flex-1 space-y-2">
             <div className="flex flex-wrap items-center gap-1.5">
-              <Badge className="bg-[#5E6AD2]/15 text-[#AEB4FF] border-[#5E6AD2]/35">{sourceLabel(run)}</Badge>
+              {run.source === "linear" && linearUrl ? (
+                <a
+                  href={linearUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex"
+                  title="Open in Linear"
+                >
+                  <Badge className="bg-[#5E6AD2]/15 text-[#AEB4FF] border-[#5E6AD2]/35 hover:bg-[#5E6AD2]/25 transition-colors">
+                    {sourceLabel(run)} ↗
+                  </Badge>
+                </a>
+              ) : (
+                <Badge className="bg-[#5E6AD2]/15 text-[#AEB4FF] border-[#5E6AD2]/35">{sourceLabel(run)}</Badge>
+              )}
               <Badge className="bg-white/5 text-white/45 border-white/10 normal-case">{categoryLabel(run.taskCategory)}</Badge>
               <Badge className={runtimeTone(run.runtime)}>{runtimeLabel(run.runtime)}</Badge>
               {deck && (

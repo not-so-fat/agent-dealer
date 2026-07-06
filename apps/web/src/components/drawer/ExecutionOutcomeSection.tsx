@@ -1,5 +1,6 @@
 import type { ExecutionResultContent } from "@agent-dealer/shared";
 import { resolveExecutionBlocker } from "@agent-dealer/shared";
+import MarkdownBody from "../ui/MarkdownBody";
 
 type Props = {
   execResult: ExecutionResultContent;
@@ -27,13 +28,13 @@ export function ExecutionOutcomeSection({ execResult }: Props) {
       <div className={`heading-section ${isBlocked ? "text-red-300" : ""}`}>
         {isBlocked ? "Blocker details" : "Result"}
       </div>
-      <pre
-        className={`field-mono text-sm whitespace-pre-wrap max-h-48 overflow-y-auto ${
+      <div
+        className={`markdown-body-panel markdown-body-panel--compact ${
           isBlocked ? "border-red-400/30 bg-red-950/20" : ""
         }`}
       >
-        {execResult.resultText}
-      </pre>
+        <MarkdownBody source={execResult.resultText} />
+      </div>
     </section>
   );
 }

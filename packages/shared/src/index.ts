@@ -82,7 +82,7 @@ export type ReflectStatusContent = z.infer<typeof ReflectStatusContent>;
 
 /** Human-readable timeline derived from NDJSON (thinking, tools, assistant text). */
 export const StreamTraceEntry = z.object({
-  type: z.enum(["system", "thinking", "assistant", "tool", "rate_limit", "result"]),
+  type: z.enum(["system", "human", "context", "thinking", "assistant", "tool", "rate_limit", "result"]),
   text: z.string(),
   toolName: z.string().optional(),
 });
@@ -207,7 +207,7 @@ export const CreateRunInput = z.object({
   repo: z.string().optional(),
   artifactWorkspace: z.string().optional(),
   acceptanceCriteria: z.string().optional(),
-  status: z.enum(["queued", "plan_pending"]).default("plan_pending"),
+  status: z.enum(["queued", "plan_pending", "plan_approved"]).default("plan_pending"),
   /** Saved agent profile — runtime/deck/playbook resolved from agent record. */
   agentId: z.string().uuid(),
   planModel: z.string().nullable().optional(),
@@ -243,7 +243,9 @@ export type KickRunInput = z.infer<typeof KickRunInput>;
 
 export const RetryRunInput = z.object({
   feedback: z.string().min(1),
+  /** @deprecated execution retry uses executeModel */
   planModel: z.string().nullable().optional(),
+  executeModel: z.string().nullable().optional(),
 });
 export type RetryRunInput = z.infer<typeof RetryRunInput>;
 
@@ -360,12 +362,11 @@ export const RuntimeModelsResponse = z.object({
 export type RuntimeModelsResponse = z.infer<typeof RuntimeModelsResponse>;
 
 export const QueueSnapshot = z.object({
-  running: z.number(),
-  queued: z.number(),
-  planPending: z.number(),
-  review: z.number(),
-  runningCount: z.number(),
+  planReviewCount: z.number(),
+  resultReviewCount: z.number(),
   maxConcurrent: z.number(),
+  planningActiveRuns: z.array(Run),
+  planningQueuedRuns: z.array(Run),
   runningRuns: z.array(Run),
   waitingExecution: z.array(Run),
   resultReviewRuns: z.array(Run),
