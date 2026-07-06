@@ -1,8 +1,14 @@
 import net from "node:net";
 import fs from "node:fs";
-import path from "node:path";
 import { claudeAvailable } from "./cli-check.js";
-import { resolveServerEntry, resolveUiDist, defaultAgentDealerHome } from "./paths.js";
+import {
+  loadProdEnvFile,
+  prodEnvFilePath,
+  prodHomeDir,
+  resolveBundledListenPort,
+  shortenHome,
+} from "./env.js";
+import { resolveServerEntry, resolveUiDist } from "./paths.js";
 
 export async function runDoctor(): Promise<number> {
   let failed = false;
@@ -38,15 +44,24 @@ export async function runDoctor(): Promise<number> {
     console.warn("⚠ dashboard bundle missing (API-only)");
   }
 
-  const home = defaultAgentDealerHome();
-  const envFile = path.join(home, ".env");
+  const envFile = loadProdEnvFile() ?? prodEnvFilePath();
   if (fs.existsSync(envFile)) {
-    console.log(`✓ config ${envFile}`);
+    console.log(`✓ config ${shortenHome(envFile)}`);
+    if (process.env.LINEAR_API_KEY?.trim()) {
+      console.log("✓ LINEAR_API_KEY set");
+    } else {
+      console.warn("⚠ LINEAR_API_KEY not set — Linear inbox disabled");
+    }
   } else {
     console.warn(`⚠ no config — run: agent-dealer setup`);
   }
 
-  const port = Number(process.env.PORT ?? 2221);
+  const home = prodHomeDir();
+  if (fs.existsSync(home)) {
+    console.log(`✓ data ${shortenHome(home)}`);
+  }
+
+  const port = resolveBundledListenPort();
   const free = await isPortFree(port);
   if (free) {
     console.log(`✓ port ${port} available`);

@@ -1,4 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import {
+  loadProdEnvFile,
+  prodEnvFilePath,
+  prodHomeDir,
+  resolveBundledListenPort,
+  shortenHome,
+} from "./env.js";
 import { resolveServerEntry, resolveUiDist } from "./paths.js";
 
 export interface StartOptions {
@@ -22,14 +29,24 @@ async function waitForHealth(url: string, attempts = 40): Promise<boolean> {
 }
 
 export async function runStart(options: StartOptions = {}): Promise<number> {
-  const port = options.port ?? Number(process.env.PORT ?? 2221);
-  const entry = resolveServerEntry();
+  const envFile = loadProdEnvFile();
+  const home = prodHomeDir();
   const uiDist = resolveUiDist();
+  const port = resolveBundledListenPort(options.port);
+  const entry = resolveServerEntry();
+
+  if (envFile) {
+    console.log(`Config: ${shortenHome(envFile)}`);
+  } else {
+    console.warn(`No config at ${shortenHome(prodEnvFilePath())} — run: agent-dealer setup`);
+  }
 
   const env: Record<string, string> = {
     ...process.env,
     AGENT_DEALER_ENV: "production",
+    AGENT_DEALER_HOME: home,
     PORT: String(port),
+    WEB_PORT: String(port),
     AGENT_DEALER_WEB_URL: `http://localhost:${port}`,
     AGENT_DEALER_API: `http://127.0.0.1:${port}`,
   };

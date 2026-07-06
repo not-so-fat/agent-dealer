@@ -18,7 +18,7 @@ agent-dealer setup
 agent-dealer start --open
 ```
 
-Dashboard + API: **http://localhost:2221** (single port when UI is bundled).
+Dashboard + API: **http://localhost:2222** (single port when UI is bundled).
 
 ## Prerequisites (publisher)
 

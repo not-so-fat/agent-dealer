@@ -47,6 +47,26 @@ agent-dealer doctor
 echo "[install-smoke] setup"
 agent-dealer setup --home "$HOME_DIR/.agent-dealer"
 
+echo "[install-smoke] seed LINEAR_API_KEY in .env (no shell export)"
+echo 'LINEAR_API_KEY=smoke_test_key' >> "$HOME_DIR/.agent-dealer/.env"
+
+echo "[install-smoke] doctor (env file only)"
+DOC_OUT="$(AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer doctor 2>&1)"
+echo "$DOC_OUT"
+echo "$DOC_OUT" | grep -Fq "LINEAR_API_KEY set" || {
+  echo "[install-smoke] FAIL doctor did not see LINEAR_API_KEY from .env"
+  exit 1
+}
+
+echo "[install-smoke] legacy PORT=2221 in .env maps to bundled 2222"
+sed -i.bak 's/^PORT=.*/PORT=2221/' "$HOME_DIR/.agent-dealer/.env"
+DOC_OUT="$(AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer doctor 2>&1)"
+echo "$DOC_OUT"
+echo "$DOC_OUT" | grep -Fq "port 2222" || {
+  echo "[install-smoke] FAIL doctor did not resolve bundled port 2222"
+  exit 1
+}
+
 echo "[install-smoke] start on port $PORT"
 PORT=$PORT AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer start --port "$PORT" &
 PID=$!

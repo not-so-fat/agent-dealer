@@ -21,9 +21,11 @@ agent-dealer setup
 agent-dealer start --open
 ```
 
-Open **http://localhost:2221** — dashboard and API on one port.
+Open **http://localhost:2222** — dashboard and API on one port (prod dashboard port).
 
 Run `agent-dealer doctor` to verify Node, Claude CLI, bundle, and port before first start.
+
+**Linear (optional):** edit `~/.agent-dealer/.env` — set `LINEAR_API_KEY` and `LINEAR_TEAM_ID`. See [LINEAR_INTEGRATION.md](docs/LINEAR_INTEGRATION.md).
 
 ## Quick start (from git)
 
@@ -38,7 +40,7 @@ npm run dev
 
 Open **http://localhost:3222** (dev dashboard). API: **http://127.0.0.1:3221**
 
-Production: see [docs/PROD_SETUP.md](docs/PROD_SETUP.md) — config at `~/.agent-dealer/.env`, API **2221**.
+Production (git): see [docs/PROD_SETUP.md](docs/PROD_SETUP.md) — API **2221**, dashboard **2222** when running split; npm CLI bundles both on **2222**.
 
 ## Workflow (SC-1)
 
