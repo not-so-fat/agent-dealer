@@ -1,0 +1,46 @@
+{
+  "name": "agent-dealer",
+  "version": "0.1.0",
+  "description": "Human control plane for agent execution — queue, plan approval, audit",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "agent-dealer": "./dist/bin.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/not-so-fat/agent-dealer.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/not-so-fat/agent-dealer#readme",
+  "bugs": {
+    "url": "https://github.com/not-so-fat/agent-dealer/issues"
+  },
+  "keywords": [
+    "agent",
+    "control-plane",
+    "human-in-the-loop"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agent-dealer/server": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  }
+}

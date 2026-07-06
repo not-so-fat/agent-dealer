@@ -13,7 +13,17 @@ Human control plane for agent execution — queue, plan approval, agent runs, an
 
 See [docs/LINEAR_INTEGRATION.md](docs/LINEAR_INTEGRATION.md) for Inbox config, write-back sync, and REST automation.
 
-## Quick start
+## Quick start (npm)
+
+```bash
+npm install -g agent-dealer
+agent-dealer setup
+agent-dealer start --open
+```
+
+Open **http://localhost:2221** — dashboard and API on one port.
+
+## Quick start (from git)
 
 ```bash
 mkdir -p ~/.agent-dealer-dev

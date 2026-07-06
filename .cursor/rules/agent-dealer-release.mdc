@@ -1,58 +1,37 @@
 ---
-description: agent-dealer release — versioning (human-agreed), git tags, dev deck bind, pre-ship gates. Repo-specific.
-globs: CHANGELOG.md,package.json,package-lock.json,apps/*/package.json,packages/*/package.json,docs/PROD_SETUP.md,docs/PUBLISHING.md,README.md
+description: agent-dealer release — versioning, git tags, npm CLI install, dev deck bind, pre-ship gates.
+globs: CHANGELOG.md,package.json,package-lock.json,packages/*/package.json,docs/PUBLISHING.md,docs/PROD_SETUP.md,scripts/prepare-release.mjs,scripts/install-smoke.sh,README.md
 alwaysApply: false
 ---
 
 # agent-dealer release (repo-specific)
 
-**Spec:** `docs/PRD_V0.md` · **Checklist:** `docs/PUBLISHING.md` · **Smoke pattern:** dev deck playbook `pb_user_path_integration_smoke`.
-
-## Dev deck (this repo)
-
-| Field | Value |
-|-------|--------|
-| Deck | **dev** |
-| `deckId` | `6e825b59-13de-4ddd-ab7e-55ab5a1c279a` |
-
-**Session opener:** `bind_workspace({ deckId: "6e825b59-13de-4ddd-ab7e-55ab5a1c279a", workspaceRoot: "<agent-dealer repo root>" })`.
+**Checklist:** `docs/PUBLISHING.md` · **Smoke:** `npm run install:smoke` · **Deck:** `6e825b59-13de-4ddd-ab7e-55ab5a1c279a` (dev).
 
 ## Versioning — human agrees first
 
-**Do not** pick a release number from habit or old `package.json`. Use an **explicit user decision** before bump/tag.
+| Surface | Tracks |
+|---------|--------|
+| Workspaces + git tag `vX.Y.Z` | Agreed `X.Y.Z` |
+| npm `@agent-dealer/*` + `agent-dealer` | Same semver |
 
-| Surface | Tracks | Notes |
-|---------|--------|-------|
-| Repo `package.json` (all workspaces) | `X.Y.Z` | Source of truth after human agrees |
-| Git tag / GitHub Release | `vX.Y.Z` | Annotated; points at Ship commit |
-| npm `agent-dealer@0.0.0` | Frozen | Name hold only — **do not** empty-publish per release |
-
-**Semver:** `0.1.x` patches · `0.2.0` features (pre-1.0) · `1.0.0` production-stable (later).
+## Friend install (what we ship on npm)
 
 ```bash
-npm version X.Y.Z --workspaces --include-workspace-root --no-git-tag-version
+npm install -g agent-dealer && agent-dealer setup && agent-dealer start
 ```
 
-## Distribution
-
-- **Ship:** git tag → GitHub Release → clone + `npm ci` + `npm run build` (`docs/PROD_SETUP.md`).
-- Root stays `"private": true` until a real installable npm surface exists (CLI/bin, not README stub).
-- **Never** wipe `~/.agent-dealer-dev/dealer.db` as release prep.
-- **Never** recommend empty `npm publish` (pointer tarballs) as a release step.
+Real CLI + bundled server/UI — **not** empty pointer tarballs.
 
 ## Release order (agent completes)
 
-1. Agree version with human.
-2. Sync workspace versions + `CHANGELOG.md`.
-3. Gates (log `.temporal/logs/`): `npm run build` · `npm run flow:verify` · `poc:integration` when integrations changed.
-4. Commit: `Ship X.Y.Z: <why>.`
-5. Tag: `git tag -a vX.Y.Z -m "agent-dealer X.Y.Z"`
-6. Push: `git push origin main && git push origin vX.Y.Z`
-7. GitHub Release: `gh release create vX.Y.Z --title "X.Y.Z" --notes-file .temporal/logs/release-notes-X.Y.Z.md`
+1. Agree version · sync workspaces · `CHANGELOG.md` · cli dep on `@agent-dealer/server`.
+2. `npm run build:release` · `npm run install:smoke` (must pass).
+3. Commit `Ship X.Y.Z:` · tag · push · `gh release create`.
+4. `npm run publish:packages` — human handles `npm login` / `--otp` only.
 
 ## Agent behavior
 
-- **Do** push, tag, and `gh release create` when shipping.
-- **Do not** empty-publish to npm for app releases.
-- **Do not** tag without human-agreed version and CHANGELOG entry.
-- **Do** claim only what gates proved in release notes.
+- **Do** push, tag, GitHub release, and attempt npm publish.
+- **Do not** empty-publish or hand off push/publish as “on you” except npm auth.
+- **Never** wipe `~/.agent-dealer-dev/dealer.db` as release prep.

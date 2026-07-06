@@ -1,40 +1,46 @@
 # Publishing agent-dealer
 
-> **Cursor:** release steps in `.cursor/rules/agent-dealer-release.mdc`.
+> **Cursor:** `.cursor/rules/agent-dealer-release.mdc`
 
-## How releases work today
+## npm packages
 
-**Ship via git only.** There is no installable npm package for the app.
+| npm package | Purpose |
+|-------------|---------|
+| `@agent-dealer/shared` | Types and schemas |
+| `@agent-dealer/server` | API, queue, SQLite, bundled dashboard (`static-ui/`) |
+| `agent-dealer` | CLI — `setup`, `start`, `doctor` (bin: `agent-dealer`) |
 
-| Surface | What |
-|---------|------|
-| **Git tag** `vX.Y.Z` + **GitHub Release** | Real product — clone, checkout tag, `npm ci`, `npm run build` |
-| **npm `agent-dealer@0.0.0`** | One-time **name reservation** only (~792 B). Do **not** bump or republish empty tarballs for app releases. |
+Publish **in order**: shared → server → cli.
 
-The monorepo root is `"private": true`. Nothing in this repo is set up for `npm install agent-dealer` to run the dashboard.
-
-**Using a release:**
+## Friend install path
 
 ```bash
-git clone https://github.com/not-so-fat/agent-dealer.git
-cd agent-dealer
-git checkout v0.1.0
-npm ci && npm run build
-npm run dev    # dev — see README
-# or prod — docs/PROD_SETUP.md
+npm install -g agent-dealer
+agent-dealer setup
+agent-dealer start --open
 ```
+
+Dashboard + API: **http://localhost:2221** (single port when UI is bundled).
+
+## Prerequisites (publisher)
+
+- Node.js 20+
+- `npm login` (+ `--otp=…` when 2FA prompts)
+- `gh` for GitHub releases
 
 ## Release order
 
 1. Agree version with human (`X.Y.Z`).
 2. `npm version X.Y.Z --workspaces --include-workspace-root --no-git-tag-version`
-3. `CHANGELOG.md` section for `X.Y.Z`
-4. Gates: `npm run build`, `npm run flow:verify` (and `poc:integration` when integrations changed)
-5. Commit: `Ship X.Y.Z: <why>.`
-6. Tag: `git tag -a vX.Y.Z -m "agent-dealer X.Y.Z"`
-7. Push: `git push origin main && git push origin vX.Y.Z`
-8. GitHub: `gh release create vX.Y.Z --title "X.Y.Z" --notes-file .temporal/logs/release-notes-X.Y.Z.md`
+3. Sync `packages/cli/package.json` dependency `"@agent-dealer/server": "X.Y.Z"`.
+4. `CHANGELOG.md` section for `X.Y.Z`.
+5. `npm run build:release` — builds all workspaces + copies web dist → `packages/server/static-ui`.
+6. `npm run install:smoke` — pack + fresh install test (must pass before publish).
+7. Gates: `npm run flow:verify` when API changes need it.
+8. Commit: `Ship X.Y.Z: <why>.`
+9. Tag + push + `gh release create`.
+10. `npm run publish:packages` (human logged in).
 
-## Future: real npm install
+## Dev monorepo
 
-Only when there is an actual install path (e.g. CLI + bundled server like Agent Deck, or scoped `@agent-dealer/*` packages with `bin` and `files`). Empty README-only publishes are **not** releases — they waste registry versions and lie to `npm install`.
+Repo root stays `"private": true`. Use `npm run dev` from a git checkout.

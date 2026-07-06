@@ -8,6 +8,7 @@ import { enrichPathForCliTools } from "./cli-env.js";
 import { migrate } from "./db/index.js";
 import { registerRoutes } from "./routes/index.js";
 import { startQueue } from "./queue/dispatcher.js";
+import { registerStaticUi } from "./static-ui.js";
 
 const { mode, envFile } = loadAgentDealerEnv();
 console.log(formatEnvStartupLine(mode, envFile));
@@ -22,10 +23,15 @@ async function main(): Promise<void> {
   await app.register(cors, { origin: true });
   await registerRoutes(app);
 
+  const uiDist = await registerStaticUi(app);
   startQueue();
 
   await app.listen({ port, host: "0.0.0.0" });
-  console.log(`agent-dealer API http://127.0.0.1:${port}`);
+  const base = `http://127.0.0.1:${port}`;
+  console.log(`agent-dealer API ${base}`);
+  if (uiDist) {
+    console.log(`agent-dealer dashboard ${base}`);
+  }
 }
 
 main().catch((err) => {

@@ -19,7 +19,12 @@ First agreed daily-driver release (git tag `v0.1.0`).
 - Linear write-back at plan / review / retry / done milestones
 - Post-review playbook reflect + propose-confirm patch (Agent Deck)
 
-### Gates
+### Install
 
-- `npm run flow:verify` — API lifecycle smoke
-- `npm run poc:integration` — Linear / Agent Deck / CLI PoCs
+```bash
+npm install -g agent-dealer
+agent-dealer setup
+agent-dealer start --open
+```
+
+Dashboard + API on **http://localhost:2221** (bundled static UI).

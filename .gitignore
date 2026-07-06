@@ -6,6 +6,7 @@ dist/
 !.cursor/rules/
 !.cursor/rules/**
 apps/web/public/fonts/
+packages/server/static-ui/
 *.db
 *.db-journal
 .DS_Store

@@ -36,7 +36,9 @@ npm run db:migrate:prod
 npm run start
 ```
 
-API listens on **http://127.0.0.1:2221**. The dashboard is not bundled for prod yet — use dev (`npm run dev`) on **3222** or point a future static build at the prod API.
+API listens on **http://127.0.0.1:2221**. With **`npm install -g agent-dealer`**, `agent-dealer start` serves the bundled dashboard on the same port.
+
+For git dev work, use `npm run dev` on **3222** (Vite) proxying API **3221**.
 
 ## Running dev and prod together
 
