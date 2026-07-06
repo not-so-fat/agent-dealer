@@ -49,7 +49,7 @@ Claude Code has **two auth routes** with different billing:
 **`claude login` is enough** for agent-dealer on a dev machine:
 
 - Verified: `claude auth status` → `loggedIn: true`, `subscriptionType: pro`, `authMethod: claude.ai`
-- Verified: `npx tsx .temporal/scripts/poc/claude-runner-probe.ts` → plan + execute both exit 0
+- Verified: `npx tsx scripts/poc/claude-runner-probe.ts` → plan + execute both exit 0
 - Init event shows `apiKeySource: "none"` (subscription session, not API key)
 - `rate_limit_event` in stream-json tracks plan limits (`rateLimitType: five_hour`, `overageStatus: rejected` when overage disabled)
 
@@ -75,7 +75,7 @@ Claude Code has **two auth routes** with different billing:
 
 - `.env`: `LINEAR_API_KEY`, `LINEAR_TEAM_ID`, `LINEAR_STATE_FILTER="Todo,In Progress,Backlog"`
 - GraphQL poll works; **current inbox: 0** (team only has Canceled onboarding issues)
-- PoC: `npx tsx .temporal/scripts/poc/linear-inbox.ts`
+- PoC: `npx tsx scripts/poc/linear-inbox.ts`
 
 ---
 
@@ -237,8 +237,8 @@ Surface in run drawer: estimated cost, limit warnings, link to `/usage` equivale
 ```bash
 npm run poc:integration          # quick smoke (linear, deck, claude-minimal, cursor --quick)
 npm run poc:deep                 # full claude + cursor plan/execute probes
-npx tsx .temporal/scripts/poc/claude-runner-probe.ts
-npx tsx .temporal/scripts/poc/cursor-agent-probe.ts   # add --quick for smoke only
+npx tsx scripts/poc/claude-runner-probe.ts
+npx tsx scripts/poc/cursor-agent-probe.ts   # add --quick for smoke only
 ```
 
 **Pre-flight checks:**

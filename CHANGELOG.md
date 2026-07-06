@@ -1,6 +1,6 @@
 # Changelog
 
-Repo releases use **git tags** (`vX.Y.Z`) and GitHub Releases. Install from git — see `docs/PUBLISHING.md`. npm `agent-dealer@0.0.0` is a frozen name hold only, not the app.
+Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
 ## 0.1.0 — 2026-07-06
 

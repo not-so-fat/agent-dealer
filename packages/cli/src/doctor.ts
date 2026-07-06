@@ -1,22 +1,34 @@
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
+import { claudeAvailable } from "./cli-check.js";
 import { resolveServerEntry, resolveUiDist, defaultAgentDealerHome } from "./paths.js";
 
 export async function runDoctor(): Promise<number> {
+  let failed = false;
+
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 20) {
-    console.error(`Node.js 20+ required (found ${process.versions.node})`);
+    console.error(`✗ Node.js 20+ required (found ${process.versions.node})`);
     return 1;
   }
   console.log(`✓ Node ${process.versions.node}`);
+
+  const claude = await claudeAvailable();
+  if (claude.ok) {
+    console.log(`✓ Claude Code CLI (${claude.bin})`);
+  } else {
+    console.error("✗ Claude Code CLI not found — install claude and ensure it is on PATH");
+    console.error("  https://docs.anthropic.com/en/docs/claude-code");
+    failed = true;
+  }
 
   try {
     resolveServerEntry();
     console.log("✓ @agent-dealer/server entry");
   } catch (err) {
     console.error(`✗ server: ${err instanceof Error ? err.message : err}`);
-    return 1;
+    failed = true;
   }
 
   const ui = resolveUiDist();
@@ -42,7 +54,7 @@ export async function runDoctor(): Promise<number> {
     console.warn(`⚠ port ${port} in use`);
   }
 
-  return 0;
+  return failed ? 1 : 0;
 }
 
 function isPortFree(port: number): Promise<boolean> {

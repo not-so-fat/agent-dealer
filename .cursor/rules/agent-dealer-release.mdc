@@ -1,37 +1,62 @@
 ---
-description: agent-dealer release — versioning, git tags, npm CLI install, dev deck bind, pre-ship gates.
-globs: CHANGELOG.md,package.json,package-lock.json,packages/*/package.json,docs/PUBLISHING.md,docs/PROD_SETUP.md,scripts/prepare-release.mjs,scripts/install-smoke.sh,README.md
+description: agent-dealer release — versioning, git tags, npm CLI install, dev deck bind, pre-ship gates. Repo-specific.
+globs: CHANGELOG.md,package.json,package-lock.json,packages/*/package.json,docs/PUBLISHING.md,docs/PROD_SETUP.md,scripts/prepare-release.mjs,scripts/stage-npm-package.mjs,scripts/publish-npm.sh,scripts/install-smoke.sh,README.md
 alwaysApply: false
 ---
 
 # agent-dealer release (repo-specific)
 
-**Checklist:** `docs/PUBLISHING.md` · **Smoke:** `npm run install:smoke` · **Deck:** `6e825b59-13de-4ddd-ab7e-55ab5a1c279a` (dev).
+**Checklist:** `docs/PUBLISHING.md` · **Smoke:** `npm run install:smoke` · **Deck:** `6e825b59-13de-4ddd-ab7e-55ab5a1c279a` (dev) · **Generic smoke:** playbook `pb_user_path_integration_smoke`.
+
+## npm — unscoped `agent-dealer` only
+
+| Rule | Detail |
+|------|--------|
+| Registry name | **`agent-dealer`** (unscoped) — one `npm install -g agent-dealer` |
+| Monorepo root | Stays `"private": true` — **never** `npm publish` from repo root |
+| Publish target | Staged dir `.temporal/npm-stage/agent-dealer` (CLI + `bundle/` server/UI) |
+| Command | `npm run publish:packages` → `scripts/publish-npm.sh` (**must `cd` into stage** — `--prefix` from root hits root `private` → `EPRIVATE`) |
+| 2FA | `npm run publish:packages -- --otp=CODE` |
+| No scoped org | Do not publish `@agent-dealer/*` to npm (no org required) |
+
+**Friend path:** `npm install -g agent-dealer` → `agent-dealer setup` → `agent-dealer start` → http://localhost:2221
+
+**Not shipped:** empty README-only tarballs; pointer packages that lie about `npm install`.
 
 ## Versioning — human agrees first
 
 | Surface | Tracks |
 |---------|--------|
 | Workspaces + git tag `vX.Y.Z` | Agreed `X.Y.Z` |
-| npm `@agent-dealer/*` + `agent-dealer` | Same semver |
-
-## Friend install (what we ship on npm)
+| npm `agent-dealer` | Same semver as git |
 
 ```bash
-npm install -g agent-dealer && agent-dealer setup && agent-dealer start
+npm version X.Y.Z --workspaces --include-workspace-root --no-git-tag-version
 ```
 
-Real CLI + bundled server/UI — **not** empty pointer tarballs.
+## Tracked scripts (cloneable)
+
+Recurring gates live in **`scripts/`** (not gitignored `.temporal/`):
+
+- `scripts/flow-verify.ts` — API lifecycle (`npm run flow:verify`)
+- `scripts/flow-doc.ts` — full agent path (`npm run flow:doc`)
+- `scripts/poc/` — integration PoCs (`npm run poc:integration`)
+- `scripts/install-smoke.sh` — pack staged tarball + fresh install test
+- `scripts/publish-npm.sh` — stage + publish from staged dir only
+
+Runtime logs only: `.temporal/logs/`.
 
 ## Release order (agent completes)
 
-1. Agree version · sync workspaces · `CHANGELOG.md` · cli dep on `@agent-dealer/server`.
+1. Agree version · sync workspaces · `CHANGELOG.md`.
 2. `npm run build:release` · `npm run install:smoke` (must pass).
-3. Commit `Ship X.Y.Z:` · tag · push · `gh release create`.
-4. `npm run publish:packages` — human handles `npm login` / `--otp` only.
+3. `npm run flow:verify` when API changed (server up on dev port).
+4. Commit `Ship X.Y.Z:` · tag `vX.Y.Z` · `git push` · `gh release create` (or `gh release edit`).
+5. Human `npm login` · `npm run publish:packages` (agent runs; human only OTP).
 
 ## Agent behavior
 
-- **Do** push, tag, GitHub release, and attempt npm publish.
-- **Do not** empty-publish or hand off push/publish as “on you” except npm auth.
+- **Do** push, tag, GitHub release notes, and run publish after smoke passes.
+- **Do not** `npm publish` from monorepo root (`EPRIVATE`).
+- **Do not** empty-publish or defer push/publish as “on you” except npm auth/OTP.
 - **Never** wipe `~/.agent-dealer-dev/dealer.db` as release prep.

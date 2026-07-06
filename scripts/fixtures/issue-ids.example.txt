@@ -1,0 +1,2 @@
+# One Linear issue ID per line (e.g. LIN-123). Lines starting with # are ignored.
+# Copy to your own file or pass a path: npm run p0 -- path/to/ids.txt

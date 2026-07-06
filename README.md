@@ -23,6 +23,8 @@ agent-dealer start --open
 
 Open **http://localhost:2221** — dashboard and API on one port.
 
+Run `agent-dealer doctor` to verify Node, Claude CLI, bundle, and port before first start.
+
 ## Quick start (from git)
 
 ```bash
@@ -45,23 +47,40 @@ Production: see [docs/PROD_SETUP.md](docs/PROD_SETUP.md) — config at `~/.agent
 3. **In progress** — **Start execution** (uses agent binding from step 1)
 4. **Review** — **Approve done** or **Retry with feedback**
 
-| `npm run flow:verify` | API flow gates (no browser) |
-| `npm run poc:integration` | Linear / Agent Deck / Claude PoCs |
+| `npm run flow:verify` | API flow gates — `scripts/flow-verify.ts` (server must be running) |
+| `npm run flow:doc` | End-to-end API smoke with agent execution |
+| `npm run poc:integration` | Linear / Agent Deck / Claude PoCs — `scripts/poc/` |
+| `npm run install:smoke` | Fresh npm pack install test |
+| `npm run build:release` | Production build + bundle dashboard for npm |
 
 Works without Agent Deck (no deck = degraded mode, SC-4). Playbook is optional.
+
+## Trust & execution scope
+
+When you **approve execution**, agent-dealer spawns **Claude Code** (`claude -p`) in the task’s bound **workspace directory**. During a run the agent may use:
+
+| Phase | Tools (allowlisted) | Budget defaults |
+|-------|---------------------|-----------------|
+| **Plan** | Read, Glob, Grep + Agent Deck MCP (playbook/deck) | 5 turns · **$0.50** max |
+| **Execute** | Read, Write, Edit, Glob, Grep, **Bash** + Agent Deck MCP | 30 turns · **$5.00** max |
+| **Reflect** (post-review) | Read, Glob, Grep + Agent Deck MCP | 3 turns · **$0.25** max |
+
+Caps are enforced via Claude Code flags (`--max-turns`, `--max-budget-usd`). Per-run budgets can be tightened in the run record. Deliverable scratch files go under `~/.agent-dealer/.temporal/output/`; audit artifacts stay in SQLite.
+
+**You gate every run:** plan approval before execution, result review before done. Nothing executes without your explicit approve (or retry with feedback).
 
 ## P0 proof script
 
 Batch-run Linear issue IDs via Claude without the dashboard:
 
 ```bash
-# Edit .temporal/issue-ids.txt with issue IDs (one per line)
+# Edit scripts/fixtures/issue-ids.example.txt (or your own file)
 export DECK_ID=optional-uuid
 export PLAYBOOK_ID=optional-id
-npm run p0 -- .temporal/issue-ids.txt
+npm run p0 -- scripts/fixtures/issue-ids.example.txt
 ```
 
-Logs: `.temporal/logs/<issue>-<timestamp>.ndjson`
+Logs: `.temporal/logs/<issue>-<timestamp>.ndjson` (gitignored runtime output)
 
 ## Ports
 
@@ -89,7 +108,12 @@ Override with `AGENT_DEALER_HOME` in the env file for that mode.
 | `npm run start` | Prod API only (`AGENT_DEALER_ENV=production`) |
 | `npm run db:migrate` | Apply schema to dev DB |
 | `npm run db:migrate:prod` | Apply schema to prod DB |
-| `npm run p0` | P0 Linear batch script |
+| `npm run p0` | P0 Linear batch — `scripts/p0-linear-batch.ts` |
+| `npm run flow:verify` | API lifecycle gates |
+| `npm run flow:doc` | Full agent path smoke |
+| `npm run poc:integration` | External integration PoCs |
+| `npm run build:release` | Release build + UI bundle |
+| `npm run install:smoke` | npm install smoke test |
 | `npm run build` | Build all packages |
 
 ## Environment

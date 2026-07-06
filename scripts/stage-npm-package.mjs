@@ -41,6 +41,8 @@ stagedPkg.dependencies = {
 };
 delete stagedPkg.dependencies["@agent-dealer/shared"];
 delete stagedPkg.dependencies["@agent-dealer/server"];
+delete stagedPkg.private;
+delete stagedPkg.devDependencies;
 stagedPkg.files = ["dist", "templates", "bundle"];
 stagedPkg.scripts = { ...stagedPkg.scripts, postinstall: "node ./dist/postinstall.js" };
 

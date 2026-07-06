@@ -37,8 +37,19 @@ Dashboard + API: **http://localhost:2221** (single port when UI is bundled).
 7. Gates: `npm run flow:verify` when API changes need it.
 8. Commit: `Ship X.Y.Z: <why>.`
 9. Tag + push + `gh release create`.
-10. `npm run publish:packages` — stages self-contained tarball then publishes `agent-dealer` (human logged in).
+10. `npm run publish:packages` — stages then publishes from `.temporal/npm-stage/agent-dealer` (must `cd` there; root monorepo is `private`). With 2FA: `npm run publish:packages -- --otp=CODE`
 
 ## Dev monorepo
 
 Repo root stays `"private": true`. Use `npm run dev` from a git checkout.
+
+## Publish command (important)
+
+```bash
+npm run publish:packages              # stages + cd into stage dir + npm publish
+npm run publish:packages -- --otp=… # 2FA
+```
+
+**Never** `npm publish` from repo root — `EPRIVATE` (root is `private: true`, same package name).
+
+Implementation: `scripts/stage-npm-package.mjs` → `.temporal/npm-stage/agent-dealer` → `scripts/publish-npm.sh`.

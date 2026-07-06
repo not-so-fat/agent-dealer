@@ -36,8 +36,8 @@ Repo-specific lessons stay here — not in Agent Deck playbooks.
 
 ## Release & versioning
 
-Repo-specific ship process, dev deck bind, and version policy: **`.cursor/rules/agent-dealer-release.mdc`** (human agrees version before tag; not npm `0.0.0` stub).
+Repo-specific ship process, dev deck bind, and version policy: **`.cursor/rules/agent-dealer-release.mdc`**.
 
 ## Temporal scripts
 
-One-off PoCs and logs under `.temporal/` only. Recurring npm scripts may wrap `.temporal/scripts/`.
+Recurring dev/CI scripts live in **`scripts/`** (tracked). Runtime logs and one-off output go under **`.temporal/`** (gitignored).

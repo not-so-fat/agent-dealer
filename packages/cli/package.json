@@ -34,8 +34,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
-    "postinstall": "node ./dist/postinstall.js"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@agent-dealer/server": "0.1.0",
