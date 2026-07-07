@@ -7,6 +7,8 @@ import {
   fetchLogTail,
   fetchRunDetail,
   kickRun,
+  latestArtifact,
+  parseArtifact,
   type StreamTraceContent,
   type UsageSummary,
 } from "../../api";
@@ -97,6 +99,20 @@ export default function ExecutionPanel({ run, agents, onRefresh }: Props) {
         )}
         {isRunning && <p className="text-sm text-[#92E4DD] animate-pulse">Executing…</p>}
       </section>
+
+      {(() => {
+        const approvedArt = latestArtifact(artifacts, "approved_plan");
+        const autoApproved =
+          approvedArt?.author === "system" ? parseArtifact<{ rationale?: string }>(approvedArt) : null;
+        return autoApproved ? (
+          <section className="space-y-1">
+            <div className="heading-section text-emerald-200">Auto-approved</div>
+            <p className="text-sm text-white/60">
+              {autoApproved.rationale ?? "Self-triage marked this plan trivial."}
+            </p>
+          </section>
+        ) : null;
+      })()}
 
       {isWaiting && (
         <>

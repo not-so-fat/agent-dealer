@@ -54,6 +54,7 @@ export default function OperationsPage({ snapshot, selectedRunId, onSelectRun }:
           <div className="relative min-h-0 h-full w-full self-stretch">
             <PlanApprovalColumn
               runs={planApproval}
+              openQuestionCounts={snapshot?.openQuestionCounts ?? {}}
               selectedId={selectedRunId}
               onSelect={onSelectRun}
             />
@@ -108,6 +109,7 @@ export default function OperationsPage({ snapshot, selectedRunId, onSelectRun }:
                 title="In Progress"
                 items={progressTickets}
                 activeBadgeLabel="Running"
+                autoApprovedRunIds={snapshot?.autoApprovedRunIds ?? []}
                 selectedId={selectedRunId}
                 onSelect={onSelectRun}
                 onClose={() => setPipelinePanel(null)}

@@ -26,6 +26,8 @@ export type RunCardProps = {
   queueQueuedLabel?: string;
   /** Hide status chip when column context already implies it */
   hideStatusBadge?: boolean;
+  /** Extra context badge (open questions, auto-approved) */
+  extraBadge?: { label: string; className: string };
 };
 
 export default function RunCard({
@@ -39,6 +41,7 @@ export default function RunCard({
   queueActiveLabel = "Running",
   queueQueuedLabel = "In queue",
   hideStatusBadge = false,
+  extraBadge,
 }: RunCardProps) {
   const status = statusOverride ?? run.status;
   const meta = statusMeta(status);
@@ -107,6 +110,7 @@ export default function RunCard({
               ◆ {deck}
             </Badge>
           )}
+          {extraBadge && <Badge className={`${extraBadge.className} normal-case`}>{extraBadge.label}</Badge>}
           {queueBadge ? (
             <Badge className={`${queueTone} ml-auto`}>
               {isActiveBadge && (

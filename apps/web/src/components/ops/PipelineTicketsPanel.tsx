@@ -13,6 +13,7 @@ type Props = {
   accent: string;
   titleAccent: string;
   empty: string;
+  autoApprovedRunIds?: string[];
 };
 
 /** Wide overlay panel — same slot as Review Plan / Result Review columns. */
@@ -26,6 +27,7 @@ export default function PipelineTicketsPanel({
   accent,
   titleAccent,
   empty,
+  autoApprovedRunIds = [],
 }: Props) {
   return (
     <section
@@ -55,6 +57,11 @@ export default function PipelineTicketsPanel({
               queueActiveLabel={activeBadgeLabel}
               queueQueuedLabel="In queue"
               hideStatusBadge
+              extraBadge={
+                autoApprovedRunIds.includes(run.id)
+                  ? { label: "Auto-approved", className: "bg-emerald-400/15 text-emerald-200 border-emerald-400/35" }
+                  : undefined
+              }
             />
           ))
         )}

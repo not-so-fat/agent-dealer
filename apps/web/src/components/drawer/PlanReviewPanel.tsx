@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AgentWithHealth, Artifact, Run } from "@agent-dealer/shared";
+import type { AgentWithHealth, Artifact, PlanTriageContent, Run } from "@agent-dealer/shared";
 import { agentSummary } from "../../AgentConfigFields";
 import PhaseConfigRow from "../agents/PhaseConfigRow";
 import {
@@ -8,10 +8,13 @@ import {
   draftPlan,
   fetchRunDetail,
   latestArtifact,
+  parseArtifact,
+  submitPlanAnswers,
   updatePlan,
   type StreamTraceContent,
   type UsageSummary,
 } from "../../api";
+import PlanQuestionsCard from "./PlanQuestionsCard";
 import {
   agentPhaseBudgetFromJson,
   budgetFormEmpty,
@@ -61,6 +64,18 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
   const hasPlan = artifacts.some((a) => a.kind === "draft_plan");
   const agentPlanning = run.status === "plan_pending" && !hasPlan;
   const planning = agentPlanning || replanning;
+
+  const triageArt = latestArtifact(artifacts, "plan_triage");
+  const answersArt = latestArtifact(artifacts, "plan_answers");
+  const triage = triageArt ? parseArtifact<PlanTriageContent>(triageArt) : null;
+  const openQuestions =
+    run.status === "plan_pending" &&
+    triage &&
+    !triage.consumed &&
+    triage.questions.length > 0 &&
+    (!answersArt || answersArt.createdAt <= triageArt!.createdAt)
+      ? triage.questions
+      : [];
 
   useEffect(() => {
     load().catch(console.error);
@@ -139,6 +154,24 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
         <div className="heading-section">Agent</div>
         <p className="text-body">{agentSummary(run)}</p>
       </section>
+
+      {openQuestions.length > 0 && !planning && (
+        <PlanQuestionsCard
+          questions={openQuestions}
+          busy={busy}
+          onSubmit={(answers) =>
+            act(async () => {
+              const res = await submitPlanAnswers(run.id, answers);
+              if (res.outcome === "approved") {
+                onApproved?.();
+                onApprovedAndNext?.();
+              } else {
+                setReplanning(true);
+              }
+            })
+          }
+        />
+      )}
 
       <section className="space-y-2">
         <div className="heading-section">Plan</div>

@@ -225,6 +225,19 @@ export async function kickRun(
   return res.json();
 }
 
+export async function submitPlanAnswers(
+  id: string,
+  answers: Array<{ questionId: string; selectedLabel?: string; freeText?: string }>
+): Promise<{ run: Run; outcome: "approved" | "redraft" }> {
+  const res = await fetch(`${API}/api/runs/${id}/plan/answers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ answers }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function approveRun(id: string): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/approve`, { method: "POST" });
   if (!res.ok) throw new Error(await res.text());
