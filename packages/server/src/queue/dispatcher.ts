@@ -1,4 +1,6 @@
 import type {
+  PlanAnswer,
+  PlanAnswersInput,
   PlanContent,
   PlanGateDecision,
   PlanTriageContent,
@@ -6,6 +8,7 @@ import type {
   RunStatus,
 } from "@agent-dealer/shared";
 import { planGateDecision } from "@agent-dealer/shared";
+import { buildPlanRevisePrompt } from "../runners/prompts.js";
 import {
   addArtifact,
   countByStatus,
@@ -284,7 +287,10 @@ export function applyPlanGate(run: Run): PlanGateDecision {
   return "auto_approve";
 }
 
-export async function draftPlan(run: Run, opts?: { replace?: boolean }): Promise<Run> {
+export async function draftPlan(
+  run: Run,
+  opts?: { replace?: boolean; revise?: { resumeSessionId?: string; prompt: string } }
+): Promise<Run> {
   if (run.status === "queued") {
     transitionRun(run.id, "plan_pending");
   }
@@ -302,7 +308,7 @@ export async function draftPlan(run: Run, opts?: { replace?: boolean }): Promise
   const rt = runtimeFor(updated);
 
   try {
-    const result = await runAgent(updated, "plan");
+    const result = await runAgent(updated, "plan", opts?.revise);
     const persisted = persistRunOutput({
       run: updated,
       phase: "plan",
@@ -363,6 +369,83 @@ export async function draftPlan(run: Run, opts?: { replace?: boolean }): Promise
 
   await notify();
   return getRun(run.id)!;
+}
+
+export type SubmitAnswersResult =
+  | { ok: true; outcome: "approved" | "redraft"; run: Run }
+  | { ok: false; code: 400 | 404 | 409; error: string };
+
+/** Answer open plan questions (PRD F3). Structured answers approve + dispatch; free-form revises the plan. */
+export function submitPlanAnswers(
+  runId: string,
+  input: PlanAnswersInput,
+  opts?: { onRedraft?: (run: Run, triage: PlanTriageContent, answers: PlanAnswer[]) => void }
+): SubmitAnswersResult {
+  const run = getRun(runId);
+  if (!run) return { ok: false, code: 404, error: "Not found" };
+  if (run.status !== "plan_pending") {
+    return { ok: false, code: 409, error: `No open questions — run is ${run.status}` };
+  }
+
+  const triageArt = getLatestArtifact(runId, "plan_triage");
+  if (!triageArt?.contentJson) return { ok: false, code: 409, error: "No open questions" };
+  let triage: PlanTriageContent;
+  try {
+    triage = JSON.parse(triageArt.contentJson) as PlanTriageContent;
+  } catch {
+    return { ok: false, code: 409, error: "No open questions" };
+  }
+  if (triage.consumed || triage.questions.length === 0) {
+    return { ok: false, code: 409, error: "No open questions" };
+  }
+  const priorAnswers = getLatestArtifact(runId, "plan_answers");
+  if (priorAnswers && priorAnswers.createdAt > triageArt.createdAt) {
+    return { ok: false, code: 409, error: "Questions already answered" };
+  }
+
+  const expected = triage.questions.map((q) => q.id).sort().join(",");
+  const got = input.answers.map((a) => a.questionId).sort().join(",");
+  if (expected !== got) {
+    return { ok: false, code: 400, error: "Answers must cover every open question exactly once" };
+  }
+
+  const freeForm = input.answers.some((a) => a.freeText);
+  const outcome = freeForm ? ("redraft" as const) : ("approved" as const);
+  addArtifact(
+    runId,
+    "plan_answers",
+    { answers: input.answers, outcome, answeredAt: new Date().toISOString() },
+    "human"
+  );
+
+  if (!freeForm) {
+    const draft = getLatestArtifact(runId, "draft_plan");
+    const plan = draft?.contentJson ? (JSON.parse(draft.contentJson) as PlanContent) : { markdown: "" };
+    addArtifact(runId, "approved_plan", plan, "human");
+    transitionRun(runId, "plan_approved");
+    void forceDispatch();
+    return { ok: true, outcome, run: getRun(runId)! };
+  }
+
+  (opts?.onRedraft ?? scheduleRevisePlan)(getRun(runId)!, triage, input.answers);
+  return { ok: true, outcome, run: getRun(runId)! };
+}
+
+function scheduleRevisePlan(run: Run, triage: PlanTriageContent, answers: PlanAnswer[]): void {
+  if (activePlanDrafts.has(run.id)) return;
+  activePlanDrafts.add(run.id);
+  void draftPlan(run, {
+    replace: true,
+    revise: {
+      resumeSessionId: triage.sessionId,
+      prompt: buildPlanRevisePrompt(run, triage.questions, answers),
+    },
+  })
+    .catch((e) => console.error("[plan-revise]", run.id, e))
+    .finally(() => {
+      activePlanDrafts.delete(run.id);
+      notify().catch(console.error);
+    });
 }
 
 /** Fire-and-forget: human requested a new agent plan (replaces draft). */

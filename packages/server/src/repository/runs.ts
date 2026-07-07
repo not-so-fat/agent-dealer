@@ -521,6 +521,19 @@ export function getLatestArtifact(runId: string, kind: ArtifactKind): Artifact |
   };
 }
 
+/** Latest plan_triage stops auto-approving / accepting answers once a human takes over the plan. */
+export function markPlanTriageConsumed(runId: string): void {
+  const art = getLatestArtifact(runId, "plan_triage");
+  if (!art?.contentJson) return;
+  try {
+    const content = JSON.parse(art.contentJson) as Record<string, unknown>;
+    if (content.consumed === true) return;
+    updateArtifactContent(art.id, { ...content, consumed: true });
+  } catch {
+    /* leave malformed triage untouched */
+  }
+}
+
 const OPS_BOARD_STATUSES: RunStatus[] = [
   "queued",
   "plan_pending",

@@ -43,7 +43,7 @@ export async function runClaude(
   run: Run,
   mode: "execute" | "plan" | "reflect" = "execute",
   model?: string,
-  promptOverride?: string
+  opts?: { promptOverride?: string; resumeSessionId?: string }
 ): Promise<RunnerResult> {
   const mcpConfig =
     process.env.CLAUDE_MCP_CONFIG ?? path.join(process.env.HOME ?? "", ".claude.json");
@@ -54,10 +54,11 @@ export async function runClaude(
   const phaseBudget = resolveBudgetForPhase(run, mode);
 
   const resumeSessionId =
-    mode === "execute" && humanFeedbackText(run) ? lineageParentExecuteSessionId(run) : null;
+    opts?.resumeSessionId ??
+    (mode === "execute" && humanFeedbackText(run) ? lineageParentExecuteSessionId(run) : null);
 
   const prompt =
-    promptOverride ??
+    opts?.promptOverride ??
     (mode === "plan"
       ? buildPlanPrompt(run)
       : mode === "reflect"
@@ -130,12 +131,18 @@ export async function runCursor(
 
 export async function runAgent(
   run: Run,
-  mode: "execute" | "plan" = "execute"
+  mode: "execute" | "plan" = "execute",
+  revise?: { resumeSessionId?: string; prompt: string }
 ): Promise<RunnerResult> {
   const fresh = getRun(run.id) ?? run;
   const model = resolveModelForPhase(fresh, mode);
   if (fresh.runtime === "cursor_local") return runCursor(fresh, mode, model);
-  return runClaude(fresh, mode, model);
+  return runClaude(
+    fresh,
+    mode,
+    model,
+    revise ? { promptOverride: revise.prompt, resumeSessionId: revise.resumeSessionId } : undefined
+  );
 }
 
 /** @deprecated use stream-json extractPlanMarkdown via persistRunOutput */

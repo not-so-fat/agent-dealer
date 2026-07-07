@@ -45,7 +45,7 @@ export async function runReflect(run: Run, opts: ReflectOpts): Promise<void> {
     const playbook = await fetchPlaybook(run.playbookId);
     const previousBody = playbook.body ?? "";
 
-    const result = await runClaude(run, "reflect", undefined, buildReflectPrompt(run, opts));
+    const result = await runClaude(run, "reflect", undefined, { promptOverride: buildReflectPrompt(run, opts) });
     const events = parseNdjson(result.transcript);
     const resultText = extractResultText(events) ?? result.transcript;
     const proposal = parseReflectProposal(resultText);
