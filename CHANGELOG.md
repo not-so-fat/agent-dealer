@@ -2,6 +2,13 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
+## Unreleased
+
+- Plan-phase structured questions: agent asks up to 3 option-based questions; answering with options starts execution, free-form answers trigger a session-resumed replan (2-round cap).
+- Self-triage auto-approve: plans marked `trivial` (no questions) skip human plan review; result review unchanged. Auto-approved runs are badged with rationale.
+- `Skill` tool allowlisted in plan/execute/reflect phases — spawned agents can use installed skills (e.g. superpowers).
+- New API: `POST /api/runs/:id/plan/answers`; snapshot gains `awaitingAnswerRuns`, `openQuestionCounts`, `autoApprovedRunIds`.
+
 ## 0.1.2 — 2026-07-06
 
 Configurable per-phase budgets; real runs default to Claude runtime limits (no CLI caps).

@@ -45,7 +45,7 @@ Production (git): see [docs/PROD_SETUP.md](docs/PROD_SETUP.md) — API **2221**,
 ## Workflow (SC-1)
 
 1. **Feed** — Pick **runtime** (+ optional deck/playbook) → add task
-2. **Plan approval** — Agent draft or manual plan → **Approve plan**
+2. **Plan approval** — Agent draft or manual plan → **Approve plan**. The agent may ask structured questions (answer to start execution); plans self-triaged **trivial** auto-approve.
 3. **In progress** — **Start execution** (uses agent binding from step 1)
 4. **Review** — **Approve done** or **Retry with feedback**
 
@@ -63,9 +63,9 @@ When you **approve execution**, agent-dealer spawns **Claude Code** (`claude -p`
 
 | Phase | Tools (allowlisted) | Budget defaults |
 |-------|---------------------|-----------------|
-| **Plan** | Read, Glob, Grep + Agent Deck MCP (playbook/deck) | 5 turns · **$0.50** max |
-| **Execute** | Read, Write, Edit, Glob, Grep, **Bash** + Agent Deck MCP | 30 turns · **$5.00** max |
-| **Reflect** (post-review) | Read, Glob, Grep + Agent Deck MCP | 3 turns · **$0.25** max |
+| **Plan** | Read, Glob, Grep, Skill + Agent Deck MCP (playbook/deck) | 5 turns · **$0.50** max |
+| **Execute** | Read, Write, Edit, Glob, Grep, **Bash**, Skill + Agent Deck MCP | 30 turns · **$5.00** max |
+| **Reflect** (post-review) | Read, Glob, Grep, Skill + Agent Deck MCP | 3 turns · **$0.25** max |
 
 Caps are enforced via Claude Code flags (`--max-turns`, `--max-budget-usd`). Per-run budgets can be tightened in the run record. Deliverable scratch files go under `~/.agent-dealer/.temporal/output/`; audit artifacts stay in SQLite.
 

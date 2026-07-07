@@ -27,6 +27,9 @@ type Snapshot = {
   maxConcurrent: number;
   awaitingPlanReview: Run[];
   resultReviewRuns: Run[];
+  awaitingAnswerRuns: Run[];
+  openQuestionCounts: Record<string, number>;
+  autoApprovedRunIds: string[];
 };
 
 async function req(method: string, path: string, body?: unknown): Promise<{ status: number; json: unknown }> {
@@ -59,7 +62,10 @@ async function main(): Promise<void> {
   assert(Array.isArray(snapshot.runningRuns), "snapshot.runningRuns");
   assert(Array.isArray(snapshot.awaitingPlanReview), "snapshot.awaitingPlanReview");
   assert(Array.isArray(snapshot.resultReviewRuns), "snapshot.resultReviewRuns");
-  ok("Snapshot has Operations fields");
+  assert(Array.isArray(snapshot.awaitingAnswerRuns), "snapshot.awaitingAnswerRuns");
+  assert(typeof snapshot.openQuestionCounts === "object" && snapshot.openQuestionCounts !== null, "snapshot.openQuestionCounts");
+  assert(Array.isArray(snapshot.autoApprovedRunIds), "snapshot.autoApprovedRunIds");
+  ok("Snapshot has plan-questions fields");
 
   const inbox = await req("GET", "/api/intake/linear");
   assert(inbox.status === 200, "intake linear");
@@ -100,6 +106,12 @@ async function main(): Promise<void> {
   assert(run.runtime === "claude_code", "runtime persisted");
   assert(run.status === "plan_pending", "starts plan_pending");
   ok(`Step 2 kick plan: run ${run.id.slice(0, 8)}`);
+
+  const noQuestions = await req("POST", `/api/runs/${run.id}/plan/answers`, {
+    answers: [{ questionId: "q1", selectedLabel: "A" }],
+  });
+  assert(noQuestions.status === 409, "answers without open questions returns 409");
+  ok("Plan answers gate (no open questions)");
 
   const testDeckId = "00000000-0000-4000-a000-000000000101";
   const testPlaybookId = "pb_flow_verify";
