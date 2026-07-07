@@ -60,6 +60,12 @@ export function migrate(): void {
     db.exec("ALTER TABLE agents ADD COLUMN default_execute_model TEXT");
   }
 
+  const agentCols3 = db.prepare("PRAGMA table_info(agents)").all() as Array<{ name: string }>;
+  if (!agentCols3.some((c) => c.name === "default_plan_budget_json")) {
+    db.exec("ALTER TABLE agents ADD COLUMN default_plan_budget_json TEXT");
+    db.exec("ALTER TABLE agents ADD COLUMN default_execute_budget_json TEXT");
+  }
+
   const runCols3 = db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
   if (!runCols3.some((c) => c.name === "plan_model")) {
     db.exec("ALTER TABLE runs ADD COLUMN plan_model TEXT");

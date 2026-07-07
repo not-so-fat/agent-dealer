@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS agents (
   workspace_root TEXT,
   default_plan_model TEXT,
   default_execute_model TEXT,
+  default_plan_budget_json TEXT,
+  default_execute_budget_json TEXT,
   is_builtin INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AgentWithHealth, Artifact, Run } from "@agent-dealer/shared";
 import { agentSummary } from "../../AgentConfigFields";
-import ModelSelect from "../agents/ModelSelect";
+import PhaseConfigRow from "../agents/PhaseConfigRow";
 import {
   artifactMarkdown,
   cancelRun,
@@ -12,6 +12,13 @@ import {
   type StreamTraceContent,
   type UsageSummary,
 } from "../../api";
+import {
+  agentPhaseBudgetFromJson,
+  budgetFormEmpty,
+  phaseBudgetFromForm,
+  runPhaseBudgetFromRun,
+  type BudgetFormValue,
+} from "../../lib/budgetForm";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
 import MarkdownBody from "../ui/MarkdownBody";
 import RemoveFromOpsAction from "./RemoveFromOpsAction";
@@ -31,6 +38,8 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
   const [planText, setPlanText] = useState("");
   const [planModel, setPlanModel] = useState("");
   const [executeModel, setExecuteModel] = useState("");
+  const [planBudget, setPlanBudget] = useState<BudgetFormValue>(budgetFormEmpty());
+  const [executeBudget, setExecuteBudget] = useState<BudgetFormValue>(budgetFormEmpty());
   const [busy, setBusy] = useState(false);
   const [replanning, setReplanning] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -60,9 +69,21 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
   useEffect(() => {
     setPlanModel(run.planModel ?? "");
     setExecuteModel(run.executeModel ?? "");
+    const runPlan = runPhaseBudgetFromRun(run.budgetJson, "plan");
+    const runExecute = runPhaseBudgetFromRun(run.budgetJson, "execute");
+    setPlanBudget(
+      runPlan.maxTurns || runPlan.maxBudgetUsd
+        ? runPlan
+        : agentPhaseBudgetFromJson(agent?.defaultPlanBudgetJson)
+    );
+    setExecuteBudget(
+      runExecute.maxTurns || runExecute.maxBudgetUsd
+        ? runExecute
+        : agentPhaseBudgetFromJson(agent?.defaultExecuteBudgetJson)
+    );
     setReplanning(false);
     setEditing(false);
-  }, [run.id, run.planModel, run.executeModel]);
+  }, [run.id, run.planModel, run.executeModel, run.budgetJson, agent?.defaultPlanBudgetJson, agent?.defaultExecuteBudgetJson]);
 
   useEffect(() => {
     if (!planning) return;
@@ -78,7 +99,7 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
     setReplanning(true);
     setBusy(true);
     try {
-      await draftPlan(run.id, planModel || null);
+      await draftPlan(run.id, planModel || null, phaseBudgetFromForm(planBudget));
       const deadline = Date.now() + 120_000;
       while (Date.now() < deadline) {
         const detail = await fetchRunDetail(run.id);
@@ -126,11 +147,13 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
             {replanning ? "Agent is replanning…" : "Agent is writing the plan…"}
           </p>
         )}
-        <ModelSelect
+        <PhaseConfigRow
+          phase="Plan"
           runtime={runtime}
-          label="Planning model"
-          value={planModel}
-          onChange={setPlanModel}
+          model={planModel}
+          onModelChange={setPlanModel}
+          budget={planBudget}
+          onBudgetChange={setPlanBudget}
           defaultModelId={agent?.defaultPlanModel}
           disabled={busy || planning}
         />
@@ -185,17 +208,17 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
         {hasPlan && !planning && (
           <section className="space-y-2 pt-3 border-t border-white/10">
             <div className="heading-section">Your Decision</div>
-            <div className="flex flex-col sm:flex-row sm:items-end gap-2">
-              <div className="flex-1 min-w-0">
-                <ModelSelect
-                  runtime={runtime}
-                  label="Execution model"
-                  value={executeModel}
-                  onChange={setExecuteModel}
-                  defaultModelId={agent?.defaultExecuteModel}
-                  disabled={busy}
-                />
-              </div>
+            <div className="space-y-2">
+              <PhaseConfigRow
+                phase="Execution"
+                runtime={runtime}
+                model={executeModel}
+                onModelChange={setExecuteModel}
+                budget={executeBudget}
+                onBudgetChange={setExecuteBudget}
+                defaultModelId={agent?.defaultExecuteModel}
+                disabled={busy}
+              />
               <button
                 type="button"
                 disabled={busy || !planText.trim()}
@@ -204,12 +227,14 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
                     await updatePlan(run.id, planText, true, {
                       planModel: planModel || null,
                       executeModel: executeModel || null,
+                      planBudget: phaseBudgetFromForm(planBudget),
+                      executeBudget: phaseBudgetFromForm(executeBudget),
                     });
                     onApproved?.();
                     onApprovedAndNext?.();
                   })
                 }
-                className="btn-gold px-5 py-2 disabled:opacity-40 shrink-0 sm:min-w-[11rem]"
+                className="btn-gold px-5 py-2 disabled:opacity-40 w-full sm:w-auto"
               >
                 Approve & next →
               </button>

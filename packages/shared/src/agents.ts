@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PhaseBudget } from "./budget.js";
 import { Runtime } from "./runtime.js";
 
 /** Built-in agent IDs — stable across installs. */
@@ -29,6 +30,10 @@ export const AgentProfile = z.object({
   defaultPlanModel: z.string().nullable(),
   /** CLI model id for execution; null = runtime default */
   defaultExecuteModel: z.string().nullable(),
+  /** Serialized PhaseBudget; null = runtime default (no CLI caps) */
+  defaultPlanBudgetJson: z.string().nullable(),
+  /** Serialized PhaseBudget; null = runtime default (no CLI caps) */
+  defaultExecuteBudgetJson: z.string().nullable(),
   isBuiltin: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -49,6 +54,8 @@ export const CreateAgentInput = z.object({
   playbookId: z.string().optional(),
   defaultPlanModel: z.string().nullable().optional(),
   defaultExecuteModel: z.string().nullable().optional(),
+  defaultPlanBudget: PhaseBudget.nullable().optional(),
+  defaultExecuteBudget: PhaseBudget.nullable().optional(),
 });
 export type CreateAgentInput = z.infer<typeof CreateAgentInput>;
 
@@ -60,6 +67,8 @@ export const UpdateAgentInput = z.object({
   playbookId: z.string().nullable().optional(),
   defaultPlanModel: z.string().nullable().optional(),
   defaultExecuteModel: z.string().nullable().optional(),
+  defaultPlanBudget: PhaseBudget.nullable().optional(),
+  defaultExecuteBudget: PhaseBudget.nullable().optional(),
 });
 export type UpdateAgentInput = z.infer<typeof UpdateAgentInput>;
 

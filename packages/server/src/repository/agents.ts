@@ -1,4 +1,5 @@
 import type { AgentProfile, CreateAgentInput, Runtime, UpdateAgentInput } from "@agent-dealer/shared";
+import { serializePhaseBudget } from "@agent-dealer/shared";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
 
@@ -12,6 +13,8 @@ interface AgentRow {
   workspace_root: string | null;
   default_plan_model: string | null;
   default_execute_model: string | null;
+  default_plan_budget_json: string | null;
+  default_execute_budget_json: string | null;
   is_builtin: number;
   created_at: string;
   updated_at: string;
@@ -28,6 +31,8 @@ function rowToAgent(row: AgentRow): AgentProfile {
     playbookId: row.playbook_id,
     defaultPlanModel: row.default_plan_model,
     defaultExecuteModel: row.default_execute_model,
+    defaultPlanBudgetJson: row.default_plan_budget_json,
+    defaultExecuteBudgetJson: row.default_execute_budget_json,
     isBuiltin: row.is_builtin === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -51,8 +56,8 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
   const now = new Date().toISOString();
   const id = uuid();
   db.prepare(`
-    INSERT INTO agents (id, name, runtime, deck_id, deck_name, playbook_id, workspace_root, default_plan_model, default_execute_model, is_builtin, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    INSERT INTO agents (id, name, runtime, deck_id, deck_name, playbook_id, workspace_root, default_plan_model, default_execute_model, default_plan_budget_json, default_execute_budget_json, is_builtin, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
   `).run(
     id,
     input.name.trim(),
@@ -63,6 +68,8 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
     input.workspaceRoot.trim(),
     input.defaultPlanModel ?? null,
     input.defaultExecuteModel ?? null,
+    serializePhaseBudget(input.defaultPlanBudget),
+    serializePhaseBudget(input.defaultExecuteBudget),
     now,
     now
   );
@@ -84,13 +91,21 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
     input.defaultPlanModel !== undefined ? input.defaultPlanModel : existing.defaultPlanModel;
   const defaultExecuteModel =
     input.defaultExecuteModel !== undefined ? input.defaultExecuteModel : existing.defaultExecuteModel;
+  const defaultPlanBudgetJson =
+    input.defaultPlanBudget !== undefined
+      ? serializePhaseBudget(input.defaultPlanBudget)
+      : existing.defaultPlanBudgetJson;
+  const defaultExecuteBudgetJson =
+    input.defaultExecuteBudget !== undefined
+      ? serializePhaseBudget(input.defaultExecuteBudget)
+      : existing.defaultExecuteBudgetJson;
   const resolvedDeckName =
     input.deckId !== undefined ? (input.deckId ? (deckName ?? null) : null) : existing.deckName;
 
   getDb()
     .prepare(`
       UPDATE agents SET name = ?, runtime = ?, deck_id = ?, deck_name = ?, playbook_id = ?, workspace_root = ?,
-        default_plan_model = ?, default_execute_model = ?, updated_at = ?
+        default_plan_model = ?, default_execute_model = ?, default_plan_budget_json = ?, default_execute_budget_json = ?, updated_at = ?
       WHERE id = ?
     `)
     .run(
@@ -102,6 +117,8 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
       workspaceRoot,
       defaultPlanModel,
       defaultExecuteModel,
+      defaultPlanBudgetJson,
+      defaultExecuteBudgetJson,
       now,
       id
     );

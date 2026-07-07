@@ -12,6 +12,7 @@ import type {
   LinearIntakeConfig,
   LinearIntakeConfigPatch,
   LinearIntakeConfigView,
+  PhaseBudget,
   QueueSnapshot,
   RuntimeModelsResponse,
   Run,
@@ -154,7 +155,12 @@ export async function updatePlan(
   id: string,
   planMarkdown: string,
   approve: boolean,
-  opts?: { executeModel?: string | null; planModel?: string | null }
+  opts?: {
+    executeModel?: string | null;
+    planModel?: string | null;
+    planBudget?: PhaseBudget | null;
+    executeBudget?: PhaseBudget | null;
+  }
 ): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/plan`, {
     method: "PATCH",
@@ -164,17 +170,26 @@ export async function updatePlan(
       approve,
       ...(opts?.planModel !== undefined ? { planModel: opts.planModel } : {}),
       ...(opts?.executeModel !== undefined ? { executeModel: opts.executeModel } : {}),
+      ...(opts?.planBudget !== undefined ? { planBudget: opts.planBudget } : {}),
+      ...(opts?.executeBudget !== undefined ? { executeBudget: opts.executeBudget } : {}),
     }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function draftPlan(id: string, planModel?: string | null): Promise<Run> {
+export async function draftPlan(
+  id: string,
+  planModel?: string | null,
+  planBudget?: PhaseBudget | null
+): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/draft-plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(planModel !== undefined ? { planModel } : {}),
+    body: JSON.stringify({
+      ...(planModel !== undefined ? { planModel } : {}),
+      ...(planBudget !== undefined ? { planBudget } : {}),
+    }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -193,11 +208,18 @@ export async function configureAgent(
   return res.json();
 }
 
-export async function kickRun(id: string, executeModel?: string | null): Promise<Run> {
+export async function kickRun(
+  id: string,
+  executeModel?: string | null,
+  executeBudget?: PhaseBudget | null
+): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/kick`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(executeModel?.trim() ? { executeModel: executeModel.trim() } : {}),
+    body: JSON.stringify({
+      ...(executeModel?.trim() ? { executeModel: executeModel.trim() } : {}),
+      ...(executeBudget !== undefined ? { executeBudget } : {}),
+    }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();

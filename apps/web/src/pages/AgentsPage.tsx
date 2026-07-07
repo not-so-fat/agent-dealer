@@ -3,6 +3,7 @@ import type { AgentWithHealth, CreateAgentInput, UpdateAgentInput } from "@agent
 import AgentConfigFields, { type AgentConfigValue } from "../AgentConfigFields";
 import { createAgent, deleteAgent, updateAgent } from "../api";
 import { runtimeLabel } from "../lib/display";
+import { agentPhaseBudgetFromJson, budgetFormEmpty, phaseBudgetFromForm } from "../lib/budgetForm";
 import Badge from "../components/ui/Badge";
 import AgentConnectionsBar from "../components/agents/AgentConnectionsBar";
 import { AgentRuntimeIcon } from "../components/agents/AgentIcon";
@@ -19,6 +20,8 @@ const emptyConfig = (): AgentConfigValue => ({
   playbookId: "",
   defaultPlanModel: "",
   defaultExecuteModel: "",
+  defaultPlanBudget: budgetFormEmpty(),
+  defaultExecuteBudget: budgetFormEmpty(),
 });
 
 export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props) {
@@ -45,6 +48,8 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         playbookId: config.playbookId || undefined,
         defaultPlanModel: config.defaultPlanModel || null,
         defaultExecuteModel: config.defaultExecuteModel || null,
+        defaultPlanBudget: phaseBudgetFromForm(config.defaultPlanBudget),
+        defaultExecuteBudget: phaseBudgetFromForm(config.defaultExecuteBudget),
       };
       await createAgent(body);
       setName("");
@@ -69,6 +74,8 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
       playbookId: agent.playbookId ?? "",
       defaultPlanModel: agent.defaultPlanModel ?? "",
       defaultExecuteModel: agent.defaultExecuteModel ?? "",
+      defaultPlanBudget: agentPhaseBudgetFromJson(agent.defaultPlanBudgetJson),
+      defaultExecuteBudget: agentPhaseBudgetFromJson(agent.defaultExecuteBudgetJson),
     });
   };
 
@@ -88,6 +95,8 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         playbookId: editConfig.playbookId || null,
         defaultPlanModel: editConfig.defaultPlanModel || null,
         defaultExecuteModel: editConfig.defaultExecuteModel || null,
+        defaultPlanBudget: phaseBudgetFromForm(editConfig.defaultPlanBudget),
+        defaultExecuteBudget: phaseBudgetFromForm(editConfig.defaultExecuteBudget),
       };
       await updateAgent(agent.id, body);
       cancelEdit();

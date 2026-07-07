@@ -6,7 +6,8 @@ import { buildExecutionPrompt, buildExecutionContinuationPrompt, buildPlanPrompt
 import { humanFeedbackText, lineageParentExecuteSessionId } from "./run-context.js";
 import { getTemporalLogsDir, getTemporalOutputDir } from "../paths.js";
 import { resolveClaudeBin, resolveCursorBin } from "../cli-env.js";
-import { resolveModelForPhase, getRun } from "../repository/runs.js";
+import { resolveBudgetForPhase, resolveModelForPhase, getRun } from "../repository/runs.js";
+import { budgetCliArgs } from "@agent-dealer/shared";
 
 export interface RunnerResult {
   exitCode: number;
@@ -50,11 +51,7 @@ export async function runClaude(
     throw new Error(`MCP config not found: ${mcpConfig}. Set CLAUDE_MCP_CONFIG.`);
   }
 
-  const budget = run.budgetJson
-    ? (JSON.parse(run.budgetJson) as { maxTurns?: number; maxBudgetUsd?: number })
-    : {};
-  const maxTurns = mode === "plan" ? 5 : mode === "reflect" ? 3 : (budget.maxTurns ?? 30);
-  const maxBudget = mode === "plan" ? 0.5 : mode === "reflect" ? 0.25 : (budget.maxBudgetUsd ?? 5);
+  const phaseBudget = resolveBudgetForPhase(run, mode);
 
   const resumeSessionId =
     mode === "execute" && humanFeedbackText(run) ? lineageParentExecuteSessionId(run) : null;
@@ -77,10 +74,7 @@ export async function runClaude(
     prompt,
     "--mcp-config",
     mcpConfig,
-    "--max-turns",
-    String(maxTurns),
-    "--max-budget-usd",
-    String(maxBudget),
+    ...budgetCliArgs(phaseBudget),
     "--output-format",
     "stream-json",
     "--verbose",

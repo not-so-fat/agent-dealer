@@ -16,6 +16,7 @@ import {
   PlaybookPatchContent,
   BUILTIN_AGENT_CLAUDE_ID,
 } from "@agent-dealer/shared";
+import { parseRunBudget } from "@agent-dealer/shared";
 import {
   addArtifact,
   createRun,
@@ -28,6 +29,8 @@ import {
   updateArtifactContent,
   transitionRun,
   getLatestArtifact,
+  patchRunPhaseBudget,
+  updateRunBudget,
 } from "../repository/runs.js";
 import {
   createAgent,
@@ -308,6 +311,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       plan_model: input.planModel !== undefined ? input.planModel : undefined,
       execute_model: input.executeModel !== undefined ? input.executeModel : undefined,
     });
+    if (input.budget !== undefined) {
+      return updateRunBudget(id, input.budget);
+    }
     return updated;
   });
 
@@ -321,6 +327,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = DraftPlanInput.parse(req.body ?? {});
     if (input.planModel !== undefined) {
       updateRunFields(id, { plan_model: input.planModel });
+    }
+    if (input.planBudget !== undefined) {
+      patchRunPhaseBudget(id, "plan", input.planBudget);
     }
     try {
       assertAgentConfigured(getRun(id)!);
@@ -366,6 +375,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
       if (Object.keys(patch).length > 0) {
         updateRunFields(id, patch);
+      }
+      if (input.planBudget !== undefined) {
+        patchRunPhaseBudget(id, "plan", input.planBudget);
+      }
+      if (input.executeBudget !== undefined) {
+        patchRunPhaseBudget(id, "execute", input.executeBudget);
       }
       const updated = transitionRun(id, "plan_approved");
       syncLinearForRun(updated, "plan_approved").catch((e) =>
@@ -419,6 +434,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
 
     updateRunFields(id, patch);
+    if (input.executeBudget !== undefined) {
+      patchRunPhaseBudget(id, "execute", input.executeBudget);
+    }
     const updated = getRun(id)!;
     await kickRun(updated);
     await forceDispatch();
@@ -465,6 +483,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         status: "plan_approved",
         agentId: run.agentId ?? BUILTIN_AGENT_CLAUDE_ID,
         planModel: run.planModel ?? undefined,
+        budget: parseRunBudget(run.budgetJson),
       },
       { source: run.source, externalId: run.externalId ?? undefined, externalLabel: run.externalLabel ?? undefined, lineageId: run.lineageId ?? run.id }
     );

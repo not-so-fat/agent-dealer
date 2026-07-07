@@ -1,9 +1,11 @@
 import { z } from "zod";
 import { Runtime } from "./runtime.js";
 import { AgentWithHealth } from "./agents.js";
+import { PhaseBudget, RunBudget } from "./budget.js";
 
 export * from "./runtime.js";
 export * from "./agents.js";
+export * from "./budget.js";
 export * from "./execution.js";
 
 export const RunStatus = z.enum([
@@ -229,6 +231,7 @@ export const CreateRunInput = z.object({
   agentId: z.string().uuid(),
   planModel: z.string().nullable().optional(),
   executeModel: z.string().nullable().optional(),
+  budget: RunBudget.optional(),
 });
 export type CreateRunInput = z.infer<typeof CreateRunInput>;
 
@@ -238,6 +241,7 @@ export const AgentConfigInput = z.object({
   playbookId: z.string().optional(),
   planModel: z.string().nullable().optional(),
   executeModel: z.string().nullable().optional(),
+  budget: RunBudget.optional(),
 });
 export type AgentConfigInput = z.infer<typeof AgentConfigInput>;
 
@@ -246,6 +250,8 @@ export const UpdatePlanInput = z.object({
   approve: z.boolean().default(false),
   planModel: z.string().nullable().optional(),
   executeModel: z.string().nullable().optional(),
+  planBudget: PhaseBudget.nullable().optional(),
+  executeBudget: PhaseBudget.nullable().optional(),
 });
 export type UpdatePlanInput = z.infer<typeof UpdatePlanInput>;
 
@@ -255,6 +261,7 @@ export const KickRunInput = z.object({
   deckId: z.string().uuid().optional(),
   playbookId: z.string().optional(),
   executeModel: z.string().nullable().optional(),
+  executeBudget: PhaseBudget.nullable().optional(),
 });
 export type KickRunInput = z.infer<typeof KickRunInput>;
 
@@ -362,6 +369,7 @@ export type PromoteLinearInput = z.infer<typeof PromoteLinearInput>;
 
 export const DraftPlanInput = z.object({
   planModel: z.string().nullable().optional(),
+  planBudget: PhaseBudget.nullable().optional(),
 });
 export type DraftPlanInput = z.infer<typeof DraftPlanInput>;
 

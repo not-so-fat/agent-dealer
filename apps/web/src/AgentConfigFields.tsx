@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import type { Runtime } from "@agent-dealer/shared";
 import { CURSOR_DEFAULT_MODEL } from "@agent-dealer/shared";
 import { fetchDeckPlaybooks, fetchDecks } from "./api";
-import ModelSelect from "./components/agents/ModelSelect";
+import PhaseConfigRow from "./components/agents/PhaseConfigRow";
+import { budgetFormEmpty, type BudgetFormValue } from "./lib/budgetForm";
 
 export type AgentConfigValue = {
   runtime: Runtime;
@@ -10,6 +11,8 @@ export type AgentConfigValue = {
   playbookId: string;
   defaultPlanModel: string;
   defaultExecuteModel: string;
+  defaultPlanBudget: BudgetFormValue;
+  defaultExecuteBudget: BudgetFormValue;
 };
 
 type Deck = { id: string; name: string };
@@ -62,18 +65,23 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
         <option value="claude_code">Claude Code (claude -p)</option>
         <option value="cursor_local">Cursor local (cursor agent -p)</option>
       </select>
-      <ModelSelect
+      <PhaseConfigRow
+        phase="Plan"
         runtime={value.runtime}
-        label="Default planning model"
-        value={value.defaultPlanModel}
-        onChange={(defaultPlanModel) => set({ defaultPlanModel })}
+        model={value.defaultPlanModel}
+        onModelChange={(defaultPlanModel) => set({ defaultPlanModel })}
+        budget={value.defaultPlanBudget}
+        onBudgetChange={(defaultPlanBudget) => set({ defaultPlanBudget })}
         disabled={disabled}
+        showHint={false}
       />
-      <ModelSelect
+      <PhaseConfigRow
+        phase="Execution"
         runtime={value.runtime}
-        label="Default execution model"
-        value={value.defaultExecuteModel}
-        onChange={(defaultExecuteModel) => set({ defaultExecuteModel })}
+        model={value.defaultExecuteModel}
+        onModelChange={(defaultExecuteModel) => set({ defaultExecuteModel })}
+        budget={value.defaultExecuteBudget}
+        onBudgetChange={(defaultExecuteBudget) => set({ defaultExecuteBudget })}
         disabled={disabled}
       />
       <label className="text-xs text-[#A8C4C0] uppercase">Agent Deck (optional)</label>

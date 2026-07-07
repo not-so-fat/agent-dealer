@@ -1,12 +1,23 @@
 import type {
   Artifact,
   ArtifactKind,
+  BudgetPhase,
   CreateRunInput,
+  PhaseBudget,
+  ResolvedPhaseBudget,
   Run,
+  RunBudget,
   RunEvent,
   RunStatus,
 } from "@agent-dealer/shared";
 import { CURSOR_DEFAULT_MODEL } from "@agent-dealer/shared";
+import {
+  mergeRunBudget,
+  parsePhaseBudget,
+  parseRunBudget,
+  resolvePhaseBudget,
+  serializeRunBudget,
+} from "@agent-dealer/shared";
 import { canTransition } from "@agent-dealer/shared";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
@@ -119,7 +130,7 @@ export function createRun(input: CreateRunInput, opts?: {
       update_ticket_status: "require_approval",
       publish_external: "require_approval",
     }),
-    budget_json: JSON.stringify({ maxTurns: 30, maxBudgetUsd: 5 }),
+    budget_json: serializeRunBudget(input.budget ?? {}),
     created_at: now,
     updated_at: now,
   };
@@ -197,6 +208,38 @@ export function listRunsReadyForPlanReview(): Run[] {
     )
     .all() as RunRow[];
   return rows.map(rowToRun);
+}
+
+export function resolveBudgetForPhase(run: Run, phase: BudgetPhase): ResolvedPhaseBudget | null {
+  const agent = run.agentId ? getAgent(run.agentId) : null;
+  return resolvePhaseBudget({
+    phase,
+    runBudget: parseRunBudget(run.budgetJson),
+    agentPlanBudget: parsePhaseBudget(agent?.defaultPlanBudgetJson),
+    agentExecuteBudget: parsePhaseBudget(agent?.defaultExecuteBudgetJson),
+    testMode: process.env.AGENT_DEALER_TEST_BUDGET === "1",
+  });
+}
+
+export function updateRunBudget(id: string, patch: Partial<RunBudget>): Run {
+  const run = getRun(id);
+  if (!run) throw new Error(`Run not found: ${id}`);
+  const merged = mergeRunBudget(parseRunBudget(run.budgetJson), patch);
+  const budgetJson = serializeRunBudget(merged);
+  const now = new Date().toISOString();
+  getDb().prepare("UPDATE runs SET budget_json = ?, updated_at = ? WHERE id = ?").run(budgetJson, now, id);
+  const updated = getRun(id);
+  if (!updated) throw new Error(`Run vanished: ${id}`);
+  return updated;
+}
+
+export function patchRunPhaseBudget(
+  id: string,
+  phase: BudgetPhase,
+  budget: PhaseBudget | null | undefined
+): Run {
+  if (budget === undefined) return getRun(id)!;
+  return updateRunBudget(id, { [phase]: budget ?? undefined });
 }
 
 export function resolveModelForPhase(run: Run, phase: "plan" | "execute"): string | undefined {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AgentWithHealth, Artifact, Run } from "@agent-dealer/shared";
 import { agentSummary } from "../../AgentConfigFields";
-import ModelSelect from "../agents/ModelSelect";
+import PhaseConfigRow from "../agents/PhaseConfigRow";
 import {
   cancelRun,
   fetchLogTail,
@@ -10,6 +10,13 @@ import {
   type StreamTraceContent,
   type UsageSummary,
 } from "../../api";
+import {
+  agentPhaseBudgetFromJson,
+  budgetFormEmpty,
+  phaseBudgetFromForm,
+  runPhaseBudgetFromRun,
+  type BudgetFormValue,
+} from "../../lib/budgetForm";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
 
 type Props = {
@@ -24,6 +31,7 @@ export default function ExecutionPanel({ run, agents, onRefresh }: Props) {
   const [traceSummary, setTraceSummary] = useState<StreamTraceContent | null>(null);
   const [transcriptText, setTranscriptText] = useState("");
   const [executeModel, setExecuteModel] = useState("");
+  const [executeBudget, setExecuteBudget] = useState<BudgetFormValue>(budgetFormEmpty());
   const [busy, setBusy] = useState(false);
 
   const agent = agents.find((a) => a.id === run.agentId);
@@ -45,7 +53,13 @@ export default function ExecutionPanel({ run, agents, onRefresh }: Props) {
 
   useEffect(() => {
     setExecuteModel(run.executeModel ?? "");
-  }, [run.id, run.executeModel]);
+    const runExecute = runPhaseBudgetFromRun(run.budgetJson, "execute");
+    setExecuteBudget(
+      runExecute.maxTurns || runExecute.maxBudgetUsd
+        ? runExecute
+        : agentPhaseBudgetFromJson(agent?.defaultExecuteBudgetJson)
+    );
+  }, [run.id, run.executeModel, run.budgetJson, agent?.defaultExecuteBudgetJson]);
 
   useEffect(() => {
     if (!isRunning && !isWaiting) return;
@@ -86,18 +100,20 @@ export default function ExecutionPanel({ run, agents, onRefresh }: Props) {
 
       {isWaiting && (
         <>
-          <ModelSelect
+          <PhaseConfigRow
+            phase="Execution"
             runtime={runtime}
-            label="Execution model"
-            value={executeModel}
-            onChange={setExecuteModel}
+            model={executeModel}
+            onModelChange={setExecuteModel}
+            budget={executeBudget}
+            onBudgetChange={setExecuteBudget}
             defaultModelId={agent?.defaultExecuteModel}
             disabled={busy}
           />
           <button
             type="button"
             disabled={busy}
-            onClick={() => act(() => kickRun(run.id, executeModel || null))}
+            onClick={() => act(() => kickRun(run.id, executeModel || null, phaseBudgetFromForm(executeBudget)))}
             className="btn-ghost px-3 py-2 w-full"
           >
             Run now (skip queue wait)

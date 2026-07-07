@@ -8,6 +8,10 @@ import { loadAgentDealerEnv } from "./load-env.ts";
 
 loadAgentDealerEnv();
 const API = process.env.AGENT_DEALER_API!;
+const TEST_PHASE_BUDGET = {
+  plan: { maxTurns: 5, maxBudgetUsd: 0.5 },
+  execute: { maxTurns: 30, maxBudgetUsd: 5 },
+} as const;
 const BUILTIN_AGENT_CLAUDE_ID = "00000000-0000-4000-a000-000000000001";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -86,6 +90,10 @@ async function main(): Promise<void> {
     description: "Automated smoke",
     taskCategory: "research",
     agentId: BUILTIN_AGENT_CLAUDE_ID,
+    budget: {
+      plan: TEST_PHASE_BUDGET.plan,
+      execute: TEST_PHASE_BUDGET.execute,
+    },
   });
   assert(created.status === 201, `create with agentId: ${JSON.stringify(created.json)}`);
   const run = created.json as Run;
@@ -110,6 +118,8 @@ async function main(): Promise<void> {
   const plan = await req("PATCH", `/api/runs/${run.id}/plan`, {
     planMarkdown: "# Plan\n1. Say hello\n2. Stop",
     approve: true,
+    planBudget: TEST_PHASE_BUDGET.plan,
+    executeBudget: TEST_PHASE_BUDGET.execute,
   });
   assert(plan.status === 200, "approve plan");
   const approved = plan.json as Run;

@@ -2,6 +2,16 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
+## 0.1.2 — 2026-07-06
+
+Configurable per-phase budgets; real runs default to Claude runtime limits (no CLI caps).
+
+- **Budget model** — plan and execution resolved separately; omit `--max-turns` / `--max-budget-usd` when unset (runtime default)
+- **Agent defaults** — optional plan/execution max turns and USD on Agents page
+- **Per-run overrides** — plan review (replan + approve) and execution kick accept phase budgets
+- **UI** — `PhaseConfigRow`: model · turns · max USD in one row per phase
+- **Testing** — `flow:verify` passes explicit test caps; legacy `budget_json` maps to execute-only
+
 ## 0.1.1 — 2026-07-06
 
 Patch: production config loading for npm install users.

@@ -10,6 +10,7 @@ type Props = {
   onChange: (v: string) => void;
   defaultModelId?: string | null;
   disabled?: boolean;
+  compact?: boolean;
 };
 
 function cursorDefaultLabel(defaultModelId?: string | null): string {
@@ -24,6 +25,7 @@ export default function ModelSelect({
   onChange,
   defaultModelId,
   disabled,
+  compact,
 }: Props) {
   const cached = getCachedRuntimeModels(runtime);
   const [models, setModels] = useState<Array<{ id: string; label: string }>>(cached?.models ?? []);
@@ -85,12 +87,12 @@ export default function ModelSelect({
           </option>
         ))}
       </select>
-      {runtime === "cursor_local" && !loading && (
+      {runtime === "cursor_local" && !loading && !compact && (
         <p className="text-xs text-white/40">
           Auto and Composer use your Cursor subscription pool. Other models draw API credits.
         </p>
       )}
-      {source === "fallback" && models.length > 0 && !loading && runtime === "cursor_local" && (
+      {source === "fallback" && models.length > 0 && !loading && runtime === "cursor_local" && !compact && (
         <p className="text-xs text-white/40">Run cursor agent login to load the full model list.</p>
       )}
     </label>
