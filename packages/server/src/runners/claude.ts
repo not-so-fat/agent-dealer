@@ -84,19 +84,19 @@ export async function runClaude(
   if (mode === "plan") {
     args.push(
       "--allowedTools",
-      "Read,Glob,Grep,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace"
+      "Read,Glob,Grep,Skill,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace"
     );
   } else if (mode === "reflect") {
     args.push(
       "--allowedTools",
-      "Read,Glob,Grep,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace"
+      "Read,Glob,Grep,Skill,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace"
     );
   } else {
     args.push(
       "--add-dir",
       getTemporalOutputDir(),
       "--allowedTools",
-      "Read,Write,Edit,Glob,Grep,Bash,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace"
+      "Read,Write,Edit,Glob,Grep,Bash,Skill,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace"
     );
   }
 
