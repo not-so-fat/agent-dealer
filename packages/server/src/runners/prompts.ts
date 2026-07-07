@@ -1,4 +1,11 @@
-import type { ArtifactKind, Run } from "@agent-dealer/shared";
+import type {
+  ArtifactKind,
+  PlanAnswer,
+  PlanAnswersContent,
+  PlanQuestion,
+  PlanTriageContent,
+  Run,
+} from "@agent-dealer/shared";
 import { getLatestArtifact } from "../repository/runs.js";
 import { documentOutputHint } from "./persist.js";
 import {
@@ -106,6 +113,8 @@ export function buildExecutionPrompt(run: Run): string {
     }
   }
 
+  parts.push(...planAnswersSections(run));
+
   if (run.taskCategory === "content" || run.taskCategory === "research") {
     parts.push(
       `## Deliverable`,
@@ -180,6 +189,60 @@ export function buildReflectPrompt(
   return parts.join("\n");
 }
 
+function planTriageContractSection(): string {
+  return [
+    "## Required final JSON block",
+    "After the plan markdown, end your reply with exactly one fenced ```json block shaped like:",
+    '{"verdict":"trivial"|"needs_review","rationale":"one sentence","questions":[{"id":"q1","question":"...","options":[{"label":"...","description":"..."}]}]}',
+    "Rules:",
+    '- "trivial" means this plan is safe to execute without human review; it requires an empty questions array. When in doubt, use "needs_review".',
+    "- Ask at most 3 questions, and only when the answer changes how you would execute. Never ask permission to proceed.",
+    "- Each question needs 2-4 concrete options; give each option a short description.",
+  ].join("\n");
+}
+
+function planAnswersSections(run: Run): string[] {
+  const ansArt = getLatestArtifact(run.id, "plan_answers");
+  if (!ansArt?.contentJson) return [];
+  try {
+    const ans = JSON.parse(ansArt.contentJson) as PlanAnswersContent;
+    if (ans.outcome !== "approved" || ans.answers.length === 0) return [];
+    const triArt = getLatestArtifact(run.id, "plan_triage");
+    const questions: PlanQuestion[] = triArt?.contentJson
+      ? (JSON.parse(triArt.contentJson) as PlanTriageContent).questions
+      : [];
+    const lines = ans.answers.map((a) => {
+      const q = questions.find((x) => x.id === a.questionId);
+      return `- ${q?.question ?? a.questionId}: **${a.selectedLabel ?? a.freeText ?? ""}**`;
+    });
+    return ["## Human answers to plan questions", ...lines, ""];
+  } catch {
+    return [];
+  }
+}
+
+export function buildPlanRevisePrompt(
+  run: Run,
+  questions: PlanQuestion[],
+  answers: PlanAnswer[]
+): string {
+  const qa = answers.map((a) => {
+    const q = questions.find((x) => x.id === a.questionId);
+    return `- Q: ${q?.question ?? a.questionId}\n  A: ${a.selectedLabel ?? a.freeText ?? ""}`;
+  });
+  return [
+    "The human answered your plan questions. Revise the plan accordingly — do not execute anything.",
+    "",
+    "## Task",
+    taskText(run),
+    "",
+    "## Answers",
+    ...qa,
+    "",
+    planTriageContractSection(),
+  ].join("\n");
+}
+
 export function buildPlanPrompt(run: Run): string {
   const parts = [
     `Draft a concise execution plan (markdown) for this task.`,
@@ -210,7 +273,7 @@ export function buildPlanPrompt(run: Run): string {
     );
   }
 
-  parts.push(`Output a step-by-step plan with risks. End with the plan markdown only.`);
+  parts.push(`Output a step-by-step plan with risks.`, ``, planTriageContractSection());
 
   return parts.join("\n");
 }
