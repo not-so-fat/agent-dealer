@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AgentWithHealth, Artifact, Run } from "@agent-dealer/shared";
 import { agentSummary } from "../../AgentConfigFields";
-import ModelSelect from "../agents/ModelSelect";
+import PhaseConfigRow from "../agents/PhaseConfigRow";
 import {
   approveRun,
   artifactMarkdown,
@@ -16,8 +16,15 @@ import {
   type StreamTraceContent,
   type UsageSummary,
 } from "../../api";
+import {
+  budgetFormEmpty,
+  phaseBudgetPayload,
+  runPhaseBudgetFromRun,
+  type BudgetFormValue,
+} from "../../lib/budgetForm";
 import { TracePanel, UsagePanel } from "../panels/TraceUsage";
 import MarkdownBody from "../ui/MarkdownBody";
+import CollapsibleSection from "../ui/CollapsibleSection";
 import { ExecutionOutcomeSection, executionHasBlocker } from "./ExecutionOutcomeSection";
 import PlaybookLearningPanel from "./PlaybookLearningPanel";
 import RemoveFromOpsAction from "./RemoveFromOpsAction";
@@ -36,8 +43,10 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
   const [traceSummary, setTraceSummary] = useState<StreamTraceContent | null>(null);
   const [feedback, setFeedback] = useState("");
   const [executeModel, setExecuteModel] = useState("");
+  const [executeBudget, setExecuteBudget] = useState<BudgetFormValue>(budgetFormEmpty());
   const [busy, setBusy] = useState(false);
   const [prefilledRetry, setPrefilledRetry] = useState(false);
+  const [traceOpen, setTraceOpen] = useState(false);
 
   const agent = agents.find((a) => a.id === run.agentId);
   const runtime = run.runtime ?? agent?.runtime ?? "claude_code";
@@ -80,8 +89,10 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
   useEffect(() => {
     setPrefilledRetry(false);
     setFeedback("");
-    setExecuteModel("");
-  }, [run.id]);
+    setTraceOpen(false);
+    setExecuteModel(run.executeModel ?? "");
+    setExecuteBudget(runPhaseBudgetFromRun(run.budgetJson, "execute"));
+  }, [run.id, run.executeModel, run.budgetJson]);
 
   useEffect(() => {
     if (prefilledRetry || !blocked) return;
@@ -137,12 +148,9 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
         </section>
       )}
 
-      {traceSummary && <TracePanel trace={traceSummary} />}
-      {usageSummary && <UsagePanel summary={usageSummary} />}
-
       <PlaybookLearningPanel run={run} artifacts={artifacts} busy={busy} act={act} />
 
-      <section className="space-y-4">
+      <section className="space-y-4 border-t border-white/10 pt-3">
         <div className="heading-section">Your Decision</div>
 
         {run.status === "review" && !blocked && (
@@ -194,11 +202,13 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
           />
-          <ModelSelect
+          <PhaseConfigRow
+            phase="Execution"
             runtime={runtime}
-            label="Execution model (retry)"
-            value={executeModel}
-            onChange={setExecuteModel}
+            model={executeModel}
+            onModelChange={setExecuteModel}
+            budget={executeBudget}
+            onBudgetChange={setExecuteBudget}
             defaultModelId={agent?.defaultExecuteModel}
             disabled={busy}
           />
@@ -207,7 +217,17 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
             disabled={busy || !canRetry}
             onClick={() =>
               act(async () => {
-                const newRun = await retryRun(run.id, feedback, executeModel || null);
+                const executeBudgetPayload = phaseBudgetPayload(
+                  executeBudget,
+                  run.budgetJson,
+                  "execute"
+                );
+                const newRun = await retryRun(
+                  run.id,
+                  feedback,
+                  executeModel || null,
+                  executeBudgetPayload
+                );
                 setFeedback("");
                 onRetry?.(newRun);
               })
@@ -218,16 +238,29 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
           </button>
         </div>
 
-        <RemoveFromOpsAction
-          busy={busy}
-          onRemoved={() =>
-            act(async () => {
-              await cancelRun(run.id);
-              onDoneAndNext?.();
-            })
-          }
-        />
       </section>
+
+      {usageSummary && (
+        <section className="border-t border-white/10 pt-3">
+          <UsagePanel summary={usageSummary} />
+        </section>
+      )}
+
+      {traceSummary && (
+        <CollapsibleSection title="Trace" open={traceOpen} onToggle={() => setTraceOpen((o) => !o)}>
+          <TracePanel trace={traceSummary} showHeading={false} />
+        </CollapsibleSection>
+      )}
+
+      <RemoveFromOpsAction
+        busy={busy}
+        onRemoved={() =>
+          act(async () => {
+            await cancelRun(run.id);
+            onDoneAndNext?.();
+          })
+        }
+      />
     </div>
   );
 }

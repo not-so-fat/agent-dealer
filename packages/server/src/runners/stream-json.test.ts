@@ -43,10 +43,11 @@ test("missing block falls back to needs_review with full markdown kept", () => {
   assert.equal(r.markdown, PLAN);
 });
 
-test("malformed JSON falls back", () => {
+test("malformed JSON falls back and strips the fence", () => {
   const r = extractPlanTriage(`${PLAN}\n\n\`\`\`json\n{not json}\n\`\`\``);
   assert.equal(r.parseFallback, true);
-  assert.equal(r.markdown.includes("# Plan"), true);
+  assert.equal(r.markdown, PLAN);
+  assert.equal(r.markdown.includes("```json"), false);
 });
 
 test("last json block wins; earlier json-in-prose is ignored", () => {
@@ -57,7 +58,8 @@ test("last json block wins; earlier json-in-prose is ignored", () => {
   assert.equal(r.markdown.includes('"verdict"'), false);
 });
 
-test("valid json block that is not a triage shape falls back", () => {
+test("valid json block that is not a triage shape falls back and strips the fence", () => {
   const r = extractPlanTriage(`${PLAN}\n\n\`\`\`json\n{"foo":"bar"}\n\`\`\``);
   assert.equal(r.parseFallback, true);
+  assert.equal(r.markdown, PLAN);
 });

@@ -227,12 +227,17 @@ export async function kickRun(
 
 export async function submitPlanAnswers(
   id: string,
-  answers: Array<{ questionId: string; selectedLabel?: string; freeText?: string }>
+  answers: Array<{ questionId: string; selectedLabel?: string; freeText?: string }>,
+  opts?: { executeModel?: string | null; executeBudget?: PhaseBudget | null }
 ): Promise<{ run: Run; outcome: "approved" | "redraft" }> {
   const res = await fetch(`${API}/api/runs/${id}/plan/answers`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ answers }),
+    body: JSON.stringify({
+      answers,
+      ...(opts?.executeModel !== undefined ? { executeModel: opts.executeModel } : {}),
+      ...(opts?.executeBudget !== undefined ? { executeBudget: opts.executeBudget } : {}),
+    }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -247,7 +252,8 @@ export async function approveRun(id: string): Promise<Run> {
 export async function retryRun(
   id: string,
   feedback: string,
-  executeModel?: string | null
+  executeModel?: string | null,
+  executeBudget?: PhaseBudget | null
 ): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/retry`, {
     method: "POST",
@@ -255,6 +261,7 @@ export async function retryRun(
     body: JSON.stringify({
       feedback,
       ...(executeModel !== undefined ? { executeModel } : {}),
+      ...(executeBudget !== undefined ? { executeBudget } : {}),
     }),
   });
   if (!res.ok) throw new Error(await res.text());

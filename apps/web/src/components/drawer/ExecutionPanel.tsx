@@ -13,9 +13,8 @@ import {
   type UsageSummary,
 } from "../../api";
 import {
-  agentPhaseBudgetFromJson,
   budgetFormEmpty,
-  phaseBudgetFromForm,
+  phaseBudgetPayload,
   runPhaseBudgetFromRun,
   type BudgetFormValue,
 } from "../../lib/budgetForm";
@@ -55,13 +54,8 @@ export default function ExecutionPanel({ run, agents, onRefresh }: Props) {
 
   useEffect(() => {
     setExecuteModel(run.executeModel ?? "");
-    const runExecute = runPhaseBudgetFromRun(run.budgetJson, "execute");
-    setExecuteBudget(
-      runExecute.maxTurns || runExecute.maxBudgetUsd
-        ? runExecute
-        : agentPhaseBudgetFromJson(agent?.defaultExecuteBudgetJson)
-    );
-  }, [run.id, run.executeModel, run.budgetJson, agent?.defaultExecuteBudgetJson]);
+    setExecuteBudget(runPhaseBudgetFromRun(run.budgetJson, "execute"));
+  }, [run.id, run.executeModel, run.budgetJson]);
 
   useEffect(() => {
     if (!isRunning && !isWaiting) return;
@@ -129,7 +123,7 @@ export default function ExecutionPanel({ run, agents, onRefresh }: Props) {
           <button
             type="button"
             disabled={busy}
-            onClick={() => act(() => kickRun(run.id, executeModel || null, phaseBudgetFromForm(executeBudget)))}
+            onClick={() => act(() => kickRun(run.id, executeModel || null, phaseBudgetPayload(executeBudget, run.budgetJson, "execute")))}
             className="btn-ghost px-3 py-2 w-full"
           >
             Run now (skip queue wait)

@@ -1,6 +1,6 @@
-import type { Run, UsageContent, UsageSummary } from "@agent-dealer/shared";
+import type { Run, UsageContent, UsageSummary, Artifact } from "@agent-dealer/shared";
 import { UsageContent as UsageContentSchema } from "@agent-dealer/shared";
-import { listArtifacts, listLineageRuns } from "./repository/runs.js";
+import { listArtifacts, listLineageRuns, resolveBudgetForPhase } from "./repository/runs.js";
 
 function parseUsage(contentJson: string): UsageContent | null {
   try {
@@ -25,14 +25,18 @@ function labelUsage(
   return lineageIdx === 1 ? "retry" : `retry ${lineageIdx}`;
 }
 
-export function buildLineageUsageSummary(run: Run): UsageSummary {
+export function buildLineageUsageSummary(
+  run: Run,
+  opts?: { artifactsByRunId?: Record<string, Artifact[]> }
+): UsageSummary {
   const lineageRuns = listLineageRuns(run);
   const lines: UsageSummary["lines"] = [];
 
   lineageRuns.forEach((lr, lineageIdx) => {
     let planCount = 0;
     let execCount = 0;
-    for (const art of listArtifacts(lr.id)) {
+    const arts = opts?.artifactsByRunId?.[lr.id] ?? listArtifacts(lr.id);
+    for (const art of arts) {
       if (art.kind !== "usage" || !art.contentJson) continue;
       const usage = parseUsage(art.contentJson);
       if (!usage) continue;
@@ -40,9 +44,13 @@ export function buildLineageUsageSummary(run: Run): UsageSummary {
       if (usage.phase === "plan") planCount++;
       else execCount++;
 
+      const resolved = resolveBudgetForPhase(lr, usage.phase);
+
       lines.push({
         label: labelUsage(lineageIdx, usage.phase, planCount, execCount),
         usage,
+        maxTurns: usage.maxTurns ?? resolved?.maxTurns,
+        maxBudgetUsd: usage.maxBudgetUsd ?? resolved?.maxBudgetUsd,
       });
     }
   });
@@ -53,8 +61,9 @@ export function buildLineageUsageSummary(run: Run): UsageSummary {
       inputTokens: acc.inputTokens + (usage.inputTokens ?? 0),
       outputTokens: acc.outputTokens + (usage.outputTokens ?? 0),
       durationMs: acc.durationMs + (usage.durationMs ?? 0),
+      numTurns: acc.numTurns + (usage.numTurns ?? 0),
     }),
-    { totalCostUsd: 0, inputTokens: 0, outputTokens: 0, durationMs: 0 }
+    { totalCostUsd: 0, inputTokens: 0, outputTokens: 0, durationMs: 0, numTurns: 0 }
   );
 
   return { lines, total };

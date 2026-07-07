@@ -87,20 +87,20 @@ export function extractPlanTriage(planMarkdown: string): PlanTriageExtraction {
   const blocks = [...planMarkdown.matchAll(/```json\s*\n([\s\S]*?)\n```/g)];
   const last = blocks[blocks.length - 1];
   if (!last) return { markdown: planMarkdown.trim(), ...TRIAGE_FALLBACK };
+  const strippedMarkdown = (
+    planMarkdown.slice(0, last.index) + planMarkdown.slice(last.index! + last[0].length)
+  ).trim();
   try {
     const parsed = PlanTriageBlock.parse(JSON.parse(last[1]));
-    const markdown = (
-      planMarkdown.slice(0, last.index) + planMarkdown.slice(last.index! + last[0].length)
-    ).trim();
     return {
-      markdown,
+      markdown: strippedMarkdown,
       verdict: parsed.verdict,
       rationale: parsed.rationale,
       questions: parsed.questions,
       parseFallback: false,
     };
   } catch {
-    return { markdown: planMarkdown.trim(), ...TRIAGE_FALLBACK };
+    return { markdown: strippedMarkdown, ...TRIAGE_FALLBACK };
   }
 }
 

@@ -117,11 +117,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const run = getRun(id);
     if (!run) return reply.status(404).send({ error: "Not found" });
+    const artifacts = listArtifacts(id);
     return {
       run,
-      artifacts: listArtifacts(id),
+      artifacts,
       events: listEvents(id),
-      usageSummary: buildLineageUsageSummary(run),
+      usageSummary: buildLineageUsageSummary(run, { artifactsByRunId: { [id]: artifacts } }),
       traceSummary: buildLineageTraceSummary(run),
     };
   });
@@ -352,12 +353,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!run) return reply.status(404).send({ error: "Not found" });
     const input = UpdatePlanInput.parse(req.body);
 
-    const kind = input.approve ? "approved_plan" : "draft_plan";
-    addArtifact(id, kind, { markdown: input.planMarkdown }, "human");
-    if (!input.approve) {
-      markPlanTriageConsumed(id);
-    }
-
     if (input.approve) {
       const hasPlan =
         listArtifacts(id).some((a) => a.kind === "draft_plan") ||
@@ -388,13 +383,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (input.executeBudget !== undefined) {
         patchRunPhaseBudget(id, "execute", input.executeBudget);
       }
-      const updated = transitionRun(id, "plan_approved");
+      markPlanTriageConsumed(id);
+      try {
+        transitionRun(id, "plan_approved");
+      } catch (e) {
+        return reply.status(409).send({ error: String(e) });
+      }
+      addArtifact(id, "approved_plan", { markdown: input.planMarkdown }, "human");
+      const updated = getRun(id)!;
       syncLinearForRun(updated, "plan_approved").catch((e) =>
         console.error("[linear-sync] plan_approved:", e)
       );
       await forceDispatch();
       return updated;
     }
+
+    addArtifact(id, "draft_plan", { markdown: input.planMarkdown }, "human");
+    markPlanTriageConsumed(id);
     if (run.status === "queued") {
       return transitionRun(id, "plan_pending");
     }
@@ -513,6 +518,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       runtime: run.runtime,
       execute_model: input.executeModel ?? input.planModel ?? run.executeModel,
     });
+    if (input.executeBudget !== undefined) {
+      patchRunPhaseBudget(retry.id, "execute", input.executeBudget);
+    }
 
     try {
       addArtifact(retry.id, "approved_plan", JSON.parse(approvedPlan.contentJson), approvedPlan.author);

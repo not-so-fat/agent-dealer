@@ -10,7 +10,7 @@ process.env.MAX_CONCURRENT_RUNS = "0";
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID } = await import("@agent-dealer/shared");
 const { updateAgent } = await import("../repository/agents.js");
-const { addArtifact, createRun, getLatestArtifact, getRun, markPlanTriageConsumed } =
+const { addArtifact, createRun, getLatestArtifact, getRun, markPlanTriageConsumed, updateRunFields } =
   await import("../repository/runs.js");
 const { submitPlanAnswers } = await import("./dispatcher.js");
 
@@ -55,6 +55,22 @@ test("all-structured answers approve and mark plan_answers approved", () => {
   const ans = getLatestArtifact(run.id, "plan_answers");
   assert.match(ans!.contentJson!, /"outcome":"approved"/);
   assert.equal(getLatestArtifact(run.id, "approved_plan")!.author, "human");
+  const triage = getLatestArtifact(run.id, "plan_triage");
+  assert.match(triage!.contentJson!, /"consumed":true/);
+});
+
+test("executeModel null does not wipe seeded execute_model", () => {
+  const run = seedQuestionRun();
+  updateRunFields(run.id, { execute_model: "claude-sonnet-4" });
+  const res = submitPlanAnswers(run.id, {
+    answers: [
+      { questionId: "q1", selectedLabel: "A" },
+      { questionId: "q2", selectedLabel: "No" },
+    ],
+    executeModel: null,
+  });
+  assert.equal(res.ok, true);
+  assert.equal(getRun(run.id)!.executeModel, "claude-sonnet-4");
 });
 
 test("free-form answer schedules a redraft instead of approving", () => {

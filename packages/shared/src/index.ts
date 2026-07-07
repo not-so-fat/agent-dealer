@@ -111,12 +111,19 @@ export const UsageContent = z.object({
   durationMs: z.number().optional(),
   model: z.string().optional(),
   numTurns: z.number().optional(),
+  /** Resolved --max-turns cap enforced when this phase ran (snapshot at persist time). */
+  maxTurns: z.number().optional(),
+  /** Resolved --max-budget-usd cap enforced when this phase ran (snapshot at persist time). */
+  maxBudgetUsd: z.number().optional(),
 });
 export type UsageContent = z.infer<typeof UsageContent>;
 
 export const UsageLineItem = z.object({
   label: z.string(),
   usage: UsageContent,
+  /** From usage artifact snapshot; falls back to current resolve for legacy rows. */
+  maxTurns: z.number().optional(),
+  maxBudgetUsd: z.number().optional(),
 });
 export type UsageLineItem = z.infer<typeof UsageLineItem>;
 
@@ -127,6 +134,7 @@ export const UsageSummary = z.object({
     inputTokens: z.number(),
     outputTokens: z.number(),
     durationMs: z.number(),
+    numTurns: z.number(),
   }),
 });
 export type UsageSummary = z.infer<typeof UsageSummary>;
@@ -273,6 +281,7 @@ export const RetryRunInput = z.object({
   /** @deprecated execution retry uses executeModel */
   planModel: z.string().nullable().optional(),
   executeModel: z.string().nullable().optional(),
+  executeBudget: PhaseBudget.nullable().optional(),
 });
 export type RetryRunInput = z.infer<typeof RetryRunInput>;
 

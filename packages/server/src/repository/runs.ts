@@ -239,7 +239,8 @@ export function patchRunPhaseBudget(
   budget: PhaseBudget | null | undefined
 ): Run {
   if (budget === undefined) return getRun(id)!;
-  return updateRunBudget(id, { [phase]: budget ?? undefined });
+  // null = clear run-level override for this phase (revert to agent defaults)
+  return updateRunBudget(id, { [phase]: budget });
 }
 
 export function resolveModelForPhase(run: Run, phase: "plan" | "execute"): string | undefined {

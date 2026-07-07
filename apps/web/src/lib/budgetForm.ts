@@ -28,6 +28,25 @@ export function phaseBudgetFromForm(form: BudgetFormValue): PhaseBudget | null {
   return { maxTurns, maxBudgetUsd };
 }
 
+export function runHasPhaseBudgetOverride(
+  budgetJson: string | null | undefined,
+  phase: "plan" | "execute"
+): boolean {
+  const form = runPhaseBudgetFromRun(budgetJson, phase);
+  return !!(form.maxTurns || form.maxBudgetUsd);
+}
+
+/** Omit when blank and no run override; null clears an existing override. */
+export function phaseBudgetPayload(
+  form: BudgetFormValue,
+  budgetJson: string | null | undefined,
+  phase: "plan" | "execute"
+): PhaseBudget | null | undefined {
+  const formEmpty = !form.maxTurns.trim() && !form.maxBudgetUsd.trim();
+  if (formEmpty && !runHasPhaseBudgetOverride(budgetJson, phase)) return undefined;
+  return phaseBudgetFromForm(form);
+}
+
 export function runPhaseBudgetFromRun(
   budgetJson: string | null | undefined,
   phase: "plan" | "execute"

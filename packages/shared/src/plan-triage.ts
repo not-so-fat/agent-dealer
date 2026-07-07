@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PhaseBudget } from "./budget.js";
 
 export const PlanQuestionOption = z.object({
   label: z.string().min(1).max(60),
@@ -53,6 +54,8 @@ export type PlanAnswer = z.infer<typeof PlanAnswer>;
 /** POST /api/runs/:id/plan/answers body (PRD §7.2). */
 export const PlanAnswersInput = z.object({
   answers: z.array(PlanAnswer).min(1),
+  executeModel: z.string().nullable().optional(),
+  executeBudget: PhaseBudget.nullable().optional(),
 });
 export type PlanAnswersInput = z.infer<typeof PlanAnswersInput>;
 

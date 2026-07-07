@@ -75,11 +75,14 @@ export function serializeRunBudget(budget: RunBudget): string | null {
   return JSON.stringify(budget);
 }
 
-export function mergeRunBudget(existing: RunBudget, patch: Partial<RunBudget>): RunBudget {
+export function mergeRunBudget(
+  existing: RunBudget,
+  patch: Partial<Record<BudgetPhase, PhaseBudget | null>>
+): RunBudget {
   return {
-    plan: patch.plan !== undefined ? patch.plan : existing.plan,
-    execute: patch.execute !== undefined ? patch.execute : existing.execute,
-    reflect: patch.reflect !== undefined ? patch.reflect : existing.reflect,
+    plan: "plan" in patch ? (patch.plan ?? undefined) : existing.plan,
+    execute: "execute" in patch ? (patch.execute ?? undefined) : existing.execute,
+    reflect: "reflect" in patch ? (patch.reflect ?? undefined) : existing.reflect,
   };
 }
 

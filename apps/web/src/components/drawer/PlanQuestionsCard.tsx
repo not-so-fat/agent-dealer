@@ -1,25 +1,22 @@
-import { useState } from "react";
 import type { PlanQuestion } from "@agent-dealer/shared";
 
-type AnswerDraft = { selectedLabel?: string; freeText?: string };
+export type AnswerDraft = { selectedLabel?: string; freeText?: string };
 
 type Props = {
   questions: PlanQuestion[];
+  drafts: Record<string, AnswerDraft>;
+  onDraftsChange: (drafts: Record<string, AnswerDraft>) => void;
   busy: boolean;
-  onSubmit: (answers: Array<{ questionId: string; selectedLabel?: string; freeText?: string }>) => void;
 };
 
-/** Structured plan questions — option buttons approve fast; free-form triggers a replan. */
-export default function PlanQuestionsCard({ questions, busy, onSubmit }: Props) {
-  const [drafts, setDrafts] = useState<Record<string, AnswerDraft>>({});
-  const allAnswered = questions.every((q) => {
-    const d = drafts[q.id];
-    return Boolean(d?.selectedLabel || d?.freeText?.trim());
-  });
-  const hasFreeForm = questions.some((q) => drafts[q.id]?.freeText?.trim());
+/** Agent plan questions — answers pair with Your Decision execution config below the plan. */
+export default function PlanQuestionsCard({ questions, drafts, onDraftsChange, busy }: Props) {
+  const setDraft = (questionId: string, draft: AnswerDraft) => {
+    onDraftsChange({ ...drafts, [questionId]: draft });
+  };
 
   return (
-    <section className="space-y-3 rounded-xl border border-amber-400/40 bg-amber-400/5 p-3">
+    <div className="space-y-3 rounded-xl border border-amber-400/40 bg-amber-400/5 p-3">
       <div className="heading-section text-amber-200">Agent needs your answer</div>
       {questions.map((q) => {
         const d = drafts[q.id] ?? {};
@@ -33,7 +30,7 @@ export default function PlanQuestionsCard({ questions, busy, onSubmit }: Props) 
                   type="button"
                   disabled={busy}
                   title={o.description}
-                  onClick={() => setDrafts((prev) => ({ ...prev, [q.id]: { selectedLabel: o.label } }))}
+                  onClick={() => setDraft(q.id, { selectedLabel: o.label })}
                   className={`btn-ghost text-xs px-2 py-1 ${
                     d.selectedLabel === o.label ? "ring-1 ring-amber-300 text-amber-200" : ""
                   }`}
@@ -47,24 +44,32 @@ export default function PlanQuestionsCard({ questions, busy, onSubmit }: Props) 
               placeholder="Other… (free-form answer triggers a replan)"
               value={d.freeText ?? ""}
               disabled={busy}
-              onChange={(e) =>
-                setDrafts((prev) => ({
-                  ...prev,
-                  [q.id]: e.target.value ? { freeText: e.target.value } : {},
-                }))
-              }
+              onChange={(e) => setDraft(q.id, e.target.value ? { freeText: e.target.value } : {})}
             />
           </div>
         );
       })}
-      <button
-        type="button"
-        disabled={busy || !allAnswered}
-        className="btn-gold px-4 py-1.5 disabled:opacity-40"
-        onClick={() => onSubmit(questions.map((q) => ({ questionId: q.id, ...drafts[q.id] })))}
-      >
-        {hasFreeForm ? "Submit & replan" : "Submit & start execution"}
-      </button>
-    </section>
+    </div>
   );
+}
+
+export function planAnswersFromDrafts(
+  questions: PlanQuestion[],
+  drafts: Record<string, AnswerDraft>
+): Array<{ questionId: string; selectedLabel?: string; freeText?: string }> {
+  return questions.map((q) => ({ questionId: q.id, ...drafts[q.id] }));
+}
+
+export function planAnswersReady(questions: PlanQuestion[], drafts: Record<string, AnswerDraft>): boolean {
+  return questions.every((q) => {
+    const d = drafts[q.id];
+    return Boolean(d?.selectedLabel || d?.freeText?.trim());
+  });
+}
+
+export function planAnswersHaveFreeForm(
+  questions: PlanQuestion[],
+  drafts: Record<string, AnswerDraft>
+): boolean {
+  return questions.some((q) => drafts[q.id]?.freeText?.trim());
 }

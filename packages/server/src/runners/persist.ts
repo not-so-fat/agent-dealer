@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Run, RunPhase, Runtime } from "@agent-dealer/shared";
 import { detectExecutionBlocker } from "@agent-dealer/shared";
-import { addArtifact, getLatestArtifact, getLineageParentRun } from "../repository/runs.js";
+import { addArtifact, getLatestArtifact, getLineageParentRun, resolveBudgetForPhase } from "../repository/runs.js";
 import { getTemporalOutputDir } from "../paths.js";
 import {
   buildStreamTrace,
@@ -85,6 +85,9 @@ export function persistRunOutput(input: PersistRunOutputInput): {
   const blocker = detectExecutionBlocker(resultText);
   const isError = exitCode !== 0 || streamError || blocker.detected;
   const usage = extractUsage(events, phase, runtime);
+  const caps = resolveBudgetForPhase(run, phase);
+  if (caps?.maxTurns != null) usage.maxTurns = caps.maxTurns;
+  if (caps?.maxBudgetUsd != null) usage.maxBudgetUsd = caps.maxBudgetUsd;
   const trace = buildStreamTrace(events);
 
   if (sessionId) {

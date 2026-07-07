@@ -16,7 +16,10 @@ import {
   getRun,
   listArtifacts,
   listRuns,
+  markPlanTriageConsumed,
+  patchRunPhaseBudget,
   transitionRun,
+  updateRunFields,
 } from "../repository/runs.js";
 import { runAgent } from "../runners/claude.js";
 import { persistRunOutput, seedDeliverableFromParent } from "../runners/persist.js";
@@ -442,6 +445,7 @@ export function submitPlanAnswers(
 
   const freeForm = input.answers.some((a) => a.freeText);
   const outcome = freeForm ? ("redraft" as const) : ("approved" as const);
+
   addArtifact(
     runId,
     "plan_answers",
@@ -450,10 +454,23 @@ export function submitPlanAnswers(
   );
 
   if (!freeForm) {
+    // null/empty = "Default" — do not wipe a seeded execute_model; only set explicit picks
+    if (input.executeModel?.trim()) {
+      updateRunFields(runId, { execute_model: input.executeModel.trim() });
+    }
+    if (input.executeBudget !== undefined) {
+      patchRunPhaseBudget(runId, "execute", input.executeBudget);
+    }
+
+    markPlanTriageConsumed(runId);
+    try {
+      transitionRun(runId, "plan_approved");
+    } catch (e) {
+      return { ok: false, code: 409, error: String(e) };
+    }
     const draft = getLatestArtifact(runId, "draft_plan");
     const plan = draft?.contentJson ? (JSON.parse(draft.contentJson) as PlanContent) : { markdown: "" };
     addArtifact(runId, "approved_plan", plan, "human");
-    transitionRun(runId, "plan_approved");
     void forceDispatch();
     return { ok: true, outcome, run: getRun(runId)! };
   }

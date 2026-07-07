@@ -24,7 +24,9 @@ alwaysApply: true
 - **Reading surfaces use the review drawer** — same centered overlay as `RunDrawer` (`ReviewDrawer`, `min(1200px, 96vw)`). Ops, Done, and Inbox issue detail all open the drawer; do not invent inline split-pane detail columns.
 - **Utility chrome stays narrow:** Inbox import / manual forms may use a compact side column (`lg:w-96`).
 
-**Canonical rule:** Agent Deck playbook `pb_product_principle` → **Layout (reading surfaces)**. Repo rule here is agent-dealer tokens and IA only.
+**Canonical rule:** Agent Deck playbook `pb_product_principle` → **Layout (reading surfaces)** and **Cluster actions (human gates)**. Repo rule here is agent-dealer tokens and IA only.
+
+**Review drawers:** read artifact first; cluster gate inputs + phase config + gold button under **Your Decision** (plan questions → execution row → Submit / Approve; result retry → execution row → Retry).
 
 ## Before asking the human to test
 
