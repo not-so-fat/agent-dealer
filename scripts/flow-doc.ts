@@ -2,10 +2,14 @@
  * End-to-end smoke: simple content document task via API.
  * Plan is auto-drafted on create — no manual draft-plan step.
  */
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadAgentDealerEnv } from "./load-env.ts";
 
 loadAgentDealerEnv();
 const API = process.env.AGENT_DEALER_API!;
+const BUILTIN_AGENT_CLAUDE_ID = "00000000-0000-4000-a000-000000000001";
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUNTIME = (process.env.FLOW_RUNTIME ?? "claude_code") as "claude_code" | "cursor_local";
 const POLL_MS = 2000;
 const TIMEOUT_MS = Number(process.env.FLOW_TIMEOUT_MS ?? 180_000);
@@ -59,13 +63,19 @@ async function main(): Promise<void> {
   const log: string[] = [];
   const ok = (msg: string) => log.push(`✓ ${msg}`);
 
+  const patched = await req("PATCH", `/api/agents/${BUILTIN_AGENT_CLAUDE_ID}`, {
+    workspaceRoot: REPO_ROOT,
+  });
+  assert(patched.status === 200, "patch agent workspace");
+
   const created = await req("POST", "/api/runs", {
     title: "E2E: random coffee facts doc",
     description: "Write 5 fun facts about coffee in markdown. Keep under 25 lines.",
     taskCategory: "content",
     runtime: RUNTIME,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
   });
-  assert(created.status === 201, "create run");
+  assert(created.status === 201, `create run: ${JSON.stringify(created.json)}`);
   const run = created.json as Run;
   ok(`Created ${run.id.slice(0, 8)} (${RUNTIME}) — auto plan draft started`);
 
@@ -77,12 +87,28 @@ async function main(): Promise<void> {
   const planMd = JSON.parse(draftPlan!.contentJson!).markdown as string;
   assert(planMd.length > 20, "plan markdown");
 
-  const approved = await req("PATCH", `/api/runs/${run.id}/plan`, { planMarkdown: planMd, approve: true });
-  assert(approved.status === 200, "approve plan");
-  ok("Plan approved");
+  const triageArt = planArts.find((a) => a.kind === "plan_triage");
+  assert(triageArt?.contentJson, "plan_triage artifact");
+  const triage = JSON.parse(triageArt!.contentJson!) as { parseFallback?: boolean };
+  if (triage.parseFallback !== false) {
+    const hint = planMd.includes("session limit")
+      ? "Claude session limit — retry after reset (see plan markdown)"
+      : "Agent did not return a valid triage JSON block";
+    throw new Error(`FAIL: plan triage contract honored (${hint})`);
+  }
+  ok("Plan triage block parsed");
 
-  await req("POST", `/api/runs/${run.id}/kick`, {});
-  ok("Execution kicked");
+  const { json: detailBefore } = await req("GET", `/api/runs/${run.id}`);
+  const statusBefore = (detailBefore as { run: Run }).run.status;
+  if (statusBefore === "plan_pending") {
+    const approved = await req("PATCH", `/api/runs/${run.id}/plan`, { planMarkdown: planMd, approve: true });
+    assert(approved.status === 200, "approve plan");
+    ok("Plan approved");
+    await req("POST", `/api/runs/${run.id}/kick`, {});
+    ok("Execution kicked");
+  } else {
+    ok(`Plan already ${statusBefore} (auto-approve or dispatched)`);
+  }
 
   const final = await waitForStatus(run.id, ["review", "failed"]);
   ok(`Final status: ${final.status}`);
