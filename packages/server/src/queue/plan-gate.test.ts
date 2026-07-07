@@ -56,8 +56,8 @@ test("third question round goes to manual review", () => {
   assert.equal(applyPlanGate(getRun(run.id)!), "await_review");
 });
 
-test.skip("snapshot exposes awaitingAnswerRuns, openQuestionCounts, autoApprovedRunIds", () => {
-  const snap = getSnapshot() as unknown as Record<string, unknown>;
+test("snapshot exposes awaitingAnswerRuns, openQuestionCounts, autoApprovedRunIds", () => {
+  const snap = getSnapshot();
   assert.equal(Array.isArray(snap.awaitingAnswerRuns), true);
   assert.equal(typeof snap.openQuestionCounts, "object");
   assert.equal(Array.isArray(snap.autoApprovedRunIds), true);

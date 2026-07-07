@@ -41,6 +41,9 @@ export interface QueueSnapshotInternal {
   resultReviewRuns: Run[];
   recentDone: Run[];
   awaitingPlanReview: Run[];
+  awaitingAnswerRuns: Run[];
+  openQuestionCounts: Record<string, number>;
+  autoApprovedRunIds: string[];
   runs: Run[];
   agentDeckOnline: boolean;
   agents: AgentWithHealth[];
@@ -89,6 +92,21 @@ function isReadyForPlanReview(run: Run): boolean {
   );
 }
 
+/** Open (unanswered, unconsumed) question count for a plan_pending run. */
+function openQuestionCount(runId: string): number {
+  const tri = getLatestArtifact(runId, "plan_triage");
+  if (!tri?.contentJson) return 0;
+  try {
+    const c = JSON.parse(tri.contentJson) as { questions?: unknown[]; consumed?: boolean };
+    if (c.consumed || !c.questions?.length) return 0;
+    const ans = getLatestArtifact(runId, "plan_answers");
+    if (ans && ans.createdAt > tri.createdAt) return 0;
+    return c.questions.length;
+  } catch {
+    return 0;
+  }
+}
+
 export function getSnapshot(): QueueSnapshotInternal {
   const all = listRuns();
   const runningRuns = all.filter((r) => r.status === "running");
@@ -108,6 +126,16 @@ export function getSnapshot(): QueueSnapshotInternal {
     (r) => !activePlanDrafts.has(r.id) && !isReadyForPlanReview(r)
   );
 
+  const openQuestionCounts: Record<string, number> = {};
+  for (const run of awaitingPlanReview) {
+    const n = openQuestionCount(run.id);
+    if (n > 0) openQuestionCounts[run.id] = n;
+  }
+  const awaitingAnswerRuns = awaitingPlanReview.filter((r) => openQuestionCounts[r.id]);
+  const autoApprovedRunIds = [...waitingExecution, ...runningRuns]
+    .filter((r) => getLatestArtifact(r.id, "approved_plan")?.author === "system")
+    .map((r) => r.id);
+
   return {
     planReviewCount: awaitingPlanReview.length,
     resultReviewCount: resultReviewRuns.length,
@@ -119,6 +147,9 @@ export function getSnapshot(): QueueSnapshotInternal {
     resultReviewRuns,
     recentDone,
     awaitingPlanReview,
+    awaitingAnswerRuns,
+    openQuestionCounts,
+    autoApprovedRunIds,
     runs: all,
     agentDeckOnline: false,
     agents: [],
