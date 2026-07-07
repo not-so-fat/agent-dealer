@@ -1,9 +1,17 @@
-import type { Run, RunStatus } from "@agent-dealer/shared";
+import type {
+  PlanContent,
+  PlanGateDecision,
+  PlanTriageContent,
+  Run,
+  RunStatus,
+} from "@agent-dealer/shared";
+import { planGateDecision } from "@agent-dealer/shared";
 import {
   addArtifact,
   countByStatus,
   getLatestArtifact,
   getRun,
+  listArtifacts,
   listRuns,
   transitionRun,
 } from "../repository/runs.js";
@@ -236,6 +244,46 @@ export async function kickRun(run: Run): Promise<void> {
   await dispatch();
 }
 
+function priorQuestionRounds(runId: string, currentTriageArtifactId: string): number {
+  return listArtifacts(runId).filter((a) => {
+    if (a.kind !== "plan_triage" || a.id === currentTriageArtifactId || !a.contentJson) return false;
+    try {
+      const c = JSON.parse(a.contentJson) as { questions?: unknown[] };
+      return (c.questions?.length ?? 0) > 0;
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
+/** Self-triage gate after a plan draft persists (PRD F2). Exported for tests. */
+export function applyPlanGate(run: Run): PlanGateDecision {
+  const art = getLatestArtifact(run.id, "plan_triage");
+  if (!art?.contentJson) return "await_review";
+  let triage: PlanTriageContent;
+  try {
+    triage = JSON.parse(art.contentJson) as PlanTriageContent;
+  } catch {
+    return "await_review";
+  }
+  const decision = planGateDecision({
+    triage,
+    priorQuestionRounds: priorQuestionRounds(run.id, art.id),
+  });
+  if (decision !== "auto_approve") return decision;
+
+  const fresh = getRun(run.id);
+  if (!fresh || fresh.status !== "plan_pending") return "await_review";
+  const draft = getLatestArtifact(run.id, "draft_plan");
+  if (!draft?.contentJson) return "await_review";
+
+  const plan = JSON.parse(draft.contentJson) as PlanContent;
+  addArtifact(run.id, "approved_plan", { ...plan, autoApproved: true, rationale: triage.rationale }, "system");
+  transitionRun(run.id, "plan_approved");
+  void forceDispatch();
+  return "auto_approve";
+}
+
 export async function draftPlan(run: Run, opts?: { replace?: boolean }): Promise<Run> {
   if (run.status === "queued") {
     transitionRun(run.id, "plan_pending");
@@ -279,6 +327,23 @@ export async function draftPlan(run: Run, opts?: { replace?: boolean }): Promise
         "agent",
         result.logPath
       );
+      const triage = persisted.planTriage;
+      if (triage) {
+        addArtifact(
+          updated.id,
+          "plan_triage",
+          {
+            verdict: triage.verdict,
+            rationale: triage.rationale,
+            questions: triage.questions,
+            sessionId: persisted.sessionId,
+            parseFallback: triage.parseFallback,
+            consumed: false,
+          },
+          "agent"
+        );
+        applyPlanGate(getRun(run.id)!);
+      }
     } else if (!opts?.replace) {
       addArtifact(updated.id, "feedback", { error: "Agent did not return a plan" }, "system");
     }

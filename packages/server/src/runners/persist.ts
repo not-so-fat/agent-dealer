@@ -7,11 +7,13 @@ import { getTemporalOutputDir } from "../paths.js";
 import {
   buildStreamTrace,
   extractPlanMarkdown,
+  extractPlanTriage,
   extractResultIsError,
   extractResultText,
   extractSessionId,
   extractUsage,
   parseNdjson,
+  type PlanTriageExtraction,
 } from "./stream-json.js";
 import { humanFeedbackText } from "./run-context.js";
 
@@ -67,6 +69,7 @@ function expectedDocPath(run: Run): string {
 
 export function persistRunOutput(input: PersistRunOutputInput): {
   planMarkdown?: string;
+  planTriage?: PlanTriageExtraction;
   resultText?: string;
   sessionId?: string;
   blocked?: boolean;
@@ -116,8 +119,16 @@ export function persistRunOutput(input: PersistRunOutputInput): {
   }
 
   if (phase === "plan") {
-    const planMarkdown = extractPlanMarkdown(events);
-    return { planMarkdown, resultText, sessionId, blocked: blocker.detected, blockerSummary: blocker.summary };
+    const rawPlan = extractPlanMarkdown(events);
+    const planTriage = extractPlanTriage(rawPlan);
+    return {
+      planMarkdown: planTriage.markdown,
+      planTriage,
+      resultText,
+      sessionId,
+      blocked: blocker.detected,
+      blockerSummary: blocker.summary,
+    };
   }
 
   return { resultText, sessionId, blocked: blocker.detected, blockerSummary: blocker.summary };
