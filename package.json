@@ -19,6 +19,7 @@
     "db:migrate:prod": "AGENT_DEALER_ENV=production npm run db:migrate -w @agent-dealer/server",
     "p0": "tsx scripts/p0-linear-batch.ts",
     "flow:verify": "tsx scripts/flow-verify.ts",
+    "test:unit": "npm run build -w @agent-dealer/shared && tsx --test $(find packages -name '*.test.ts' -not -path '*/node_modules/*' -not -path '*/dist/*')",
     "flow:doc": "tsx scripts/flow-doc.ts",
     "poc:integration": "tsx scripts/poc/run-all.ts",
     "poc:deep": "tsx scripts/poc/claude-runner-probe.ts && tsx scripts/poc/cursor-agent-probe.ts",

@@ -7,6 +7,7 @@ export * from "./runtime.js";
 export * from "./agents.js";
 export * from "./budget.js";
 export * from "./execution.js";
+export * from "./plan-triage.js";
 
 export const RunStatus = z.enum([
   "queued",
@@ -34,6 +35,8 @@ export const ArtifactKind = z.enum([
   "task_snapshot",
   "draft_plan",
   "approved_plan",
+  "plan_triage",
+  "plan_answers",
   "acceptance_criteria",
   "transcript",
   "stream_trace",
