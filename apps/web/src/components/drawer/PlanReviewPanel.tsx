@@ -272,7 +272,7 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
           {openQuestions.length > 0 && (
             <div className="flex items-center gap-3 text-xs text-white/30 uppercase tracking-wide">
               <span className="h-px flex-1 bg-white/10" />
-              or approve as-is
+              or skip the questions
               <span className="h-px flex-1 bg-white/10" />
             </div>
           )}
@@ -293,8 +293,13 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
             }
             className="btn-gold px-5 py-2 disabled:opacity-40 w-full sm:w-auto"
           >
-            Approve & next →
+            {openQuestions.length > 0 ? "Proceed — agent decides →" : "Approve & next →"}
           </button>
+          {openQuestions.length > 0 && (
+            <p className="text-xs text-white/40">
+              The unanswered questions are passed to the agent, which decides them itself.
+            </p>
+          )}
         </section>
       )}
 

@@ -39,10 +39,30 @@ function hasDisallowSend(args: string[]): boolean {
 }
 
 test("all phases deny call_service_tool", () => {
-  for (const mode of ["plan", "execute", "reflect"] as const) {
+  for (const mode of ["plan", "execute", "reflect", "qa"] as const) {
     const args = buildClaudePhaseArgs(runWithCategory("code"), mode);
     assert.equal(hasDisallowSend(args), true, mode);
   }
+});
+
+test("qa allowlist is read-only", () => {
+  const args = buildClaudePhaseArgs(runWithCategory("code"), "qa");
+  const i = args.indexOf("--allowedTools");
+  assert.equal(args[i + 1], "Read,Glob,Grep,Skill");
+});
+
+test("qa forbids mutation tools even for code tasks", () => {
+  const args = buildClaudePhaseArgs(runWithCategory("code"), "qa");
+  const i = args.indexOf("--allowedTools");
+  for (const tool of ["Write", "Edit", "Bash"]) {
+    assert.doesNotMatch(args[i + 1], new RegExp(`\\b${tool}\\b`), tool);
+  }
+  assert.equal(hasDisallowSend(args), true);
+});
+
+test("qa does not add the deliverable output dir", () => {
+  const args = buildClaudePhaseArgs(runWithCategory("content"), "qa");
+  assert.equal(args.includes("--add-dir"), false);
 });
 
 test("execute allowlist includes list_service_tools", () => {

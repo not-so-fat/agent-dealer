@@ -8,6 +8,9 @@ const DECK_READ_TOOLS =
 
 const PLAN_REFLECT_TOOLS = `Read,Glob,Grep,Skill,${DECK_READ_TOOLS}`;
 
+/** Q&A about a finished result — read-only, no deck writes, no workspace mutation. */
+const QA_TOOLS = "Read,Glob,Grep,Skill";
+
 function executeToolsForCategory(category: TaskCategory): string {
   const base = ["Read", "Write", "Edit", "Glob", "Grep", "Skill", DECK_READ_TOOLS];
   if (category !== "communication" && category !== "email") {
@@ -19,11 +22,13 @@ function executeToolsForCategory(category: TaskCategory): string {
 /** Build claude -p CLI args for a phase (excluding prompt, model, resume, mcp-config, budget). */
 export function buildClaudePhaseArgs(
   run: Run,
-  mode: "execute" | "plan" | "reflect"
+  mode: "execute" | "plan" | "reflect" | "qa"
 ): string[] {
   const args: string[] = ["--output-format", "stream-json", "--verbose"];
 
-  if (mode === "plan" || mode === "reflect") {
+  if (mode === "qa") {
+    args.push("--allowedTools", QA_TOOLS);
+  } else if (mode === "plan" || mode === "reflect") {
     args.push("--allowedTools", PLAN_REFLECT_TOOLS);
   } else {
     args.push("--add-dir", getTemporalOutputDir());

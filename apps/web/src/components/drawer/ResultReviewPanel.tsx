@@ -5,6 +5,7 @@ import PhaseConfigRow from "../agents/PhaseConfigRow";
 import {
   approveRun,
   artifactMarkdown,
+  askResultQuestion,
   cancelRun,
   fetchRunDetail,
   latestArtifact,
@@ -28,6 +29,7 @@ import CollapsibleSection from "../ui/CollapsibleSection";
 import { ExecutionOutcomeSection, executionHasBlocker } from "./ExecutionOutcomeSection";
 import PlaybookLearningPanel from "./PlaybookLearningPanel";
 import OutboundDraftCard from "./OutboundDraftCard";
+import ResultQaThread, { qaExchanges } from "./ResultQaThread";
 import RemoveFromOpsAction from "./RemoveFromOpsAction";
 
 type Props = {
@@ -76,6 +78,8 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
   const pendingOutbound = findPendingOutboundDraft(artifacts);
   const blocked = executionHasBlocker(execResult);
   const canRetry = !!feedback.trim();
+  const exchanges = qaExchanges(artifacts);
+  const qaPending = exchanges.some((e) => e.status === "pending");
 
   useEffect(() => {
     load().catch(console.error);
@@ -90,13 +94,15 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
     }
   });
 
+  const shouldPoll = reflectPending || qaPending;
+
   useEffect(() => {
-    if (!reflectPending) return;
+    if (!shouldPoll) return;
     const timer = setInterval(() => {
       load().catch(console.error);
     }, 3000);
     return () => clearInterval(timer);
-  }, [reflectPending, load]);
+  }, [shouldPoll, load]);
 
   useEffect(() => {
     setPrefilledRetry(false);
@@ -169,6 +175,12 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
 
       {execResult && <ExecutionOutcomeSection execResult={execResult} />}
 
+      <ResultQaThread
+        exchanges={exchanges}
+        busy={busy}
+        onAsk={(question) => act(() => askResultQuestion(run.id, question))}
+      />
+
       <section className="space-y-4 border-t border-white/10 pt-3">
         <div className="heading-section">Your Decision</div>
 
@@ -224,6 +236,9 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
           <label htmlFor={`retry-${run.id}`} className="text-xs text-white/40 uppercase tracking-wide">
             Retry instructions
           </label>
+          {exchanges.some((e) => e.status === "answered") && (
+            <p className="text-xs text-white/40">This discussion is included automatically if you retry.</p>
+          )}
           <textarea
             id={`retry-${run.id}`}
             className="field-mono min-h-[min(140px,22vh)] resize-y leading-relaxed"

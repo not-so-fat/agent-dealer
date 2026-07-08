@@ -14,6 +14,7 @@ import type {
   LinearIntakeConfigView,
   PhaseBudget,
   QueueSnapshot,
+  ResultQaContent,
   RuntimeModelsResponse,
   Run,
   StreamTraceContent,
@@ -266,6 +267,19 @@ export async function approveRun(id: string): Promise<Run> {
   return res.json();
 }
 
+export async function askResultQuestion(
+  id: string,
+  question: string
+): Promise<{ exchange: ResultQaContent }> {
+  const res = await fetch(`${API}/api/runs/${id}/qa`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 export async function retryRun(
   id: string,
   feedback: string,
@@ -420,4 +434,4 @@ export function latestByPhase<T extends { phase?: string }>(
   return last ? parseArtifact<T>(last) : null;
 }
 
-export type { StreamTraceContent, UsageContent, UsageSummary, ExecutionResultContent, DocumentContent, LinearCandidate };
+export type { StreamTraceContent, UsageContent, UsageSummary, ExecutionResultContent, DocumentContent, LinearCandidate, ResultQaContent };

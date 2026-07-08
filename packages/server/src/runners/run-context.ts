@@ -1,5 +1,6 @@
 import type { ArtifactKind, Run, StreamTraceContent, StreamTraceEntry } from "@agent-dealer/shared";
 import { getLatestArtifact, getLineageParentRun, listArtifacts } from "../repository/runs.js";
+import { listQaExchanges } from "../repository/result-qa.js";
 
 const EXCERPT = 2000;
 
@@ -73,6 +74,26 @@ export function lineageParentExecuteSessionId(run: Run): string | null {
     }
   }
   return null;
+}
+
+export interface ReviewQaPair {
+  question: string;
+  answer: string;
+}
+
+/** Answered result Q&A from this run and its lineage parent — a retry inherits the discussion. */
+export function reviewQaPairs(run: Run): ReviewQaPair[] {
+  const parent = getLineageParentRun(run);
+  const runIds = parent ? [parent.id, run.id] : [run.id];
+  const pairs: ReviewQaPair[] = [];
+  for (const id of runIds) {
+    for (const e of listQaExchanges(id)) {
+      if (e.status === "answered" && e.answer) {
+        pairs.push({ question: e.question, answer: e.answer });
+      }
+    }
+  }
+  return pairs;
 }
 
 function priorExecuteTraceTail(run: Run, max = 12): StreamTraceEntry[] {

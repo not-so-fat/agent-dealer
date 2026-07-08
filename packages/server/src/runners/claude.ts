@@ -7,7 +7,7 @@ import { humanFeedbackText, lineageParentExecuteSessionId } from "./run-context.
 import { getTemporalLogsDir } from "../paths.js";
 import { resolveClaudeBin, resolveCursorBin } from "../cli-env.js";
 import { resolveBudgetForPhase, resolveModelForPhase, getRun } from "../repository/runs.js";
-import { budgetCliArgs } from "@agent-dealer/shared";
+import { budgetCliArgs, QA_PHASE_BUDGET } from "@agent-dealer/shared";
 import { buildClaudePhaseArgs } from "./claude-args.js";
 
 export interface RunnerResult {
@@ -35,14 +35,14 @@ async function spawnCli(
   });
 }
 
-function logPathFor(run: Run, mode: "plan" | "execute" | "reflect"): string {
+function logPathFor(run: Run, mode: "plan" | "execute" | "reflect" | "qa"): string {
   const logDir = getTemporalLogsDir();
   return path.join(logDir, `${run.id}-${mode}-${Date.now()}.ndjson`);
 }
 
 export async function runClaude(
   run: Run,
-  mode: "execute" | "plan" | "reflect" = "execute",
+  mode: "execute" | "plan" | "reflect" | "qa" = "execute",
   model?: string,
   opts?: { promptOverride?: string; resumeSessionId?: string }
 ): Promise<RunnerResult> {
@@ -52,7 +52,11 @@ export async function runClaude(
     throw new Error(`MCP config not found: ${mcpConfig}. Set CLAUDE_MCP_CONFIG.`);
   }
 
-  const phaseBudget = resolveBudgetForPhase(run, mode);
+  if (mode === "qa" && !opts?.promptOverride) {
+    throw new Error("qa mode requires a promptOverride");
+  }
+
+  const phaseBudget = mode === "qa" ? { ...QA_PHASE_BUDGET } : resolveBudgetForPhase(run, mode);
 
   const resumeSessionId =
     opts?.resumeSessionId ??
@@ -67,7 +71,7 @@ export async function runClaude(
         : resumeSessionId
           ? buildExecutionContinuationPrompt(run)
           : buildExecutionPrompt(run));
-  const logPath = logPathFor(run, mode === "reflect" ? "reflect" : mode);
+  const logPath = logPathFor(run, mode);
 
   const args = [
     ...(model ? ["--model", model] : []),
