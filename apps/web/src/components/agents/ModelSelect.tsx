@@ -93,7 +93,7 @@ export default function ModelSelect({
         </p>
       )}
       {source === "fallback" && models.length > 0 && !loading && runtime === "cursor_local" && !compact && (
-        <p className="text-xs text-white/40">Run cursor agent login to load the full model list.</p>
+        <p className="text-xs text-white/40">Run cursor-agent login to load the full model list.</p>
       )}
     </label>
   );

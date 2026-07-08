@@ -47,18 +47,33 @@ export function resolveClaudeBin(): string {
   );
 }
 
-/** Resolve Cursor CLI binary. */
+/** Resolve Cursor Agent CLI binary (`cursor-agent` from cursor.com/install). */
 export function resolveCursorBin(): string {
   const home = process.env.HOME ?? os.homedir();
   if (process.env.CURSOR_CLI) return process.env.CURSOR_CLI;
   return (
     firstExisting([
+      path.join(home, ".local/bin/cursor-agent"),
+      path.join(home, ".cursor/bin/cursor-agent"),
+      "/opt/homebrew/bin/cursor-agent",
+      "/usr/local/bin/cursor-agent",
+      // Legacy: Cursor editor `cursor` shim routes `cursor agent` → cursor-agent
       path.join(home, ".local/bin/cursor"),
       path.join(home, ".cursor/bin/cursor"),
       "/opt/homebrew/bin/cursor",
       "/usr/local/bin/cursor",
-    ]) ?? "cursor"
+    ]) ?? "cursor-agent"
   );
+}
+
+/**
+ * Args for Cursor agent invocations.
+ * `cursor-agent` is invoked directly; legacy editor `cursor` needs an `agent` subcommand.
+ */
+export function cursorInvokeArgs(args: string[]): string[] {
+  const bin = resolveCursorBin();
+  if (path.basename(bin) === "cursor") return ["agent", ...args];
+  return args;
 }
 
 export function claudeBinExists(): boolean {
@@ -68,5 +83,5 @@ export function claudeBinExists(): boolean {
 
 export function cursorBinExists(): boolean {
   const bin = resolveCursorBin();
-  return bin !== "cursor" ? fs.existsSync(bin) : false;
+  return bin !== "cursor-agent" && bin !== "cursor" ? fs.existsSync(bin) : false;
 }

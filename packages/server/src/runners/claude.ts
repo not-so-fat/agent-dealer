@@ -5,7 +5,7 @@ import type { Run } from "@agent-dealer/shared";
 import { buildExecutionPrompt, buildExecutionContinuationPrompt, buildPlanPrompt, buildReflectPrompt, workspaceForRun } from "./prompts.js";
 import { humanFeedbackText, lineageParentExecuteSessionId } from "./run-context.js";
 import { getTemporalLogsDir } from "../paths.js";
-import { resolveClaudeBin, resolveCursorBin } from "../cli-env.js";
+import { cursorInvokeArgs, resolveClaudeBin, resolveCursorBin } from "../cli-env.js";
 import { resolveBudgetForPhase, resolveModelForPhase, getRun } from "../repository/runs.js";
 import { budgetCliArgs, QA_PHASE_BUDGET } from "@agent-dealer/shared";
 import { buildClaudePhaseArgs } from "./claude-args.js";
@@ -102,8 +102,7 @@ export async function runCursor(
     opts?.promptOverride ?? (mode === "plan" ? buildPlanPrompt(run) : buildExecutionPrompt(run));
   const logPath = logPathFor(run, mode);
 
-  const args = [
-    "agent",
+  const args = cursorInvokeArgs([
     "-p",
     "--trust",
     "--output-format",
@@ -113,7 +112,7 @@ export async function runCursor(
     ...(opts?.resumeSessionId ? ["--resume", opts.resumeSessionId] : []),
     ...(model ? ["--model", model] : []),
     prompt,
-  ];
+  ]);
 
   const { exitCode, transcript } = await spawnCli(resolveCursorBin(), args, workspaceForRun(run));
   if (transcript) fs.writeFileSync(logPath, transcript);

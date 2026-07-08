@@ -5,6 +5,7 @@ import {
   claudeBinExists,
   cursorBinExists,
   resolveClaudeBin,
+  cursorInvokeArgs,
   resolveCursorBin,
 } from "../cli-env.js";
 import { checkAgentDeckHealth, isAgentDeckMcpRegistered } from "./agent-deck.js";
@@ -55,13 +56,13 @@ async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHealthIssue
     return [];
   }
 
-  const status = await runCommand(resolveCursorBin(), ["agent", "status"]);
+  const status = await runCommand(resolveCursorBin(), cursorInvokeArgs(["status"]));
   if (!status.ok && !status.output.trim() && !cursorBinExists()) {
-    return [{ code: "cli_missing", message: "Cursor CLI not found" }];
+    return [{ code: "cli_missing", message: "cursor-agent not found — run: curl https://cursor.com/install -fsS | bash" }];
   }
   const out = status.output.toLowerCase();
   if (out.includes("not logged in") || out.includes("login required") || out.includes("not authenticated")) {
-    return [{ code: "runtime_auth", message: "Run cursor agent login" }];
+    return [{ code: "runtime_auth", message: "Run cursor-agent login" }];
   }
   return [];
 }

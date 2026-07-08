@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import type { Runtime, RuntimeModelOption } from "@agent-dealer/shared";
 import { CURSOR_DEFAULT_MODEL, CURSOR_SUBSCRIPTION_MODEL_IDS } from "@agent-dealer/shared";
-import { resolveCursorBin } from "../cli-env.js";
+import { cursorInvokeArgs, resolveCursorBin } from "../cli-env.js";
 
 const CURSOR_PINNED: RuntimeModelOption[] = [
   { id: CURSOR_DEFAULT_MODEL, label: "Auto (subscription pool)" },
@@ -88,7 +88,7 @@ async function tryAnthropicModelsApi(): Promise<RuntimeModelOption[]> {
 
 function listCursorModels(): ModelsResult {
   const bin = resolveCursorBin();
-  const result = spawnSync(bin, ["agent", "--list-models"], {
+  const result = spawnSync(bin, cursorInvokeArgs(["--list-models"]), {
     encoding: "utf8",
     timeout: 20_000,
   });

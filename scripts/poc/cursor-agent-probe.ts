@@ -67,7 +67,6 @@ async function runCursor(
   fs.mkdirSync(LOG_DIR, { recursive: true });
   const logPath = path.join(LOG_DIR, `poc-cursor-${label}-${Date.now()}.ndjson`);
   const args = [
-    "agent",
     "-p",
     "--trust",
     "--output-format",
@@ -80,7 +79,7 @@ async function runCursor(
   return new Promise((resolve, reject) => {
     let raw = "";
     const logStream = fs.createWriteStream(logPath);
-    const child = spawn("cursor", args, {
+    const child = spawn("cursor-agent", args, {
       cwd: ROOT,
       env: { ...process.env },
       stdio: ["ignore", "pipe", "pipe"],
@@ -198,7 +197,7 @@ async function main(): Promise<void> {
   }
 
   const conclusions = report.conclusions as string[];
-  conclusions.push("Cursor CLI: cursor agent -p --trust --output-format stream-json (requires --trust in CI/non-interactive)");
+  conclusions.push("Cursor CLI: cursor-agent -p --trust --output-format stream-json (requires --trust in CI/non-interactive)");
   conclusions.push("Events: system(init), user, assistant (partial chunks with --stream-partial-output), result");
   conclusions.push("session_id on init — --resume <id> can continue plan→execute in ONE session (alternative to prompt carryover)");
   conclusions.push("v0 default: two processes + approved_plan in prompt; optional --resume for Cursor continuity");
