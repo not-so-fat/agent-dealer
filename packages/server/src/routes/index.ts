@@ -9,6 +9,7 @@ import {
   DraftPlanInput,
   KickRunInput,
   PlanAnswersInput,
+  ResultQaInput,
   LinearIntakeConfigPatch,
   PromoteLinearInput,
   RetryRunInput,
@@ -53,6 +54,8 @@ import {
   subscribe,
 } from "../queue/dispatcher.js";
 import { approveRunWithDeliver } from "../queue/approve-deliver.js";
+import { recordPlanDelegation } from "../queue/plan-delegation.js";
+import { askResultQuestion } from "../queue/result-qa.js";
 import { rejectPendingOutboundDrafts } from "../repository/outbound-drafts.js";
 import { fetchAgentDeckDecks, updatePlaybookBody } from "../adapters/agent-deck.js";
 import { testAgentDeckConnection } from "../adapters/agent-deck.js";
@@ -385,6 +388,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (input.executeBudget !== undefined) {
         patchRunPhaseBudget(id, "execute", input.executeBudget);
       }
+      recordPlanDelegation(id);
       markPlanTriageConsumed(id);
       try {
         transitionRun(id, "plan_approved");
@@ -419,6 +423,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const result = submitPlanAnswers(id, input);
     if (!result.ok) return reply.status(result.code).send({ error: result.error });
     return { run: result.run, outcome: result.outcome };
+  });
+
+  app.post("/api/runs/:id/qa", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    let input;
+    try {
+      input = ResultQaInput.parse(req.body);
+    } catch (e) {
+      return reply.status(400).send({ error: String(e) });
+    }
+    const result = askResultQuestion(id, input.question);
+    if (!result.ok) return reply.status(result.code).send({ error: result.error });
+    return reply.status(202).send({ exchange: result.exchange });
   });
 
   app.post("/api/runs/:id/kick", async (req, reply) => {

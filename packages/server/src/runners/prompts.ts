@@ -13,6 +13,7 @@ import {
   appendPlanRetrySections,
   appendExecutionRetrySections,
   retryContext,
+  reviewQaPairs,
 } from "./run-context.js";
 
 export function workspaceForRun(run: Run): string {
@@ -64,6 +65,13 @@ function outboundDraftContractSection(): string {
   ].join("\n");
 }
 
+function reviewQaSections(run: Run): string[] {
+  const pairs = reviewQaPairs(run);
+  if (pairs.length === 0) return [];
+  const lines = pairs.flatMap((p) => [`Q: ${p.question}`, `A: ${p.answer}`, ``]);
+  return [`## Review Q&A`, `The human asked about the prior result. Honor these answers.`, ...lines];
+}
+
 export function buildExecutionContinuationPrompt(run: Run): string {
   const ctx = retryContext(run);
   const parts = [
@@ -83,6 +91,8 @@ export function buildExecutionContinuationPrompt(run: Run): string {
       parts.push(`## Human feedback`, feedback, ``);
     }
   }
+
+  parts.push(...reviewQaSections(run));
 
   if (run.deckId) {
     parts.push(
@@ -131,6 +141,8 @@ export function buildExecutionPrompt(run: Run): string {
   }
 
   parts.push(...planAnswersSections(run));
+  parts.push(...planDelegationSections(run));
+  parts.push(...reviewQaSections(run));
 
   if (run.taskCategory === "content" || run.taskCategory === "research") {
     parts.push(
@@ -207,6 +219,44 @@ export function buildReflectPrompt(
   return parts.join("\n");
 }
 
+export function buildQaPrompt(
+  run: Run,
+  question: string,
+  opts: { grounded: boolean }
+): string {
+  const parts = [
+    `The human reviewing your finished work has a question about it.`,
+    ``,
+    `IMPORTANT:`,
+    `- Answer the question. Do NOT modify anything — no files, no edits, no commands, no sends.`,
+    `- You may read files to check your own work.`,
+    `- Answer concisely in markdown. No preamble, no restating the question.`,
+    `- If you do not know, say so plainly rather than guessing.`,
+    ``,
+  ];
+
+  if (opts.grounded) {
+    parts.push(`## Task`, taskText(run), ``);
+  } else {
+    parts.push(
+      `Your original session is gone, so the relevant context is reproduced below.`,
+      ``,
+      `## Task`,
+      taskText(run),
+      ``
+    );
+    const plan = artifactMarkdown("approved_plan", run.id);
+    if (plan) parts.push(`## Approved plan`, plan, ``);
+    const result = artifactMarkdown("execution_result", run.id);
+    if (result) parts.push(`## Execution outcome`, result, ``);
+    const doc = artifactMarkdown("document", run.id);
+    if (doc) parts.push(`## Deliverable`, doc, ``);
+  }
+
+  parts.push(`## Question`, question);
+  return parts.join("\n");
+}
+
 function hasOutboundSendGate(category: Run["taskCategory"]): boolean {
   return category === "communication" || category === "email";
 }
@@ -251,6 +301,32 @@ function planAnswersSections(run: Run): string[] {
       return `- ${q?.question ?? a.questionId}: **${a.selectedLabel ?? a.freeText ?? ""}**`;
     });
     return ["## Human answers to plan questions", ...lines, ""];
+  } catch {
+    return [];
+  }
+}
+
+function planDelegationSections(run: Run): string[] {
+  const ansArt = getLatestArtifact(run.id, "plan_answers");
+  if (!ansArt?.contentJson) return [];
+  try {
+    const ans = JSON.parse(ansArt.contentJson) as PlanAnswersContent;
+    if (ans.outcome !== "delegated") return [];
+    const triArt = getLatestArtifact(run.id, "plan_triage");
+    const questions: PlanQuestion[] = triArt?.contentJson
+      ? (JSON.parse(triArt.contentJson) as PlanTriageContent).questions
+      : [];
+    if (questions.length === 0) return [];
+    const lines = questions.map((q) => {
+      const options = q.options.map((o) => o.label).join(" | ");
+      return `- ${q.question} (options: ${options})`;
+    });
+    return [
+      "## Unanswered plan questions",
+      "The reviewer chose to proceed without answering these. Use your best judgment.",
+      ...lines,
+      "",
+    ];
   } catch {
     return [];
   }

@@ -92,7 +92,7 @@ export function persistRunOutput(input: PersistRunOutputInput): {
   const blocker = detectExecutionBlocker(resultText);
   const isError = exitCode !== 0 || streamError || blocker.detected;
   const usage = extractUsage(events, phase, runtime);
-  const caps = resolveBudgetForPhase(run, phase);
+  const caps = phase === "qa" ? null : resolveBudgetForPhase(run, phase);
   if (caps?.maxTurns != null) usage.maxTurns = caps.maxTurns;
   if (caps?.maxBudgetUsd != null) usage.maxBudgetUsd = caps.maxBudgetUsd;
   const trace = buildStreamTrace(events);

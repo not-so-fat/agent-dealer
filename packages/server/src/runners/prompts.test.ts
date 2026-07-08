@@ -11,7 +11,8 @@ const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID } = await import("@agent-dealer/shared");
 const { updateAgent } = await import("../repository/agents.js");
 const { addArtifact, createRun } = await import("../repository/runs.js");
-const { buildExecutionPrompt, buildPlanPrompt, buildPlanRevisePrompt } = await import("./prompts.js");
+const { buildExecutionPrompt, buildPlanPrompt, buildPlanRevisePrompt, buildQaPrompt } =
+  await import("./prompts.js");
 
 const QUESTIONS = [
   {
@@ -102,6 +103,97 @@ test("revise prompt pairs each answer with its question and re-states the contra
   assert.match(prompt, /Which storage backend\?/);
   assert.match(prompt, /Use flat files instead/);
   assert.match(prompt, /"verdict"/);
+});
+
+test("delegated plan answers surface the unanswered questions to the executor", () => {
+  const run = makeRun();
+  addArtifact(run.id, "draft_plan", { markdown: "# Plan" }, "agent");
+  addArtifact(run.id, "plan_triage", {
+    verdict: "needs_review", rationale: "r", questions: QUESTIONS, parseFallback: false, consumed: true,
+  }, "agent");
+  addArtifact(run.id, "approved_plan", { markdown: "# Plan" }, "human");
+  addArtifact(run.id, "plan_answers", { answers: [], outcome: "delegated", answeredAt: new Date().toISOString() }, "human");
+
+  const prompt = buildExecutionPrompt(run);
+  assert.match(prompt, /## Unanswered plan questions/);
+  assert.match(prompt, /Which storage backend\?/);
+  assert.match(prompt, /SQLite/);
+  assert.match(prompt, /best judgment/i);
+  assert.doesNotMatch(prompt, /## Human answers to plan questions/);
+});
+
+test("execution prompt renders answered review Q&A from the lineage parent", () => {
+  const parent = makeRun();
+  addArtifact(parent.id, "approved_plan", { markdown: "# Plan" }, "human");
+  addArtifact(parent.id, "result_qa", {
+    exchangeId: "x1",
+    question: "Did you run the tests?",
+    answer: "Yes, all 12 pass.",
+    status: "answered",
+    sessionResumed: true,
+    askedAt: "2026-07-08T00:00:00.000Z",
+    answeredAt: "2026-07-08T00:01:00.000Z",
+  }, "agent");
+  addArtifact(parent.id, "result_qa", {
+    exchangeId: "x2",
+    question: "Pending one",
+    status: "pending",
+    sessionResumed: true,
+    askedAt: "2026-07-08T00:02:00.000Z",
+  }, "human");
+
+  const retry = createRun(
+    {
+      title: "Prompt test task",
+      taskCategory: "other",
+      status: "plan_approved",
+      agentId: BUILTIN_AGENT_CLAUDE_ID,
+    },
+    { lineageId: parent.lineageId ?? parent.id }
+  );
+  addArtifact(retry.id, "approved_plan", { markdown: "# Plan" }, "human");
+  addArtifact(retry.id, "feedback", { markdown: "Tighten the summary" }, "human");
+
+  const prompt = buildExecutionPrompt(retry);
+  assert.match(prompt, /## Review Q&A/);
+  assert.match(prompt, /Did you run the tests\?/);
+  assert.match(prompt, /Yes, all 12 pass\./);
+  assert.doesNotMatch(prompt, /Pending one/);
+});
+
+test("execution prompt omits the Q&A section when there are no answered exchanges", () => {
+  const run = makeRun();
+  addArtifact(run.id, "approved_plan", { markdown: "# Plan" }, "human");
+  assert.doesNotMatch(buildExecutionPrompt(run), /## Review Q&A/);
+});
+
+test("grounded qa prompt asks the question without re-stating artifacts", () => {
+  const run = makeRun();
+  addArtifact(run.id, "approved_plan", { markdown: "# Plan\n1. Use SQLite" }, "human");
+  const prompt = buildQaPrompt(run, "Why SQLite?", { grounded: true });
+  assert.match(prompt, /Why SQLite\?/);
+  assert.match(prompt, /Do NOT modify anything/i);
+  assert.doesNotMatch(prompt, /## Approved plan/);
+});
+
+test("ungrounded qa prompt rebuilds context from artifacts", () => {
+  const run = makeRun();
+  addArtifact(run.id, "approved_plan", { markdown: "# Plan\n1. Use SQLite" }, "human");
+  addArtifact(run.id, "execution_result", { phase: "execute", exitCode: 0, resultText: "Wrote the doc", isError: false }, "agent");
+  addArtifact(run.id, "document", { path: "/tmp/x.md", title: "x", markdown: "# Deliverable body" }, "agent");
+  const prompt = buildQaPrompt(run, "Why SQLite?", { grounded: false });
+  assert.match(prompt, /## Approved plan/);
+  assert.match(prompt, /## Execution outcome/);
+  assert.match(prompt, /## Deliverable/);
+  assert.match(prompt, /# Deliverable body/);
+  assert.match(prompt, /Why SQLite\?/);
+});
+
+test("qa prompt never asks for a json block or an outbound draft", () => {
+  const run = makeRun();
+  const prompt = buildQaPrompt(run, "What did you check?", { grounded: true });
+  assert.doesNotMatch(prompt, /Outbound actions/);
+  assert.doesNotMatch(prompt, /"verdict"/);
 });
 
 test("execution prompt includes outbound draft contract", () => {

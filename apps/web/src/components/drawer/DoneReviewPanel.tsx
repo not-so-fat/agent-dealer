@@ -3,6 +3,7 @@ import type { Artifact, OutboundDraftContent, Run, SendReceiptContent } from "@a
 import { agentSummary } from "../../AgentConfigFields";
 import {
   artifactMarkdown,
+  askResultQuestion,
   fetchRunDetail,
   latestArtifact,
   latestByPhase,
@@ -16,6 +17,7 @@ import { TracePanel, UsagePanel } from "../panels/TraceUsage";
 import MarkdownBody from "../ui/MarkdownBody";
 import { ExecutionOutcomeSection } from "./ExecutionOutcomeSection";
 import PlaybookLearningPanel from "./PlaybookLearningPanel";
+import ResultQaThread, { qaExchanges } from "./ResultQaThread";
 
 type Props = {
   run: Run;
@@ -53,10 +55,20 @@ export default function DoneReviewPanel({ run }: Props) {
   const outboundDraft = latestOutboundDraft(artifacts);
   const sendReceipt = latestArtifact(artifacts, "send_receipt");
   const receipt = sendReceipt ? parseArtifact<SendReceiptContent>(sendReceipt) : null;
+  const exchanges = qaExchanges(artifacts);
+  const qaPending = exchanges.some((e) => e.status === "pending");
 
   useEffect(() => {
     load().catch(console.error);
   }, [load]);
+
+  useEffect(() => {
+    if (!qaPending) return;
+    const timer = setInterval(() => {
+      load().catch(console.error);
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [qaPending, load]);
 
   return (
     <div className="space-y-4">
@@ -80,6 +92,12 @@ export default function DoneReviewPanel({ run }: Props) {
           <textarea className="field-mono min-h-[160px] resize-y" value={document.markdown} readOnly />
         </section>
       )}
+
+      <ResultQaThread
+        exchanges={exchanges}
+        busy={busy}
+        onAsk={(question) => act(() => askResultQuestion(run.id, question))}
+      />
 
       {execResult && <ExecutionOutcomeSection execResult={execResult} />}
 

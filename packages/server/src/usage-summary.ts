@@ -14,10 +14,14 @@ function labelUsage(
   lineageIdx: number,
   phase: UsageContent["phase"],
   planCount: number,
-  execCount: number
+  execCount: number,
+  qaCount: number
 ): string {
   if (phase === "plan") {
     return planCount > 1 ? `plan ${planCount}` : "plan";
+  }
+  if (phase === "qa") {
+    return qaCount > 1 ? `Q&A ${qaCount}` : "Q&A";
   }
   if (lineageIdx === 0) {
     return execCount > 1 ? `execute ${execCount}` : "execute";
@@ -35,6 +39,7 @@ export function buildLineageUsageSummary(
   lineageRuns.forEach((lr, lineageIdx) => {
     let planCount = 0;
     let execCount = 0;
+    let qaCount = 0;
     const arts = opts?.artifactsByRunId?.[lr.id] ?? listArtifacts(lr.id);
     for (const art of arts) {
       if (art.kind !== "usage" || !art.contentJson) continue;
@@ -42,12 +47,14 @@ export function buildLineageUsageSummary(
       if (!usage) continue;
 
       if (usage.phase === "plan") planCount++;
+      else if (usage.phase === "qa") qaCount++;
       else execCount++;
 
-      const resolved = resolveBudgetForPhase(lr, usage.phase);
+      // qa has no configurable budget — its cap is snapshotted on the artifact
+      const resolved = usage.phase === "qa" ? null : resolveBudgetForPhase(lr, usage.phase);
 
       lines.push({
-        label: labelUsage(lineageIdx, usage.phase, planCount, execCount),
+        label: labelUsage(lineageIdx, usage.phase, planCount, execCount, qaCount),
         usage,
         maxTurns: usage.maxTurns ?? resolved?.maxTurns,
         maxBudgetUsd: usage.maxBudgetUsd ?? resolved?.maxBudgetUsd,

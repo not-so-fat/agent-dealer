@@ -9,6 +9,7 @@ export * from "./budget.js";
 export * from "./execution.js";
 export * from "./plan-triage.js";
 export * from "./outbound-draft.js";
+export * from "./result-qa.js";
 
 export const RunStatus = z.enum([
   "queued",
@@ -56,10 +57,11 @@ export const ArtifactKind = z.enum([
   "reflect_status",
   "linear_sync",
   "send_receipt",
+  "result_qa",
 ]);
 export type ArtifactKind = z.infer<typeof ArtifactKind>;
 
-export const RunPhase = z.enum(["plan", "execute", "reflect"]);
+export const RunPhase = z.enum(["plan", "execute", "reflect", "qa"]);
 export type RunPhase = z.infer<typeof RunPhase>;
 
 export const PlaybookPatchStatus = z.enum(["proposed", "applied", "dismissed"]);

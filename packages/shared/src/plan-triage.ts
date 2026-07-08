@@ -59,10 +59,10 @@ export const PlanAnswersInput = z.object({
 });
 export type PlanAnswersInput = z.infer<typeof PlanAnswersInput>;
 
-/** plan_answers artifact contentJson (PRD §7.4). */
+/** plan_answers artifact contentJson (PRD §7.4). `delegated` = human approved past open questions. */
 export const PlanAnswersContent = z.object({
   answers: z.array(PlanAnswer),
-  outcome: z.enum(["approved", "redraft"]),
+  outcome: z.enum(["approved", "redraft", "delegated"]),
   answeredAt: z.string(),
 });
 export type PlanAnswersContent = z.infer<typeof PlanAnswersContent>;

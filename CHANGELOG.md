@@ -2,6 +2,20 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
+## Unreleased
+
+### Result Q&A (`docs/superpowers/specs/2026-07-07-result-qa-and-plan-delegation-design.md`)
+
+- **Ask the agent** — question box in the review and done drawers; a new read-only `qa` phase resumes the execute session (`Read,Glob,Grep,Skill` only, fixed 6-turn / $0.25 cap) instead of re-running execution
+- **Append-only thread** — each exchange persists as a `result_qa` artifact; latest artifact per `exchangeId` wins; one pending question at a time
+- **Retry carries the discussion** — answered exchanges render as `## Review Q&A` in the execution prompt, inherited from the lineage parent, so a retry needs no copy-paste
+- **Graceful fallback** — expired execute session answers from artifacts (approved plan, execution outcome, deliverable) and the UI flags it; a failed Q&A never changes run status
+- **API** — `POST /api/runs/:id/qa`; `qa` usage lines roll up as `Q&A` in the usage summary
+
+### Changed
+
+- **Approving a plan with open questions is now an explicit delegation.** The button reads "Proceed — agent decides", the approve route records a `plan_answers` artifact with the new `delegated` outcome, and the execution prompt lists the unanswered questions under `## Unanswered plan questions`. Previously the questions were silently dropped, so the executor never learned the planner had flagged the plan as underspecified.
+
 ## 0.1.4 — 2026-07-08
 
 ### Outbound send gate (`docs/PRD_SEND_GATE.md`)

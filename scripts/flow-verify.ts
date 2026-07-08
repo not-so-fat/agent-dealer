@@ -116,6 +116,18 @@ async function main(): Promise<void> {
   assert(noQuestions.status === 409, "answers without open questions returns 409");
   ok("Plan answers gate (no open questions)");
 
+  const qaTooEarly = await req("POST", `/api/runs/${run.id}/qa`, { question: "Why?" });
+  assert(qaTooEarly.status === 409, "qa before review returns 409");
+  ok("Result Q&A gate (run not finished)");
+
+  const qaEmpty = await req("POST", `/api/runs/${run.id}/qa`, { question: "" });
+  assert(qaEmpty.status === 400, "empty question rejected");
+  ok("Result Q&A input validation");
+
+  const qaMissing = await req("POST", "/api/runs/00000000-0000-4000-a000-0000000000ff/qa", { question: "Why?" });
+  assert(qaMissing.status === 404, "qa on unknown run returns 404");
+  ok("Result Q&A 404 on unknown run");
+
   const testDeckId = "00000000-0000-4000-a000-000000000101";
   const testPlaybookId = "pb_flow_verify";
   const bound = await req("PATCH", `/api/runs/${run.id}/agent`, {
