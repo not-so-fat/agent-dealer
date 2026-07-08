@@ -386,6 +386,10 @@ export type PromoteLinearInput = z.infer<typeof PromoteLinearInput>;
 export const DraftPlanInput = z.object({
   planModel: z.string().nullable().optional(),
   planBudget: PhaseBudget.nullable().optional(),
+  /** Human comments for the agent to revise the plan. */
+  feedback: z.string().optional(),
+  /** Human-edited plan markdown — agent refines from these edits. */
+  editedMarkdown: z.string().optional(),
 });
 export type DraftPlanInput = z.infer<typeof DraftPlanInput>;
 

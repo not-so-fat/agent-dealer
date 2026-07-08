@@ -332,6 +332,34 @@ function planDelegationSections(run: Run): string[] {
   }
 }
 
+export function buildPlanFeedbackPrompt(run: Run, feedback: string): string {
+  return [
+    "The human reviewed your plan and wants a revision. Revise the plan accordingly — do not execute anything.",
+    "",
+    "## Task",
+    taskText(run),
+    "",
+    "## Human feedback",
+    feedback.trim(),
+    "",
+    planTriageContractSection(run.taskCategory),
+  ].join("\n");
+}
+
+export function buildPlanEditedReplanPrompt(run: Run, editedMarkdown: string): string {
+  return [
+    "The human edited the plan directly. Start from their edits and produce a refined plan — do not execute anything.",
+    "",
+    "## Task",
+    taskText(run),
+    "",
+    "## Human-edited plan",
+    editedMarkdown.trim(),
+    "",
+    planTriageContractSection(run.taskCategory),
+  ].join("\n");
+}
+
 export function buildPlanRevisePrompt(
   run: Run,
   questions: PlanQuestion[],

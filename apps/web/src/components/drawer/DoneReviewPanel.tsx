@@ -80,7 +80,7 @@ export default function DoneReviewPanel({ run }: Props) {
       {approvedPlan && (
         <section className="space-y-2">
           <div className="heading-section">Approved Plan</div>
-          <div className="markdown-body-panel markdown-body-panel--short">
+          <div className="markdown-body-panel markdown-body-panel--flow">
             <MarkdownBody source={artifactMarkdown(approvedPlan)} />
           </div>
         </section>

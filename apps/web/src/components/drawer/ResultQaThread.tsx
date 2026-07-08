@@ -30,7 +30,7 @@ export default function ResultQaThread({ exchanges, busy, onAsk }: Props) {
           )}
           {e.status === "answered" && e.answer && (
             <>
-              <div className="markdown-body-panel markdown-body-panel--short">
+              <div className="markdown-body-panel markdown-body-panel--flow">
                 <MarkdownBody source={e.answer} />
               </div>
               {!e.sessionResumed && (

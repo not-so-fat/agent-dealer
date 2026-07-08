@@ -58,11 +58,14 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
   const [executeBudget, setExecuteBudget] = useState<BudgetFormValue>(budgetFormEmpty());
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, AnswerDraft>>({});
   const [planExpanded, setPlanExpanded] = useState(false);
-  const [replanOpen, setReplanOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [replanFeedback, setReplanFeedback] = useState("");
+  const [editMode, setEditMode] = useState(false);
+  const [editDraft, setEditDraft] = useState("");
+  const [savedPlanText, setSavedPlanText] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [replanning, setReplanning] = useState(false);
-  const [editing, setEditing] = useState(false);
 
   const agent = agents.find((a) => a.id === run.agentId);
   const runtime = run.runtime ?? agent?.runtime ?? "claude_code";
@@ -75,7 +78,11 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
     const approved = latestArtifact(detail.artifacts, "approved_plan");
     const agentPlan = latestArtifact(detail.artifacts, "draft_plan");
     const src = approved ?? agentPlan;
-    if (src) setPlanText(artifactMarkdown(src));
+    if (src) {
+      const md = artifactMarkdown(src);
+      setPlanText(md);
+      setSavedPlanText(md);
+    }
   }, [run.id]);
 
   const hasPlan = artifacts.some((a) => a.kind === "draft_plan");
@@ -108,10 +115,12 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
     setExecuteBudget(runPhaseBudgetFromRun(run.budgetJson, "execute"));
     setAnswerDrafts({});
     setPlanExpanded(false);
-    setReplanOpen(false);
+    setFeedbackOpen(false);
+    setReplanFeedback("");
+    setEditMode(false);
+    setEditDraft("");
     setDetailsOpen(false);
     setReplanning(false);
-    setEditing(false);
   }, [run.id, run.planModel, run.executeModel, run.budgetJson]);
 
   useEffect(() => {
@@ -123,31 +132,98 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
     return () => clearInterval(t);
   }, [planning, load, onRefresh]);
 
-  const requestReplan = async () => {
+  const waitForNewPlan = async (before?: string) => {
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      const detail = await fetchRunDetail(run.id);
+      setArtifacts(detail.artifacts);
+      const latest = latestArtifact(detail.artifacts, "draft_plan");
+      if (latest && latest.createdAt !== before) {
+        const md = artifactMarkdown(latest);
+        setPlanText(md);
+        setSavedPlanText(md);
+        setPlanExpanded(true);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    onRefresh();
+  };
+
+  const requestReplan = async (opts?: { feedback?: string; editedMarkdown?: string }) => {
     const before = latestArtifact(artifacts, "draft_plan")?.createdAt;
     setReplanning(true);
     setBusy(true);
     try {
-      await draftPlan(run.id, planModel || null, phaseBudgetPayload(planBudget, run.budgetJson, "plan"));
-      const deadline = Date.now() + 120_000;
-      while (Date.now() < deadline) {
-        const detail = await fetchRunDetail(run.id);
-        setArtifacts(detail.artifacts);
-        const latest = latestArtifact(detail.artifacts, "draft_plan");
-        if (latest && latest.createdAt !== before) {
-          setPlanText(artifactMarkdown(latest));
-          setPlanExpanded(true);
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 2000));
-      }
-      onRefresh();
+      await draftPlan(
+        run.id,
+        planModel || null,
+        phaseBudgetPayload(planBudget, run.budgetJson, "plan"),
+        opts
+      );
+      await waitForNewPlan(before);
     } catch (e) {
       alert(String(e));
     } finally {
       setReplanning(false);
       setBusy(false);
+      setFeedbackOpen(false);
+      setEditMode(false);
+      setReplanFeedback("");
     }
+  };
+
+  const openFeedback = () => {
+    setEditMode(false);
+    setFeedbackOpen((open) => !open);
+  };
+
+  const toggleEditMode = () => {
+    setFeedbackOpen(false);
+    if (editMode) {
+      cancelEdit();
+      return;
+    }
+    setEditDraft(planText);
+    setEditMode(true);
+  };
+
+  const cancelEdit = () => {
+    if (editDraft !== savedPlanText) {
+      if (!confirm("Discard your edits? Unsaved changes will be lost.")) return;
+    }
+    setEditDraft(savedPlanText);
+    setEditMode(false);
+  };
+
+  const replanWithEdits = async () => {
+    if (!editDraft.trim()) return;
+    setBusy(true);
+    try {
+      await updatePlan(run.id, editDraft, false);
+      setPlanText(editDraft);
+      setSavedPlanText(editDraft);
+    } catch (e) {
+      alert(String(e));
+      setBusy(false);
+      return;
+    }
+    await requestReplan({ editedMarkdown: editDraft });
+  };
+
+  const executeWithEdits = async () => {
+    if (!editDraft.trim()) return;
+    await act(async () => {
+      await updatePlan(run.id, editDraft, true, {
+        planModel: planModel || null,
+        executeModel: executeModel || null,
+        planBudget: phaseBudgetPayload(planBudget, run.budgetJson, "plan"),
+        executeBudget: phaseBudgetPayload(executeBudget, run.budgetJson, "execute"),
+      });
+      setEditMode(false);
+      onApproved?.();
+      onApprovedAndNext?.();
+    });
   };
 
   const act = async (fn: () => Promise<unknown>) => {
@@ -194,7 +270,7 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
             )}
             {planExpanded && (
               <div className="space-y-2">
-                <div className="markdown-body-panel markdown-body-panel--short">
+                <div className="markdown-body-panel markdown-body-panel--flow">
                   <MarkdownBody source={planText} />
                 </div>
                 <button
@@ -207,6 +283,119 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
               </div>
             )}
           </>
+        )}
+
+        {hasPlan && !planning && (
+          <div className="space-y-3 pt-1 border-t border-white/10">
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={openFeedback}
+                className={`btn-ghost text-xs px-3 py-1.5 disabled:opacity-40 ${
+                  feedbackOpen ? "border-[#92E4DD]/40 text-[#92E4DD]" : ""
+                }`}
+              >
+                Replan with feedback
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={toggleEditMode}
+                className={`btn-ghost text-xs px-3 py-1.5 disabled:opacity-40 ${
+                  editMode ? "border-[#92E4DD]/40 text-[#92E4DD]" : ""
+                }`}
+              >
+                Edit & replan / execute
+              </button>
+            </div>
+
+            {feedbackOpen && (
+              <div className="space-y-3 rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                <label htmlFor={`replan-feedback-${run.id}`} className="text-xs text-white/45 uppercase tracking-wide">
+                  What should change?
+                </label>
+                <textarea
+                  id={`replan-feedback-${run.id}`}
+                  className="field-mono min-h-[min(120px,18vh)] resize-y leading-relaxed w-full"
+                  value={replanFeedback}
+                  onChange={(e) => setReplanFeedback(e.target.value)}
+                  placeholder="Comments for the agent — e.g. use a simpler approach, add tests, skip step 2…"
+                  disabled={busy}
+                />
+                <PhaseConfigRow
+                  phase="Plan"
+                  runtime={runtime}
+                  model={planModel}
+                  onModelChange={setPlanModel}
+                  budget={planBudget}
+                  onBudgetChange={setPlanBudget}
+                  defaultModelId={agent?.defaultPlanModel}
+                  disabled={busy}
+                />
+                <button
+                  type="button"
+                  disabled={busy || !replanFeedback.trim()}
+                  onClick={() => requestReplan({ feedback: replanFeedback.trim() })}
+                  className="btn-gold px-4 py-2 text-sm disabled:opacity-40 w-full sm:w-auto"
+                >
+                  Replan
+                </button>
+              </div>
+            )}
+
+            {editMode && (
+              <div className="space-y-3 rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                <label htmlFor={`plan-edit-${run.id}`} className="text-xs text-white/45 uppercase tracking-wide">
+                  Edit plan markdown
+                </label>
+                <textarea
+                  id={`plan-edit-${run.id}`}
+                  className="field-mono min-h-[min(280px,35vh)] resize-y leading-relaxed w-full"
+                  value={editDraft}
+                  onChange={(e) => setEditDraft(e.target.value)}
+                  placeholder="Edit plan markdown"
+                  disabled={busy}
+                />
+                <PhaseConfigRow
+                  phase="Execution"
+                  runtime={runtime}
+                  model={executeModel}
+                  onModelChange={setExecuteModel}
+                  budget={executeBudget}
+                  onBudgetChange={setExecuteBudget}
+                  defaultModelId={agent?.defaultExecuteModel}
+                  disabled={busy}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={busy || !editDraft.trim()}
+                    onClick={() => void replanWithEdits()}
+                    className="btn-ghost text-xs px-3 py-1.5 disabled:opacity-40"
+                  >
+                    Replan
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || !editDraft.trim()}
+                    onClick={() => void executeWithEdits()}
+                    className="btn-gold px-4 py-2 text-sm disabled:opacity-40"
+                  >
+                    Execute
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={cancelEdit}
+                    className="btn-ghost text-xs px-3 py-1.5"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </section>
 
@@ -303,73 +492,6 @@ export default function PlanReviewPanel({ run, agents, onRefresh, onApproved, on
         </section>
       )}
 
-      {/* 4. Replan */}
-      {hasPlan && !planning && (
-        <CollapsibleSection title="Replan" open={replanOpen} onToggle={() => setReplanOpen((o) => !o)}>
-          <div className="space-y-3 pl-0.5">
-              <p className="text-sm text-white/45">Change plan model/budget or ask the agent to rewrite the plan.</p>
-              <PhaseConfigRow
-                phase="Plan"
-                runtime={runtime}
-                model={planModel}
-                onModelChange={setPlanModel}
-                budget={planBudget}
-                onBudgetChange={setPlanBudget}
-                defaultModelId={agent?.defaultPlanModel}
-                disabled={busy}
-              />
-              {editing ? (
-                <>
-                  <textarea
-                    className="field-mono min-h-[min(280px,35vh)] resize-y leading-relaxed w-full"
-                    value={planText}
-                    onChange={(e) => setPlanText(e.target.value)}
-                    placeholder="Edit plan markdown"
-                  />
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={busy || !planText.trim()}
-                      onClick={() => act(() => updatePlan(run.id, planText, false))}
-                      className="btn-ghost text-xs px-2 py-1 disabled:opacity-40"
-                    >
-                      Save edits
-                    </button>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => setEditing(false)}
-                      className="btn-ghost text-xs px-2 py-1"
-                    >
-                      Cancel edit
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => setEditing(true)}
-                    className="btn-ghost text-xs px-2 py-1 disabled:opacity-40"
-                  >
-                    Edit markdown
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => requestReplan()}
-                    className="btn-ghost text-xs px-2 py-1 disabled:opacity-40"
-                  >
-                    Ask agent to replan
-                  </button>
-                </div>
-              )}
-          </div>
-        </CollapsibleSection>
-      )}
-
-      {/* 5. More details */}
       {usageSummary && (
         <section className="border-t border-white/10 pt-3">
           <UsagePanel summary={usageSummary} />

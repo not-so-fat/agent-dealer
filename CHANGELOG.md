@@ -2,7 +2,26 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
-## Unreleased
+## 0.1.6 — 2026-07-08
+
+### Plan review UX
+
+- **Replan with feedback** — compact button under Plan review expands a comment box; agent revises from your notes (`draft-plan` accepts `feedback`)
+- **Edit & replan / execute** — direct markdown edit with **Replan**, **Execute**, or **Cancel** (cancel warns and reverts unsaved edits)
+- **Pipeline panels** — In Planning / In Progress ticket overlays use solid `#0F0F0C` so lists are readable over Review Plan
+- **Drawer scroll** — plan, result, done, and Q&A markdown panels flow in the main drawer scroll (no nested scroll traps)
+
+### CLI
+
+- **`agent-dealer upgrade`** — install a specific or latest published version (`--to`, `--yes`)
+- **Update check on start/doctor** — throttled npm registry check; optional prompt or `AGENT_DEALER_AUTO_UPGRADE=1`
+
+### Changed
+
+- **Result Q&A** — `cursor_local` runs can ask questions (ask mode + session resume fallback)
+- **API** — `POST /api/runs/:id/draft-plan` accepts optional `feedback` and `editedMarkdown` for guided replans
+
+## 0.1.5 — 2026-07-08
 
 ### Result Q&A (`docs/superpowers/specs/2026-07-07-result-qa-and-plan-delegation-design.md`)
 

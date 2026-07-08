@@ -11,7 +11,7 @@ const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID } = await import("@agent-dealer/shared");
 const { updateAgent } = await import("../repository/agents.js");
 const { addArtifact, createRun } = await import("../repository/runs.js");
-const { buildExecutionPrompt, buildPlanPrompt, buildPlanRevisePrompt, buildQaPrompt } =
+const { buildExecutionPrompt, buildPlanPrompt, buildPlanEditedReplanPrompt, buildPlanFeedbackPrompt, buildPlanRevisePrompt, buildQaPrompt } =
   await import("./prompts.js");
 
 const QUESTIONS = [
@@ -95,6 +95,20 @@ test("execution prompt omits answers section when none exist", () => {
   const run = makeRun();
   addArtifact(run.id, "approved_plan", { markdown: "# Plan" }, "human");
   assert.doesNotMatch(buildExecutionPrompt(run), /Human answers to plan questions/);
+});
+
+test("feedback replan prompt includes human comments and contract", () => {
+  const run = makeRun();
+  const prompt = buildPlanFeedbackPrompt(run, "Add integration tests and skip the migration step.");
+  assert.match(prompt, /Add integration tests/);
+  assert.match(prompt, /"verdict"/);
+});
+
+test("edited replan prompt includes human-edited markdown", () => {
+  const run = makeRun();
+  const prompt = buildPlanEditedReplanPrompt(run, "# Revised plan\n\n1. Ship feature");
+  assert.match(prompt, /Revised plan/);
+  assert.match(prompt, /Ship feature/);
 });
 
 test("revise prompt pairs each answer with its question and re-states the contract", () => {

@@ -199,7 +199,8 @@ export async function updatePlan(
 export async function draftPlan(
   id: string,
   planModel?: string | null,
-  planBudget?: PhaseBudget | null
+  planBudget?: PhaseBudget | null,
+  opts?: { feedback?: string; editedMarkdown?: string }
 ): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/draft-plan`, {
     method: "POST",
@@ -207,6 +208,8 @@ export async function draftPlan(
     body: JSON.stringify({
       ...(planModel !== undefined ? { planModel } : {}),
       ...(planBudget !== undefined ? { planBudget } : {}),
+      ...(opts?.feedback !== undefined ? { feedback: opts.feedback } : {}),
+      ...(opts?.editedMarkdown !== undefined ? { editedMarkdown: opts.editedMarkdown } : {}),
     }),
   });
   if (!res.ok) throw new Error(await res.text());

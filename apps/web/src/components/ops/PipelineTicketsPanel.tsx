@@ -31,7 +31,7 @@ export default function PipelineTicketsPanel({
 }: Props) {
   return (
     <section
-      className={`absolute inset-0 z-10 flex flex-col min-h-0 glass-column rounded-xl overflow-hidden border-t-2 ${accent} bg-[#0A0A07]/95`}
+      className={`absolute inset-0 z-10 flex flex-col min-h-0 rounded-xl overflow-hidden border border-white/10 border-t-2 ${accent} bg-[#0F0F0C] shadow-2xl`}
     >
       <header className="px-4 pt-3 pb-2.5 border-b border-white/[0.06] shrink-0 flex items-center justify-between gap-3">
         <h2 className={`heading-column ${titleAccent}`}>{title}</h2>

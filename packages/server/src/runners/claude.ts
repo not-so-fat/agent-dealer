@@ -91,10 +91,15 @@ export async function runClaude(
 
 export async function runCursor(
   run: Run,
-  mode: "execute" | "plan" = "execute",
-  model?: string
+  mode: "execute" | "plan" | "qa" = "execute",
+  model?: string,
+  opts?: { promptOverride?: string; resumeSessionId?: string }
 ): Promise<RunnerResult> {
-  const prompt = mode === "plan" ? buildPlanPrompt(run) : buildExecutionPrompt(run);
+  if (mode === "qa" && !opts?.promptOverride) {
+    throw new Error("qa mode requires a promptOverride");
+  }
+  const prompt =
+    opts?.promptOverride ?? (mode === "plan" ? buildPlanPrompt(run) : buildExecutionPrompt(run));
   const logPath = logPathFor(run, mode);
 
   const args = [
@@ -104,6 +109,8 @@ export async function runCursor(
     "--output-format",
     "stream-json",
     "--stream-partial-output",
+    ...(mode === "qa" ? ["--mode", "ask"] : []),
+    ...(opts?.resumeSessionId ? ["--resume", opts.resumeSessionId] : []),
     ...(model ? ["--model", model] : []),
     prompt,
   ];

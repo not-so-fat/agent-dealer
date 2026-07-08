@@ -370,6 +370,10 @@ body {
   @apply min-h-0 max-h-48 py-2.5;
 }
 
+.markdown-body-panel--flow {
+  @apply min-h-0 max-h-none overflow-visible;
+}
+
 .markdown-body-panel--short {
   @apply min-h-0 max-h-[min(280px,35vh)] py-2.5;
 }

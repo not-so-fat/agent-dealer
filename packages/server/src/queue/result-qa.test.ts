@@ -159,9 +159,9 @@ test("unknown run returns 404", () => {
   assert.equal(!res.ok && res.code, 404);
 });
 
-test("non-claude runtime returns 409", () => {
+test("cursor runtime is allowed", () => {
   const run = seedReviewRun({ session: "sess-exec" });
   updateRunFields(run.id, { runtime: "cursor_local" });
   const res = askResultQuestion(run.id, "Why?", { runner: async () => ({ ok: true, answer: "x", usage: USAGE }) });
-  assert.equal(!res.ok && res.code, 409);
+  assert.equal(res.ok, true);
 });

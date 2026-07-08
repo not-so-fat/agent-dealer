@@ -342,7 +342,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     try {
       assertAgentConfigured(getRun(id)!);
-      const scheduled = scheduleRedraft(getRun(id)!);
+      const scheduled = scheduleRedraft(getRun(id)!, {
+        feedback: input.feedback,
+        editedMarkdown: input.editedMarkdown,
+      });
       if (!scheduled) {
         return reply.status(409).send({ error: "Plan draft already in progress" });
       }

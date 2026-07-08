@@ -1,6 +1,6 @@
 import type { Run, UsageContent } from "@agent-dealer/shared";
 import { QA_PHASE_BUDGET } from "@agent-dealer/shared";
-import { runClaude } from "./claude.js";
+import { runClaude, runCursor, type RunnerResult } from "./claude.js";
 import { buildQaPrompt } from "./prompts.js";
 import { extractResultIsError, extractResultText, extractUsage, parseNdjson } from "./stream-json.js";
 
@@ -17,13 +17,30 @@ export async function runQa(
   question: string,
   resumeSessionId: string | null
 ): Promise<QaRunResult> {
-  const result = await runClaude(run, "qa", run.executeModel ?? undefined, {
-    promptOverride: buildQaPrompt(run, question, { grounded: Boolean(resumeSessionId) }),
-    ...(resumeSessionId ? { resumeSessionId } : {}),
-  });
+  let result: RunnerResult;
+  const runtime = run.runtime ?? "claude_code";
+  const executeModel = run.executeModel ?? undefined;
+  if (runtime === "cursor_local") {
+    const prompt = buildQaPrompt(run, question, { grounded: Boolean(resumeSessionId) });
+    result = await runCursor(run, "qa", executeModel, {
+      promptOverride: prompt,
+      ...(resumeSessionId ? { resumeSessionId } : {}),
+    });
+    // Resume can fail when the local Cursor chat has expired. Retry ungrounded from artifacts.
+    if (result.exitCode !== 0 && resumeSessionId) {
+      result = await runCursor(run, "qa", executeModel, {
+        promptOverride: buildQaPrompt(run, question, { grounded: false }),
+      });
+    }
+  } else {
+    result = await runClaude(run, "qa", executeModel, {
+      promptOverride: buildQaPrompt(run, question, { grounded: Boolean(resumeSessionId) }),
+      ...(resumeSessionId ? { resumeSessionId } : {}),
+    });
+  }
 
   const events = parseNdjson(result.transcript);
-  const usage = extractUsage(events, "qa", "claude_code");
+  const usage = extractUsage(events, "qa", runtime);
   usage.maxTurns = QA_PHASE_BUDGET.maxTurns;
   usage.maxBudgetUsd = QA_PHASE_BUDGET.maxBudgetUsd;
 

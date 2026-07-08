@@ -15,6 +15,7 @@ export type AskQuestionResult =
   | { ok: false; code: 400 | 404 | 409; error: string };
 
 const ASKABLE_STATUSES = new Set(["review", "done"]);
+const QA_RUNTIMES = new Set(["claude_code", "cursor_local"]);
 
 /** Ask the run's agent about its finished result. Read-only; never changes run status. */
 export function askResultQuestion(
@@ -33,8 +34,9 @@ export function askResultQuestion(
   if (!ASKABLE_STATUSES.has(run.status)) {
     return { ok: false, code: 409, error: `Can only ask about a finished result — run is ${run.status}` };
   }
-  if ((run.runtime ?? "claude_code") !== "claude_code") {
-    return { ok: false, code: 409, error: "Q&A requires the claude_code runtime" };
+  const runtime = run.runtime ?? "claude_code";
+  if (!QA_RUNTIMES.has(runtime)) {
+    return { ok: false, code: 409, error: `Q&A is unsupported for runtime ${runtime}` };
   }
   // The pending check and the insert below must stay in one synchronous block: every
   // call here is sync (better-sqlite3), so no other request can interleave between them.

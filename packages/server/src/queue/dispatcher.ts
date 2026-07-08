@@ -8,7 +8,11 @@ import type {
   RunStatus,
 } from "@agent-dealer/shared";
 import { planGateDecision } from "@agent-dealer/shared";
-import { buildPlanRevisePrompt } from "../runners/prompts.js";
+import {
+  buildPlanEditedReplanPrompt,
+  buildPlanFeedbackPrompt,
+  buildPlanRevisePrompt,
+} from "../runners/prompts.js";
 import {
   addArtifact,
   countByStatus,
@@ -510,13 +514,39 @@ function scheduleRevisePlan(run: Run, triage: PlanTriageContent, answers: PlanAn
 }
 
 /** Fire-and-forget: human requested a new agent plan (replaces draft). */
-export function scheduleRedraft(run: Run): boolean {
+export function scheduleRedraft(
+  run: Run,
+  opts?: { feedback?: string; editedMarkdown?: string }
+): boolean {
   if (activePlanDrafts.has(run.id)) return false;
   if (run.status !== "plan_pending" && run.status !== "queued") return false;
   if (!run.runtime) return false;
 
+  const feedback = opts?.feedback?.trim();
+  const editedMarkdown = opts?.editedMarkdown?.trim();
+  let revise: { resumeSessionId?: string; prompt: string } | undefined;
+  if (editedMarkdown) {
+    const draft = getLatestArtifact(run.id, "draft_plan");
+    const sessionId = draft?.contentJson
+      ? (JSON.parse(draft.contentJson) as PlanContent).sessionId
+      : undefined;
+    revise = {
+      resumeSessionId: sessionId,
+      prompt: buildPlanEditedReplanPrompt(run, editedMarkdown),
+    };
+  } else if (feedback) {
+    const draft = getLatestArtifact(run.id, "draft_plan");
+    const sessionId = draft?.contentJson
+      ? (JSON.parse(draft.contentJson) as PlanContent).sessionId
+      : undefined;
+    revise = {
+      resumeSessionId: sessionId,
+      prompt: buildPlanFeedbackPrompt(run, feedback),
+    };
+  }
+
   activePlanDrafts.add(run.id);
-  void draftPlan(run, { replace: true })
+  void draftPlan(run, { replace: true, ...(revise ? { revise } : {}) })
     .catch((e) => console.error("[plan-redraft]", run.id, e))
     .finally(() => {
       activePlanDrafts.delete(run.id);
