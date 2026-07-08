@@ -2,6 +2,12 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
+## 0.1.7 — 2026-07-08
+
+### Fixed
+
+- **Cursor CLI** — resolve and invoke `cursor-agent` directly (`cursor-agent login`, `-p`, `--list-models`, `status`). Fixes `cursor_local` on machines that only have the standalone CLI from `cursor.com/install`, without the editor's `cursor agent` shim.
+
 ## 0.1.6 — 2026-07-08
 
 ### Plan review UX
