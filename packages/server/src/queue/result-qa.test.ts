@@ -12,7 +12,7 @@ const { BUILTIN_AGENT_CLAUDE_ID } = await import("@agent-dealer/shared");
 const { updateAgent } = await import("../repository/agents.js");
 const { addArtifact, createRun, getLatestArtifact, getRun, transitionRun, updateRunFields } =
   await import("../repository/runs.js");
-const { listQaExchanges } = await import("../repository/result-qa.js");
+const { listQaExchanges, hasPendingQaExchange } = await import("../repository/result-qa.js");
 const { askResultQuestion } = await import("./result-qa.js");
 
 const USAGE = { phase: "qa" as const, runtime: "claude_code" as const, totalCostUsd: 0.02 };
@@ -128,6 +128,30 @@ test("asking a running run returns 409", () => {
   transitionRun(run.id, "running");
   const res = askResultQuestion(run.id, "Why?", { runner: async () => ({ ok: true, answer: "x", usage: USAGE }) });
   assert.equal(!res.ok && res.code, 409);
+});
+
+test("whitespace-only question is rejected before spending anything", async () => {
+  const run = seedReviewRun({ session: "sess-exec" });
+  let runnerCalled = false;
+  const res = askResultQuestion(run.id, "   ", {
+    runner: async () => { runnerCalled = true; return { ok: true, answer: "x", usage: USAGE }; },
+  });
+  assert.equal(!res.ok && res.code, 400);
+  await settle();
+  assert.equal(runnerCalled, false, "no paid agent call");
+  assert.equal(listQaExchanges(run.id).length, 0, "no artifact persisted");
+  assert.equal(hasPendingQaExchange(run.id), false, "pending lock not corrupted");
+});
+
+test("a persisted exchange always round-trips through the content schema", async () => {
+  const run = seedReviewRun({ session: "sess-exec" });
+  askResultQuestion(run.id, "  Why SQLite?  ", {
+    runner: async () => ({ ok: true, answer: "Single-process.", usage: USAGE }),
+  });
+  await settle();
+  const thread = listQaExchanges(run.id);
+  assert.equal(thread.length, 1, "exchange is visible, i.e. it parsed");
+  assert.equal(thread[0].question, "Why SQLite?", "stored trimmed");
 });
 
 test("unknown run returns 404", () => {

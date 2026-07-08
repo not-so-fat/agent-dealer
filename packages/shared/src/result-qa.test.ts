@@ -39,6 +39,18 @@ test("question over 2000 chars is rejected", () => {
   assert.throws(() => ResultQaInput.parse({ question: "x".repeat(2001) }));
 });
 
+test("whitespace-only question is rejected, not silently emptied", () => {
+  assert.throws(() => ResultQaInput.parse({ question: "   " }));
+  assert.throws(() => ResultQaInput.parse({ question: "\n\t " }));
+});
+
+test("question is trimmed before length checks", () => {
+  assert.equal(ResultQaInput.parse({ question: "  Why SQLite?  " }).question, "Why SQLite?");
+  // 2000 real chars plus padding still fits once trimmed
+  const padded = `  ${"x".repeat(2000)}  `;
+  assert.equal(ResultQaInput.parse({ question: padded }).question.length, 2000);
+});
+
 test("QA budget is the fixed v1 cap", () => {
   assert.deepEqual(QA_PHASE_BUDGET, { maxTurns: 6, maxBudgetUsd: 0.25 });
 });

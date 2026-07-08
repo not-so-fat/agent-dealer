@@ -17,9 +17,9 @@ export const ResultQaContent = z.object({
 });
 export type ResultQaContent = z.infer<typeof ResultQaContent>;
 
-/** POST /api/runs/:id/qa body. */
+/** POST /api/runs/:id/qa body. Trims first: a whitespace-only question must not reach a paid run. */
 export const ResultQaInput = z.object({
-  question: z.string().min(1).max(2000),
+  question: z.string().trim().min(1).max(2000),
 });
 export type ResultQaInput = z.infer<typeof ResultQaInput>;
 

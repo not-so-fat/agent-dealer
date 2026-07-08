@@ -433,7 +433,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     } catch (e) {
       return reply.status(400).send({ error: String(e) });
     }
-    const result = askResultQuestion(id, input.question.trim());
+    const result = askResultQuestion(id, input.question);
     if (!result.ok) return reply.status(result.code).send({ error: result.error });
     return reply.status(202).send({ exchange: result.exchange });
   });
