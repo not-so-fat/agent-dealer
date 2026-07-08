@@ -25,6 +25,22 @@ import { clearCachedRuntimeModels, fetchRuntimeModelsDeduped } from "./lib/runti
 
 const API = "";
 
+type RunEvent = { type: string; payloadJson?: string | null };
+
+async function readApiError(res: Response): Promise<string> {
+  const text = await res.text();
+  try {
+    const json = JSON.parse(text) as { error?: string; message?: string };
+    const raw = json.error ?? json.message;
+    if (typeof raw === "string" && raw.trim()) {
+      return raw.replace(/^Error:\s*/i, "");
+    }
+  } catch {
+    // not json
+  }
+  return text;
+}
+
 export async function fetchSnapshot(): Promise<QueueSnapshot> {
   const res = await fetch(`${API}/api/snapshot`);
   if (!res.ok) throw new Error("Failed to fetch snapshot");
@@ -34,6 +50,7 @@ export async function fetchSnapshot(): Promise<QueueSnapshot> {
 export async function fetchRunDetail(id: string): Promise<{
   run: Run;
   artifacts: Artifact[];
+  events?: RunEvent[];
   usageSummary?: UsageSummary;
   traceSummary?: StreamTraceContent;
 }> {
@@ -245,7 +262,7 @@ export async function submitPlanAnswers(
 
 export async function approveRun(id: string): Promise<Run> {
   const res = await fetch(`${API}/api/runs/${id}/approve`, { method: "POST" });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
 }
 

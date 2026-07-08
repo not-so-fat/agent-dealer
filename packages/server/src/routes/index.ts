@@ -52,6 +52,8 @@ import {
   submitPlanAnswers,
   subscribe,
 } from "../queue/dispatcher.js";
+import { approveRunWithDeliver } from "../queue/approve-deliver.js";
+import { rejectPendingOutboundDrafts } from "../repository/outbound-drafts.js";
 import { fetchAgentDeckDecks, updatePlaybookBody } from "../adapters/agent-deck.js";
 import { testAgentDeckConnection } from "../adapters/agent-deck.js";
 import {
@@ -469,15 +471,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/api/runs/:id/approve", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const run = getRun(id);
-    if (!run) return reply.status(404).send({ error: "Not found" });
-    if (run.status !== "review") {
-      return reply.status(400).send({ error: "Run must be in review" });
+    const result = await approveRunWithDeliver(id);
+    if (!result.ok) {
+      return reply.status(result.code).send({ error: result.error });
     }
-    const updated = transitionRun(id, "done");
-    syncLinearForRun(updated, "done").catch((e) => console.error("[linear-sync] done:", e));
-    scheduleReflect(updated, { trigger: "approve" });
-    return updated;
+    return result.run;
   });
 
   app.post("/api/runs/:id/retry", async (req, reply) => {
@@ -495,6 +493,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     const input = RetryRunInput.parse(req.body);
     addArtifact(id, "feedback", { markdown: input.feedback }, "human");
+    rejectPendingOutboundDrafts(id);
 
     const retry = createRun(
       {

@@ -206,6 +206,7 @@ export default function App() {
             runs={snapshot?.runs ?? []}
             selectedRunId={selectedRun?.id ?? null}
             onSelectRun={setSelectedRun}
+            sentRunIds={snapshot?.sentRunIds ?? []}
           />
         )}
       </main>

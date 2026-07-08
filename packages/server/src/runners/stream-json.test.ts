@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractPlanTriage } from "./stream-json.js";
+import { extractPlanTriage, extractOutboundDraft } from "./stream-json.js";
 
 const PLAN = "# Plan\n1. Do the thing\n2. Verify";
 
@@ -62,4 +62,48 @@ test("valid json block that is not a triage shape falls back and strips the fenc
   const r = extractPlanTriage(`${PLAN}\n\n\`\`\`json\n{"foo":"bar"}\n\`\`\``);
   assert.equal(r.parseFallback, true);
   assert.equal(r.markdown, PLAN);
+});
+
+const VALID_DRAFT = {
+  actionType: "slack_message",
+  summary: { target: "#test", body: "Hello" },
+  toolCall: {
+    serviceName: "svc-1",
+    toolName: "chat_postMessage",
+    arguments: { channel: "C1", text: "Hello" },
+  },
+};
+
+const DRAFT_BLOCK = [
+  "```json",
+  JSON.stringify(VALID_DRAFT),
+  "```",
+].join("\n");
+
+test("extractOutboundDraft parses valid block and strips markdown", () => {
+  const r = extractOutboundDraft(`Done.\n\n${DRAFT_BLOCK}`);
+  assert.equal(r.invalid, false);
+  assert.equal(r.draft?.actionType, "slack_message");
+  assert.equal(r.markdown, "Done.");
+});
+
+test("extractOutboundDraft absent block leaves markdown", () => {
+  const r = extractOutboundDraft("plain result");
+  assert.equal(r.hadJsonBlock, false);
+  assert.equal(r.markdown, "plain result");
+});
+
+test("extractOutboundDraft malformed json marks invalid", () => {
+  const r = extractOutboundDraft(`x\n\n\`\`\`json\n{bad}\n\`\`\``);
+  assert.equal(r.invalid, true);
+});
+
+test("extractOutboundDraft detects body mismatch", () => {
+  const bad = {
+    ...VALID_DRAFT,
+    toolCall: { ...VALID_DRAFT.toolCall, arguments: { channel: "C1", text: "Other" } },
+  };
+  const r = extractOutboundDraft(`\`\`\`json\n${JSON.stringify(bad)}\n\`\`\``);
+  assert.equal(r.mismatch, true);
+  assert.ok(r.draft);
 });

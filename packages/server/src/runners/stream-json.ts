@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import { PlanTriageBlock } from "@agent-dealer/shared";
-import type { PlanQuestion, RunPhase, Runtime, StreamTraceEntry, UsageContent } from "@agent-dealer/shared";
+import { OutboundDraftBlock, outboundMessageMatchesSummary, PlanTriageBlock } from "@agent-dealer/shared";
+import type { OutboundDraftBlock as OutboundDraftBlockType, PlanQuestion, RunPhase, Runtime, StreamTraceEntry, UsageContent } from "@agent-dealer/shared";
 
 type StreamEvent = Record<string, unknown>;
 
@@ -101,6 +101,39 @@ export function extractPlanTriage(planMarkdown: string): PlanTriageExtraction {
     };
   } catch {
     return { markdown: strippedMarkdown, ...TRIAGE_FALLBACK };
+  }
+}
+
+export interface OutboundDraftExtraction {
+  markdown: string;
+  draft?: OutboundDraftBlockType;
+  hadJsonBlock: boolean;
+  invalid: boolean;
+  mismatch: boolean;
+}
+
+/** Parse the trailing fenced json outbound draft block from execute result (PRD F2.2). */
+export function extractOutboundDraft(resultMarkdown: string): OutboundDraftExtraction {
+  const blocks = [...resultMarkdown.matchAll(/```json\s*\n([\s\S]*?)\n```/g)];
+  const last = blocks[blocks.length - 1];
+  if (!last) {
+    return { markdown: resultMarkdown.trim(), hadJsonBlock: false, invalid: false, mismatch: false };
+  }
+  const strippedMarkdown = (
+    resultMarkdown.slice(0, last.index) + resultMarkdown.slice(last.index! + last[0].length)
+  ).trim();
+  try {
+    const parsed = OutboundDraftBlock.parse(JSON.parse(last[1]));
+    const mismatch = !outboundMessageMatchesSummary(parsed.toolCall, parsed.summary.body);
+    return {
+      markdown: strippedMarkdown,
+      draft: parsed,
+      hadJsonBlock: true,
+      invalid: false,
+      mismatch,
+    };
+  } catch {
+    return { markdown: strippedMarkdown, hadJsonBlock: true, invalid: true, mismatch: false };
   }
 }
 

@@ -29,6 +29,7 @@ type Snapshot = {
   resultReviewRuns: Run[];
   awaitingAnswerRuns: Run[];
   openQuestionCounts: Record<string, number>;
+  pendingSendCounts: Record<string, number>;
   autoApprovedRunIds: string[];
 };
 
@@ -65,7 +66,9 @@ async function main(): Promise<void> {
   assert(Array.isArray(snapshot.awaitingAnswerRuns), "snapshot.awaitingAnswerRuns");
   assert(typeof snapshot.openQuestionCounts === "object" && snapshot.openQuestionCounts !== null, "snapshot.openQuestionCounts");
   assert(Array.isArray(snapshot.autoApprovedRunIds), "snapshot.autoApprovedRunIds");
+  assert(typeof snapshot.pendingSendCounts === "object" && snapshot.pendingSendCounts !== null, "snapshot.pendingSendCounts");
   ok("Snapshot has plan-questions fields");
+  ok("Snapshot has send-gate pendingSendCounts");
 
   const inbox = await req("GET", "/api/intake/linear");
   assert(inbox.status === 200, "intake linear");

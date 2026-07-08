@@ -48,6 +48,22 @@ function artifactMarkdown(kind: ArtifactKind, runId: string): string {
   }
 }
 
+function outboundDraftContractSection(): string {
+  return [
+    "## Outbound actions (required when sending Slack or email)",
+    "Do NOT send Slack messages, post to chat, or send email during execution — call_service_tool is blocked.",
+    "If the task requires an outward-facing message, end your reply with exactly one fenced ```json block shaped like:",
+    '{"actionType":"slack_message"|"email","summary":{"target":"#channel or recipient","body":"exact message text"},"toolCall":{"serviceName":"<deck service UUID>","toolName":"<tool from list_service_tools>","arguments":{...}}}',
+    "Rules:",
+    "- At most one outbound draft block per run.",
+    "- Call bind_workspace, then get_bound_deck and list_service_tools — never invent a service UUID or tool name.",
+    "- toolCall.serviceName must be the exact Slack/email service id from the bound deck (not a display name).",
+    "- Slack: toolName is slack_send_message; arguments.channel_id is the user or channel id from slack_search_users (never guess IDs from meeting notes); arguments.message must byte-match summary.body.",
+    "- Email: use the real tool name and message field from list_service_tools; message body must byte-match summary.body.",
+    "- Do not perform the send — the human approves and the server delivers verbatim.",
+  ].join("\n");
+}
+
 export function buildExecutionContinuationPrompt(run: Run): string {
   const ctx = retryContext(run);
   const parts = [
@@ -77,6 +93,7 @@ export function buildExecutionContinuationPrompt(run: Run): string {
     }
   }
 
+  parts.push(outboundDraftContractSection());
   return parts.join("\n");
 }
 
@@ -133,6 +150,7 @@ export function buildExecutionPrompt(run: Run): string {
     }
   }
 
+  parts.push(outboundDraftContractSection());
   return parts.join("\n");
 }
 
@@ -189,16 +207,33 @@ export function buildReflectPrompt(
   return parts.join("\n");
 }
 
-function planTriageContractSection(): string {
-  return [
+function hasOutboundSendGate(category: Run["taskCategory"]): boolean {
+  return category === "communication" || category === "email";
+}
+
+function planTriageContractSection(taskCategory: Run["taskCategory"] = "other"): string {
+  const sendGate = hasOutboundSendGate(taskCategory);
+  const rules = [
     "## Required final JSON block",
     "After the plan markdown, end your reply with exactly one fenced ```json block shaped like:",
     '{"verdict":"trivial"|"needs_review","rationale":"one sentence","questions":[{"id":"q1","question":"...","options":[{"label":"...","description":"..."}]}]}',
     "Rules:",
-    '- "trivial" means this plan is safe to execute without human review; it requires an empty questions array. When in doubt, use "needs_review".',
-    "- Ask at most 3 questions, and only when the answer changes how you would execute. Never ask permission to proceed.",
-    "- Each question needs 2-4 concrete options; give each option a short description.",
-  ].join("\n");
+    sendGate
+      ? '- "trivial" means safe to execute without human plan review; it requires an empty questions array. Use "trivial" when the task names recipient and message (or execution steps are obvious). The send gate reviews the exact payload before anything is sent.'
+      : '- "trivial" means this plan is safe to execute without human review; it requires an empty questions array. When in doubt, use "needs_review".',
+  ];
+  if (sendGate) {
+    rules.push(
+      "- Do not ask plan questions about recipient, channel, or message wording — those are confirmed when the human approves the outbound draft.",
+      "- Ask at most 3 questions, and only when a missing decision would change how you execute (not send approval). Never ask permission to proceed."
+    );
+  } else {
+    rules.push(
+      "- Ask at most 3 questions, and only when the answer changes how you would execute. Never ask permission to proceed."
+    );
+  }
+  rules.push("- Each question needs 2-4 concrete options; give each option a short description.");
+  return rules.join("\n");
 }
 
 function planAnswersSections(run: Run): string[] {
@@ -239,7 +274,7 @@ export function buildPlanRevisePrompt(
     "## Answers",
     ...qa,
     "",
-    planTriageContractSection(),
+    planTriageContractSection(run.taskCategory),
   ].join("\n");
 }
 
@@ -273,7 +308,21 @@ export function buildPlanPrompt(run: Run): string {
     );
   }
 
-  parts.push(`Output a step-by-step plan with risks.`, ``, planTriageContractSection());
+  if (hasOutboundSendGate(run.taskCategory)) {
+    parts.push(
+      `## Outbound send gate`,
+      `Execution drafts the Slack/email payload; the human approves the exact message before send.`,
+      `If the task text names who to message and what to say (or the intent is obvious), plan for verdict "trivial" with no questions.`,
+      ``
+    );
+    parts.push(
+      `Output a brief bullet plan (3–5 steps). Skip a risks section unless execution is blocked.`,
+      ``,
+      planTriageContractSection(run.taskCategory)
+    );
+  } else {
+    parts.push(`Output a step-by-step plan with risks.`, ``, planTriageContractSection(run.taskCategory));
+  }
 
   return parts.join("\n");
 }

@@ -94,15 +94,26 @@ export default function OperationsPage({ snapshot, selectedRunId, onSelectRun }:
               isEmpty={resultReview.length === 0}
               empty={<p className="text-sm text-white/45 py-4 text-center">Nothing awaiting sign-off</p>}
             >
-              {resultReview.map((run) => (
-                <RunCard
-                  key={run.id}
-                  run={run}
-                  selected={selectedRunId === run.id}
-                  onSelect={() => onSelectRun(run)}
-                  hideStatusBadge={run.status === "review"}
-                />
-              ))}
+              {resultReview.map((run) => {
+                const willSend = (snapshot?.pendingSendCounts ?? {})[run.id];
+                return (
+                  <RunCard
+                    key={run.id}
+                    run={run}
+                    selected={selectedRunId === run.id}
+                    onSelect={() => onSelectRun(run)}
+                    hideStatusBadge={run.status === "review"}
+                    extraBadge={
+                      willSend
+                        ? {
+                            label: "will send on approve",
+                            className: "bg-[#C4B643]/15 text-[#E8DC7A] border-[#C4B643]/35",
+                          }
+                        : undefined
+                    }
+                  />
+                );
+              })}
             </KanbanColumn>
             {pipelinePanel === "progress" && (
               <PipelineTicketsPanel

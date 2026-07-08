@@ -8,6 +8,7 @@ export * from "./agents.js";
 export * from "./budget.js";
 export * from "./execution.js";
 export * from "./plan-triage.js";
+export * from "./outbound-draft.js";
 
 export const RunStatus = z.enum([
   "queued",
@@ -54,6 +55,7 @@ export const ArtifactKind = z.enum([
   "playbook_patch",
   "reflect_status",
   "linear_sync",
+  "send_receipt",
 ]);
 export type ArtifactKind = z.infer<typeof ArtifactKind>;
 
@@ -411,6 +413,8 @@ export const QueueSnapshot = z.object({
   awaitingPlanReview: z.array(Run),
   awaitingAnswerRuns: z.array(Run),
   openQuestionCounts: z.record(z.string(), z.number()),
+  pendingSendCounts: z.record(z.string(), z.number()),
+  sentRunIds: z.array(z.string()).optional(),
   autoApprovedRunIds: z.array(z.string()),
   runs: z.array(Run),
   agentDeckOnline: z.boolean(),

@@ -13,11 +13,15 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const logDir = path.join(root, ".temporal/logs");
 const logPath = path.join(logDir, "poc-integration.log");
 
-const scripts: Array<{ name: string; args?: string[] }> = [
+const scripts: Array<{ name: string; args?: string[]; skip?: () => boolean }> = [
   { name: "linear-inbox.ts" },
   { name: "agent-deck-decks.ts" },
   { name: "claude-minimal.ts" },
   { name: "cursor-agent-probe.ts", args: ["--quick"] },
+  {
+    name: "agent-deck-send.ts",
+    skip: () => !process.env.SEND_POC_SERVICE_ID || !process.env.SEND_POC_CHANNEL,
+  },
 ];
 
 async function runScript(name: string, extraArgs: string[] = []): Promise<number> {
@@ -47,6 +51,10 @@ async function main(): Promise<void> {
 
   let failed = 0;
   for (const s of scripts) {
+    if (s.skip?.()) {
+      console.log(`\n--- ${s.name} --- SKIP (env not set)`);
+      continue;
+    }
     console.log(`\n--- ${s.name} ---`);
     const code = await runScript(s.name, s.args);
     if (code !== 0) failed++;

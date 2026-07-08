@@ -14,10 +14,11 @@ type Props = {
   run: Run;
   selected?: boolean;
   onSelect: () => void;
+  sent?: boolean;
 };
 
 /** Wide audit row — source, title, agent, meta, time on one line. */
-export default function DoneRunRow({ run, selected, onSelect }: Props) {
+export default function DoneRunRow({ run, selected, onSelect, sent }: Props) {
   const deck = deckLabel(run);
   const ts = run.updatedAt;
 
@@ -49,8 +50,13 @@ export default function DoneRunRow({ run, selected, onSelect }: Props) {
         </div>
 
         <div className="min-w-0 md:col-start-2">
-          <p className="font-semibold text-[#E8F6F4] leading-snug truncate" title={run.title}>
-            {run.title}
+          <p className="font-semibold text-[#E8F6F4] leading-snug truncate flex items-center gap-2" title={run.title}>
+            <span className="truncate">{run.title}</span>
+            {sent && (
+              <Badge className="bg-[#C4B643]/15 text-[#E8DC7A] border-[#C4B643]/35 shrink-0 normal-case text-[10px]">
+                sent
+              </Badge>
+            )}
           </p>
           {run.description && (
             <p className="text-xs text-white/40 truncate mt-0.5" title={run.description}>

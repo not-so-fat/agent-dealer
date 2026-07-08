@@ -26,6 +26,7 @@ import { persistRunOutput, seedDeliverableFromParent } from "../runners/persist.
 import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
 import { pollLinearIssues } from "../adapters/external.js";
 import { syncLinearForRun } from "../adapters/linear-sync.js";
+import { pendingSendCount } from "../repository/outbound-drafts.js";
 import { listAgentsWithHealth } from "../adapters/agent-health.js";
 import { listAgents } from "../repository/agents.js";
 import { runReflect, type ReflectOpts } from "../runners/reflect.js";
@@ -46,6 +47,8 @@ export interface QueueSnapshotInternal {
   awaitingPlanReview: Run[];
   awaitingAnswerRuns: Run[];
   openQuestionCounts: Record<string, number>;
+  pendingSendCounts: Record<string, number>;
+  sentRunIds: string[];
   autoApprovedRunIds: string[];
   runs: Run[];
   agentDeckOnline: boolean;
@@ -135,8 +138,16 @@ export function getSnapshot(): QueueSnapshotInternal {
     if (n > 0) openQuestionCounts[run.id] = n;
   }
   const awaitingAnswerRuns = awaitingPlanReview.filter((r) => openQuestionCounts[r.id]);
+  const pendingSendCounts: Record<string, number> = {};
+  for (const run of resultReviewRuns) {
+    const n = pendingSendCount(run.id);
+    if (n > 0) pendingSendCounts[run.id] = n;
+  }
   const autoApprovedRunIds = [...waitingExecution, ...runningRuns]
     .filter((r) => getLatestArtifact(r.id, "approved_plan")?.author === "system")
+    .map((r) => r.id);
+  const sentRunIds = recentDone
+    .filter((r) => getLatestArtifact(r.id, "send_receipt"))
     .map((r) => r.id);
 
   return {
@@ -152,6 +163,8 @@ export function getSnapshot(): QueueSnapshotInternal {
     awaitingPlanReview,
     awaitingAnswerRuns,
     openQuestionCounts,
+    pendingSendCounts,
+    sentRunIds,
     autoApprovedRunIds,
     runs: all,
     agentDeckOnline: false,

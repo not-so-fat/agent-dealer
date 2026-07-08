@@ -4,10 +4,11 @@ import path from "node:path";
 import type { Run } from "@agent-dealer/shared";
 import { buildExecutionPrompt, buildExecutionContinuationPrompt, buildPlanPrompt, buildReflectPrompt, workspaceForRun } from "./prompts.js";
 import { humanFeedbackText, lineageParentExecuteSessionId } from "./run-context.js";
-import { getTemporalLogsDir, getTemporalOutputDir } from "../paths.js";
+import { getTemporalLogsDir } from "../paths.js";
 import { resolveClaudeBin, resolveCursorBin } from "../cli-env.js";
 import { resolveBudgetForPhase, resolveModelForPhase, getRun } from "../repository/runs.js";
 import { budgetCliArgs } from "@agent-dealer/shared";
+import { buildClaudePhaseArgs } from "./claude-args.js";
 
 export interface RunnerResult {
   exitCode: number;
@@ -76,29 +77,8 @@ export async function runClaude(
     "--mcp-config",
     mcpConfig,
     ...budgetCliArgs(phaseBudget),
-    "--output-format",
-    "stream-json",
-    "--verbose",
+    ...buildClaudePhaseArgs(run, mode),
   ];
-
-  if (mode === "plan") {
-    args.push(
-      "--allowedTools",
-      "Read,Glob,Grep,Skill,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace"
-    );
-  } else if (mode === "reflect") {
-    args.push(
-      "--allowedTools",
-      "Read,Glob,Grep,Skill,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace"
-    );
-  } else {
-    args.push(
-      "--add-dir",
-      getTemporalOutputDir(),
-      "--allowedTools",
-      "Read,Write,Edit,Glob,Grep,Bash,Skill,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace"
-    );
-  }
 
   const { exitCode, transcript } = await spawnCli(resolveClaudeBin(), args, workspaceForRun(run));
   if (transcript) fs.writeFileSync(logPath, transcript);

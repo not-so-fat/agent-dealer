@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AgentWithHealth, Artifact, Run } from "@agent-dealer/shared";
+import type { AgentWithHealth, Artifact, OutboundDraftContent, Run } from "@agent-dealer/shared";
 import { agentSummary } from "../../AgentConfigFields";
 import PhaseConfigRow from "../agents/PhaseConfigRow";
 import {
@@ -27,6 +27,7 @@ import MarkdownBody from "../ui/MarkdownBody";
 import CollapsibleSection from "../ui/CollapsibleSection";
 import { ExecutionOutcomeSection, executionHasBlocker } from "./ExecutionOutcomeSection";
 import PlaybookLearningPanel from "./PlaybookLearningPanel";
+import OutboundDraftCard from "./OutboundDraftCard";
 import RemoveFromOpsAction from "./RemoveFromOpsAction";
 
 type Props = {
@@ -47,6 +48,7 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
   const [busy, setBusy] = useState(false);
   const [prefilledRetry, setPrefilledRetry] = useState(false);
   const [traceOpen, setTraceOpen] = useState(false);
+  const [deliverError, setDeliverError] = useState<string | null>(null);
 
   const agent = agents.find((a) => a.id === run.agentId);
   const runtime = run.runtime ?? agent?.runtime ?? "claude_code";
@@ -56,12 +58,22 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
     setArtifacts(detail.artifacts);
     setUsageSummary(detail.usageSummary ?? null);
     setTraceSummary(detail.traceSummary ?? null);
+    const failed = detail.events?.filter((e) => e.type === "deliver_failed").at(-1);
+    if (failed?.payloadJson) {
+      try {
+        const payload = JSON.parse(failed.payloadJson) as { error?: string };
+        setDeliverError(payload.error ?? null);
+      } catch {
+        setDeliverError(null);
+      }
+    }
   }, [run.id]);
 
   const execResult = latestByPhase<ExecutionResultContent>(artifacts, "execution_result", "execute");
   const documentArtifact = latestArtifact(artifacts, "document");
   const document = documentArtifact ? parseArtifact<DocumentContent>(documentArtifact) : null;
   const approvedPlan = artifacts.find((a) => a.kind === "approved_plan");
+  const pendingOutbound = findPendingOutboundDraft(artifacts);
   const blocked = executionHasBlocker(execResult);
   const canRetry = !!feedback.trim();
 
@@ -90,6 +102,7 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
     setPrefilledRetry(false);
     setFeedback("");
     setTraceOpen(false);
+    setDeliverError(null);
     setExecuteModel(run.executeModel ?? "");
     setExecuteBudget(runPhaseBudgetFromRun(run.budgetJson, "execute"));
   }, [run.id, run.executeModel, run.budgetJson]);
@@ -111,6 +124,23 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
       onRefresh();
     } catch (e) {
       alert(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const approveSend = async () => {
+    setBusy(true);
+    setDeliverError(null);
+    try {
+      await approveRun(run.id);
+      await load();
+      onRefresh();
+      onDoneAndNext?.();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (pendingOutbound) setDeliverError(msg);
+      else alert(msg);
     } finally {
       setBusy(false);
     }
@@ -139,38 +169,41 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
 
       {execResult && <ExecutionOutcomeSection execResult={execResult} />}
 
-      {approvedPlan && (
-        <section className="space-y-2">
-          <div className="heading-section">Approved Plan</div>
-          <div className="markdown-body-panel markdown-body-panel--short">
-            <MarkdownBody source={artifactMarkdown(approvedPlan)} />
-          </div>
-        </section>
-      )}
-
-      <PlaybookLearningPanel run={run} artifacts={artifacts} busy={busy} act={act} />
-
       <section className="space-y-4 border-t border-white/10 pt-3">
         <div className="heading-section">Your Decision</div>
 
+        {pendingOutbound && run.status === "review" && !blocked && (
+          <OutboundDraftCard
+            content={pendingOutbound}
+            deliverError={deliverError}
+            onRetrySend={approveSend}
+            retrySendBusy={busy}
+          />
+        )}
+
         {run.status === "review" && !blocked && (
           <div className="space-y-2">
-            <p className="text-sm text-white/45">Looks good? Accept and move on.</p>
+            <p className="text-sm text-white/45">
+              {pendingOutbound
+                ? deliverError
+                  ? "Fix the send issue above, or redraft below if the message needs to change."
+                  : "Review the message above, then approve to send."
+                : "Looks good? Accept and move on."}
+            </p>
             <button
               type="button"
-              disabled={busy || !!feedback.trim()}
-              title={feedback.trim() ? "Clear retry instructions below to mark done" : undefined}
-              onClick={() =>
-                act(async () => {
-                  await approveRun(run.id);
-                  onDoneAndNext?.();
-                })
+              disabled={busy || (!pendingOutbound && !!feedback.trim())}
+              title={
+                !pendingOutbound && feedback.trim()
+                  ? "Clear retry instructions below to mark done"
+                  : undefined
               }
+              onClick={() => void approveSend()}
               className="btn-gold w-full py-2 disabled:opacity-40"
             >
-              Mark done & next →
+              {pendingOutbound ? "Approve & send →" : "Mark done & next →"}
             </button>
-            {feedback.trim() && (
+            {!pendingOutbound && feedback.trim() && (
               <p className="text-xs text-white/40">Clear the retry field below to accept this result.</p>
             )}
           </div>
@@ -197,7 +230,9 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
             placeholder={
               blocked
                 ? "What to change after fixing the blocker"
-                : "What should the agent do differently?"
+                : pendingOutbound
+                  ? "What should change in the draft? (e.g. correct Slack user ID)"
+                  : "What should the agent do differently?"
             }
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
@@ -229,6 +264,7 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
                   executeBudgetPayload
                 );
                 setFeedback("");
+                setDeliverError(null);
                 onRetry?.(newRun);
               })
             }
@@ -239,6 +275,17 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
         </div>
 
       </section>
+
+      {approvedPlan && (
+        <section className="space-y-2">
+          <div className="heading-section">Approved Plan</div>
+          <div className="markdown-body-panel markdown-body-panel--short">
+            <MarkdownBody source={artifactMarkdown(approvedPlan)} />
+          </div>
+        </section>
+      )}
+
+      <PlaybookLearningPanel run={run} artifacts={artifacts} busy={busy} act={act} />
 
       {usageSummary && (
         <section className="border-t border-white/10 pt-3">
@@ -263,4 +310,18 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
       />
     </div>
   );
+}
+
+function findPendingOutboundDraft(artifacts: Artifact[]): OutboundDraftContent | null {
+  for (const kind of ["slack_draft", "email_draft"] as const) {
+    const art = latestArtifact(artifacts, kind);
+    if (!art?.contentJson) continue;
+    try {
+      const content = JSON.parse(art.contentJson) as OutboundDraftContent;
+      if (content.status === "pending") return content;
+    } catch {
+      // skip
+    }
+  }
+  return null;
 }

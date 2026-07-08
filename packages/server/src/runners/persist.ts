@@ -1,11 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Run, RunPhase, Runtime } from "@agent-dealer/shared";
-import { detectExecutionBlocker } from "@agent-dealer/shared";
-import { addArtifact, getLatestArtifact, getLineageParentRun, resolveBudgetForPhase } from "../repository/runs.js";
+import { detectExecutionBlocker, outboundDraftKind } from "@agent-dealer/shared";
+import { addArtifact, appendEvent, getLatestArtifact, getLineageParentRun, resolveBudgetForPhase } from "../repository/runs.js";
 import { getTemporalOutputDir } from "../paths.js";
 import {
   buildStreamTrace,
+  extractOutboundDraft,
   extractPlanMarkdown,
   extractPlanTriage,
   extractResultIsError,
@@ -80,7 +81,13 @@ export function persistRunOutput(input: PersistRunOutputInput): {
   const events = parseNdjson(raw);
 
   const sessionId = extractSessionId(events);
-  const resultText = extractResultText(events);
+  let resultText = extractResultText(events);
+  const outboundExtract =
+    phase === "execute" ? extractOutboundDraft(resultText ?? "") : null;
+  if (outboundExtract) {
+    resultText = outboundExtract.markdown || resultText;
+  }
+
   const streamError = extractResultIsError(events);
   const blocker = detectExecutionBlocker(resultText);
   const isError = exitCode !== 0 || streamError || blocker.detected;
@@ -117,8 +124,9 @@ export function persistRunOutput(input: PersistRunOutputInput): {
     logPath
   );
 
-  if (phase === "execute") {
+  if (phase === "execute" && outboundExtract) {
     captureDocumentArtifact(run, resultText);
+    persistOutboundDraft(run, outboundExtract);
   }
 
   if (phase === "plan") {
@@ -135,6 +143,34 @@ export function persistRunOutput(input: PersistRunOutputInput): {
   }
 
   return { resultText, sessionId, blocked: blocker.detected, blockerSummary: blocker.summary };
+}
+
+function persistOutboundDraft(
+  run: Run,
+  outbound: ReturnType<typeof extractOutboundDraft>
+): void {
+  if (!outbound.hadJsonBlock) return;
+  if (outbound.invalid) {
+    appendEvent(run.id, "outbound_draft_invalid", { reason: "malformed block" });
+    return;
+  }
+  if (!outbound.draft) return;
+  if (outbound.mismatch) {
+    appendEvent(run.id, "outbound_draft_mismatch", {
+      summaryBody: outbound.draft.summary.body,
+      toolCall: outbound.draft.toolCall,
+    });
+  }
+  addArtifact(
+    run.id,
+    outboundDraftKind(outbound.draft.actionType),
+    {
+      draft: outbound.draft,
+      status: "pending",
+      bodyMismatch: outbound.mismatch || undefined,
+    },
+    "agent"
+  );
 }
 
 function captureDocumentArtifact(run: Run, resultText?: string): void {

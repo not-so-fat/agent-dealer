@@ -63,9 +63,11 @@ When you **approve execution**, agent-dealer spawns **Claude Code** (`claude -p`
 
 | Phase | Tools (allowlisted) | Budget defaults |
 |-------|---------------------|-----------------|
-| **Plan** | Read, Glob, Grep, Skill + Agent Deck MCP (playbook/deck) | 5 turns · **$0.50** max |
-| **Execute** | Read, Write, Edit, Glob, Grep, **Bash**, Skill + Agent Deck MCP | 30 turns · **$5.00** max |
+| **Plan** | Read, Glob, Grep, Skill + Agent Deck MCP (playbook/deck, list tools) | 5 turns · **$0.50** max |
+| **Execute** | Read, Write, Edit, Glob, Grep, Skill + Agent Deck MCP (playbook/deck, list tools); **Bash** only for code/research/content tasks | 30 turns · **$5.00** max |
 | **Reflect** (post-review) | Read, Glob, Grep, Skill + Agent Deck MCP | 3 turns · **$0.25** max |
+
+`call_service_tool` is **denied** in every agent phase — outbound Slack/email sends only after you **Approve & send** in result review; the server delivers the stored payload verbatim via Agent Deck MCP.
 
 Caps are enforced via Claude Code flags (`--max-turns`, `--max-budget-usd`). Per-run budgets can be tightened in the run record. Deliverable scratch files go under `~/.agent-dealer/.temporal/output/`; audit artifacts stay in SQLite.
 

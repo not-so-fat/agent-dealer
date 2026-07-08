@@ -42,6 +42,29 @@ test("plan prompt includes the triage contract", () => {
   assert.match(prompt, /at most 3 questions/i);
 });
 
+test("communication plan prompt favors trivial triage and defers send details to send gate", () => {
+  const run = createRun({
+    title: "Send a test message to Yusuke",
+    description: "Say hello from agent-dealer",
+    taskCategory: "communication",
+    status: "plan_pending",
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+  });
+  const prompt = buildPlanPrompt(run);
+  assert.match(prompt, /Outbound send gate/);
+  assert.match(prompt, /send gate reviews the exact payload/i);
+  assert.match(prompt, /Do not ask plan questions about recipient/i);
+  assert.doesNotMatch(prompt, /When in doubt, use "needs_review"/);
+  assert.match(prompt, /brief bullet plan/i);
+  assert.doesNotMatch(prompt, /step-by-step plan with risks/);
+});
+
+test("other category plan prompt keeps conservative when-in-doubt rule", () => {
+  const prompt = buildPlanPrompt(makeRun());
+  assert.match(prompt, /When in doubt, use "needs_review"/);
+  assert.match(prompt, /step-by-step plan with risks/);
+});
+
 test("execution prompt renders human answers as Q→A pairs", () => {
   const run = makeRun();
   addArtifact(run.id, "draft_plan", { markdown: "# Plan" }, "agent");
@@ -79,4 +102,13 @@ test("revise prompt pairs each answer with its question and re-states the contra
   assert.match(prompt, /Which storage backend\?/);
   assert.match(prompt, /Use flat files instead/);
   assert.match(prompt, /"verdict"/);
+});
+
+test("execution prompt includes outbound draft contract", () => {
+  const run = makeRun();
+  addArtifact(run.id, "approved_plan", { markdown: "# Plan" }, "human");
+  const prompt = buildExecutionPrompt(run);
+  assert.match(prompt, /Outbound actions/);
+  assert.match(prompt, /call_service_tool is blocked/);
+  assert.match(prompt, /"actionType"/);
 });

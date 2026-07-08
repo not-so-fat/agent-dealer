@@ -6,9 +6,10 @@ type Props = {
   runs: Run[];
   selectedRunId: string | null;
   onSelectRun: (run: Run | null) => void;
+  sentRunIds?: string[];
 };
 
-export default function DonePage({ runs, selectedRunId, onSelectRun }: Props) {
+export default function DonePage({ runs, selectedRunId, onSelectRun, sentRunIds = [] }: Props) {
   const [query, setQuery] = useState("");
 
   const done = useMemo(
@@ -79,6 +80,7 @@ export default function DonePage({ runs, selectedRunId, onSelectRun }: Props) {
                 run={run}
                 selected={selectedRunId === run.id}
                 onSelect={() => onSelectRun(run)}
+                sent={sentRunIds.includes(run.id)}
               />
             ))
           )}
