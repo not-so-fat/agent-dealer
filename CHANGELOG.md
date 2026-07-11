@@ -2,6 +2,19 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
+## 0.1.8 — 2026-07-11
+
+### Playbook learning (Agent Deck 1.4.0)
+
+- **Reflect → proposal queue** — post-review reflect posts item-delta patches to Agent Deck `POST /api/playbook-patches` (`source: dealer`) instead of inline apply/dismiss in the review drawer
+- **Review drawer** — shows proposal id, rationale, and **Review in Agent Deck** link; accept/reject happens in the deck dashboard
+- **Prompt** — reflect outputs `{ rationale, ops[], evidence? }` (prefer `add_item` gotchas over full-body rewrites)
+
+### CI
+
+- **GitHub Actions** — build, typecheck, unit tests, and `flow:verify` API gates on every push/PR to `main`
+- **flow:verify** — CI-safe when Claude CLI is absent (retry gate before approve; accepts fast-fail execution states)
+
 ## 0.1.7 — 2026-07-08
 
 ### Fixed
