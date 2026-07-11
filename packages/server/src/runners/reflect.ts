@@ -1,6 +1,11 @@
-import type { PlaybookPatchContent, PlaybookPatchTrigger, Run } from "@agent-dealer/shared";
+import { PlaybookPatchContent, ReflectProposalSchema, type PlaybookPatchTrigger, type Run } from "@agent-dealer/shared";
 import { addArtifact, getLatestArtifact } from "../repository/runs.js";
-import { fetchPlaybook } from "../adapters/agent-deck.js";
+import {
+  agentDeckPatchesUrl,
+  checkAgentDeckHealth,
+  fetchPlaybook,
+  proposePlaybookPatch,
+} from "../adapters/agent-deck.js";
 import { runClaude } from "./claude.js";
 import { buildReflectPrompt } from "./prompts.js";
 import { extractResultText, parseNdjson } from "./stream-json.js";
@@ -10,16 +15,14 @@ export interface ReflectOpts {
   feedback?: string;
 }
 
-function parseReflectProposal(text: string): { rationale: string; proposedBody: string } | null {
+function parseReflectProposal(text: string) {
   const trimmed = text.trim();
   const jsonFence = trimmed.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
   const candidates = [jsonFence?.[1] ?? trimmed, trimmed];
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(candidate) as { rationale?: string; proposedBody?: string };
-      if (parsed.rationale?.trim() && parsed.proposedBody?.trim()) {
-        return { rationale: parsed.rationale.trim(), proposedBody: parsed.proposedBody.trim() };
-      }
+      const parsed = ReflectProposalSchema.safeParse(JSON.parse(candidate));
+      if (parsed.success) return parsed.data;
     } catch {
       // try next
     }
@@ -42,8 +45,18 @@ export async function runReflect(run: Run, opts: ReflectOpts): Promise<void> {
   addArtifact(run.id, "reflect_status", { status: "pending", trigger: opts.trigger }, "system");
 
   try {
+    const healthy = await checkAgentDeckHealth();
+    if (!healthy) {
+      addArtifact(
+        run.id,
+        "reflect_status",
+        { status: "failed", trigger: opts.trigger, error: "Agent Deck offline" },
+        "system"
+      );
+      return;
+    }
+
     const playbook = await fetchPlaybook(run.playbookId);
-    const previousBody = playbook.body ?? "";
 
     const result = await runClaude(run, "reflect", undefined, { promptOverride: buildReflectPrompt(run, opts) });
     const events = parseNdjson(result.transcript);
@@ -64,24 +77,31 @@ export async function runReflect(run: Run, opts: ReflectOpts): Promise<void> {
       return;
     }
 
-    if (proposal.proposedBody.trim() === previousBody.trim()) {
-      addArtifact(
-        run.id,
-        "reflect_status",
-        { status: "completed", trigger: opts.trigger, error: "No playbook changes proposed" },
-        "system"
-      );
-      return;
-    }
+    const evidence =
+      opts.trigger === "retry" && opts.feedback?.trim()
+        ? {
+            failure_summary:
+              proposal.evidence?.failure_summary ??
+              "Human requested retry with feedback after reviewing execution",
+            user_feedback_excerpt: opts.feedback.trim(),
+            corrected_output_hint: proposal.evidence?.corrected_output_hint,
+          }
+        : proposal.evidence;
+
+    const created = await proposePlaybookPatch(run.deckId, run.id, {
+      ...proposal,
+      evidence,
+      playbook_id: run.playbookId,
+    });
 
     const patch: PlaybookPatchContent = {
+      patchId: created.id,
       playbookId: run.playbookId,
       playbookTitle: playbook.title,
-      previousBody,
-      proposedBody: proposal.proposedBody,
       rationale: proposal.rationale,
       status: "proposed",
       trigger: opts.trigger,
+      dashboardUrl: agentDeckPatchesUrl(),
     };
     addArtifact(run.id, "playbook_patch", patch, "agent", result.logPath);
     addArtifact(run.id, "reflect_status", { status: "completed", trigger: opts.trigger }, "system");
@@ -99,7 +119,7 @@ export function latestProposedPatch(runId: string): PlaybookPatchContent | null 
   const art = getLatestArtifact(runId, "playbook_patch");
   if (!art?.contentJson) return null;
   try {
-    const parsed = JSON.parse(art.contentJson) as PlaybookPatchContent;
+    const parsed = PlaybookPatchContent.parse(JSON.parse(art.contentJson));
     return parsed.status === "proposed" ? parsed : null;
   } catch {
     return null;

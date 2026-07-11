@@ -300,7 +300,7 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
         </section>
       )}
 
-      <PlaybookLearningPanel run={run} artifacts={artifacts} busy={busy} act={act} />
+      <PlaybookLearningPanel run={run} artifacts={artifacts} />
 
       {usageSummary && (
         <section className="border-t border-white/10 pt-3">

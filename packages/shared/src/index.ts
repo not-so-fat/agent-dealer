@@ -10,6 +10,7 @@ export * from "./execution.js";
 export * from "./plan-triage.js";
 export * from "./outbound-draft.js";
 export * from "./result-qa.js";
+export * from "./playbook-reflect.js";
 
 export const RunStatus = z.enum([
   "queued",
@@ -64,21 +65,18 @@ export type ArtifactKind = z.infer<typeof ArtifactKind>;
 export const RunPhase = z.enum(["plan", "execute", "reflect", "qa"]);
 export type RunPhase = z.infer<typeof RunPhase>;
 
-export const PlaybookPatchStatus = z.enum(["proposed", "applied", "dismissed"]);
-export type PlaybookPatchStatus = z.infer<typeof PlaybookPatchStatus>;
-
 export const PlaybookPatchTrigger = z.enum(["retry", "approve"]);
 export type PlaybookPatchTrigger = z.infer<typeof PlaybookPatchTrigger>;
 
+/** Slim ref after reflect posts to Agent Deck proposal queue (review in deck dashboard). */
 export const PlaybookPatchContent = z.object({
-  playbookId: z.string(),
+  patchId: z.string(),
+  playbookId: z.string().optional(),
   playbookTitle: z.string().optional(),
-  previousBody: z.string(),
-  proposedBody: z.string(),
-  rationale: z.string(),
-  status: PlaybookPatchStatus,
+  rationale: z.string().optional(),
+  status: z.literal("proposed"),
   trigger: PlaybookPatchTrigger,
-  appliedAt: z.string().optional(),
+  dashboardUrl: z.string().optional(),
 });
 export type PlaybookPatchContent = z.infer<typeof PlaybookPatchContent>;
 

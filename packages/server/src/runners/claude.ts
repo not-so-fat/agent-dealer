@@ -7,7 +7,7 @@ import { humanFeedbackText, lineageParentExecuteSessionId } from "./run-context.
 import { getTemporalLogsDir } from "../paths.js";
 import { cursorInvokeArgs, resolveClaudeBin, resolveCursorBin } from "../cli-env.js";
 import { resolveBudgetForPhase, resolveModelForPhase, getRun } from "../repository/runs.js";
-import { budgetCliArgs, QA_PHASE_BUDGET } from "@agent-dealer/shared";
+import { budgetCliArgs } from "@agent-dealer/shared";
 import { buildClaudePhaseArgs } from "./claude-args.js";
 
 export interface RunnerResult {
@@ -56,7 +56,7 @@ export async function runClaude(
     throw new Error("qa mode requires a promptOverride");
   }
 
-  const phaseBudget = mode === "qa" ? { ...QA_PHASE_BUDGET } : resolveBudgetForPhase(run, mode);
+  const phaseBudget = mode === "qa" ? null : resolveBudgetForPhase(run, mode);
 
   const resumeSessionId =
     opts?.resumeSessionId ??

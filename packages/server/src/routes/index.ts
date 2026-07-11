@@ -15,7 +15,6 @@ import {
   RetryRunInput,
   Runtime,
   UpdatePlanInput,
-  PlaybookPatchContent,
   BUILTIN_AGENT_CLAUDE_ID,
 } from "@agent-dealer/shared";
 import { parseRunBudget } from "@agent-dealer/shared";
@@ -28,7 +27,6 @@ import {
   listEvents,
   listRuns,
   updateRunFields,
-  updateArtifactContent,
   transitionRun,
   getLatestArtifact,
   markPlanTriageConsumed,
@@ -57,7 +55,7 @@ import { approveRunWithDeliver } from "../queue/approve-deliver.js";
 import { recordPlanDelegation } from "../queue/plan-delegation.js";
 import { askResultQuestion } from "../queue/result-qa.js";
 import { rejectPendingOutboundDrafts } from "../repository/outbound-drafts.js";
-import { fetchAgentDeckDecks, updatePlaybookBody } from "../adapters/agent-deck.js";
+import { fetchAgentDeckDecks } from "../adapters/agent-deck.js";
 import { testAgentDeckConnection } from "../adapters/agent-deck.js";
 import {
   getLinearIssue,
@@ -573,45 +571,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     scheduleReflect(run, { trigger: "retry", feedback: input.feedback });
     await forceDispatch();
     return reply.status(201).send(retryRun);
-  });
-
-  app.post("/api/runs/:id/playbook-patch/apply", async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const run = getRun(id);
-    if (!run) return reply.status(404).send({ error: "Not found" });
-    const art = getLatestArtifact(id, "playbook_patch");
-    if (!art?.contentJson) return reply.status(404).send({ error: "No playbook patch" });
-    const patch = PlaybookPatchContent.parse(JSON.parse(art.contentJson));
-    if (patch.status !== "proposed") {
-      return reply.status(400).send({ error: `Patch already ${patch.status}` });
-    }
-    try {
-      await updatePlaybookBody(patch.playbookId, patch.proposedBody);
-      const applied: PlaybookPatchContent = {
-        ...patch,
-        status: "applied",
-        appliedAt: new Date().toISOString(),
-      };
-      updateArtifactContent(art.id, applied);
-      return applied;
-    } catch (e) {
-      return reply.status(502).send({ error: String(e) });
-    }
-  });
-
-  app.post("/api/runs/:id/playbook-patch/dismiss", async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const run = getRun(id);
-    if (!run) return reply.status(404).send({ error: "Not found" });
-    const art = getLatestArtifact(id, "playbook_patch");
-    if (!art?.contentJson) return reply.status(404).send({ error: "No playbook patch" });
-    const patch = PlaybookPatchContent.parse(JSON.parse(art.contentJson));
-    if (patch.status !== "proposed") {
-      return reply.status(400).send({ error: `Patch already ${patch.status}` });
-    }
-    const dismissed: PlaybookPatchContent = { ...patch, status: "dismissed" };
-    updateArtifactContent(art.id, dismissed);
-    return dismissed;
   });
 
   app.post("/api/runs/:id/cancel", async (req, reply) => {

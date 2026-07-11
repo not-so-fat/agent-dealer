@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ResultQaContent, ResultQaInput, QA_PHASE_BUDGET, latestQaExchanges } from "./result-qa.js";
+import { ResultQaContent, ResultQaInput, latestQaExchanges } from "./result-qa.js";
 
 const base = {
   exchangeId: "x1",
@@ -49,10 +49,6 @@ test("question is trimmed before length checks", () => {
   // 2000 real chars plus padding still fits once trimmed
   const padded = `  ${"x".repeat(2000)}  `;
   assert.equal(ResultQaInput.parse({ question: padded }).question.length, 2000);
-});
-
-test("QA budget is the fixed v1 cap", () => {
-  assert.deepEqual(QA_PHASE_BUDGET, { maxTurns: 6, maxBudgetUsd: 0.25 });
 });
 
 test("latestQaExchanges keeps the newest artifact per exchangeId, ordered by askedAt", () => {

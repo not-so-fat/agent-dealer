@@ -23,9 +23,6 @@ export const ResultQaInput = z.object({
 });
 export type ResultQaInput = z.infer<typeof ResultQaInput>;
 
-/** Fixed v1 cap — answering is cheaper than planning (half the plan-draft cap). */
-export const QA_PHASE_BUDGET = { maxTurns: 6, maxBudgetUsd: 0.25 } as const;
-
 /** Collapse append-only exchanges: last artifact per exchangeId, ordered by askedAt. */
 export function latestQaExchanges(contents: ResultQaContent[]): ResultQaContent[] {
   const byId = new Map<string, ResultQaContent>();

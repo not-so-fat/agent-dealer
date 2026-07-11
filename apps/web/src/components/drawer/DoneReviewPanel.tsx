@@ -126,7 +126,7 @@ export default function DoneReviewPanel({ run }: Props) {
         </section>
       )}
 
-      <PlaybookLearningPanel run={run} artifacts={artifacts} busy={busy} act={act} />
+      <PlaybookLearningPanel run={run} artifacts={artifacts} />
 
       {usageSummary && <UsagePanel summary={usageSummary} />}
       {traceSummary && <TracePanel trace={traceSummary} />}

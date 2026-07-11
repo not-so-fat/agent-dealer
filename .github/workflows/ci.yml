@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      AGENT_DEALER_ENV: development
+      AGENT_DEALER_HOME: ${{ runner.temp }}/agent-dealer-home
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspaces
+        run: npm run build
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Start server for flow verify
+        run: |
+          node packages/server/dist/index.js > server.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3221/health >/dev/null; then
+              echo "Server ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server failed to start"
+          tail -n 100 server.log || true
+          exit 1
+
+      - name: Flow verify (API gates)
+        run: npm run flow:verify
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" 2>/dev/null || true
+          fi
+          if [ -f server.log ]; then
+            tail -n 50 server.log || true
+          fi

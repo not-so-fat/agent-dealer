@@ -3,6 +3,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { OutboundToolCall } from "@agent-dealer/shared";
+import type { ReflectProposal } from "@agent-dealer/shared";
 import { getAgentDeckConfig } from "../repository/intake-settings.js";
 
 export function getAgentDeckApiUrl(): string {
@@ -89,6 +90,42 @@ export async function fetchAgentDeckDecks(): Promise<unknown> {
 }
 
 const DASHBOARD_HEADERS = { "x-agent-deck-client": "dashboard" };
+const DEALER_HEADERS = { "x-agent-deck-client": "dealer" };
+
+export async function proposePlaybookPatch(
+  deckId: string,
+  runId: string,
+  proposal: ReflectProposal & { playbook_id: string }
+): Promise<{ id: string; playbookId: string | null }> {
+  const res = await fetch(`${getAgentDeckApiUrl()}/api/playbook-patches`, {
+    method: "POST",
+    headers: {
+      ...DEALER_HEADERS,
+      "Content-Type": "application/json",
+      "x-agent-deck-deck-id": deckId,
+      "x-agent-deck-source-ref": runId,
+    },
+    body: JSON.stringify({
+      kind: "update",
+      playbook_id: proposal.playbook_id,
+      ops: proposal.ops,
+      rationale: proposal.rationale,
+      evidence: proposal.evidence,
+    }),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`Agent Deck patch propose failed: ${res.status} ${await res.text()}`);
+  const json = (await res.json()) as {
+    success?: boolean;
+    data?: { id: string; playbookId: string | null };
+  };
+  if (!json.data?.id) throw new Error("Playbook patch propose failed");
+  return json.data;
+}
+
+export function agentDeckPatchesUrl(): string {
+  return `${getAgentDeckApiUrl()}/playbook-patches`;
+}
 
 export async function fetchPlaybook(playbookId: string): Promise<{ id: string; title: string; body: string }> {
   const res = await fetch(`${getAgentDeckApiUrl()}/api/playbooks/${playbookId}`, {

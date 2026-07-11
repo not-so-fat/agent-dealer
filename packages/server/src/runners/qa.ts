@@ -1,5 +1,4 @@
 import type { Run, UsageContent } from "@agent-dealer/shared";
-import { QA_PHASE_BUDGET } from "@agent-dealer/shared";
 import { runClaude, runCursor, type RunnerResult } from "./claude.js";
 import { buildQaPrompt } from "./prompts.js";
 import { extractResultIsError, extractResultText, extractUsage, parseNdjson } from "./stream-json.js";
@@ -41,8 +40,6 @@ export async function runQa(
 
   const events = parseNdjson(result.transcript);
   const usage = extractUsage(events, "qa", runtime);
-  usage.maxTurns = QA_PHASE_BUDGET.maxTurns;
-  usage.maxBudgetUsd = QA_PHASE_BUDGET.maxBudgetUsd;
 
   const answer = extractResultText(events)?.trim() ?? "";
   const failed = result.exitCode !== 0 || extractResultIsError(events) || !answer;

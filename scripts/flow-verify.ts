@@ -164,10 +164,6 @@ async function main(): Promise<void> {
     ok("Step 5 auto-dispatched (already running)");
   }
 
-  const noPatch = await req("POST", `/api/runs/${run.id}/playbook-patch/apply`, {});
-  assert(noPatch.status === 404, "apply without patch returns 404");
-  ok("Playbook patch apply gate (no patch)");
-
   const retryBlocked = await req("POST", `/api/runs/${run.id}/retry`, {
     feedback: "Flow verify — should block outside review",
   });

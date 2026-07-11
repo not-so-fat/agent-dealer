@@ -50,7 +50,7 @@ export function buildLineageUsageSummary(
       else if (usage.phase === "qa") qaCount++;
       else execCount++;
 
-      // qa has no configurable budget — its cap is snapshotted on the artifact
+      // qa uses agent/runtime defaults — no separate budget phase
       const resolved = usage.phase === "qa" ? null : resolveBudgetForPhase(lr, usage.phase);
 
       lines.push({

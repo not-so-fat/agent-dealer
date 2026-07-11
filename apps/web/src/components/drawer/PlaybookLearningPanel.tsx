@@ -1,11 +1,9 @@
 import type { Artifact, PlaybookPatchContent, ReflectStatusContent, Run } from "@agent-dealer/shared";
-import { applyPlaybookPatch, dismissPlaybookPatch, latestArtifact, parseArtifact } from "../../api";
+import { latestArtifact, parseArtifact } from "../../api";
 
 type Props = {
   run: Run;
   artifacts: Artifact[];
-  busy: boolean;
-  act: (fn: () => Promise<unknown>) => Promise<void>;
 };
 
 function latestPatch(artifacts: Artifact[]): PlaybookPatchContent | null {
@@ -28,8 +26,8 @@ function reflectStatus(artifacts: Artifact[]): ReflectStatusContent | null {
   }
 }
 
-/** Post-run playbook learning — propose-confirm apply per D3. */
-export default function PlaybookLearningPanel({ run, artifacts, busy, act }: Props) {
+/** Post-run playbook learning — proposal queued in Agent Deck dashboard (D3). */
+export default function PlaybookLearningPanel({ run, artifacts }: Props) {
   if (!run.playbookId) return null;
 
   const patch = latestPatch(artifacts);
@@ -76,57 +74,32 @@ export default function PlaybookLearningPanel({ run, artifacts, busy, act }: Pro
     return null;
   }
 
-  const isProposed = patch.status === "proposed";
-  const isApplied = patch.status === "applied";
-  const isDismissed = patch.status === "dismissed";
+  const reviewUrl = patch.dashboardUrl;
 
   return (
     <section className="space-y-3">
       <div className="heading-section">Playbook learning</div>
       {patch.playbookTitle && (
         <p className="text-sm text-white/45">
-          {patch.playbookTitle} <span className="text-white/30">({patch.playbookId})</span>
+          {patch.playbookTitle}{" "}
+          {patch.playbookId && <span className="text-white/30">({patch.playbookId})</span>}
         </p>
       )}
-      <p className="text-sm text-white/55">{patch.rationale}</p>
-
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="space-y-1">
-          <div className="text-xs text-white/40 uppercase tracking-wide">Current</div>
-          <textarea className="field-mono min-h-[120px] resize-y text-sm" value={patch.previousBody} readOnly />
-        </div>
-        <div className="space-y-1">
-          <div className="text-xs text-white/40 uppercase tracking-wide">Proposed</div>
-          <textarea className="field-mono min-h-[120px] resize-y text-sm" value={patch.proposedBody} readOnly />
-        </div>
-      </div>
-
-      {isProposed && (
-        <div className="flex gap-2 flex-wrap">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => act(() => applyPlaybookPatch(run.id))}
-            className="btn-gold px-4 py-2 disabled:opacity-40"
-          >
-            Apply to playbook
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => act(() => dismissPlaybookPatch(run.id))}
-            className="btn-ghost px-4 py-2 disabled:opacity-40"
-          >
-            Dismiss
-          </button>
-        </div>
+      {patch.rationale && <p className="text-sm text-white/55">{patch.rationale}</p>}
+      <p className="text-sm text-[#92E4DD]/80">
+        Proposal <span className="font-mono text-white/50">{patch.patchId}</span> queued in Agent Deck
+        — accept or reject in the deck review queue.
+      </p>
+      {reviewUrl && (
+        <a
+          href={reviewUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-block btn-gold px-4 py-2 text-sm no-underline"
+        >
+          Review in Agent Deck
+        </a>
       )}
-      {isApplied && (
-        <p className="text-sm text-[#92E4DD]/80">
-          Applied to playbook{patch.appliedAt ? ` · ${new Date(patch.appliedAt).toLocaleString()}` : ""}
-        </p>
-      )}
-      {isDismissed && <p className="text-sm text-white/40">Dismissed — playbook unchanged</p>}
     </section>
   );
 }
