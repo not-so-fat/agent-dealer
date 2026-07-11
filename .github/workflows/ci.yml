@@ -5,13 +5,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   verify:
     runs-on: ubuntu-latest
-    env:
-      AGENT_DEALER_ENV: development
-      AGENT_DEALER_HOME: ${{ runner.temp }}/agent-dealer-home
 
     steps:
       - name: Checkout repository
@@ -36,6 +37,9 @@ jobs:
         run: npm run test:unit
 
       - name: Start server for flow verify
+        env:
+          AGENT_DEALER_ENV: development
+          AGENT_DEALER_HOME: ${{ runner.temp }}/agent-dealer-home
         run: |
           node packages/server/dist/index.js > server.log 2>&1 &
           echo $! > server.pid
@@ -51,6 +55,9 @@ jobs:
           exit 1
 
       - name: Flow verify (API gates)
+        env:
+          AGENT_DEALER_ENV: development
+          AGENT_DEALER_HOME: ${{ runner.temp }}/agent-dealer-home
         run: npm run flow:verify
 
       - name: Stop server
