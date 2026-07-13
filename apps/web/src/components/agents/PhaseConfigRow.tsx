@@ -47,7 +47,7 @@ export default function PhaseConfigRow({
             type="number"
             min={1}
             step={1}
-            placeholder="Default"
+            placeholder="—"
             disabled={disabled}
             value={budget.maxTurns}
             onChange={(e) => setBudget({ maxTurns: e.target.value })}
@@ -60,7 +60,7 @@ export default function PhaseConfigRow({
             type="number"
             min={0.01}
             step={0.01}
-            placeholder="Default"
+            placeholder="—"
             disabled={disabled}
             value={budget.maxBudgetUsd}
             onChange={(e) => setBudget({ maxBudgetUsd: e.target.value })}
@@ -68,7 +68,7 @@ export default function PhaseConfigRow({
         </label>
       </div>
       {showHint && (
-        <p className="text-xs text-white/40">Blank turns or USD = runtime default (no cap).</p>
+        <p className="text-xs text-white/40">Leave blank for no cap on that field.</p>
       )}
     </section>
   );

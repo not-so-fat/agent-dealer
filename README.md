@@ -18,7 +18,7 @@ Your calendar is full; your task list doesn't care. Tasks pile up from everywher
 
 **Approve the plan, not every keystroke.** For each task the agent drafts a plan. You skim all five in one pass and approve — one cheap, high-leverage gate before the next meeting starts, not per-action nagging mid-run. Plans the agent triages as trivial auto-approve; if something is genuinely ambiguous, the plan comes back with structured questions instead of a guess.
 
-**Runs halt, they don't overrun.** Execution is headless under a per-task ceiling — 30 turns / $5 by default. A run that hits its cap stops with its partial trace and waits for you. No surprise bill when you're back.
+**Runs halt, they don't overrun.** Set optional per-task turn and dollar caps at plan approval (or on an agent profile). A run that hits its cap stops with its partial trace and waits for you. Leave caps blank and Claude uses its own runtime limits.
 
 **Nothing leaves without you.** When a task wants to post to Slack, send an email, or update a ticket, the exact outbound payload is held for your approval. You read the literal message, fix the one wrong line, approve *that* send — or reject it, and it never existed.
 
@@ -28,7 +28,7 @@ Your calendar is full; your task list doesn't care. Tasks pile up from everywher
 
 - **Plan approval before execution** — one gate up front instead of permission prompts mid-run. Gates are few and heavy on purpose.
 - **A separate gate on the send** — outbound Slack/email/ticket payloads are held verbatim for your approve/edit/reject. Competitors gate the PR or a workflow node; nothing here leaves without you seeing exactly what leaves.
-- **Caps that halt** — per-task turn and dollar ceilings enforced via Claude Code flags, adjustable per run.
+- **Caps that halt** — optional per-task turn and dollar ceilings enforced via Claude Code flags when you set them.
 - **Audit treasure** — task → plan → trace → proposed payloads → your decisions, queryable in SQLite. "Who approved this and why" has a literal answer.
 - **Playbooks that learn** — post-review reflection files playbook improvement proposals back to your [Agent Deck](https://github.com/not-so-fat/agent_deck), so the Nth similar task is cheaper than the first.
 
@@ -36,7 +36,7 @@ Your calendar is full; your task list doesn't care. Tasks pile up from everywher
 
 1. **Feed** — pick a runtime (+ optional deck/playbook) → add tasks, from Linear or by hand
 2. **Plan approval** — agent drafts a plan (or answer its structured questions) → **Approve plan**; trivial plans auto-approve
-3. **Execution** — headless run under per-task caps; halts at the ceiling instead of overrunning
+3. **Execution** — headless run; halts at any cap you set instead of overrunning
 4. **Review** — approve done, or retry with feedback; outbound sends are approved separately, payload-by-payload
 5. **Reflect** — after your review, the agent proposes playbook updates to Agent Deck's proposal queue
 
@@ -62,15 +62,15 @@ Run `agent-dealer doctor` to verify Node, Claude CLI, bundle, and port before fi
 
 When you **approve execution**, agent-dealer spawns **Claude Code** (`claude -p`) in the task's bound **workspace directory**. During a run the agent may use:
 
-| Phase | Tools (allowlisted) | Budget defaults |
-|-------|---------------------|-----------------|
-| **Plan** | Read, Glob, Grep, Skill + Agent Deck MCP (playbook/deck, list tools) | 5 turns · **$0.50** max |
-| **Execute** | Read, Write, Edit, Glob, Grep, Skill + Agent Deck MCP (playbook/deck, list tools); **Bash** only for code/research/content tasks | 30 turns · **$5.00** max |
-| **Reflect** (post-review) | Read, Glob, Grep, Skill + Agent Deck MCP | 3 turns · **$0.25** max |
+| Phase | Tools (allowlisted) | Budget caps |
+|-------|---------------------|-------------|
+| **Plan** | Read, Glob, Grep, Skill + Agent Deck MCP (playbook/deck, list tools) | Optional — set per run or agent |
+| **Execute** | Read, Write, Edit, Glob, Grep, Skill + Agent Deck MCP (playbook/deck, list tools); **Bash** only for code/research/content tasks | Optional — set per run or agent |
+| **Reflect** (post-review) | Read, Glob, Grep, Skill + Agent Deck MCP | Optional — set per run |
 
 `call_service_tool` is **denied** in every agent phase — outbound Slack/email sends only after you **Approve & send** in result review; the server delivers the stored payload verbatim via Agent Deck MCP.
 
-Caps are enforced via Claude Code flags (`--max-turns`, `--max-budget-usd`). Per-run budgets can be tightened in the run record. Deliverable scratch files go under `~/.agent-dealer/.temporal/output/`; audit artifacts stay in SQLite.
+When set, caps are enforced via Claude Code flags (`--max-turns`, `--max-budget-usd`). Leave turns or USD blank for no cap on that dimension. Deliverable scratch files go under `~/.agent-dealer/.temporal/output/`; audit artifacts stay in SQLite.
 
 **You gate every run:** plan approval before execution, result review before done. Nothing executes without your explicit approve (or retry with feedback).
 
