@@ -339,7 +339,7 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
 }
 
 function findPendingOutboundDraft(artifacts: Artifact[]): OutboundDraftContent | null {
-  for (const kind of ["slack_draft", "email_draft"] as const) {
+  for (const kind of ["slack_draft", "email_draft", "service_draft"] as const) {
     const art = latestArtifact(artifacts, kind);
     if (!art?.contentJson) continue;
     try {

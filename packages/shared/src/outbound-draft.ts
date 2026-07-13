@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const OutboundActionType = z.enum(["slack_message", "email"]);
+export const OutboundActionType = z.enum(["slack_message", "email", "service_tool_call"]);
 export type OutboundActionType = z.infer<typeof OutboundActionType>;
 
 export const OutboundDraftSummary = z.object({
@@ -27,7 +27,7 @@ export type OutboundDraftBlock = z.infer<typeof OutboundDraftBlock>;
 export const OutboundDraftStatus = z.enum(["pending", "sent", "rejected"]);
 export type OutboundDraftStatus = z.infer<typeof OutboundDraftStatus>;
 
-/** slack_draft / email_draft artifact contentJson (PRD §7.2). */
+/** slack_draft / email_draft / service_draft artifact contentJson (PRD §7.2). */
 export const OutboundDraftContent = z.object({
   draft: OutboundDraftBlock,
   status: OutboundDraftStatus,
@@ -46,18 +46,27 @@ export const SendReceiptContent = z.object({
 });
 export type SendReceiptContent = z.infer<typeof SendReceiptContent>;
 
-export function outboundDraftKind(actionType: OutboundActionType): "slack_draft" | "email_draft" {
-  return actionType === "slack_message" ? "slack_draft" : "email_draft";
+export type OutboundDraftKind = "slack_draft" | "email_draft" | "service_draft";
+
+export function outboundDraftKind(actionType: OutboundActionType): OutboundDraftKind {
+  if (actionType === "slack_message") return "slack_draft";
+  if (actionType === "email") return "email_draft";
+  return "service_draft";
 }
 
-const OUTBOUND_DRAFT_KINDS = new Set<string>(["slack_draft", "email_draft"]);
+const OUTBOUND_DRAFT_KINDS = new Set<string>(["slack_draft", "email_draft", "service_draft"]);
 
-export function isOutboundDraftKind(kind: string): kind is "slack_draft" | "email_draft" {
+export function isOutboundDraftKind(kind: string): kind is OutboundDraftKind {
   return OUTBOUND_DRAFT_KINDS.has(kind);
 }
 
 /** Compare summary.body to the message field in toolCall.arguments (Slack: text, email: body). */
-export function outboundMessageMatchesSummary(toolCall: OutboundToolCall, body: string): boolean {
+export function outboundMessageMatchesSummary(
+  toolCall: OutboundToolCall,
+  body: string,
+  actionType?: OutboundActionType
+): boolean {
+  if (actionType === "service_tool_call") return true;
   const args = toolCall.arguments;
   const candidates = [args.text, args.body, args.message].filter((v): v is string => typeof v === "string");
   return candidates.some((v) => v === body);
@@ -65,8 +74,11 @@ export function outboundMessageMatchesSummary(toolCall: OutboundToolCall, body: 
 
 const OUTBOUND_BODY_ARG_KEYS = ["text", "body", "message"] as const;
 
-/** Human edit before approve — sync summary.body into the toolCall message field. */
+/** Human edit before approve — sync summary.body into the toolCall message field (Slack/email only). */
 export function applyOutboundBodyEdit(draft: OutboundDraftBlock, body: string): OutboundDraftBlock {
+  if (draft.actionType === "service_tool_call") {
+    return { ...draft, summary: { ...draft.summary, body } };
+  }
   const args = { ...draft.toolCall.arguments };
   const key = OUTBOUND_BODY_ARG_KEYS.find((k) => typeof args[k] === "string");
   if (key) args[key] = body;

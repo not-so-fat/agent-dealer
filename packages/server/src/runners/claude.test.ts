@@ -38,8 +38,13 @@ function hasDisallowSend(args: string[]): boolean {
   return i >= 0 && args[i + 1] === DENY_SEND_TOOL;
 }
 
-test("all phases deny call_service_tool", () => {
-  for (const mode of ["plan", "execute", "reflect", "qa"] as const) {
+test("execute allows call_service_tool; plan/reflect/qa deny it", () => {
+  const executeArgs = buildClaudePhaseArgs(runWithCategory("code"), "execute");
+  assert.equal(hasDisallowSend(executeArgs), false, "execute");
+  const i = executeArgs.indexOf("--allowedTools");
+  assert.match(executeArgs[i + 1], /call_service_tool/);
+
+  for (const mode of ["plan", "reflect", "qa"] as const) {
     const args = buildClaudePhaseArgs(runWithCategory("code"), mode);
     assert.equal(hasDisallowSend(args), true, mode);
   }

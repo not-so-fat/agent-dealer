@@ -124,7 +124,11 @@ export function extractOutboundDraft(resultMarkdown: string): OutboundDraftExtra
   ).trim();
   try {
     const parsed = OutboundDraftBlock.parse(JSON.parse(last[1]));
-    const mismatch = !outboundMessageMatchesSummary(parsed.toolCall, parsed.summary.body);
+    const mismatch = !outboundMessageMatchesSummary(
+      parsed.toolCall,
+      parsed.summary.body,
+      parsed.actionType
+    );
     return {
       markdown: strippedMarkdown,
       draft: parsed,

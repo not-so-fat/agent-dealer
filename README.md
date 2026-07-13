@@ -65,10 +65,11 @@ When you **approve execution**, agent-dealer spawns **Claude Code** (`claude -p`
 | Phase | Tools (allowlisted) | Budget caps |
 |-------|---------------------|-------------|
 | **Plan** | Read, Glob, Grep, Skill + Agent Deck MCP (playbook/deck, list tools) | Optional — set per run or agent |
-| **Execute** | Read, Write, Edit, Glob, Grep, Skill + Agent Deck MCP (playbook/deck, list tools); **Bash** only for code/research/content tasks | Optional — set per run or agent |
+| **Execute** | Read, Write, Edit, Glob, Grep, Skill + Agent Deck MCP (playbook/deck, list tools, **call_service_tool**); **Bash** only for code/research/content tasks | Optional — set per run or agent |
 | **Reflect** (post-review) | Read, Glob, Grep, Skill + Agent Deck MCP | Optional — set per run |
+| **Q&A** | Read, Glob, Grep, Skill | — |
 
-`call_service_tool` is **denied** in every agent phase — outbound Slack/email sends only after you **Approve & send** in result review; the server delivers the stored payload verbatim via Agent Deck MCP.
+`call_service_tool` is **allowed in execute** (soft gate) so Linear/GitHub/Docmost writes can finish mid-run. Plan / reflect / qa still deny it. Prefer the outbound **draft → Approve & send** path for Slack/email (and any write you want human eyes on); the server still delivers stored drafts verbatim via Agent Deck MCP. Interactive Agent Deck sessions outside dealer are unchanged — the tool is always registered on the deck MCP.
 
 When set, caps are enforced via Claude Code flags (`--max-turns`, `--max-budget-usd`). Leave turns or USD blank for no cap on that dimension. Deliverable scratch files go under `~/.agent-dealer/.temporal/output/`; audit artifacts stay in SQLite.
 

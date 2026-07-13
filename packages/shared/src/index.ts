@@ -50,6 +50,7 @@ export const ArtifactKind = z.enum([
   "pr",
   "email_draft",
   "slack_draft",
+  "service_draft",
   "document",
   "research_brief",
   "deliverable",

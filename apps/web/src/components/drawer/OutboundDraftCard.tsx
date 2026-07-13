@@ -31,14 +31,22 @@ export default function OutboundDraftCard({
 
   return (
     <section className="space-y-3 rounded-lg border border-[#C4B643]/30 bg-[#C4B643]/5 p-3">
-      <div className="heading-section text-[#E8DC7A]">Outbound message (will send on approve)</div>
+      <div className="heading-section text-[#E8DC7A]">
+        {draft.actionType === "service_tool_call"
+          ? "Outbound action (will run on approve)"
+          : "Outbound message (will send on approve)"}
+      </div>
       {bodyMismatch && !edited && (
         <p className="text-sm text-amber-300/90">
           Summary body does not match toolCall arguments — review the exact payload below.
         </p>
       )}
       {edited && (
-        <p className="text-sm text-[#92E4DD]/90">Message edited — approve to send your version.</p>
+        <p className="text-sm text-[#92E4DD]/90">
+          {draft.actionType === "service_tool_call"
+            ? "Summary edited — approve to run with the stored tool call (edit tool JSON via Retry if args must change)."
+            : "Message edited — approve to send your version."}
+        </p>
       )}
       <div className="space-y-1">
         <p className="text-xs text-white/40 uppercase tracking-wide">To</p>
@@ -46,7 +54,7 @@ export default function OutboundDraftCard({
       </div>
       <div className="space-y-1">
         <label htmlFor="outbound-body" className="text-xs text-white/40 uppercase tracking-wide">
-          Message
+          {draft.actionType === "service_tool_call" ? "Summary" : "Message"}
         </label>
         <textarea
           id="outbound-body"

@@ -26,6 +26,35 @@ test("OutboundDraftBlock parses valid slack draft", () => {
 test("outboundDraftKind maps action types", () => {
   assert.equal(outboundDraftKind("slack_message"), "slack_draft");
   assert.equal(outboundDraftKind("email"), "email_draft");
+  assert.equal(outboundDraftKind("service_tool_call"), "service_draft");
+});
+
+test("OutboundDraftBlock parses service_tool_call", () => {
+  const parsed = OutboundDraftBlock.parse({
+    actionType: "service_tool_call",
+    summary: { target: "Linear · create issue", body: "Title: Kite Passport video retrieval" },
+    toolCall: {
+      serviceName: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      toolName: "create_issue",
+      arguments: { title: "Kite Passport video retrieval", team: "ENG" },
+    },
+  });
+  assert.equal(parsed.actionType, "service_tool_call");
+});
+
+test("outboundMessageMatchesSummary is true for service_tool_call drafts", () => {
+  assert.equal(
+    outboundMessageMatchesSummary(
+      {
+        serviceName: "svc",
+        toolName: "create_issue",
+        arguments: { title: "x" },
+      },
+      "human summary body",
+      "service_tool_call"
+    ),
+    true
+  );
 });
 
 test("outboundMessageMatchesSummary matches text field", () => {

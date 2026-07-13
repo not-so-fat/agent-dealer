@@ -6,13 +6,15 @@ export const DENY_SEND_TOOL = "mcp__agent-deck__call_service_tool";
 const DECK_READ_TOOLS =
   "mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace,mcp__agent-deck__list_service_tools";
 
+const DECK_EXECUTE_TOOLS = `${DECK_READ_TOOLS},mcp__agent-deck__call_service_tool`;
+
 const PLAN_REFLECT_TOOLS = `Read,Glob,Grep,Skill,${DECK_READ_TOOLS}`;
 
 /** Q&A about a finished result — read-only, no deck writes, no workspace mutation. */
 const QA_TOOLS = "Read,Glob,Grep,Skill";
 
 function executeToolsForCategory(category: TaskCategory): string {
-  const base = ["Read", "Write", "Edit", "Glob", "Grep", "Skill", DECK_READ_TOOLS];
+  const base = ["Read", "Write", "Edit", "Glob", "Grep", "Skill", DECK_EXECUTE_TOOLS];
   if (category !== "communication" && category !== "email") {
     base.splice(5, 0, "Bash");
   }
@@ -35,6 +37,9 @@ export function buildClaudePhaseArgs(
     args.push("--allowedTools", executeToolsForCategory(run.taskCategory));
   }
 
-  args.push("--disallowedTools", DENY_SEND_TOOL);
+  // Soft gate: execute may call_service_tool; plan/reflect/qa stay denied.
+  if (mode !== "execute") {
+    args.push("--disallowedTools", DENY_SEND_TOOL);
+  }
   return args;
 }

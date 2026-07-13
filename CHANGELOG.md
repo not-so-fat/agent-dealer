@@ -2,6 +2,14 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
+## 0.1.10 — 2026-07-13
+
+### Outbound soft gate
+
+- **Execute may `call_service_tool`** — no longer denied mid-run so Linear/GitHub/Docmost (and similar) writes can complete; plan / reflect / qa still deny the tool
+- **Prompt** — prefer draft → Approve & send for Slack/email; do not claim the tool is blocked
+- **Draft schema** — `actionType: service_tool_call` → `service_draft` artifact for optional gated delivery of arbitrary deck-service writes
+
 ## 0.1.9 — 2026-07-12
 
 ### CLI — daemon lifecycle

@@ -20,7 +20,9 @@ related:
 
 Today a task like "message X about Y on Slack" sends **during the execute phase**, and the human reviews the result only after the message has landed. The review gate exists (`running → review → done`) but outward actions escape it. Worse, the send happened through the deck MCP even though `call_service_tool` is **not** in the execute `--allowedTools` list (`packages/server/src/runners/claude.ts:99`) — user-scope permission settings merge into spawned `claude -p` runs and widen the allowlist. Allowlist-by-omission is not enforcement.
 
-This feature makes "send" a lifecycle stage owned by the server instead of a capability the agent has: (1) send-capable tools are **explicitly denied** in every phase, (2) the execution prompt contract requires outward actions to end as a structured **draft artifact**, (3) the review card renders the draft and **Approve** becomes **Approve & send**, (4) a server-side deliver step sends the stored payload **verbatim** and persists a receipt. `PRD_V0.md` §7 already names this pattern ("draft → gate → send"); the `slack_draft` / `email_draft` artifact kinds already exist unused in `@agent-dealer/shared`.
+This feature makes "send" a lifecycle stage owned by the server when the agent chooses the draft path: (1) plan / reflect / qa deny `call_service_tool`; **execute allows it** (soft gate — agents can complete non-message deck writes mid-run), (2) the execution prompt prefers outward Slack/email actions as a structured **draft artifact** (`slack_message` | `email` | `service_tool_call`), (3) the review card renders the draft and **Approve** becomes **Approve & send**, (4) a server-side deliver step sends the stored payload **verbatim** and persists a receipt. `PRD_V0.md` §7 already names this pattern ("draft → gate → send").
+
+> **2026-07-13 soft-gate note:** The original F1.1 hard deny on every phase stranded Linear/GitHub writes (draft enum was Slack/email-only). Execute now allows `call_service_tool`; draft remains preferred for messages. See `docs/superpowers/specs/2026-07-13-outbound-soft-gate-design.md`.
 
 The mid-run pause/resume gate flow from `PRD_V0.md` §7 is deliberately **not** built (see §10): it holds a live subprocess and a concurrency slot while the human is away, which conflicts with the overnight-queue use case. The stage-gate design gets the same fidelity guarantee (reviewed bytes are sent bytes) because the server, not a resumed agent, performs the send.
 
@@ -124,7 +126,7 @@ Not applicable — agent-dealer does not host, proxy, or bill. (Section retained
   "required": ["actionType", "summary", "toolCall"],
   "additionalProperties": false,
   "properties": {
-    "actionType": { "enum": ["slack_message", "email"] },
+    "actionType": { "enum": ["slack_message", "email", "service_tool_call"] },
     "summary": {
       "type": "object",
       "required": ["target", "body"],

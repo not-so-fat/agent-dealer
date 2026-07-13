@@ -51,17 +51,19 @@ function artifactMarkdown(kind: ArtifactKind, runId: string): string {
 
 function outboundDraftContractSection(): string {
   return [
-    "## Outbound actions (required when sending Slack or email)",
-    "Do NOT send Slack messages, post to chat, or send email during execution — call_service_tool is blocked.",
-    "If the task requires an outward-facing message, end your reply with exactly one fenced ```json block shaped like:",
-    '{"actionType":"slack_message"|"email","summary":{"target":"#channel or recipient","body":"exact message text"},"toolCall":{"serviceName":"<deck service UUID>","toolName":"<tool from list_service_tools>","arguments":{...}}}',
+    "## Outbound actions (Slack/email prefer draft; other services may write directly)",
+    "Prefer ending with a fenced ```json draft for Slack/email (and any write you want human approval on before send).",
+    "call_service_tool IS available during execution — use it for non-message deck writes (Linear, GitHub, Docmost, …) when the task must complete the write now.",
+    "For Slack/email (or when drafting), do NOT send mid-run: end your reply with exactly one fenced ```json block shaped like:",
+    '{"actionType":"slack_message"|"email"|"service_tool_call","summary":{"target":"#channel, recipient, or service action","body":"exact message text or short human summary"},"toolCall":{"serviceName":"<deck service UUID>","toolName":"<tool from list_service_tools>","arguments":{...}}}',
     "Rules:",
-    "- At most one outbound draft block per run.",
+    "- At most one outbound draft block per run (omit the block if you already called call_service_tool to finish the write).",
     "- Call bind_workspace, then get_bound_deck and list_service_tools — never invent a service UUID or tool name.",
-    "- toolCall.serviceName must be the exact Slack/email service id from the bound deck (not a display name).",
+    "- toolCall.serviceName must be the exact service id from the bound deck (not a display name).",
     "- Slack: toolName is slack_send_message; arguments.channel_id is the user or channel id from slack_search_users (never guess IDs from meeting notes); arguments.message must byte-match summary.body.",
     "- Email: use the real tool name and message field from list_service_tools; message body must byte-match summary.body.",
-    "- Do not perform the send — the human approves and the server delivers verbatim.",
+    "- service_tool_call: summary is for the human review card; arguments need not byte-match summary.body.",
+    "- Draft path: do not perform the send — the human approves and the server delivers verbatim.",
   ].join("\n");
 }
 

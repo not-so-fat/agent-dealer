@@ -215,6 +215,8 @@ test("execution prompt includes outbound draft contract", () => {
   addArtifact(run.id, "approved_plan", { markdown: "# Plan" }, "human");
   const prompt = buildExecutionPrompt(run);
   assert.match(prompt, /Outbound actions/);
-  assert.match(prompt, /call_service_tool is blocked/);
+  assert.match(prompt, /call_service_tool IS available/);
+  assert.doesNotMatch(prompt, /call_service_tool is blocked/);
+  assert.match(prompt, /service_tool_call/);
   assert.match(prompt, /"actionType"/);
 });
