@@ -287,6 +287,12 @@ export const RetryRunInput = z.object({
 });
 export type RetryRunInput = z.infer<typeof RetryRunInput>;
 
+export const ApproveRunInput = z.object({
+  /** Human-edited message body before send (synced into toolCall on approve). */
+  outboundBody: z.string().min(1).max(4000).optional(),
+});
+export type ApproveRunInput = z.infer<typeof ApproveRunInput>;
+
 export const LinearCandidate = z.object({
   id: z.string(),
   identifier: z.string(),

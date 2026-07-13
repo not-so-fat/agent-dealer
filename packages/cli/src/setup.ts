@@ -32,7 +32,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<number> {
   fs.copyFileSync(template, envFile);
   console.log(`Created ${envFile}`);
   console.log(`Data directory: ${home}`);
-  console.log("Next: agent-dealer start");
+  console.log("Next: agent-dealer start --daemon");
   return 0;
 }
 

@@ -1,5 +1,9 @@
 import type { Artifact, OutboundDraftContent, OutboundToolCall } from "@agent-dealer/shared";
-import { isOutboundDraftKind } from "@agent-dealer/shared";
+import {
+  applyOutboundBodyEdit,
+  isOutboundDraftKind,
+  outboundMessageMatchesSummary,
+} from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 import { listArtifacts } from "./runs.js";
 
@@ -42,6 +46,53 @@ export function rejectPendingOutboundDrafts(runId: string): void {
       // skip
     }
   }
+}
+
+/** Apply human body edit to a pending draft artifact. Returns false if not pending. */
+export function patchPendingOutboundBody(artifactId: string, body: string): boolean {
+  const db = getDb();
+  const row = db.prepare("SELECT content_json FROM artifacts WHERE id = ?").get(artifactId) as
+    | { content_json: string }
+    | undefined;
+  if (!row?.content_json) return false;
+  let content: OutboundDraftContent;
+  try {
+    content = JSON.parse(row.content_json) as OutboundDraftContent;
+  } catch {
+    return false;
+  }
+  if (content.status !== "pending") return false;
+  const draft = applyOutboundBodyEdit(content.draft, body);
+  const next: OutboundDraftContent = {
+    ...content,
+    draft,
+    bodyMismatch: !outboundMessageMatchesSummary(draft.toolCall, draft.summary.body),
+  };
+  const result = db
+    .prepare("UPDATE artifacts SET content_json = ? WHERE id = ? AND content_json = ?")
+    .run(JSON.stringify(next), artifactId, row.content_json);
+  return result.changes === 1;
+}
+
+/** Revert sent → pending after a failed deliver attempt. Returns false if not sent. */
+export function revertOutboundDraftToPending(artifactId: string): boolean {
+  const db = getDb();
+  const row = db.prepare("SELECT content_json FROM artifacts WHERE id = ?").get(artifactId) as
+    | { content_json: string }
+    | undefined;
+  if (!row?.content_json) return false;
+  let content: OutboundDraftContent;
+  try {
+    content = JSON.parse(row.content_json) as OutboundDraftContent;
+  } catch {
+    return false;
+  }
+  if (content.status !== "sent") return false;
+  const next: OutboundDraftContent = { ...content, status: "pending", sentAt: undefined };
+  const result = db
+    .prepare("UPDATE artifacts SET content_json = ? WHERE id = ? AND content_json = ?")
+    .run(JSON.stringify(next), artifactId, row.content_json);
+  return result.changes === 1;
 }
 
 /** Atomic pending → sent transition. Returns false if not pending. */

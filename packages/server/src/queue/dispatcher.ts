@@ -7,7 +7,7 @@ import type {
   Run,
   RunStatus,
 } from "@agent-dealer/shared";
-import { planGateDecision } from "@agent-dealer/shared";
+import { canTransition, planGateDecision } from "@agent-dealer/shared";
 import {
   buildPlanEditedReplanPrompt,
   buildPlanFeedbackPrompt,
@@ -25,7 +25,7 @@ import {
   transitionRun,
   updateRunFields,
 } from "../repository/runs.js";
-import { runAgent } from "../runners/claude.js";
+import { runAgent, killRunProcess } from "../runners/claude.js";
 import { persistRunOutput, seedDeliverableFromParent } from "../runners/persist.js";
 import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
 import { pollLinearIssues } from "../adapters/external.js";
@@ -66,6 +66,11 @@ const activeReflects = new Set<string>();
 let listeners: SnapshotListener[] = [];
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let dispatchTimer: ReturnType<typeof setInterval> | null = null;
+let healthCache: { at: number; agentDeckOnline: boolean; agents: AgentWithHealth[] } | null = null;
+
+const HEALTH_CACHE_MS = 15_000;
+const MAX_PLAN_ATTEMPTS = Number(process.env.MAX_PLAN_ATTEMPTS ?? 3);
+const EMPTY_PLAN_ERROR = "Agent did not return a plan";
 
 function maxConcurrent(): number {
   return Number(process.env.MAX_CONCURRENT_RUNS ?? 2);
@@ -179,10 +184,63 @@ export function getSnapshot(): QueueSnapshotInternal {
 
 export async function getSnapshotAsync(): Promise<QueueSnapshotInternal> {
   const snap = getSnapshot();
-  snap.agentDeckOnline = await checkAgentDeckHealth();
-  snap.agents = await listAgentsWithHealth(listAgents());
+  const now = Date.now();
+  if (!healthCache || now - healthCache.at > HEALTH_CACHE_MS) {
+    healthCache = {
+      at: now,
+      agentDeckOnline: await checkAgentDeckHealth(),
+      agents: await listAgentsWithHealth(listAgents()),
+    };
+  }
+  snap.agentDeckOnline = healthCache.agentDeckOnline;
+  snap.agents = healthCache.agents;
   snap.agentIssueCount = snap.agents.filter((a) => !a.healthy).length;
   return snap;
+}
+
+/** Fail runs left in `running` after a server restart or crash. */
+export function recoverOrphanedRuns(): number {
+  let count = 0;
+  for (const run of listRuns("running" as RunStatus)) {
+    transitionRun(run.id, "failed");
+    addArtifact(
+      run.id,
+      "feedback",
+      { error: "Server restarted mid-run — retry from failed", recoverable: true },
+      "system"
+    );
+    count++;
+  }
+  return count;
+}
+
+function reconcileOrphanedRunning(): void {
+  for (const run of listRuns("running" as RunStatus)) {
+    if (activeRuns.has(run.id)) continue;
+    transitionRun(run.id, "failed");
+    addArtifact(
+      run.id,
+      "feedback",
+      { error: "Run lost active worker — marked failed", recoverable: true },
+      "system"
+    );
+  }
+}
+
+function priorEmptyPlanAttempts(runId: string): number {
+  return listArtifacts(runId).filter((a) => {
+    if (a.kind !== "feedback" || !a.contentJson) return false;
+    try {
+      const c = JSON.parse(a.contentJson) as { error?: string };
+      return c.error === EMPTY_PLAN_ERROR;
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
+export function cancelActiveRun(runId: string): void {
+  killRunProcess(runId);
 }
 
 export function subscribe(listener: SnapshotListener): () => void {
@@ -273,6 +331,7 @@ async function dispatchPlanDrafts(): Promise<void> {
 }
 
 async function dispatch(): Promise<void> {
+  reconcileOrphanedRunning();
   await dispatchPlanDrafts();
 
   const running = countByStatus("running");
@@ -282,10 +341,12 @@ async function dispatch(): Promise<void> {
   const approved = sortQueueFifo(listRuns("plan_approved" as RunStatus));
   for (const run of approved.slice(0, slots)) {
     if (activeRuns.has(run.id)) continue;
-    const job = executeRun(run).finally(() => {
-      activeRuns.delete(run.id);
-      notify().catch(console.error);
-    });
+    const job = executeRun(run)
+      .catch((e) => console.error("[execute]", run.id, e))
+      .finally(() => {
+        activeRuns.delete(run.id);
+        notify().catch(console.error);
+      });
     activeRuns.set(run.id, job);
   }
   await notify();
@@ -331,7 +392,12 @@ export function applyPlanGate(run: Run): PlanGateDecision {
   const draft = getLatestArtifact(run.id, "draft_plan");
   if (!draft?.contentJson) return "await_review";
 
-  const plan = JSON.parse(draft.contentJson) as PlanContent;
+  let plan: PlanContent;
+  try {
+    plan = JSON.parse(draft.contentJson) as PlanContent;
+  } catch {
+    return "await_review";
+  }
   addArtifact(run.id, "approved_plan", { ...plan, autoApproved: true, rationale: triage.rationale }, "system");
   transitionRun(run.id, "plan_approved");
   void forceDispatch();
@@ -402,13 +468,35 @@ export async function draftPlan(
         applyPlanGate(getRun(run.id)!);
       }
     } else if (!opts?.replace) {
-      addArtifact(updated.id, "feedback", { error: "Agent did not return a plan" }, "system");
+      addArtifact(updated.id, "feedback", { error: EMPTY_PLAN_ERROR }, "system");
     }
 
-    const planFailed = !persisted.planMarkdown && result.exitCode !== 0;
+    const emptyPlanExhausted =
+      !persisted.planMarkdown &&
+      !opts?.replace &&
+      priorEmptyPlanAttempts(updated.id) >= MAX_PLAN_ATTEMPTS;
+    const planFailed =
+      result.timedOut ||
+      emptyPlanExhausted ||
+      (!persisted.planMarkdown && result.exitCode !== 0);
     if (planFailed) {
-      transitionRun(run.id, "failed");
-      addArtifact(run.id, "feedback", { error: "Planning failed", exitCode: result.exitCode }, "system");
+      const stillActive = getRun(run.id);
+      if (stillActive && (stillActive.status === "plan_pending" || stillActive.status === "queued")) {
+        transitionRun(run.id, "failed");
+        addArtifact(
+          run.id,
+          "feedback",
+          {
+            error: result.timedOut
+              ? "Planning timed out"
+              : emptyPlanExhausted
+                ? `Planning failed after ${MAX_PLAN_ATTEMPTS} empty results`
+                : "Planning failed",
+            exitCode: result.exitCode,
+          },
+          "system"
+        );
+      }
     }
   } catch (err) {
     const after = getRun(run.id);
@@ -486,7 +574,14 @@ export function submitPlanAnswers(
       return { ok: false, code: 409, error: String(e) };
     }
     const draft = getLatestArtifact(runId, "draft_plan");
-    const plan = draft?.contentJson ? (JSON.parse(draft.contentJson) as PlanContent) : { markdown: "" };
+    let plan: PlanContent = { markdown: "" };
+    if (draft?.contentJson) {
+      try {
+        plan = JSON.parse(draft.contentJson) as PlanContent;
+      } catch {
+        return { ok: false, code: 409, error: "Draft plan is unreadable — request a re-draft" };
+      }
+    }
     addArtifact(runId, "approved_plan", plan, "human");
     void forceDispatch();
     return { ok: true, outcome, run: getRun(runId)! };
@@ -568,6 +663,13 @@ async function executeRun(run: Run): Promise<void> {
     await notify();
 
     const result = await runAgent(run, "execute");
+
+    const after = getRun(run.id);
+    if (!after || after.status === "cancelled") {
+      await notify();
+      return;
+    }
+
     const persisted = persistRunOutput({
       run,
       phase: "execute",
@@ -577,10 +679,24 @@ async function executeRun(run: Run): Promise<void> {
       rawTranscript: result.transcript,
     });
 
-    if (result.exitCode === 0 && !persisted.blocked) {
+    const current = getRun(run.id);
+    if (!current || current.status === "cancelled") {
+      await notify();
+      return;
+    }
+
+    if (result.timedOut) {
+      transitionRun(run.id, "failed");
+      addArtifact(
+        run.id,
+        "feedback",
+        { error: "Execution timed out", exitCode: result.exitCode, logPath: result.logPath },
+        "system"
+      );
+    } else if (result.exitCode === 0 && !persisted.blocked) {
       const updated = transitionRun(run.id, "review");
       syncLinearForRun(updated, "review").catch((e) => console.error("[linear-sync] review:", e));
-    } else {
+    } else if (canTransition(current.status, "failed")) {
       transitionRun(run.id, "failed");
       addArtifact(
         run.id,
@@ -594,8 +710,11 @@ async function executeRun(run: Run): Promise<void> {
       );
     }
   } catch (err) {
-    transitionRun(run.id, "failed");
-    addArtifact(run.id, "feedback", { error: String(err) }, "system");
+    const after = getRun(run.id);
+    if (after && after.status !== "cancelled" && canTransition(after.status, "failed")) {
+      transitionRun(run.id, "failed");
+      addArtifact(run.id, "feedback", { error: String(err) }, "system");
+    }
   }
   await notify();
 }

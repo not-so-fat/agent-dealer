@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import fs from "node:fs";
 import {
+  ApproveRunInput,
   CreateRunInput,
   AgentConfigInput,
   AgentDeckConfigPatch,
@@ -45,6 +46,7 @@ import {
   forceDispatch,
   getSnapshotAsync,
   kickRun,
+  cancelActiveRun,
   schedulePlanDraft,
   scheduleRedraft,
   scheduleReflect,
@@ -54,7 +56,8 @@ import {
 import { approveRunWithDeliver } from "../queue/approve-deliver.js";
 import { recordPlanDelegation } from "../queue/plan-delegation.js";
 import { askResultQuestion } from "../queue/result-qa.js";
-import { rejectPendingOutboundDrafts } from "../repository/outbound-drafts.js";
+import { rejectPendingOutboundDrafts, deliverInFlight } from "../repository/outbound-drafts.js";
+import { getActiveLogPath } from "../runners/claude.js";
 import { fetchAgentDeckDecks } from "../adapters/agent-deck.js";
 import { testAgentDeckConnection } from "../adapters/agent-deck.js";
 import {
@@ -141,13 +144,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       artifacts.find((a) => a.kind === kind && a.blobPath) ??
       artifacts.find((a) => a.kind === "transcript" && a.blobPath) ??
       artifacts.find((a) => a.kind === "stream_trace" && a.blobPath);
-    if (!artifact?.blobPath) return reply.status(404).send({ error: "No log artifact" });
-    if (!fs.existsSync(artifact.blobPath)) {
+    const livePath = getActiveLogPath(id);
+    const blobPath = artifact?.blobPath ?? livePath;
+    if (!blobPath) return reply.status(404).send({ error: "No log artifact" });
+    if (!fs.existsSync(blobPath)) {
       return reply.status(404).send({ error: "Log file missing on disk" });
     }
     const max = Math.min(Number((req.query as { max?: string }).max ?? 50000), 200000);
-    const raw = fs.readFileSync(artifact.blobPath, "utf8");
-    return { content: raw.slice(-max), path: artifact.blobPath, kind: artifact.kind };
+    const raw = fs.readFileSync(blobPath, "utf8");
+    return { content: raw.slice(-max), path: blobPath, kind: artifact?.kind ?? kind, live: !!livePath };
   });
 
   app.get("/api/intake/linear/status", async () => testLinearConnection());
@@ -489,7 +494,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/api/runs/:id/approve", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const result = await approveRunWithDeliver(id);
+    const input = ApproveRunInput.parse(req.body ?? {});
+    const result = await approveRunWithDeliver(id, {
+      outboundBody: input.outboundBody,
+    });
     if (!result.ok) {
       return reply.status(result.code).send({ error: result.error });
     }
@@ -502,6 +510,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!run) return reply.status(404).send({ error: "Not found" });
     if (run.status !== "review" && run.status !== "failed") {
       return reply.status(400).send({ error: "Retry only from review or failed" });
+    }
+    if (deliverInFlight.has(id)) {
+      return reply.status(409).send({ error: "Deliver in progress — wait before retrying" });
     }
 
     const approvedPlan = getLatestArtifact(id, "approved_plan");
@@ -577,6 +588,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const run = getRun(id);
     if (!run) return reply.status(404).send({ error: "Not found" });
+    cancelActiveRun(id);
     return transitionRun(id, "cancelled");
   });
 

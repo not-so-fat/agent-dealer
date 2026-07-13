@@ -264,8 +264,12 @@ export async function submitPlanAnswers(
   return res.json();
 }
 
-export async function approveRun(id: string): Promise<Run> {
-  const res = await fetch(`${API}/api/runs/${id}/approve`, { method: "POST" });
+export async function approveRun(id: string, outboundBody?: string): Promise<Run> {
+  const res = await fetch(`${API}/api/runs/${id}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(outboundBody ? { outboundBody } : {}),
+  });
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
 }

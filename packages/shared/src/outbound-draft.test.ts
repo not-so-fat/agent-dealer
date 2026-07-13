@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  applyOutboundBodyEdit,
   OutboundDraftBlock,
   outboundDraftKind,
   outboundMessageMatchesSummary,
@@ -38,6 +39,16 @@ test("outboundMessageMatchesSummary detects mismatch", () => {
   assert.equal(
     outboundMessageMatchesSummary(VALID_DRAFT.toolCall, "different body"),
     false
+  );
+});
+
+test("applyOutboundBodyEdit syncs summary and toolCall text", () => {
+  const edited = applyOutboundBodyEdit(VALID_DRAFT, "Edited before send");
+  assert.equal(edited.summary.body, "Edited before send");
+  assert.equal(edited.toolCall.arguments.text, "Edited before send");
+  assert.equal(
+    outboundMessageMatchesSummary(edited.toolCall, edited.summary.body),
+    true
   );
 });
 

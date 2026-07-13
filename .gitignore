@@ -9,5 +9,6 @@ apps/web/public/fonts/
 packages/server/static-ui/
 *.db
 *.db-journal
+docs/video/audio/
 .DS_Store
 *.tsbuildinfo

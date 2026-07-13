@@ -62,3 +62,19 @@ export function outboundMessageMatchesSummary(toolCall: OutboundToolCall, body: 
   const candidates = [args.text, args.body, args.message].filter((v): v is string => typeof v === "string");
   return candidates.some((v) => v === body);
 }
+
+const OUTBOUND_BODY_ARG_KEYS = ["text", "body", "message"] as const;
+
+/** Human edit before approve — sync summary.body into the toolCall message field. */
+export function applyOutboundBodyEdit(draft: OutboundDraftBlock, body: string): OutboundDraftBlock {
+  const args = { ...draft.toolCall.arguments };
+  const key = OUTBOUND_BODY_ARG_KEYS.find((k) => typeof args[k] === "string");
+  if (key) args[key] = body;
+  else args.text = body;
+
+  return {
+    ...draft,
+    summary: { ...draft.summary, body },
+    toolCall: { ...draft.toolCall, arguments: args },
+  };
+}

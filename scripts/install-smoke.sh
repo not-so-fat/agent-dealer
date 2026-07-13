@@ -19,9 +19,8 @@ export HOME="$HOME_DIR"
 PORT=49221
 
 cleanup() {
-  if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then
-    kill "$PID" 2>/dev/null || true
-    wait "$PID" 2>/dev/null || true
+  if [[ -n "${HOME_DIR:-}" ]] && command -v agent-dealer >/dev/null 2>&1; then
+    AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer stop >/dev/null 2>&1 || true
   fi
   rm -rf "$PACK_DIR" "$INSTALL_DIR"
 }
@@ -62,14 +61,13 @@ echo "[install-smoke] legacy PORT=2221 in .env maps to bundled 2222"
 sed -i.bak 's/^PORT=.*/PORT=2221/' "$HOME_DIR/.agent-dealer/.env"
 DOC_OUT="$(AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer doctor 2>&1)"
 echo "$DOC_OUT"
-echo "$DOC_OUT" | grep -Fq "port 2222" || {
+echo "$DOC_OUT" | grep -Eq "port 2222|agent-dealer running on :2222" || {
   echo "[install-smoke] FAIL doctor did not resolve bundled port 2222"
   exit 1
 }
 
-echo "[install-smoke] start on port $PORT"
-PORT=$PORT AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer start --port "$PORT" &
-PID=$!
+echo "[install-smoke] start --daemon on port $PORT"
+AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer start --daemon --port "$PORT"
 
 for i in $(seq 1 40); do
   if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null; then
@@ -83,9 +81,18 @@ curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "[install-smoke] F
 curl -sf "http://127.0.0.1:$PORT/" | head -c 200 | grep -qi html || { echo "[install-smoke] FAIL dashboard HTML"; exit 1; }
 curl -sf "http://127.0.0.1:$PORT/api/snapshot" >/dev/null || { echo "[install-smoke] FAIL /api/snapshot"; exit 1; }
 
-echo "[install-smoke] ✓ dashboard + API"
-kill "$PID"
-wait "$PID" 2>/dev/null || true
-PID=""
+echo "[install-smoke] status"
+AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer status || { echo "[install-smoke] FAIL status"; exit 1; }
+
+echo "[install-smoke] run.json exists"
+test -f "$HOME_DIR/.agent-dealer/run.json" || { echo "[install-smoke] FAIL run.json missing"; exit 1; }
+
+echo "[install-smoke] ✓ dashboard + API (daemon)"
+
+echo "[install-smoke] stop"
+AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer stop || { echo "[install-smoke] FAIL stop"; exit 1; }
+
+sleep 0.5
+curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && { echo "[install-smoke] FAIL still healthy after stop"; exit 1; }
 
 echo "[install-smoke] PASS"

@@ -311,10 +311,12 @@ export async function deliverOutboundDraft(
   opts?: {
     workspaceRoot?: string;
     callTool?: (payload: CallServiceToolPayload) => Promise<unknown>;
+    timeoutMs?: number;
   }
 ): Promise<DeliverOutboundResult> {
   const payload = toCallServiceToolPayload(toolCall);
   const workspaceRoot = opts?.workspaceRoot ?? process.cwd();
+  const timeoutMs = opts?.timeoutMs ?? Number(process.env.DELIVER_TIMEOUT_MS ?? 60_000);
 
   const callTool =
     opts?.callTool ??
@@ -322,16 +324,24 @@ export async function deliverOutboundDraft(
       const mcpBase = getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "");
       const transport = new StreamableHTTPClientTransport(new URL(`${mcpBase}/mcp`));
       const client = new Client({ name: "agent-dealer-deliver", version: "0.0.1" });
-      await client.connect(transport);
-      try {
-        await client.callTool({
-          name: "bind_workspace",
-          arguments: { deckId, workspaceRoot },
-        });
-        return await client.callTool({ name: "call_service_tool", arguments: p });
-      } finally {
-        await client.close();
-      }
+      const connectAndCall = async () => {
+        await client.connect(transport);
+        try {
+          await client.callTool({
+            name: "bind_workspace",
+            arguments: { deckId, workspaceRoot },
+          });
+          return await client.callTool({ name: "call_service_tool", arguments: p });
+        } finally {
+          await client.close();
+        }
+      };
+      return await Promise.race([
+        connectAndCall(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Outbound deliver timed out after ${timeoutMs}ms`)), timeoutMs)
+        ),
+      ]);
     });
 
   const toolResult = await callTool(payload);

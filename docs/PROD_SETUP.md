@@ -36,7 +36,9 @@ npm run db:migrate:prod
 npm run start
 ```
 
-API listens on **http://127.0.0.1:2221** (`npm run start` from git). With **`npm install -g agent-dealer`**, `agent-dealer start` serves the bundled dashboard on **http://localhost:2222** (API + UI, one port).
+API listens on **http://127.0.0.1:2221** (`npm run start` from git). With **`npm install -g agent-dealer`**, `agent-dealer start --daemon` serves the bundled dashboard on **http://localhost:2222** (API + UI, one port).
+
+**Daemon mode:** `agent-dealer start --daemon` spawns a detached supervisor; server logs go to `~/.agent-dealer/logs/` (`server.log`, `supervisor.log`). Foreground `agent-dealer start` still works for debugging in an open terminal. Stop with `agent-dealer stop`; check with `agent-dealer status`.
 
 For git dev work, use `npm run dev` on **3222** (Vite) proxying API **3221**.
 

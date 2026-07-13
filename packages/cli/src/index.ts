@@ -1,6 +1,8 @@
 import { runDoctor } from "./doctor.js";
 import { runSetup, printSetupHelp } from "./setup.js";
 import { runStart, printStartHelp } from "./start.js";
+import { runStatus } from "./status.js";
+import { runStop } from "./stop.js";
 import { maybeCheckForUpdateOnRun } from "./update-check.js";
 import { getVersion } from "./version.js";
 import { runUpgrade, printUpgradeHelp } from "./upgrade.js";
@@ -8,7 +10,9 @@ import { runUpgrade, printUpgradeHelp } from "./upgrade.js";
 function printUsage(): void {
   console.log(`Usage:
   agent-dealer setup [--home DIR] [--force]
-  agent-dealer start [--port PORT] [--open]
+  agent-dealer start [--daemon] [--port PORT] [--open] [--force]
+  agent-dealer stop
+  agent-dealer status
   agent-dealer doctor
   agent-dealer upgrade [--to VERSION] [--yes]
   agent-dealer --version
@@ -57,15 +61,30 @@ export async function runCli(argv: string[]): Promise<number> {
     if (upgraded) return 0;
     let port: number | undefined;
     let open = false;
+    let daemon = false;
+    let force = false;
+    let supervisor = false;
     for (let i = 1; i < args.length; i += 1) {
-      if (args[i] === "--port") port = Number(args[++i]);
-      else if (args[i] === "--open") open = true;
+      const arg = args[i];
+      if (arg === "--port") port = Number(args[++i]);
+      else if (arg === "--open") open = true;
+      else if (arg === "--daemon") daemon = true;
+      else if (arg === "--force") force = true;
+      else if (arg === "--_supervisor") supervisor = true;
       else {
-        console.error(`Unknown start option: ${args[i]}`);
+        console.error(`Unknown start option: ${arg}`);
         return 1;
       }
     }
-    return runStart({ port, open });
+    return runStart({ port, open, daemon, force, supervisor });
+  }
+
+  if (cmd === "stop") {
+    return runStop();
+  }
+
+  if (cmd === "status") {
+    return runStatus();
   }
 
   if (cmd === "doctor") {

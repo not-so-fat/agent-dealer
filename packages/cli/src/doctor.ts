@@ -8,6 +8,7 @@ import {
   resolveBundledListenPort,
   shortenHome,
 } from "./env.js";
+import { probeAgentDealer } from "./ports.js";
 import { resolveServerEntry, resolveUiDist } from "./paths.js";
 
 export async function runDoctor(): Promise<number> {
@@ -62,11 +63,16 @@ export async function runDoctor(): Promise<number> {
   }
 
   const port = resolveBundledListenPort();
-  const free = await isPortFree(port);
-  if (free) {
-    console.log(`✓ port ${port} available`);
+  const probe = await probeAgentDealer("127.0.0.1", port);
+  if (probe.up) {
+    console.log(`✓ agent-dealer running on :${port}`);
   } else {
-    console.warn(`⚠ port ${port} in use`);
+    const free = await isPortFree(port);
+    if (free) {
+      console.log(`✓ port ${port} available`);
+    } else {
+      console.warn(`⚠ port ${port} in use (not agent-dealer — run: agent-dealer status)`);
+    }
   }
 
   return failed ? 1 : 0;

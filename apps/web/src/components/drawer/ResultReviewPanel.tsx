@@ -51,6 +51,7 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
   const [prefilledRetry, setPrefilledRetry] = useState(false);
   const [traceOpen, setTraceOpen] = useState(false);
   const [deliverError, setDeliverError] = useState<string | null>(null);
+  const [outboundBody, setOutboundBody] = useState("");
 
   const agent = agents.find((a) => a.id === run.agentId);
   const runtime = run.runtime ?? agent?.runtime ?? "claude_code";
@@ -109,9 +110,16 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
     setFeedback("");
     setTraceOpen(false);
     setDeliverError(null);
+    setOutboundBody("");
     setExecuteModel(run.executeModel ?? "");
     setExecuteBudget(runPhaseBudgetFromRun(run.budgetJson, "execute"));
   }, [run.id, run.executeModel, run.budgetJson]);
+
+  useEffect(() => {
+    if (pendingOutbound) {
+      setOutboundBody(pendingOutbound.draft.summary.body);
+    }
+  }, [pendingOutbound?.draft.summary.body, run.id]);
 
   useEffect(() => {
     if (prefilledRetry || !blocked) return;
@@ -139,7 +147,7 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
     setBusy(true);
     setDeliverError(null);
     try {
-      await approveRun(run.id);
+      await approveRun(run.id, pendingOutbound ? outboundBody.trim() || undefined : undefined);
       await load();
       onRefresh();
       onDoneAndNext?.();
@@ -187,9 +195,12 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
         {pendingOutbound && run.status === "review" && !blocked && (
           <OutboundDraftCard
             content={pendingOutbound}
+            body={outboundBody}
+            onBodyChange={setOutboundBody}
             deliverError={deliverError}
             onRetrySend={approveSend}
             retrySendBusy={busy}
+            disabled={busy}
           />
         )}
 
@@ -198,13 +209,13 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
             <p className="text-sm text-white/45">
               {pendingOutbound
                 ? deliverError
-                  ? "Fix the send issue above, or redraft below if the message needs to change."
-                  : "Review the message above, then approve to send."
+                  ? "Fix the send issue above, or edit the message and retry."
+                  : "Edit the message if needed, then approve to send."
                 : "Looks good? Accept and move on."}
             </p>
             <button
               type="button"
-              disabled={busy || (!pendingOutbound && !!feedback.trim())}
+              disabled={busy || (!pendingOutbound && !!feedback.trim()) || (!!pendingOutbound && !outboundBody.trim())}
               title={
                 !pendingOutbound && feedback.trim()
                   ? "Clear retry instructions below to mark done"

@@ -7,7 +7,7 @@ import cors from "@fastify/cors";
 import { enrichPathForCliTools } from "./cli-env.js";
 import { migrate } from "./db/index.js";
 import { registerRoutes } from "./routes/index.js";
-import { startQueue } from "./queue/dispatcher.js";
+import { startQueue, recoverOrphanedRuns } from "./queue/dispatcher.js";
 import { registerStaticUi } from "./static-ui.js";
 
 const { mode, envFile } = loadAgentDealerEnv();
@@ -24,9 +24,13 @@ async function main(): Promise<void> {
   await registerRoutes(app);
 
   const uiDist = await registerStaticUi(app);
+  const orphans = recoverOrphanedRuns();
+  if (orphans > 0) {
+    console.warn(`[startup] recovered ${orphans} orphaned running run(s) → failed`);
+  }
   startQueue();
 
-  await app.listen({ port, host: "0.0.0.0" });
+  await app.listen({ port, host: "127.0.0.1" });
   const base = `http://127.0.0.1:${port}`;
   console.log(`agent-dealer API ${base}`);
   if (uiDist) {

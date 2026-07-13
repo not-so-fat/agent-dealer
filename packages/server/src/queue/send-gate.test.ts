@@ -91,6 +91,25 @@ test("approve with mock deliver sends byte-identical payload and creates receipt
   assert.match(draftArt!.contentJson!, /"status":"sent"/);
 });
 
+test("approve with human-edited body sends updated payload", async () => {
+  const run = seedReviewRun(true);
+  let captured: OutboundToolCall | null = null;
+  const res = await approveRunWithDeliver(run.id, {
+    outboundBody: "Human tweak before send",
+    deliver: async (_deckId, toolCall) => {
+      captured = toolCall;
+      return { toolResult: { ok: true } };
+    },
+  });
+  assert.equal(res.ok, true);
+  assert.deepEqual(captured, {
+    ...TOOL_CALL,
+    arguments: { ...TOOL_CALL.arguments, text: "Human tweak before send" },
+  });
+  const draftArt = getLatestArtifact(run.id, "slack_draft");
+  assert.match(draftArt!.contentJson!, /Human tweak before send/);
+});
+
 test("deliver failure keeps run in review with pending draft", async () => {
   const run = seedReviewRun(true);
   const res = await approveRunWithDeliver(run.id, {
@@ -102,6 +121,23 @@ test("deliver failure keeps run in review with pending draft", async () => {
   assert.equal(!res.ok && res.code, 502);
   assert.equal(getRun(run.id)!.status, "review");
   assert.equal(pendingSendCount(run.id), 1);
+  const draftArt = getLatestArtifact(run.id, "slack_draft");
+  assert.match(draftArt!.contentJson!, /"status":"pending"/);
+});
+
+test("mark sent before deliver prevents double-send race", async () => {
+  const run = seedReviewRun(true);
+  let deliverCalls = 0;
+  const res = await approveRunWithDeliver(run.id, {
+    deliver: async () => {
+      deliverCalls++;
+      return { toolResult: { ok: true } };
+    },
+  });
+  assert.equal(res.ok, true);
+  assert.equal(deliverCalls, 1);
+  const draftArt = getLatestArtifact(run.id, "slack_draft");
+  assert.match(draftArt!.contentJson!, /"status":"sent"/);
 });
 
 test("proxy success:false from deck is treated as deliver failure", async () => {

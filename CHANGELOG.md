@@ -2,6 +2,40 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
+## 0.1.9 — 2026-07-12
+
+### CLI — daemon lifecycle
+
+- **`agent-dealer start --daemon`** — detached supervisor; survives terminal close; logs under `~/.agent-dealer/logs/`
+- **`agent-dealer status`** — PID, port, health, log paths
+- **`agent-dealer stop`** — graceful shutdown of a running daemon
+- **`start --force`** — replace an existing listener on the port
+
+### Execution pipeline — reliability
+
+- **Orphan recovery** — `running` rows left by a restart are swept to `failed` at startup (retryable)
+- **Cancel safety** — cancelling a run kills the child process; late completions no longer crash the daemon
+- **Empty-plan cap** — repeated empty plan results fail after 3 attempts (no infinite spend loop)
+- **Wall-clock timeouts** — plan (15m) and execute (60m) kill stalled agents and free concurrency slots
+- **Global spawn cap** — plan, execute, reflect, and Q&A share `MAX_CONCURRENT_RUNS`
+- **Live transcripts** — stdout streams to ndjson during the run; `/log-tail` works on in-flight runs
+
+### Outbound send gate
+
+- **Sent-before-deliver** — draft marked `sent` atomically before MCP call; reverted to `pending` on failure (no double-send race)
+- **Retry guard** — `/retry` returns 409 while a deliver is in flight
+- **Deliver timeout** — MCP outbound calls time out after 60s (`DELIVER_TIMEOUT_MS`)
+- **Review drawer** — edit outbound message body before approve/send
+
+### Security
+
+- **Localhost only** — API binds `127.0.0.1` (not `0.0.0.0`)
+
+### Docs
+
+- **README** — story-first rewrite of the product path
+- **PROD_SETUP** — daemon commands and ops notes
+
 ## 0.1.8 — 2026-07-11
 
 ### Playbook learning (Agent Deck 1.4.0)

@@ -19,7 +19,7 @@ alwaysApply: false
 | 2FA | `npm run publish:packages -- --otp=CODE` |
 | No scoped org | Do not publish `@agent-dealer/*` to npm (no org required) |
 
-**Friend path:** `npm install -g agent-dealer` → `agent-dealer setup` → `agent-dealer start` → http://localhost:2222
+**Friend path:** `npm install -g agent-dealer` → `agent-dealer setup` → `agent-dealer start --daemon` → http://localhost:2222
 
 **Not shipped:** empty README-only tarballs; pointer packages that lie about `npm install`.
 
