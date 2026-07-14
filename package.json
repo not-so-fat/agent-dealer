@@ -1,6 +1,6 @@
 {
   "name": "agent-dealer",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": true,
   "description": "Human control plane for agent execution — queue, plan approval, audit treasure",
   "workspaces": [

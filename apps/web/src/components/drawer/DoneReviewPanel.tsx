@@ -89,7 +89,9 @@ export default function DoneReviewPanel({ run }: Props) {
       {document && (
         <section className="space-y-2">
           <div className="heading-section">Document</div>
-          <textarea className="field-mono min-h-[160px] resize-y" value={document.markdown} readOnly />
+          <div className="markdown-body-panel markdown-body-panel--flow">
+            <MarkdownBody source={document.markdown} />
+          </div>
         </section>
       )}
 

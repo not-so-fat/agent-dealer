@@ -2,6 +2,13 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
+## 0.1.11 — 2026-07-14
+
+### Review drawer — reading surfaces
+
+- **Result** — expand/collapse like Plan (`Show full result` / `Show summary`); defaults to full natural height instead of a tight scroll box
+- **Deliverable / Document** — render markdown instead of a raw readonly textarea
+
 ## 0.1.10 — 2026-07-13
 
 ### Outbound soft gate

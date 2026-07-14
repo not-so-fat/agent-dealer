@@ -177,7 +177,9 @@ export default function ResultReviewPanel({ run, agents, onRefresh, onRetry, onD
         <section className="space-y-2">
           <div className="heading-section">Deliverable</div>
           <p className="text-sm text-white/45">{document.path}</p>
-          <textarea className="field-mono min-h-[160px] resize-y" value={document.markdown} readOnly />
+          <div className="markdown-body-panel markdown-body-panel--flow">
+            <MarkdownBody source={document.markdown} />
+          </div>
         </section>
       )}
 

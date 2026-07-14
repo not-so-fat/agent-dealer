@@ -1,6 +1,6 @@
 {
   "name": "agent-dealer",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Human control plane for agent execution — queue, plan approval, audit",
   "license": "MIT",
   "type": "module",
@@ -37,8 +37,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@agent-dealer/server": "0.1.10",
-    "@agent-dealer/shared": "0.1.10",
+    "@agent-dealer/server": "0.1.11",
+    "@agent-dealer/shared": "0.1.11",
     "dotenv": "^16.5.0"
   },
   "devDependencies": {
