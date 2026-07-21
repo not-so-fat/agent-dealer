@@ -102,10 +102,12 @@ export function createRun(input: CreateRunInput, opts?: {
   if (!repo) {
     throw new Error("Agent workspace not configured — set workspace on Agents page or provide repo override");
   }
+  const source = opts?.source ?? "manual";
+  const externalId = opts?.externalId ?? (source === "manual" ? id : null);
   const run: RunRow = {
     id,
-    source: opts?.source ?? "manual",
-    external_id: opts?.externalId ?? null,
+    source,
+    external_id: externalId,
     external_label: opts?.externalLabel ?? null,
     task_category: input.taskCategory,
     title: input.title,
