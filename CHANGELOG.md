@@ -2,6 +2,16 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
+## 0.1.13 — 2026-07-21
+
+### Review drawer
+
+- **Arrow keys in fields** — Left/Right no longer advance the review queue while the caret is in an input, textarea, or other editable control
+
+### Build / CI
+
+- **Lockfile + CLI workspace pins** — CLI `@agent-dealer/shared` / `server` match the release version so `npm ci` resolves workspaces (fixes main CI 404 on unpublished scoped packages)
+
 ## 0.1.12 — 2026-07-21
 
 ### Manual task identity
