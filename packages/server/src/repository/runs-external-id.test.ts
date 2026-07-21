@@ -33,7 +33,7 @@ test("manual retry copies parent external_id", () => {
   const parent = createRun({
     title: "Manual task",
     taskCategory: "other",
-    status: "review",
+    status: "plan_pending",
     agentId: BUILTIN_AGENT_CLAUDE_ID,
   });
   const child = createRun(

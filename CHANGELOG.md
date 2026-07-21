@@ -2,6 +2,12 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
 
+## 0.1.12 — 2026-07-21
+
+### Manual task identity
+
+- **Manual runs mint `external_id`** — set to the first run’s `id` at create (same stable task-key pattern as Linear); copied on retry. `external_label` stays null for manual.
+
 ## 0.1.11 — 2026-07-14
 
 ### Review drawer — reading surfaces

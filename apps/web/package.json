@@ -1,6 +1,6 @@
 {
   "name": "@agent-dealer/web",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "type": "module",
   "scripts": {
     "predev": "node scripts/ensure-monaco-font.mjs",
