@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from "react";
+import { isEditableKeyboardTarget } from "../../lib/keyboard";
 
 type Props = {
   onClose: () => void;
@@ -16,6 +17,8 @@ export default function ReviewDrawer({ onClose, header, children, onKeyDown }: P
         onClose();
         return;
       }
+      // Queue Left/Right must not steal caret movement inside form fields.
+      if (isEditableKeyboardTarget(e.target)) return;
       onKeyDown?.(e);
     };
     window.addEventListener("keydown", onKey);
