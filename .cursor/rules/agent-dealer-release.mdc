@@ -46,17 +46,19 @@ Recurring gates live in **`scripts/`** (not gitignored `.temporal/`):
 
 Runtime logs only: `.temporal/logs/`.
 
-## Release order (agent completes)
+## Release order (agent completes; human OTP only)
 
 1. Agree version · sync workspaces · `CHANGELOG.md`.
 2. `npm run build:release` · `npm run install:smoke` (must pass).
 3. `npm run flow:verify` when API changed (server up on dev port).
-4. Commit `Ship X.Y.Z:` · tag `vX.Y.Z` · `git push` · `gh release create` (or `gh release edit`).
-5. Human `npm login` · `npm run publish:packages` (agent runs; human only OTP).
+4. Commit `Ship X.Y.Z:` · push `main`.
+5. **Human:** `npm run publish:packages -- --otp=CODE` (only human step).
+6. **Agent:** tag `vX.Y.Z` · `git push` tag · `gh release create` from CHANGELOG (after `npm view agent-dealer version` matches).
 
 ## Agent behavior
 
-- **Do** push, tag, GitHub release notes, and run publish after smoke passes.
+- **Never** run `npm publish` / `publish:packages` — human’s only step (OTP).
+- **Do** version bump, CHANGELOG, `build:release`, `install:smoke`, commit, push, tag `vX.Y.Z`, `gh release create` after npm shows the version.
 - **Do not** `npm publish` from monorepo root (`EPRIVATE`).
-- **Do not** empty-publish or defer push/publish as “on you” except npm auth/OTP.
+- **Do not** empty-publish or leave Ship commits without tags/GitHub Releases.
 - **Never** wipe `~/.agent-dealer-dev/dealer.db` as release prep.
