@@ -46,11 +46,17 @@ Works without Agent Deck too (no deck = degraded mode; playbooks optional).
 
 Prerequisites: Node.js 20+ · [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude` on PATH) · [Agent Deck](https://github.com/not-so-fat/agent_deck) optional · `LINEAR_API_KEY` optional (manual tasks work without it)
 
+**Recommended (managed install — auto-updates, keeps existing `~/.agent-dealer` data):**
+
 ```bash
-npm install -g agent-dealer
+curl -fsSL https://raw.githubusercontent.com/not-so-fat/agent-dealer/main/scripts/install.sh | bash
+# or: npx agent-dealer@latest install
+export PATH="$HOME/.local/bin:$PATH"
 agent-dealer setup
 agent-dealer start --daemon --open
 ```
+
+Compat: `npm install -g agent-dealer` still works; `agent-dealer install` switches only the CLI binary (no data migration).
 
 Open **http://localhost:2222** — dashboard and API on one port. Day to day: `agent-dealer start --daemon` / `agent-dealer stop` · `agent-dealer status` if something fails. Use plain `agent-dealer start` only when you want a foreground process in an open terminal (logs go to stdout).
 

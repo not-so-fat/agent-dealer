@@ -1,6 +1,23 @@
 # Changelog
 
-Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** — see `docs/PUBLISHING.md`.
+Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
+
+## 0.2.0 — 2026-07-30
+
+### Managed CLI install + auto-upgrade
+
+- **Recommended install:** `agent-dealer install` (or `scripts/install.sh`) → `~/.agent-dealer/versions/` + `~/.local/bin/agent-dealer` — **existing config/queue/logs untouched**
+- **Auto-update on by default** for managed installs (background check; activate on next `start` / `doctor` / `upgrade`)
+- **Opt out:** `AGENT_DEALER_DISABLE_AUTOUPDATER=1`
+- **`upgrade`:** managed path activates the version tree; npm-global path still uses `npm i -g` (compat)
+- **doctor:** reports install kind + managed current / pending
+- **Docs:** README + PUBLISHING friend path
+
+### After upgrade
+
+- New users: `curl -fsSL …/scripts/install.sh | bash` then `export PATH="$HOME/.local/bin:$PATH"`
+- Existing `npm i -g` users: optional `agent-dealer install` (CLI binary only — no data migration)
+- Restart any running daemon after managed activate
 
 ## 0.1.13 — 2026-07-21
 

@@ -12,11 +12,23 @@ One install — no scoped org required on npm.
 
 ## Friend install path
 
+**Recommended (managed — auto-updates; existing `~/.agent-dealer` data kept):**
+
 ```bash
-npm install -g agent-dealer
+curl -fsSL https://raw.githubusercontent.com/not-so-fat/agent-dealer/main/scripts/install.sh | bash
+# or: npx agent-dealer@latest install
+export PATH="$HOME/.local/bin:$PATH"
 agent-dealer setup
 agent-dealer start --open
 ```
+
+Compat: `npm install -g agent-dealer` still works.
+
+| Command / env | Behavior |
+|---------------|----------|
+| `agent-dealer install` | Versions under `~/.agent-dealer/versions/` + `~/.local/bin/agent-dealer` |
+| `agent-dealer upgrade` | Managed activate or npm-global reinstall |
+| `AGENT_DEALER_DISABLE_AUTOUPDATER=1` | Disable background managed updates |
 
 Dashboard + API: **http://localhost:2222** (single port when UI is bundled).
 

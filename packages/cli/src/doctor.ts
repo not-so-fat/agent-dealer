@@ -10,6 +10,14 @@ import {
 } from "./env.js";
 import { probeAgentDealer } from "./ports.js";
 import { resolveServerEntry, resolveUiDist } from "./paths.js";
+import {
+  detectInstallKind,
+  localBinLauncherPath,
+  readCurrentManagedVersion,
+  readUpdateState,
+  resolveCurrentVersionDir,
+} from "./managed/index.js";
+import { getVersion } from "./version.js";
 
 export async function runDoctor(): Promise<number> {
   let failed = false;
@@ -60,6 +68,22 @@ export async function runDoctor(): Promise<number> {
   const home = prodHomeDir();
   if (fs.existsSync(home)) {
     console.log(`✓ data ${shortenHome(home)}`);
+  }
+
+  console.log(`Package version ${getVersion()}`);
+  const kind = detectInstallKind();
+  console.log(`Install kind: ${kind}`);
+  if (kind === "managed") {
+    const current = readCurrentManagedVersion();
+    const currentDir = resolveCurrentVersionDir();
+    console.log(`Managed current: ${current ?? "(unknown)"} (${currentDir ?? "missing"})`);
+    console.log(`Launcher: ${localBinLauncherPath()}`);
+    const pending = readUpdateState()?.pendingVersion;
+    if (pending) {
+      console.log(`Pending managed version: ${pending} (activates on next start/doctor/upgrade)`);
+    }
+  } else {
+    console.log("Tip: agent-dealer install  # managed CLI + auto-updates (data unchanged)");
   }
 
   const port = resolveBundledListenPort();

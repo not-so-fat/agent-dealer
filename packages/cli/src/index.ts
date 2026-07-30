@@ -6,6 +6,7 @@ import { runStop } from "./stop.js";
 import { maybeCheckForUpdateOnRun } from "./update-check.js";
 import { getVersion } from "./version.js";
 import { runUpgrade, printUpgradeHelp } from "./upgrade.js";
+import { runInstall, printInstallHelp } from "./install.js";
 
 function printUsage(): void {
   console.log(`Usage:
@@ -14,7 +15,8 @@ function printUsage(): void {
   agent-dealer stop
   agent-dealer status
   agent-dealer doctor
-  agent-dealer upgrade [--to VERSION] [--yes]
+  agent-dealer install [--to VERSION] [--migrate-cli] [--purge-global]
+  agent-dealer upgrade [--to VERSION] [--yes] [--check]
   agent-dealer --version
 
 Human control plane for agent execution.`);
@@ -93,6 +95,14 @@ export async function runCli(argv: string[]): Promise<number> {
     return runDoctor();
   }
 
+  if (cmd === "install") {
+    if (args.includes("--help")) {
+      printInstallHelp();
+      return 0;
+    }
+    return runInstall(args.slice(1));
+  }
+
   if (cmd === "upgrade") {
     if (args.includes("--help")) {
       printUpgradeHelp();
@@ -100,15 +110,17 @@ export async function runCli(argv: string[]): Promise<number> {
     }
     let toVersion: string | undefined;
     let yes = false;
+    let check = false;
     for (let i = 1; i < args.length; i += 1) {
       if (args[i] === "--to") toVersion = args[++i];
       else if (args[i] === "--yes") yes = true;
+      else if (args[i] === "--check") check = true;
       else {
         console.error(`Unknown upgrade option: ${args[i]}`);
         return 1;
       }
     }
-    return runUpgrade({ toVersion, yes });
+    return runUpgrade({ toVersion, yes, check });
   }
 
   console.error(`Unknown command: ${cmd}`);

@@ -1,6 +1,6 @@
 {
   "name": "@agent-dealer/web",
-  "version": "0.1.13",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "predev": "node scripts/ensure-monaco-font.mjs",
@@ -11,7 +11,7 @@
     "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {
-    "@agent-dealer/shared": "*",
+    "@agent-dealer/shared": "0.2.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
