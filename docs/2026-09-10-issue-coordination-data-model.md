@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Zod, better-sqlite3, uuid. Tests use Node's built-in test runner (`node:test` + `node:assert/strict`), the same as every existing `*.test.ts` in this repo (see `packages/server/src/repository/runs-external-id.test.ts`) — **not** vitest/jest, which are not installed. The repo-root command is `npm run test:unit`, which runs `npm run build -w @agent-dealer/shared` first and then `tsx --test` over every `*.test.ts` under `packages/`. Any server-side test that imports `@agent-dealer/shared` will resolve stale/missing types unless the shared package has been rebuilt since the last shared-source change — every task below that touches server tests includes the rebuild step explicitly.
 
-**Spec:** `docs/superpowers/specs/2026-09-10-issue-centric-coordination-design.md` (Data model, Migration and cutover sections)
+**Spec:** `docs/2026-09-10-issue-centric-coordination-design.md` (Data model, Migration and cutover sections)
 
 ## Global Constraints
 
