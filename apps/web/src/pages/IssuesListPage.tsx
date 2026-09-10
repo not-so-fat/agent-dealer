@@ -1,12 +1,19 @@
 import { useEffect, useState } from "react";
-import type { AgentWithHealth } from "@agent-dealer/shared";
-import { createIssue, fetchIssues, type IssueListRow } from "../api";
+import type { AgentWithHealth, HumanAction, HumanActionType } from "@agent-dealer/shared";
+import { createIssue, fetchHumanActions, fetchIssues, type IssueListRow } from "../api";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
 import AlertIcon from "../components/ui/AlertIcon";
 
 type Props = {
   agents: AgentWithHealth[];
   onSelectIssue: (id: string) => void;
+};
+
+const ACTION_LABELS: Record<HumanActionType, string> = {
+  final_review: "Final review",
+  attempts_exhausted: "Attempts exhausted",
+  policy_escalation: "Policy escalation",
+  product_scope_decision: "Product scope decision",
 };
 
 function timeAgo(iso: string): string {
@@ -21,6 +28,7 @@ function timeAgo(iso: string): string {
 
 export default function IssuesListPage({ agents, onSelectIssue }: Props) {
   const [issues, setIssues] = useState<IssueListRow[] | null>(null);
+  const [actions, setActions] = useState<HumanAction[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState("");
   const [repo, setRepo] = useState("");
@@ -31,7 +39,10 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
   const [reviewerAgentId, setReviewerAgentId] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = () => fetchIssues().then(setIssues).catch((e) => setError(String(e)));
+  const refresh = () => {
+    fetchIssues().then(setIssues).catch((e) => setError(String(e)));
+    fetchHumanActions().then(setActions).catch(() => undefined);
+  };
 
   useEffect(() => {
     refresh();
@@ -78,8 +89,35 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
 
       {error && <p className="text-sm text-red-300 mb-3">{error}</p>}
 
+      {actions.length > 0 && (
+        <div className="mb-4 rounded border border-red-400/30 bg-red-500/10">
+          <div className="px-4 py-2 flex items-center gap-2 border-b border-red-400/20">
+            <AlertIcon className="w-4 h-4 shrink-0 text-red-300" />
+            <span className="text-sm font-medium text-red-200">
+              {actions.length} {actions.length === 1 ? "issue needs" : "issues need"} your attention
+            </span>
+          </div>
+          <div className="divide-y divide-white/5">
+            {actions.map((a) => (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => onSelectIssue(a.issueId)}
+                className="w-full text-left px-4 py-2 hover:bg-white/5 transition-colors"
+              >
+                <span className="text-xs uppercase tracking-wide text-red-300/80">{ACTION_LABELS[a.actionType]}</span>
+                <span className="text-sm text-white/80 ml-2">{a.question}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {showCreate && (
         <div className="mb-4 p-4 rounded border border-white/10 bg-panel-elevated/60 space-y-2">
+          <p className="text-xs text-white/50">
+            Workflow: <span className="text-white/75">developer implements → reviewer (up to 3 rounds) → final human review</span>. agent-dealer coordinates the handoffs and never merges.
+          </p>
           <input className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
           <textarea className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" rows={3} placeholder="Problem statement / description" value={description} onChange={(e) => setDescription(e.target.value)} />
           <textarea className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" rows={3} placeholder="Acceptance criteria" value={acceptanceCriteria} onChange={(e) => setAcceptanceCriteria(e.target.value)} />
