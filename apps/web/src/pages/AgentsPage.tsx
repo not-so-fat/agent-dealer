@@ -129,7 +129,7 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         <div className="min-w-0">
           <h1 className="heading-page">Agents</h1>
           <p className="text-sm text-white/50 mt-1">
-            Saved execution profiles — pick one at Inbox instead of configuring each task
+            Saved execution profiles — pick one when creating an issue instead of configuring each task
           </p>
           <p className="text-sm text-white/45 mt-2">
             {agents.length} agent{agents.length === 1 ? "" : "s"}

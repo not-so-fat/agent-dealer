@@ -5,6 +5,8 @@ import AgentsPage from "./pages/AgentsPage";
 import DonePage from "./pages/DonePage";
 import IntakePage from "./pages/IntakePage";
 import OperationsPage from "./pages/OperationsPage";
+import IssuesListPage from "./pages/IssuesListPage";
+import IssueDetailPage from "./pages/IssueDetailPage";
 import { fetchSnapshot, subscribeEvents } from "./api";
 import { nextInQueue, queueIndex, reviewQueueForRun } from "./lib/reviewQueue";
 import AmbientBackground from "./components/ui/AmbientBackground";
@@ -12,10 +14,14 @@ import AlertIcon from "./components/ui/AlertIcon";
 import AgentsNavIcon from "./components/ui/AgentsNavIcon";
 import Logo from "./components/ui/Logo";
 
-type View = "ops" | "intake" | "done" | "agents";
+// NOT-58: the issue-centric shell ("issues") is the new primary surface. The
+// run-oriented views (Operations / Inbox / Done) stay available for existing
+// plan/review/running work until the legacy→issue cutover lands in NOT-66.
+type View = "issues" | "ops" | "intake" | "done" | "agents";
 
 export default function App() {
-  const [view, setView] = useState<View>("ops");
+  const [view, setView] = useState<View>("issues");
+  const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<QueueSnapshot | null>(null);
   const [selectedRun, setSelectedRun] = useState<Run | null>(null);
 
@@ -49,7 +55,7 @@ export default function App() {
 
   const reviewQueue = useMemo(() => {
     if (!selectedRun || !snapshot) return [];
-    return reviewQueueForRun(selectedRun, snapshot, view);
+    return reviewQueueForRun(selectedRun, snapshot, view === "ops" || view === "done" ? view : "ops");
   }, [selectedRun, snapshot, view]);
 
   const reviewIndex = selectedRun ? queueIndex(reviewQueue, selectedRun.id) : -1;
@@ -65,7 +71,7 @@ export default function App() {
       const queue = reviewQueueForRun(
         snapshot.runs.find((r) => r.id === currentId) ?? selectedRun!,
         snapshot,
-        view
+        view === "ops" || view === "done" ? view : "ops"
       );
       const next = nextInQueue(queue, currentId);
       const snap = await fetchSnapshot();
@@ -80,163 +86,174 @@ export default function App() {
   );
 
   const navClass = (v: View) =>
-    `px-3 py-2 text-base rounded ${view === v ? "bg-[#92E4DD]/20 text-[#92E4DD]" : "text-white/60 hover:text-white"}`;
+    `px-3 py-2 text-base rounded ${view === v ? "bg-cyber-teal/20 text-cyber-teal" : "text-white/60 hover:text-white"}`;
 
+  const goIssues = () => {
+    setView("issues");
+    setSelectedIssueId(null);
+  };
   const goAgents = () => setView("agents");
 
   return (
     <>
       <AmbientBackground />
       <div className="relative z-10 min-h-screen flex flex-col">
-      <header className="px-6 py-4 border-b border-white/10 flex flex-wrap gap-4 items-center justify-between glass-header shrink-0">
-        <div className="flex items-center gap-6">
+        <header className="px-6 py-4 border-b border-white/10 flex flex-wrap gap-4 items-center justify-between glass-header shrink-0">
+          <div className="flex items-center gap-6">
+            <button
+              type="button"
+              onClick={goIssues}
+              className="flex items-center gap-3 text-left rounded cursor-pointer hover:opacity-90 transition-opacity focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyber-teal/45"
+              aria-label="AgentDealer — go to Issues"
+            >
+              <Logo size={40} />
+              <div>
+                <h1
+                  className="text-xl font-bold sm:text-2xl"
+                  style={{
+                    background: "linear-gradient(to right, #C4B643, #D4C760)",
+                    WebkitBackgroundClip: "text",
+                    WebkitTextFillColor: "transparent",
+                    backgroundClip: "text",
+                  }}
+                >
+                  AgentDealer
+                </h1>
+                <p className="text-sm text-cyber-teal">One issue, one durable coordination record</p>
+              </div>
+            </button>
+            <nav className="flex gap-1">
+              <button type="button" onClick={goIssues} className={navClass("issues")}>
+                Issues
+              </button>
+              <button type="button" onClick={() => setView("ops")} className={navClass("ops")}>
+                Operations
+                {actionTotal > 0 && (
+                  <span className="ml-1.5 inline-flex items-center gap-1 align-middle">
+                    {planReviewCount > 0 && (
+                      <span
+                        className="text-xs leading-none bg-cyber-violet/20 text-cyber-violet-light px-1.5 py-0.5 rounded tabular-nums border border-cyber-violet/35"
+                        title={`${planReviewCount} plan${planReviewCount === 1 ? "" : "s"} ready to review`}
+                      >
+                        {planReviewCount}
+                      </span>
+                    )}
+                    {resultReviewCount > 0 && (
+                      <span
+                        className="text-xs leading-none bg-[#C4B643]/30 text-[#E8DC7A] px-1.5 py-0.5 rounded tabular-nums"
+                        title={`${resultReviewCount} result${resultReviewCount === 1 ? "" : "s"} to review`}
+                      >
+                        {resultReviewCount}
+                      </span>
+                    )}
+                  </span>
+                )}
+              </button>
+              <button type="button" onClick={() => setView("intake")} className={navClass("intake")}>
+                Inbox
+              </button>
+              <button type="button" onClick={() => setView("done")} className={navClass("done")}>
+                Done
+                {doneCount > 0 && (
+                  <span className="ml-1 text-xs bg-white/10 px-1.5 py-0.5 rounded">{doneCount}</span>
+                )}
+              </button>
+            </nav>
+          </div>
           <button
             type="button"
-            onClick={() => {
-              setView("ops");
-              setSelectedRun(null);
-            }}
-            className="flex items-center gap-3 text-left rounded cursor-pointer hover:opacity-90 transition-opacity focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#92E4DD]/45"
-            aria-label="AgentDealer — go to Operations"
+            onClick={goAgents}
+            className={`${navClass("agents")} inline-flex items-center gap-1.5 transition-colors`}
+            aria-label="Agents"
+            title="Agents"
           >
-            <Logo size={40} />
-            <div>
-              <h1
-                className="text-xl font-bold sm:text-2xl"
-                style={{
-                  background: "linear-gradient(to right, #C4B643, #D4C760)",
-                  WebkitBackgroundClip: "text",
-                  WebkitTextFillColor: "transparent",
-                  backgroundClip: "text",
-                }}
+            <AgentsNavIcon className="w-6 h-6 shrink-0" />
+            <span>Agents</span>
+            {agentCount > 0 && (
+              <span
+                className="text-xs leading-none bg-white/10 text-white/55 px-1.5 py-0.5 rounded tabular-nums border border-white/10"
+                title={`${agentCount} configured agent${agentCount === 1 ? "" : "s"}`}
               >
-                AgentDealer
-              </h1>
-              <p className="text-sm text-[#92E4DD]">Kick tasks, approve plans, review results</p>
-            </div>
+                {agentCount}
+              </span>
+            )}
+            {agentIssueCount > 0 && (
+              <span
+                className="inline-flex items-center gap-0.5 text-xs leading-none bg-red-500/20 text-red-300 px-1.5 py-0.5 rounded tabular-nums border border-red-400/30"
+                title={`${agentIssueCount} need${agentIssueCount === 1 ? "s" : ""} attention`}
+              >
+                <AlertIcon className="w-3 h-3 shrink-0" />
+                {agentIssueCount}
+              </span>
+            )}
           </button>
-          <nav className="flex gap-1">
-            <button type="button" onClick={() => setView("ops")} className={navClass("ops")}>
-              Operations
-              {actionTotal > 0 && (
-                <span className="ml-1.5 inline-flex items-center gap-1 align-middle">
-                  {planReviewCount > 0 && (
-                    <span
-                      className="text-xs leading-none bg-cyber-violet/20 text-cyber-violet-light px-1.5 py-0.5 rounded tabular-nums border border-cyber-violet/35"
-                      title={`${planReviewCount} plan${planReviewCount === 1 ? "" : "s"} ready to review`}
-                    >
-                      {planReviewCount}
-                    </span>
-                  )}
-                  {resultReviewCount > 0 && (
-                    <span
-                      className="text-xs leading-none bg-[#C4B643]/30 text-[#E8DC7A] px-1.5 py-0.5 rounded tabular-nums"
-                      title={`${resultReviewCount} result${resultReviewCount === 1 ? "" : "s"} to review`}
-                    >
-                      {resultReviewCount}
-                    </span>
-                  )}
-                </span>
-              )}
-            </button>
-            <button type="button" onClick={() => setView("intake")} className={navClass("intake")}>
-              Inbox
-            </button>
-            <button type="button" onClick={() => setView("done")} className={navClass("done")}>
-              Done
-              {doneCount > 0 && (
-                <span className="ml-1 text-xs bg-white/10 px-1.5 py-0.5 rounded">{doneCount}</span>
-              )}
-            </button>
-          </nav>
-        </div>
-        <button
-          type="button"
-          onClick={goAgents}
-          className={`${navClass("agents")} inline-flex items-center gap-1.5 transition-colors`}
-          aria-label="Agents"
-          title="Agents"
-        >
-          <AgentsNavIcon className="w-6 h-6 shrink-0" />
-          {agentCount > 0 && (
-            <span
-              className="text-xs leading-none bg-white/10 text-white/55 px-1.5 py-0.5 rounded tabular-nums border border-white/10"
-              title={`${agentCount} configured agent${agentCount === 1 ? "" : "s"}`}
-            >
-              {agentCount}
-            </span>
-          )}
-          {agentIssueCount > 0 && (
-            <span
-              className="inline-flex items-center gap-0.5 text-xs leading-none bg-red-500/20 text-red-300 px-1.5 py-0.5 rounded tabular-nums border border-red-400/30"
-              title={`${agentIssueCount} need${agentIssueCount === 1 ? "s" : ""} attention`}
-            >
-              <AlertIcon className="w-3 h-3 shrink-0" />
-              {agentIssueCount}
-            </span>
-          )}
-        </button>
-      </header>
+        </header>
 
-      <main className="flex-1 flex overflow-hidden">
-        {view === "ops" && (
-          <OperationsPage
-            snapshot={snapshot}
-            selectedRunId={selectedRun?.id ?? null}
-            onSelectRun={setSelectedRun}
-          />
-        )}
-        {view === "intake" && (
-          <IntakePage
-            agents={snapshot?.agents ?? []}
-            onRefresh={refresh}
-            onGoOperations={() => setView("ops")}
-            onManageAgents={goAgents}
-          />
-        )}
-        {view === "agents" && (
-          <AgentsPage
-            agents={snapshot?.agents ?? []}
-            agentDeckOnline={snapshot?.agentDeckOnline ?? false}
-            onRefresh={refresh}
-          />
-        )}
-        {view === "done" && (
-          <DonePage
-            runs={snapshot?.runs ?? []}
-            selectedRunId={selectedRun?.id ?? null}
-            onSelectRun={setSelectedRun}
-            sentRunIds={snapshot?.sentRunIds ?? []}
-          />
-        )}
-      </main>
+        <main className="flex-1 flex overflow-hidden">
+          {view === "issues" && !selectedIssueId && (
+            <IssuesListPage agents={snapshot?.agents ?? []} onSelectIssue={setSelectedIssueId} />
+          )}
+          {view === "issues" && selectedIssueId && (
+            <IssueDetailPage issueId={selectedIssueId} onBack={() => setSelectedIssueId(null)} />
+          )}
+          {view === "ops" && (
+            <OperationsPage
+              snapshot={snapshot}
+              selectedRunId={selectedRun?.id ?? null}
+              onSelectRun={setSelectedRun}
+            />
+          )}
+          {view === "intake" && (
+            <IntakePage
+              agents={snapshot?.agents ?? []}
+              onRefresh={refresh}
+              onGoOperations={() => setView("ops")}
+              onManageAgents={goAgents}
+            />
+          )}
+          {view === "done" && (
+            <DonePage
+              runs={snapshot?.runs ?? []}
+              selectedRunId={selectedRun?.id ?? null}
+              onSelectRun={setSelectedRun}
+              sentRunIds={snapshot?.sentRunIds ?? []}
+            />
+          )}
+          {view === "agents" && (
+            <AgentsPage
+              agents={snapshot?.agents ?? []}
+              agentDeckOnline={snapshot?.agentDeckOnline ?? false}
+              onRefresh={refresh}
+            />
+          )}
+        </main>
 
-      {selectedRun && (
-        <RunDrawer
-          run={selectedRun}
-          agents={snapshot?.agents ?? []}
-          onClose={() => setSelectedRun(null)}
-          onRefresh={refresh}
-          onApproved={refresh}
-          onApprovedAndNext={() => advanceAfterAction(selectedRun.id)}
-          onDoneAndNext={() => advanceAfterAction(selectedRun.id)}
-          queueNav={
-            reviewQueue.length > 1
-              ? {
-                  runs: reviewQueue,
-                  index: reviewIndex,
-                  onPrev: () => goToReviewAt(reviewIndex - 1),
-                  onNext: () => goToReviewAt(reviewIndex + 1),
-                }
-              : undefined
-          }
-          onRetry={(newRun) => {
-            setSelectedRun(newRun);
-            setView("ops");
-            refresh();
-          }}
-        />
-      )}
+        {selectedRun && (
+          <RunDrawer
+            run={selectedRun}
+            agents={snapshot?.agents ?? []}
+            onClose={() => setSelectedRun(null)}
+            onRefresh={refresh}
+            onApproved={refresh}
+            onApprovedAndNext={() => advanceAfterAction(selectedRun.id)}
+            onDoneAndNext={() => advanceAfterAction(selectedRun.id)}
+            queueNav={
+              reviewQueue.length > 1
+                ? {
+                    runs: reviewQueue,
+                    index: reviewIndex,
+                    onPrev: () => goToReviewAt(reviewIndex - 1),
+                    onNext: () => goToReviewAt(reviewIndex + 1),
+                  }
+                : undefined
+            }
+            onRetry={(newRun) => {
+              setSelectedRun(newRun);
+              setView("ops");
+              refresh();
+            }}
+          />
+        )}
       </div>
     </>
   );

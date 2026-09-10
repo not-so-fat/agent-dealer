@@ -17,6 +17,11 @@ function printUsage(): void {
   agent-dealer doctor
   agent-dealer install [--to VERSION] [--migrate-cli] [--purge-global]
   agent-dealer upgrade [--to VERSION] [--yes] [--check]
+  agent-dealer issue create --title T --repo R --developer-agent ID --reviewer-agent ID [--description D] [--acceptance-criteria A] [--base-branch B]
+  agent-dealer issue import --external-id ID --title T --repo R --developer-agent ID --reviewer-agent ID [--external-label L]
+  agent-dealer issue show <id> [--include evidence]
+  agent-dealer issue guide <id> --message M
+  agent-dealer action list
   agent-dealer --version
 
 Human control plane for agent execution.`);
@@ -121,6 +126,16 @@ export async function runCli(argv: string[]): Promise<number> {
       }
     }
     return runUpgrade({ toVersion, yes, check });
+  }
+
+  if (cmd === "issue") {
+    const { runIssueCommand } = await import("./issue.js");
+    return runIssueCommand(args.slice(1));
+  }
+
+  if (cmd === "action") {
+    const { runActionCommand } = await import("./action.js");
+    return runActionCommand(args.slice(1));
   }
 
   console.error(`Unknown command: ${cmd}`);

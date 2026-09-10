@@ -73,6 +73,104 @@ export function migrate(): void {
     db.exec("ALTER TABLE runs ADD COLUMN execute_model TEXT");
   }
 
+  // NOT-58: the role-neutral agent-profile columns (default_model, default_budget_json,
+  // purpose, playbook_ids_json, external_memory_refs_json, permission_policy_json) are added
+  // by NOT-60 together with the resolve/snapshot code and the agent-form UI that write them.
+
+  // Tighten the workflow-event idempotency index to UNIQUE for DBs created before the
+  // constraint (schema.sql's IF NOT EXISTS won't upgrade an existing non-unique index).
+  // A pre-fix DB may already hold duplicate keys — the old index was non-unique and
+  // appendWorkflowEvent() inserted unconditionally — so dedupe first, then swap the
+  // index, all inside one transaction so a failure never leaves the table indexless.
+  const wfIdemIdx = db.prepare("PRAGMA index_list(workflow_events)").all() as Array<{
+    name: string;
+    unique: number;
+  }>;
+  const nonUnique = wfIdemIdx.find(
+    (i) => i.name === "idx_workflow_events_idempotency" && i.unique === 0
+  );
+  if (nonUnique) {
+    db.transaction(() => {
+      // Preservation policy: for each repeated provider key keep the first event
+      // recorded for it (lowest rowid = earliest insert) and drop the later copies —
+      // a duplicate delivery should collapse to its original, matching the runtime
+      // ON CONFLICT DO NOTHING behaviour.
+      //
+      // causation_event_id is a self-FK, so first repoint any reference that points at
+      // a discarded duplicate to the canonical (kept) event for that key — otherwise
+      // the DELETE below fails with FOREIGN KEY constraint failed and rolls back.
+      db.exec(`
+        WITH canon AS (
+          SELECT idempotency_key, MIN(rowid) AS keep_rowid
+          FROM workflow_events
+          WHERE idempotency_key IS NOT NULL
+          GROUP BY idempotency_key
+        ),
+        remap AS (
+          SELECT e.id AS dup_id, k.id AS canon_id
+          FROM workflow_events e
+          JOIN canon c ON c.idempotency_key = e.idempotency_key
+          JOIN workflow_events k ON k.rowid = c.keep_rowid
+          WHERE e.idempotency_key IS NOT NULL AND e.rowid <> c.keep_rowid
+        )
+        UPDATE workflow_events
+        SET causation_event_id = remap.canon_id
+        FROM remap
+        WHERE workflow_events.causation_event_id = remap.dup_id
+      `);
+      db.exec(`
+        DELETE FROM workflow_events
+        WHERE idempotency_key IS NOT NULL
+          AND rowid NOT IN (
+            SELECT MIN(rowid) FROM workflow_events
+            WHERE idempotency_key IS NOT NULL
+            GROUP BY idempotency_key
+          )
+      `);
+      db.exec("DROP INDEX idx_workflow_events_idempotency");
+      db.exec(
+        "CREATE UNIQUE INDEX idx_workflow_events_idempotency ON workflow_events(idempotency_key) WHERE idempotency_key IS NOT NULL"
+      );
+    })();
+  }
+
+  const artifactCols = db.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>;
+  if (!artifactCols.some((c) => c.name === "issue_id")) {
+    // Additive per spec §"artifacts": issue_id/worker_session_id are nullable here since
+    // existing rows predate the issue model — every row the migration or new coordinator
+    // writes going forward populates issue_id.
+    db.exec("ALTER TABLE artifacts ADD COLUMN issue_id TEXT REFERENCES issues(id)");
+    db.exec("ALTER TABLE artifacts ADD COLUMN worker_session_id TEXT REFERENCES worker_sessions(id)");
+  }
+
+  // NOT-57 Task 1 amendment: issue-linked artifacts have no run, so run_id must be
+  // nullable — but SQLite can't ALTER a column's NOT NULL away, so rebuild the table for
+  // any database created before schema.sql dropped the constraint (fresh databases from
+  // the updated schema.sql never hit this branch).
+  const artifactRunIdCol = (db.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string; notnull: number }>).find(
+    (c) => c.name === "run_id"
+  );
+  if (artifactRunIdCol?.notnull === 1) {
+    db.exec(`
+      CREATE TABLE artifacts_new (
+        id TEXT PRIMARY KEY,
+        run_id TEXT REFERENCES runs(id),
+        kind TEXT NOT NULL,
+        content_json TEXT,
+        blob_path TEXT,
+        author TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        issue_id TEXT REFERENCES issues(id),
+        worker_session_id TEXT REFERENCES worker_sessions(id)
+      );
+      INSERT INTO artifacts_new (id, run_id, kind, content_json, blob_path, author, created_at, issue_id, worker_session_id)
+        SELECT id, run_id, kind, content_json, blob_path, author, created_at, issue_id, worker_session_id FROM artifacts;
+      DROP TABLE artifacts;
+      ALTER TABLE artifacts_new RENAME TO artifacts;
+      CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
+    `);
+  }
+
   seedBuiltinAgents(db);
   seedIntakeSettings(db);
   migrateLegacyAgentDeckPort(db);

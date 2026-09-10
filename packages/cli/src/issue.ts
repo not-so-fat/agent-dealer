@@ -1,0 +1,109 @@
+import { readRunState } from "./runtime-state.js";
+import { loadProdEnvFile, resolveBundledListenPort } from "./env.js";
+
+export function resolveApiBase(): string {
+  loadProdEnvFile();
+  const state = readRunState();
+  const port = state?.port ?? resolveBundledListenPort();
+  return `http://127.0.0.1:${port}`;
+}
+
+export type ParsedIssueArgs =
+  | { subcommand: "create"; title: string; repo: string; developerAgentId: string; reviewerAgentId: string; description?: string; acceptanceCriteria?: string; baseBranch?: string }
+  | { subcommand: "import"; externalId: string; externalLabel?: string; title: string; repo: string; developerAgentId: string; reviewerAgentId: string }
+  | { subcommand: "show"; id: string; includeEvidence: boolean }
+  | { subcommand: "guide"; id: string; message: string };
+
+function flag(args: string[], name: string): string | undefined {
+  const idx = args.indexOf(name);
+  return idx >= 0 ? args[idx + 1] : undefined;
+}
+
+export function parseIssueArgs(args: string[]): ParsedIssueArgs {
+  const [subcommand, ...rest] = args;
+  switch (subcommand) {
+    case "create":
+    case "import": {
+      const title = flag(rest, "--title");
+      const repo = flag(rest, "--repo");
+      const developerAgentId = flag(rest, "--developer-agent");
+      const reviewerAgentId = flag(rest, "--reviewer-agent");
+      if (!title || !repo || !developerAgentId || !reviewerAgentId) {
+        throw new Error(`${subcommand} requires --title, --repo, --developer-agent, --reviewer-agent`);
+      }
+      if (subcommand === "import") {
+        const externalId = flag(rest, "--external-id");
+        if (!externalId) throw new Error("import requires --external-id");
+        return { subcommand: "import", externalId, externalLabel: flag(rest, "--external-label"), title, repo, developerAgentId, reviewerAgentId };
+      }
+      return { subcommand: "create", title, repo, developerAgentId, reviewerAgentId, description: flag(rest, "--description"), acceptanceCriteria: flag(rest, "--acceptance-criteria"), baseBranch: flag(rest, "--base-branch") };
+    }
+    case "show": {
+      const id = rest[0];
+      if (!id) throw new Error("show requires an issue id");
+      return { subcommand: "show", id, includeEvidence: rest.includes("--include") && rest[rest.indexOf("--include") + 1] === "evidence" };
+    }
+    case "guide": {
+      const id = rest[0];
+      const message = flag(rest, "--message");
+      if (!id || !message) throw new Error("guide requires an issue id and --message");
+      return { subcommand: "guide", id, message };
+    }
+    default:
+      throw new Error(`Unknown issue subcommand: ${subcommand}`);
+  }
+}
+
+async function apiFetch(path: string, opts?: { method?: string; body?: unknown }): Promise<unknown> {
+  const res = await fetch(`${resolveApiBase()}${path}`, {
+    method: opts?.method ?? "GET",
+    headers: opts?.body ? { "content-type": "application/json" } : undefined,
+    body: opts?.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(`API error ${res.status}: ${JSON.stringify(json)}`);
+  return json;
+}
+
+export async function runIssueCommand(args: string[]): Promise<number> {
+  let parsed: ParsedIssueArgs;
+  try {
+    parsed = parseIssueArgs(args);
+  } catch (err) {
+    console.error((err as Error).message);
+    return 1;
+  }
+
+  try {
+    switch (parsed.subcommand) {
+      case "create": {
+        const result = await apiFetch("/api/issues", { method: "POST", body: { title: parsed.title, repo: parsed.repo, developerAgentId: parsed.developerAgentId, reviewerAgentId: parsed.reviewerAgentId, description: parsed.description, acceptanceCriteria: parsed.acceptanceCriteria, baseBranch: parsed.baseBranch, source: "agent" } });
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      case "import": {
+        const result = await apiFetch("/api/issues", { method: "POST", body: { title: parsed.title, repo: parsed.repo, developerAgentId: parsed.developerAgentId, reviewerAgentId: parsed.reviewerAgentId, source: "linear", externalId: parsed.externalId, externalLabel: parsed.externalLabel } });
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      case "show": {
+        const result = await apiFetch(`/api/issues/${parsed.id}`);
+        if (parsed.includeEvidence) {
+          const evidence = await apiFetch(`/api/issues/${parsed.id}/evidence`);
+          console.log(JSON.stringify({ ...(result as object), evidence }, null, 2));
+        } else {
+          console.log(JSON.stringify(result, null, 2));
+        }
+        return 0;
+      }
+      case "guide": {
+        const result = await apiFetch(`/api/issues/${parsed.id}/guidance`, { method: "POST", body: { markdown: parsed.message } });
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
+    }
+  } catch (err) {
+    console.error((err as Error).message);
+    return 1;
+  }
+}
