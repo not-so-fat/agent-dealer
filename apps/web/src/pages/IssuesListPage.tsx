@@ -24,6 +24,9 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState("");
   const [repo, setRepo] = useState("");
+  const [baseBranch, setBaseBranch] = useState("main");
+  const [description, setDescription] = useState("");
+  const [acceptanceCriteria, setAcceptanceCriteria] = useState("");
   const [developerAgentId, setDeveloperAgentId] = useState("");
   const [reviewerAgentId, setReviewerAgentId] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -42,10 +45,22 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
       return;
     }
     try {
-      await createIssue({ title, repo, developerAgentId, reviewerAgentId, baseBranch: "main", maxReviewRounds: 3, source: "manual" });
+      await createIssue({
+        title,
+        repo,
+        baseBranch: baseBranch.trim() || "main",
+        description: description.trim() || undefined,
+        acceptanceCriteria: acceptanceCriteria.trim() || undefined,
+        developerAgentId,
+        reviewerAgentId,
+        maxReviewRounds: 3,
+        source: "manual",
+      });
       setShowCreate(false);
       setTitle("");
       setRepo("");
+      setDescription("");
+      setAcceptanceCriteria("");
       refresh();
     } catch (e) {
       setError(String(e));
@@ -66,7 +81,12 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
       {showCreate && (
         <div className="mb-4 p-4 rounded border border-white/10 bg-panel-elevated/60 space-y-2">
           <input className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
-          <input className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" placeholder="Repo path" value={repo} onChange={(e) => setRepo(e.target.value)} />
+          <textarea className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" rows={3} placeholder="Problem statement / description" value={description} onChange={(e) => setDescription(e.target.value)} />
+          <textarea className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" rows={3} placeholder="Acceptance criteria" value={acceptanceCriteria} onChange={(e) => setAcceptanceCriteria(e.target.value)} />
+          <div className="flex gap-2">
+            <input className="flex-1 bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" placeholder="Repo path" value={repo} onChange={(e) => setRepo(e.target.value)} />
+            <input className="w-32 bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" placeholder="Base branch" value={baseBranch} onChange={(e) => setBaseBranch(e.target.value)} />
+          </div>
           <select className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" value={developerAgentId} onChange={(e) => setDeveloperAgentId(e.target.value)}>
             <option value="">Developer agent…</option>
             {agents.map((a) => (

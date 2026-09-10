@@ -101,6 +101,8 @@ Columns dropped from `runs` that no longer belong at issue level: `plan_model`/`
 
 Retain the existing profile identity, workspace, runtime, Agent Deck, and built-in fields. Replace the plan/execute-specific defaults with role-neutral `default_model` and `default_budget_json`, and add `purpose`, `playbook_ids_json`, `external_memory_refs_json`, and `permission_policy_json`. Existing profiles backfill role-neutral defaults from `default_execute_*` first and `default_plan_*` second; the old columns remain legacy-readable for the same one-release window as the run tables.
 
+> **Not in PR #3.** These role-neutral profile columns land in [NOT-60](https://linear.app/not-so-fat/issue/NOT-60) alongside the `CreateAgentInput`/`UpdateAgentInput` fields, repository INSERT/UPDATE, agent-form UI, and the resolve/snapshot code that consumes them — so the foundation carries no read-only-always-null profile fields.
+
 Each `worker_session` snapshots the resolved runtime/model/budget and effective permissions so later profile edits do not rewrite history. Conclusions, transcripts, findings, and usage remain owned by the issue/session; completing work never writes learned identity or conversation memory back into the profile.
 
 ### `worker_sessions` (replaces `runs`' execution-record half)

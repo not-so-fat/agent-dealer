@@ -73,21 +73,9 @@ export function migrate(): void {
     db.exec("ALTER TABLE runs ADD COLUMN execute_model TEXT");
   }
 
-  const agentCols4 = db.prepare("PRAGMA table_info(agents)").all() as Array<{ name: string }>;
-  if (!agentCols4.some((c) => c.name === "default_model")) {
-    db.exec("ALTER TABLE agents ADD COLUMN default_model TEXT");
-    db.exec("ALTER TABLE agents ADD COLUMN default_budget_json TEXT");
-    db.exec("ALTER TABLE agents ADD COLUMN purpose TEXT");
-    db.exec("ALTER TABLE agents ADD COLUMN playbook_ids_json TEXT");
-    db.exec("ALTER TABLE agents ADD COLUMN external_memory_refs_json TEXT");
-    db.exec("ALTER TABLE agents ADD COLUMN permission_policy_json TEXT");
-    // Backfill role-neutral defaults from execute_* first, then plan_* — matches
-    // spec §"agents (reusable profiles, not durable workers)".
-    db.exec(`
-      UPDATE agents SET default_model = COALESCE(default_execute_model, default_plan_model)
-      WHERE default_model IS NULL
-    `);
-  }
+  // NOT-58: the role-neutral agent-profile columns (default_model, default_budget_json,
+  // purpose, playbook_ids_json, external_memory_refs_json, permission_policy_json) are added
+  // by NOT-60 together with the resolve/snapshot code and the agent-form UI that write them.
 
   const artifactCols = db.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>;
   if (!artifactCols.some((c) => c.name === "issue_id")) {
