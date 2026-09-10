@@ -1,4 +1,4 @@
-import type { Artifact, ArtifactKind } from "@agent-dealer/shared";
+import type { IssueArtifact } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 
 interface ArtifactRow {
@@ -12,21 +12,23 @@ interface ArtifactRow {
   created_at: string;
 }
 
-function rowToArtifact(row: ArtifactRow): Artifact & { issueId: string | null; workerSessionId: string | null } {
+function rowToArtifact(row: ArtifactRow): IssueArtifact {
   return {
     id: row.id,
-    runId: "", // legacy field, unused for issue-linked artifacts — kept only so the Artifact shape still parses
     issueId: row.issue_id,
     workerSessionId: row.worker_session_id,
-    kind: row.kind as ArtifactKind,
+    kind: row.kind,
     contentJson: row.content_json,
     blobPath: row.blob_path,
-    author: row.author as Artifact["author"],
+    author: row.author as IssueArtifact["author"],
     createdAt: row.created_at,
   };
 }
 
-export function listArtifactsForIssue(issueId: string, opts?: { limit?: number; before?: string }) {
+export function listArtifactsForIssue(
+  issueId: string,
+  opts?: { limit?: number; before?: string }
+): IssueArtifact[] {
   const limit = opts?.limit ?? 50;
   const rows = opts?.before
     ? (getDb()

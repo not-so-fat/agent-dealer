@@ -175,7 +175,9 @@ CREATE TABLE IF NOT EXISTS workflow_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_workflow_events_issue ON workflow_events(issue_id, ts);
-CREATE INDEX IF NOT EXISTS idx_workflow_events_idempotency ON workflow_events(idempotency_key)
+-- Provider-native idempotency key is unique: re-ingesting the same delivery must not
+-- create a duplicate event (PRD §9.3).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_events_idempotency ON workflow_events(idempotency_key)
   WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS human_actions (

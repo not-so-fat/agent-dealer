@@ -85,3 +85,20 @@ export const ISSUE_STATUS_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
 export function canTransitionIssue(from: IssueStatus, to: IssueStatus): boolean {
   return ISSUE_STATUS_TRANSITIONS[from].includes(to);
 }
+
+/**
+ * Issue-scoped artifact. Distinct from the legacy run-scoped `Artifact`: it is keyed
+ * by `issueId` (+ optional `workerSessionId`), never a `runId`, so it validates on its
+ * own terms rather than failing `Artifact.runId`'s UUID check.
+ */
+export const IssueArtifact = z.object({
+  id: z.string(),
+  issueId: z.string().nullable(),
+  workerSessionId: z.string().nullable(),
+  kind: z.string(),
+  contentJson: z.string().nullable(),
+  blobPath: z.string().nullable(),
+  author: z.enum(["human", "agent", "system"]),
+  createdAt: z.string(),
+});
+export type IssueArtifact = z.infer<typeof IssueArtifact>;

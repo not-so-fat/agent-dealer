@@ -77,6 +77,22 @@ export function migrate(): void {
   // purpose, playbook_ids_json, external_memory_refs_json, permission_policy_json) are added
   // by NOT-60 together with the resolve/snapshot code and the agent-form UI that write them.
 
+  // Tighten the workflow-event idempotency index to UNIQUE for dev DBs created before the
+  // constraint (schema.sql's IF NOT EXISTS won't upgrade an existing non-unique index).
+  const wfIdemIdx = db.prepare("PRAGMA index_list(workflow_events)").all() as Array<{
+    name: string;
+    unique: number;
+  }>;
+  const nonUnique = wfIdemIdx.find(
+    (i) => i.name === "idx_workflow_events_idempotency" && i.unique === 0
+  );
+  if (nonUnique) {
+    db.exec("DROP INDEX idx_workflow_events_idempotency");
+    db.exec(
+      "CREATE UNIQUE INDEX idx_workflow_events_idempotency ON workflow_events(idempotency_key) WHERE idempotency_key IS NOT NULL"
+    );
+  }
+
   const artifactCols = db.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>;
   if (!artifactCols.some((c) => c.name === "issue_id")) {
     // Additive per spec §"artifacts": issue_id/worker_session_id are nullable here since

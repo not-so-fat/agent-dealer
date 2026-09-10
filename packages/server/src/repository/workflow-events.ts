@@ -75,15 +75,27 @@ export function appendWorkflowEvent(input: AppendWorkflowEventInput): WorkflowEv
     causation_event_id: input.causationEventId ?? null,
     ts: new Date().toISOString(),
   };
-  db.prepare(`
-    INSERT INTO workflow_events (
-      id, issue_id, workflow_instance_id, worker_session_id, type, actor_type, actor_ref,
-      stage, round, payload_json, artifact_ref, idempotency_key, causation_event_id, ts
-    ) VALUES (
-      @id, @issue_id, @workflow_instance_id, @worker_session_id, @type, @actor_type, @actor_ref,
-      @stage, @round, @payload_json, @artifact_ref, @idempotency_key, @causation_event_id, @ts
-    )
-  `).run(row);
+  // Idempotent on the provider-native key: a repeated delivery is a no-op that returns
+  // the event already recorded for that key, not a duplicate row (PRD §9.3).
+  const info = db
+    .prepare(`
+      INSERT INTO workflow_events (
+        id, issue_id, workflow_instance_id, worker_session_id, type, actor_type, actor_ref,
+        stage, round, payload_json, artifact_ref, idempotency_key, causation_event_id, ts
+      ) VALUES (
+        @id, @issue_id, @workflow_instance_id, @worker_session_id, @type, @actor_type, @actor_ref,
+        @stage, @round, @payload_json, @artifact_ref, @idempotency_key, @causation_event_id, @ts
+      )
+      ON CONFLICT DO NOTHING
+    `)
+    .run(row);
+
+  if (info.changes === 0 && input.idempotencyKey) {
+    const existing = db
+      .prepare("SELECT * FROM workflow_events WHERE idempotency_key = ?")
+      .get(input.idempotencyKey) as WorkflowEventRow;
+    return rowToEvent(existing);
+  }
   return rowToEvent(row);
 }
 

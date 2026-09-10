@@ -47,3 +47,23 @@ test("appends and lists events in timestamp order", () => {
   assert.deepStrictEqual(events.map((e) => e.type), ["issue.created", "guidance.added"]);
   assert.deepStrictEqual(JSON.parse(events[0].payloadJson!), { note: "created" });
 });
+
+test("a repeated idempotency key does not create a duplicate event", () => {
+  const issueId = seedIssue("Idempotent issue");
+  const first = appendWorkflowEvent({
+    issueId,
+    type: "pull_request.updated",
+    actorType: "system",
+    stage: "developing",
+    idempotencyKey: "gh-delivery-abc123",
+  });
+  const second = appendWorkflowEvent({
+    issueId,
+    type: "pull_request.updated",
+    actorType: "system",
+    stage: "developing",
+    idempotencyKey: "gh-delivery-abc123",
+  });
+  assert.equal(second.id, first.id);
+  assert.equal(listWorkflowEventsForIssue(issueId).length, 1);
+});
