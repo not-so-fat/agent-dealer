@@ -1,0 +1,569 @@
+// packages/server/src/coordinator/commands.ts
+//
+// The coordinator kernel's write path. Every command is one short SQLite transaction that
+// records the validated issue transition, the workflow event(s), and exactly one next
+// durable effect (a queued work item, a human action, or workflow completion) together —
+// so a process crash at any point either applies the whole step or none of it, and a
+// duplicate delivery is a no-op. The effect *work* itself runs elsewhere, through a leased
+// worker whose structured result comes back into applyCompletion.
+import type {
+  HumanAction,
+  HumanActionType,
+  Issue,
+  WorkflowInstance,
+  WorkflowEventType,
+} from "@agent-dealer/shared";
+import { getDb } from "../db/index.js";
+import {
+  getIssue,
+  incrementIssueRound,
+  transitionIssue,
+  type TransitionIssuePatch,
+} from "../repository/issues.js";
+import {
+  appendWorkflowEvent,
+  completeWorkflowInstance,
+  getActiveWorkflowInstance,
+  startWorkflowInstance,
+  WorkflowAlreadyActiveError,
+} from "../repository/workflow-events.js";
+import {
+  createHumanAction,
+  getHumanAction,
+  resolveHumanAction,
+} from "../repository/human-actions.js";
+import { reconcileFinding } from "../repository/findings.js";
+import {
+  enqueueWorkItem,
+  finishWorkItem,
+  getWorkItem,
+  type WorkItem,
+} from "../repository/work-items.js";
+import {
+  routeDeveloperOutcome,
+  routeReviewerOutcome,
+  type DeveloperOutcome,
+  type ReviewerOutcome,
+} from "./routing.js";
+import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } from "./projection.js";
+import { parseHumanResolution, resolveHumanActionOutcome } from "./human-resolution.js";
+
+export const WORKFLOW_VERSION = "dev_reviewer_v1";
+
+export type StartResult =
+  | { ok: true; instance: WorkflowInstance; workItem: WorkItem }
+  | { ok: "needs_scope_decision"; action: HumanAction }
+  | { ok: false; code: number; error: string };
+
+const REQUIRED_FIELDS: Array<[keyof Issue, string]> = [
+  ["title", "title"],
+  ["repo", "repo"],
+  ["developerAgentId", "developer profile"],
+  ["reviewerAgentId", "reviewer profile"],
+];
+
+class StartPreconditionError extends Error {
+  constructor(
+    readonly code: number,
+    message: string
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * The instance + `workflow.started` event + issue transition + round-1 developer work item,
+ * all as unconditional writes. Throws on any precondition failure so a caller that runs this
+ * inside its own transaction (see resolveHumanActionAndAdvance) rolls the whole step back.
+ * Must be called within a transaction.
+ */
+function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workItem: WorkItem } {
+  const issue = getIssue(issueId);
+  if (!issue) throw new StartPreconditionError(404, "Issue not found");
+  if (issue.status !== "ready" && issue.status !== "needs_human") {
+    throw new StartPreconditionError(409, `Issue is ${issue.status} — not startable`);
+  }
+  if (getActiveWorkflowInstance(issueId)) {
+    throw new StartPreconditionError(409, "Issue already has an active workflow");
+  }
+  for (const [field, label] of REQUIRED_FIELDS) {
+    const value = issue[field];
+    if (value === null || value === undefined || String(value).trim() === "") {
+      throw new StartPreconditionError(400, `Missing required field: ${label}`);
+    }
+  }
+  if (!issue.acceptanceCriteria || !issue.acceptanceCriteria.trim()) {
+    throw new StartPreconditionError(400, "Issue has no acceptance criteria");
+  }
+
+  const instance = startWorkflowInstance(issueId, WORKFLOW_VERSION);
+  appendWorkflowEvent({
+    issueId,
+    workflowInstanceId: instance.id,
+    type: "workflow.started",
+    actorType: "system",
+    stage: issue.status,
+    round: 1,
+  });
+  transitionIssue(issueId, "developing", {
+    currentOwner: "developer",
+    currentIntent: "Developer implementing round 1",
+  });
+  const workItem = enqueueWorkItem({
+    issueId,
+    workflowInstanceId: instance.id,
+    kind: "developer",
+    round: 1,
+    idempotencyKey: `${instance.id}:developer:1`,
+  });
+  return { instance, workItem };
+}
+
+/**
+ * Starts the issue's one `dev_reviewer_v1` workflow in a single transaction. A second call
+ * while an instance is active is **rejected with 409** (not a resume-by-id — callers must
+ * not assume the PRD §8 "returns its active instance" behaviour until the API layer adds
+ * it). Missing acceptance criteria opens a `product_scope_decision` instead of starting.
+ */
+export function startWorkflow(issueId: string): StartResult {
+  const issue = getIssue(issueId);
+  if (!issue) return { ok: false, code: 404, error: "Issue not found" };
+
+  // PRD §6.1: if required product intent cannot be normalized without guessing, ask.
+  if (
+    (issue.status === "ready" || issue.status === "needs_human") &&
+    !getActiveWorkflowInstance(issueId) &&
+    (!issue.acceptanceCriteria || !issue.acceptanceCriteria.trim())
+  ) {
+    const action = createHumanAction({
+      issueId,
+      actionType: "product_scope_decision",
+      reason: "The issue has no acceptance criteria — development needs a testable target.",
+      question: "Add acceptance criteria (or an accepted task snapshot), then start the workflow.",
+      responseOptions: [{ choice: "resume", label: "Acceptance criteria added — start" }],
+    });
+    return { ok: "needs_scope_decision", action };
+  }
+
+  try {
+    const result = getDb().transaction(() => startWorkflowCore(issueId))();
+    return { ok: true, ...result };
+  } catch (err) {
+    if (err instanceof StartPreconditionError) return { ok: false, code: err.code, error: err.message };
+    if (err instanceof WorkflowAlreadyActiveError) return { ok: false, code: 409, error: err.message };
+    throw err;
+  }
+}
+
+export type ApplyResult =
+  | {
+      applied: true;
+      issueStatus: Issue["status"];
+      nextWorkItemId: string | null;
+      humanActionId: string | null;
+      instanceCompleted: boolean;
+    }
+  | { applied: false; reason: "already_terminal" | "lease_lost" | "no_active_instance" | "not_found" };
+
+/**
+ * Applies a leased effect's structured completion in one transaction: the item is
+ * CAS-marked `done` (fenced on `leaseToken` — the ONLY path to a terminal state), then the
+ * routing decision is projected onto the issue, the workflow events appended, and exactly
+ * one next effect created. If the CAS matches nothing — a duplicate delivery, or a slow
+ * worker whose lease was reclaimed and re-run — nothing is applied.
+ */
+export function applyCompletion(
+  workItemId: string,
+  leaseToken: string,
+  outcome: DeveloperOutcome | ReviewerOutcome
+): ApplyResult {
+  return getDb().transaction((): ApplyResult => {
+    const before = getWorkItem(workItemId);
+    if (!before) return { applied: false, reason: "not_found" };
+    if (before.status === "done" || before.status === "dead") {
+      return { applied: false, reason: "already_terminal" };
+    }
+
+    const issue = getIssue(before.issueId);
+    if (!issue) return { applied: false, reason: "not_found" };
+    const instance = getActiveWorkflowInstance(before.issueId);
+    if (!instance || instance.id !== before.workflowInstanceId) {
+      return { applied: false, reason: "no_active_instance" };
+    }
+
+    const item = finishWorkItem(workItemId, leaseToken, { status: "done", result: outcome });
+    if (!item) return { applied: false, reason: "lease_lost" };
+
+    return routeAppliedOutcome(issue, instance, item, outcome);
+  })();
+}
+
+/**
+ * Projects an already-terminal work item's outcome onto the workflow: transition, events,
+ * findings, and the single next effect. The caller has already CAS-marked the item
+ * terminal and is inside a transaction — used by applyCompletion (success) and by the
+ * recovery / handler-failure paths (a dead-lettered item routed as `session_failed`).
+ */
+export function routeAppliedOutcome(
+  issue: Issue,
+  instance: WorkflowInstance,
+  item: WorkItem,
+  outcome: DeveloperOutcome | ReviewerOutcome
+): ApplyResult {
+  return item.kind === "developer"
+    ? applyDeveloper(issue, instance, item, outcome as DeveloperOutcome)
+    : applyReviewer(issue, instance, item, outcome as ReviewerOutcome);
+}
+
+interface EventEmitter {
+  emit: (type: WorkflowEventType, opts?: EmitOpts) => void;
+}
+interface EmitOpts {
+  actorType?: "system" | "developer" | "reviewer" | "human";
+  payload?: unknown;
+  artifactRef?: string | null;
+}
+
+function eventEmitter(
+  issue: Issue,
+  instance: WorkflowInstance,
+  workerSessionId: string | null,
+  stage: string,
+  round: number
+): EventEmitter {
+  let causation: string | null = null;
+  return {
+    emit(type, opts) {
+      const evt = appendWorkflowEvent({
+        issueId: issue.id,
+        workflowInstanceId: instance.id,
+        workerSessionId,
+        type,
+        actorType: opts?.actorType ?? (type.startsWith("worker.") ? "developer" : "system"),
+        stage,
+        round,
+        payload: opts?.payload,
+        artifactRef: opts?.artifactRef ?? null,
+        causationEventId: causation,
+      });
+      causation = evt.id;
+    },
+  };
+}
+
+function applyProjectionTransition(issue: Issue, projection: IssueProjection, patch: TransitionIssuePatch): void {
+  transitionIssue(issue.id, projection.issueStatus, {
+    currentOwner: projection.currentOwner,
+    currentIntent: projection.currentIntent,
+    ...patch,
+  });
+}
+
+function applyDeveloper(
+  issue: Issue,
+  instance: WorkflowInstance,
+  item: WorkItem,
+  outcome: DeveloperOutcome
+): ApplyResult {
+  const route = routeDeveloperOutcome(outcome, {
+    currentRound: issue.currentRound,
+    maxReviewRounds: issue.maxReviewRounds,
+  });
+  const { projection, effect, advanceRound } = projectDeveloperRoute(route, issue.status, issue.currentRound);
+  const ev = eventEmitter(issue, instance, item.workerSessionId, projection.issueStatus, issue.currentRound);
+
+  const patch: TransitionIssuePatch = {};
+  for (const type of projection.events) {
+    if (type === "pull_request.opened" && outcome.kind === "clean_handoff") {
+      ev.emit("pull_request.opened", {
+        actorType: "system",
+        payload: {
+          prNumber: outcome.prNumber,
+          prUrl: outcome.prUrl,
+          headSha: outcome.headSha,
+          baseSha: outcome.baseSha,
+        },
+        artifactRef: outcome.prUrl,
+      });
+      patch.headSha = outcome.headSha;
+      patch.baseSha = outcome.baseSha;
+      patch.prNumber = outcome.prNumber;
+      patch.prUrl = outcome.prUrl;
+    } else {
+      ev.emit(type);
+    }
+  }
+
+  applyProjectionTransition(issue, projection, patch);
+  if (advanceRound) incrementIssueRound(issue.id);
+  const roundNow = getIssue(issue.id)!.currentRound;
+
+  return applyEffect(issue, instance, effect, route, roundNow, ev);
+}
+
+function applyReviewer(
+  issue: Issue,
+  instance: WorkflowInstance,
+  item: WorkItem,
+  outcome: ReviewerOutcome
+): ApplyResult {
+  const route = routeReviewerOutcome(outcome, {
+    currentRound: issue.currentRound,
+    maxReviewRounds: issue.maxReviewRounds,
+  });
+  const hasVerdict = outcome.kind === "verdict";
+  const { projection, effect, advanceRound } = projectReviewerRoute(route, issue.currentRound, hasVerdict);
+  const ev = eventEmitter(issue, instance, item.workerSessionId, projection.issueStatus, issue.currentRound);
+
+  const patch: TransitionIssuePatch = {};
+  for (const type of projection.events) {
+    if (type === "review.submitted" && outcome.kind === "verdict") {
+      ev.emit("review.submitted", { actorType: "reviewer", payload: outcome.result });
+    } else if (type === "worker.completed" || type === "worker.failed") {
+      ev.emit(type, { actorType: "reviewer" });
+    } else {
+      ev.emit(type);
+    }
+  }
+  if (route.next === "retry_reviewer_at_new_head") {
+    patch.headSha = route.headSha;
+  }
+
+  // Thread reviewer findings across rounds (PRD §6.4) — every blocking/non-blocking finding.
+  if (outcome.kind === "verdict") {
+    for (const f of outcome.result.findings) {
+      reconcileFinding({
+        issueId: issue.id,
+        fingerprint: f.fingerprint,
+        severity: f.severity,
+        title: f.title,
+        rationale: f.rationale,
+        file: f.file ?? null,
+        line: f.line ?? null,
+        round: issue.currentRound,
+      });
+    }
+  }
+
+  applyProjectionTransition(issue, projection, patch);
+  if (advanceRound) incrementIssueRound(issue.id);
+  const roundNow = getIssue(issue.id)!.currentRound;
+
+  return applyEffect(issue, instance, effect, route, roundNow, ev, outcome);
+}
+
+type AnyRoute =
+  | ReturnType<typeof routeDeveloperOutcome>
+  | ReturnType<typeof routeReviewerOutcome>;
+
+function applyEffect(
+  issue: Issue,
+  instance: WorkflowInstance,
+  effect: ReturnType<typeof projectDeveloperRoute>["effect"],
+  route: AnyRoute,
+  roundNow: number,
+  ev: EventEmitter,
+  reviewerOutcome?: ReviewerOutcome
+): ApplyResult {
+  const base = {
+    applied: true as const,
+    issueStatus: getIssue(issue.id)!.status,
+    nextWorkItemId: null as string | null,
+    humanActionId: null as string | null,
+    instanceCompleted: false,
+  };
+
+  if (effect.kind === "enqueue") {
+    const kind = effect.workItem;
+    const suffix = effect.atHeadSha ? `:${effect.atHeadSha}` : "";
+    if (route.next === "retry_developer_with_findings") ev.emit("repair.started");
+    const next = enqueueWorkItem({
+      issueId: issue.id,
+      workflowInstanceId: instance.id,
+      kind,
+      round: roundNow,
+      payload: effect.atHeadSha ? { inputSha: effect.atHeadSha } : undefined,
+      idempotencyKey: `${instance.id}:${kind}:${roundNow}${suffix}`,
+    });
+    return { ...base, issueStatus: getIssue(issue.id)!.status, nextWorkItemId: next.id };
+  }
+
+  if (effect.kind === "human_action") {
+    const actionType = effect.actionType as HumanActionType;
+    const action = createHumanAction({
+      issueId: issue.id,
+      workflowInstanceId: instance.id,
+      actionType,
+      reason: effect.reason,
+      question: questionFor(actionType, effect.reason),
+      evidence: reviewerOutcome?.kind === "verdict" ? { review: reviewerOutcome.result } : undefined,
+      responseOptions: responseOptionsFor(actionType),
+    });
+    if (actionType === "final_review") ev.emit("final_review.requested");
+    ev.emit("human_action.requested", { payload: { actionType, actionId: action.id } });
+    return { ...base, issueStatus: getIssue(issue.id)!.status, humanActionId: action.id };
+  }
+
+  return base;
+}
+
+function questionFor(actionType: HumanActionType, reason: string): string {
+  switch (actionType) {
+    case "final_review":
+      return "Accept this work, send it back for another repair round, or close it?";
+    case "attempts_exhausted":
+      return "The review-round limit is reached. Retry with a fresh round, or close the issue?";
+    case "policy_escalation":
+      return `${reason} Resume development, or close the issue?`;
+    case "product_scope_decision":
+      return `${reason} Provide the missing decision to resume.`;
+  }
+}
+
+function responseOptionsFor(actionType: HumanActionType): Array<{ choice: string; label: string }> {
+  switch (actionType) {
+    case "final_review":
+      return [
+        { choice: "complete", label: "Accept — mark done" },
+        { choice: "repair", label: "Another repair round" },
+        { choice: "close", label: "Close without accepting" },
+      ];
+    case "attempts_exhausted":
+      return [
+        { choice: "retry", label: "Retry — another round" },
+        { choice: "close", label: "Close" },
+      ];
+    case "policy_escalation":
+      return [
+        { choice: "resume", label: "Resume development" },
+        { choice: "close", label: "Close" },
+      ];
+    case "product_scope_decision":
+      return [{ choice: "resume", label: "Resume development" }];
+  }
+}
+
+export type ResolveResult =
+  | {
+      ok: true;
+      issueStatus: Issue["status"];
+      nextWorkItemId: string | null;
+      instanceCompleted: boolean;
+      restarted: boolean;
+    }
+  | { ok: false; code: number; error: string };
+
+/**
+ * Resolves an open human action and applies its workflow outcome in one transaction:
+ * PRD §6.3's continue / repair / complete / close. A pre-start `product_scope_decision`
+ * (no active instance) is resolved and the workflow started fresh.
+ */
+export function resolveHumanActionAndAdvance(
+  actionId: string,
+  resolvedBy: string,
+  choice: string
+): ResolveResult {
+  const action = getHumanAction(actionId);
+  if (!action) return { ok: false, code: 404, error: "Human action not found" };
+  if (action.status !== "open") return { ok: false, code: 409, error: "Human action already resolved" };
+
+  const resolution = parseHumanResolution(action.actionType, choice);
+  if (!resolution) {
+    return { ok: false, code: 400, error: `Invalid choice "${choice}" for ${action.actionType}` };
+  }
+
+  const issue = getIssue(action.issueId);
+  if (!issue) return { ok: false, code: 404, error: "Issue not found" };
+  const instance = getActiveWorkflowInstance(action.issueId);
+
+  // Pre-start product_scope_decision: resolve the action AND start the workflow in one
+  // transaction. If the start still can't proceed (criteria not actually added), the whole
+  // step rolls back and the action stays open — never a resolved action with no workflow.
+  if (!instance) {
+    if (action.actionType !== "product_scope_decision") {
+      return { ok: false, code: 409, error: "No active workflow for this action" };
+    }
+    try {
+      return getDb().transaction((): ResolveResult => {
+        resolveHumanAction(actionId, resolvedBy, { choice });
+        appendWorkflowEvent({
+          issueId: issue.id,
+          type: "human_action.resolved",
+          actorType: "human",
+          actorRef: resolvedBy,
+          stage: issue.status,
+          payload: { actionType: action.actionType, choice },
+        });
+        const { workItem } = startWorkflowCore(issue.id);
+        return {
+          ok: true,
+          issueStatus: getIssue(issue.id)!.status,
+          nextWorkItemId: workItem.id,
+          instanceCompleted: false,
+          restarted: true,
+        };
+      })();
+    } catch (err) {
+      if (err instanceof StartPreconditionError) {
+        return {
+          ok: false,
+          code: err.code === 400 ? 409 : err.code,
+          error: `Cannot start the workflow yet: ${err.message}. Add acceptance criteria, then resolve.`,
+        };
+      }
+      throw err;
+    }
+  }
+
+  const outcome = resolveHumanActionOutcome(resolution);
+
+  return getDb().transaction((): ResolveResult => {
+    resolveHumanAction(actionId, resolvedBy, { choice });
+    const ev = eventEmitter(issue, instance, null, outcome.issueStatus, issue.currentRound);
+    ev.emit("human_action.resolved", {
+      actorType: "human",
+      payload: { actionType: action.actionType, choice },
+    });
+
+    transitionIssue(issue.id, outcome.issueStatus, {
+      currentOwner: outcome.issueStatus === "done" || outcome.issueStatus === "closed" ? "system" : "developer",
+      currentIntent:
+        outcome.issueStatus === "done"
+          ? "Complete"
+          : outcome.issueStatus === "closed"
+            ? "Closed"
+            : `Developer implementing round ${issue.currentRound + 1}`,
+    });
+
+    if (outcome.workflowOutcome) {
+      completeWorkflowInstance(instance.id, outcome.workflowOutcome);
+      ev.emit(outcome.workflowOutcome === "done" ? "issue.completed" : "issue.closed");
+      return {
+        ok: true,
+        issueStatus: getIssue(issue.id)!.status,
+        nextWorkItemId: null,
+        instanceCompleted: true,
+        restarted: false,
+      };
+    }
+
+    // Another round: advance the round and queue a fresh developer work item.
+    incrementIssueRound(issue.id);
+    const roundNow = getIssue(issue.id)!.currentRound;
+    ev.emit("repair.started");
+    const next = enqueueWorkItem({
+      issueId: issue.id,
+      workflowInstanceId: instance.id,
+      kind: "developer",
+      round: roundNow,
+      idempotencyKey: `${instance.id}:developer:${roundNow}`,
+    });
+    return {
+      ok: true,
+      issueStatus: getIssue(issue.id)!.status,
+      nextWorkItemId: next.id,
+      instanceCompleted: false,
+      restarted: false,
+    };
+  })();
+}

@@ -1,10 +1,111 @@
-import type { WorkflowEvent, WorkflowEventType } from "@agent-dealer/shared";
+import type {
+  WorkflowEvent,
+  WorkflowEventType,
+  WorkflowInstance,
+  WorkflowInstanceOutcome,
+} from "@agent-dealer/shared";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
 
-// NOT-58 foundation: `workflow_instances` stays in the schema as a declared contract,
-// but nothing starts a workflow yet — the instance lifecycle (start / complete /
-// at-most-one-active enforcement) lands with the coordinator kernel in NOT-59.
+// NOT-59: the workflow-instance lifecycle (start / complete / at-most-one-active
+// enforcement) — the coordinator kernel is the only runtime writer.
+
+interface WorkflowInstanceRow {
+  id: string;
+  issue_id: string;
+  workflow_version: string;
+  started_at: string;
+  completed_at: string | null;
+  outcome: string | null;
+}
+
+function rowToInstance(row: WorkflowInstanceRow): WorkflowInstance {
+  return {
+    id: row.id,
+    issueId: row.issue_id,
+    workflowVersion: row.workflow_version,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    outcome: row.outcome as WorkflowInstanceOutcome | null,
+  };
+}
+
+/** Raised when an issue already has a running workflow instance (partial unique index). */
+export class WorkflowAlreadyActiveError extends Error {
+  constructor(issueId: string) {
+    super(`Issue ${issueId} already has an active workflow instance`);
+    this.name = "WorkflowAlreadyActiveError";
+  }
+}
+
+/**
+ * Starts a workflow instance. The `idx_workflow_instances_one_active` partial unique index
+ * guarantees at most one active instance per issue (PRD §2.1); a concurrent second start
+ * fails the INSERT, which is rethrown as WorkflowAlreadyActiveError.
+ */
+export function startWorkflowInstance(issueId: string, workflowVersion: string): WorkflowInstance {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const row: WorkflowInstanceRow = {
+    id: uuid(),
+    issue_id: issueId,
+    workflow_version: workflowVersion,
+    started_at: now,
+    completed_at: null,
+    outcome: null,
+  };
+  try {
+    db.prepare(`
+      INSERT INTO workflow_instances (id, issue_id, workflow_version, started_at, completed_at, outcome)
+      VALUES (@id, @issue_id, @workflow_version, @started_at, @completed_at, @outcome)
+    `).run(row);
+  } catch (err) {
+    if (err instanceof Error && /UNIQUE constraint failed/.test(err.message)) {
+      throw new WorkflowAlreadyActiveError(issueId);
+    }
+    throw err;
+  }
+  return rowToInstance(row);
+}
+
+export function completeWorkflowInstance(
+  id: string,
+  outcome: WorkflowInstanceOutcome
+): WorkflowInstance {
+  const now = new Date().toISOString();
+  getDb()
+    .prepare("UPDATE workflow_instances SET completed_at = ?, outcome = ? WHERE id = ? AND completed_at IS NULL")
+    .run(now, outcome, id);
+  const row = getDb().prepare("SELECT * FROM workflow_instances WHERE id = ?").get(id) as
+    | WorkflowInstanceRow
+    | undefined;
+  if (!row) throw new Error(`Workflow instance not found: ${id}`);
+  return rowToInstance(row);
+}
+
+export function getWorkflowInstance(id: string): WorkflowInstance | null {
+  const row = getDb().prepare("SELECT * FROM workflow_instances WHERE id = ?").get(id) as
+    | WorkflowInstanceRow
+    | undefined;
+  return row ? rowToInstance(row) : null;
+}
+
+/** The single running instance for an issue, or null. */
+export function getActiveWorkflowInstance(issueId: string): WorkflowInstance | null {
+  const row = getDb()
+    .prepare(
+      "SELECT * FROM workflow_instances WHERE issue_id = ? AND completed_at IS NULL ORDER BY started_at DESC LIMIT 1"
+    )
+    .get(issueId) as WorkflowInstanceRow | undefined;
+  return row ? rowToInstance(row) : null;
+}
+
+export function listWorkflowInstancesForIssue(issueId: string): WorkflowInstance[] {
+  const rows = getDb()
+    .prepare("SELECT * FROM workflow_instances WHERE issue_id = ? ORDER BY started_at ASC")
+    .all(issueId) as WorkflowInstanceRow[];
+  return rows.map(rowToInstance);
+}
 
 interface WorkflowEventRow {
   id: string;

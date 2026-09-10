@@ -10,7 +10,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-se
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue } = await import("./issues.js");
-const { createWorkerSession, getWorkerSession, listWorkerSessionsForIssue } =
+const { createWorkerSession, getWorkerSession, listWorkerSessionsForIssue, startSession, completeSession } =
   await import("./worker-sessions.js");
 
 let issueId: string;
@@ -52,4 +52,18 @@ test("a fresh session starts queued with no worktree path", () => {
   assert.equal(session.status, "queued");
   assert.equal(session.worktreePath, null);
   assert.equal(session.startedAt, null);
+});
+
+test("completeSession does not overwrite an already-terminal session", () => {
+  const session = createWorkerSession({ issueId, role: "developer", round: 1, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
+  startSession(session.id);
+  const failed = completeSession(session.id, { status: "failed", errorJson: JSON.stringify({ reason: "recovered" }) });
+  assert.equal(failed.status, "failed");
+  const firstCompletedAt = failed.completedAt;
+
+  // a zombie worker's late completion is a no-op — recovery's evidence stands
+  const again = completeSession(session.id, { status: "cancelled", errorJson: JSON.stringify({ reason: "late" }) });
+  assert.equal(again.status, "failed");
+  assert.equal(again.completedAt, firstCompletedAt);
+  assert.match(again.errorJson ?? "", /recovered/);
 });

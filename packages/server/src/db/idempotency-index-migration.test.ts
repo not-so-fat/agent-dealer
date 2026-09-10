@@ -75,7 +75,10 @@ test("migrate() upgrades a pre-fix non-unique idempotency index that already hol
     (i) => i.name === "idx_workflow_events_idempotency"
   );
   assert.equal(idx?.unique, 1);
-  assert.throws(() => insert.run("e5", issue.id, "dup-key", "2026-01-01T00:00:04.000Z"));
+  assert.throws(
+    () => insert.run("e7", issue.id, "dup-key", null, "2026-01-01T00:00:06.000Z"),
+    /UNIQUE constraint failed: workflow_events\.idempotency_key/
+  );
 
   // A second migrate() is a no-op (index already unique) and still starts cleanly.
   assert.doesNotThrow(() => migrate());

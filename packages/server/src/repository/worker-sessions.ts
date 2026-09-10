@@ -107,6 +107,79 @@ export function listWorkerSessionsForIssue(issueId: string): WorkerSession[] {
   return rows.map(rowToSession);
 }
 
-// NOT-58 foundation: the worker-session lease lifecycle — compare-and-set claim,
-// worktree-path binding, heartbeat, and terminal completion — is the coordinator
-// kernel's durable work-item contract and lands with it in NOT-59 / NOT-60.
+// NOT-59: the worker-session execution-record lifecycle. The durable lease/retry contract
+// lives on `work_items` (repository/work-items.ts) — this is the evidence record the effect
+// worker updates alongside it: running → done/failed, with heartbeat while it runs.
+
+/** Compare-and-set queued → running for the session the effect worker just picked up. */
+export function startSession(id: string): WorkerSession | null {
+  const now = new Date().toISOString();
+  const info = getDb()
+    .prepare(
+      `UPDATE worker_sessions SET status = 'running', started_at = ?, heartbeat_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'queued'`
+    )
+    .run(now, now, now, id);
+  if (info.changes === 0) return null;
+  return getWorkerSession(id);
+}
+
+/** Refreshes the running session's heartbeat — mirrors the work-item lease refresh. */
+export function heartbeatSession(id: string): void {
+  const now = new Date().toISOString();
+  getDb()
+    .prepare(
+      "UPDATE worker_sessions SET heartbeat_at = ?, updated_at = ? WHERE id = ? AND status = 'running'"
+    )
+    .run(now, now, id);
+}
+
+export interface CompleteSessionPatch {
+  status: Extract<WorkerSessionStatus, "done" | "failed" | "timed_out" | "cancelled">;
+  exitCode?: number | null;
+  errorJson?: string | null;
+  sessionRef?: string | null;
+  logPath?: string | null;
+  worktreePath?: string | null;
+}
+
+const SESSION_TERMINAL = ["done", "failed", "timed_out", "cancelled"] as const;
+
+/**
+ * Finalises a session — but only from a non-terminal state. If recovery already marked a
+ * zombie attempt's session `failed`, that attempt's own late completion is a no-op and
+ * returns the row unchanged, so it can't overwrite recovery's error/timestamp.
+ */
+export function completeSession(id: string, patch: CompleteSessionPatch): WorkerSession {
+  const current = getWorkerSession(id);
+  if (!current) throw new Error(`Worker session not found: ${id}`);
+  if ((SESSION_TERMINAL as readonly string[]).includes(current.status)) return current;
+  const now = new Date().toISOString();
+  getDb()
+    .prepare(`
+      UPDATE worker_sessions SET
+        status = @status,
+        exit_code = @exit_code,
+        error_json = @error_json,
+        session_ref = @session_ref,
+        log_path = @log_path,
+        worktree_path = @worktree_path,
+        completed_at = @completed_at,
+        updated_at = @updated_at
+      WHERE id = @id AND status NOT IN ('done', 'failed', 'timed_out', 'cancelled')
+    `)
+    .run({
+      id,
+      status: patch.status,
+      exit_code: patch.exitCode !== undefined ? patch.exitCode : current.exitCode,
+      error_json: patch.errorJson !== undefined ? patch.errorJson : current.errorJson,
+      session_ref: patch.sessionRef !== undefined ? patch.sessionRef : current.sessionRef,
+      log_path: patch.logPath !== undefined ? patch.logPath : current.logPath,
+      worktree_path: patch.worktreePath !== undefined ? patch.worktreePath : current.worktreePath,
+      completed_at: now,
+      updated_at: now,
+    });
+  const updated = getWorkerSession(id);
+  if (!updated) throw new Error(`Worker session vanished: ${id}`);
+  return updated;
+}
