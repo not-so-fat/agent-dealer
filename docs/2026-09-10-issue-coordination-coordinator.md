@@ -1708,6 +1708,10 @@ git add packages/server/src/coordinator/dispatcher.ts packages/server/src/coordi
 git commit -m "Add coordinator dispatch loop and crash recovery (NOT-57)"
 ```
 
+**Amendments (found running this task; bug in the plan's own Task 7 test code, not a schema gap):**
+
+1. **Real bug — test callbacks used `await` without being `async`.** Both `reconcileStaleSessions` tests in the plan's Step 1 code declared their callback as a plain arrow function (`() => { ... }`) but then called `const db = (await import("../db/index.js")).getDb();` inside it. Running the test at Step 2 confirmed this: it failed with `esbuild` transform error `"await" can only be used inside an "async" function` at the `await import` line — not the plan's predicted `Cannot find module './dispatcher.js'`, since the file never even got parsed far enough to reach the missing-module resolution. This is a genuine syntax bug in the plan's transcribed test, not a stand-in for the expected "module not found" failure. Fixed by marking both test callbacks `async () => {...}`, consistent with how every other dynamic `await import(...)` in this same test suite (e.g. `session-lifecycle.test.ts`'s top-level awaits, `dispatcher-recovery.test.ts`) is already used only inside async contexts. After the fix, Step 2 reproduced the plan's intended failure (`Cannot find module './dispatcher.js'`), and Step 4 passed both tests (2/2) once `dispatcher.ts` was written verbatim from the plan.
+
 ---
 
 ### Task 8: Reflect trigger on final_review completion
