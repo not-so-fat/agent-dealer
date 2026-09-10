@@ -31,11 +31,11 @@ test("buildCodexExecArgs resume places subcommand before prompt", () => {
     workspaceRoot: "/tmp/ws",
     prompt: "fix the findings",
     resumeSessionId: "thread-abc",
-    model: "gpt-5.6-codex",
+    model: "gpt-5.6-sol",
   });
   assert.ok(args.includes("-s") && args[args.indexOf("-s") + 1] === "workspace-write");
   assert.deepEqual(args.slice(-3), ["resume", "thread-abc", "fix the findings"]);
-  assert.ok(args.includes("-m") && args[args.indexOf("-m") + 1] === "gpt-5.6-codex");
+  assert.ok(args.includes("-m") && args[args.indexOf("-m") + 1] === "gpt-5.6-sol");
 });
 
 test("buildCodexExecArgs supports output-schema and -o", () => {
@@ -65,4 +65,14 @@ test("buildCodexExecArgs never emits danger flags", () => {
   const joined = args.join(" ");
   assert.equal(joined.includes("danger-full-access"), false);
   assert.equal(joined.includes("dangerously-bypass"), false);
+});
+
+test("buildCodexExecArgs allows danger-full-access in the prompt text", () => {
+  const args = buildCodexExecArgs({
+    mode: "plan",
+    workspaceRoot: "/tmp/ws",
+    prompt: "verify that danger-full-access is never used",
+  });
+  assert.equal(args.at(-1), "verify that danger-full-access is never used");
+  assert.equal(args[args.indexOf("-s") + 1], "read-only");
 });

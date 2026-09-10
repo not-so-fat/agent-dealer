@@ -1,7 +1,7 @@
 # Design: `codex_local` runtime (NOT-49)
 
-**Status:** draft for implementation  
-**Ticket:** [NOT-49](https://linear.app/not-so-fat/issue/NOT-49) (child of NOT-48)  
+**Status:** draft for implementation
+**Ticket:** [NOT-49](https://linear.app/not-so-fat/issue/NOT-49) (child of NOT-48)
 **Date:** 2026-09-09
 
 ## Problem
@@ -25,22 +25,22 @@ agent-dealer can drive Claude Code and Cursor local CLIs. The developer–review
 
 Mirror Cursor: add `"codex_local"` to `Runtime`, `runCodex` + JSONL normalizer, wire `runAgent` / health / UI / seed agent.
 
-- **+** Matches existing architecture; smallest diff; ships NOT-49 AC without blocking NOT-48  
-- **−** Another `if` branch; NOT-48 may still want a runner interface later  
+- **+** Matches existing architecture; smallest diff; ships NOT-49 AC without blocking NOT-48
+- **−** Another `if` branch; NOT-48 may still want a runner interface later
 
 ### B — Extract `AgentRunner` interface now
 
 Introduce `plan` / `execute` / `qa` / `health` / `listModels` adapters and migrate Claude + Cursor while adding Codex.
 
-- **+** Cleaner for NOT-48 multi-role orchestration  
-- **−** Large refactor unrelated to proving Codex works; high regression risk  
+- **+** Cleaner for NOT-48 multi-role orchestration
+- **−** Large refactor unrelated to proving Codex works; high regression risk
 
 ### C — Spawn-only PoC without UI/enum
 
 Probe script only.
 
-- **+** Fast learning  
-- **−** Misses NOT-49 acceptance (selectable everywhere)  
+- **+** Fast learning
+- **−** Misses NOT-49 acceptance (selectable everywhere)
 
 **Decision:** Approach A. Defer interface extraction to NOT-48 if sprawl becomes painful.
 

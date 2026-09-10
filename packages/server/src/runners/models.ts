@@ -1,4 +1,7 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { Runtime, RuntimeModelOption } from "@agent-dealer/shared";
 import { CURSOR_DEFAULT_MODEL, CURSOR_SUBSCRIPTION_MODEL_IDS } from "@agent-dealer/shared";
 import { cursorInvokeArgs, resolveCursorBin, resolveCodexBin } from "../cli-env.js";
@@ -21,9 +24,9 @@ const CLAUDE_FALLBACK: RuntimeModelOption[] = [
 ];
 
 const CODEX_FALLBACK: RuntimeModelOption[] = [
-  { id: "gpt-5.6-codex", label: "GPT-5.6 Codex" },
-  { id: "gpt-5.6", label: "GPT-5.6" },
-  { id: "o3", label: "o3" },
+  { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+  { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
+  { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
 ];
 
 type ModelsResult = { models: RuntimeModelOption[]; source: "live" | "fallback" };
@@ -105,15 +108,40 @@ function listCursorModels(): ModelsResult {
   return { models: CURSOR_FALLBACK, source: "fallback" };
 }
 
+function listCodexModelsFromCache(): RuntimeModelOption[] {
+  const home = process.env.HOME ?? os.homedir();
+  const cachePath = path.join(home, ".codex", "models_cache.json");
+  if (!fs.existsSync(cachePath)) return [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(cachePath, "utf8")) as {
+      models?: Array<{ id?: string; slug?: string; display_name?: string; label?: string }>;
+    };
+    const models: RuntimeModelOption[] = [];
+    for (const m of raw.models ?? []) {
+      const id = m.id ?? m.slug;
+      if (!id) continue;
+      models.push({ id, label: m.display_name ?? m.label ?? id });
+    }
+    return models;
+  } catch {
+    return [];
+  }
+}
+
+function listCodexModels(): ModelsResult {
+  void resolveCodexBin();
+  const live = listCodexModelsFromCache();
+  if (live.length > 0) return { models: live, source: "live" };
+  return { models: CODEX_FALLBACK, source: "fallback" };
+}
+
 async function fetchRuntimeModelsFresh(runtime: Runtime): Promise<ModelsResult> {
   if (runtime === "cursor_local") {
     return listCursorModels();
   }
 
   if (runtime === "codex_local") {
-    // Codex does not expose a stable `--list-models` in all builds; use curated fallbacks.
-    void resolveCodexBin();
-    return { models: CODEX_FALLBACK, source: "fallback" };
+    return listCodexModels();
   }
 
   const fromApi = await tryAnthropicModelsApi();

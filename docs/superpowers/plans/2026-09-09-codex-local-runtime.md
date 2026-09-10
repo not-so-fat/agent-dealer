@@ -78,7 +78,7 @@ In `seedBuiltinAgents`, `INSERT OR IGNORE` Codex with runtime `codex_local`.
 
 - [ ] **Step 3: Build shared package**
 
-Run: `npm run build -w @agent-dealer/shared`  
+Run: `npm run build -w @agent-dealer/shared`
 Expected: success
 
 ---
@@ -90,7 +90,7 @@ Expected: success
 - Modify: `packages/server/src/cli-env.test.ts`
 
 **Interfaces:**
-- Produces: `resolveCodexBin(): string`, `codexBinExists(): boolean`  
+- Produces: `resolveCodexBin(): string`, `codexBinExists(): boolean`
 - Env override: `CODEX_CLI` (mirror `CLAUDE_CLI` / `CURSOR_CLI`)
 
 - [ ] **Step 1: Failing tests** for env override and PATH fallback (`codex`)
@@ -176,8 +176,8 @@ Normalization rules (minimum):
 - Modify: `packages/server/src/runners/qa.ts` and/or `queue/result-qa.ts` (`QA_RUNTIMES`)
 
 **Interfaces:**
-- Produces: `runCodex(run, mode, model?, opts?) => Promise<RunnerResult>`  
-- `runAgent`: if `runtime === "codex_local"` → `runCodex`  
+- Produces: `runCodex(run, mode, model?, opts?) => Promise<RunnerResult>`
+- `runAgent`: if `runtime === "codex_local"` → `runCodex`
 - QA allowlist includes `codex_local`
 
 Implementation notes:

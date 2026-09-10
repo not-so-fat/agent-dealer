@@ -1,5 +1,6 @@
 import type { Run } from "@agent-dealer/shared";
 import { resolveCodexBin } from "../cli-env.js";
+import { getTemporalOutputDir } from "../paths.js";
 import { buildCodexExecArgs, type CodexPhaseMode } from "./codex-args.js";
 import { logPathFor, spawnCli, timeoutMsForMode, type RunnerResult } from "./spawn-cli.js";
 import {
@@ -54,6 +55,10 @@ export async function runCodex(
   const logPath = logPathFor(run, mode);
   const workspaceRoot = workspaceForRun(run);
 
+  // Match Claude execute: temporal output dir must be writable for document artifacts.
+  const addDirs =
+    opts?.addDirs ?? (mode === "execute" ? [getTemporalOutputDir()] : undefined);
+
   const args = buildCodexExecArgs({
     mode,
     workspaceRoot,
@@ -62,7 +67,7 @@ export async function runCodex(
     resumeSessionId,
     outputSchemaPath: opts?.outputSchemaPath,
     outputLastMessagePath: opts?.outputLastMessagePath,
-    addDirs: opts?.addDirs,
+    addDirs,
   });
 
   const { exitCode, transcript, timedOut } = await spawnCli(

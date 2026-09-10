@@ -69,14 +69,19 @@ async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHealthIssue
     if (!ver.ok) {
       return [{ code: "cli_missing", message: "Codex CLI not found — install Codex (`codex`)" }];
     }
-    const out = ver.output.toLowerCase();
-    if (
-      out.includes("not logged in") ||
-      out.includes("login required") ||
-      out.includes("not authenticated") ||
-      out.includes("authentication required")
-    ) {
-      return [{ code: "runtime_auth", message: "Run `codex login` (or set CODEX_API_KEY for automation)" }];
+    // `codex --version` succeeds without auth — use login status for auth health.
+    const login = await runCommand(resolveCodexBin(), ["login", "status"]);
+    const out = login.output.toLowerCase();
+    const loggedIn =
+      login.ok &&
+      (out.includes("logged in") || out.includes("authenticated") || out.includes("api key"));
+    if (!loggedIn) {
+      return [
+        {
+          code: "runtime_auth",
+          message: "Run `codex login` (or set OPENAI_API_KEY for automation)",
+        },
+      ];
     }
     return [];
   }
