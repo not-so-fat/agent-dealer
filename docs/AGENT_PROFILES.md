@@ -37,11 +37,11 @@ Deleting `~/.agent-dealer/.temporal/` is safe — treasure remains in the databa
 | Field | Required | Role |
 |-------|----------|------|
 | `workspaceRoot` | Yes (before kick) | CLI working directory — git repo for dev, vault folder for notes |
-| `runtime` | Yes | `claude_code` or `cursor_local` |
+| `runtime` | Yes | `claude_code`, `cursor_local`, or `codex_local` |
 | `deckId` / `playbookId` | No | Agent Deck binding |
 | `name` | Yes | Display label |
 
-Built-in Claude and Cursor agents ship with **no default workspace**. Configure workspace on the Agents page before kicking tasks.
+Built-in Claude, Cursor, and Codex agents ship with **no default workspace**. Configure workspace on the Agents page before kicking tasks.
 
 ## Task override
 
@@ -79,19 +79,23 @@ Permissions are explicit tools and paths — not category presets like "Artifact
 
 **Cursor**: `--trust` (already applied).
 
+**Codex plan / QA**: `codex exec --sandbox read-only` (never `danger-full-access` in managed flows).
+
+**Codex execute**: `codex exec --sandbox workspace-write`; Agent Deck via Codex marketplace plugin when a deck is bound.
+
 ## User stories
 
 ### Dev agent (code tasks)
 
 - **Workspace:** `/Users/me/projects/my-app` (git repo)
-- **Runtime:** Claude Code with optional Agent Deck deck
+- **Runtime:** Claude Code, Cursor local, or Codex local (optional Agent Deck deck)
 - **Kick:** Linear issue or manual task → agent runs in repo cwd, edits source files there
 - **Review:** Plan + diff-style results in Operations; treasure in SQLite
 
 ### Notes agent (content in vault)
 
 - **Workspace:** `/Users/me/Obsidian/Main` (vault root)
-- **Runtime:** Claude or Cursor
+- **Runtime:** Claude, Cursor, or Codex
 - **Kick:** Manual content task; agent reads context from vault
 - **Deliverable:** Scratch written to `~/.agent-dealer/.temporal/output/{runId}.md`, captured as `document` artifact; final vault placement is P2 (`deliverable_template`)
 
@@ -106,8 +110,8 @@ Permissions are explicit tools and paths — not category presets like "Artifact
 | Code | When |
 |------|------|
 | `workspace_missing` | No `workspaceRoot` configured, or path not found on disk |
-| `cli_missing` | Claude/Cursor CLI not installed |
-| `runtime_auth` | Cursor not logged in |
+| `cli_missing` | Claude / Cursor / Codex CLI not installed |
+| `runtime_auth` | Cursor or Codex not logged in / missing auth |
 | `deck_offline` | Agent has deck but Agent Deck API unreachable |
 
 ## P2 (documented, not yet implemented)

@@ -15,7 +15,7 @@ export type AskQuestionResult =
   | { ok: false; code: 400 | 404 | 409; error: string };
 
 const ASKABLE_STATUSES = new Set(["review", "done"]);
-const QA_RUNTIMES = new Set(["claude_code", "cursor_local"]);
+const QA_RUNTIMES = new Set(["claude_code", "cursor_local", "codex_local"]);
 
 /** Ask the run's agent about its finished result. Read-only; never changes run status. */
 export function askResultQuestion(

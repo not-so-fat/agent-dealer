@@ -39,6 +39,25 @@ export function GenericAgentIcon({ className = "h-8 w-8" }: IconProps) {
   );
 }
 
+export function CodexIcon({ className = "h-8 w-8" }: IconProps) {
+  return (
+    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden>
+      <rect width="32" height="32" rx="8" fill="white" fillOpacity="0.06" />
+      <text
+        x="16"
+        y="21"
+        textAnchor="middle"
+        fill="#92E4DD"
+        fontSize="11"
+        fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+        fontWeight="600"
+      >
+        Cx
+      </text>
+    </svg>
+  );
+}
+
 export function AgentRuntimeLogo({
   runtime,
   className = "h-3.5 w-3.5 shrink-0",
@@ -52,6 +71,9 @@ export function AgentRuntimeLogo({
   if (runtime === "cursor_local") {
     return <img src={cursorLogo} alt="" className={`object-contain ${className}`} draggable={false} />;
   }
+  if (runtime === "codex_local") {
+    return <CodexIcon className={className} />;
+  }
   return null;
 }
 
@@ -64,5 +86,6 @@ export function AgentRuntimeIcon({
 }) {
   if (runtime === "claude_code") return <ClaudeIcon className={className} />;
   if (runtime === "cursor_local") return <CursorIcon className={className} />;
+  if (runtime === "codex_local") return <CodexIcon className={className} />;
   return <GenericAgentIcon className={className} />;
 }

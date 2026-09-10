@@ -41,6 +41,7 @@ export default function AgentConnectionsBar({ agents, agentDeckOnline }: Props) 
 
   const claude = runtimeCliStatus(agents, "claude_code");
   const cursor = runtimeCliStatus(agents, "cursor_local");
+  const codex = runtimeCliStatus(agents, "codex_local");
   const mcpIssue = agents
     .flatMap((a) => a.issues)
     .find((i) => i.code === "mcp_not_registered");
@@ -55,6 +56,10 @@ export default function AgentConnectionsBar({ agents, agentDeckOnline }: Props) 
       <span className="inline-flex items-center gap-1.5" title={cursor.detail}>
         <StatusDot ok={cursor.ok} />
         <span className={cursor.ok ? "text-white/55" : "text-amber-200/90"}>Cursor</span>
+      </span>
+      <span className="inline-flex items-center gap-1.5" title={codex.detail}>
+        <StatusDot ok={codex.ok} />
+        <span className={codex.ok ? "text-white/55" : "text-amber-200/90"}>Codex</span>
       </span>
       <span
         className="inline-flex items-center gap-1.5"

@@ -5,6 +5,7 @@ import { Runtime } from "./runtime.js";
 /** Built-in agent IDs — stable across installs. */
 export const BUILTIN_AGENT_CLAUDE_ID = "00000000-0000-4000-a000-000000000001";
 export const BUILTIN_AGENT_CURSOR_ID = "00000000-0000-4000-a000-000000000002";
+export const BUILTIN_AGENT_CODEX_ID = "00000000-0000-4000-a000-000000000003";
 
 /** Cursor CLI model id for Auto + Composer subscription pool (not IDE default). */
 export const CURSOR_DEFAULT_MODEL = "auto";

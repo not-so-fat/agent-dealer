@@ -1,7 +1,10 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { Runtime, RuntimeModelOption } from "@agent-dealer/shared";
 import { CURSOR_DEFAULT_MODEL, CURSOR_SUBSCRIPTION_MODEL_IDS } from "@agent-dealer/shared";
-import { cursorInvokeArgs, resolveCursorBin } from "../cli-env.js";
+import { cursorInvokeArgs, resolveCursorBin, resolveCodexBin } from "../cli-env.js";
 
 const CURSOR_PINNED: RuntimeModelOption[] = [
   { id: CURSOR_DEFAULT_MODEL, label: "Auto (subscription pool)" },
@@ -18,6 +21,12 @@ const CLAUDE_FALLBACK: RuntimeModelOption[] = [
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
   { id: "claude-opus-4-6", label: "Claude Opus 4.6" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
+];
+
+const CODEX_FALLBACK: RuntimeModelOption[] = [
+  { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+  { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
+  { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
 ];
 
 type ModelsResult = { models: RuntimeModelOption[]; source: "live" | "fallback" };
@@ -99,9 +108,55 @@ function listCursorModels(): ModelsResult {
   return { models: CURSOR_FALLBACK, source: "fallback" };
 }
 
+function listCodexModelsFromCache(): RuntimeModelOption[] {
+  const home = process.env.HOME ?? os.homedir();
+  const cachePath = path.join(home, ".codex", "models_cache.json");
+  if (!fs.existsSync(cachePath)) return [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(cachePath, "utf8")) as unknown;
+    return parseCodexModelsCache(raw);
+  } catch {
+    return [];
+  }
+}
+
+/** Picker-visible Codex models only (`visibility === "list"`). Exported for unit tests. */
+export function parseCodexModelsCache(raw: unknown): RuntimeModelOption[] {
+  if (!raw || typeof raw !== "object") return [];
+  const modelsIn = (raw as { models?: unknown }).models;
+  if (!Array.isArray(modelsIn)) return [];
+  const models: RuntimeModelOption[] = [];
+  for (const entry of modelsIn) {
+    if (!entry || typeof entry !== "object") continue;
+    const m = entry as {
+      id?: string;
+      slug?: string;
+      display_name?: string;
+      label?: string;
+      visibility?: string;
+    };
+    if (m.visibility !== "list") continue;
+    const id = m.id ?? m.slug;
+    if (!id) continue;
+    models.push({ id, label: m.display_name ?? m.label ?? id });
+  }
+  return models;
+}
+
+function listCodexModels(): ModelsResult {
+  void resolveCodexBin();
+  const live = listCodexModelsFromCache();
+  if (live.length > 0) return { models: live, source: "live" };
+  return { models: CODEX_FALLBACK, source: "fallback" };
+}
+
 async function fetchRuntimeModelsFresh(runtime: Runtime): Promise<ModelsResult> {
   if (runtime === "cursor_local") {
     return listCursorModels();
+  }
+
+  if (runtime === "codex_local") {
+    return listCodexModels();
   }
 
   const fromApi = await tryAnthropicModelsApi();

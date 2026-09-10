@@ -34,12 +34,12 @@ export default function PlaybookLearningPanel({ run, artifacts }: Props) {
   const reflect = reflectStatus(artifacts);
   const runtime = run.runtime ?? "claude_code";
 
-  if (runtime === "cursor_local") {
+  if (runtime === "cursor_local" || runtime === "codex_local") {
     return (
       <section className="space-y-2">
         <div className="heading-section">Playbook learning</div>
         <p className="text-sm text-white/45">
-          Playbook learning requires Claude Code runtime (Cursor has no Agent Deck MCP).
+          Playbook learning requires Claude Code runtime ({runtime === "cursor_local" ? "Cursor" : "Codex"} reflect path is not wired).
         </p>
       </section>
     );

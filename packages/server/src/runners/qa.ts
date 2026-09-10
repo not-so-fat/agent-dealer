@@ -1,7 +1,9 @@
 import type { Run, UsageContent } from "@agent-dealer/shared";
 import { runClaude, runCursor, type RunnerResult } from "./claude.js";
+import { runCodex } from "./codex.js";
 import { buildQaPrompt } from "./prompts.js";
 import { extractResultIsError, extractResultText, extractUsage, parseNdjson } from "./stream-json.js";
+import { normalizeCodexEvents, parseCodexJsonl } from "./codex-jsonl.js";
 
 export interface QaRunResult {
   ok: boolean;
@@ -31,6 +33,17 @@ export async function runQa(
         promptOverride: buildQaPrompt(run, question, { grounded: false }),
       });
     }
+  } else if (runtime === "codex_local") {
+    const prompt = buildQaPrompt(run, question, { grounded: Boolean(resumeSessionId) });
+    result = await runCodex(run, "qa", executeModel ?? undefined, {
+      promptOverride: prompt,
+      ...(resumeSessionId ? { resumeSessionId } : {}),
+    });
+    if (result.exitCode !== 0 && resumeSessionId) {
+      result = await runCodex(run, "qa", executeModel ?? undefined, {
+        promptOverride: buildQaPrompt(run, question, { grounded: false }),
+      });
+    }
   } else {
     result = await runClaude(run, "qa", executeModel, {
       promptOverride: buildQaPrompt(run, question, { grounded: Boolean(resumeSessionId) }),
@@ -38,7 +51,10 @@ export async function runQa(
     });
   }
 
-  const events = parseNdjson(result.transcript);
+  const events =
+    runtime === "codex_local"
+      ? normalizeCodexEvents(parseCodexJsonl(result.transcript))
+      : parseNdjson(result.transcript);
   const usage = extractUsage(events, "qa", runtime);
 
   const answer = extractResultText(events)?.trim() ?? "";

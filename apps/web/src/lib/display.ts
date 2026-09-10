@@ -44,12 +44,14 @@ export function formatDurationMs(ms: number): string {
 export function runtimeLabel(runtime: Runtime | null | undefined): string {
   if (runtime === "claude_code") return "Claude";
   if (runtime === "cursor_local") return "Cursor";
+  if (runtime === "codex_local") return "Codex";
   return "No agent";
 }
 
 export function runtimeTone(runtime: Runtime | null | undefined): string {
   if (runtime === "claude_code") return "bg-[#D4A574]/20 text-[#E8C9A8] border-[#D4A574]/40";
   if (runtime === "cursor_local") return "bg-[#7EB8FF]/15 text-[#A8D4FF] border-[#7EB8FF]/35";
+  if (runtime === "codex_local") return "bg-[#92E4DD]/15 text-[#92E4DD] border-[#92E4DD]/35";
   return "bg-white/5 text-white/50 border-white/15";
 }
 
