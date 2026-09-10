@@ -5,8 +5,13 @@ import type {
   AgentWithHealth,
   Artifact,
   CreateAgentInput,
+  CreateIssueInput,
   DocumentContent,
   ExecutionResultContent,
+  Finding,
+  HumanAction,
+  Issue,
+  IssueStatus,
   LinearCandidate,
   LinearConnectionStatus,
   LinearIntakeConfig,
@@ -20,7 +25,10 @@ import type {
   StreamTraceContent,
   UpdateAgentInput,
   UsageContent,
+  UsageEvent,
   UsageSummary,
+  WorkerSession,
+  WorkflowEvent,
 } from "@agent-dealer/shared";
 import { clearCachedRuntimeModels, fetchRuntimeModelsDeduped } from "./lib/runtimeModelsCache";
 
@@ -427,6 +435,92 @@ export function latestByPhase<T extends { phase?: string }>(
   }
   const last = matches[matches.length - 1];
   return last ? parseArtifact<T>(last) : null;
+}
+
+export interface IssueListRow {
+  id: string;
+  title: string;
+  status: IssueStatus;
+  currentOwner: string;
+  currentIntent: string | null;
+  updatedAt: string;
+  hasOpenHumanAction: boolean;
+}
+
+export interface IssueDetail {
+  issue: Issue;
+  timeline: WorkflowEvent[];
+  forecast: { now: string; next: string };
+  humanActions: HumanAction[];
+  findings: Finding[];
+  usageSummary: { totalCostUsd: number; totalDurationMs: number; totalTokensIn: number; totalTokensOut: number };
+}
+
+export interface IssueEvidence {
+  workerSessions: WorkerSession[];
+  artifacts: Array<{ id: string; kind: string; contentJson: string | null; createdAt: string }>;
+  usageEvents: UsageEvent[];
+}
+
+export async function fetchIssues(status?: IssueStatus[]): Promise<IssueListRow[]> {
+  const qs = status?.length ? `?status=${status.join(",")}` : "";
+  const res = await fetch(`${API}/api/issues${qs}`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export async function fetchIssueDetail(id: string): Promise<IssueDetail> {
+  const res = await fetch(`${API}/api/issues/${id}`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export async function fetchIssueEvidence(id: string): Promise<IssueEvidence> {
+  const res = await fetch(`${API}/api/issues/${id}/evidence`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export async function createIssue(input: CreateIssueInput): Promise<Issue> {
+  const res = await fetch(`${API}/api/issues`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export async function startIssue(id: string): Promise<Issue> {
+  const res = await fetch(`${API}/api/issues/${id}/start`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export async function guideIssue(id: string, markdown: string): Promise<WorkflowEvent> {
+  const res = await fetch(`${API}/api/issues/${id}/guidance`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ markdown }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export async function fetchHumanActions(): Promise<HumanAction[]> {
+  const res = await fetch(`${API}/api/human-actions`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export async function resolveHumanAction(id: string, choice: string, resolvedBy: string): Promise<HumanAction> {
+  const res = await fetch(`${API}/api/human-actions/${id}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ choice, resolvedBy }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
 }
 
 export type { StreamTraceContent, UsageContent, UsageSummary, ExecutionResultContent, DocumentContent, LinearCandidate, ResultQaContent };
