@@ -2,6 +2,12 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## Unreleased
+
+### Runtimes
+
+- **`codex_local`** — first-class local Codex CLI runtime (`codex exec --json`): phase sandboxes, JSONL→artifact mapping, QA allowlist, health/models/UI, and Claude-parity session resume on feedback execute / QA
+
 ## 0.2.0 — 2026-07-30
 
 ### Managed CLI install + auto-upgrade

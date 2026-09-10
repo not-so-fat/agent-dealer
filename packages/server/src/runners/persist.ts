@@ -16,6 +16,7 @@ import {
   parseNdjson,
   type PlanTriageExtraction,
 } from "./stream-json.js";
+import { normalizeCodexEvents, parseCodexJsonl } from "./codex-jsonl.js";
 import { humanFeedbackText } from "./run-context.js";
 
 export function seedDeliverableFromParent(run: Run): void {
@@ -78,7 +79,10 @@ export function persistRunOutput(input: PersistRunOutputInput): {
 } {
   const { run, phase, runtime, exitCode, logPath } = input;
   const raw = input.rawTranscript ?? (fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "");
-  const events = parseNdjson(raw);
+  const events =
+    runtime === "codex_local"
+      ? normalizeCodexEvents(parseCodexJsonl(raw))
+      : parseNdjson(raw);
 
   const sessionId = extractSessionId(events);
   let resultText = extractResultText(events);

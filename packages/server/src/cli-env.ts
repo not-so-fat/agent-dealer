@@ -85,3 +85,22 @@ export function cursorBinExists(): boolean {
   const bin = resolveCursorBin();
   return bin !== "cursor-agent" && bin !== "cursor" ? fs.existsSync(bin) : false;
 }
+
+/** Resolve Codex CLI binary (`codex` from OpenAI Codex install). */
+export function resolveCodexBin(): string {
+  const home = process.env.HOME ?? os.homedir();
+  if (process.env.CODEX_CLI) return process.env.CODEX_CLI;
+  return (
+    firstExisting([
+      path.join(home, ".local/bin/codex"),
+      path.join(home, ".codex/bin/codex"),
+      "/opt/homebrew/bin/codex",
+      "/usr/local/bin/codex",
+    ]) ?? "codex"
+  );
+}
+
+export function codexBinExists(): boolean {
+  const bin = resolveCodexBin();
+  return bin !== "codex" ? fs.existsSync(bin) : false;
+}

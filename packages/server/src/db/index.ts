@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   BUILTIN_AGENT_CLAUDE_ID,
   BUILTIN_AGENT_CURSOR_ID,
+  BUILTIN_AGENT_CODEX_ID,
   CURSOR_DEFAULT_MODEL,
 } from "@agent-dealer/shared";
 
@@ -140,6 +141,7 @@ function seedBuiltinAgents(db: Database.Database): void {
   `);
   insert.run(BUILTIN_AGENT_CLAUDE_ID, "Claude", "claude_code", now, now);
   insert.run(BUILTIN_AGENT_CURSOR_ID, "Cursor", "cursor_local", now, now);
+  insert.run(BUILTIN_AGENT_CODEX_ID, "Codex", "codex_local", now, now);
 
   db.prepare(
     `UPDATE agents SET

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cursorInvokeArgs } from "./cli-env.js";
+import { cursorInvokeArgs, resolveCodexBin } from "./cli-env.js";
 
 test("cursorInvokeArgs passes through for cursor-agent", () => {
   const prev = process.env.CURSOR_CLI;
@@ -22,5 +22,16 @@ test("cursorInvokeArgs prepends agent subcommand for legacy cursor shim", () => 
   } finally {
     if (prev === undefined) delete process.env.CURSOR_CLI;
     else process.env.CURSOR_CLI = prev;
+  }
+});
+
+test("resolveCodexBin respects CODEX_CLI override", () => {
+  const prev = process.env.CODEX_CLI;
+  process.env.CODEX_CLI = "/tmp/custom-codex";
+  try {
+    assert.equal(resolveCodexBin(), "/tmp/custom-codex");
+  } finally {
+    if (prev === undefined) delete process.env.CODEX_CLI;
+    else process.env.CODEX_CLI = prev;
   }
 });

@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import type { Runtime, RuntimeModelOption } from "@agent-dealer/shared";
 import { CURSOR_DEFAULT_MODEL, CURSOR_SUBSCRIPTION_MODEL_IDS } from "@agent-dealer/shared";
-import { cursorInvokeArgs, resolveCursorBin } from "../cli-env.js";
+import { cursorInvokeArgs, resolveCursorBin, resolveCodexBin } from "../cli-env.js";
 
 const CURSOR_PINNED: RuntimeModelOption[] = [
   { id: CURSOR_DEFAULT_MODEL, label: "Auto (subscription pool)" },
@@ -18,6 +18,12 @@ const CLAUDE_FALLBACK: RuntimeModelOption[] = [
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
   { id: "claude-opus-4-6", label: "Claude Opus 4.6" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
+];
+
+const CODEX_FALLBACK: RuntimeModelOption[] = [
+  { id: "gpt-5.6-codex", label: "GPT-5.6 Codex" },
+  { id: "gpt-5.6", label: "GPT-5.6" },
+  { id: "o3", label: "o3" },
 ];
 
 type ModelsResult = { models: RuntimeModelOption[]; source: "live" | "fallback" };
@@ -102,6 +108,12 @@ function listCursorModels(): ModelsResult {
 async function fetchRuntimeModelsFresh(runtime: Runtime): Promise<ModelsResult> {
   if (runtime === "cursor_local") {
     return listCursorModels();
+  }
+
+  if (runtime === "codex_local") {
+    // Codex does not expose a stable `--list-models` in all builds; use curated fallbacks.
+    void resolveCodexBin();
+    return { models: CODEX_FALLBACK, source: "fallback" };
   }
 
   const fromApi = await tryAnthropicModelsApi();

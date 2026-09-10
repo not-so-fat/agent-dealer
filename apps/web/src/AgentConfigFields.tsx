@@ -64,6 +64,7 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
       >
         <option value="claude_code">Claude Code (claude -p)</option>
         <option value="cursor_local">Cursor local (cursor-agent -p)</option>
+        <option value="codex_local">Codex local (codex exec)</option>
       </select>
       <PhaseConfigRow
         phase="Plan"

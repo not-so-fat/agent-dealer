@@ -7,6 +7,8 @@ import {
   resolveClaudeBin,
   cursorInvokeArgs,
   resolveCursorBin,
+  resolveCodexBin,
+  codexBinExists,
 } from "../cli-env.js";
 import { checkAgentDeckHealth, isAgentDeckMcpRegistered } from "./agent-deck.js";
 
@@ -56,6 +58,29 @@ async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHealthIssue
     return [];
   }
 
+  if (runtime === "codex_local") {
+    if (!codexBinExists()) {
+      const ver = await runCommand(resolveCodexBin(), ["--version"]);
+      if (!ver.ok) {
+        return [{ code: "cli_missing", message: "Codex CLI not found — install Codex (`codex`)" }];
+      }
+    }
+    const ver = await runCommand(resolveCodexBin(), ["--version"]);
+    if (!ver.ok) {
+      return [{ code: "cli_missing", message: "Codex CLI not found — install Codex (`codex`)" }];
+    }
+    const out = ver.output.toLowerCase();
+    if (
+      out.includes("not logged in") ||
+      out.includes("login required") ||
+      out.includes("not authenticated") ||
+      out.includes("authentication required")
+    ) {
+      return [{ code: "runtime_auth", message: "Run `codex login` (or set CODEX_API_KEY for automation)" }];
+    }
+    return [];
+  }
+
   const status = await runCommand(resolveCursorBin(), cursorInvokeArgs(["status"]));
   if (!status.ok && !status.output.trim() && !cursorBinExists()) {
     return [{ code: "cli_missing", message: "cursor-agent not found — run: curl https://cursor.com/install -fsS | bash" }];
@@ -100,6 +125,7 @@ function agentSpecificIssues(
       message: "Run agent-deck setup --client claude --start (Claude MCP not registered)",
     });
   }
+  // Codex deck binding uses the Agent Deck marketplace plugin (not `agent-deck use --client codex`).
   return issues;
 }
 

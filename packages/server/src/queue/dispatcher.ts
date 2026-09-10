@@ -76,7 +76,7 @@ function maxConcurrent(): number {
   return Number(process.env.MAX_CONCURRENT_RUNS ?? 2);
 }
 
-function runtimeFor(run: Run): "claude_code" | "cursor_local" {
+function runtimeFor(run: Run): "claude_code" | "cursor_local" | "codex_local" {
   return run.runtime ?? "claude_code";
 }
 
