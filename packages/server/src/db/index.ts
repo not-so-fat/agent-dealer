@@ -89,6 +89,15 @@ export function migrate(): void {
     `);
   }
 
+  const artifactCols = db.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>;
+  if (!artifactCols.some((c) => c.name === "issue_id")) {
+    // Additive per spec §"artifacts": run_id stays NOT NULL for legacy rows; issue_id/
+    // worker_session_id are nullable here since existing rows predate the issue model —
+    // every row the migration or new coordinator writes going forward populates issue_id.
+    db.exec("ALTER TABLE artifacts ADD COLUMN issue_id TEXT REFERENCES issues(id)");
+    db.exec("ALTER TABLE artifacts ADD COLUMN worker_session_id TEXT REFERENCES worker_sessions(id)");
+  }
+
   seedBuiltinAgents(db);
   seedIntakeSettings(db);
   migrateLegacyAgentDeckPort(db);
