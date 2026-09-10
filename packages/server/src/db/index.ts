@@ -91,11 +91,39 @@ export function migrate(): void {
 
   const artifactCols = db.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>;
   if (!artifactCols.some((c) => c.name === "issue_id")) {
-    // Additive per spec §"artifacts": run_id stays NOT NULL for legacy rows; issue_id/
-    // worker_session_id are nullable here since existing rows predate the issue model —
-    // every row the migration or new coordinator writes going forward populates issue_id.
+    // Additive per spec §"artifacts": issue_id/worker_session_id are nullable here since
+    // existing rows predate the issue model — every row the migration or new coordinator
+    // writes going forward populates issue_id.
     db.exec("ALTER TABLE artifacts ADD COLUMN issue_id TEXT REFERENCES issues(id)");
     db.exec("ALTER TABLE artifacts ADD COLUMN worker_session_id TEXT REFERENCES worker_sessions(id)");
+  }
+
+  // NOT-57 Task 1 amendment: issue-linked artifacts have no run, so run_id must be
+  // nullable — but SQLite can't ALTER a column's NOT NULL away, so rebuild the table for
+  // any database created before schema.sql dropped the constraint (fresh databases from
+  // the updated schema.sql never hit this branch).
+  const artifactRunIdCol = (db.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string; notnull: number }>).find(
+    (c) => c.name === "run_id"
+  );
+  if (artifactRunIdCol?.notnull === 1) {
+    db.exec(`
+      CREATE TABLE artifacts_new (
+        id TEXT PRIMARY KEY,
+        run_id TEXT REFERENCES runs(id),
+        kind TEXT NOT NULL,
+        content_json TEXT,
+        blob_path TEXT,
+        author TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        issue_id TEXT REFERENCES issues(id),
+        worker_session_id TEXT REFERENCES worker_sessions(id)
+      );
+      INSERT INTO artifacts_new (id, run_id, kind, content_json, blob_path, author, created_at, issue_id, worker_session_id)
+        SELECT id, run_id, kind, content_json, blob_path, author, created_at, issue_id, worker_session_id FROM artifacts;
+      DROP TABLE artifacts;
+      ALTER TABLE artifacts_new RENAME TO artifacts;
+      CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
+    `);
   }
 
   seedBuiltinAgents(db);

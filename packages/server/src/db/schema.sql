@@ -49,7 +49,9 @@ CREATE INDEX IF NOT EXISTS idx_runs_external ON runs(source, external_id);
 
 CREATE TABLE IF NOT EXISTS artifacts (
   id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL REFERENCES runs(id),
+  -- Nullable: issue-linked artifacts (issue_id column, added below by migrate()) have no
+  -- run — only legacy run-scoped artifacts populate run_id. See NOT-57 Task 1 amendment.
+  run_id TEXT REFERENCES runs(id),
   kind TEXT NOT NULL,
   content_json TEXT,
   blob_path TEXT,

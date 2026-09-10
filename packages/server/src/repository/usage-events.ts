@@ -89,3 +89,10 @@ export function summarizeIssueUsage(issueId: string): IssueUsageSummary {
     totalTokensOut: row.total_out,
   };
 }
+
+export function listUsageEventsForIssue(issueId: string): UsageEvent[] {
+  const rows = getDb()
+    .prepare("SELECT * FROM usage_events WHERE issue_id = ? ORDER BY ts ASC")
+    .all(issueId) as UsageEventRow[];
+  return rows.map(rowToUsageEvent);
+}
