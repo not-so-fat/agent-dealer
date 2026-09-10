@@ -113,19 +113,34 @@ function listCodexModelsFromCache(): RuntimeModelOption[] {
   const cachePath = path.join(home, ".codex", "models_cache.json");
   if (!fs.existsSync(cachePath)) return [];
   try {
-    const raw = JSON.parse(fs.readFileSync(cachePath, "utf8")) as {
-      models?: Array<{ id?: string; slug?: string; display_name?: string; label?: string }>;
-    };
-    const models: RuntimeModelOption[] = [];
-    for (const m of raw.models ?? []) {
-      const id = m.id ?? m.slug;
-      if (!id) continue;
-      models.push({ id, label: m.display_name ?? m.label ?? id });
-    }
-    return models;
+    const raw = JSON.parse(fs.readFileSync(cachePath, "utf8")) as unknown;
+    return parseCodexModelsCache(raw);
   } catch {
     return [];
   }
+}
+
+/** Picker-visible Codex models only (`visibility === "list"`). Exported for unit tests. */
+export function parseCodexModelsCache(raw: unknown): RuntimeModelOption[] {
+  if (!raw || typeof raw !== "object") return [];
+  const modelsIn = (raw as { models?: unknown }).models;
+  if (!Array.isArray(modelsIn)) return [];
+  const models: RuntimeModelOption[] = [];
+  for (const entry of modelsIn) {
+    if (!entry || typeof entry !== "object") continue;
+    const m = entry as {
+      id?: string;
+      slug?: string;
+      display_name?: string;
+      label?: string;
+      visibility?: string;
+    };
+    if (m.visibility !== "list") continue;
+    const id = m.id ?? m.slug;
+    if (!id) continue;
+    models.push({ id, label: m.display_name ?? m.label ?? id });
+  }
+  return models;
 }
 
 function listCodexModels(): ModelsResult {
