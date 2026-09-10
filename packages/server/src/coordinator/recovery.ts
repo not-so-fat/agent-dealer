@@ -1,16 +1,16 @@
 // packages/server/src/coordinator/recovery.ts
 //
-// Startup + periodic recovery for the coordinator kernel. A process crash can leave a work
-// item `leased` with no live worker; recovery reclaims it and routes it through the *same*
-// bounded retry/escalation policy as an observed failure — never merely a status rewrite
-// (design §"Durable dispatch and recovery"). Mirrors recoverOrphanedRuns() in
-// queue/dispatcher.ts, for the issue-centric kernel.
+// Startup + periodic recovery for the coordinator kernel. A crash can leave a work item
+// `leased` with no live worker; once its lease expires (no heartbeat for `leaseMs`)
+// recovery reclaims it and routes it through the *same* bounded retry/escalation policy as
+// an observed failure — never merely a status rewrite (design §"Durable dispatch and
+// recovery"). Mirrors recoverOrphanedRuns() in queue/dispatcher.ts, for the kernel.
 //
-// Each candidate is reclaimed in its OWN transaction: the CAS is fenced on the lease token
-// it was observed with, so a worker completing concurrently with recovery still wins; a
-// dead-lettered item is CAS'd to `dead` and routed together, so a crash can never leave a
-// `dead` item with no next effect; and one item that fails to route never rolls back the
-// recovery of the others.
+// Each candidate is reclaimed in its OWN transaction. The reclaim CAS is fenced on both
+// the lease token AND `lease_expires_at < now`, so a worker that heartbeats or completes
+// between recovery's read-only snapshot and its write keeps/wins its lease. A dead-lettered
+// item is CAS'd to `dead` and routed together, so a crash can't strand it with no next
+// effect; and one item that fails to route never rolls back the others.
 import { getDb } from "../db/index.js";
 import { getIssue } from "../repository/issues.js";
 import { getActiveWorkflowInstance } from "../repository/workflow-events.js";
@@ -47,15 +47,15 @@ function failOrphanSession(workerSessionId: string | null): void {
 }
 
 /**
- * @param opts.now      current epoch ms (injectable for tests)
- * @param opts.startup  true on server boot: every `leased` item is orphaned regardless of
- *                      its lease expiry, because the worker died with the process. Defaults
- *                      to false so a periodic tick never steals a healthy in-flight lease.
+ * @param opts.now  current epoch ms (injectable for tests). Recovery reclaims every lease
+ *                  whose `lease_expires_at` is before this — the recovery latency for an
+ *                  orphaned item is bounded by `COORDINATOR_LEASE_MS`.
  */
-export function recoverCoordinator(opts?: { now?: number; startup?: boolean }): RecoverResult {
+export function recoverCoordinator(opts?: { now?: number }): RecoverResult {
   const now = opts?.now ?? Date.now();
+  const nowIso = new Date(now).toISOString();
   const backoffMs = num("COORDINATOR_FAIL_BACKOFF_MS", 10_000);
-  const candidates = listExpiredLeases(now, { includeAllLeased: opts?.startup ?? false });
+  const candidates = listExpiredLeases(now);
 
   const reclaimed: string[] = [];
   const deadLettered: string[] = [];
@@ -66,9 +66,13 @@ export function recoverCoordinator(opts?: { now?: number; startup?: boolean }): 
     try {
       const kind = getDb().transaction((): "reclaimed" | "dead" | "lost" => {
         if (!attemptCapReached(item)) {
-          if (!requeueWorkItem(item.id, token, { reason: "lease expired" }, { backoffMs })) {
-            return "lost"; // a concurrent completion won the CAS
-          }
+          const ok = requeueWorkItem(
+            item.id,
+            token,
+            { reason: "lease expired" },
+            { backoffMs, onlyIfExpiredBefore: nowIso }
+          );
+          if (!ok) return "lost"; // completed or heartbeated concurrently
           failOrphanSession(item.workerSessionId);
           return "reclaimed";
         }
@@ -76,6 +80,7 @@ export function recoverCoordinator(opts?: { now?: number; startup?: boolean }): 
         const dead = finishWorkItem(item.id, token, {
           status: "dead",
           error: { reason: "lease expired after the attempt cap" },
+          onlyIfExpiredBefore: nowIso,
         });
         if (!dead) return "lost";
         failOrphanSession(item.workerSessionId);

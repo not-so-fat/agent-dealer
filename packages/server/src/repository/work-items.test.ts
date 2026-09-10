@@ -10,10 +10,12 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wo
 const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue } = await import("./issues.js");
+const { createWorkerSession } = await import("./worker-sessions.js");
 const { startWorkflowInstance } = await import("./workflow-events.js");
 const {
   enqueueWorkItem,
   claimWorkItem,
+  bindWorkItemSession,
   refreshHeartbeat,
   finishWorkItem,
   requeueWorkItem,
@@ -66,6 +68,23 @@ test("claimWorkItem is a compare-and-set and mints a fencing token; only one of 
   assert.equal(getWorkItem(item.id)!.attemptCount, 1);
 });
 
+test("bindWorkItemSession is fenced on the lease token", () => {
+  const { issueId, instanceId } = freshInstance();
+  const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
+  const claimed = claimWorkItem("owner-A", { leaseMs: 60_000 })!;
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "claude_code",
+  });
+  assert.equal(bindWorkItemSession(item.id, session.id, "stale-token"), false);
+  assert.equal(getWorkItem(item.id)!.workerSessionId, null);
+  assert.equal(bindWorkItemSession(item.id, session.id, claimed.leaseToken!), true);
+  assert.equal(getWorkItem(item.id)!.workerSessionId, session.id);
+});
+
 test("refreshHeartbeat extends the lease for the token holder and fails for a stale token", () => {
   const { issueId, instanceId } = freshInstance();
   const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
@@ -97,15 +116,13 @@ test("requeueWorkItem returns a leased item to pending behind a backoff gate, fe
   assert.equal(claimWorkItem("o", { leaseMs: 60_000 }), null);
 });
 
-test("listExpiredLeases: periodic sees only expired leases; startup sees all", () => {
+test("listExpiredLeases returns only leases whose lease_expires_at is past the given clock", () => {
   const { issueId, instanceId } = freshInstance();
   const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
   claimWorkItem("o", { leaseMs: 600_000 });
 
   assert.equal(listExpiredLeases(Date.now()).length, 0); // lease still valid
-  assert.equal(listExpiredLeases(Date.now(), { includeAllLeased: true }).length, 1);
-  assert.equal(listExpiredLeases(Date.now() + 1_200_000).length, 1); // now past expiry
-  assert.equal(listExpiredLeases(Date.now())[0]?.id, undefined);
+  assert.equal(listExpiredLeases(Date.now() + 1_200_000).length, 1); // past expiry
   assert.equal(listExpiredLeases(Date.now() + 1_200_000)[0].id, item.id);
 });
 
@@ -116,7 +133,29 @@ test("a completion that wins its CAS defeats a concurrent reclaim", () => {
   // worker finishes first…
   assert.ok(finishWorkItem(item.id, claimed.leaseToken!, { status: "done" }));
   // …recovery then observes the (now stale) expired-lease snapshot and its CAS matches nothing
-  const stale = { ...claimed };
-  assert.equal(requeueWorkItem(stale.id, stale.leaseToken!, { r: 1 }, { backoffMs: 0 }), false);
+  assert.equal(
+    requeueWorkItem(claimed.id, claimed.leaseToken!, { r: 1 }, { backoffMs: 0, onlyIfExpiredBefore: new Date(Date.now() + 10_000).toISOString() }),
+    false
+  );
   assert.equal(getWorkItem(item.id)!.status, "done");
+});
+
+test("a heartbeat that renews the lease defeats a concurrent reclaim (onlyIfExpiredBefore guard)", () => {
+  const { issueId, instanceId } = freshInstance();
+  const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
+  const claimed = claimWorkItem("o", { leaseMs: 5 })!;
+  const recoveryClock = Date.now() + 1_000; // recovery observed the lease as expired
+
+  // the worker heartbeats first, pushing lease_expires_at past the recovery clock
+  assert.equal(refreshHeartbeat(item.id, claimed.leaseToken!, { leaseMs: 600_000 }), true);
+
+  // recovery's guarded CAS now matches nothing — the healthy attempt keeps its lease
+  assert.equal(
+    requeueWorkItem(claimed.id, claimed.leaseToken!, { r: 1 }, {
+      backoffMs: 0,
+      onlyIfExpiredBefore: new Date(recoveryClock).toISOString(),
+    }),
+    false
+  );
+  assert.equal(getWorkItem(item.id)!.status, "leased");
 });

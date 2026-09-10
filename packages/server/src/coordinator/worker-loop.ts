@@ -62,11 +62,15 @@ const roleFor: Record<WorkItemKind, "developer" | "reviewer"> = {
   reviewer: "reviewer",
 };
 
+// Keyed by lease token, not work-item id: recovery can requeue an expired item while its
+// zombie handler is still unwinding, and a later tick may re-claim the same id. Keying by
+// the per-attempt token keeps the two tracked separately, so the concurrency bound holds
+// and drainCoordinator awaits both.
 const active = new Map<string, Promise<void>>();
 
-/** Visible for tests — the in-flight work-item ids this process is running. */
-export function activeWorkItemIds(): string[] {
-  return [...active.keys()];
+/** Visible for tests — the number of effect attempts this process is running. */
+export function activeAttemptCount(): number {
+  return active.size;
 }
 
 function isFailureOutcome(outcome: DeveloperOutcome | ReviewerOutcome): boolean {
@@ -131,30 +135,40 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
   }
 
   // Create + bind + start the session and emit worker.started atomically, so a crash never
-  // leaves a running session that recovery (which keys off work_items) cannot locate.
-  const session = getDb().transaction(() => {
-    const s = createWorkerSession({
-      issueId: claimed.issueId,
-      role: roleFor[claimed.kind],
-      round: claimed.round,
-      agentId: claimed.kind === "developer" ? issue.developerAgentId : issue.reviewerAgentId,
-      runtime: null,
-      inputSha,
-      metadataJson: JSON.stringify({ workItemId: claimed.id }),
-    });
-    bindWorkItemSession(claimed.id, s.id);
-    startSession(s.id);
-    appendWorkflowEvent({
-      issueId: claimed.issueId,
-      workflowInstanceId: instance.id,
-      workerSessionId: s.id,
-      type: "worker.started",
-      actorType: "system",
-      stage: issue.status,
-      round: claimed.round,
-    });
-    return s;
-  })();
+  // leaves a running session that recovery (which keys off work_items) cannot locate. The
+  // bind is fenced on the lease token: if this attempt lost its lease between claim and
+  // here, the transaction rolls back (session creation undone) and the attempt is dropped.
+  let session;
+  try {
+    session = getDb().transaction(() => {
+      const s = createWorkerSession({
+        issueId: claimed.issueId,
+        role: roleFor[claimed.kind],
+        round: claimed.round,
+        agentId: claimed.kind === "developer" ? issue.developerAgentId : issue.reviewerAgentId,
+        runtime: null,
+        inputSha,
+        metadataJson: JSON.stringify({ workItemId: claimed.id }),
+      });
+      if (!bindWorkItemSession(claimed.id, s.id, leaseToken)) {
+        throw new Error("lease lost before session setup");
+      }
+      startSession(s.id);
+      appendWorkflowEvent({
+        issueId: claimed.issueId,
+        workflowInstanceId: instance.id,
+        workerSessionId: s.id,
+        type: "worker.started",
+        actorType: "system",
+        stage: issue.status,
+        round: claimed.round,
+      });
+      return s;
+    })();
+  } catch (err) {
+    console.error("[coordinator] session setup", claimed.id, err);
+    return; // lost the lease — recovery will reprocess the item when the lease expires
+  }
 
   const controller = new AbortController();
   const heartbeat = setInterval(() => {
@@ -206,11 +220,12 @@ export async function runCoordinatorTick(opts?: { leaseOwner?: string }): Promis
   let started = 0;
   while (active.size < coordinatorConfig.maxConcurrency) {
     const item = claimWorkItem(leaseOwner, { leaseMs: coordinatorConfig.leaseMs });
-    if (!item) break;
+    if (!item || !item.leaseToken) break;
+    const key = item.leaseToken;
     const job = processWorkItem(item)
       .catch((err) => console.error("[coordinator] processWorkItem", item.id, err))
-      .finally(() => active.delete(item.id));
-    active.set(item.id, job);
+      .finally(() => active.delete(key));
+    active.set(key, job);
     started++;
   }
   return started;

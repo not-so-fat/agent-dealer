@@ -25,7 +25,9 @@ const { listWorkerSessionsForIssue } = await import("../repository/worker-sessio
 const { listWorkItemsForIssue, claimWorkItem, getWorkItem } = await import("../repository/work-items.js");
 const { startWorkflow, applyCompletion, resolveHumanActionAndAdvance } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
-const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
+const { runCoordinatorTick, drainCoordinator, activeAttemptCount } = await import(
+  "./worker-loop.js"
+);
 const { recoverCoordinator } = await import("./recovery.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
 
@@ -136,8 +138,8 @@ test("crash before effect: a leased item with no completion is recovered and adv
   claimWorkItem("dead-worker", { leaseMs: 60_000 });
   assert.equal(getWorkItem(devItem.id)!.status, "leased");
 
-  // Restart recovery requeues the orphaned lease…
-  recoverCoordinator({ startup: true });
+  // Recovery requeues the orphaned lease once it has expired…
+  recoverCoordinator({ now: Date.now() + 120_000 });
   assert.equal(getWorkItem(devItem.id)!.status, "pending");
 
   // …now a working handler picks it up and the issue advances exactly once.
@@ -199,8 +201,8 @@ test("lease expiry: a hung worker's late completion is dropped; the requeued ite
   const hung = claimWorkItem("hung", { leaseMs: 20 })!;
   await new Promise((r) => setTimeout(r, 40));
 
-  // The periodic (non-startup) reclaim requeues the expired lease.
-  const res = recoverCoordinator({ startup: false, now: Date.now() });
+  // The periodic reclaim requeues the now-expired lease.
+  const res = recoverCoordinator({ now: Date.now() });
   assert.deepEqual(res.reclaimed, [devItemId]);
   assert.equal(getWorkItem(devItemId)!.status, "pending");
 
@@ -235,6 +237,51 @@ test("duplicate dispatch: two racing ticks run one worker session, one advance",
   await pump();
   assert.equal(getIssue(issueId)!.status, "final_review");
 });
+
+test("a recovery-requeued re-attempt is tracked separately from its zombie predecessor", async () => {
+  // Regression for "active.set(item.id) replaces the old promise" — key by lease token.
+  const prevHb = process.env.COORDINATOR_HEARTBEAT_MS;
+  const prevLease = process.env.COORDINATOR_LEASE_MS;
+  process.env.COORDINATOR_HEARTBEAT_MS = "100000"; // effectively never during the test
+  process.env.COORDINATOR_LEASE_MS = "10";
+  try {
+    const issueId = newIssue();
+    let calls = 0;
+    let releaseA: () => void = () => {};
+    const gateA = new Promise<void>((r) => {
+      releaseA = r;
+    });
+    registerEffectHandler("developer", async () => {
+      calls++;
+      if (calls === 1) await gateA;
+      return cleanHandoff(`h${calls}`);
+    });
+    registerEffectHandler("reviewer", async () => approvedVerdict);
+    startWorkflow(issueId);
+
+    await runCoordinatorTick({ leaseOwner: "A" }); // attempt A starts, hangs on gateA
+    assert.equal(activeAttemptCount(), 1);
+
+    await new Promise((r) => setTimeout(r, 25)); // the 10ms lease expires; no heartbeat fires
+    recoverCoordinator({ now: Date.now() }); // requeues the item
+    await runCoordinatorTick({ leaseOwner: "B" }); // attempt B claims the requeued item
+    assert.equal(activeAttemptCount(), 2, "zombie A + re-attempt B tracked separately");
+
+    releaseA();
+    await drainCoordinator();
+    assert.equal(activeAttemptCount(), 0);
+    await pump(); // run the reviewer B enqueued
+    assert.equal(getIssue(issueId)!.status, "final_review");
+  } finally {
+    restoreEnv("COORDINATOR_HEARTBEAT_MS", prevHb);
+    restoreEnv("COORDINATOR_LEASE_MS", prevLease);
+  }
+});
+
+function restoreEnv(key: string, prev: string | undefined): void {
+  if (prev === undefined) delete process.env[key];
+  else process.env[key] = prev;
+}
 
 test("placeholder handlers escalate rather than fabricating a PR", async () => {
   const issueId = newIssue();

@@ -213,15 +213,23 @@ export function claimWorkItem(leaseOwner: string, opts: ClaimOpts): WorkItem | n
 }
 
 /**
- * Binds the effect worker's session to the item. Callers do this inside the same
- * transaction that creates and starts the session, so a crash never leaves a running
- * session that recovery (which keys off the item) cannot find.
+ * Binds the effect worker's session to the item, fenced on the lease token, inside the
+ * same transaction that creates and starts the session. Returns false when this attempt no
+ * longer holds the lease — the caller must roll the session creation back rather than
+ * overwrite a newer attempt's binding.
  */
-export function bindWorkItemSession(id: string, workerSessionId: string): void {
+export function bindWorkItemSession(
+  id: string,
+  workerSessionId: string,
+  leaseToken: string
+): boolean {
   const now = new Date().toISOString();
-  getDb()
-    .prepare("UPDATE work_items SET worker_session_id = ?, updated_at = ? WHERE id = ?")
-    .run(workerSessionId, now, id);
+  const info = getDb()
+    .prepare(
+      "UPDATE work_items SET worker_session_id = ?, updated_at = ? WHERE id = ? AND status = 'leased' AND lease_token = ?"
+    )
+    .run(workerSessionId, now, id, leaseToken);
+  return info.changes > 0;
 }
 
 /** Extends the lease. Returns false if this token no longer holds it (reclaimed/expired). */
@@ -245,12 +253,18 @@ export interface FinishInput {
   status: "done" | "dead";
   result?: unknown;
   error?: unknown;
+  /**
+   * Recovery guard: also require `lease_expires_at < this ISO time`. A heartbeat that
+   * renewed the lease after recovery snapshotted the item pushes the expiry past this
+   * cutoff, so the CAS matches nothing and the now-healthy attempt is left alone.
+   */
+  onlyIfExpiredBefore?: string;
 }
 
 /**
  * Compare-and-set a leased item to a terminal state, fenced on the lease token. Returns
- * the updated item, or null when this attempt no longer holds the lease (reclaimed, or a
- * peer already finished it) — the caller must then treat its work as discarded. This is
+ * the updated item, or null when this attempt no longer holds the lease (reclaimed, a peer
+ * already finished it, or — with `onlyIfExpiredBefore` — the lease was renewed). This is
  * the ONLY path to `done`/`dead`, so a duplicate completion or a recovery race can never
  * re-advance the workflow.
  */
@@ -271,6 +285,7 @@ export function finishWorkItem(
         lease_expires_at = NULL,
         updated_at = @now
       WHERE id = @id AND status = 'leased' AND lease_token = @token
+        AND (@expired_before IS NULL OR lease_expires_at < @expired_before)
       RETURNING *
     `)
     .get({
@@ -279,6 +294,7 @@ export function finishWorkItem(
       status: input.status,
       result: input.result !== undefined ? JSON.stringify(input.result) : null,
       error: input.error !== undefined ? JSON.stringify(input.error) : null,
+      expired_before: input.onlyIfExpiredBefore ?? null,
       now,
     }) as WorkItemRow | undefined;
   return row ? rowToWorkItem(row) : null;
@@ -286,12 +302,14 @@ export function finishWorkItem(
 
 export interface RequeueOpts {
   backoffMs: number;
+  /** Recovery guard — see FinishInput.onlyIfExpiredBefore. */
+  onlyIfExpiredBefore?: string;
 }
 
 /**
  * Returns a leased item to `pending` behind a backoff gate for another attempt, fenced on
  * the lease token. Returns false when the token no longer holds the lease (a concurrent
- * completion won). Same backoff policy as a reclaimed expiry.
+ * completion won, or the lease was renewed). Same backoff policy as a reclaimed expiry.
  */
 export function requeueWorkItem(
   id: string,
@@ -311,35 +329,28 @@ export function requeueWorkItem(
         lease_expires_at = NULL,
         updated_at = @now
       WHERE id = @id AND status = 'leased' AND lease_token = @token
+        AND (@expired_before IS NULL OR lease_expires_at < @expired_before)
     `)
     .run({
       id,
       token: leaseToken,
       error: JSON.stringify(error),
       available_at: new Date(now + opts.backoffMs).toISOString(),
+      expired_before: opts.onlyIfExpiredBefore ?? null,
       now: new Date(now).toISOString(),
     });
   return info.changes > 0;
 }
 
-export interface ExpiredLeaseOpts {
-  /** Startup recovery: every `leased` row is orphaned (its worker died with the process). */
-  includeAllLeased?: boolean;
-}
-
 /**
- * The leased items whose worker is gone: on a periodic tick, those past `lease_expires_at`;
- * on startup, every leased item. Read-only — the caller reclaims each one with a
- * token-fenced `requeueWorkItem` / `finishWorkItem` inside a transaction, so a worker that
- * completes concurrently with recovery still wins its own CAS.
+ * Leased items whose lease has expired (no heartbeat for `leaseMs`). Read-only — the
+ * caller reclaims each one with a token-fenced, `onlyIfExpiredBefore`-guarded
+ * `requeueWorkItem` / `finishWorkItem` inside a transaction, so a worker that heartbeats or
+ * completes concurrently with recovery still keeps/wins its lease.
  */
-export function listExpiredLeases(nowMs: number, opts: ExpiredLeaseOpts = {}): WorkItem[] {
+export function listExpiredLeases(nowMs: number): WorkItem[] {
   const rows = getDb()
-    .prepare(
-      opts.includeAllLeased
-        ? "SELECT * FROM work_items WHERE status = 'leased'"
-        : "SELECT * FROM work_items WHERE status = 'leased' AND lease_expires_at < ?"
-    )
-    .all(...(opts.includeAllLeased ? [] : [new Date(nowMs).toISOString()])) as WorkItemRow[];
+    .prepare("SELECT * FROM work_items WHERE status = 'leased' AND lease_expires_at < ?")
+    .all(new Date(nowMs).toISOString()) as WorkItemRow[];
   return rows.map(rowToWorkItem);
 }
