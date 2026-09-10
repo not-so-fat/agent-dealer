@@ -7,6 +7,8 @@ import cors from "@fastify/cors";
 import { enrichPathForCliTools } from "./cli-env.js";
 import { migrate } from "./db/index.js";
 import { registerRoutes } from "./routes/index.js";
+import { registerIssueRoutes } from "./routes/issues.js";
+import { registerHumanActionRoutes } from "./routes/human-actions.js";
 import { startQueue, recoverOrphanedRuns } from "./queue/dispatcher.js";
 import { registerStaticUi } from "./static-ui.js";
 
@@ -22,6 +24,8 @@ async function main(): Promise<void> {
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
   await registerRoutes(app);
+  await registerIssueRoutes(app);
+  await registerHumanActionRoutes(app);
 
   const uiDist = await registerStaticUi(app);
   const orphans = recoverOrphanedRuns();
