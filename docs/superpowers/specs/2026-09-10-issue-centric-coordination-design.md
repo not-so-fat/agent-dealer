@@ -13,7 +13,7 @@
 
 - **Replace, don't dual-write.** `runs`/`events`/`artifacts` are renamed/reshaped in place; `approval_gates` is dropped (dead table — today's gating is implicit in `run.status`, nothing reads/writes that table).
 - **Plan/review (today's default) is retired as the default mode.** All issues run the developer–reviewer workflow from PRD §6.2. Plan-approval-before-execution is gone; humans engage only at the four PRD action types.
-- **Real coordinator, not just UI.** Separate developer and reviewer worker sessions/worktrees, SHA-bound handoffs via `gh` CLI verification — this is "very basic" to the product per the PRD, not deferrable.
+- **Real coordinator, not just UI.** Separate developer and reviewer worker sessions/worktrees, SHA-bound handoffs via `gh` CLI verification — the developer/reviewer separation is core to the product (PRD §6.2); confirmed explicitly during scoping as not deferrable to a later ticket.
 - **Human-action resolve is functional**, reusing the same underlying resolution path as today.
 - **Intake folds into the Issues list** (a "New issue" / "Import from Linear" action) rather than keeping its own nav slot.
 
@@ -50,9 +50,20 @@ One row per actual agent process. A repaired issue has 4+ rows (dev r1, reviewer
 | `status` | `queued`\|`running`\|`done`\|`failed`\|`timed_out` |
 | `created_at`, `updated_at` | |
 
+### `workflow_instances` (new)
+
+One row per issue executing one immutable workflow version (PRD §9.1). This ticket has exactly one hardcoded workflow (`dev_reviewer_v1`), so it's 1:1 with `issues` today — the table exists so a future second workflow type, or an issue restarted under a new version, doesn't force a schema change later.
+
+| Column | Notes |
+|---|---|
+| `id`, `issue_id` | |
+| `workflow_version` | hardcoded string, e.g. `dev_reviewer_v1` |
+| `started_at`, `completed_at` | |
+| `outcome` | `done`\|`closed`\|null while running |
+
 ### `workflow_events` (replaces `events`)
 
-`id`, `issue_id`, `worker_session_id` (nullable), `type`, `actor_type`, `actor_ref`, `payload_json`, `artifact_ref`, `causation_event_id`, `ts`.
+`id`, `issue_id`, `workflow_instance_id`, `worker_session_id` (nullable), `type`, `actor_type`, `actor_ref`, `stage` (issue status at emit time), `round`, `payload_json`, `artifact_ref`, `idempotency_key` (provider-native key when available, e.g. a GitHub delivery id — nullable), `causation_event_id`, `ts`. Covers every field PRD §9.2 requires per event.
 
 `type` is normalized to the PRD §9.2 vocabulary: `issue.created`, `workflow.started`, `worker.started`, `worker.completed`, `worker.failed`, `pull_request.opened`, `pull_request.updated`, `checks.completed`, `review.submitted`, `repair.started`, `human_action.requested`, `human_action.resolved`, `final_review.requested`, `issue.completed`, `issue.closed`.
 
@@ -70,17 +81,30 @@ Resolving an action reuses the same code path today's result-review approval use
 
 `run_id` → `issue_id` (required) + `worker_session_id` (nullable — null for issue-level artifacts like the task snapshot and final packet).
 
+### `usage_events` (new)
+
+Duration/token/cost evidence by role and runtime (PRD §9.1, required for §10's per-issue rollups). Replaces today's `artifacts.kind='usage'` + `lineage_id` aggregation (`buildLineageUsageSummary`), which has no equivalent under the round-based model — there is no `lineage_id` chain anymore, just `worker_sessions` per issue.
+
+| Column | Notes |
+|---|---|
+| `id`, `issue_id`, `worker_session_id` | |
+| `role`, `runtime` | denormalized from the session for cheap per-issue rollup queries |
+| `tokens_in`, `tokens_out`, `cost_usd`, `duration_ms` | |
+| `ts` | |
+
+Per-issue duration/cost/round/human-wait (PRD §10) are computed by summing `usage_events` for the issue's `worker_sessions`, plus `human_actions.resolved_at - requested_at` for human-wait — no separate rollup table needed for v1.
+
 ## Coordinator
 
-State machine per issue, implemented as a new `packages/server/src/coordinator/` module (parallel to today's `queue/dispatcher.ts`, not a rewrite of it — the dispatcher's process-spawn/timeout/retry plumbing is reused, its run-status branching is not).
+State machine per issue, implemented as a new `packages/server/src/coordinator/` module (parallel to today's `queue/dispatcher.ts`, not a rewrite of it). Reuse is narrower than it looks at first glance: the low-level `spawnCli` (process spawn/timeout/kill, `runners/spawn-cli.ts`) is generic and reusable as-is, but `runClaude`/`runCursor`/`runCodex` in `runners/claude.ts` are hardcoded to the `Run` shape and a closed `plan|execute|reflect|qa` mode union — they do not accept a `developer|reviewer` mode. This design requires new per-runtime spawn wrappers (one pair per runtime × role, or a refactored mode union covering both) as real implementation work, not a drop-in reuse. The dispatcher's run-status branching is not reused at all.
 
 ### Session lifecycle
 
 1. **Prepare task snapshot** — freeze title/description/acceptance criteria/repo/base branch/workflow version onto the issue at start; store as an issue-level artifact.
-2. **Developer session** — `git worktree add` a read-write worktree on the issue branch; spawn the developer agent (reused `spawnCli`/runner plumbing) with a new developer prompt (parallel to today's `buildExecutionPrompt`) instructing it to implement, run tests/Lens, and push + open/update a draft PR via its own `gh pr create`/`gh push` tool calls.
-3. **Verify handoff** — after the session ends, the coordinator runs `gh pr view --json headRefOid,number,url` itself. This is the ground truth for `head_sha`/`pr_number`, not the agent's text claim. Emits `pull_request.opened`/`updated`.
+2. **Developer session** — `git worktree add` a read-write worktree on the issue branch; spawn the developer agent with a new developer prompt (parallel to today's `buildExecutionPrompt`, using the new per-role spawn wrapper noted above) instructing it to implement, run tests/Lens, push + open/update a draft PR via its own `gh pr create`/`gh push` tool calls, and end its reply with a short structured **implementation conclusion** (what changed, why, deviations from acceptance criteria, known follow-ups — distinct from the PR description) per PRD §6.2 step 3 / open decision #4. Stored as a worker-session-scoped artifact and threaded into the next review round and the final review packet; the exact minimal field set is open decision #4 below, but producing it every developer session is not optional.
+3. **Verify handoff** — after the session ends, the coordinator runs `gh pr view --json headRefOid,number,url` itself. This is the ground truth for `head_sha`/`pr_number`, not the agent's text claim. Emits `pull_request.opened`/`updated`. If the developer session itself failed or timed out (`worker_sessions.status`), or `gh pr view` finds no PR at all, the session is treated as a failed round — routed the same as `changes_requested` with no reviewer round consumed (the round limit still applies) rather than left waiting for a review that will never happen.
 4. **Reviewer session** — `git worktree add` a **separate** detached-HEAD worktree at the verified head SHA; spawn the reviewer agent with a new reviewer prompt instructing it to review the diff/evidence/prior findings and submit a real `gh pr review`, ending the review body with one fenced JSON block (verdict + findings) — same "structured output in a JSON fence" contract already used by plan-triage/reflect today.
-5. **Verify review** — coordinator runs `gh pr view --json reviews` to read the actual submitted verdict, cross-checked against the parsed JSON fence. If the PR head changed since the reviewer started, the review is stale and cannot advance the issue (PRD §6.3).
+5. **Verify review** — coordinator runs `gh pr view --json reviews` to read the actual submitted verdict, cross-checked against the parsed JSON fence. If the PR head changed since the reviewer started, the review is stale and cannot advance the issue (PRD §6.3) — the coordinator discards it and starts a fresh reviewer session at the new head, without consuming a review round. If the reviewer session itself failed/timed out, or its worktree checkout failed, this routes as `policy_escalation` rather than a silent retry — an infrastructure failure shouldn't be indistinguishable from a code problem.
 6. **Route outcome**:
    - `approved` → create `final_review` human action.
    - `changes_requested`, rounds remain → increment round, start a new developer session (step 2) with the findings as context.
@@ -91,6 +115,12 @@ State machine per issue, implemented as a new `packages/server/src/coordinator/`
 ### GitHub access
 
 No new SDK dependency (no Octokit). Developer/reviewer agents call `gh` themselves inside their sandboxed worktree, using whatever ambient `gh auth` is already configured on the host — same trust model already used for Claude Code/Codex CLI auth. The coordinator's own verification reads (`gh pr view --json ...`, read-only, never a write) shell out to the same `gh` binary via a thin wrapper in `packages/server/src/adapters/github.ts` — a few functions, not a client library.
+
+### Worktree lifecycle and concurrency
+
+- A developer worktree is removed once its handoff is verified (step 3); a reviewer worktree is removed once its review is verified (step 5) — worktrees are not kept across rounds, so a repaired issue creates and tears down a fresh worktree per session rather than accumulating stale ones.
+- `git worktree add`/`remove` for one repo is serialized behind a per-repo lock (extending the existing global spawn-slot pattern in `process-registry.ts` with a repo-keyed mutex), so two sessions on the same repo never race the same `.git` metadata.
+- If `git worktree add` fails because a prior worktree wasn't cleaned up (e.g. after a crash), the coordinator runs `git worktree remove --force` once and retries before failing the session outright.
 
 ## API
 
@@ -133,3 +163,4 @@ Nav becomes **Issues / Human actions / Agents** (Operations/Intake/Done removed)
 1. Issue pause: persistent workflow state vs. operator control interrupting only the active session — deferred, not needed for the first coordinator pass.
 2. Final human rejection: consumes a review round or needs an explicit limit override — deferred; v1 treats a rejection as equivalent to "another repair round" if rounds remain, else `attempts_exhausted`.
 3. Raw evidence retention policy — deferred; v1 retains everything indefinitely.
+4. Exact structured shape of the developer's implementation conclusion (PRD open decision #4) — this design fixes the *mechanism* (produced every developer session, see Coordinator step 2), but the precise minimal field set is deferred to implementation.
