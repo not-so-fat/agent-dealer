@@ -146,7 +146,7 @@ Nav becomes **Issues / Human actions / Agents** (Operations/Intake/Done removed)
 
 ## Testing
 
-- Coordinator state machine: unit tests per transition (approved/changes_requested+rounds-left/changes_requested+limit/escalated), using a fake `gh` wrapper so no network/real GitHub calls are needed.
+- Coordinator state machine: unit tests per transition, using a fake `gh` wrapper so no network/real GitHub calls are needed. Covers both the PRD's four review outcomes (approved / changes_requested+rounds-left / changes_requested+limit / escalated) and the failure-mode routing this design adds: developer session failed/timed-out or no PR found → treated as a failed round (no reviewer round consumed); reviewer session failed/timed-out or worktree checkout failed → `policy_escalation`; stale review (head changed mid-review) → discarded and retried without consuming a round; `git worktree add` failing on a leftover worktree → forced removal and one retry.
 - Migration: script tested against a copy of the current dev DB, asserting row counts and status-vocabulary mapping match 1:1 before/after.
 - API: existing route-test patterns extended to `/issues`, `/human-actions`.
 - UI: no new automated UI tests required beyond what exists; manual walkthrough of the five-second-state test (PRD §12) before PR.
