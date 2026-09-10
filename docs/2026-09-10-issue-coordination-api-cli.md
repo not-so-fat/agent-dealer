@@ -1052,6 +1052,13 @@ git add packages/cli/src/issue.ts packages/cli/src/issue.test.ts packages/cli/sr
 git commit -m "Add agent-dealer issue/action CLI subcommands (NOT-57)"
 ```
 
+**Amendment (found running this task; two small deviations from this task's own Step 3/5 prose, neither inherited from earlier plans):**
+
+1. **Real bug — the plan's `resolveApiBase` template skips the `.env` load every other port-resolving CLI command performs first.** Task 5's own "Consumes" line names `readRunState` and `resolveBundledListenPort` as "the same port-resolution pattern `status.ts` already uses," but the Step 3 template for `resolveApiBase` calls only those two — it never calls `loadProdEnvFile()`. Checked before implementing: every existing call site of `resolveBundledListenPort()` (`status.ts`, `stop.ts`, `start.ts`, `doctor.ts`) calls `loadProdEnvFile()` immediately beforehand, precisely because `resolveBundledListenPort`'s own fallback reads `process.env.WEB_PORT`/`process.env.PORT`, which are only populated if `~/.agent-dealer/.env` has been loaded into the process first. Without it, a user who configured a non-default port via that `.env` file (and has no `run.json` yet — e.g. before the first `start`, or after a `stop` clears it) would have `agent-dealer issue`/`action` commands silently resolve to the hardcoded default port 2222 instead of their configured one, producing a connection failure with no indication why. Fixed by adding `loadProdEnvFile()` as the first line of `resolveApiBase()` in `packages/cli/src/issue.ts`, matching the pattern at all four existing call sites exactly.
+2. **Doc bug — Step 5's typecheck command names a workspace that doesn't exist.** `npm run typecheck -w @agent-dealer/cli` fails with `npm error No workspaces found: --workspace=@agent-dealer/cli` — the CLI package's `package.json` `name` field is `agent-dealer`, not `@agent-dealer/cli` (unlike `@agent-dealer/server`/`@agent-dealer/shared`/`@agent-dealer/web`, which do use the scoped form). Ran `npm run typecheck -w agent-dealer` instead, which resolved correctly and passed (`tsc --noEmit`, no errors, no output). No file changes needed — this only affected which command was actually run, not any implementation file.
+
+Both `packages/cli/src/issue.test.ts` (4/4) and the full CLI package test suite (5/5, including the one pre-existing test) passed.
+
 ---
 
 ## Plan Self-Review Notes
