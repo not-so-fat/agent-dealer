@@ -340,6 +340,10 @@ git add apps/web/src/components/issues/IssueStatusBadge.tsx apps/web/src/pages/I
 git commit -m "Add IssueStatusBadge and IssuesListPage (NOT-57)"
 ```
 
+**Amendment (found running this task; a bug in this task's own Step 1 code, not inherited from earlier plans):**
+
+1. **Real bug — `btn-primary` does not exist as a CSS class anywhere in this repo.** Checked `apps/web/src/index.css`'s full contents before writing: it defines `.btn-gold`, `.btn-ghost`, `.btn-ghost-danger`, `.btn-retry`, and `.btn-retry-ready`, but no `.btn-primary`. Confirmed with a repo-wide grep of `apps/web/src` that no other file references `btn-primary` either — it isn't defined elsewhere and applying it as written would silently render unstyled buttons (Tailwind v4's CSS-based `@theme` doesn't generate a `btn-primary` utility on its own; it's only a plain custom class name with no matching rule). Cross-checked existing pages (`AgentsPage.tsx`, `IntakePage.tsx`, several `components/drawer/*` files) to find the actual convention: `.btn-gold` (gold background, dark text) is used consistently for primary/CTA buttons across the app ("Save", "New agent", "Import" confirm, "Approve", etc.), with `.btn-ghost` for secondary actions. Fixed by substituting `btn-gold` for every `btn-primary` occurrence in `IssuesListPage.tsx` (the "New issue" button, the "Create" submit button) — no other change needed since `.btn-gold` composes with the same `px-4` utility class the plan already appended. `npm run typecheck -w @agent-dealer/web` passes with this fix.
+
 ---
 
 ### Task 3: `IssueTimeline` + `IssueDetailPage`
