@@ -11,6 +11,7 @@ export * from "./plan-triage.js";
 export * from "./outbound-draft.js";
 export * from "./result-qa.js";
 export * from "./playbook-reflect.js";
+export * from "./issues.js";
 
 export const RunStatus = z.enum([
   "queued",
