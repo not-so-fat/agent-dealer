@@ -84,3 +84,147 @@ CREATE TABLE IF NOT EXISTS intake_settings (
   key TEXT PRIMARY KEY,
   value_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS issues (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  external_id TEXT,
+  external_label TEXT,
+  external_url TEXT,
+  title TEXT NOT NULL,
+  description TEXT,
+  acceptance_criteria TEXT,
+  repo TEXT NOT NULL,
+  base_branch TEXT NOT NULL,
+  status TEXT NOT NULL,
+  current_owner TEXT NOT NULL,
+  current_intent TEXT,
+  developer_agent_id TEXT REFERENCES agents(id),
+  reviewer_agent_id TEXT REFERENCES agents(id),
+  max_review_rounds INTEGER NOT NULL DEFAULT 3,
+  current_round INTEGER NOT NULL DEFAULT 1,
+  branch TEXT,
+  base_sha TEXT,
+  head_sha TEXT,
+  pr_number INTEGER,
+  pr_url TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
+CREATE INDEX IF NOT EXISTS idx_issues_external ON issues(source, external_id);
+
+CREATE TABLE IF NOT EXISTS worker_sessions (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL REFERENCES issues(id),
+  role TEXT NOT NULL,
+  round INTEGER NOT NULL,
+  agent_id TEXT REFERENCES agents(id),
+  runtime TEXT,
+  model TEXT,
+  budget_json TEXT,
+  worktree_path TEXT,
+  input_sha TEXT,
+  status TEXT NOT NULL,
+  session_ref TEXT,
+  log_path TEXT,
+  exit_code INTEGER,
+  error_json TEXT,
+  metadata_json TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  heartbeat_at TEXT,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_sessions_issue ON worker_sessions(issue_id);
+CREATE INDEX IF NOT EXISTS idx_worker_sessions_status ON worker_sessions(status);
+
+CREATE TABLE IF NOT EXISTS workflow_instances (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL REFERENCES issues(id),
+  workflow_version TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  outcome TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_instances_issue ON workflow_instances(issue_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_instances_one_active
+  ON workflow_instances(issue_id) WHERE completed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS workflow_events (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL REFERENCES issues(id),
+  workflow_instance_id TEXT REFERENCES workflow_instances(id),
+  worker_session_id TEXT REFERENCES worker_sessions(id),
+  type TEXT NOT NULL,
+  actor_type TEXT NOT NULL,
+  actor_ref TEXT,
+  stage TEXT NOT NULL,
+  round INTEGER,
+  payload_json TEXT,
+  artifact_ref TEXT,
+  idempotency_key TEXT,
+  causation_event_id TEXT REFERENCES workflow_events(id),
+  ts TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_events_issue ON workflow_events(issue_id, ts);
+CREATE INDEX IF NOT EXISTS idx_workflow_events_idempotency ON workflow_events(idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS human_actions (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL REFERENCES issues(id),
+  workflow_instance_id TEXT REFERENCES workflow_instances(id),
+  action_type TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  question TEXT NOT NULL,
+  evidence_json TEXT,
+  response_options_json TEXT,
+  continuation_preview_json TEXT,
+  status TEXT NOT NULL,
+  resolution_json TEXT,
+  resolved_by TEXT,
+  requested_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_human_actions_issue ON human_actions(issue_id);
+CREATE INDEX IF NOT EXISTS idx_human_actions_status ON human_actions(status);
+
+CREATE TABLE IF NOT EXISTS findings (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL REFERENCES issues(id),
+  fingerprint TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  title TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  evidence_ref TEXT,
+  file TEXT,
+  line INTEGER,
+  status TEXT NOT NULL,
+  first_round INTEGER NOT NULL,
+  last_round INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_findings_issue ON findings(issue_id);
+CREATE INDEX IF NOT EXISTS idx_findings_fingerprint ON findings(issue_id, fingerprint);
+
+CREATE TABLE IF NOT EXISTS usage_events (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL REFERENCES issues(id),
+  worker_session_id TEXT NOT NULL REFERENCES worker_sessions(id),
+  role TEXT NOT NULL,
+  runtime TEXT,
+  tokens_in INTEGER,
+  tokens_out INTEGER,
+  cost_usd REAL,
+  duration_ms INTEGER,
+  ts TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_events_issue ON usage_events(issue_id);
