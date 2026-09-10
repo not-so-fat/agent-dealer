@@ -143,9 +143,17 @@ export interface CompleteSessionPatch {
   worktreePath?: string | null;
 }
 
+const SESSION_TERMINAL = ["done", "failed", "timed_out", "cancelled"] as const;
+
+/**
+ * Finalises a session — but only from a non-terminal state. If recovery already marked a
+ * zombie attempt's session `failed`, that attempt's own late completion is a no-op and
+ * returns the row unchanged, so it can't overwrite recovery's error/timestamp.
+ */
 export function completeSession(id: string, patch: CompleteSessionPatch): WorkerSession {
   const current = getWorkerSession(id);
   if (!current) throw new Error(`Worker session not found: ${id}`);
+  if ((SESSION_TERMINAL as readonly string[]).includes(current.status)) return current;
   const now = new Date().toISOString();
   getDb()
     .prepare(`
@@ -158,7 +166,7 @@ export function completeSession(id: string, patch: CompleteSessionPatch): Worker
         worktree_path = @worktree_path,
         completed_at = @completed_at,
         updated_at = @updated_at
-      WHERE id = @id
+      WHERE id = @id AND status NOT IN ('done', 'failed', 'timed_out', 'cancelled')
     `)
     .run({
       id,

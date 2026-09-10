@@ -263,13 +263,21 @@ test("a recovery-requeued re-attempt is tracked separately from its zombie prede
     assert.equal(activeAttemptCount(), 1);
 
     await new Promise((r) => setTimeout(r, 25)); // the 10ms lease expires; no heartbeat fires
-    recoverCoordinator({ now: Date.now() }); // requeues the item
+    recoverCoordinator({ now: Date.now() }); // requeues the item + fails A's session
+    const predecessorSessionId = listWorkerSessionsForIssue(issueId)[0].id;
+    assert.equal(listWorkerSessionsForIssue(issueId)[0].status, "failed");
+
     await runCoordinatorTick({ leaseOwner: "B" }); // attempt B claims the requeued item
     assert.equal(activeAttemptCount(), 2, "zombie A + re-attempt B tracked separately");
 
     releaseA();
     await drainCoordinator();
     assert.equal(activeAttemptCount(), 0);
+    // A's late completion must NOT overwrite recovery's terminal evidence on its session.
+    const predecessor = listWorkerSessionsForIssue(issueId).find((s) => s.id === predecessorSessionId)!;
+    assert.equal(predecessor.status, "failed");
+    assert.match(predecessor.errorJson ?? "", /presumed dead/);
+
     await pump(); // run the reviewer B enqueued
     assert.equal(getIssue(issueId)!.status, "final_review");
   } finally {
