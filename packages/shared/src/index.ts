@@ -13,6 +13,7 @@ export * from "./result-qa.js";
 export * from "./playbook-reflect.js";
 export * from "./issues.js";
 export * from "./worker-sessions.js";
+export * from "./workflow.js";
 
 export const RunStatus = z.enum([
   "queued",
