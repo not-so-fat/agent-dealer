@@ -1,0 +1,234 @@
+// packages/server/src/coordinator/worker-loop.test.ts
+//
+// End-to-end kernel behaviour with fake effect handlers — the ticket's acceptance
+// scenarios: crash before effect, crash after effect / duplicate completion, lease expiry,
+// restart recovery, and duplicate dispatch.
+import { test, before, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-loop-"));
+process.env.MAX_COORDINATOR_CONCURRENCY = "4";
+process.env.COORDINATOR_HEARTBEAT_MS = "20";
+process.env.COORDINATOR_FAIL_BACKOFF_MS = "0";
+
+const { migrate, getDb } = await import("../db/index.js");
+const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
+const { createIssue, getIssue } = await import("../repository/issues.js");
+const { getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
+const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
+const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
+const { listWorkItemsForIssue, claimWorkItem, getWorkItem } = await import("../repository/work-items.js");
+const { startWorkflow, applyCompletion, resolveHumanActionAndAdvance } = await import("./commands.js");
+const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
+const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
+const { recoverCoordinator } = await import("./recovery.js");
+const { ReviewerResult } = await import("./reviewer-result.js");
+
+before(() => migrate());
+// claimWorkItem / recovery scan the whole table (one loop in production); start each
+// case from an empty queue so a prior test's un-processed item is never claimed here.
+beforeEach(() => getDb().exec("DELETE FROM work_items"));
+afterEach(() => resetEffectHandlers());
+
+function newIssue(maxReviewRounds = 3): string {
+  return createIssue({
+    title: "Loop me",
+    acceptanceCriteria: "It works",
+    repo: "/repo",
+    developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+    reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    baseBranch: "main",
+    maxReviewRounds,
+    source: "manual",
+  }).id;
+}
+
+const cleanHandoff = (headSha = "head1") => ({
+  kind: "clean_handoff" as const,
+  headSha,
+  baseSha: "base1",
+  prNumber: 7,
+  prUrl: "https://gh/pr/7",
+});
+const approvedVerdict = {
+  kind: "verdict" as const,
+  result: ReviewerResult.parse({
+    verdict: "approved",
+    baseSha: "base1",
+    headSha: "head1",
+    acceptanceCriteriaAssessment: "ok",
+    evidenceAssessment: "ok",
+    findings: [],
+    risks: [],
+  }),
+};
+
+/** Runs ticks until nothing is claimable and all in-flight work has drained. */
+async function pump(max = 20): Promise<void> {
+  for (let i = 0; i < max; i++) {
+    const started = await runCoordinatorTick({ leaseOwner: "pump" });
+    await drainCoordinator();
+    if (started === 0) return;
+  }
+}
+
+test("happy path: developer → reviewer(approved) → final_review, resolved complete → done", async () => {
+  const issueId = newIssue();
+  registerEffectHandler("developer", async () => cleanHandoff());
+  registerEffectHandler("reviewer", async () => approvedVerdict);
+  startWorkflow(issueId);
+  await pump();
+
+  assert.equal(getIssue(issueId)!.status, "final_review");
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review")!;
+  resolveHumanActionAndAdvance(action.id, "yusuke", "complete");
+  assert.equal(getIssue(issueId)!.status, "done");
+  assert.equal(getActiveWorkflowInstance(issueId), null);
+
+  const roles = listWorkerSessionsForIssue(issueId).map((s) => s.role);
+  assert.deepEqual(roles, ["developer", "reviewer"]);
+  assert.ok(listWorkerSessionsForIssue(issueId).every((s) => s.status === "done"));
+});
+
+test("changes_requested drives an automatic repair round with no human involvement", async () => {
+  const issueId = newIssue(3);
+  let devCalls = 0;
+  registerEffectHandler("developer", async () => {
+    devCalls++;
+    return cleanHandoff(`head${devCalls}`);
+  });
+  registerEffectHandler("reviewer", async () =>
+    devCalls === 1
+      ? {
+          kind: "verdict" as const,
+          result: ReviewerResult.parse({
+            verdict: "changes_requested",
+            baseSha: "b",
+            headSha: "head1",
+            acceptanceCriteriaAssessment: "partial",
+            evidenceAssessment: "ok",
+            findings: [{ fingerprint: "f1", severity: "blocking", title: "T", rationale: "R" }],
+            risks: [],
+          }),
+        }
+      : approvedVerdict
+  );
+  startWorkflow(issueId);
+  await pump();
+
+  assert.equal(devCalls, 2);
+  assert.equal(getIssue(issueId)!.status, "final_review");
+  assert.equal(getIssue(issueId)!.currentRound, 2);
+  assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.actionType !== "final_review").length, 0);
+});
+
+test("crash before effect: a leased item with no completion is recovered and advances once", async () => {
+  const issueId = newIssue();
+  // developer handler that "crashes" — the process dies before applyCompletion.
+  registerEffectHandler("developer", async () => {
+    throw new Error("kill -9");
+  });
+  startWorkflow(issueId);
+  const devItem = listWorkItemsForIssue(issueId)[0];
+
+  // Simulate the crash: claim the item and never complete it, bypassing the loop.
+  claimWorkItem("dead-worker", { leaseMs: 60_000 });
+  assert.equal(getWorkItem(devItem.id)!.status, "leased");
+
+  // Restart recovery requeues the orphaned lease…
+  recoverCoordinator({ startup: true });
+  assert.equal(getWorkItem(devItem.id)!.status, "pending");
+
+  // …now a working handler picks it up and the issue advances exactly once.
+  resetEffectHandlers();
+  registerEffectHandler("developer", async () => cleanHandoff());
+  registerEffectHandler("reviewer", async () => approvedVerdict);
+  await pump();
+  assert.equal(getIssue(issueId)!.status, "final_review");
+  assert.equal(
+    listWorkItemsForIssue(issueId).filter((i) => i.kind === "developer").length,
+    1,
+    "the recovered item was reused, not duplicated"
+  );
+});
+
+test("crash after effect: a duplicate applyCompletion is a no-op", async () => {
+  const issueId = newIssue();
+  const handoff = cleanHandoff();
+  registerEffectHandler("developer", async () => handoff);
+  registerEffectHandler("reviewer", async () => approvedVerdict);
+  startWorkflow(issueId);
+
+  const devItem = listWorkItemsForIssue(issueId)[0];
+  claimWorkItem("w1", { leaseMs: 60_000 });
+  const first = applyCompletion(devItem.id, handoff);
+  assert.equal(first.applied, true);
+  // The worker "crashed" after committing but before recording success — it retries.
+  const second = applyCompletion(devItem.id, handoff);
+  assert.equal(second.applied, false);
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 1);
+});
+
+test("lease expiry: a hung worker's late completion is dropped; the requeued item wins", async () => {
+  const issueId = newIssue();
+  registerEffectHandler("developer", async () => cleanHandoff());
+  registerEffectHandler("reviewer", async () => approvedVerdict);
+  startWorkflow(issueId);
+  const devItemId = listWorkItemsForIssue(issueId)[0].id;
+
+  // A hung worker: it holds the lease but its heartbeat stopped (process frozen).
+  claimWorkItem("hung", { leaseMs: 20 });
+  await new Promise((r) => setTimeout(r, 40));
+
+  // The periodic (non-startup) reclaim requeues the expired lease.
+  const res = recoverCoordinator({ startup: false, now: Date.now() });
+  assert.deepEqual(res.reclaimed, [devItemId]);
+  assert.equal(getWorkItem(devItemId)!.status, "pending");
+
+  // The hung worker finally wakes and reports success — but its lease is gone: no-op.
+  const late = applyCompletion(devItemId, cleanHandoff());
+  assert.equal(late.applied, false);
+
+  // A fresh worker reprocesses the requeued item and drives the workflow forward.
+  await pump();
+  assert.equal(getIssue(issueId)!.status, "final_review");
+});
+
+test("duplicate dispatch: two racing ticks run one worker session, one advance", async () => {
+  const issueId = newIssue();
+  registerEffectHandler("developer", async () => {
+    await new Promise((r) => setTimeout(r, 15));
+    return cleanHandoff();
+  });
+  registerEffectHandler("reviewer", async () => approvedVerdict);
+  startWorkflow(issueId);
+
+  await Promise.all([
+    runCoordinatorTick({ leaseOwner: "A" }),
+    runCoordinatorTick({ leaseOwner: "B" }),
+  ]);
+  await drainCoordinator();
+
+  assert.equal(
+    listWorkerSessionsForIssue(issueId).filter((s) => s.role === "developer").length,
+    1
+  );
+  await pump();
+  assert.equal(getIssue(issueId)!.status, "final_review");
+});
+
+test("placeholder handlers escalate rather than fabricating a PR", async () => {
+  const issueId = newIssue();
+  // no handlers registered → defaults return session_failed
+  startWorkflow(issueId);
+  await pump();
+  // maxReviewRounds 3 → session_failed retries until exhausted, then attempts_exhausted
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  assert.equal(
+    listHumanActionsForIssue(issueId).find((a) => a.status === "open")!.actionType,
+    "attempts_exhausted"
+  );
+});

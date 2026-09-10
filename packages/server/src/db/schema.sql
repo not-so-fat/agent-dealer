@@ -232,3 +232,40 @@ CREATE TABLE IF NOT EXISTS usage_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_events_issue ON usage_events(issue_id);
+
+-- NOT-59: the coordinator kernel's durable work-item / outbox. Each applied coordinator
+-- command records the state transition, the workflow event, and exactly one next work
+-- item in one transaction; a leased effect worker claims a work item, refreshes a
+-- heartbeat, and its structured completion is applied in a second transaction. No event
+-- sourcing or queue broker — SQLite plus this table is sufficient (design §"Accepted
+-- architecture" point 3).
+CREATE TABLE IF NOT EXISTS work_items (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL REFERENCES issues(id),
+  workflow_instance_id TEXT NOT NULL REFERENCES workflow_instances(id),
+  worker_session_id TEXT REFERENCES worker_sessions(id),
+  kind TEXT NOT NULL,                 -- 'developer' | 'reviewer'
+  round INTEGER NOT NULL,
+  payload_json TEXT,
+  status TEXT NOT NULL,               -- pending | leased | done | failed | dead
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  heartbeat_at TEXT,
+  available_at TEXT NOT NULL,         -- backoff gate; <= now ⇒ claimable
+  idempotency_key TEXT,
+  result_json TEXT,
+  error_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_items_claimable ON work_items(status, available_at);
+-- A retried callback, poll, or restart must not enqueue the same next effect twice.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_items_idempotency ON work_items(idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+-- Structural guarantee that duplicate dispatch can't leave two "next" effects outstanding
+-- for one workflow instance (design: "exactly one next effect").
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_items_one_active ON work_items(workflow_instance_id)
+  WHERE status IN ('pending', 'leased');
