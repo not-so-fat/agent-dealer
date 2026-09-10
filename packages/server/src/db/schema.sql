@@ -247,10 +247,11 @@ CREATE TABLE IF NOT EXISTS work_items (
   kind TEXT NOT NULL,                 -- 'developer' | 'reviewer'
   round INTEGER NOT NULL,
   payload_json TEXT,
-  status TEXT NOT NULL,               -- pending | leased | done | failed | dead
+  status TEXT NOT NULL,               -- pending | leased | done | dead
   attempt_count INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 3,
   lease_owner TEXT,
+  lease_token TEXT,                   -- fencing token: rotated on every claim/reclaim
   lease_expires_at TEXT,
   heartbeat_at TEXT,
   available_at TEXT NOT NULL,         -- backoff gate; <= now ⇒ claimable

@@ -2,14 +2,20 @@
 //
 // The leased effect worker + its poll loop. A dispatcher claims a queued work item with a
 // compare-and-set (so concurrent dispatchers never run one twice), records a running
-// worker_session, keeps a heartbeat while the effect handler runs, then applies the
-// structured completion transactionally. Bounded concurrency; non-overlapping polling.
+// worker_session, keeps a token-fenced heartbeat while the effect handler runs, then
+// applies the structured completion transactionally. Bounded concurrency; non-overlapping
+// polling.
 //
 // NOT-59 exports startCoordinatorLoop/stopCoordinatorLoop but does NOT wire them into the
 // server — index.ts integration lands with NOT-60.
 import { v4 as uuid } from "uuid";
+import { getDb } from "../db/index.js";
 import { getIssue } from "../repository/issues.js";
-import { getWorkflowInstance, appendWorkflowEvent } from "../repository/workflow-events.js";
+import {
+  getWorkflowInstance,
+  getActiveWorkflowInstance,
+  appendWorkflowEvent,
+} from "../repository/workflow-events.js";
 import {
   createWorkerSession,
   startSession,
@@ -17,15 +23,19 @@ import {
   completeSession,
 } from "../repository/worker-sessions.js";
 import {
+  attemptCapReached,
   bindWorkItemSession,
   claimWorkItem,
-  failWorkItem,
+  finishWorkItem,
+  getWorkItem,
   refreshHeartbeat,
+  requeueWorkItem,
   type WorkItem,
   type WorkItemKind,
 } from "../repository/work-items.js";
-import { applyCompletion } from "./commands.js";
+import { applyCompletion, routeAppliedOutcome } from "./commands.js";
 import { getEffectHandler } from "./effect-registry.js";
+import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -59,88 +69,131 @@ export function activeWorkItemIds(): string[] {
   return [...active.keys()];
 }
 
-async function processWorkItem(item: WorkItem, leaseOwner: string): Promise<void> {
-  const issue = getIssue(item.issueId);
-  const instance = getWorkflowInstance(item.workflowInstanceId);
-  if (!issue || !instance) {
-    failWorkItem(item.id, { reason: "issue or workflow instance vanished" }, {
-      backoffMs: coordinatorConfig.failBackoffMs,
+function isFailureOutcome(outcome: DeveloperOutcome | ReviewerOutcome): boolean {
+  return outcome.kind === "session_failed" || outcome.kind === "publish_failed";
+}
+
+/** completeSession is bookkeeping — its failure must never re-route or revive a work item. */
+function safeCompleteSession(sessionId: string, status: "done" | "failed" | "cancelled", error?: unknown): void {
+  try {
+    completeSession(sessionId, {
+      status,
+      errorJson: error !== undefined ? JSON.stringify(error) : undefined,
     });
+  } catch (err) {
+    console.error("[coordinator] completeSession", sessionId, err);
+  }
+}
+
+/**
+ * A failed effect (handler threw, or lost its lease mid-run). One transaction, fenced on
+ * the lease token: either requeue with backoff, or — at the attempt cap — CAS to `dead`
+ * AND route it as `session_failed` together, so a crash can't strand the workflow with a
+ * dead item and no next effect.
+ */
+function handleEffectFailure(itemId: string, leaseToken: string, error: unknown): void {
+  getDb().transaction(() => {
+    const item = getWorkItem(itemId);
+    if (!item || item.status !== "leased") return; // already reclaimed / finished by a peer
+
+    if (!attemptCapReached(item)) {
+      requeueWorkItem(itemId, leaseToken, error, { backoffMs: coordinatorConfig.failBackoffMs });
+      return;
+    }
+
+    const dead = finishWorkItem(itemId, leaseToken, { status: "dead", error });
+    if (!dead) return; // a peer won the CAS
+
+    const issue = getIssue(dead.issueId);
+    const instance = getActiveWorkflowInstance(dead.issueId);
+    if (issue && instance && instance.id === dead.workflowInstanceId) {
+      routeAppliedOutcome(issue, instance, dead, { kind: "session_failed" });
+    }
+  })();
+}
+
+async function processWorkItem(claimed: WorkItem): Promise<void> {
+  const leaseToken = claimed.leaseToken;
+  if (!leaseToken) return; // not actually leased — defensive
+
+  const issue = getIssue(claimed.issueId);
+  const instance = getWorkflowInstance(claimed.workflowInstanceId);
+  if (!issue || !instance) {
+    handleEffectFailure(claimed.id, leaseToken, { reason: "issue or workflow instance vanished" });
     return;
   }
 
   let inputSha: string | null = null;
   try {
-    inputSha = item.payloadJson ? (JSON.parse(item.payloadJson).inputSha ?? null) : null;
+    inputSha = claimed.payloadJson ? (JSON.parse(claimed.payloadJson).inputSha ?? null) : null;
   } catch {
     inputSha = null;
   }
 
-  const session = createWorkerSession({
-    issueId: item.issueId,
-    role: roleFor[item.kind],
-    round: item.round,
-    agentId: item.kind === "developer" ? issue.developerAgentId : issue.reviewerAgentId,
-    runtime: null,
-    inputSha,
-    metadataJson: JSON.stringify({ workItemId: item.id }),
-  });
-  startSession(session.id);
-  bindWorkItemSession(item.id, session.id);
-  appendWorkflowEvent({
-    issueId: item.issueId,
-    workflowInstanceId: instance.id,
-    workerSessionId: session.id,
-    type: "worker.started",
-    actorType: "system",
-    stage: issue.status,
-    round: item.round,
-  });
+  // Create + bind + start the session and emit worker.started atomically, so a crash never
+  // leaves a running session that recovery (which keys off work_items) cannot locate.
+  const session = getDb().transaction(() => {
+    const s = createWorkerSession({
+      issueId: claimed.issueId,
+      role: roleFor[claimed.kind],
+      round: claimed.round,
+      agentId: claimed.kind === "developer" ? issue.developerAgentId : issue.reviewerAgentId,
+      runtime: null,
+      inputSha,
+      metadataJson: JSON.stringify({ workItemId: claimed.id }),
+    });
+    bindWorkItemSession(claimed.id, s.id);
+    startSession(s.id);
+    appendWorkflowEvent({
+      issueId: claimed.issueId,
+      workflowInstanceId: instance.id,
+      workerSessionId: s.id,
+      type: "worker.started",
+      actorType: "system",
+      stage: issue.status,
+      round: claimed.round,
+    });
+    return s;
+  })();
 
   const controller = new AbortController();
   const heartbeat = setInterval(() => {
-    const held = refreshHeartbeat(item.id, leaseOwner, { leaseMs: coordinatorConfig.leaseMs });
-    if (held) {
+    if (refreshHeartbeat(claimed.id, leaseToken, { leaseMs: coordinatorConfig.leaseMs })) {
       heartbeatSession(session.id);
     } else {
       controller.abort();
     }
   }, coordinatorConfig.heartbeatMs);
 
+  let outcome: DeveloperOutcome | ReviewerOutcome;
   try {
-    const handler = getEffectHandler(item.kind);
-    const outcome = await handler({
-      workItem: { ...item, workerSessionId: session.id },
+    outcome = await getEffectHandler(claimed.kind)({
+      workItem: { ...claimed, workerSessionId: session.id },
       issue,
       instance,
       signal: controller.signal,
     });
-    clearInterval(heartbeat);
-    const result = applyCompletion(item.id, outcome);
-    if (!result.applied) {
-      // The lease was reclaimed mid-flight (or already applied) — this run's output is
-      // discarded and the requeued item, if any, is reprocessed by another worker.
-      completeSession(session.id, {
-        status: "cancelled",
-        errorJson: JSON.stringify({ reason: `completion not applied: ${result.reason}` }),
-      });
-      return;
-    }
-    completeSession(session.id, {
-      status:
-        outcome.kind === "session_failed" || outcome.kind === "publish_failed" ? "failed" : "done",
-    });
   } catch (err) {
     clearInterval(heartbeat);
-    const { dead } = failWorkItem(item.id, { error: String(err) }, {
-      backoffMs: coordinatorConfig.failBackoffMs,
-    });
-    completeSession(session.id, { status: "failed", errorJson: JSON.stringify({ error: String(err) }) });
-    if (dead) {
-      // A dead-lettered work item still routes through the retry/escalation policy.
-      applyCompletion(item.id, { kind: "session_failed" });
+    try {
+      handleEffectFailure(claimed.id, leaseToken, { error: String(err) });
+    } catch (routeErr) {
+      // routing threw — leave the item leased for recovery to retry
+      console.error("[coordinator] handleEffectFailure", claimed.id, routeErr);
     }
+    safeCompleteSession(session.id, "failed", { error: String(err) });
+    return;
   }
+  clearInterval(heartbeat);
+
+  // The completion CAS is fenced on leaseToken and is the only path to a terminal state —
+  // a duplicate or a reclaimed-then-late completion applies nothing.
+  const result = applyCompletion(claimed.id, leaseToken, outcome);
+  if (!result.applied) {
+    safeCompleteSession(session.id, "cancelled", { reason: result.reason });
+    return;
+  }
+  safeCompleteSession(session.id, isFailureOutcome(outcome) ? "failed" : "done");
 }
 
 /**
@@ -154,7 +207,7 @@ export async function runCoordinatorTick(opts?: { leaseOwner?: string }): Promis
   while (active.size < coordinatorConfig.maxConcurrency) {
     const item = claimWorkItem(leaseOwner, { leaseMs: coordinatorConfig.leaseMs });
     if (!item) break;
-    const job = processWorkItem(item, leaseOwner)
+    const job = processWorkItem(item)
       .catch((err) => console.error("[coordinator] processWorkItem", item.id, err))
       .finally(() => active.delete(item.id));
     active.set(item.id, job);

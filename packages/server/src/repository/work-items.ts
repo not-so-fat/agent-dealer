@@ -2,14 +2,19 @@
 //
 // The coordinator kernel's durable work-item / outbox (NOT-59). A coordinator command
 // enqueues exactly one next work item in the same transaction as its state transition and
-// workflow event; a leased effect worker claims it (CAS), refreshes a heartbeat, and its
+// workflow event; a leased effect worker claims it, refreshes a heartbeat, and its
 // structured completion is applied in a second transaction. Lease expiry, attempt count,
 // backoff, idempotency key and dead-lettering all live here — not on `worker_sessions`.
+//
+// Every mutation a leased worker makes is fenced on `lease_token`: a token is minted on
+// each claim/reclaim, so a slow attempt A that resumes after its lease was reclaimed and
+// re-leased to attempt B can neither commit stale output nor clear B's live lease — its
+// CAS simply matches zero rows.
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
 
 export type WorkItemKind = "developer" | "reviewer";
-export type WorkItemStatus = "pending" | "leased" | "done" | "failed" | "dead";
+export type WorkItemStatus = "pending" | "leased" | "done" | "dead";
 
 export interface WorkItem {
   id: string;
@@ -23,6 +28,8 @@ export interface WorkItem {
   attemptCount: number;
   maxAttempts: number;
   leaseOwner: string | null;
+  /** Fencing token for the current lease; null unless `status = 'leased'`. */
+  leaseToken: string | null;
   leaseExpiresAt: string | null;
   heartbeatAt: string | null;
   availableAt: string;
@@ -45,6 +52,7 @@ interface WorkItemRow {
   attempt_count: number;
   max_attempts: number;
   lease_owner: string | null;
+  lease_token: string | null;
   lease_expires_at: string | null;
   heartbeat_at: string | null;
   available_at: string;
@@ -68,6 +76,7 @@ function rowToWorkItem(row: WorkItemRow): WorkItem {
     attemptCount: row.attempt_count,
     maxAttempts: row.max_attempts,
     leaseOwner: row.lease_owner,
+    leaseToken: row.lease_token,
     leaseExpiresAt: row.lease_expires_at,
     heartbeatAt: row.heartbeat_at,
     availableAt: row.available_at,
@@ -77,6 +86,11 @@ function rowToWorkItem(row: WorkItemRow): WorkItem {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/** The attempt cap is reached — the next failure/expiry must dead-letter, not retry. */
+export function attemptCapReached(item: WorkItem): boolean {
+  return item.attemptCount >= item.maxAttempts;
 }
 
 export interface EnqueueWorkItemInput {
@@ -111,6 +125,7 @@ export function enqueueWorkItem(input: EnqueueWorkItemInput): WorkItem {
     attempt_count: 0,
     max_attempts: input.maxAttempts ?? 3,
     lease_owner: null,
+    lease_token: null,
     lease_expires_at: null,
     heartbeat_at: null,
     available_at: now,
@@ -124,12 +139,12 @@ export function enqueueWorkItem(input: EnqueueWorkItemInput): WorkItem {
     .prepare(`
       INSERT INTO work_items (
         id, issue_id, workflow_instance_id, worker_session_id, kind, round, payload_json,
-        status, attempt_count, max_attempts, lease_owner, lease_expires_at, heartbeat_at,
-        available_at, idempotency_key, result_json, error_json, created_at, updated_at
+        status, attempt_count, max_attempts, lease_owner, lease_token, lease_expires_at,
+        heartbeat_at, available_at, idempotency_key, result_json, error_json, created_at, updated_at
       ) VALUES (
         @id, @issue_id, @workflow_instance_id, @worker_session_id, @kind, @round, @payload_json,
-        @status, @attempt_count, @max_attempts, @lease_owner, @lease_expires_at, @heartbeat_at,
-        @available_at, @idempotency_key, @result_json, @error_json, @created_at, @updated_at
+        @status, @attempt_count, @max_attempts, @lease_owner, @lease_token, @lease_expires_at,
+        @heartbeat_at, @available_at, @idempotency_key, @result_json, @error_json, @created_at, @updated_at
       )
       ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
     `)
@@ -166,7 +181,8 @@ export interface ClaimOpts {
  * Compare-and-set claim of the oldest claimable work item: `pending` and past its backoff
  * gate. Two concurrent dispatchers racing the same row: only the `WHERE ... status =
  * 'pending'` guard that wins flips it, so a work item is never run twice. Bumps
- * `attempt_count` at claim time so an expired lease costs an attempt like any failure.
+ * `attempt_count` at claim time so an expired lease costs an attempt like any failure, and
+ * mints a fresh `lease_token` that every later mutation by this attempt must present.
  */
 export function claimWorkItem(leaseOwner: string, opts: ClaimOpts): WorkItem | null {
   const now = Date.now();
@@ -177,6 +193,7 @@ export function claimWorkItem(leaseOwner: string, opts: ClaimOpts): WorkItem | n
       UPDATE work_items SET
         status = 'leased',
         lease_owner = @lease_owner,
+        lease_token = @lease_token,
         lease_expires_at = @expires,
         heartbeat_at = @now,
         attempt_count = attempt_count + 1,
@@ -189,11 +206,17 @@ export function claimWorkItem(leaseOwner: string, opts: ClaimOpts): WorkItem | n
       ) AND status = 'pending'
       RETURNING *
     `)
-    .get({ lease_owner: leaseOwner, expires: expiresIso, now: nowIso }) as WorkItemRow | undefined;
+    .get({ lease_owner: leaseOwner, lease_token: uuid(), expires: expiresIso, now: nowIso }) as
+    | WorkItemRow
+    | undefined;
   return row ? rowToWorkItem(row) : null;
 }
 
-/** Records the effect worker's session on the work item before it starts running. */
+/**
+ * Binds the effect worker's session to the item. Callers do this inside the same
+ * transaction that creates and starts the session, so a crash never leaves a running
+ * session that recovery (which keys off the item) cannot find.
+ */
 export function bindWorkItemSession(id: string, workerSessionId: string): void {
   const now = new Date().toISOString();
   getDb()
@@ -201,129 +224,122 @@ export function bindWorkItemSession(id: string, workerSessionId: string): void {
     .run(workerSessionId, now, id);
 }
 
-/** Extends the lease. Returns false if this owner no longer holds it (reclaimed/expired). */
-export function refreshHeartbeat(id: string, leaseOwner: string, opts: ClaimOpts): boolean {
+/** Extends the lease. Returns false if this token no longer holds it (reclaimed/expired). */
+export function refreshHeartbeat(id: string, leaseToken: string, opts: ClaimOpts): boolean {
   const now = Date.now();
   const info = getDb()
     .prepare(`
       UPDATE work_items SET heartbeat_at = @now, lease_expires_at = @expires, updated_at = @now
-      WHERE id = @id AND status = 'leased' AND lease_owner = @owner
+      WHERE id = @id AND status = 'leased' AND lease_token = @token
     `)
     .run({
       id,
-      owner: leaseOwner,
+      token: leaseToken,
       now: new Date(now).toISOString(),
       expires: new Date(now + opts.leaseMs).toISOString(),
     });
   return info.changes > 0;
 }
 
+export interface FinishInput {
+  status: "done" | "dead";
+  result?: unknown;
+  error?: unknown;
+}
+
 /**
- * Terminal success. Only a still-`leased` item is completed: an item reclaimed after a
- * lease expiry (now `pending` or re-run by another worker) is left alone, so a late
- * completion from a stale worker is a no-op. Returns the completed item, or null.
+ * Compare-and-set a leased item to a terminal state, fenced on the lease token. Returns
+ * the updated item, or null when this attempt no longer holds the lease (reclaimed, or a
+ * peer already finished it) — the caller must then treat its work as discarded. This is
+ * the ONLY path to `done`/`dead`, so a duplicate completion or a recovery race can never
+ * re-advance the workflow.
  */
-export function completeWorkItem(id: string, result: unknown): WorkItem | null {
+export function finishWorkItem(
+  id: string,
+  leaseToken: string,
+  input: FinishInput
+): WorkItem | null {
   const now = new Date().toISOString();
-  const info = getDb()
-    .prepare(
-      "UPDATE work_items SET status = 'done', result_json = ?, updated_at = ? WHERE id = ? AND status = 'leased'"
-    )
-    .run(JSON.stringify(result), now, id);
-  if (info.changes === 0) return null;
-  return getWorkItem(id);
-}
-
-export interface FailOpts {
-  backoffMs: number;
-}
-
-export interface FailResult {
-  dead: boolean;
-  item: WorkItem;
-}
-
-/**
- * A failed effect. If the attempt cap is reached the item is dead-lettered (`dead`);
- * otherwise it returns to `pending` behind a backoff gate for another attempt. Expired
- * leases route through the same policy (see reclaimExpiredWorkItems).
- */
-export function failWorkItem(id: string, error: unknown, opts: FailOpts): FailResult {
-  const item = getWorkItem(id);
-  if (!item) throw new Error(`Work item not found: ${id}`);
-  const now = Date.now();
-  const nowIso = new Date(now).toISOString();
-  const dead = item.attemptCount >= item.maxAttempts;
-  getDb()
+  const row = getDb()
     .prepare(`
       UPDATE work_items SET
         status = @status,
+        result_json = @result,
+        error_json = @error,
+        lease_owner = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        updated_at = @now
+      WHERE id = @id AND status = 'leased' AND lease_token = @token
+      RETURNING *
+    `)
+    .get({
+      id,
+      token: leaseToken,
+      status: input.status,
+      result: input.result !== undefined ? JSON.stringify(input.result) : null,
+      error: input.error !== undefined ? JSON.stringify(input.error) : null,
+      now,
+    }) as WorkItemRow | undefined;
+  return row ? rowToWorkItem(row) : null;
+}
+
+export interface RequeueOpts {
+  backoffMs: number;
+}
+
+/**
+ * Returns a leased item to `pending` behind a backoff gate for another attempt, fenced on
+ * the lease token. Returns false when the token no longer holds the lease (a concurrent
+ * completion won). Same backoff policy as a reclaimed expiry.
+ */
+export function requeueWorkItem(
+  id: string,
+  leaseToken: string,
+  error: unknown,
+  opts: RequeueOpts
+): boolean {
+  const now = Date.now();
+  const info = getDb()
+    .prepare(`
+      UPDATE work_items SET
+        status = 'pending',
         error_json = @error,
         available_at = @available_at,
         lease_owner = NULL,
+        lease_token = NULL,
         lease_expires_at = NULL,
         updated_at = @now
-      WHERE id = @id
+      WHERE id = @id AND status = 'leased' AND lease_token = @token
     `)
     .run({
       id,
-      status: dead ? "dead" : "pending",
+      token: leaseToken,
       error: JSON.stringify(error),
-      available_at: dead ? item.availableAt : new Date(now + opts.backoffMs).toISOString(),
-      now: nowIso,
+      available_at: new Date(now + opts.backoffMs).toISOString(),
+      now: new Date(now).toISOString(),
     });
-  return { dead, item: getWorkItem(id)! };
+  return info.changes > 0;
 }
 
-export interface ReclaimOpts {
+export interface ExpiredLeaseOpts {
   /** Startup recovery: every `leased` row is orphaned (its worker died with the process). */
   includeAllLeased?: boolean;
 }
 
-export interface ReclaimResult {
-  /** Requeued for another attempt. */
-  reclaimed: WorkItem[];
-  /** Attempt cap reached — the coordinator must route these to a human action. */
-  deadLettered: WorkItem[];
-}
-
 /**
- * Reclaims leased work whose worker is gone: on the periodic tick, items past
- * `lease_expires_at`; on startup (`includeAllLeased`), every leased item. Each reclaimed
- * item follows the same bounded retry/escalation policy as an ordinary failure — past the
- * attempt cap it is dead-lettered, otherwise requeued.
+ * The leased items whose worker is gone: on a periodic tick, those past `lease_expires_at`;
+ * on startup, every leased item. Read-only — the caller reclaims each one with a
+ * token-fenced `requeueWorkItem` / `finishWorkItem` inside a transaction, so a worker that
+ * completes concurrently with recovery still wins its own CAS.
  */
-export function reclaimExpiredWorkItems(nowMs: number, opts: ReclaimOpts = {}): ReclaimResult {
-  const db = getDb();
-  const nowIso = new Date(nowMs).toISOString();
-  const rows = db
+export function listExpiredLeases(nowMs: number, opts: ExpiredLeaseOpts = {}): WorkItem[] {
+  const rows = getDb()
     .prepare(
       opts.includeAllLeased
         ? "SELECT * FROM work_items WHERE status = 'leased'"
         : "SELECT * FROM work_items WHERE status = 'leased' AND lease_expires_at < ?"
     )
-    .all(...(opts.includeAllLeased ? [] : [nowIso])) as WorkItemRow[];
-
-  const reclaimed: WorkItem[] = [];
-  const deadLettered: WorkItem[] = [];
-  for (const row of rows) {
-    const item = rowToWorkItem(row);
-    const dead = item.attemptCount >= item.maxAttempts;
-    db.prepare(`
-      UPDATE work_items SET
-        status = @status,
-        lease_owner = NULL,
-        lease_expires_at = NULL,
-        error_json = @error,
-        updated_at = @now
-      WHERE id = @id AND status = 'leased'
-    `).run({
-      id: item.id,
-      status: dead ? "dead" : "pending",
-      error: JSON.stringify({ reason: "lease expired — worker presumed dead" }),
-      now: nowIso,
-    });
-    (dead ? deadLettered : reclaimed).push(getWorkItem(item.id)!);
-  }
-  return { reclaimed, deadLettered };
+    .all(...(opts.includeAllLeased ? [] : [new Date(nowMs).toISOString()])) as WorkItemRow[];
+  return rows.map(rowToWorkItem);
 }

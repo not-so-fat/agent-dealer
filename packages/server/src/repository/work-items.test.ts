@@ -15,15 +15,15 @@ const {
   enqueueWorkItem,
   claimWorkItem,
   refreshHeartbeat,
-  completeWorkItem,
-  failWorkItem,
-  reclaimExpiredWorkItems,
+  finishWorkItem,
+  requeueWorkItem,
+  listExpiredLeases,
   getWorkItem,
 } = await import("./work-items.js");
 
 before(() => migrate());
-// claimWorkItem / reclaim scan the whole table (one coordinator loop in production);
-// clear it between cases so each test's assertions see only its own rows.
+// claimWorkItem / listExpiredLeases scan the whole table (one coordinator loop in
+// production); clear it between cases so each test's assertions see only its own rows.
 beforeEach(() => getDb().exec("DELETE FROM work_items"));
 
 function freshInstance(): { issueId: string; instanceId: string } {
@@ -55,70 +55,68 @@ test("the one-active partial index rejects a second non-terminal work item per i
   );
 });
 
-test("claimWorkItem is a compare-and-set — only one of two racing claims wins", () => {
+test("claimWorkItem is a compare-and-set and mints a fencing token; only one of two racing claims wins", () => {
   const { issueId, instanceId } = freshInstance();
   const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
   const first = claimWorkItem("owner-A", { leaseMs: 60_000 });
   const second = claimWorkItem("owner-B", { leaseMs: 60_000 });
   assert.equal(first?.id, item.id);
+  assert.ok(first?.leaseToken);
   assert.equal(second, null);
   assert.equal(getWorkItem(item.id)!.attemptCount, 1);
 });
 
-test("refreshHeartbeat extends the lease for the owner and fails for a non-owner", () => {
+test("refreshHeartbeat extends the lease for the token holder and fails for a stale token", () => {
   const { issueId, instanceId } = freshInstance();
   const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
-  claimWorkItem("owner-A", { leaseMs: 60_000 });
-  assert.equal(refreshHeartbeat(item.id, "owner-A", { leaseMs: 60_000 }), true);
-  assert.equal(refreshHeartbeat(item.id, "owner-B", { leaseMs: 60_000 }), false);
+  const claimed = claimWorkItem("owner-A", { leaseMs: 60_000 })!;
+  assert.equal(refreshHeartbeat(item.id, claimed.leaseToken!, { leaseMs: 60_000 }), true);
+  assert.equal(refreshHeartbeat(item.id, "some-other-token", { leaseMs: 60_000 }), false);
 });
 
-test("completeWorkItem only completes a leased item", () => {
+test("finishWorkItem CAS-marks a leased item terminal, fenced on the token", () => {
   const { issueId, instanceId } = freshInstance();
   const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
-  assert.equal(completeWorkItem(item.id, { kind: "no_pr" }), null); // still pending
-  claimWorkItem("owner-A", { leaseMs: 60_000 });
-  assert.equal(completeWorkItem(item.id, { kind: "no_pr" })!.status, "done");
-  assert.equal(completeWorkItem(item.id, { kind: "no_pr" }), null); // already done
+  assert.equal(finishWorkItem(item.id, "no-token", { status: "done" }), null); // still pending
+  const claimed = claimWorkItem("owner-A", { leaseMs: 60_000 })!;
+  assert.equal(finishWorkItem(item.id, "wrong-token", { status: "done" }), null);
+  assert.equal(finishWorkItem(item.id, claimed.leaseToken!, { status: "done" })!.status, "done");
+  assert.equal(finishWorkItem(item.id, claimed.leaseToken!, { status: "done" }), null); // already terminal
 });
 
-test("failWorkItem backs off, then dead-letters at the attempt cap", () => {
+test("requeueWorkItem returns a leased item to pending behind a backoff gate, fenced on the token", () => {
   const { issueId, instanceId } = freshInstance();
-  const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1, maxAttempts: 2 });
-  claimWorkItem("o", { leaseMs: 1 }); // attempt 1
-  let r = failWorkItem(item.id, { e: 1 }, { backoffMs: 0 });
-  assert.equal(r.dead, false);
-  assert.equal(getWorkItem(item.id)!.status, "pending");
-  claimWorkItem("o", { leaseMs: 1 }); // attempt 2
-  r = failWorkItem(item.id, { e: 2 }, { backoffMs: 0 });
-  assert.equal(r.dead, true);
-  assert.equal(getWorkItem(item.id)!.status, "dead");
+  const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
+  const claimed = claimWorkItem("o", { leaseMs: 60_000 })!;
+  assert.equal(requeueWorkItem(item.id, "wrong-token", { e: 1 }, { backoffMs: 50_000 }), false);
+  assert.equal(requeueWorkItem(item.id, claimed.leaseToken!, { e: 1 }, { backoffMs: 50_000 }), true);
+  const after = getWorkItem(item.id)!;
+  assert.equal(after.status, "pending");
+  assert.ok(new Date(after.availableAt).getTime() > Date.now() + 40_000);
+  // behind the backoff gate → not yet claimable
+  assert.equal(claimWorkItem("o", { leaseMs: 60_000 }), null);
 });
 
-test("reclaimExpiredWorkItems requeues an expired lease for another attempt", () => {
-  const a = freshInstance();
-  const item = enqueueWorkItem({ issueId: a.issueId, workflowInstanceId: a.instanceId, kind: "developer", round: 1, maxAttempts: 3 });
-  claimWorkItem("o", { leaseMs: 1 });
-  const res = reclaimExpiredWorkItems(Date.now() + 10_000);
-  assert.equal(res.reclaimed.length, 1);
-  assert.equal(res.deadLettered.length, 0);
-  assert.equal(getWorkItem(item.id)!.status, "pending");
-});
-
-test("reclaimExpiredWorkItems dead-letters an expired lease past the attempt cap", () => {
-  const b = freshInstance();
-  const capped = enqueueWorkItem({ issueId: b.issueId, workflowInstanceId: b.instanceId, kind: "developer", round: 1, maxAttempts: 1 });
-  claimWorkItem("o", { leaseMs: 1 }); // attempt_count → 1 == cap
-  const res = reclaimExpiredWorkItems(Date.now() + 10_000);
-  assert.deepEqual(res.deadLettered.map((i) => i.id), [capped.id]);
-  assert.equal(getWorkItem(capped.id)!.status, "dead");
-});
-
-test("startup reclaim (includeAllLeased) requeues a lease that has not yet expired", () => {
+test("listExpiredLeases: periodic sees only expired leases; startup sees all", () => {
   const { issueId, instanceId } = freshInstance();
   const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
   claimWorkItem("o", { leaseMs: 600_000 });
-  const res = reclaimExpiredWorkItems(Date.now(), { includeAllLeased: true });
-  assert.equal(res.reclaimed.map((i) => i.id).includes(item.id), true);
-  assert.equal(getWorkItem(item.id)!.status, "pending");
+
+  assert.equal(listExpiredLeases(Date.now()).length, 0); // lease still valid
+  assert.equal(listExpiredLeases(Date.now(), { includeAllLeased: true }).length, 1);
+  assert.equal(listExpiredLeases(Date.now() + 1_200_000).length, 1); // now past expiry
+  assert.equal(listExpiredLeases(Date.now())[0]?.id, undefined);
+  assert.equal(listExpiredLeases(Date.now() + 1_200_000)[0].id, item.id);
+});
+
+test("a completion that wins its CAS defeats a concurrent reclaim", () => {
+  const { issueId, instanceId } = freshInstance();
+  const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
+  const claimed = claimWorkItem("o", { leaseMs: 1 })!;
+  // worker finishes first…
+  assert.ok(finishWorkItem(item.id, claimed.leaseToken!, { status: "done" }));
+  // …recovery then observes the (now stale) expired-lease snapshot and its CAS matches nothing
+  const stale = { ...claimed };
+  assert.equal(requeueWorkItem(stale.id, stale.leaseToken!, { r: 1 }, { backoffMs: 0 }), false);
+  assert.equal(getWorkItem(item.id)!.status, "done");
 });

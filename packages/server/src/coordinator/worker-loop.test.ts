@@ -17,7 +17,9 @@ process.env.COORDINATOR_FAIL_BACKOFF_MS = "0";
 const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue, getIssue } = await import("../repository/issues.js");
-const { getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
+const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import(
+  "../repository/workflow-events.js"
+);
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
 const { listWorkItemsForIssue, claimWorkItem, getWorkItem } = await import("../repository/work-items.js");
@@ -127,10 +129,6 @@ test("changes_requested drives an automatic repair round with no human involveme
 
 test("crash before effect: a leased item with no completion is recovered and advances once", async () => {
   const issueId = newIssue();
-  // developer handler that "crashes" — the process dies before applyCompletion.
-  registerEffectHandler("developer", async () => {
-    throw new Error("kill -9");
-  });
   startWorkflow(issueId);
   const devItem = listWorkItemsForIssue(issueId)[0];
 
@@ -143,7 +141,6 @@ test("crash before effect: a leased item with no completion is recovered and adv
   assert.equal(getWorkItem(devItem.id)!.status, "pending");
 
   // …now a working handler picks it up and the issue advances exactly once.
-  resetEffectHandlers();
   registerEffectHandler("developer", async () => cleanHandoff());
   registerEffectHandler("reviewer", async () => approvedVerdict);
   await pump();
@@ -155,21 +152,40 @@ test("crash before effect: a leased item with no completion is recovered and adv
   );
 });
 
-test("crash after effect: a duplicate applyCompletion is a no-op", async () => {
+test("crash after effect: a duplicate applyCompletion (same or stale token) is a no-op", async () => {
   const issueId = newIssue();
   const handoff = cleanHandoff();
-  registerEffectHandler("developer", async () => handoff);
-  registerEffectHandler("reviewer", async () => approvedVerdict);
   startWorkflow(issueId);
 
-  const devItem = listWorkItemsForIssue(issueId)[0];
-  claimWorkItem("w1", { leaseMs: 60_000 });
-  const first = applyCompletion(devItem.id, handoff);
+  const claimed = claimWorkItem("w1", { leaseMs: 60_000 })!;
+  const first = applyCompletion(claimed.id, claimed.leaseToken!, handoff);
   assert.equal(first.applied, true);
   // The worker "crashed" after committing but before recording success — it retries.
-  const second = applyCompletion(devItem.id, handoff);
+  const second = applyCompletion(claimed.id, claimed.leaseToken!, handoff);
   assert.equal(second.applied, false);
+  // Recovery also races an apply against the same (now stale) observed token.
+  const stale = applyCompletion(claimed.id, claimed.leaseToken!, { kind: "session_failed" });
+  assert.equal(stale.applied, false);
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 1);
+  assert.equal(
+    listWorkflowEventsForIssue(issueId).filter((e) => e.type === "pull_request.opened").length,
+    1
+  );
+});
+
+test("fail-after-done: a completeSession failure never revives a work item that already advanced", async () => {
+  // Regression for the reviewer's "failure path can undo a successful apply".
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const claimed = claimWorkItem("w1", { leaseMs: 60_000 })!;
+  applyCompletion(claimed.id, claimed.leaseToken!, cleanHandoff());
+  assert.equal(getWorkItem(claimed.id)!.status, "done");
+
+  // A late token-fenced failure attempt (what the old catch path would have done) is a no-op.
+  const { requeueWorkItem, finishWorkItem } = await import("../repository/work-items.js");
+  assert.equal(requeueWorkItem(claimed.id, claimed.leaseToken!, { e: 1 }, { backoffMs: 0 }), false);
+  assert.equal(finishWorkItem(claimed.id, claimed.leaseToken!, { status: "dead" }), null);
+  assert.equal(getWorkItem(claimed.id)!.status, "done");
 });
 
 test("lease expiry: a hung worker's late completion is dropped; the requeued item wins", async () => {
@@ -180,7 +196,7 @@ test("lease expiry: a hung worker's late completion is dropped; the requeued ite
   const devItemId = listWorkItemsForIssue(issueId)[0].id;
 
   // A hung worker: it holds the lease but its heartbeat stopped (process frozen).
-  claimWorkItem("hung", { leaseMs: 20 });
+  const hung = claimWorkItem("hung", { leaseMs: 20 })!;
   await new Promise((r) => setTimeout(r, 40));
 
   // The periodic (non-startup) reclaim requeues the expired lease.
@@ -188,8 +204,8 @@ test("lease expiry: a hung worker's late completion is dropped; the requeued ite
   assert.deepEqual(res.reclaimed, [devItemId]);
   assert.equal(getWorkItem(devItemId)!.status, "pending");
 
-  // The hung worker finally wakes and reports success — but its lease is gone: no-op.
-  const late = applyCompletion(devItemId, cleanHandoff());
+  // The hung worker finally wakes and reports success — but its token is dead: no-op.
+  const late = applyCompletion(devItemId, hung.leaseToken!, cleanHandoff());
   assert.equal(late.applied, false);
 
   // A fresh worker reprocesses the requeued item and drives the workflow forward.

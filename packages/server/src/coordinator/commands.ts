@@ -34,8 +34,8 @@ import {
 } from "../repository/human-actions.js";
 import { reconcileFinding } from "../repository/findings.js";
 import {
-  completeWorkItem,
   enqueueWorkItem,
+  finishWorkItem,
   getWorkItem,
   type WorkItem,
 } from "../repository/work-items.js";
@@ -62,30 +62,79 @@ const REQUIRED_FIELDS: Array<[keyof Issue, string]> = [
   ["reviewerAgentId", "reviewer profile"],
 ];
 
+class StartPreconditionError extends Error {
+  constructor(
+    readonly code: number,
+    message: string
+  ) {
+    super(message);
+  }
+}
+
 /**
- * Starts the issue's one `dev_reviewer_v1` workflow: a workflow instance, a `workflow.started`
- * event, the issue moved to `developing`, and the round-1 developer work item — all in one
- * transaction. Idempotent-ish: a second call while an instance is active is rejected (409),
- * matching PRD §8 "idempotently returns its active instance when already running".
+ * The instance + `workflow.started` event + issue transition + round-1 developer work item,
+ * all as unconditional writes. Throws on any precondition failure so a caller that runs this
+ * inside its own transaction (see resolveHumanActionAndAdvance) rolls the whole step back.
+ * Must be called within a transaction.
  */
-export function startWorkflow(issueId: string): StartResult {
+function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workItem: WorkItem } {
   const issue = getIssue(issueId);
-  if (!issue) return { ok: false, code: 404, error: "Issue not found" };
+  if (!issue) throw new StartPreconditionError(404, "Issue not found");
   if (issue.status !== "ready" && issue.status !== "needs_human") {
-    return { ok: false, code: 409, error: `Issue is ${issue.status} — not startable` };
+    throw new StartPreconditionError(409, `Issue is ${issue.status} — not startable`);
   }
   if (getActiveWorkflowInstance(issueId)) {
-    return { ok: false, code: 409, error: "Issue already has an active workflow" };
+    throw new StartPreconditionError(409, "Issue already has an active workflow");
   }
   for (const [field, label] of REQUIRED_FIELDS) {
     const value = issue[field];
     if (value === null || value === undefined || String(value).trim() === "") {
-      return { ok: false, code: 400, error: `Missing required field: ${label}` };
+      throw new StartPreconditionError(400, `Missing required field: ${label}`);
     }
   }
+  if (!issue.acceptanceCriteria || !issue.acceptanceCriteria.trim()) {
+    throw new StartPreconditionError(400, "Issue has no acceptance criteria");
+  }
+
+  const instance = startWorkflowInstance(issueId, WORKFLOW_VERSION);
+  appendWorkflowEvent({
+    issueId,
+    workflowInstanceId: instance.id,
+    type: "workflow.started",
+    actorType: "system",
+    stage: issue.status,
+    round: 1,
+  });
+  transitionIssue(issueId, "developing", {
+    currentOwner: "developer",
+    currentIntent: "Developer implementing round 1",
+  });
+  const workItem = enqueueWorkItem({
+    issueId,
+    workflowInstanceId: instance.id,
+    kind: "developer",
+    round: 1,
+    idempotencyKey: `${instance.id}:developer:1`,
+  });
+  return { instance, workItem };
+}
+
+/**
+ * Starts the issue's one `dev_reviewer_v1` workflow in a single transaction. A second call
+ * while an instance is active is **rejected with 409** (not a resume-by-id — callers must
+ * not assume the PRD §8 "returns its active instance" behaviour until the API layer adds
+ * it). Missing acceptance criteria opens a `product_scope_decision` instead of starting.
+ */
+export function startWorkflow(issueId: string): StartResult {
+  const issue = getIssue(issueId);
+  if (!issue) return { ok: false, code: 404, error: "Issue not found" };
 
   // PRD §6.1: if required product intent cannot be normalized without guessing, ask.
-  if (!issue.acceptanceCriteria || !issue.acceptanceCriteria.trim()) {
+  if (
+    (issue.status === "ready" || issue.status === "needs_human") &&
+    !getActiveWorkflowInstance(issueId) &&
+    (!issue.acceptanceCriteria || !issue.acceptanceCriteria.trim())
+  ) {
     const action = createHumanAction({
       issueId,
       actionType: "product_scope_decision",
@@ -97,34 +146,11 @@ export function startWorkflow(issueId: string): StartResult {
   }
 
   try {
-    const result = getDb().transaction((): { instance: WorkflowInstance; workItem: WorkItem } => {
-      const instance = startWorkflowInstance(issueId, WORKFLOW_VERSION);
-      appendWorkflowEvent({
-        issueId,
-        workflowInstanceId: instance.id,
-        type: "workflow.started",
-        actorType: "system",
-        stage: issue.status,
-        round: 1,
-      });
-      transitionIssue(issueId, "developing", {
-        currentOwner: "developer",
-        currentIntent: "Developer implementing round 1",
-      });
-      const workItem = enqueueWorkItem({
-        issueId,
-        workflowInstanceId: instance.id,
-        kind: "developer",
-        round: 1,
-        idempotencyKey: `${instance.id}:developer:1`,
-      });
-      return { instance, workItem };
-    })();
+    const result = getDb().transaction(() => startWorkflowCore(issueId))();
     return { ok: true, ...result };
   } catch (err) {
-    if (err instanceof WorkflowAlreadyActiveError) {
-      return { ok: false, code: 409, error: err.message };
-    }
+    if (err instanceof StartPreconditionError) return { ok: false, code: err.code, error: err.message };
+    if (err instanceof WorkflowAlreadyActiveError) return { ok: false, code: 409, error: err.message };
     throw err;
   }
 }
@@ -137,42 +163,56 @@ export type ApplyResult =
       humanActionId: string | null;
       instanceCompleted: boolean;
     }
-  | { applied: false; reason: "already_done" | "not_leased" | "no_active_instance" | "not_found" };
+  | { applied: false; reason: "already_terminal" | "lease_lost" | "no_active_instance" | "not_found" };
 
 /**
- * Applies a leased effect's structured completion in one transaction: the work item is
- * marked done, the routing decision is projected onto the issue, the workflow events are
- * appended, and exactly one next effect is created. A second call for the same work item
- * (a retried callback, or a stale worker after a lease reclaim) is a no-op.
+ * Applies a leased effect's structured completion in one transaction: the item is
+ * CAS-marked `done` (fenced on `leaseToken` — the ONLY path to a terminal state), then the
+ * routing decision is projected onto the issue, the workflow events appended, and exactly
+ * one next effect created. If the CAS matches nothing — a duplicate delivery, or a slow
+ * worker whose lease was reclaimed and re-run — nothing is applied.
  */
 export function applyCompletion(
   workItemId: string,
+  leaseToken: string,
   outcome: DeveloperOutcome | ReviewerOutcome
 ): ApplyResult {
   return getDb().transaction((): ApplyResult => {
-    const item = getWorkItem(workItemId);
-    if (!item) return { applied: false, reason: "not_found" };
-    if (item.status === "done") return { applied: false, reason: "already_done" };
-    // `leased` = a normal completion; `dead` = recovery routing a dead-lettered item
-    // through the ordinary failure policy (see recoverCoordinator).
-    if (item.status !== "leased" && item.status !== "dead") {
-      return { applied: false, reason: "not_leased" };
+    const before = getWorkItem(workItemId);
+    if (!before) return { applied: false, reason: "not_found" };
+    if (before.status === "done" || before.status === "dead") {
+      return { applied: false, reason: "already_terminal" };
     }
 
-    const issue = getIssue(item.issueId);
+    const issue = getIssue(before.issueId);
     if (!issue) return { applied: false, reason: "not_found" };
-    const instance = getActiveWorkflowInstance(item.issueId);
-    if (!instance || instance.id !== item.workflowInstanceId) {
+    const instance = getActiveWorkflowInstance(before.issueId);
+    if (!instance || instance.id !== before.workflowInstanceId) {
       return { applied: false, reason: "no_active_instance" };
     }
-    if (item.status === "leased" && completeWorkItem(workItemId, outcome) === null) {
-      return { applied: false, reason: "not_leased" };
-    }
 
-    return item.kind === "developer"
-      ? applyDeveloper(issue, instance, item, outcome as DeveloperOutcome)
-      : applyReviewer(issue, instance, item, outcome as ReviewerOutcome);
+    const item = finishWorkItem(workItemId, leaseToken, { status: "done", result: outcome });
+    if (!item) return { applied: false, reason: "lease_lost" };
+
+    return routeAppliedOutcome(issue, instance, item, outcome);
   })();
+}
+
+/**
+ * Projects an already-terminal work item's outcome onto the workflow: transition, events,
+ * findings, and the single next effect. The caller has already CAS-marked the item
+ * terminal and is inside a transaction — used by applyCompletion (success) and by the
+ * recovery / handler-failure paths (a dead-lettered item routed as `session_failed`).
+ */
+export function routeAppliedOutcome(
+  issue: Issue,
+  instance: WorkflowInstance,
+  item: WorkItem,
+  outcome: DeveloperOutcome | ReviewerOutcome
+): ApplyResult {
+  return item.kind === "developer"
+    ? applyDeveloper(issue, instance, item, outcome as DeveloperOutcome)
+    : applyReviewer(issue, instance, item, outcome as ReviewerOutcome);
 }
 
 interface EventEmitter {
@@ -436,33 +476,43 @@ export function resolveHumanActionAndAdvance(
   if (!issue) return { ok: false, code: 404, error: "Issue not found" };
   const instance = getActiveWorkflowInstance(action.issueId);
 
-  // Pre-start product_scope_decision: resolve, then start the workflow.
+  // Pre-start product_scope_decision: resolve the action AND start the workflow in one
+  // transaction. If the start still can't proceed (criteria not actually added), the whole
+  // step rolls back and the action stays open — never a resolved action with no workflow.
   if (!instance) {
     if (action.actionType !== "product_scope_decision") {
       return { ok: false, code: 409, error: "No active workflow for this action" };
     }
-    getDb().transaction(() => {
-      resolveHumanAction(actionId, resolvedBy, { choice });
-      appendWorkflowEvent({
-        issueId: issue.id,
-        type: "human_action.resolved",
-        actorType: "human",
-        actorRef: resolvedBy,
-        stage: issue.status,
-        payload: { actionType: action.actionType, choice },
-      });
-    })();
-    const started = startWorkflow(issue.id);
-    if (started.ok === true) {
-      return {
-        ok: true,
-        issueStatus: getIssue(issue.id)!.status,
-        nextWorkItemId: started.workItem.id,
-        instanceCompleted: false,
-        restarted: true,
-      };
+    try {
+      return getDb().transaction((): ResolveResult => {
+        resolveHumanAction(actionId, resolvedBy, { choice });
+        appendWorkflowEvent({
+          issueId: issue.id,
+          type: "human_action.resolved",
+          actorType: "human",
+          actorRef: resolvedBy,
+          stage: issue.status,
+          payload: { actionType: action.actionType, choice },
+        });
+        const { workItem } = startWorkflowCore(issue.id);
+        return {
+          ok: true,
+          issueStatus: getIssue(issue.id)!.status,
+          nextWorkItemId: workItem.id,
+          instanceCompleted: false,
+          restarted: true,
+        };
+      })();
+    } catch (err) {
+      if (err instanceof StartPreconditionError) {
+        return {
+          ok: false,
+          code: err.code === 400 ? 409 : err.code,
+          error: `Cannot start the workflow yet: ${err.message}. Add acceptance criteria, then resolve.`,
+        };
+      }
+      throw err;
     }
-    return { ok: true, issueStatus: getIssue(issue.id)!.status, nextWorkItemId: null, instanceCompleted: false, restarted: false };
   }
 
   const outcome = resolveHumanActionOutcome(resolution);
