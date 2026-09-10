@@ -45,13 +45,14 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RoundLi
 export type ReviewerRouteResult =
   | { next: "final_review" }
   | { next: "retry_developer_with_findings" }
-  | { next: "retry_reviewer_same_head" }
+  /** Head moved mid-review — re-review at the freshly verified SHA, never the stale one. */
+  | { next: "retry_reviewer_at_new_head"; headSha: string }
   | { next: "human_action"; actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision"; reason: string };
 
 export function routeReviewerOutcome(outcome: ReviewerOutcome, limits: RoundLimits): ReviewerRouteResult {
   switch (outcome.kind) {
     case "stale":
-      return { next: "retry_reviewer_same_head" };
+      return { next: "retry_reviewer_at_new_head", headSha: outcome.currentHeadSha };
     case "session_failed":
       return { next: "human_action", actionType: "policy_escalation", reason: "Reviewer session failed, timed out, or its worktree checkout failed." };
     case "publish_failed":

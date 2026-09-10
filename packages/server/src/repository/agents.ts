@@ -15,6 +15,12 @@ interface AgentRow {
   default_execute_model: string | null;
   default_plan_budget_json: string | null;
   default_execute_budget_json: string | null;
+  default_model: string | null;
+  default_budget_json: string | null;
+  purpose: string | null;
+  playbook_ids_json: string | null;
+  external_memory_refs_json: string | null;
+  permission_policy_json: string | null;
   is_builtin: number;
   created_at: string;
   updated_at: string;
@@ -33,6 +39,12 @@ function rowToAgent(row: AgentRow): AgentProfile {
     defaultExecuteModel: row.default_execute_model,
     defaultPlanBudgetJson: row.default_plan_budget_json,
     defaultExecuteBudgetJson: row.default_execute_budget_json,
+    defaultModel: row.default_model,
+    defaultBudgetJson: row.default_budget_json,
+    purpose: row.purpose,
+    playbookIdsJson: row.playbook_ids_json,
+    externalMemoryRefsJson: row.external_memory_refs_json,
+    permissionPolicyJson: row.permission_policy_json,
     isBuiltin: row.is_builtin === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

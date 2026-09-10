@@ -12,6 +12,17 @@ export interface DeveloperPromptInput {
   taskSnapshot: TaskSnapshot;
   round: number;
   findings?: Finding[];
+  /** The generated worktree the agent is actually running in — binding must target this, not the original repo checkout. */
+  worktreePath?: string;
+  deckId?: string | null;
+  playbookId?: string | null;
+}
+
+function agentDeckSection(worktreePath: string | undefined, deckId: string | null | undefined, playbookId: string | null | undefined): string[] {
+  if (!deckId || !worktreePath) return [];
+  const parts = [`Use Agent Deck: bind_workspace({ deckId: "${deckId}", workspaceRoot: "${worktreePath}" })`];
+  if (playbookId) parts.push(`Then get_playbook("${playbookId}") and follow it.`);
+  return parts;
 }
 
 export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
@@ -38,6 +49,8 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
     parts.push(``);
   }
 
+  parts.push(...agentDeckSection(input.worktreePath, input.deckId, input.playbookId));
+
   parts.push(
     `## Required`,
     `Run tests and Lens checks. Push your branch with \`git\` and open or update the draft PR with \`gh pr create\`/\`gh pr edit\`.`,
@@ -53,6 +66,9 @@ export interface ReviewerPromptInput {
   headSha: string;
   implementationConclusion?: string;
   priorFindings?: Finding[];
+  worktreePath?: string;
+  deckId?: string | null;
+  playbookId?: string | null;
 }
 
 export function buildReviewerPrompt(input: ReviewerPromptInput): string {
@@ -84,10 +100,13 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
     parts.push(``);
   }
 
+  parts.push(...agentDeckSection(input.worktreePath, input.deckId, input.playbookId));
+
   parts.push(
-    `Submit your review with \`gh pr review\`, ending the review body with exactly one fenced ` +
+    `You do not publish the review yourself — you have no write access to git or GitHub. Reply with your ` +
+      `assessment ending in exactly one fenced ` +
       "```json" +
-      ` block:`,
+      ` block; the coordinator reads it and publishes the GitHub review on your behalf:`,
     `{"verdict":"approved"|"changes_requested"|"escalated","baseSha":"...","headSha":"...","acceptanceCriteriaAssessment":"...","evidenceAssessment":"...","findings":[{"fingerprint":"...","severity":"blocking"|"non_blocking","title":"...","rationale":"...","file":"...","line":0}],"risks":["..."],"productScopeQuestion":"..."}`,
     `Rules:`,
     `- "escalated" means you cannot form approved/changes_requested — set productScopeQuestion if a missing product decision is the reason.`,

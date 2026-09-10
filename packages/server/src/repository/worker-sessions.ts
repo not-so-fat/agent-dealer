@@ -120,6 +120,15 @@ export function claimQueuedSession(id: string): WorkerSession | null {
   return getWorkerSession(id);
 }
 
+/** Persists the worktree path once the checkout exists, before the session is spawned. */
+export function setSessionWorktreePath(id: string, worktreePath: string): WorkerSession {
+  const now = new Date().toISOString();
+  getDb().prepare("UPDATE worker_sessions SET worktree_path = ?, updated_at = ? WHERE id = ?").run(worktreePath, now, id);
+  const updated = getWorkerSession(id);
+  if (!updated) throw new Error(`Worker session vanished: ${id}`);
+  return updated;
+}
+
 export function heartbeatSession(id: string): void {
   const now = new Date().toISOString();
   getDb()

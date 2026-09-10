@@ -72,7 +72,9 @@ export type CreateIssueInput = z.infer<typeof CreateIssueInput>;
 export const ISSUE_STATUS_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   ready: ["developing", "closed"],
   developing: ["developing", "reviewing", "needs_human", "closed"],
-  reviewing: ["repairing", "final_review", "needs_human", "closed"],
+  // Self-loop matches developing/repairing below: a stale-review retry re-queues a fresh
+  // reviewer at a newly verified head without leaving the "reviewing" stage.
+  reviewing: ["reviewing", "repairing", "final_review", "needs_human", "closed"],
   repairing: ["repairing", "reviewing", "needs_human", "closed"],
   needs_human: ["developing", "repairing", "final_review", "done", "closed"],
   final_review: ["done", "repairing", "needs_human", "closed"],

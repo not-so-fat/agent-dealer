@@ -83,9 +83,9 @@ test("escalated without a product scope question routes to policy_escalation", (
   assert.equal((result as { actionType: string }).actionType, "policy_escalation");
 });
 
-test("stale review retries the reviewer at the same head without consuming a round", () => {
+test("stale review retries the reviewer at the freshly verified head without consuming a round", () => {
   const outcome: ReviewerOutcome = { kind: "stale", currentHeadSha: "new-head" };
-  assert.deepStrictEqual(routeReviewerOutcome(outcome, LIMITS_ROUNDS_LEFT), { next: "retry_reviewer_same_head" });
+  assert.deepStrictEqual(routeReviewerOutcome(outcome, LIMITS_ROUNDS_LEFT), { next: "retry_reviewer_at_new_head", headSha: "new-head" });
 });
 
 test("reviewer session_failed escalates rather than silently retrying", () => {

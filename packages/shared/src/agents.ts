@@ -35,6 +35,17 @@ export const AgentProfile = z.object({
   defaultPlanBudgetJson: z.string().nullable(),
   /** Serialized PhaseBudget; null = runtime default (no CLI caps) */
   defaultExecuteBudgetJson: z.string().nullable(),
+  /** Role-neutral CLI model id for issue-centric developer/reviewer sessions; null = runtime default. */
+  defaultModel: z.string().nullable().default(null),
+  /** Serialized PhaseBudget for issue-centric sessions; null = runtime default. */
+  defaultBudgetJson: z.string().nullable().default(null),
+  purpose: z.string().nullable().default(null),
+  /** Serialized string[] of playbook ids. */
+  playbookIdsJson: z.string().nullable().default(null),
+  /** Serialized string[] of external memory refs. */
+  externalMemoryRefsJson: z.string().nullable().default(null),
+  /** Serialized permission-policy object. */
+  permissionPolicyJson: z.string().nullable().default(null),
   isBuiltin: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),

@@ -1,18 +1,26 @@
 // packages/server/src/coordinator/session-lifecycle.ts
 import path from "node:path";
 import os from "node:os";
+import fs from "node:fs";
 import { v4 as uuid } from "uuid";
-import type { Issue, WorkerSession } from "@agent-dealer/shared";
+import type { Issue, Runtime, WorkerSession } from "@agent-dealer/shared";
 import { getIssue, transitionIssue, incrementIssueRound } from "../repository/issues.js";
-import { createWorkerSession, claimQueuedSession, completeSession, listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
+import {
+  createWorkerSession,
+  claimQueuedSession,
+  completeSession,
+  listWorkerSessionsForIssue,
+  setSessionWorktreePath,
+} from "../repository/worker-sessions.js";
 import { startWorkflowInstance, appendWorkflowEvent } from "../repository/workflow-events.js";
 import { createHumanAction } from "../repository/human-actions.js";
 import { reconcileFinding, listFindingsForIssue } from "../repository/findings.js";
+import { getAgent } from "../repository/agents.js";
 import { addWorktree, removeWorktree, isWorktreeClean, mergeBase } from "../adapters/git-worktree.js";
 import { viewPr, publishReview } from "../adapters/github.js";
 import { spawnDeveloperSession, spawnReviewerSession } from "./spawn.js";
 import { buildDeveloperPrompt, buildReviewerPrompt } from "./prompts.js";
-import { parseReviewerResult } from "./reviewer-result.js";
+import { parseReviewerResult, type ReviewerResult } from "./reviewer-result.js";
 import { routeDeveloperOutcome, routeReviewerOutcome, type DeveloperOutcome, type ReviewerOutcome } from "./routing.js";
 
 export interface CoordinatorDeps {
@@ -41,21 +49,53 @@ function worktreePathFor(issue: Issue, role: "developer" | "reviewer", round: nu
   return path.join(os.tmpdir(), "agent-dealer-worktrees", issue.id, `${role}-r${round}`);
 }
 
-export async function startIssueWorkflow(issueId: string, deps: CoordinatorDeps = defaultCoordinatorDeps): Promise<void> {
+interface ResolvedProfile {
+  runtime: Runtime;
+  model: string | null;
+  deckId: string | null;
+  playbookId: string | null;
+}
+
+/**
+ * Resolves the selected agent profile's effective runtime/model/deck at session-creation
+ * time so the recorded worker_session snapshots it (later profile edits don't rewrite
+ * history). Falls back to claude_code only when no profile is set at all.
+ */
+function resolveProfile(agentId: string | null): ResolvedProfile {
+  const agent = agentId ? getAgent(agentId) : null;
+  return {
+    runtime: agent?.runtime ?? "claude_code",
+    model: agent?.defaultModel ?? agent?.defaultExecuteModel ?? null,
+    deckId: agent?.deckId ?? null,
+    playbookId: agent?.playbookId ?? null,
+  };
+}
+
+export async function startIssueWorkflow(issueId: string, _deps: CoordinatorDeps = defaultCoordinatorDeps): Promise<void> {
   const issue = getIssue(issueId);
   if (!issue) throw new Error(`Issue not found: ${issueId}`);
 
   const instance = startWorkflowInstance(issueId, "dev_reviewer_v1");
   appendWorkflowEvent({ issueId, workflowInstanceId: instance.id, type: "workflow.started", actorType: "system", stage: "ready" });
 
-  const updated = transitionIssue(issueId, "developing", { currentOwner: "developer", currentIntent: "Developer implementing round 1" });
+  // Deciding and recording the branch name here (not just on a successful handoff) means
+  // every developer round — including a round 1 that fails after creating the branch —
+  // agrees on the same name, so repair rounds always check out the right ref.
+  const branch = `issue-${issue.id}`;
+  const updated = transitionIssue(issueId, "developing", {
+    currentOwner: "developer",
+    currentIntent: "Developer implementing round 1",
+    branch,
+  });
 
+  const profile = resolveProfile(issue.developerAgentId);
   const session = createWorkerSession({
     issueId,
     role: "developer",
     round: 1,
     agentId: issue.developerAgentId,
-    runtime: "claude_code",
+    runtime: profile.runtime,
+    model: profile.model,
   });
   appendWorkflowEvent({
     issueId,
@@ -79,9 +119,9 @@ export async function advanceIssue(issueId: string, deps: CoordinatorDeps = defa
   const claimed = claimQueuedSession(session.id);
   if (!claimed) return; // another dispatcher already took it
 
-  const worktreePath = worktreePathFor(issue, session.role === "reviewer" ? "reviewer" : "developer", session.round);
+  const worktreePath = worktreePathFor(issue, claimed.role === "reviewer" ? "reviewer" : "developer", claimed.round);
 
-  if (session.role === "developer") {
+  if (claimed.role === "developer") {
     await runDeveloperSession(issue, claimed, worktreePath, deps);
   } else {
     await runReviewerSession(issue, claimed, worktreePath, deps);
@@ -94,18 +134,31 @@ async function runDeveloperSession(
   worktreePath: string,
   deps: CoordinatorDeps
 ): Promise<void> {
-  await deps.worktree.addWorktree({ repo: issue.repo, path: worktreePath, ref: issue.baseBranch, newBranch: `issue-${issue.id}` });
+  const branch = issue.branch ?? `issue-${issue.id}`;
+  if (session.round === 1) {
+    await deps.worktree.addWorktree({ repo: issue.repo, path: worktreePath, ref: issue.baseBranch, newBranch: branch });
+  } else {
+    // Repair round: the branch already exists from round 1 (git worktree add -b creates
+    // the branch in the repo, independent of that worktree's later removal) — check it
+    // out as-is so work continues from the prior head instead of restarting from base.
+    await deps.worktree.addWorktree({ repo: issue.repo, path: worktreePath, ref: branch });
+  }
+  const withPath = setSessionWorktreePath(session.id, worktreePath);
 
   const priorFindings = listFindingsForIssue(issue.id).filter((f) => f.status === "open" || f.status === "recurring");
+  const profile = resolveProfile(issue.developerAgentId);
   const prompt = buildDeveloperPrompt({
     taskSnapshot: { title: issue.title, description: issue.description ?? "", acceptanceCriteria: issue.acceptanceCriteria ?? "", repo: issue.repo, baseBranch: issue.baseBranch },
     round: session.round,
     findings: priorFindings.length ? priorFindings : undefined,
+    worktreePath,
+    deckId: profile.deckId,
+    playbookId: profile.playbookId,
   });
 
   let result;
   try {
-    result = await deps.spawnDeveloper(session, prompt);
+    result = await deps.spawnDeveloper(withPath, prompt);
   } catch {
     result = { exitCode: 1, transcript: "", logPath: "", timedOut: false };
   }
@@ -130,11 +183,13 @@ async function runDeveloperSession(
       prNumber: outcome.prNumber,
       prUrl: outcome.prUrl,
     });
-    createWorkerSession({ issueId: issue.id, role: "reviewer", round: session.round, agentId: issue.reviewerAgentId, runtime: "claude_code", inputSha: outcome.headSha });
+    const reviewerProfile = resolveProfile(issue.reviewerAgentId);
+    createWorkerSession({ issueId: issue.id, role: "reviewer", round: session.round, agentId: issue.reviewerAgentId, runtime: reviewerProfile.runtime, model: reviewerProfile.model, inputSha: outcome.headSha });
   } else if (routed.next === "retry_developer") {
     incrementIssueRound(issue.id);
     const next = getIssue(issue.id)!;
-    createWorkerSession({ issueId: issue.id, role: "developer", round: next.currentRound, agentId: issue.developerAgentId, runtime: "claude_code" });
+    const developerProfile = resolveProfile(issue.developerAgentId);
+    createWorkerSession({ issueId: issue.id, role: "developer", round: next.currentRound, agentId: issue.developerAgentId, runtime: developerProfile.runtime, model: developerProfile.model });
   } else if (routed.next === "human_action") {
     transitionIssue(issue.id, "needs_human", { currentOwner: "human" });
     createHumanAction({ issueId: issue.id, actionType: routed.actionType, reason: routed.reason, question: routed.reason });
@@ -170,16 +225,21 @@ async function runReviewerSession(
   deps: CoordinatorDeps
 ): Promise<void> {
   await deps.worktree.addWorktree({ repo: issue.repo, path: worktreePath, ref: session.inputSha ?? issue.headSha ?? issue.baseBranch, detach: true });
+  const withPath = setSessionWorktreePath(session.id, worktreePath);
 
+  const reviewerProfile = resolveProfile(issue.reviewerAgentId);
   const prompt = buildReviewerPrompt({
     taskSnapshot: { title: issue.title, description: issue.description ?? "", acceptanceCriteria: issue.acceptanceCriteria ?? "", repo: issue.repo, baseBranch: issue.baseBranch },
     baseSha: issue.baseSha ?? "",
     headSha: session.inputSha ?? issue.headSha ?? "",
+    worktreePath,
+    deckId: reviewerProfile.deckId,
+    playbookId: reviewerProfile.playbookId,
   });
 
   let result;
   try {
-    result = await deps.spawnReviewer(session, prompt);
+    result = await deps.spawnReviewer(withPath, prompt);
   } catch {
     result = { exitCode: 1, transcript: "", logPath: "", timedOut: false };
   }
@@ -205,16 +265,45 @@ async function runReviewerSession(
     transitionIssue(issue.id, "repairing", { currentOwner: "developer" });
     incrementIssueRound(issue.id);
     const next = getIssue(issue.id)!;
-    createWorkerSession({ issueId: issue.id, role: "developer", round: next.currentRound, agentId: issue.developerAgentId, runtime: "claude_code" });
+    const developerProfile = resolveProfile(issue.developerAgentId);
+    createWorkerSession({ issueId: issue.id, role: "developer", round: next.currentRound, agentId: issue.developerAgentId, runtime: developerProfile.runtime, model: developerProfile.model });
     appendWorkflowEvent({ issueId: issue.id, type: "repair.started", actorType: "system", stage: next.status, round: next.currentRound });
-  } else if (routed.next === "retry_reviewer_same_head") {
-    createWorkerSession({ issueId: issue.id, role: "reviewer", round: session.round, agentId: issue.reviewerAgentId, runtime: "claude_code", inputSha: issue.headSha });
+  } else if (routed.next === "retry_reviewer_at_new_head") {
+    // Record the freshly verified head (never re-queue against the stale one) — the issue
+    // stays in "reviewing" (self-loop) throughout, it never actually left that stage.
+    transitionIssue(issue.id, "reviewing", { headSha: routed.headSha });
+    createWorkerSession({ issueId: issue.id, role: "reviewer", round: session.round, agentId: issue.reviewerAgentId, runtime: reviewerProfile.runtime, model: reviewerProfile.model, inputSha: routed.headSha });
   } else if (routed.next === "human_action") {
     transitionIssue(issue.id, "needs_human", { currentOwner: "human" });
     createHumanAction({ issueId: issue.id, actionType: routed.actionType, reason: routed.reason, question: routed.reason });
   }
 
   await deps.worktree.removeWorktree({ repo: issue.repo, path: worktreePath, force: true }).catch(() => undefined);
+}
+
+/** Renders the coordinator's own normalized review body — never the agent's raw transcript. */
+function renderReviewBody(result: ReviewerResult): string {
+  const lines = [
+    `**Verdict:** ${result.verdict}`,
+    ``,
+    `**Acceptance criteria:** ${result.acceptanceCriteriaAssessment}`,
+    `**Evidence:** ${result.evidenceAssessment}`,
+  ];
+  if (result.findings.length) {
+    lines.push(``, `**Findings:**`);
+    for (const f of result.findings) {
+      const loc = f.file ? ` (${f.file}${f.line ? `:${f.line}` : ""})` : "";
+      lines.push(`- [${f.severity}] ${f.title}${loc}: ${f.rationale}`);
+    }
+  }
+  if (result.risks.length) {
+    lines.push(``, `**Risks:**`);
+    for (const r of result.risks) lines.push(`- ${r}`);
+  }
+  if (result.productScopeQuestion) {
+    lines.push(``, `**Product scope question:** ${result.productScopeQuestion}`);
+  }
+  return lines.join("\n");
 }
 
 async function classifyReviewerOutcome(
@@ -235,13 +324,18 @@ async function classifyReviewerOutcome(
   const parsed = parseReviewerResult(transcript);
   if (!parsed) return { kind: "session_failed" };
 
+  // The coordinator is the only component that publishes — the reviewer has no git/GitHub
+  // write access (see args.ts), so this is the sole place a review is ever submitted.
   if (issue.prNumber) {
     const event = parsed.verdict === "approved" ? "APPROVE" : parsed.verdict === "changes_requested" ? "REQUEST_CHANGES" : "COMMENT";
     const bodyFile = path.join(os.tmpdir(), `review-${uuid()}.md`);
-    const fs = await import("node:fs");
-    fs.writeFileSync(bodyFile, transcript);
-    const published = await deps.github.publishReview({ cwd: worktreePath, prNumber: issue.prNumber, event, bodyFilePath: bodyFile });
-    if (!published.ok) return { kind: "publish_failed" };
+    fs.writeFileSync(bodyFile, renderReviewBody(parsed));
+    try {
+      const published = await deps.github.publishReview({ cwd: worktreePath, prNumber: issue.prNumber, event, bodyFilePath: bodyFile });
+      if (!published.ok) return { kind: "publish_failed" };
+    } finally {
+      fs.unlink(bodyFile, () => undefined);
+    }
   }
 
   return { kind: "verdict", result: parsed };

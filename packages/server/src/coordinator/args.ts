@@ -5,7 +5,14 @@ const DECK_READ_TOOLS =
 const DENY_SEND_TOOL = "mcp__agent-deck__call_service_tool";
 
 const DEVELOPER_TOOLS = `Read,Write,Edit,Glob,Grep,Bash,Skill,${DECK_READ_TOOLS}`;
-const REVIEWER_TOOLS = `Read,Glob,Grep,Bash,Skill,${DECK_READ_TOOLS}`;
+/**
+ * Read-only: no Bash. The coordinator, not the reviewer, publishes the GitHub review
+ * (session-lifecycle.ts renders and posts the validated ReviewerResult) — Bash access
+ * would let the reviewer shell out to `gh pr review` itself, duplicating or racing that
+ * publish and defeating the "coordinator is the only component that publishes" boundary
+ * (spec §Role permissions).
+ */
+const REVIEWER_TOOLS = `Read,Glob,Grep,Skill,${DECK_READ_TOOLS}`;
 
 export function buildDeveloperArgs(runtime: Runtime, prompt: string, model?: string): string[] {
   if (runtime === "codex_local") {

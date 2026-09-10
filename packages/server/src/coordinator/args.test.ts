@@ -12,11 +12,12 @@ test("buildDeveloperArgs for claude_code allows Bash and Write/Edit", () => {
   assert.ok(args[toolsIdx + 1].includes("Write"));
 });
 
-test("buildReviewerArgs for claude_code excludes Write/Edit and denies the send tool", () => {
+test("buildReviewerArgs for claude_code excludes Write/Edit/Bash and denies the send tool", () => {
   const args = buildReviewerArgs("claude_code", "review the diff");
   const toolsIdx = args.indexOf("--allowedTools");
   assert.ok(!args[toolsIdx + 1].includes("Write"));
   assert.ok(!args[toolsIdx + 1].includes("Edit"));
+  assert.ok(!args[toolsIdx + 1].split(",").includes("Bash"));
   assert.ok(args.includes("--disallowedTools"));
 });
 

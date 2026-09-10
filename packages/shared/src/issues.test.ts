@@ -19,6 +19,10 @@ test("issue transitions: final_review can send back to repairing", () => {
   assert.equal(canTransitionIssue("final_review", "repairing"), true);
 });
 
+test("issue transitions: reviewing can self-loop (stale-review retry at a fresh head)", () => {
+  assert.equal(canTransitionIssue("reviewing", "reviewing"), true);
+});
+
 test("Issue schema parses a well-formed issue", () => {
   const issue: Issue = {
     id: "11111111-1111-1111-1111-111111111111",
