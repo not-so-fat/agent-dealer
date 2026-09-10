@@ -2890,6 +2890,13 @@ git add scripts/migrate-to-issues.ts scripts/migrate-to-issues.test.ts
 git commit -m "Add issue-centric migration and cutover script (NOT-57)"
 ```
 
+**Amendments (found running this task; both are bugs in the plan's own Task 10 code, not schema gaps):**
+
+1. `seedLegacyDb()`'s fixture built `schema.sql` alone, without the Task 5 amendment's `artifacts.issue_id`/`worker_session_id` columns — those only exist at runtime via `migrate()`'s additive `ALTER`, never in `schema.sql` itself (this repo's established convention; see Task 5's amendment). Fix: add the same two `ALTER TABLE artifacts ADD COLUMN ...` lines to `seedLegacyDb()` right after it applies `schema.sql`, so the fixture matches what a real production `dealer.db` looks like (migrate() always runs before this script does).
+2. The artifacts `INSERT` in Step 3's `runMigration` implementation omitted `run_id`, which is `NOT NULL` on the legacy `artifacts` table (it stays `NOT NULL` until the final rename at the end of the same transaction). Fix: carry `run.id` forward into the new row alongside `issue_id`/`worker_session_id` — `INSERT INTO artifacts (id, run_id, issue_id, worker_session_id, kind, content_json, blob_path, author, created_at)`.
+
+If executing this plan fresh, fold both fixes into the Step 1/Step 3 code directly instead of applying them as follow-up edits.
+
 ---
 
 ## Plan Self-Review Notes
