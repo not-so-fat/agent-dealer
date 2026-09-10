@@ -19,18 +19,7 @@ export async function runActionCommand(args: string[]): Promise<number> {
       console.log(JSON.stringify(result, null, 2));
       return 0;
     }
-    if (subcommand === "resolve") {
-      const id = rest[0];
-      const choiceIdx = rest.indexOf("--choice");
-      const choice = choiceIdx >= 0 ? rest[choiceIdx + 1] : undefined;
-      if (!id || !choice) {
-        console.error("resolve requires an action id and --choice");
-        return 1;
-      }
-      const result = await apiFetch(`/api/human-actions/${id}/resolve`, { method: "POST", body: { resolvedBy: "cli", choice } });
-      console.log(JSON.stringify(result, null, 2));
-      return 0;
-    }
+    // NOT-58: `action` is read-only. Typed resolution lands in NOT-64.
     console.error(`Unknown action subcommand: ${subcommand}`);
     return 1;
   } catch (err) {

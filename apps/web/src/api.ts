@@ -450,7 +450,6 @@ export interface IssueListRow {
 export interface IssueDetail {
   issue: Issue;
   timeline: WorkflowEvent[];
-  forecast: { now: string; next: string };
   humanActions: HumanAction[];
   findings: Finding[];
   usageSummary: { totalCostUsd: number; totalDurationMs: number; totalTokensIn: number; totalTokensOut: number };
@@ -491,12 +490,6 @@ export async function createIssue(input: CreateIssueInput): Promise<Issue> {
   return res.json();
 }
 
-export async function startIssue(id: string): Promise<Issue> {
-  const res = await fetch(`${API}/api/issues/${id}/start`, { method: "POST" });
-  if (!res.ok) throw new Error(await readApiError(res));
-  return res.json();
-}
-
 export async function guideIssue(id: string, markdown: string): Promise<WorkflowEvent> {
   const res = await fetch(`${API}/api/issues/${id}/guidance`, {
     method: "POST",
@@ -509,16 +502,6 @@ export async function guideIssue(id: string, markdown: string): Promise<Workflow
 
 export async function fetchHumanActions(): Promise<HumanAction[]> {
   const res = await fetch(`${API}/api/human-actions`);
-  if (!res.ok) throw new Error(await readApiError(res));
-  return res.json();
-}
-
-export async function resolveHumanAction(id: string, choice: string, resolvedBy: string): Promise<HumanAction> {
-  const res = await fetch(`${API}/api/human-actions/${id}/resolve`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ choice, resolvedBy }),
-  });
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
 }

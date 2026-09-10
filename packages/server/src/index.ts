@@ -10,33 +10,7 @@ import { registerRoutes } from "./routes/index.js";
 import { registerIssueRoutes } from "./routes/issues.js";
 import { registerHumanActionRoutes } from "./routes/human-actions.js";
 import { startQueue, recoverOrphanedRuns } from "./queue/dispatcher.js";
-import { pollAndDispatch, reconcileStaleSessions } from "./coordinator/dispatcher.js";
 import { registerStaticUi } from "./static-ui.js";
-
-/** How often to check for queued issue coordinator sessions to advance. */
-const COORDINATOR_POLL_MS = Number(process.env.COORDINATOR_POLL_INTERVAL_MS ?? 5000);
-/** How often to sweep for worker_sessions whose heartbeat has gone stale (crashed process). */
-const COORDINATOR_RECONCILE_MS = Number(process.env.COORDINATOR_RECONCILE_INTERVAL_MS ?? 60_000);
-/** A "running" session with no heartbeat for this long is presumed dead. */
-const COORDINATOR_STALE_THRESHOLD_MS = Number(process.env.COORDINATOR_STALE_THRESHOLD_MS ?? 30 * 60_000);
-
-function startCoordinator(): void {
-  const reconciled = reconcileStaleSessions(COORDINATOR_STALE_THRESHOLD_MS);
-  if (reconciled.reconciled.length > 0) {
-    console.warn(`[coordinator] reconciled ${reconciled.reconciled.length} stale worker_session(s) on startup`);
-  }
-
-  setInterval(() => {
-    pollAndDispatch().catch((err) => console.error("[coordinator] pollAndDispatch failed:", err));
-  }, COORDINATOR_POLL_MS);
-
-  setInterval(() => {
-    const result = reconcileStaleSessions(COORDINATOR_STALE_THRESHOLD_MS);
-    if (result.reconciled.length > 0) {
-      console.warn(`[coordinator] reconciled ${result.reconciled.length} stale worker_session(s)`);
-    }
-  }, COORDINATOR_RECONCILE_MS);
-}
 
 const { mode, envFile } = loadAgentDealerEnv();
 console.log(formatEnvStartupLine(mode, envFile));
@@ -59,7 +33,6 @@ async function main(): Promise<void> {
     console.warn(`[startup] recovered ${orphans} orphaned running run(s) → failed`);
   }
   startQueue();
-  startCoordinator();
 
   await app.listen({ port, host: "127.0.0.1" });
   const base = `http://127.0.0.1:${port}`;

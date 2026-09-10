@@ -9,7 +9,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ac
 
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
-const { createIssue, getIssue, transitionIssue } = await import("../repository/issues.js");
+const { createIssue, transitionIssue } = await import("../repository/issues.js");
 const { createHumanAction } = await import("../repository/human-actions.js");
 const { registerHumanActionRoutes } = await import("./human-actions.js");
 
@@ -32,60 +32,12 @@ function seedIssueAwaitingFinalReview() {
   return { issue, action };
 }
 
+// NOT-58: the global queue is read-only. Typed resolution + continuation land in NOT-64.
 test("GET /api/human-actions lists only open actions", async () => {
   const app = await buildApp();
   const { action } = seedIssueAwaitingFinalReview();
   const res = await app.inject({ method: "GET", url: "/api/human-actions" });
   const list = res.json() as Array<{ id: string; status: string }>;
   assert.ok(list.some((a) => a.id === action.id && a.status === "open"));
-  await app.close();
-});
-
-test("resolving final_review as complete marks the issue done", async () => {
-  const app = await buildApp();
-  const { issue, action } = seedIssueAwaitingFinalReview();
-  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "complete" } });
-  assert.equal(res.statusCode, 200);
-  assert.equal(getIssue(issue.id)?.status, "done");
-  const after = await app.inject({ method: "GET", url: "/api/human-actions" });
-  assert.equal((after.json() as unknown[]).some((a: any) => a.id === action.id), false);
-  await app.close();
-});
-
-test("resolving an already-resolved action returns its resolved state instead of erroring", async () => {
-  const app = await buildApp();
-  const { action } = seedIssueAwaitingFinalReview();
-  await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "complete" } });
-  const second = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "complete" } });
-  assert.equal(second.statusCode, 200);
-  const body = second.json() as { status: string };
-  assert.equal(body.status, "resolved");
-  await app.close();
-});
-
-test("resolving final_review as repair sends the issue back to repairing", async () => {
-  const app = await buildApp();
-  const { issue, action } = seedIssueAwaitingFinalReview();
-  await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "repair" } });
-  assert.equal(getIssue(issue.id)?.status, "repairing");
-  await app.close();
-});
-
-// Reviewer finding #8: an invalid choice must be rejected (400), not silently treated as "close".
-test("resolving with a choice not valid for this action type returns 400 and leaves the action open", async () => {
-  const app = await buildApp();
-  const { issue, action } = seedIssueAwaitingFinalReview();
-  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "bogus" } });
-  assert.equal(res.statusCode, 400);
-  assert.equal(getIssue(issue.id)?.status, "final_review"); // untouched
-  const stillOpen = await app.inject({ method: "GET", url: "/api/human-actions" });
-  assert.ok((stillOpen.json() as Array<{ id: string }>).some((a) => a.id === action.id));
-  await app.close();
-});
-
-test("resolving an unknown action id returns 404", async () => {
-  const app = await buildApp();
-  const res = await app.inject({ method: "POST", url: `/api/human-actions/does-not-exist/resolve`, payload: { resolvedBy: "yusuke", choice: "complete" } });
-  assert.equal(res.statusCode, 404);
   await app.close();
 });

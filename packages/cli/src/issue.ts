@@ -12,7 +12,6 @@ export type ParsedIssueArgs =
   | { subcommand: "create"; title: string; repo: string; developerAgentId: string; reviewerAgentId: string; description?: string; acceptanceCriteria?: string; baseBranch?: string }
   | { subcommand: "import"; externalId: string; externalLabel?: string; title: string; repo: string; developerAgentId: string; reviewerAgentId: string }
   | { subcommand: "show"; id: string; includeEvidence: boolean }
-  | { subcommand: "start"; id: string }
   | { subcommand: "guide"; id: string; message: string };
 
 function flag(args: string[], name: string): string | undefined {
@@ -43,11 +42,6 @@ export function parseIssueArgs(args: string[]): ParsedIssueArgs {
       const id = rest[0];
       if (!id) throw new Error("show requires an issue id");
       return { subcommand: "show", id, includeEvidence: rest.includes("--include") && rest[rest.indexOf("--include") + 1] === "evidence" };
-    }
-    case "start": {
-      const id = rest[0];
-      if (!id) throw new Error("start requires an issue id");
-      return { subcommand: "start", id };
     }
     case "guide": {
       const id = rest[0];
@@ -100,11 +94,6 @@ export async function runIssueCommand(args: string[]): Promise<number> {
         } else {
           console.log(JSON.stringify(result, null, 2));
         }
-        return 0;
-      }
-      case "start": {
-        const result = await apiFetch(`/api/issues/${parsed.id}/start`, { method: "POST" });
-        console.log(JSON.stringify(result, null, 2));
         return 0;
       }
       case "guide": {

@@ -77,6 +77,7 @@ export default function App() {
           </div>
           <button type="button" onClick={() => setView("agents")} className={`${navClass("agents")} inline-flex items-center gap-1.5`} aria-label="Agents" title="Agents">
             <AgentsNavIcon className="w-6 h-6 shrink-0" />
+            <span>Agents</span>
           </button>
         </header>
 

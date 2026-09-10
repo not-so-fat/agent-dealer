@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchIssueDetail, guideIssue, startIssue, type IssueDetail } from "../api";
+import { fetchIssueDetail, guideIssue, type IssueDetail } from "../api";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
 import IssueTimeline from "../components/issues/IssueTimeline";
 
@@ -24,9 +24,10 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
   if (error) return <div className="p-6 text-red-300 text-sm">{error}</div>;
   if (!detail) return <div className="p-6 text-white/50 text-sm">Loading…</div>;
 
-  const { issue, timeline, forecast, humanActions, usageSummary } = detail;
+  const { issue, timeline, humanActions, usageSummary } = detail;
   const durationMs = Date.now() - new Date(issue.createdAt).getTime();
   const durationMin = Math.floor(durationMs / 60_000);
+  const openActions = humanActions.filter((a) => a.status === "open");
 
   const submitGuidance = async () => {
     if (!guidance.trim()) return;
@@ -35,14 +36,9 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
     refresh();
   };
 
-  const handleStart = async () => {
-    await startIssue(issueId);
-    refresh();
-  };
-
   return (
-    <div className="flex-1 min-h-0 flex overflow-hidden">
-      <div className="flex-1 min-w-0 overflow-y-auto px-6 py-4">
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
+      <div className="max-w-3xl">
         <button type="button" onClick={onBack} className="text-sm text-white/50 hover:text-white mb-3">
           ← Issues
         </button>
@@ -62,13 +58,17 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
               <span>${usageSummary.totalCostUsd.toFixed(2)}</span>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <IssueStatusBadge status={issue.status} />
-            {issue.status === "ready" && (
-              <button type="button" className="btn-gold px-3 py-1.5 text-sm" onClick={handleStart}>Start</button>
-            )}
-          </div>
+          <IssueStatusBadge status={issue.status} />
         </div>
+
+        {openActions.length > 0 && (
+          <div className="mb-4 p-3 rounded border border-red-400/30 bg-red-500/10">
+            <p className="text-xs text-red-300 font-medium">Human action needed</p>
+            {openActions.map((a) => (
+              <p key={a.id} className="text-sm text-white/80 mt-1">{a.question}</p>
+            ))}
+          </div>
+        )}
 
         <div className="border-t border-white/10 pt-3">
           <IssueTimeline events={timeline} />
@@ -85,21 +85,6 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
           <button type="button" className="btn-gold px-4" onClick={submitGuidance}>Send</button>
         </div>
       </div>
-
-      <aside className="w-72 shrink-0 border-l border-white/10 px-4 py-4 overflow-y-auto">
-        <h3 className="text-xs uppercase tracking-wide text-white/40 mb-2">Intent forecast</h3>
-        <p className="text-sm text-white/85 mb-1">Now: {forecast.now}</p>
-        {forecast.next && <p className="text-sm text-white/55">Next: {forecast.next}</p>}
-
-        {humanActions.filter((a) => a.status === "open").length > 0 && (
-          <div className="mt-4 p-3 rounded border border-red-400/30 bg-red-500/10">
-            <p className="text-xs text-red-300 font-medium">Human action needed</p>
-            {humanActions.filter((a) => a.status === "open").map((a) => (
-              <p key={a.id} className="text-sm text-white/80 mt-1">{a.question}</p>
-            ))}
-          </div>
-        )}
-      </aside>
     </div>
   );
 }

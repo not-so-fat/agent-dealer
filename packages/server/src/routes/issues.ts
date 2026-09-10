@@ -8,8 +8,6 @@ import { listUsageEventsForIssue, summarizeIssueUsage } from "../repository/usag
 import { listWorkflowEventsForIssue, appendWorkflowEvent } from "../repository/workflow-events.js";
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
-import { computeIntentForecast } from "../coordinator/intent-forecast.js";
-import { startIssueWorkflow } from "../coordinator/session-lifecycle.js";
 
 export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/issues", async (req) => {
@@ -34,7 +32,6 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     return {
       issue,
       timeline: listWorkflowEventsForIssue(id),
-      forecast: computeIntentForecast(issue),
       humanActions: listHumanActionsForIssue(id),
       findings: listFindingsForIssue(id),
       usageSummary: summarizeIssueUsage(id),
@@ -64,19 +61,6 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     const issue = createIssue(input);
     appendWorkflowEvent({ issueId: issue.id, type: "issue.created", actorType: "human", stage: issue.status });
     return issue;
-  });
-
-  app.post("/api/issues/:id/start", async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const issue = getIssue(id);
-    if (!issue) return reply.status(404).send({ error: "Not found" });
-    if (issue.status !== "ready") {
-      // Idempotent: issue already has an active (or terminal) workflow — return current state
-      // rather than erroring, matching "idempotently returns its active instance."
-      return issue;
-    }
-    await startIssueWorkflow(id);
-    return getIssue(id);
   });
 
   app.post("/api/issues/:id/guidance", async (req, reply) => {

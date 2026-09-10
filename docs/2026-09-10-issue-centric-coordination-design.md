@@ -5,6 +5,64 @@
 **PRD:** `docs/PRD_ISSUE_COORDINATION.md`
 **Date:** 2026-09-10
 
+> ## Scope revision — 2026-09-10
+>
+> This document was written to cover the full P0 slice (data model + coordinator + UI) in
+> one change. That was split. **PR #3 / [NOT-58](https://linear.app/not-so-fat/issue/NOT-58)
+> delivers the foundation only: the issue-centric data model, repositories, a read-model
+> API/CLI, and a read-only management shell — with no autonomous agent execution.**
+>
+> The sections below describing runtime behaviour are the durable design for the child
+> tickets and are **not implemented in PR #3**:
+>
+> | Design section | Lands in |
+> |---|---|
+> | Coordinator → Session lifecycle, Durable dispatch and recovery | [NOT-59](https://linear.app/not-so-fat/issue/NOT-59) kernel, [NOT-63](https://linear.app/not-so-fat/issue/NOT-63) repair/recovery |
+> | Coordinator → Worktree lifecycle, Role permissions / profile snapshot / Agent Deck bind | [NOT-60](https://linear.app/not-so-fat/issue/NOT-60) |
+> | Coordinator → developer session, handoff verification, evidence capture | [NOT-61](https://linear.app/not-so-fat/issue/NOT-61) |
+> | Coordinator → reviewer session, exact-SHA verification, `github.ts` publication | [NOT-62](https://linear.app/not-so-fat/issue/NOT-62) |
+> | Guidance semantics injection, human-action resolution, reflect trigger | [NOT-64](https://linear.app/not-so-fat/issue/NOT-64) |
+> | Frontend intent-forecast rail, cost/timing/readiness, completed-execution UI | [NOT-65](https://linear.app/not-so-fat/issue/NOT-65) |
+> | Migration and cutover | [NOT-66](https://linear.app/not-so-fat/issue/NOT-66) |
+>
+> In PR #3, `worker_sessions` / `workflow_instances` / `findings` / `usage_events` exist as
+> schema + repositories with no runtime writer yet; `POST /api/issues/:id/start`, human-action
+> resolution, the background coordinator loop, the `git`/`gh` adapters, and the migration
+> script are **not present** and land with their child tickets, branched from `main` after
+> this foundation merges.
+>
+> ### Accepted architecture for the child tickets (PR #3 review, load-bearing)
+>
+> The recurring bugs in the original one-PR implementation shared one cause: a single
+> `session-lifecycle.ts` combining the state machine, persistence, process execution,
+> Git/worktree management, GitHub verification, and recovery, so every external failure
+> could leave DB state stranded mid-step. The child tickets adopt this narrower structure:
+>
+> 1. **One hardcoded, versioned `dev_reviewer_v1` state machine.** No generic workflow
+>    editor / configurable graph topology. `workflow_instances.workflow_version` is only a
+>    version tag; transition legality stays a pure function.
+> 2. **Each coordinator command is a short DB transaction** recording the state transition,
+>    the workflow event, and the next durable work item together.
+> 3. **External effects run through a leased worker** (heartbeat + idempotency); its
+>    structured completion is applied in a second transaction. SQLite plus a durable
+>    work-item / outbox table is sufficient — no event sourcing, queue broker, or agent
+>    identity system.
+> 4. **Immutable execution-profile snapshot** (runtime/model/budget/permissions/deck/
+>    playbooks/memory refs) stored on each `worker_session`; worktree binding is a verified
+>    preflight effect. The `worker_sessions.profile_snapshot_json` column is added by NOT-60
+>    with the code that writes it, not pre-added here.
+> 5. **PR + exact head/base SHA + structured result/artifact refs are the inter-agent
+>    protocol.** Agents are temporary workers; the issue owns history.
+> 6. **Human actions are typed pending commands** carrying their workflow instance, allowed
+>    responses, evidence, and continuation preview — the `human_actions` schema already
+>    matches this.
+>
+> Landing order: kernel (NOT-59) → execution environment (NOT-60) → developer→PR handoff
+> (NOT-61) → reviewer→decision handoff (NOT-62) → repair/failure policy (NOT-63) →
+> human-action contract (NOT-64) → evidence/measurement + product surfaces (NOT-65) →
+> legacy cutover (NOT-66). Each child ticket carries one end-to-end acceptance test at its
+> boundary and branches from the latest `main`.
+
 ## Problem
 
 `docs/PRD_ISSUE_COORDINATION.md` reframes agent-dealer around a durable **issue** that runs one hardcoded developer–reviewer workflow, instead of today's single-agent plan→execute→review `runs` model. NOT-57's title says "UI," but the PRD's dev/reviewer separation only means anything if two different coding-agent sessions actually run — so this ticket covers the full P0 slice: data model, coordinator, and UI. No supported compatibility contract exists for the current run-shaped routes; the cutover can replace them after preserving their data.

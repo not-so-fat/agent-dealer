@@ -20,10 +20,8 @@ function printUsage(): void {
   agent-dealer issue create --title T --repo R --developer-agent ID --reviewer-agent ID [--description D] [--acceptance-criteria A] [--base-branch B]
   agent-dealer issue import --external-id ID --title T --repo R --developer-agent ID --reviewer-agent ID [--external-label L]
   agent-dealer issue show <id> [--include evidence]
-  agent-dealer issue start <id>
   agent-dealer issue guide <id> --message M
   agent-dealer action list
-  agent-dealer action resolve <id> --choice CHOICE
   agent-dealer --version
 
 Human control plane for agent execution.`);

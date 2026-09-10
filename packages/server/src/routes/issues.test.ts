@@ -48,17 +48,19 @@ test("POST /api/issues is idempotent on (source, externalId)", async () => {
   await app.close();
 });
 
-test("GET /api/issues/:id returns header, timeline, forecast, actions, findings", async () => {
+test("GET /api/issues/:id returns header, timeline, actions, findings, usage", async () => {
   const app = await buildApp();
   const created = (
     await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Detail issue", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
   const res = await app.inject({ method: "GET", url: `/api/issues/${created.id}` });
   assert.equal(res.statusCode, 200);
-  const body = res.json() as { issue: { id: string }; timeline: unknown[]; forecast: { now: string }; humanActions: unknown[]; findings: unknown[]; usageSummary: unknown };
+  const body = res.json() as { issue: { id: string }; timeline: unknown[]; humanActions: unknown[]; findings: unknown[]; usageSummary: unknown };
   assert.equal(body.issue.id, created.id);
   assert.ok(Array.isArray(body.timeline));
-  assert.ok(body.forecast.now.length > 0);
+  assert.ok(Array.isArray(body.humanActions));
+  assert.ok(Array.isArray(body.findings));
+  assert.ok(body.usageSummary);
   await app.close();
 });
 
@@ -66,18 +68,6 @@ test("GET /api/issues/:id 404s for an unknown id", async () => {
   const app = await buildApp();
   const res = await app.inject({ method: "GET", url: "/api/issues/does-not-exist" });
   assert.equal(res.statusCode, 404);
-  await app.close();
-});
-
-test("POST /api/issues/:id/start transitions to developing and is idempotent", async () => {
-  const app = await buildApp();
-  const created = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Start me", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
-  ).json() as { id: string };
-  const first = await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` });
-  assert.equal(first.statusCode, 200);
-  const second = await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` });
-  assert.equal(second.statusCode, 200); // idempotent, not a 409
   await app.close();
 });
 

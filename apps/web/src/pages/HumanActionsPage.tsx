@@ -1,26 +1,9 @@
 import { useEffect, useState } from "react";
 import type { HumanAction, HumanActionType } from "@agent-dealer/shared";
-import { fetchHumanActions, resolveHumanAction } from "../api";
+import { fetchHumanActions } from "../api";
 
 type Props = {
   onSelectIssue: (id: string) => void;
-};
-
-const CHOICES: Record<HumanActionType, Array<{ value: string; label: string }>> = {
-  final_review: [
-    { value: "complete", label: "Complete" },
-    { value: "repair", label: "Another round" },
-    { value: "close", label: "Close without accepting" },
-  ],
-  attempts_exhausted: [
-    { value: "retry", label: "Allow another round" },
-    { value: "close", label: "Close" },
-  ],
-  policy_escalation: [
-    { value: "resume", label: "Resume" },
-    { value: "close", label: "Close" },
-  ],
-  product_scope_decision: [{ value: "resume", label: "Resume with this decision" }],
 };
 
 const TYPE_LABELS: Record<HumanActionType, string> = {
@@ -30,6 +13,10 @@ const TYPE_LABELS: Record<HumanActionType, string> = {
   product_scope_decision: "Product scope decision",
 };
 
+/**
+ * NOT-58 foundation: read-only global queue of open human actions. Typed
+ * resolution and workflow continuation land in NOT-64.
+ */
 export default function HumanActionsPage({ onSelectIssue }: Props) {
   const [actions, setActions] = useState<HumanAction[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,15 +28,6 @@ export default function HumanActionsPage({ onSelectIssue }: Props) {
     const poll = setInterval(refresh, 5000);
     return () => clearInterval(poll);
   }, []);
-
-  const resolve = async (id: string, choice: string) => {
-    try {
-      await resolveHumanAction(id, choice, "human");
-      refresh();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
 
   return (
     <div className="flex-1 min-h-0 px-6 py-4 w-full overflow-y-auto">
@@ -71,19 +49,7 @@ export default function HumanActionsPage({ onSelectIssue }: Props) {
                 </button>
               </div>
               <p className="text-sm text-white/85 mb-1">{action.reason}</p>
-              <p className="text-sm text-white/60 mb-3">{action.question}</p>
-              <div className="flex gap-2">
-                {CHOICES[action.actionType].map((choice) => (
-                  <button
-                    key={choice.value}
-                    type="button"
-                    className="btn-gold px-3 py-1.5 text-sm"
-                    onClick={() => resolve(action.id, choice.value)}
-                  >
-                    {choice.label}
-                  </button>
-                ))}
-              </div>
+              <p className="text-sm text-white/60">{action.question}</p>
             </div>
           ))}
         </div>
