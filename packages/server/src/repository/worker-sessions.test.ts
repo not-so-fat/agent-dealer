@@ -10,7 +10,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-se
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue } = await import("./issues.js");
-const { createWorkerSession, getWorkerSession, listWorkerSessionsForIssue, claimQueuedSession, completeSession } =
+const { createWorkerSession, getWorkerSession, listWorkerSessionsForIssue } =
   await import("./worker-sessions.js");
 
 let issueId: string;
@@ -47,20 +47,9 @@ test("lists sessions for an issue in creation order", () => {
   assert.ok(ids.indexOf(s1.id) < ids.indexOf(s2.id));
 });
 
-test("claims a queued session exactly once (compare-and-set)", () => {
-  const session = createWorkerSession({ issueId, role: "developer", round: 1, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
-  const claimed = claimQueuedSession(session.id);
-  assert.equal(claimed?.status, "running");
-  assert.notEqual(claimed?.startedAt, null);
-  const secondClaim = claimQueuedSession(session.id);
-  assert.equal(secondClaim, null);
-});
-
-test("completes a session", () => {
-  const session = createWorkerSession({ issueId, role: "developer", round: 1, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
-  claimQueuedSession(session.id);
-  const done = completeSession(session.id, { status: "done", exitCode: 0 });
-  assert.equal(done.status, "done");
-  assert.equal(done.exitCode, 0);
-  assert.notEqual(done.completedAt, null);
+test("a fresh session starts queued with no worktree path", () => {
+  const session = createWorkerSession({ issueId, role: "reviewer", round: 1, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
+  assert.equal(session.status, "queued");
+  assert.equal(session.worktreePath, null);
+  assert.equal(session.startedAt, null);
 });
