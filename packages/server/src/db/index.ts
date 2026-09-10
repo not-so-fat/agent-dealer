@@ -77,8 +77,11 @@ export function migrate(): void {
   // purpose, playbook_ids_json, external_memory_refs_json, permission_policy_json) are added
   // by NOT-60 together with the resolve/snapshot code and the agent-form UI that write them.
 
-  // Tighten the workflow-event idempotency index to UNIQUE for dev DBs created before the
+  // Tighten the workflow-event idempotency index to UNIQUE for DBs created before the
   // constraint (schema.sql's IF NOT EXISTS won't upgrade an existing non-unique index).
+  // A pre-fix DB may already hold duplicate keys — the old index was non-unique and
+  // appendWorkflowEvent() inserted unconditionally — so dedupe first, then swap the
+  // index, all inside one transaction so a failure never leaves the table indexless.
   const wfIdemIdx = db.prepare("PRAGMA index_list(workflow_events)").all() as Array<{
     name: string;
     unique: number;
@@ -87,10 +90,25 @@ export function migrate(): void {
     (i) => i.name === "idx_workflow_events_idempotency" && i.unique === 0
   );
   if (nonUnique) {
-    db.exec("DROP INDEX idx_workflow_events_idempotency");
-    db.exec(
-      "CREATE UNIQUE INDEX idx_workflow_events_idempotency ON workflow_events(idempotency_key) WHERE idempotency_key IS NOT NULL"
-    );
+    db.transaction(() => {
+      // Preservation policy: for each repeated provider key keep the first event
+      // recorded for it (lowest rowid = earliest insert) and drop the later copies —
+      // a duplicate delivery should collapse to its original, matching the runtime
+      // ON CONFLICT DO NOTHING behaviour.
+      db.exec(`
+        DELETE FROM workflow_events
+        WHERE idempotency_key IS NOT NULL
+          AND rowid NOT IN (
+            SELECT MIN(rowid) FROM workflow_events
+            WHERE idempotency_key IS NOT NULL
+            GROUP BY idempotency_key
+          )
+      `);
+      db.exec("DROP INDEX idx_workflow_events_idempotency");
+      db.exec(
+        "CREATE UNIQUE INDEX idx_workflow_events_idempotency ON workflow_events(idempotency_key) WHERE idempotency_key IS NOT NULL"
+      );
+    })();
   }
 
   const artifactCols = db.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>;
