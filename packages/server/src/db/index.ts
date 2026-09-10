@@ -95,6 +95,29 @@ export function migrate(): void {
       // recorded for it (lowest rowid = earliest insert) and drop the later copies —
       // a duplicate delivery should collapse to its original, matching the runtime
       // ON CONFLICT DO NOTHING behaviour.
+      //
+      // causation_event_id is a self-FK, so first repoint any reference that points at
+      // a discarded duplicate to the canonical (kept) event for that key — otherwise
+      // the DELETE below fails with FOREIGN KEY constraint failed and rolls back.
+      db.exec(`
+        WITH canon AS (
+          SELECT idempotency_key, MIN(rowid) AS keep_rowid
+          FROM workflow_events
+          WHERE idempotency_key IS NOT NULL
+          GROUP BY idempotency_key
+        ),
+        remap AS (
+          SELECT e.id AS dup_id, k.id AS canon_id
+          FROM workflow_events e
+          JOIN canon c ON c.idempotency_key = e.idempotency_key
+          JOIN workflow_events k ON k.rowid = c.keep_rowid
+          WHERE e.idempotency_key IS NOT NULL AND e.rowid <> c.keep_rowid
+        )
+        UPDATE workflow_events
+        SET causation_event_id = remap.canon_id
+        FROM remap
+        WHERE workflow_events.causation_event_id = remap.dup_id
+      `);
       db.exec(`
         DELETE FROM workflow_events
         WHERE idempotency_key IS NOT NULL

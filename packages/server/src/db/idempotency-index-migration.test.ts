@@ -29,13 +29,17 @@ test("migrate() upgrades a pre-fix non-unique idempotency index that already hol
     "CREATE INDEX idx_workflow_events_idempotency ON workflow_events(idempotency_key) WHERE idempotency_key IS NOT NULL"
   );
   const insert = db.prepare(
-    `INSERT INTO workflow_events (id, issue_id, type, actor_type, stage, idempotency_key, ts)
-     VALUES (?, ?, 'pull_request.updated', 'system', 'developing', ?, ?)`
+    `INSERT INTO workflow_events (id, issue_id, type, actor_type, stage, idempotency_key, causation_event_id, ts)
+     VALUES (?, ?, 'pull_request.updated', 'system', 'developing', ?, ?, ?)`
   );
-  insert.run("e1", issue.id, "dup-key", "2026-01-01T00:00:00.000Z");
-  insert.run("e2", issue.id, "dup-key", "2026-01-01T00:00:01.000Z");
-  insert.run("e3", issue.id, "dup-key", "2026-01-01T00:00:02.000Z");
-  insert.run("e4", issue.id, "other-key", "2026-01-01T00:00:03.000Z");
+  insert.run("e1", issue.id, "dup-key", null, "2026-01-01T00:00:00.000Z");
+  insert.run("e2", issue.id, "dup-key", null, "2026-01-01T00:00:01.000Z");
+  insert.run("e3", issue.id, "dup-key", null, "2026-01-01T00:00:02.000Z");
+  insert.run("e4", issue.id, "other-key", null, "2026-01-01T00:00:03.000Z");
+  // A downstream event whose recorded cause is a duplicate that will be discarded.
+  insert.run("e5", issue.id, "later-key", "e2", "2026-01-01T00:00:04.000Z");
+  // A duplicate row that itself points at another duplicate.
+  insert.run("e6", issue.id, "dup-key", "e3", "2026-01-01T00:00:05.000Z");
 
   assert.doesNotThrow(() => migrate());
 
@@ -47,6 +51,23 @@ test("migrate() upgrades a pre-fix non-unique idempotency index that already hol
   assert.equal(
     (db.prepare("SELECT COUNT(*) c FROM workflow_events WHERE idempotency_key = 'other-key'").get() as { c: number }).c,
     1
+  );
+
+  // Causality is remapped to the canonical event, not left dangling or dropped.
+  assert.equal(
+    (db.prepare("SELECT causation_event_id x FROM workflow_events WHERE id = 'e5'").get() as { x: string }).x,
+    "e1"
+  );
+  // Every causation reference still resolves to a surviving event.
+  assert.equal(
+    (db
+      .prepare(
+        `SELECT COUNT(*) c FROM workflow_events e
+         WHERE e.causation_event_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM workflow_events p WHERE p.id = e.causation_event_id)`
+      )
+      .get() as { c: number }).c,
+    0
   );
 
   // The index is now unique and actually enforced.
