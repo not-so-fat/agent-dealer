@@ -1,10 +1,13 @@
 import type { FastifyInstance } from "fastify";
-import { listOpenHumanActions, resolveHumanAction } from "../repository/human-actions.js";
+import type { HumanAction } from "@agent-dealer/shared";
+import { getDb } from "../db/index.js";
+import { listOpenHumanActions, resolveHumanAction, getHumanAction } from "../repository/human-actions.js";
 import { getIssue, transitionIssue, incrementIssueRound } from "../repository/issues.js";
 import { createWorkerSession } from "../repository/worker-sessions.js";
 import { completeWorkflowInstance, listWorkflowEventsForIssue } from "../repository/workflow-events.js";
-import { resolveHumanActionOutcome, type HumanResolution } from "../coordinator/human-resolution.js";
+import { parseHumanResolution, resolveHumanActionOutcome } from "../coordinator/human-resolution.js";
 import { triggerReflectOnComplete } from "../coordinator/reflect-trigger.js";
+import { resolveProfile } from "../coordinator/session-lifecycle.js";
 import { getAgent } from "../repository/agents.js";
 
 export async function registerHumanActionRoutes(app: FastifyInstance): Promise<void> {
@@ -14,50 +17,60 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
     const { id } = req.params as { id: string };
     const body = req.body as { resolvedBy: string; choice: string };
 
-    // Determine idempotency *before* resolving: resolveHumanAction only throws when the
-    // action id doesn't exist at all — resolving an already-resolved action is a silent
-    // no-op UPDATE that returns the (already resolved) row rather than throwing. So the
-    // only reliable way to detect "this call is the one that actually resolved it" is to
-    // check open-ness first, not to catch an exception that never comes on a double-resolve.
-    const wasOpen = listOpenHumanActions().some((a) => a.id === id);
+    const existing = getHumanAction(id);
+    if (!existing) return reply.status(404).send({ error: "Human action not found" });
 
-    let action;
-    try {
-      action = resolveHumanAction(id, body.resolvedBy, { choice: body.choice });
-    } catch {
-      return reply.status(404).send({ error: "Human action not found" });
+    // Validate the choice against this action type's allowed response options before
+    // touching any state — an unrecognized choice is a 400, never a silent "close".
+    const resolution = parseHumanResolution(existing.actionType, body.choice);
+    if (!resolution) {
+      return reply.status(400).send({ error: `Invalid choice "${body.choice}" for action type "${existing.actionType}"` });
     }
 
+    // Idempotent: resolveHumanAction's UPDATE ... WHERE status='open' is a silent no-op on
+    // an already-resolved action (it re-reads and returns the same resolved row rather than
+    // throwing), so "was this call the one that actually resolved it" must be checked
+    // before resolving, not inferred from an exception that never comes.
+    const wasOpen = existing.status === "open";
     if (!wasOpen) {
-      // Idempotent: already resolved by a prior call. Return its resolved state without
-      // re-applying side effects (transitionIssue would reject a terminal->terminal
-      // self-transition like done->done, and we must not double-increment rounds or
-      // double-fire reflect).
-      return action;
+      return existing;
     }
 
-    const issue = getIssue(action.issueId);
+    const issue = getIssue(existing.issueId);
     if (!issue) return reply.status(404).send({ error: "Issue not found" });
 
-    const resolution = { actionType: action.actionType, choice: body.choice } as HumanResolution;
     const outcome = resolveHumanActionOutcome(resolution);
 
-    transitionIssue(issue.id, outcome.issueStatus, {
-      currentOwner: outcome.issueStatus === "developing" || outcome.issueStatus === "repairing" ? "developer" : "system",
-    });
+    // All the synchronous DB writes — resolving the action, transitioning the issue,
+    // completing the workflow instance, and (if applicable) starting the next round —
+    // commit or roll back together. A failure partway through must not leave a resolved
+    // action with an issue stuck in its pre-resolution state.
+    const action: HumanAction = getDb().transaction(() => {
+      const resolved = resolveHumanAction(id, body.resolvedBy, { choice: body.choice });
 
-    if (outcome.workflowOutcome) {
-      const events = listWorkflowEventsForIssue(issue.id);
-      const instanceId = events.find((e) => e.workflowInstanceId)?.workflowInstanceId;
-      if (instanceId) completeWorkflowInstance(instanceId, outcome.workflowOutcome);
-    }
+      transitionIssue(issue.id, outcome.issueStatus, {
+        currentOwner: outcome.issueStatus === "developing" || outcome.issueStatus === "repairing" ? "developer" : "system",
+      });
 
-    if (outcome.startNewRound) {
-      incrementIssueRound(issue.id);
-      const next = getIssue(issue.id)!;
-      createWorkerSession({ issueId: issue.id, role: "developer", round: next.currentRound, agentId: issue.developerAgentId, runtime: "claude_code" });
-    }
+      if (outcome.workflowOutcome) {
+        const events = listWorkflowEventsForIssue(issue.id);
+        const instanceId = events.find((e) => e.workflowInstanceId)?.workflowInstanceId;
+        if (instanceId) completeWorkflowInstance(instanceId, outcome.workflowOutcome);
+      }
 
+      if (outcome.startNewRound) {
+        incrementIssueRound(issue.id);
+        const next = getIssue(issue.id)!;
+        const developerProfile = resolveProfile(issue.developerAgentId);
+        createWorkerSession({ issueId: issue.id, role: "developer", round: next.currentRound, agentId: issue.developerAgentId, runtime: developerProfile.runtime, model: developerProfile.model });
+      }
+
+      return resolved;
+    })();
+
+    // Reflect is a best-effort network call to Agent Deck — it cannot run inside a
+    // synchronous better-sqlite3 transaction, so it happens after the state above has
+    // already committed. Its own failure does not roll back the resolution.
     if (outcome.triggerReflect) {
       const developerAgent = issue.developerAgentId ? getAgent(issue.developerAgentId) : null;
       await triggerReflectOnComplete(issue.id, developerAgent?.deckId ?? null, developerAgent?.playbookId ?? null);

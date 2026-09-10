@@ -116,6 +116,26 @@ export function runMigration(dbPath: string, opts?: { skipServiceCheck?: boolean
     }
     if (report.mismatches.length > 0) return;
 
+    // Stage migrated artifact copies in a separate table rather than inserting them
+    // straight into "artifacts": that table is renamed to legacy_v0_artifacts at the end
+    // of this transaction (below), and a fresh, EMPTY "artifacts" table gets created the
+    // next time migrate() runs schema.sql — so anything inserted directly into "artifacts"
+    // here would silently vanish from every post-cutover query. Staging + a final rename
+    // keeps the migrated rows in the table the live API actually queries.
+    db.exec(`
+      CREATE TABLE artifacts_migrated (
+        id TEXT PRIMARY KEY,
+        run_id TEXT REFERENCES runs(id),
+        kind TEXT NOT NULL,
+        content_json TEXT,
+        blob_path TEXT,
+        author TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        issue_id TEXT REFERENCES issues(id),
+        worker_session_id TEXT REFERENCES worker_sessions(id)
+      )
+    `);
+
     const groups = groupByLineage(runs);
     let issueSeq = 0;
     let sessionSeq = 0;
@@ -215,11 +235,8 @@ export function runMigration(dbPath: string, opts?: { skipServiceCheck?: boolean
           created_at: string;
         }>;
         for (const a of artifacts) {
-          // run_id stays NOT NULL on the legacy artifacts table until the rename at the end
-          // of this transaction — carry the original run id forward alongside the new
-          // issue_id/worker_session_id links rather than dropping it.
           db.prepare(`
-            INSERT INTO artifacts (id, run_id, issue_id, worker_session_id, kind, content_json, blob_path, author, created_at)
+            INSERT INTO artifacts_migrated (id, run_id, issue_id, worker_session_id, kind, content_json, blob_path, author, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(`${a.id}-migrated`, run.id, issueId, sessionId, a.kind, a.content_json, a.blob_path, a.author, a.created_at);
           report.artifactsRepointed += 1;
@@ -254,6 +271,10 @@ export function runMigration(dbPath: string, opts?: { skipServiceCheck?: boolean
     if (sessionCount !== runs.length) {
       report.mismatches.push(`expected ${runs.length} legacy sessions, found ${sessionCount}`);
     }
+    const stagedArtifactCount = (db.prepare("SELECT COUNT(*) as c FROM artifacts_migrated").get() as { c: number }).c;
+    if (stagedArtifactCount !== report.artifactsRepointed) {
+      report.mismatches.push(`expected ${report.artifactsRepointed} staged migrated artifacts, found ${stagedArtifactCount}`);
+    }
 
     if (report.mismatches.length > 0) {
       throw new Error("migration verification failed — rolling back");
@@ -263,6 +284,23 @@ export function runMigration(dbPath: string, opts?: { skipServiceCheck?: boolean
     // "issues"/"worker_sessions"/etc., while the originals stay inspectable for one release.
     for (const table of ["runs", "artifacts", "events", "approval_gates"]) {
       db.exec(`ALTER TABLE ${table} RENAME TO legacy_v0_${table}`);
+    }
+    // Now that the name "artifacts" is free, promote the staged migrated copies into it —
+    // this is the table listArtifactsForIssue() queries going forward.
+    db.exec(`ALTER TABLE artifacts_migrated RENAME TO artifacts`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id)`);
+
+    // Post-cutover assertion, not just a pre-rename count: query the table exactly the way
+    // the live API does (by issue_id) and confirm every migrated artifact is actually
+    // reachable there, not just present somewhere in the database.
+    const reachableCount = (db.prepare("SELECT COUNT(*) as c FROM artifacts WHERE issue_id IS NOT NULL").get() as {
+      c: number;
+    }).c;
+    if (reachableCount !== report.artifactsRepointed) {
+      report.mismatches.push(
+        `expected ${report.artifactsRepointed} migrated artifacts reachable via the post-cutover "artifacts" table, found ${reachableCount}`
+      );
+      throw new Error("migration verification failed — rolling back");
     }
   });
 
@@ -279,6 +317,32 @@ export function runMigration(dbPath: string, opts?: { skipServiceCheck?: boolean
   return report;
 }
 
+/**
+ * Real liveness check, not a placeholder: the running service is tracked via
+ * `run.json` (packages/cli/src/runtime-state.ts's RunState — a sibling of dealer.db in
+ * the same AGENT_DEALER_HOME directory), not a lock file this codebase never creates.
+ * Mirrors runtime-state.ts#isProcessAlive without importing across the scripts/->cli
+ * package boundary.
+ */
+export function isServiceRunning(dbPath: string): { running: boolean; detail?: string } {
+  const runStatePath = path.join(path.dirname(dbPath), "run.json");
+  if (!fs.existsSync(runStatePath)) return { running: false };
+  let state: { serverPid?: number; port?: number };
+  try {
+    state = JSON.parse(fs.readFileSync(runStatePath, "utf8"));
+  } catch {
+    return { running: false };
+  }
+  const pid = state.serverPid;
+  if (!pid || !Number.isFinite(pid) || pid <= 0) return { running: false };
+  try {
+    process.kill(pid, 0);
+    return { running: true, detail: `serverPid ${pid} (from ${runStatePath})` };
+  } catch {
+    return { running: false };
+  }
+}
+
 async function main(): Promise<void> {
   const dbPath = process.argv[2];
   if (!dbPath) {
@@ -289,9 +353,9 @@ async function main(): Promise<void> {
     console.error(`Database not found: ${dbPath}`);
     process.exit(1);
   }
-  const lockPath = path.join(path.dirname(dbPath), "dealer.lock");
-  if (fs.existsSync(lockPath)) {
-    console.error(`Refusing to migrate while a registered process is active (lock: ${lockPath})`);
+  const liveness = isServiceRunning(dbPath);
+  if (liveness.running) {
+    console.error(`Refusing to migrate while the service is running (${liveness.detail}) — stop it first.`);
     process.exit(1);
   }
   const report = runMigration(dbPath);

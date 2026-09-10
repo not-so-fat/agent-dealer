@@ -49,7 +49,7 @@ function worktreePathFor(issue: Issue, role: "developer" | "reviewer", round: nu
   return path.join(os.tmpdir(), "agent-dealer-worktrees", issue.id, `${role}-r${round}`);
 }
 
-interface ResolvedProfile {
+export interface ResolvedProfile {
   runtime: Runtime;
   model: string | null;
   deckId: string | null;
@@ -59,9 +59,11 @@ interface ResolvedProfile {
 /**
  * Resolves the selected agent profile's effective runtime/model/deck at session-creation
  * time so the recorded worker_session snapshots it (later profile edits don't rewrite
- * history). Falls back to claude_code only when no profile is set at all.
+ * history). Falls back to claude_code only when no profile is set at all. Exported so
+ * other call sites that create worker_sessions (e.g. the human-action resolve route's
+ * repair-round restart) resolve the real profile instead of re-hardcoding a runtime.
  */
-function resolveProfile(agentId: string | null): ResolvedProfile {
+export function resolveProfile(agentId: string | null): ResolvedProfile {
   const agent = agentId ? getAgent(agentId) : null;
   return {
     runtime: agent?.runtime ?? "claude_code",

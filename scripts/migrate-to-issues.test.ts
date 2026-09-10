@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { runMigration } from "./migrate-to-issues.js";
+import { runMigration, isServiceRunning } from "./migrate-to-issues.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const legacySchemaPath = path.join(__dirname, "..", "packages", "server", "src", "db", "schema.sql");
@@ -86,6 +86,16 @@ test("creates one issue per lineage, preserves artifacts/events, and renames leg
   }>;
   assert.ok(legacySessions.some((s) => s.status === "done"));
   assert.ok(legacySessions.some((s) => s.status === "cancelled"));
+
+  // Reviewer finding #4: migrated artifacts must be reachable via the exact query the live
+  // API uses (listArtifactsForIssue queries "artifacts" by issue_id) — not just "somewhere
+  // in the database" post-rename. Also confirm the staging table doesn't linger.
+  assert.equal(names.includes("artifacts"), true);
+  assert.equal(names.includes("artifacts_migrated"), false);
+  const doneIssue = db.prepare("SELECT id FROM issues WHERE status = 'done'").get() as { id: string };
+  const reachable = db.prepare("SELECT kind FROM artifacts WHERE issue_id = ?").all(doneIssue.id) as Array<{ kind: string }>;
+  assert.equal(reachable.length, 1);
+  assert.equal(reachable[0].kind, "execution_result");
   db.close();
 });
 
@@ -109,4 +119,35 @@ test("rolls back and leaves the original tables untouched when a lineage_id poin
   }>;
   assert.ok(tables.map((t) => t.name).includes("runs")); // untouched — rollback happened
   after.close();
+});
+
+// Data-safety follow-up from the PR review: the stopped-service guard previously checked a
+// "dealer.lock" file this codebase never creates, so it never actually guarded anything.
+// isServiceRunning() replaces it with a real check against run.json (mirroring
+// packages/cli/src/runtime-state.ts's RunState + isProcessAlive).
+test("isServiceRunning: no run.json means not running", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-liveness-"));
+  const dbPath = path.join(dir, "dealer.db");
+  fs.writeFileSync(dbPath, "");
+  assert.equal(isServiceRunning(dbPath).running, false);
+});
+
+test("isServiceRunning: run.json with a dead pid means not running", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-liveness-"));
+  const dbPath = path.join(dir, "dealer.db");
+  fs.writeFileSync(dbPath, "");
+  // PID 999999 is picked to be implausibly alive on any normal dev/CI machine.
+  fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify({ serverPid: 999999, port: 2221 }));
+  assert.equal(isServiceRunning(dbPath).running, false);
+});
+
+test("isServiceRunning: run.json with a live pid means running", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-liveness-"));
+  const dbPath = path.join(dir, "dealer.db");
+  fs.writeFileSync(dbPath, "");
+  // This test process's own pid is guaranteed alive for the duration of the assertion.
+  fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify({ serverPid: process.pid, port: 2221 }));
+  const result = isServiceRunning(dbPath);
+  assert.equal(result.running, true);
+  assert.ok(result.detail?.includes(String(process.pid)));
 });

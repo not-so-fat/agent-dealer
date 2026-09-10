@@ -70,3 +70,22 @@ test("resolving final_review as repair sends the issue back to repairing", async
   assert.equal(getIssue(issue.id)?.status, "repairing");
   await app.close();
 });
+
+// Reviewer finding #8: an invalid choice must be rejected (400), not silently treated as "close".
+test("resolving with a choice not valid for this action type returns 400 and leaves the action open", async () => {
+  const app = await buildApp();
+  const { issue, action } = seedIssueAwaitingFinalReview();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "bogus" } });
+  assert.equal(res.statusCode, 400);
+  assert.equal(getIssue(issue.id)?.status, "final_review"); // untouched
+  const stillOpen = await app.inject({ method: "GET", url: "/api/human-actions" });
+  assert.ok((stillOpen.json() as Array<{ id: string }>).some((a) => a.id === action.id));
+  await app.close();
+});
+
+test("resolving an unknown action id returns 404", async () => {
+  const app = await buildApp();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/does-not-exist/resolve`, payload: { resolvedBy: "yusuke", choice: "complete" } });
+  assert.equal(res.statusCode, 404);
+  await app.close();
+});

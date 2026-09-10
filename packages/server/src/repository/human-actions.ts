@@ -101,6 +101,11 @@ export function resolveHumanAction(id: string, resolvedBy: string, resolution: u
   return rowToAction(row);
 }
 
+export function getHumanAction(id: string): HumanAction | null {
+  const row = getDb().prepare("SELECT * FROM human_actions WHERE id = ?").get(id) as HumanActionRow | undefined;
+  return row ? rowToAction(row) : null;
+}
+
 export function listOpenHumanActions(): HumanAction[] {
   const rows = getDb()
     .prepare("SELECT * FROM human_actions WHERE status = 'open' ORDER BY requested_at ASC")

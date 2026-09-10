@@ -1,6 +1,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveHumanActionOutcome } from "./human-resolution.js";
+import { resolveHumanActionOutcome, parseHumanResolution } from "./human-resolution.js";
+
+// Reviewer finding #8: an unrecognized choice must be rejected, not silently treated as "close".
+test("parseHumanResolution rejects a choice not in that action type's allowed set", () => {
+  assert.equal(parseHumanResolution("final_review", "bogus"), null);
+  assert.equal(parseHumanResolution("attempts_exhausted", "complete"), null); // valid for final_review, not this type
+});
+
+test("parseHumanResolution rejects an unknown action type", () => {
+  assert.equal(parseHumanResolution("not_a_real_action_type", "complete"), null);
+});
+
+test("parseHumanResolution accepts a valid (actionType, choice) pair", () => {
+  assert.deepStrictEqual(parseHumanResolution("final_review", "repair"), { actionType: "final_review", choice: "repair" });
+});
+
+test("resolveHumanActionOutcome throws rather than silently closing on an invalid choice reaching it directly", () => {
+  assert.throws(() => resolveHumanActionOutcome({ actionType: "final_review", choice: "bogus" } as never), /Unrecognized final_review choice/);
+});
 
 test("final_review complete marks the issue done and triggers reflect", () => {
   const result = resolveHumanActionOutcome({ actionType: "final_review", choice: "complete" });
