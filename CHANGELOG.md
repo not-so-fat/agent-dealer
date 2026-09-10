@@ -2,11 +2,13 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
-## Unreleased
+## 0.3.0 — 2026-09-09
 
 ### Runtimes
 
 - **`codex_local`** — first-class local Codex CLI runtime (`codex exec --json`): phase sandboxes, JSONL→artifact mapping, QA allowlist, health/models/UI, and Claude-parity session resume on feedback execute / QA
+- **Model picker** — Codex models from `~/.codex/models_cache.json` (`visibility=list` only), with `gpt-5.6-sol` / `terra` / `luna` fallback
+- **Health** — `codex login status` for auth; remediation points at `OPENAI_API_KEY`
 
 ## 0.2.0 — 2026-07-30
 
