@@ -1548,7 +1548,7 @@ git commit -m "Add coordinator session-lifecycle orchestrator (NOT-57)"
 
 **Interfaces:**
 - Consumes: `listIssues` (`../repository/issues.js`); `listWorkerSessionsForIssue`, `completeSession` (`../repository/worker-sessions.js`); `advanceIssue` (`./session-lifecycle.js`); `isWorktreeClean`, `removeWorktree`, `pruneWorktrees` (`../adapters/git-worktree.js`)
-- Produces: `async function pollAndDispatch(deps?: CoordinatorDeps): Promise<void>` — advances every issue with a queued session; `function reconcileStaleSessions(staleThresholdMs: number): { reconciled: string[] }` — marks stuck `running` sessions failed and re-routes them; `async function recoverWorktree(session: WorkerSession, deps?: CoordinatorDeps): Promise<"removed" | "escalated">`
+- Produces: `async function pollAndDispatch(deps?: CoordinatorDeps): Promise<void>` — advances every issue with a queued session; `function reconcileStaleSessions(staleThresholdMs: number): { reconciled: string[] }` — marks stuck `running` sessions failed and re-routes them; `async function recoverWorktree(session: WorkerSession, issueId: string): Promise<"removed" | "escalated" | "missing">` (takes the owning issue's id directly rather than a full deps object, and distinguishes an already-gone worktree path from one that was actually removed or escalated)
 
 - [ ] **Step 1: Write the failing test**
 
