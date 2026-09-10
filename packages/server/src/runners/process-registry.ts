@@ -26,6 +26,22 @@ export function releaseSpawnSlot(): void {
   if (next) next();
 }
 
+// Per-repository serialization for `git worktree add/remove/prune`. Two coordinator
+// sessions on the same repo must never touch that repo's `.git` worktree metadata
+// concurrently (design §"Worktree lifecycle and concurrency"). Keyed by repo path;
+// a rejected task still releases the lock for the next waiter.
+const repoLocks = new Map<string, Promise<unknown>>();
+
+export function withRepoLock<T>(repo: string, fn: () => Promise<T>): Promise<T> {
+  const prior = repoLocks.get(repo) ?? Promise.resolve();
+  const next = prior.then(fn, fn);
+  repoLocks.set(
+    repo,
+    next.catch(() => undefined)
+  );
+  return next;
+}
+
 export function registerChild(runId: string, child: ChildProcess, logPath?: string): void {
   activeChildren.set(runId, child);
   if (logPath) activeLogPaths.set(runId, logPath);

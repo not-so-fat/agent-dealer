@@ -10,6 +10,7 @@
 // server — index.ts integration lands with NOT-60.
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
+import { getAgent } from "../repository/agents.js";
 import { getIssue } from "../repository/issues.js";
 import {
   getWorkflowInstance,
@@ -35,6 +36,7 @@ import {
 } from "../repository/work-items.js";
 import { applyCompletion, routeAppliedOutcome } from "./commands.js";
 import { getEffectHandler } from "./effect-registry.js";
+import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
@@ -134,6 +136,15 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     inputSha = null;
   }
 
+  // Freeze the selected profile into an immutable execution contract for this session.
+  // Resolved here, once, so a later edit to the agent profile never rewrites a queued or
+  // running session (design §"Immutable execution-profile snapshot"). The effect handler
+  // (placeholder until NOT-61/62) reads this snapshot rather than the live profile.
+  const role = roleFor[claimed.kind];
+  const agentId = claimed.kind === "developer" ? issue.developerAgentId : issue.reviewerAgentId;
+  const agent = agentId ? getAgent(agentId) : null;
+  const snapshot = agent ? buildProfileSnapshot(agent, role) : null;
+
   // Create + bind + start the session and emit worker.started atomically, so a crash never
   // leaves a running session that recovery (which keys off work_items) cannot locate. The
   // bind is fenced on the lease token: if this attempt lost its lease between claim and
@@ -143,12 +154,15 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     session = getDb().transaction(() => {
       const s = createWorkerSession({
         issueId: claimed.issueId,
-        role: roleFor[claimed.kind],
+        role,
         round: claimed.round,
-        agentId: claimed.kind === "developer" ? issue.developerAgentId : issue.reviewerAgentId,
-        runtime: null,
+        agentId,
+        runtime: snapshot?.runtime ?? null,
+        model: snapshot?.model ?? null,
+        budgetJson: snapshot?.budgetJson ?? null,
         inputSha,
         metadataJson: JSON.stringify({ workItemId: claimed.id }),
+        profileSnapshotJson: snapshot ? serializeProfileSnapshot(snapshot) : null,
       });
       if (!bindWorkItemSession(claimed.id, s.id, leaseToken)) {
         throw new Error("lease lost before session setup");

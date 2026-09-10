@@ -73,9 +73,33 @@ export function migrate(): void {
     db.exec("ALTER TABLE runs ADD COLUMN execute_model TEXT");
   }
 
-  // NOT-58: the role-neutral agent-profile columns (default_model, default_budget_json,
-  // purpose, playbook_ids_json, external_memory_refs_json, permission_policy_json) are added
-  // by NOT-60 together with the resolve/snapshot code and the agent-form UI that write them.
+  // NOT-60: role-neutral agent-profile columns + the frozen per-session execution
+  // snapshot. Additive ALTERs (SQLite has no ADD COLUMN IF NOT EXISTS), guarded by a
+  // PRAGMA check so re-running migrate() is a no-op.
+  const agentCols4 = db.prepare("PRAGMA table_info(agents)").all() as Array<{ name: string }>;
+  if (!agentCols4.some((c) => c.name === "default_model")) {
+    db.exec("ALTER TABLE agents ADD COLUMN default_model TEXT");
+    db.exec("ALTER TABLE agents ADD COLUMN default_budget_json TEXT");
+    db.exec("ALTER TABLE agents ADD COLUMN purpose TEXT");
+    db.exec("ALTER TABLE agents ADD COLUMN playbook_ids_json TEXT");
+    db.exec("ALTER TABLE agents ADD COLUMN external_memory_refs_json TEXT");
+    db.exec("ALTER TABLE agents ADD COLUMN permission_policy_json TEXT");
+    // Backfill the role-neutral defaults from the legacy phase columns — execute first,
+    // then plan (design §`agents`). The old columns stay legacy-readable for one release.
+    db.exec(`
+      UPDATE agents SET
+        default_model = COALESCE(default_execute_model, default_plan_model),
+        default_budget_json = COALESCE(default_execute_budget_json, default_plan_budget_json)
+      WHERE default_model IS NULL AND default_budget_json IS NULL
+    `);
+  }
+
+  const workerSessionCols = db.prepare("PRAGMA table_info(worker_sessions)").all() as Array<{
+    name: string;
+  }>;
+  if (!workerSessionCols.some((c) => c.name === "profile_snapshot_json")) {
+    db.exec("ALTER TABLE worker_sessions ADD COLUMN profile_snapshot_json TEXT");
+  }
 
   // Tighten the workflow-event idempotency index to UNIQUE for DBs created before the
   // constraint (schema.sql's IF NOT EXISTS won't upgrade an existing non-unique index).

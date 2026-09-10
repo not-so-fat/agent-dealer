@@ -13,6 +13,12 @@ export type AgentConfigValue = {
   defaultExecuteModel: string;
   defaultPlanBudget: BudgetFormValue;
   defaultExecuteBudget: BudgetFormValue;
+  // Issue-centric (developer/reviewer) session defaults — snapshotted per session.
+  purpose: string;
+  defaultModel: string;
+  defaultBudget: BudgetFormValue;
+  playbookIds: string[];
+  externalMemoryRefs: string;
 };
 
 type Deck = { id: string; name: string };
@@ -120,8 +126,109 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
       {!value.deckId && value.runtime && (
         <p className="text-xs text-white/45">Degraded mode: no deck MCP. Audit trail still captured.</p>
       )}
+
+      <div className="pt-2 mt-2 border-t border-white/10 space-y-2">
+        <div className="text-xs uppercase tracking-wide text-white/40">
+          Issue-centric session defaults
+        </div>
+        <label className="block space-y-1">
+          <span className="text-xs text-[#A8C4C0] uppercase">Purpose (optional)</span>
+          <input
+            className="field text-sm"
+            placeholder="e.g. backend refactors on the payments service"
+            disabled={disabled}
+            value={value.purpose}
+            onChange={(e) => set({ purpose: e.target.value })}
+          />
+        </label>
+        <div className="grid grid-cols-3 gap-2">
+          <label className="col-span-1 space-y-1">
+            <span className="text-xs text-[#A8C4C0] uppercase">Default model</span>
+            <input
+              className="field text-sm"
+              placeholder="runtime default"
+              disabled={disabled}
+              value={value.defaultModel}
+              onChange={(e) => set({ defaultModel: e.target.value })}
+            />
+          </label>
+          <label className="col-span-1 space-y-1">
+            <span className="text-xs text-[#A8C4C0] uppercase">Max turns</span>
+            <input
+              className="field text-sm"
+              type="number"
+              min={1}
+              placeholder="none"
+              disabled={disabled}
+              value={value.defaultBudget.maxTurns}
+              onChange={(e) =>
+                set({ defaultBudget: { ...value.defaultBudget, maxTurns: e.target.value } })
+              }
+            />
+          </label>
+          <label className="col-span-1 space-y-1">
+            <span className="text-xs text-[#A8C4C0] uppercase">Max $ / session</span>
+            <input
+              className="field text-sm"
+              type="number"
+              min={0}
+              step="0.1"
+              placeholder="none"
+              disabled={disabled}
+              value={value.defaultBudget.maxBudgetUsd}
+              onChange={(e) =>
+                set({ defaultBudget: { ...value.defaultBudget, maxBudgetUsd: e.target.value } })
+              }
+            />
+          </label>
+        </div>
+        {value.deckId && playbooks.length > 0 && (
+          <label className="block space-y-1">
+            <span className="text-xs text-[#A8C4C0] uppercase">Playbooks (multi-select)</span>
+            <select
+              className="field text-sm"
+              multiple
+              size={Math.min(4, Math.max(2, playbooks.length))}
+              disabled={disabled}
+              value={value.playbookIds}
+              onChange={(e) =>
+                set({
+                  playbookIds: Array.from(e.target.selectedOptions, (o) => o.value),
+                })
+              }
+            >
+              {playbooks.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.title}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label className="block space-y-1">
+          <span className="text-xs text-[#A8C4C0] uppercase">
+            External memory refs (one per line)
+          </span>
+          <textarea
+            className="field text-sm font-mono"
+            rows={2}
+            placeholder={"vault://decisions/payments\nhttps://docs.internal/runbook"}
+            disabled={disabled}
+            value={value.externalMemoryRefs}
+            onChange={(e) => set({ externalMemoryRefs: e.target.value })}
+          />
+        </label>
+      </div>
     </div>
   );
+}
+
+/** Split a newline/comma separated textarea into a trimmed, non-empty list. */
+export function parseRefList(raw: string): string[] {
+  return raw
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 export function agentConfigured(run: { runtime: string | null }): boolean {
