@@ -1015,6 +1015,18 @@ git add packages/server/src/db/schema.sql packages/server/src/db/index.ts packag
 git commit -m "Add issue-centric tables and role-neutral agent columns (NOT-57)"
 ```
 
+**Amendment (found during Task 10 execution, fixed in a follow-up commit):** this task as originally written omitted the additive `artifacts.issue_id`/`artifacts.worker_session_id` columns that the spec's "artifacts" data-model section calls for, and that Task 10's migration script requires to repoint legacy artifacts. The fix follows the exact same `PRAGMA table_info` idempotent-`ALTER` pattern as the other columns in this task, added to `migrate()` right after the `agentCols4` block and before `seedBuiltinAgents(db)`:
+
+```typescript
+const artifactCols = db.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>;
+if (!artifactCols.some((c) => c.name === "issue_id")) {
+  db.exec("ALTER TABLE artifacts ADD COLUMN issue_id TEXT REFERENCES issues(id)");
+  db.exec("ALTER TABLE artifacts ADD COLUMN worker_session_id TEXT REFERENCES worker_sessions(id)");
+}
+```
+
+If executing this plan fresh (rather than resuming from this session's history), fold this block into Task 5 Step 4 directly instead of applying it as a separate follow-up commit.
+
 ---
 
 ### Task 6: Repository — `issues.ts`
