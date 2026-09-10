@@ -884,7 +884,7 @@ function routeVerdict(result: ReviewerResult, limits: RoundLimits): ReviewerRout
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx tsx --test packages/server/src/coordinator/routing.test.ts`
-Expected: PASS (14 tests)
+Expected: PASS (13 tests)
 
 - [ ] **Step 5: Run the full server test suite, then commit**
 
