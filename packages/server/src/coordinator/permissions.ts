@@ -64,9 +64,11 @@ export function assertReviewerReadOnly(args: string[]): void {
     if (flagValue(args, "-s") !== "read-only") {
       throw new Error("reviewer codex args are not constrained to a read-only sandbox");
     }
-    // codex's read-only sandbox does not gate configured MCP/plugin calls.
-    if (!args.some((a, i) => a === "-c" && args[i + 1] === "mcp_servers={}")) {
-      throw new Error("reviewer codex args do not disable configured MCP servers");
+    // codex's read-only sandbox does not gate configured MCP/plugin calls, and merging a
+    // `-c mcp_servers={}` override does not clear them (verified against the installed
+    // CLI) — only skipping config.toml entirely does.
+    if (!args.includes("--ignore-user-config")) {
+      throw new Error("reviewer codex args do not isolate configured MCP servers");
     }
   }
 

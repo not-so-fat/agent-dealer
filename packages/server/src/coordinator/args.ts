@@ -10,7 +10,19 @@ import { roleCeiling } from "@agent-dealer/shared";
 const DECK_READ_TOOLS =
   "mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace,mcp__agent-deck__list_service_tools";
 const DENY_SEND_TOOL = "mcp__agent-deck__call_service_tool";
-/** Bash command prefixes denied when a policy pins the corresponding capability off. */
+/**
+ * Bash command-prefix denials for claude_code, kept as defense-in-depth only. A prefix
+ * denylist is bypassable by construction (`git -C . push`, an absolute path, `command
+ * git push`, a shell alias, `curl`/`gh api` against the same endpoint) and provides no
+ * coverage at all for codex_local/cursor_local, which have no per-command gate. The
+ * load-bearing, runtime-agnostic control for `push` is the git-level worktree
+ * `pushurl` block in `adapters/git-worktree.ts` (`createRoleWorktree({ pushBlocked })`),
+ * which `git` itself enforces however push is invoked. `openPr` (`gh pr create`) has no
+ * equivalent non-bypassable control yet — real enforcement needs push/PR-creation to move
+ * to a credentialed call the worker never makes itself (the coordinator already owns
+ * "the only component that publishes"), which is developer→PR handoff scope (NOT-61+),
+ * not this ticket's execution-environment primitives.
+ */
 const DENY_PUSH = ["Bash(git push:*)"];
 const DENY_OPEN_PR = ["Bash(gh pr create:*)", "Bash(gh pr edit:*)", "Bash(gh pr ready:*)"];
 
@@ -43,11 +55,15 @@ function buildArgs(
   if (runtime === "codex_local") {
     const args = ["exec", "--json", "-s", policy.worktreeWrite ? "workspace-write" : "read-only"];
     // codex's read-only sandbox constrains shell/files but NOT configured MCP/plugin
-    // calls, and it loads the user config — so `call_service_tool` (and any other
-    // configured server) stays reachable for a reviewer. codex has no per-tool gate, so
-    // for a read-only session we pin the whole MCP table empty. (A codex *developer*
-    // keeps MCP for deck reads; a finer per-tool gate is a NOT-61+ refinement.)
-    if (!policy.worktreeWrite) args.push("-c", "mcp_servers={}");
+    // calls, and `-c mcp_servers={}` does NOT clear the loaded table — codex merges CLI
+    // overrides into `~/.codex/config.toml` rather than replacing it, so
+    // `call_service_tool` (and every other configured server) stays reachable for a
+    // reviewer; confirmed directly against the installed CLI (`codex mcp list` shows
+    // `agent-deck` enabled with or without that override). `--ignore-user-config` instead
+    // skips loading `$CODEX_HOME/config.toml` — where `mcp_servers` is defined — entirely,
+    // so a read-only session genuinely has none configured. (A codex *developer* keeps
+    // MCP for deck reads; a finer per-tool gate is a NOT-61+ refinement.)
+    if (!policy.worktreeWrite) args.push("--ignore-user-config");
     if (model) args.push("-m", model);
     args.push(prompt);
     return args;

@@ -84,10 +84,14 @@ test("push / open-PR flags gate the corresponding Bash commands for a claude dev
   assert.ok(args[args.indexOf("--allowedTools") + 1].split(",").includes("Bash"));
 });
 
-test("a codex reviewer invocation disables configured MCP servers", () => {
+test("a codex reviewer invocation isolates configured MCP servers via --ignore-user-config", () => {
+  // `-c mcp_servers={}` is a no-op (codex merges overrides into config.toml rather than
+  // replacing it — verified against the installed CLI); --ignore-user-config skips
+  // config.toml, where mcp_servers is defined, entirely.
   const args = buildReviewerArgs("codex_local", "review");
-  assert.ok(args.some((a, i) => a === "-c" && args[i + 1] === "mcp_servers={}"));
+  assert.ok(args.includes("--ignore-user-config"));
+  assert.ok(!args.includes("-c"), "no longer relies on the disproven -c mcp_servers={} override");
   // a codex developer keeps MCP (deck reads)
   const dev = buildDeveloperArgs("codex_local", "impl");
-  assert.ok(!dev.some((a, i) => a === "-c" && dev[i + 1] === "mcp_servers={}"));
+  assert.ok(!dev.includes("--ignore-user-config"));
 });

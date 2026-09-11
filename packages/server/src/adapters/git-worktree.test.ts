@@ -18,6 +18,7 @@ const {
 } = await import("./git-worktree.js");
 
 let repo: string;
+let remote: string;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -32,11 +33,19 @@ before(() => {
   git(repo, "add", ".");
   git(repo, "commit", "-m", "init");
   git(repo, "branch", "issue-1");
+
+  // A real `origin` so push-block tests exercise the pushurl override, not just a
+  // missing-remote error, while fetch/read stays meaningful.
+  remote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-remote-"));
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", remote]);
+  git(repo, "remote", "add", "origin", remote);
+  git(repo, "push", "-q", "origin", "main", "issue-1");
 });
 
 after(() => {
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(repo, { recursive: true, force: true });
+  fs.rmSync(remote, { recursive: true, force: true });
 });
 
 test("createRoleWorktree gives the developer a branch checkout and the reviewer a detached one", async () => {
@@ -103,6 +112,40 @@ test("withRepoLock serializes concurrent worktree operations on one repo", async
   });
   await Promise.all([slow, fast]);
   assert.deepEqual(order, ["a:start", "a:end", "b:start", "b:end"]);
+});
+
+test("createRoleWorktree with pushBlocked denies git push however it's invoked, without touching the original checkout", async () => {
+  const dev = await createRoleWorktree({
+    repo,
+    role: "developer",
+    sessionId: "s-dev-pushblock",
+    ref: "issue-1",
+    pushBlocked: true,
+  });
+  try {
+    assert.equal(dev.pushBlocked, true);
+
+    // Ordinary invocation
+    assert.throws(() => git(dev.path, "push", "origin", "HEAD:refs/heads/issue-1"));
+    // Invocation forms an argv denylist would miss: -C, absolute git, a shell wrapper.
+    assert.throws(() => execFileSync("git", ["-C", dev.path, "push", "origin", "HEAD"]));
+    const gitBin = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    assert.throws(() => execFileSync(gitBin, ["push", "origin", "HEAD"], { cwd: dev.path }));
+
+    // Read operations are unaffected.
+    assert.doesNotThrow(() => git(dev.path, "fetch", "origin"));
+    // The block is scoped to this worktree — the original checkout's own pushurl is untouched.
+    assert.equal(git(repo, "remote", "get-url", "--push", "origin"), remote);
+  } finally {
+    fs.rmSync(dev.path, { recursive: true, force: true });
+    await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  }
+});
+
+test("reviewer worktrees are always push-blocked regardless of the pushBlocked argument", async () => {
+  const rev = await createRoleWorktree({ repo, role: "reviewer", sessionId: "s-rev-pushblock", ref: "HEAD" });
+  assert.equal(rev.pushBlocked, true);
+  await safeRemoveWorktree({ repo, path: rev.path, role: "reviewer" });
 });
 
 test("inspectLeftoverWorktree classifies missing / clean / dirty", async () => {

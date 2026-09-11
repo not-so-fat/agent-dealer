@@ -77,12 +77,32 @@ export interface RoleWorktree {
   role: WorkerSessionRole;
   ref: string;
   detached: boolean;
+  pushBlocked: boolean;
+}
+
+/** RFC 2606 reserved TLD — guaranteed never to resolve, so a blocked push fails safely. */
+const BLOCKED_PUSH_URL = "https://push-blocked.invalid/policy-denied.git";
+
+/**
+ * Deny `git push` for one worktree at the git-config level, scoped to that worktree only
+ * (requires `extensions.worktreeConfig`). Unlike a CLI-argv deny pattern this is enforced
+ * by `git` itself however push is invoked — an absolute path, `git -C`, a shell alias, or
+ * a wrapper command all resolve the same `remote.origin.pushurl` — and it applies the same
+ * way regardless of which runtime (claude/codex/cursor) is driving the session, so it is
+ * the load-bearing control for a profile's `push` capability (§NOT-60 PR review round 2).
+ * Fetch/pull and the original checkout are unaffected.
+ */
+async function blockPush(repo: string, worktreePath: string): Promise<void> {
+  await git(repo, ["config", "extensions.worktreeConfig", "true"]);
+  await git(worktreePath, ["config", "--worktree", "remote.origin.pushurl", BLOCKED_PUSH_URL]);
 }
 
 /**
  * Create the checkout for one worker session. Developer = branch checkout the session
  * can commit/push; reviewer = detached HEAD at the exact SHA it must not mutate.
- * Serialized per repo.
+ * Serialized per repo. `pushBlocked` denies `git push` from this worktree regardless of
+ * runtime or invocation form (see `blockPush`) — pass `!policy.push` when wiring a real
+ * session (NOT-61/62).
  */
 export async function createRoleWorktree(opts: {
   repo: string;
@@ -90,14 +110,18 @@ export async function createRoleWorktree(opts: {
   sessionId: string;
   /** Branch name for a developer worktree, exact SHA for a reviewer worktree. */
   ref: string;
+  pushBlocked?: boolean;
 }): Promise<RoleWorktree> {
   const detached = opts.role === "reviewer";
+  // A reviewer never pushes regardless of policy (ADR 0003 role ceiling).
+  const pushBlocked = detached || opts.pushBlocked === true;
   const worktreePath = roleWorktreePath(opts.sessionId, opts.role);
   await withRepoLock(opts.repo, async () => {
     await pruneWorktrees(opts.repo);
     await addWorktree({ repo: opts.repo, path: worktreePath, ref: opts.ref, detach: detached });
+    if (pushBlocked) await blockPush(opts.repo, worktreePath);
   });
-  return { path: worktreePath, role: opts.role, ref: opts.ref, detached };
+  return { path: worktreePath, role: opts.role, ref: opts.ref, detached, pushBlocked };
 }
 
 export type WorktreeRemoval =
