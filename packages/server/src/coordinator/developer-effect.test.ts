@@ -469,6 +469,15 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
     }).id;
 
     const isoCommittingSpawn: SpawnFn = async (input) => {
+      // Build the feature commit ON TOP of the advanced origin/main (B), not the stale
+      // local main (A) the worktree was cut from — a review round found the original
+      // version of this test built H directly off A, so merge-base(A, H) and
+      // merge-base(B, H) were BOTH A and the test couldn't actually distinguish the
+      // fetched-base fix from the pre-fix stale-local-base bug (mutation-tested: reverting
+      // fetchRef still passed it). With H containing B as an ancestor, the two bases
+      // genuinely differ, so this only stays green under the real fetch.
+      git(input.cwd, "fetch", "-q", "origin", "main");
+      git(input.cwd, "merge", "-q", "--ff-only", "origin/main");
       fs.writeFileSync(path.join(input.cwd, "feature.txt"), "implemented\n");
       git(input.cwd, "add", ".");
       git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "implement");
@@ -499,12 +508,16 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
 
     const issue = getIssue(issueId)!;
     assert.equal(issue.status, "reviewing");
-    // The developer's own branch was cut from the stale local main, so the true merge-base
-    // is the ORIGINAL commit both share — proves fetchRef ran (origin/main now includes
-    // "upstream change") without that unrelated commit corrupting the computed base.
-    const expectedBase = git(isoRepo, "merge-base", "origin/main", issue.headSha!);
-    assert.equal(issue.baseSha, expectedBase);
-    assert.notEqual(issue.baseSha, currentOriginMainSha, "sanity: the base is the shared ancestor, not the tip of the advanced origin/main");
+    // H contains B (the advanced origin/main) as a direct ancestor, so its true base is B
+    // itself — this is exactly what fetchRef existing to be tested: without it, mergeBase
+    // would run against the stale local "main" (still at A) and return A instead.
+    assert.equal(issue.baseSha, currentOriginMainSha, "baseSha must be the fetched origin/main tip");
+    const staleLocalBase = git(isoRepo, "merge-base", "main", issue.headSha!);
+    assert.notEqual(
+      currentOriginMainSha,
+      staleLocalBase,
+      "sanity: the fetched and stale-local bases must actually differ, or this test can't tell them apart"
+    );
   } finally {
     fs.rmSync(isoRepo, { recursive: true, force: true });
     fs.rmSync(isoRemote, { recursive: true, force: true });
