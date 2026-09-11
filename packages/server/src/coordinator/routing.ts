@@ -2,9 +2,16 @@
 import type { ReviewerResult } from "./reviewer-result.js";
 
 export type DeveloperOutcome =
-  | { kind: "clean_handoff"; headSha: string; baseSha: string; prNumber: number; prUrl: string }
+  | { kind: "clean_handoff"; branch: string; headSha: string; baseSha: string; prNumber: number; prUrl: string }
   | { kind: "no_pr" }
   | { kind: "dirty_worktree" }
+  /** Local commits exist but the coordinator's own push was rejected (e.g. non-fast-forward). */
+  | { kind: "unpushed_commit"; reason: string }
+  | { kind: "checks_failed"; details?: string }
+  /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll. */
+  | { kind: "timed_out" }
+  /** git/gh tooling itself errored during verification — not the agent's fault. */
+  | { kind: "adapter_failure"; reason: string }
   | { kind: "session_failed" };
 
 export type ReviewerOutcome =
@@ -33,12 +40,21 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RoundLi
       return { next: "spawn_reviewer" };
     case "dirty_worktree":
       // Never spends a round — an unclean handoff is preserved for inspection, not retried blindly.
-      return { next: "human_action", actionType: "policy_escalation", reason: "Developer worktree has uncommitted or unpushed changes after the session ended." };
+      return { next: "human_action", actionType: "policy_escalation", reason: "Developer worktree has uncommitted changes after the session ended." };
+    case "unpushed_commit":
+      // Same bucket as dirty_worktree: local work exists that must not be silently discarded
+      // or force-retried — a human decides how to resolve the rejected push.
+      return { next: "human_action", actionType: "policy_escalation", reason: `Developer's commits could not be pushed: ${outcome.reason}` };
+    case "adapter_failure":
+      // Infrastructure/tooling failure, not a code problem — same bucket as reviewer publish_failed.
+      return { next: "human_action", actionType: "policy_escalation", reason: `Git/GitHub verification failed: ${outcome.reason}` };
     case "no_pr":
     case "session_failed":
+    case "timed_out":
+    case "checks_failed":
       return roundsRemain(limits)
         ? { next: "retry_developer" }
-        : { next: "human_action", actionType: "attempts_exhausted", reason: "Developer session failed or produced no PR, and the review-round limit is reached." };
+        : { next: "human_action", actionType: "attempts_exhausted", reason: "Developer session failed, timed out, produced no PR, or its checks failed, and the review-round limit is reached." };
   }
 }
 

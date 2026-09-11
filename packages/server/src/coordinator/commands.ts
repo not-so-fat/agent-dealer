@@ -34,6 +34,7 @@ import {
 } from "../repository/human-actions.js";
 import { reconcileFinding } from "../repository/findings.js";
 import { getAgent } from "../repository/agents.js";
+import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import {
   enqueueWorkItem,
   finishWorkItem,
@@ -52,6 +53,59 @@ import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } fro
 import { parseHumanResolution, resolveHumanActionOutcome } from "./human-resolution.js";
 
 export const WORKFLOW_VERSION = "dev_reviewer_v1";
+
+/**
+ * The frozen issue-level snapshot design §"Prepare task snapshot" requires: written once,
+ * at workflow start, so a later edit to the issue (were an edit route to ever exist) can
+ * never change what a queued or running session sees. Persisted as an artifact — the
+ * developer prompt builder (NOT-61) reads this instead of live issue fields.
+ */
+export const TASK_SNAPSHOT_ARTIFACT_KIND = "task_snapshot";
+
+export interface TaskSnapshotContent {
+  title: string;
+  description: string;
+  acceptanceCriteria: string;
+  repo: string;
+  baseBranch: string;
+  workflowVersion: string;
+}
+
+/** Reads the frozen snapshot back; falls back to live issue fields for an item queued before NOT-61. */
+export function getTaskSnapshot(issue: Issue): TaskSnapshotContent {
+  const artifact = latestIssueArtifact(issue.id, TASK_SNAPSHOT_ARTIFACT_KIND);
+  if (artifact?.contentJson) {
+    try {
+      return JSON.parse(artifact.contentJson) as TaskSnapshotContent;
+    } catch {
+      // fall through to the live-field fallback below
+    }
+  }
+  return {
+    title: issue.title,
+    description: issue.description ?? "",
+    acceptanceCriteria: issue.acceptanceCriteria ?? "",
+    repo: issue.repo,
+    baseBranch: issue.baseBranch,
+    workflowVersion: WORKFLOW_VERSION,
+  };
+}
+
+function freezeTaskSnapshot(issue: Issue): void {
+  createIssueArtifact({
+    issueId: issue.id,
+    kind: TASK_SNAPSHOT_ARTIFACT_KIND,
+    author: "system",
+    content: {
+      title: issue.title,
+      description: issue.description ?? "",
+      acceptanceCriteria: issue.acceptanceCriteria ?? "",
+      repo: issue.repo,
+      baseBranch: issue.baseBranch,
+      workflowVersion: WORKFLOW_VERSION,
+    } satisfies TaskSnapshotContent,
+  });
+}
 
 /**
  * Freeze the role's execution profile at the moment the work item is enqueued (NOT-60):
@@ -112,6 +166,7 @@ function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workI
   }
 
   const instance = startWorkflowInstance(issueId, WORKFLOW_VERSION);
+  freezeTaskSnapshot(issue);
   appendWorkflowEvent({
     issueId,
     workflowInstanceId: instance.id,
@@ -298,9 +353,11 @@ function applyDeveloper(
           prUrl: outcome.prUrl,
           headSha: outcome.headSha,
           baseSha: outcome.baseSha,
+          branch: outcome.branch,
         },
         artifactRef: outcome.prUrl,
       });
+      patch.branch = outcome.branch;
       patch.headSha = outcome.headSha;
       patch.baseSha = outcome.baseSha;
       patch.prNumber = outcome.prNumber;

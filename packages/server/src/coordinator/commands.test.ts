@@ -16,8 +16,9 @@ const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue } = await import("../repository/findings.js");
 const { claimWorkItem, listWorkItemsForIssue, getWorkItem } = await import("../repository/work-items.js");
-const { startWorkflow, applyCompletion, resolveHumanActionAndAdvance } = await import("./commands.js");
+const { startWorkflow, applyCompletion, resolveHumanActionAndAdvance, getTaskSnapshot, TASK_SNAPSHOT_ARTIFACT_KIND } = await import("./commands.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
+const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 
 before(() => migrate());
 beforeEach(() => getDb().exec("DELETE FROM work_items"));
@@ -63,7 +64,7 @@ const okReview = (verdict: "approved" | "changes_requested" | "escalated") =>
     findings: [],
     risks: [],
   });
-const cleanHandoff = { kind: "clean_handoff", headSha: "abc123", baseSha: "base1", prNumber: 42, prUrl: "https://gh/pr/42" } as const;
+const cleanHandoff = { kind: "clean_handoff", branch: "issue-1", headSha: "abc123", baseSha: "base1", prNumber: 42, prUrl: "https://gh/pr/42" } as const;
 
 test("startWorkflow writes instance + workflow.started + a queued developer work item in one shot", () => {
   const issueId = newIssue();
@@ -79,6 +80,29 @@ test("startWorkflow writes instance + workflow.started + a queued developer work
   assert.equal(items[0].status, "pending");
   assert.deepEqual(listWorkflowEventsForIssue(issueId).map((e) => e.type), ["workflow.started"]);
   assert.equal(listWorkflowEventsForIssue(issueId)[0].workflowInstanceId, res.instance.id);
+});
+
+test("startWorkflow freezes a task_snapshot artifact; getTaskSnapshot reads it back over live issue fields", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+
+  const artifacts = listArtifactsForIssue(issueId).filter((a) => a.kind === TASK_SNAPSHOT_ARTIFACT_KIND);
+  assert.equal(artifacts.length, 1);
+  const content = JSON.parse(artifacts[0].contentJson!);
+  assert.equal(content.title, "Coordinate me");
+  assert.equal(content.acceptanceCriteria, "It works");
+
+  const snapshot = getTaskSnapshot(getIssue(issueId)!);
+  assert.equal(snapshot.title, "Coordinate me");
+  assert.equal(snapshot.baseBranch, "main");
+  assert.equal(snapshot.workflowVersion, "dev_reviewer_v1");
+});
+
+test("getTaskSnapshot falls back to live issue fields when no snapshot artifact exists", () => {
+  const issueId = newIssue();
+  const snapshot = getTaskSnapshot(getIssue(issueId)!);
+  assert.equal(snapshot.title, "Coordinate me");
+  assert.equal(snapshot.acceptanceCriteria, "It works");
 });
 
 test("startWorkflow with no acceptance criteria asks for a product scope decision and starts nothing", () => {

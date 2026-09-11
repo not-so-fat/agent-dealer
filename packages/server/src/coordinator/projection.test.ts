@@ -29,7 +29,7 @@ function assertLegal(from: IssueStatus, to: IssueStatus): void {
 test("every developer projection lands on a legal issue transition", () => {
   for (const from of ["developing", "repairing"] as IssueStatus[]) {
     for (const outcome of [
-      { kind: "clean_handoff", headSha: "h", baseSha: "b", prNumber: 1, prUrl: "u" },
+      { kind: "clean_handoff", branch: "br", headSha: "h", baseSha: "b", prNumber: 1, prUrl: "u" },
       { kind: "no_pr" },
       { kind: "session_failed" },
       { kind: "dirty_worktree" },
@@ -75,7 +75,7 @@ test("only a verdict carries review.submitted; a failed session does not", () =>
 
 test("spawn_reviewer advances no round; a repair round does", () => {
   const spawn = projectDeveloperRoute(
-    routeDeveloperOutcome({ kind: "clean_handoff", headSha: "h", baseSha: "b", prNumber: 1, prUrl: "u" }, ROUNDS_LEFT),
+    routeDeveloperOutcome({ kind: "clean_handoff", branch: "br", headSha: "h", baseSha: "b", prNumber: 1, prUrl: "u" }, ROUNDS_LEFT),
     "developing",
     1
   );

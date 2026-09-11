@@ -9,7 +9,7 @@ const LIMITS_AT_LIMIT = { currentRound: 3, maxReviewRounds: 3 };
 // --- Developer outcomes ---
 
 test("clean handoff routes to spawn_reviewer", () => {
-  const outcome: DeveloperOutcome = { kind: "clean_handoff", headSha: "h", baseSha: "b", prNumber: 1, prUrl: "u" };
+  const outcome: DeveloperOutcome = { kind: "clean_handoff", branch: "br", headSha: "h", baseSha: "b", prNumber: 1, prUrl: "u" };
   assert.deepStrictEqual(routeDeveloperOutcome(outcome, LIMITS_ROUNDS_LEFT), { next: "spawn_reviewer" });
 });
 
@@ -35,6 +35,37 @@ test("dirty worktree always escalates, even with rounds remaining — never spen
   const result = routeDeveloperOutcome(outcome, LIMITS_ROUNDS_LEFT);
   assert.equal(result.next, "human_action");
   assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+});
+
+test("unpushed commit always escalates, even with rounds remaining — never spends a round", () => {
+  const outcome: DeveloperOutcome = { kind: "unpushed_commit", reason: "non-fast-forward" };
+  const result = routeDeveloperOutcome(outcome, LIMITS_ROUNDS_LEFT);
+  assert.equal(result.next, "human_action");
+  assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+});
+
+test("adapter failure always escalates, even with rounds remaining — never spends a round", () => {
+  const outcome: DeveloperOutcome = { kind: "adapter_failure", reason: "gh: command not found" };
+  const result = routeDeveloperOutcome(outcome, LIMITS_ROUNDS_LEFT);
+  assert.equal(result.next, "human_action");
+  assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+});
+
+test("timed_out with rounds remaining retries (same bucket as session_failed/no_pr)", () => {
+  const outcome: DeveloperOutcome = { kind: "timed_out" };
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, LIMITS_ROUNDS_LEFT), { next: "retry_developer" });
+});
+
+test("checks_failed with rounds remaining retries (same bucket as session_failed/no_pr)", () => {
+  const outcome: DeveloperOutcome = { kind: "checks_failed", details: "lint failed" };
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, LIMITS_ROUNDS_LEFT), { next: "retry_developer" });
+});
+
+test("checks_failed at the round limit exhausts attempts", () => {
+  const outcome: DeveloperOutcome = { kind: "checks_failed" };
+  const result = routeDeveloperOutcome(outcome, LIMITS_AT_LIMIT);
+  assert.equal(result.next, "human_action");
+  assert.equal((result as { actionType: string }).actionType, "attempts_exhausted");
 });
 
 // --- Reviewer outcomes ---

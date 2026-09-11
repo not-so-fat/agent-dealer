@@ -80,8 +80,15 @@ function isFailureOutcome(outcome: DeveloperOutcome | ReviewerOutcome): boolean 
   return outcome.kind === "session_failed" || outcome.kind === "publish_failed";
 }
 
+/** `timed_out` is the only outcome meaning the agent process itself hit its wall clock —
+ * every other kind (no_pr, dirty_worktree, checks_failed, ...) is a session that ran to
+ * completion and handed off a (possibly unwanted) verified result. */
+function isTimedOutOutcome(outcome: DeveloperOutcome | ReviewerOutcome): boolean {
+  return outcome.kind === "timed_out";
+}
+
 /** completeSession is bookkeeping — its failure must never re-route or revive a work item. */
-function safeCompleteSession(sessionId: string, status: "done" | "failed" | "cancelled", error?: unknown): void {
+function safeCompleteSession(sessionId: string, status: "done" | "failed" | "timed_out" | "cancelled", error?: unknown): void {
   try {
     completeSession(sessionId, {
       status,
@@ -227,7 +234,8 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     safeCompleteSession(session.id, "cancelled", { reason: result.reason });
     return;
   }
-  safeCompleteSession(session.id, isFailureOutcome(outcome) ? "failed" : "done");
+  const sessionStatus = isTimedOutOutcome(outcome) ? "timed_out" : isFailureOutcome(outcome) ? "failed" : "done";
+  safeCompleteSession(session.id, sessionStatus);
 }
 
 /**

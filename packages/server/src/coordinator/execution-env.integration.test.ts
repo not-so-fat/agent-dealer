@@ -76,6 +76,7 @@ test("editing the profile after the work is queued does not change the eventual 
 
   registerEffectHandler("developer", async () => ({
     kind: "clean_handoff" as const,
+    branch: "issue-1",
     headSha: "head1",
     baseSha: "base1",
     prNumber: 7,
@@ -105,6 +106,7 @@ test("the reviewer session snapshot yields a read-only permission policy and rea
 
   registerEffectHandler("developer", async () => ({
     kind: "clean_handoff" as const,
+    branch: "issue-1",
     headSha: "head1",
     baseSha: "base1",
     prNumber: 7,

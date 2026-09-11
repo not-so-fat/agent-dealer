@@ -104,22 +104,61 @@ async function blockPush(repo: string, worktreePath: string): Promise<void> {
  * Create the checkout for one worker session. Developer = branch checkout the session
  * can commit/push; reviewer = detached HEAD at the exact SHA it must not mutate (and is
  * additionally push-blocked as hygiene — see `blockPush`). Serialized per repo.
+ *
+ * `newBranch` creates a fresh branch off `ref` (round 1 of a developer session, where the
+ * issue has no branch yet) instead of checking out an existing one (repair rounds 2+).
  */
 export async function createRoleWorktree(opts: {
   repo: string;
   role: WorkerSessionRole;
   sessionId: string;
-  /** Branch name for a developer worktree, exact SHA for a reviewer worktree. */
+  /** Existing branch name or exact SHA to check out, or the base ref when `newBranch` is set. */
   ref: string;
+  /** Developer round 1 only: create this branch off `ref` instead of checking it out. */
+  newBranch?: string;
 }): Promise<RoleWorktree> {
   const detached = opts.role === "reviewer";
   const worktreePath = roleWorktreePath(opts.sessionId, opts.role);
   await withRepoLock(opts.repo, async () => {
     await pruneWorktrees(opts.repo);
-    await addWorktree({ repo: opts.repo, path: worktreePath, ref: opts.ref, detach: detached });
+    await addWorktree({
+      repo: opts.repo,
+      path: worktreePath,
+      ref: opts.ref,
+      detach: detached,
+      newBranch: opts.newBranch,
+    });
     if (detached) await blockPush(opts.repo, worktreePath);
   });
-  return { path: worktreePath, role: opts.role, ref: opts.ref, detached };
+  return { path: worktreePath, role: opts.role, ref: opts.newBranch ?? opts.ref, detached };
+}
+
+export type PushResult = { ok: true } | { ok: false; reason: string; rejected: boolean };
+
+const PUSH_REJECTION_PATTERNS = /rejected|non-fast-forward|fetch first|stale info/i;
+
+/**
+ * The coordinator — never the developer worker — pushes the branch, after the worker's
+ * session has already ended (design §"Role permissions": the credentialed push effect
+ * never runs inside the worker's own process; see profile-snapshot.ts's PermissionPolicy
+ * doc comment for why this could never be an enforceable worker-side policy toggle).
+ * Distinguishes a clean rejection (remote diverged — `unpushed_commit`, a policy_escalation
+ * a human resolves) from an unexpected tooling failure (`adapter_failure`).
+ */
+export async function pushBranch(opts: { worktreePath: string; branch: string }): Promise<PushResult> {
+  try {
+    await git(opts.worktreePath, ["push", "-u", "origin", `HEAD:refs/heads/${opts.branch}`]);
+    return { ok: true };
+  } catch (err) {
+    const message = (err as Error).message;
+    return { ok: false, reason: message, rejected: PUSH_REJECTION_PATTERNS.test(message) };
+  }
+}
+
+/** Commits on HEAD not on `baseRef` — zero means the developer produced nothing to push/PR. */
+export async function commitsAhead(opts: { worktreePath: string; baseRef: string }): Promise<number> {
+  const { stdout } = await git(opts.worktreePath, ["rev-list", "--count", `${opts.baseRef}..HEAD`]);
+  return Number(stdout.trim());
 }
 
 export type WorktreeRemoval =
