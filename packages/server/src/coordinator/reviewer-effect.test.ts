@@ -100,9 +100,17 @@ async function makeIssue(): Promise<string> {
   }).id;
 }
 
-/** Directly manipulates the work item's live lease, simulating what claim/recovery would otherwise do. */
-function setWorkItemLease(workItemId: string, leaseToken: string, status: "leased" | "pending" = "leased"): void {
-  getDb().prepare("UPDATE work_items SET lease_token = ?, status = ? WHERE id = ?").run(leaseToken, status, workItemId);
+/**
+ * Directly manipulates the work item's live lease, simulating what claim/recovery would
+ * otherwise do. `expiresInMs` defaults far enough in the future for a live lease; pass a
+ * negative value to simulate one that has expired but recovery hasn't swept yet — same
+ * `status = 'leased'`, same token, just past its `lease_expires_at`.
+ */
+function setWorkItemLease(workItemId: string, leaseToken: string, expiresInMs = 60_000): void {
+  const expiresAt = new Date(Date.now() + expiresInMs).toISOString();
+  getDb()
+    .prepare("UPDATE work_items SET lease_token = ?, status = 'leased', lease_expires_at = ? WHERE id = ?")
+    .run(leaseToken, expiresAt, workItemId);
 }
 
 async function pump(max = 20): Promise<void> {
@@ -359,6 +367,23 @@ test("publish claim: a zombie holding a stale lease token can never win the publ
   const currentOutcome = await runReviewerEffect(ctxWithLease("new-token"), { spawn: verdictSpawn({ verdict: "approved" }), github });
   assert.equal(currentOutcome.kind, "verdict", "the current lease holder — not the zombie — is the one that actually publishes");
   assert.equal(github.publishCallCount(), 1);
+});
+
+test("publish claim: a lease that has expired but recovery hasn't swept yet is not \"live\" just because status still says leased", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  const ctxWithLease = reviewerCtxFactory(issueId);
+
+  // Same token, status still 'leased' — but lease_expires_at is already in the past.
+  // Recovery's sweep hasn't run yet, so nothing has moved this row off 'leased', but the
+  // lease itself is no longer actually held by anyone.
+  setWorkItemLease(workItem.id, "expired-token", -60_000);
+  const outcome = await runReviewerEffect(ctxWithLease("expired-token"), { spawn: verdictSpawn({ verdict: "approved" }), github });
+
+  assert.equal(outcome.kind, "publish_failed", "an expired lease must never be treated as live, even with a matching token and status");
+  assert.equal(github.publishCallCount(), 0, "an attempt resuming on an expired lease must never actually call gh");
 });
 
 test("publish claim: a stuck in-flight claim (prior holder never settles) is waited on, then given up on as publish_failed", async () => {

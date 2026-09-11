@@ -8,17 +8,21 @@
 //
 // The claim is gated on the SAME lease token the work-item kernel already uses (round 4):
 // every write here requires the caller's `leaseToken` to still equal the live
-// `work_items.lease_token` (and `status = 'leased'`), checked in the same statement as
-// the write. A zombie whose lease has already been reclaimed by recovery can therefore
-// never win — or reclaim — this claim, no matter how the two attempts' wall-clock timing
-// happens to fall; only whichever attempt currently holds the work item's one lease token
-// ever can. Without this, round 3's design let a slower-but-still-legitimate zombie win
-// the claim ahead of the actual current lease holder, which would then time out waiting
-// and apply `publish_failed` as the workflow's terminal decision while the zombie went on
-// to actually publish moments later — the exact "GitHub and workflow state disagree"
-// failure mode this table exists to prevent. Once the winner records its actual result,
-// a loser reports exactly that (never its own independently-produced verdict, which two
-// separate reviewer sessions really can disagree on).
+// `work_items.lease_token`, with `status = 'leased'` AND `lease_expires_at` still in the
+// future (round 5 — `status` alone lags reality: a work item sits at `status = 'leased'`
+// with its old token for the whole window between the lease actually expiring and
+// recovery's next sweep reclaiming it, and an attempt resuming inside that window is not
+// "live" just because no one has swept it yet), checked in the same statement as the
+// write. A zombie whose lease has already expired or been reclaimed can therefore never
+// win — or reclaim — this claim, no matter how the two attempts' wall-clock timing
+// happens to fall; only whichever attempt currently holds the work item's one *unexpired*
+// lease token ever can. Without this, an earlier design let a slower-but-still-"leased"
+// zombie win the claim ahead of the actual current lease holder, which would then time
+// out waiting and apply `publish_failed` as the workflow's terminal decision while the
+// zombie went on to actually publish moments later — the exact "GitHub and workflow
+// state disagree" failure mode this table exists to prevent. Once the winner records its
+// actual result, a loser reports exactly that (never its own independently-produced
+// verdict, which two separate reviewer sessions really can disagree on).
 import { getDb } from "../db/index.js";
 
 export type ReviewPublicationState = "claimed" | "published" | "failed";
@@ -49,8 +53,15 @@ function rowFrom(raw: ReviewPublicationDbRow): ReviewPublicationRow {
   };
 }
 
-/** True only while `leaseToken` is still the work item's current, active lease. */
-const STILL_LEASED = `EXISTS (SELECT 1 FROM work_items WHERE id = @work_item_id AND lease_token = @lease_token AND status = 'leased')`;
+/**
+ * True only while `leaseToken` is still the work item's current, ACTUALLY-active lease
+ * — `status = 'leased'` on its own is not enough (it lags an expiry that recovery hasn't
+ * swept yet); `lease_expires_at` must still be in the future too.
+ */
+const STILL_LEASED = `EXISTS (
+  SELECT 1 FROM work_items
+  WHERE id = @work_item_id AND lease_token = @lease_token AND status = 'leased' AND lease_expires_at > @now
+)`;
 
 /**
  * Returns true if this call won the claim and may proceed to publish. False either
