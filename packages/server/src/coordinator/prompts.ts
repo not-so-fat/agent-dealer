@@ -108,23 +108,28 @@ function reviewerContractSection(baseSha: string, headSha: string): string[] {
   ];
 }
 
-const PER_FILE_DIFF_LIMIT = 8_000;
-const TOTAL_DIFF_LIMIT = 80_000;
-
 /**
- * Per-file capping, not one flat cut over the whole diff: a flat cap spends its entire
- * budget on the first file(s) it hits and silently drops every later file's changes
- * entirely from what the reviewer ever sees — a review round demonstrated exactly this
- * on this PR's own diff (a flat 12,000-char cap ended inside the second changed file,
- * so the reviewer prompt never contained several of the changed files at all). Every
- * file gets its own budget, and the manifest lists every changed file up front so a
- * file that still has to be dropped for total length is at least visible as changed,
- * not silently absent — the reviewer is told to flag any omitted file as unreviewed
- * rather than treat its absence as "no changes there."
+ * Sized to comfortably fit a realistically large PR in full (a review round found an
+ * earlier, much smaller per-file cap still truncated mid-file on a genuinely large PR,
+ * cutting off before the code under review). Whole files only — never a mid-hunk cut,
+ * which would be actively misleading — so a file either fits completely or is entirely
+ * omitted and counted in `truncated`. `runReviewerEffect` treats `truncated: true` as
+ * grounds to override whatever verdict the reviewer reports: the reviewer cannot see the
+ * full revision, so no verdict against it can be trusted, and this must be enforced in
+ * code — a prompt instruction alone is not a structural guarantee (the same reasoning
+ * `args.ts`/`permissions.ts` already apply to enforcement in general).
  */
-function formatDiffForPrompt(diff: string): string {
+export const TOTAL_DIFF_LIMIT = 300_000;
+
+export interface FormattedDiff {
+  text: string;
+  /** True when at least one changed file had to be omitted for total length. */
+  truncated: boolean;
+}
+
+export function formatDiffForPrompt(diff: string): FormattedDiff {
   const trimmed = diff.trim();
-  if (!trimmed) return "(empty diff)";
+  if (!trimmed) return { text: "(empty diff)", truncated: false };
 
   const blocks = trimmed.split(/(?=^diff --git )/m).filter(Boolean);
   const manifest = blocks.map((b) => b.slice(0, b.indexOf("\n"))).join("\n");
@@ -133,22 +138,22 @@ function formatDiffForPrompt(diff: string): string {
   let total = 0;
   let omittedFiles = 0;
   for (const block of blocks) {
-    const piece =
-      block.length > PER_FILE_DIFF_LIMIT
-        ? `${block.slice(0, PER_FILE_DIFF_LIMIT)}\n... [this file's diff truncated at ${PER_FILE_DIFF_LIMIT} chars]\n`
-        : block;
-    if (total + piece.length > TOTAL_DIFF_LIMIT) {
+    if (total + block.length > TOTAL_DIFF_LIMIT) {
       omittedFiles++;
       continue;
     }
-    pieces.push(piece);
-    total += piece.length;
+    pieces.push(block);
+    total += block.length;
   }
 
-  const footer = omittedFiles
-    ? `\n... [${omittedFiles} additional changed file(s) omitted for length — see the file list above; treat those as unreviewed in your assessment, not as unchanged]`
+  const truncated = omittedFiles > 0;
+  const footer = truncated
+    ? `\n... [${omittedFiles} changed file(s) omitted — this diff exceeds ${TOTAL_DIFF_LIMIT} characters. You cannot examine the complete revision; the coordinator will not accept "approved" or "changes_requested" from this session regardless of what you report.]`
     : "";
-  return `Changed files (${blocks.length}):\n${manifest}\n\n${pieces.join("\n")}${footer}`;
+  return {
+    text: `Changed files (${blocks.length}):\n${manifest}\n\n${pieces.join("\n")}${footer}`,
+    truncated,
+  };
 }
 
 export function buildReviewerPrompt(input: ReviewerPromptInput): string {
@@ -166,7 +171,7 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
     ``,
     `## Diff (base ${input.baseSha.slice(0, 8)} → head ${input.headSha.slice(0, 8)})`,
     "```diff",
-    formatDiffForPrompt(input.diff),
+    formatDiffForPrompt(input.diff).text,
     "```",
     ``,
   ];

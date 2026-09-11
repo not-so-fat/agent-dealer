@@ -45,7 +45,9 @@ type ReviewerSpawnFn = typeof realReviewerSpawn;
 type GithubFn = typeof realGithubAdapter;
 
 before(() => migrate());
-beforeEach(() => getDb().exec("DELETE FROM work_items"));
+// review_publications rows FK-reference work_items — deleted first, or the delete below
+// (needed between tests since each makes its own issue/work items) fails the constraint.
+beforeEach(() => getDb().exec("DELETE FROM review_publications; DELETE FROM work_items;"));
 after(() => resetEffectHandlers());
 
 let repo: string;
@@ -170,17 +172,21 @@ interface FakeGithubOpts {
 
 /**
  * In-memory PR store — real git tells it the branch/head, nothing hits real GitHub.
- * `publishReview` tracks what it has already recorded per `(number, headSha)`, mirroring
- * the real adapter's idempotency contract (github.ts's `findOwnReviewAtSha`): a second
- * call for the same PR at the same head returns the already-recorded event without
- * incrementing `publishCallCount()`, so a test can simulate the effect handler being
- * re-run (a crash before the work item's completion CAS, followed by recovery) and
- * assert GitHub was only actually mutated once.
+ *
+ * `publishReview` always actually "submits" (increments `publishCallCount()`) — it does
+ * NOT independently deduplicate by `(number, headSha)`. That's deliberate: the real
+ * duplicate-submission guard now lives in `reviewer-effect.ts` itself (the durable
+ * `review_publications` claim, gating entry before `publishReview` is ever called), not
+ * in the adapter. Keeping the fake's own bookkeeping this simple means a test asserting
+ * `publishCallCount() === 1` after two effect runs is actually exercising the caller's
+ * claim, not a dedup the fake would have papered over on its own. `findOwnReview` reports
+ * by `(number, headSha, marker)`, matching the real adapter's own narrower-than-identity
+ * lookup.
  */
 function fakeGithub(opts: FakeGithubOpts = {}): GithubFn & { publishCallCount(): number } {
   const prsByBranch = new Map<string, { number: number; url: string; base: string }>();
   const branchByNumber = new Map<number, string>();
-  const publishedReviews = new Map<string, ReviewEvent>();
+  const publishedReviews = new Map<string, { event: ReviewEvent; marker: string }>();
   let nextNumber = 100;
   let publishCalls = 0;
   const currentBranch = (cwd: string) => git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
@@ -204,15 +210,15 @@ function fakeGithub(opts: FakeGithubOpts = {}): GithubFn & { publishCallCount():
     async checksSnapshot() {
       return opts.checks ?? "success";
     },
-    async publishReview({ number, headSha, event }) {
-      const key = `${number}:${headSha}`;
-      const existing = publishedReviews.get(key);
-      if (existing) return { ok: true, event: existing, usedCommentFallback: existing !== event };
-
+    async findOwnReview({ number, headSha, marker }) {
+      const existing = publishedReviews.get(`${number}:${headSha}`);
+      return existing && existing.marker === marker ? existing.event : null;
+    },
+    async publishReview({ number, headSha, marker, event }) {
       publishCalls++;
       if (opts.publishFails) return { ok: false, reason: "boom" };
       const finalEvent: ReviewEvent = opts.rejectSelfReview && event !== "COMMENT" ? "COMMENT" : event;
-      publishedReviews.set(key, finalEvent);
+      publishedReviews.set(`${number}:${headSha}`, { event: finalEvent, marker });
       return { ok: true, event: finalEvent, usedCommentFallback: finalEvent !== event };
     },
   };
@@ -310,6 +316,35 @@ test("publish is idempotent: re-running the effect for the same PR/head (simulat
   assert.equal(first.kind, "verdict");
   assert.equal(second.kind, "verdict");
   assert.equal(github.publishCallCount(), 1, "GitHub must only actually be mutated once");
+});
+
+test("diff truncated: an oversized diff forces the verdict to escalate in code, regardless of what the reviewer reports", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+
+  // A single file whose diff alone exceeds prompts.ts's TOTAL_DIFF_LIMIT (300,000 chars).
+  const bigFileSpawn: SpawnFn = async (input) => {
+    const lines = Array.from({ length: 20_000 }, (_, i) => `line ${i} of a very large generated file`);
+    fs.writeFileSync(path.join(input.cwd, "big.txt"), `${lines.join("\n")}\n`);
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "add a big file");
+    return { exitCode: 0, transcript: "Implementation conclusion: added a big file.", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: bigFileSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+  assert.equal(getIssue(issueId)!.status, "reviewing", "test setup: developer stage did not reach reviewing");
+
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human", "an oversized diff must never reach final_review, even though the reviewer reported approved");
+  assert.ok(listArtifactsForIssue(issueId).find((a) => a.kind === "diff_truncated_evidence"));
+  // The override still publishes — as a COMMENT (escalated's mapped event), never as the
+  // reviewer's actually-reported APPROVE.
+  const published = listArtifactsForIssue(issueId).find((a) => a.kind === "review_published");
+  assert.equal(JSON.parse(published!.contentJson!).event, "COMMENT");
 });
 
 test("changes_requested: findings thread onto the issue and a fresh developer repair round is queued", async () => {

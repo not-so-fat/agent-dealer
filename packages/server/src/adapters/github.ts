@@ -101,6 +101,16 @@ export interface GithubAdapter {
   /** One-shot read of the current check rollup for the PR's head. */
   checksSnapshot(opts: { cwd: string }): Promise<ChecksSnapshot>;
   /**
+   * Whether `number`'s exact `headSha` already carries a review from the current `gh`
+   * identity whose body contains `marker` — narrower than matching on identity+SHA alone
+   * (a review round found that over-broad: any manual/unrelated review by the same
+   * identity at that commit would be misidentified as this workflow's own publication).
+   * `marker` should be a string unique to the specific intended publication (the caller's
+   * work-item id embedded in the review body) so this only ever recognizes agent-dealer's
+   * own prior attempt for this exact reviewer round, never someone else's review.
+   */
+  findOwnReview(opts: { cwd: string; number: number; headSha: string; marker: string }): Promise<ReviewEvent | null>;
+  /**
    * Publishes the reviewer's validated verdict against `number` explicitly — required for
    * a detached-HEAD reviewer worktree, same reason as `viewPr`'s `number`. `event`
    * "APPROVE"/"REQUEST_CHANGES" falls back to a plain comment review carrying the same
@@ -109,14 +119,13 @@ export interface GithubAdapter {
    * developer and coordinator share one `gh auth`), not an edge case. The internal verdict
    * stays the workflow authority either way.
    *
-   * Idempotent on `(number, headSha)`: first checks whether a review already exists from
-   * this identity at exactly `headSha` — the same "check current state before mutating"
-   * idiom `createDraftPr`'s callers already use for the PR itself — so a crash between
-   * `gh` accepting the review and the work item's completion CAS, followed by recovery
-   * re-running the same work item, reports the existing review instead of submitting a
-   * second one.
+   * `findOwnReview`-checked as a fast path before publishing, matching `createDraftPr`'s
+   * "check current state before mutating" idiom — but that read-only check alone is a
+   * check-then-publish race, so the caller is expected to additionally serialize entry
+   * with a durable claim (`repository/review-publications.ts`) keyed on the same work
+   * item before ever calling this.
    */
-  publishReview(opts: { cwd: string; number: number; headSha: string; event: ReviewEvent; bodyFilePath: string }): Promise<PublishReviewResult>;
+  publishReview(opts: { cwd: string; number: number; headSha: string; marker: string; event: ReviewEvent; bodyFilePath: string }): Promise<PublishReviewResult>;
 }
 
 async function ghPrView(cwd: string, fields: string, number?: number): Promise<Record<string, unknown> | null> {
@@ -162,8 +171,12 @@ export const realGithubAdapter: GithubAdapter = {
     return summarizeChecks(rollup);
   },
 
-  async publishReview({ cwd, number, headSha, event, bodyFilePath }) {
-    const existing = await findOwnReviewAtSha(cwd, number, headSha);
+  async findOwnReview({ cwd, number, headSha, marker }) {
+    return findOwnReviewAtSha(cwd, number, headSha, marker);
+  },
+
+  async publishReview({ cwd, number, headSha, marker, event, bodyFilePath }) {
+    const existing = await findOwnReviewAtSha(cwd, number, headSha, marker);
     if (existing) {
       return { ok: true, event: existing, usedCommentFallback: existing !== event };
     }
@@ -209,6 +222,7 @@ interface RawReview {
   user?: { login?: string };
   commit_id?: string;
   state?: string;
+  body?: string;
 }
 
 const STATE_TO_EVENT: Record<string, ReviewEvent> = {
@@ -219,21 +233,27 @@ const STATE_TO_EVENT: Record<string, ReviewEvent> = {
 
 /**
  * Whether the authenticated identity has already submitted a review on `number` at
- * exactly `headSha` — checked via the REST API (`commit_id` isn't exposed by `gh pr
- * view --json reviews`) so a retried publish can recognize its own prior effect instead
- * of submitting a duplicate. Best-effort: any failure (offline, `gh api` unavailable)
- * returns null and lets the caller proceed to publish normally.
+ * exactly `headSha` whose body contains `marker` — checked via the REST API (`commit_id`
+ * isn't exposed by `gh pr view --json reviews`) so a retried publish can recognize its
+ * own prior effect instead of submitting a duplicate. `marker` (not just identity+SHA)
+ * is required: a review round found identity+SHA alone would misidentify any unrelated
+ * manual review by the same identity on that commit as this workflow's own publication.
+ * Best-effort: any failure (offline, `gh api` unavailable) returns null and lets the
+ * caller proceed to publish normally.
  */
-async function findOwnReviewAtSha(cwd: string, number: number, headSha: string): Promise<ReviewEvent | null> {
+async function findOwnReviewAtSha(cwd: string, number: number, headSha: string, marker: string): Promise<ReviewEvent | null> {
   try {
     const { stdout: login } = await run("gh", ["api", "user", "--jq", ".login"], { cwd });
     const me = login.trim();
     if (!me) return null;
     const { stdout } = await run("gh", ["api", `repos/{owner}/{repo}/pulls/${number}/reviews`, "--paginate"], { cwd });
     const reviews = JSON.parse(stdout) as RawReview[];
-    // Last-matching wins — a later review from the same identity/commit supersedes an
-    // earlier one (e.g. a COMMENT fallback recorded before a since-changed policy).
-    const mine = [...reviews].reverse().find((r) => r.user?.login === me && r.commit_id === headSha);
+    // Last-matching wins — a later review from the same identity/commit/marker
+    // supersedes an earlier one (e.g. a COMMENT fallback recorded before a
+    // since-changed policy).
+    const mine = [...reviews]
+      .reverse()
+      .find((r) => r.user?.login === me && r.commit_id === headSha && typeof r.body === "string" && r.body.includes(marker));
     return mine?.state ? STATE_TO_EVENT[mine.state] ?? null : null;
   } catch {
     return null;

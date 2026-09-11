@@ -277,3 +277,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_work_items_idempotency ON work_items(idemp
 -- for one workflow instance (design: "exactly one next effect").
 CREATE UNIQUE INDEX IF NOT EXISTS idx_work_items_one_active ON work_items(workflow_instance_id)
   WHERE status IN ('pending', 'leased');
+
+-- A durable claim for the reviewer effect's GitHub publication (NOT-62 review round 2).
+-- Unlike a push, a `gh pr review` submission is not naturally idempotent, and a
+-- read-only "does a review already exist" check alone is a check-then-publish race: two
+-- overlapping attempts on the same work item (a crash-and-recover, or a genuine zombie
+-- still running past its reclaimed lease) could both read "not found" before either has
+-- published. One row is inserted here, atomically, before either attempt is allowed to
+-- call `gh` — whichever insert wins the primary key is the only attempt allowed to
+-- publish; the loser's insert fails immediately instead of racing the actual GitHub call.
+CREATE TABLE IF NOT EXISTS review_publications (
+  work_item_id TEXT PRIMARY KEY REFERENCES work_items(id),
+  claimed_at TEXT NOT NULL
+);

@@ -27,7 +27,7 @@ import { parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
 import type { EffectContext } from "./effect-registry.js";
 import type { ReviewerOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
-import { buildReviewerPrompt } from "./prompts.js";
+import { buildReviewerPrompt, formatDiffForPrompt, TOTAL_DIFF_LIMIT } from "./prompts.js";
 import { realReviewerSpawn, type ReviewerSpawn } from "./spawn.js";
 import { parseReviewerResult, type ReviewerResult, type ReviewerVerdict } from "./reviewer-result.js";
 import {
@@ -42,6 +42,7 @@ import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adap
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
+import { claimReviewPublication } from "../repository/review-publications.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -96,7 +97,17 @@ function readChecksSummary(issueId: string): string | null {
   }
 }
 
-function renderReviewBody(result: ReviewerResult): string {
+/**
+ * Unique per queued reviewer work item (a retry_reviewer_at_new_head or a repair round
+ * always enqueues a fresh work item, never reuses this one) — embedded in the published
+ * review body so `findOwnReview`/`publishReview` can recognize agent-dealer's own prior
+ * publication for this exact intended review, not just any review by the same identity.
+ */
+function reviewMarker(workItemId: string): string {
+  return `<!-- agent-dealer:review:${workItemId} -->`;
+}
+
+function renderReviewBody(result: ReviewerResult, marker: string): string {
   const lines = [
     `**Verdict:** ${result.verdict}`,
     ``,
@@ -119,7 +130,7 @@ function renderReviewBody(result: ReviewerResult): string {
   if (result.productScopeQuestion) {
     lines.push(``, `**Escalation — product scope question**`, result.productScopeQuestion);
   }
-  lines.push(``, `_agent-dealer automated review (base ${result.baseSha.slice(0, 8)} → head ${result.headSha.slice(0, 8)})_`);
+  lines.push(``, `_agent-dealer automated review (base ${result.baseSha.slice(0, 8)} → head ${result.headSha.slice(0, 8)})_`, marker);
   return lines.join("\n");
 }
 
@@ -172,6 +183,7 @@ export async function runReviewerEffect(
     await fetchRef(worktreePath, issue.baseBranch);
     const baseSha = await mergeBase({ repo: worktreePath, base: `origin/${issue.baseBranch}`, head: headSha });
     const diff = await diffShas({ worktreePath, baseSha, headSha });
+    const { truncated: diffTruncated } = formatDiffForPrompt(diff);
 
     const openFindings = listFindingsForIssue(issue.id).filter(
       (f) => f.status === "open" || f.status === "recurring"
@@ -230,6 +242,22 @@ export async function runReviewerEffect(
       return { kind: "session_failed" };
     }
     result = parsed;
+
+    // A prompt instruction alone ("don't approve an incomplete diff") is not a structural
+    // guarantee — the same reasoning this codebase already applies to tool permissions
+    // (args.ts/permissions.ts). If the diff had to be truncated, the reviewer's verdict is
+    // overridden to "escalated" in code, regardless of what it actually reported, so a
+    // truncated review can never reach final_review or an automatic repair loop.
+    if (diffTruncated && result.verdict !== "escalated") {
+      createIssueArtifact({
+        issueId: issue.id,
+        workerSessionId: sessionId,
+        kind: "diff_truncated_evidence",
+        author: "system",
+        content: { reportedVerdict: result.verdict, overriddenTo: "escalated", diffCharLimit: TOTAL_DIFF_LIMIT },
+      });
+      result = { ...result, verdict: "escalated" };
+    }
   } catch {
     return { kind: "session_failed" };
   }
@@ -260,14 +288,37 @@ export async function runReviewerEffect(
       return { kind: "stale", currentHeadSha: prView.headRefOid };
     }
 
+    const marker = reviewMarker(workItem.id);
+    const requestedEvent = EVENT_FOR_VERDICT[result.verdict];
+
+    // Serializes entry into the actual `gh` call across overlapping attempts on the same
+    // work item (a crash-and-recover, or a genuine zombie still running past its
+    // reclaimed lease) — a read-only "does a review already exist" lookup alone is a
+    // check-then-publish race that two such attempts could both pass before either has
+    // published. Whichever attempt's insert wins is the only one allowed to proceed.
+    if (!claimReviewPublication(workItem.id)) {
+      const already = await deps.github.findOwnReview({ cwd: worktreePath, number: issue.prNumber, headSha, marker });
+      await bestEffortRemove(issue.repo, worktreePath);
+      if (!already) return { kind: "publish_failed" };
+      createIssueArtifact({
+        issueId: issue.id,
+        workerSessionId: sessionId,
+        kind: "review_published",
+        author: "system",
+        content: { event: already, usedCommentFallback: already !== requestedEvent, verdict: result.verdict, viaConcurrentAttempt: true },
+      });
+      return { kind: "verdict", result };
+    }
+
     const bodyDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-review-body-"));
     const bodyFilePath = path.join(bodyDir, "body.md");
-    fs.writeFileSync(bodyFilePath, renderReviewBody(result));
+    fs.writeFileSync(bodyFilePath, renderReviewBody(result, marker));
     const published = await deps.github.publishReview({
       cwd: worktreePath,
       number: issue.prNumber,
       headSha,
-      event: EVENT_FOR_VERDICT[result.verdict],
+      marker,
+      event: requestedEvent,
       bodyFilePath,
     });
     fs.rmSync(bodyDir, { recursive: true, force: true });
