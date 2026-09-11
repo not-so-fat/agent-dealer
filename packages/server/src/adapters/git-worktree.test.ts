@@ -15,6 +15,8 @@ const {
   inspectLeftoverWorktree,
   isWorktreeClean,
   withRepoLock,
+  pushBranch,
+  commitsAhead,
 } = await import("./git-worktree.js");
 
 let repo: string;
@@ -142,6 +144,65 @@ test("the pushurl redirect is NOT a security boundary — it does not survive a 
     // Throwaway bare remote is removed wholesale in after() — no branch cleanup needed.
     await safeRemoveWorktree({ repo, path: rev.path, role: "reviewer" });
   }
+});
+
+test("createRoleWorktree with newBranch creates a fresh branch off the given base ref (round 1)", async () => {
+  const dev = await createRoleWorktree({ repo, role: "developer", sessionId: "s-dev-new", ref: "main", newBranch: "issue-new-1" });
+  assert.equal(git(dev.path, "rev-parse", "--abbrev-ref", "HEAD"), "issue-new-1");
+  assert.equal(dev.ref, "issue-new-1");
+  fs.rmSync(dev.path, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  execFileSync("git", ["branch", "-D", "issue-new-1"], { cwd: repo });
+});
+
+test("commitsAhead counts commits on HEAD not on the base ref, zero when there are none", async () => {
+  const dev = await createRoleWorktree({ repo, role: "developer", sessionId: "s-dev-ahead", ref: "main", newBranch: "issue-ahead" });
+  assert.equal(await commitsAhead({ worktreePath: dev.path, baseRef: "origin/main" }), 0);
+  fs.writeFileSync(path.join(dev.path, "feature.txt"), "work\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "feature");
+  assert.equal(await commitsAhead({ worktreePath: dev.path, baseRef: "origin/main" }), 1);
+  fs.rmSync(dev.path, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  execFileSync("git", ["branch", "-D", "issue-ahead"], { cwd: repo });
+});
+
+test("pushBranch pushes a clean commit and reports a real rejection distinctly from a tooling failure", async () => {
+  const dev = await createRoleWorktree({ repo, role: "developer", sessionId: "s-dev-push", ref: "main", newBranch: "issue-push" });
+  fs.writeFileSync(path.join(dev.path, "feature.txt"), "work\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "feature");
+
+  const ok = await pushBranch({ worktreePath: dev.path, branch: "issue-push" });
+  assert.deepEqual(ok, { ok: true });
+  assert.equal(git(repo, "ls-remote", "origin", "refs/heads/issue-push").length > 0, true);
+
+  // Diverge the remote branch, then try to push again — a real rejection, not a crash.
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-other-"));
+  execFileSync("git", ["clone", "-q", remote, other]);
+  git(other, "checkout", "issue-push");
+  git(other, "config", "user.email", "test@example.com");
+  git(other, "config", "user.name", "Test");
+  fs.writeFileSync(path.join(other, "elsewhere.txt"), "y");
+  git(other, "add", ".");
+  git(other, "commit", "-m", "elsewhere");
+  git(other, "push", "origin", "issue-push");
+
+  fs.writeFileSync(path.join(dev.path, "feature2.txt"), "more\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "feature2");
+  const rejected = await pushBranch({ worktreePath: dev.path, branch: "issue-push" });
+  assert.equal(rejected.ok, false);
+  if (!rejected.ok) assert.equal(rejected.rejected, true);
+
+  const infra = await pushBranch({ worktreePath: "/no/such/worktree", branch: "issue-push" });
+  assert.equal(infra.ok, false);
+  if (!infra.ok) assert.equal(infra.rejected, false);
+
+  fs.rmSync(dev.path, { recursive: true, force: true });
+  fs.rmSync(other, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  execFileSync("git", ["branch", "-D", "issue-push"], { cwd: repo });
 });
 
 test("inspectLeftoverWorktree classifies missing / clean / dirty", async () => {

@@ -52,6 +52,7 @@ function newIssue(maxReviewRounds = 3): string {
 
 const cleanHandoff = (headSha = "head1") => ({
   kind: "clean_handoff" as const,
+  branch: "issue-1",
   headSha,
   baseSha: "base1",
   prNumber: 7,
