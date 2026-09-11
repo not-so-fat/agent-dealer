@@ -100,6 +100,11 @@ async function makeIssue(): Promise<string> {
   }).id;
 }
 
+/** Directly manipulates the work item's live lease, simulating what claim/recovery would otherwise do. */
+function setWorkItemLease(workItemId: string, leaseToken: string, status: "leased" | "pending" = "leased"): void {
+  getDb().prepare("UPDATE work_items SET lease_token = ?, status = ? WHERE id = ?").run(leaseToken, status, workItemId);
+}
+
 async function pump(max = 20): Promise<void> {
   for (let i = 0; i < max; i++) {
     const started = await runCoordinatorTick({ leaseOwner: "pump" });
@@ -229,6 +234,28 @@ async function advanceToReviewing(issueId: string, github: GithubFn): Promise<vo
   assert.equal(getIssue(issueId)!.status, "reviewing", "test setup: developer stage did not reach reviewing");
 }
 
+/** Builds an EffectContext for the pending reviewer work item with a specific (possibly stale) leaseToken, mimicking what worker-loop.ts's processWorkItem does per attempt. */
+function reviewerCtxFactory(issueId: string) {
+  const issue = getIssue(issueId)!;
+  const instance = getActiveWorkflowInstance(issueId)!;
+  const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  return (leaseToken: string): EffectContext => {
+    const session = createWorkerSession({
+      issueId: issue.id,
+      role: "reviewer",
+      round: workItem.round,
+      agentId: issue.reviewerAgentId,
+      runtime: "claude_code",
+    });
+    return {
+      workItem: { ...workItem, workerSessionId: session.id, leaseToken },
+      issue,
+      instance,
+      signal: new AbortController().signal,
+    };
+  };
+}
+
 test("approved: the coordinator verifies the pinned SHA, publishes the review, and opens final_review", async () => {
   const issueId = await makeIssue();
   const github = fakeGithub();
@@ -282,34 +309,19 @@ test("publish is idempotent: re-running the effect for the same PR/head (simulat
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
 
-  const issue = getIssue(issueId)!;
-  const instance = getActiveWorkflowInstance(issueId)!;
   const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  const ctxWithLease = reviewerCtxFactory(issueId);
 
-  // A real worker_sessions row per attempt — createIssueArtifact's FK requires one, and
-  // this also matches what worker-loop.ts's processWorkItem actually does on each attempt
-  // (a fresh session per claim of the same work item).
-  const ctxFor = (): EffectContext => {
-    const session = createWorkerSession({
-      issueId: issue.id,
-      role: "reviewer",
-      round: workItem.round,
-      agentId: issue.reviewerAgentId,
-      runtime: "claude_code",
-    });
-    return {
-      workItem: { ...workItem, workerSessionId: session.id },
-      issue,
-      instance,
-      signal: new AbortController().signal,
-    };
-  };
+  // Realistic: the first attempt holds "token-1" while it actually runs; recovery only
+  // reclaims to "token-2" for the retry afterward (simulating the crash-and-recover).
+  setWorkItemLease(workItem.id, "token-1");
+  const first = await runReviewerEffect(ctxWithLease("token-1"), { spawn: verdictSpawn({ verdict: "approved" }), github });
 
+  setWorkItemLease(workItem.id, "token-2");
   // Two genuinely independent reviewer sessions can disagree (they're two separate model
   // calls over the same diff) — this is exactly what round 3 found unhandled: the loser
   // must report what the winner actually published, not its own different verdict.
-  const first = await runReviewerEffect(ctxFor(), { spawn: verdictSpawn({ verdict: "approved" }), github });
-  const second = await runReviewerEffect(ctxFor(), {
+  const second = await runReviewerEffect(ctxWithLease("token-2"), {
     spawn: verdictSpawn({
       verdict: "changes_requested",
       findings: [{ fingerprint: "disagreement", severity: "blocking", title: "Second session found this", rationale: "..." }],
@@ -326,38 +338,65 @@ test("publish is idempotent: re-running the effect for the same PR/head (simulat
   }
 });
 
-test("publish claim: a stuck in-flight claim (winner never settles) is waited on, then given up on as publish_failed", async () => {
+test("publish claim: a zombie holding a stale lease token can never win the publication claim — only the current lease holder can", async () => {
   const issueId = await makeIssue();
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
   const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  const ctxWithLease = reviewerCtxFactory(issueId);
 
-  // Simulates another attempt that claimed publication and then never recorded any
-  // outcome (crashed mid-flight) — this attempt must wait, not immediately assume failure.
-  assert.equal(claimReviewPublication(workItem.id), true);
+  // The zombie held "old-token" when its session started, but recovery has already
+  // reclaimed the lease to "new-token" (the current holder) by the time the zombie
+  // — delayed, e.g. a slow `gh` call earlier in its own flow — reaches the publish step.
+  setWorkItemLease(workItem.id, "old-token");
+  const zombieCtx = ctxWithLease("old-token");
+  setWorkItemLease(workItem.id, "new-token");
 
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
-  await pump(1);
+  const zombieOutcome = await runReviewerEffect(zombieCtx, { spawn: verdictSpawn({ verdict: "approved" }), github });
+  assert.equal(zombieOutcome.kind, "publish_failed", "a zombie whose lease was already reclaimed must never win the claim");
+  assert.equal(github.publishCallCount(), 0, "the zombie must never actually call gh, no matter how the wall-clock timing falls");
 
-  assert.equal(getIssue(issueId)!.status, "needs_human", "a claim that never settles must escalate, never silently approve");
+  const currentOutcome = await runReviewerEffect(ctxWithLease("new-token"), { spawn: verdictSpawn({ verdict: "approved" }), github });
+  assert.equal(currentOutcome.kind, "verdict", "the current lease holder — not the zombie — is the one that actually publishes");
+  assert.equal(github.publishCallCount(), 1);
+});
+
+test("publish claim: a stuck in-flight claim (prior holder never settles) is waited on, then given up on as publish_failed", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  const ctxWithLease = reviewerCtxFactory(issueId);
+
+  // Simulates a prior lease holder that claimed publication and then never recorded any
+  // outcome (crashed mid-flight, before ever calling `gh`) — the current holder must
+  // wait, not immediately assume failure, but ultimately escalate rather than guess.
+  setWorkItemLease(workItem.id, "old-token");
+  assert.equal(claimReviewPublication(workItem.id, "old-token"), true);
+  setWorkItemLease(workItem.id, "new-token");
+
+  const outcome = await runReviewerEffect(ctxWithLease("new-token"), { spawn: verdictSpawn({ verdict: "approved" }), github });
+  assert.equal(outcome.kind, "publish_failed", "a claim that never settles must escalate, never silently approve");
   assert.equal(github.publishCallCount(), 0, "this attempt must never call gh while the claim is held elsewhere");
 });
 
-test("publish claim: a prior claimant that recorded failure is safely reclaimed and the review is published normally", async () => {
+test("publish claim: a prior claimant that recorded failure is safely reclaimed by the current lease holder and the review is published normally", async () => {
   const issueId = await makeIssue();
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
   const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  const ctxWithLease = reviewerCtxFactory(issueId);
 
-  // Simulates a prior attempt that claimed publication and then genuinely failed (its
-  // own `gh` call errored) — a fresh attempt must be able to take over from `failed`.
-  assert.equal(claimReviewPublication(workItem.id), true);
+  // Simulates a prior lease holder that claimed publication and genuinely failed (its
+  // own `gh` call errored) — the current holder taking over the lease must be able to
+  // reclaim from `failed` and publish normally.
+  setWorkItemLease(workItem.id, "old-token");
+  assert.equal(claimReviewPublication(workItem.id, "old-token"), true);
   recordReviewPublishFailed(workItem.id);
+  setWorkItemLease(workItem.id, "new-token");
 
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
-  await pump(1);
-
-  assert.equal(getIssue(issueId)!.status, "final_review", "reclaiming a failed prior claim must let publication proceed normally");
+  const outcome = await runReviewerEffect(ctxWithLease("new-token"), { spawn: verdictSpawn({ verdict: "approved" }), github });
+  assert.equal(outcome.kind, "verdict", "reclaiming a failed prior claim must let publication proceed normally");
   assert.equal(github.publishCallCount(), 1);
 });
 

@@ -1,16 +1,24 @@
 // packages/server/src/repository/review-publications.ts
 //
-// A one-row-per-work-item durable claim + result (NOT-62 review rounds 2-3), inserted
+// A one-row-per-work-item durable claim + result (NOT-62 review rounds 2-4), inserted
 // atomically BEFORE the reviewer effect calls `gh pr review`. A `gh` review submission
 // isn't naturally idempotent the way a `git push` is, and a read-only "does a review
 // already exist" lookup alone is a check-then-publish race — two overlapping attempts on
 // the same work item could both observe "not found" before either has published.
-// Whichever attempt's insert wins the primary key is the only one allowed to publish;
-// the loser fences on SQLite itself (not an in-process lock, so it also holds across a
-// crash-and-restart), and — once the winner records its actual result — reports exactly
-// what the winner published rather than its own independently-produced verdict, which a
-// review round found could genuinely disagree with the winner's (two separate reviewer
-// sessions are two separate model calls).
+//
+// The claim is gated on the SAME lease token the work-item kernel already uses (round 4):
+// every write here requires the caller's `leaseToken` to still equal the live
+// `work_items.lease_token` (and `status = 'leased'`), checked in the same statement as
+// the write. A zombie whose lease has already been reclaimed by recovery can therefore
+// never win — or reclaim — this claim, no matter how the two attempts' wall-clock timing
+// happens to fall; only whichever attempt currently holds the work item's one lease token
+// ever can. Without this, round 3's design let a slower-but-still-legitimate zombie win
+// the claim ahead of the actual current lease holder, which would then time out waiting
+// and apply `publish_failed` as the workflow's terminal decision while the zombie went on
+// to actually publish moments later — the exact "GitHub and workflow state disagree"
+// failure mode this table exists to prevent. Once the winner records its actual result,
+// a loser reports exactly that (never its own independently-produced verdict, which two
+// separate reviewer sessions really can disagree on).
 import { getDb } from "../db/index.js";
 
 export type ReviewPublicationState = "claimed" | "published" | "failed";
@@ -41,22 +49,26 @@ function rowFrom(raw: ReviewPublicationDbRow): ReviewPublicationRow {
   };
 }
 
-interface SqliteConstraintError {
-  code?: string;
-}
+/** True only while `leaseToken` is still the work item's current, active lease. */
+const STILL_LEASED = `EXISTS (SELECT 1 FROM work_items WHERE id = @work_item_id AND lease_token = @lease_token AND status = 'leased')`;
 
-/** Returns true if this call won the claim and may proceed to publish; false if another attempt already holds or held it. */
-export function claimReviewPublication(workItemId: string): boolean {
+/**
+ * Returns true if this call won the claim and may proceed to publish. False either
+ * because another attempt already holds/held it, or because `leaseToken` is no longer
+ * the work item's current lease (this attempt is itself the zombie — it must not
+ * publish regardless of who else is racing it).
+ */
+export function claimReviewPublication(workItemId: string, leaseToken: string): boolean {
   const now = new Date().toISOString();
-  try {
-    getDb()
-      .prepare("INSERT INTO review_publications (work_item_id, state, claimed_at, updated_at) VALUES (?, 'claimed', ?, ?)")
-      .run(workItemId, now, now);
-    return true;
-  } catch (err) {
-    if ((err as SqliteConstraintError).code === "SQLITE_CONSTRAINT_PRIMARYKEY") return false;
-    throw err;
-  }
+  const result = getDb()
+    .prepare(`
+      INSERT INTO review_publications (work_item_id, state, claimed_at, updated_at)
+      SELECT @work_item_id, 'claimed', @now, @now
+      WHERE NOT EXISTS (SELECT 1 FROM review_publications WHERE work_item_id = @work_item_id)
+        AND ${STILL_LEASED}
+    `)
+    .run({ work_item_id: workItemId, lease_token: leaseToken, now });
+  return result.changes === 1;
 }
 
 export function getReviewPublication(workItemId: string): ReviewPublicationRow | null {
@@ -86,16 +98,28 @@ export function recordReviewPublishFailed(workItemId: string): void {
 
 /**
  * Lets a new attempt retry publishing after a prior claimant recorded `failed` (it ran,
- * but its own `gh` call never succeeded) — a stale `claimed` row (the claimant crashed
- * before recording either outcome) is deliberately NOT reclaimable here; that case
- * surfaces as a human-visible `publish_failed` escalation instead of an automatic
- * takeover, matching this codebase's general policy of escalating rather than guessing
- * when a prior attempt's true fate is unknown.
+ * but its own `gh` call never succeeded) — gated on the same live lease check as
+ * `claimReviewPublication`, so only the work item's current holder can ever reclaim.
+ *
+ * A stale `claimed` row (the claimant crashed between `gh` succeeding and this table
+ * being updated) is deliberately NOT reclaimable at all, by anyone, ever — surfacing
+ * instead as a human-visible `publish_failed` escalation. This is a known, accepted gap
+ * (a review already posted to GitHub could in that narrow case go unrecorded here): it
+ * fails toward a human double-checking an already-safe state rather than toward an
+ * automatic decision this code cannot actually verify is safe, matching this codebase's
+ * general policy of escalating, not guessing, when a prior attempt's true fate is
+ * unknown (see `profile-snapshot.ts`'s `PermissionPolicy` doc comment for the same
+ * reasoning applied elsewhere).
  */
-export function reclaimFailedReviewPublication(workItemId: string): boolean {
+export function reclaimFailedReviewPublication(workItemId: string, leaseToken: string): boolean {
   const now = new Date().toISOString();
   const result = getDb()
-    .prepare("UPDATE review_publications SET state = 'claimed', claimed_at = ?, updated_at = ? WHERE work_item_id = ? AND state = 'failed'")
-    .run(now, now, workItemId);
+    .prepare(`
+      UPDATE review_publications
+      SET state = 'claimed', claimed_at = @now, updated_at = @now
+      WHERE work_item_id = @work_item_id AND state = 'failed'
+        AND ${STILL_LEASED}
+    `)
+    .run({ work_item_id: workItemId, lease_token: leaseToken, now });
   return result.changes === 1;
 }

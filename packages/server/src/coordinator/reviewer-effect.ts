@@ -76,18 +76,22 @@ type PublicationClaim = { owns: true } | { owns: false; row: ReviewPublicationRo
  * Serializes entry into the actual `gh pr review` call across overlapping attempts on
  * the same work item (round 2/3): a read-only "does a review already exist" lookup
  * alone is a check-then-publish race two such attempts could both pass before either
- * has published. This loops because a loser may find the winner still `claimed` (in
- * flight) rather than settled yet — it waits, bounded, rather than guessing; if the
- * winner instead already failed, this attempt safely reclaims and becomes the new
- * winner itself.
+ * has published. Gated on `leaseToken` (round 4) — only whoever currently holds the
+ * work item's one lease token can ever win or reclaim this claim, so a zombie whose
+ * lease has already been reclaimed can never win it out from under the actual current
+ * holder no matter how the two attempts' wall-clock timing falls (see the module doc
+ * on `repository/review-publications.ts`). This loops because a loser may find the
+ * winner still `claimed` (in flight) rather than settled yet — it waits, bounded,
+ * rather than guessing; if the winner instead already failed, this attempt safely
+ * reclaims and becomes the new winner itself.
  */
-async function acquireOrAwaitPublication(workItemId: string): Promise<PublicationClaim> {
+async function acquireOrAwaitPublication(workItemId: string, leaseToken: string): Promise<PublicationClaim> {
   for (let attempt = 0; attempt < reviewerEffectConfig.publicationWaitAttempts; attempt++) {
-    if (claimReviewPublication(workItemId)) return { owns: true };
+    if (claimReviewPublication(workItemId, leaseToken)) return { owns: true };
     const row = getReviewPublication(workItemId);
     if (row?.state === "published") return { owns: false, row };
     if (row?.state === "failed") {
-      if (reclaimFailedReviewPublication(workItemId)) return { owns: true };
+      if (reclaimFailedReviewPublication(workItemId, leaseToken)) return { owns: true };
       continue; // someone else reclaimed it in the same instant — loop and re-check
     }
     // row is null (raced right at the insert boundary) or still 'claimed' (in flight).
@@ -186,6 +190,8 @@ export async function runReviewerEffect(
   const { issue, workItem } = ctx;
   const sessionId = workItem.workerSessionId;
   if (!sessionId) return { kind: "session_failed" };
+  const leaseToken = workItem.leaseToken;
+  if (!leaseToken) return { kind: "session_failed" };
 
   const session = getWorkerSession(sessionId);
   const snapshot = parseProfileSnapshot(session?.profileSnapshotJson);
@@ -335,7 +341,7 @@ export async function runReviewerEffect(
 
     const requestedEvent = EVENT_FOR_VERDICT[result.verdict];
 
-    const claim = await acquireOrAwaitPublication(workItem.id);
+    const claim = await acquireOrAwaitPublication(workItem.id, leaseToken);
     if (!claim.owns) {
       await bestEffortRemove(issue.repo, worktreePath);
       // The winner's *actual* published result is authoritative here — never this
