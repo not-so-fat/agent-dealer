@@ -23,7 +23,34 @@
 // state disagree" failure mode this table exists to prevent. Once the winner records its
 // actual result, a loser reports exactly that (never its own independently-produced
 // verdict, which two separate reviewer sessions really can disagree on).
+//
+// Round 6: checking the lease is only "live" at the instant of claiming isn't enough —
+// nothing stopped the underlying lease from expiring, and recovery reclaiming it to a
+// new attempt, WHILE the `gh pr review` call granted by this claim is still in flight.
+// So granting a claim now ALSO atomically extends the work item's lease
+// (`PUBLICATION_LEASE_EXTENSION_MS`) in the same transaction as the claim itself —
+// recovery's own reclaim query (`work_items.lease_expires_at < now`) is a single
+// statement too, so the two can never interleave: either recovery's reclaim commits
+// first (and this claim's own live-lease check then correctly fails) or this claim's
+// extension commits first (and recovery's reclaim then correctly does not match). The
+// ambient per-tick heartbeat (`worker-loop.ts`) would ordinarily keep re-extending the
+// lease throughout anyway on a healthy process, but that protection is incidental to
+// this table; the extension here makes holding the claim its own explicit, structural
+// guarantee for the whole publish operation, not something borrowed from unrelated
+// machinery timing.
 import { getDb } from "../db/index.js";
+
+const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
+
+/**
+ * How long a granted claim guarantees the underlying lease stays valid for — must
+ * comfortably exceed how long a real `gh pr review` call can take. Deliberately much
+ * longer than the work-item kernel's own default per-heartbeat `leaseMs` (60s): this is
+ * a one-shot grant at claim time, not refreshed on a timer the way the heartbeat is.
+ */
+function publicationLeaseExtensionMs(): number {
+  return num("REVIEWER_PUBLISH_LEASE_EXTENSION_MS", 5 * 60_000);
+}
 
 export type ReviewPublicationState = "claimed" | "published" | "failed";
 
@@ -64,22 +91,41 @@ const STILL_LEASED = `EXISTS (
 )`;
 
 /**
+ * Extends `workItemId`'s lease so it cannot expire (and so be reclaimed by recovery)
+ * before `publicationLeaseExtensionMs()` has elapsed. Re-checks the live-lease condition
+ * itself — a caller only extends a lease it is actually the current, live holder of.
+ * Must be called from inside the same transaction as the claim/reclaim grant it protects.
+ */
+function extendLeaseForPublication(workItemId: string, leaseToken: string, now: string): void {
+  const expires = new Date(Date.parse(now) + publicationLeaseExtensionMs()).toISOString();
+  getDb()
+    .prepare("UPDATE work_items SET lease_expires_at = @expires, updated_at = @now WHERE id = @work_item_id AND lease_token = @lease_token AND status = 'leased'")
+    .run({ work_item_id: workItemId, lease_token: leaseToken, expires, now });
+}
+
+/**
  * Returns true if this call won the claim and may proceed to publish. False either
  * because another attempt already holds/held it, or because `leaseToken` is no longer
  * the work item's current lease (this attempt is itself the zombie — it must not
- * publish regardless of who else is racing it).
+ * publish regardless of who else is racing it). Winning atomically extends the
+ * underlying work-item lease (see module doc) so recovery cannot reclaim it out from
+ * under the `gh` call this grant is about to allow.
  */
 export function claimReviewPublication(workItemId: string, leaseToken: string): boolean {
   const now = new Date().toISOString();
-  const result = getDb()
-    .prepare(`
-      INSERT INTO review_publications (work_item_id, state, claimed_at, updated_at)
-      SELECT @work_item_id, 'claimed', @now, @now
-      WHERE NOT EXISTS (SELECT 1 FROM review_publications WHERE work_item_id = @work_item_id)
-        AND ${STILL_LEASED}
-    `)
-    .run({ work_item_id: workItemId, lease_token: leaseToken, now });
-  return result.changes === 1;
+  return getDb().transaction(() => {
+    const result = getDb()
+      .prepare(`
+        INSERT INTO review_publications (work_item_id, state, claimed_at, updated_at)
+        SELECT @work_item_id, 'claimed', @now, @now
+        WHERE NOT EXISTS (SELECT 1 FROM review_publications WHERE work_item_id = @work_item_id)
+          AND ${STILL_LEASED}
+      `)
+      .run({ work_item_id: workItemId, lease_token: leaseToken, now });
+    if (result.changes !== 1) return false;
+    extendLeaseForPublication(workItemId, leaseToken, now);
+    return true;
+  })();
 }
 
 export function getReviewPublication(workItemId: string): ReviewPublicationRow | null {
@@ -124,13 +170,17 @@ export function recordReviewPublishFailed(workItemId: string): void {
  */
 export function reclaimFailedReviewPublication(workItemId: string, leaseToken: string): boolean {
   const now = new Date().toISOString();
-  const result = getDb()
-    .prepare(`
-      UPDATE review_publications
-      SET state = 'claimed', claimed_at = @now, updated_at = @now
-      WHERE work_item_id = @work_item_id AND state = 'failed'
-        AND ${STILL_LEASED}
-    `)
-    .run({ work_item_id: workItemId, lease_token: leaseToken, now });
-  return result.changes === 1;
+  return getDb().transaction(() => {
+    const result = getDb()
+      .prepare(`
+        UPDATE review_publications
+        SET state = 'claimed', claimed_at = @now, updated_at = @now
+        WHERE work_item_id = @work_item_id AND state = 'failed'
+          AND ${STILL_LEASED}
+      `)
+      .run({ work_item_id: workItemId, lease_token: leaseToken, now });
+    if (result.changes !== 1) return false;
+    extendLeaseForPublication(workItemId, leaseToken, now);
+    return true;
+  })();
 }
