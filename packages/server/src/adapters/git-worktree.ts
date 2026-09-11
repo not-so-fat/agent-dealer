@@ -57,6 +57,11 @@ export async function mergeBase(opts: { repo: string; base: string; head: string
   return stdout.trim();
 }
 
+/** Updates the local `origin/<ref>` remote-tracking branch — call before resolving a base SHA against it. */
+export async function fetchRef(worktreePath: string, ref: string): Promise<void> {
+  await git(worktreePath, ["fetch", "origin", ref]);
+}
+
 /** The worktree's actual local HEAD — compared against what `gh` reports to catch a stale/wrong view. */
 export async function revParseHead(worktreePath: string): Promise<string> {
   const { stdout } = await git(worktreePath, ["rev-parse", "HEAD"]);

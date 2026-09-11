@@ -31,6 +31,7 @@ import {
   mergeBase,
   branchExists,
   revParseHead,
+  fetchRef,
 } from "../adapters/git-worktree.js";
 import { bindAndVerify, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
@@ -178,13 +179,18 @@ export async function runDeveloperEffect(
       timeoutMs: developerEffectConfig.sessionTimeoutMs,
     });
 
-    if (spawned.timedOut) {
+    if (spawned.timedOut || spawned.exitCode !== 0) {
+      // A crash/timeout must not be routed as a blind retry without checking the
+      // worktree first: a review round found that when the agent left it dirty, the
+      // preserved checkout kept the branch checked out, so the *next* round's retry
+      // could never `git worktree add` that same branch — it burned a round and then
+      // failed as a confusing adapter_failure two rounds later. dirty_worktree (which
+      // preserves the checkout and escalates without consuming a round) must win here,
+      // exactly as it does when the agent exits 0 but leaves the worktree dirty below.
+      const clean = await isWorktreeClean(worktreePath).catch(() => false);
+      if (!clean) return { kind: "dirty_worktree" };
       await bestEffortRemove(issue.repo, worktreePath);
-      return { kind: "timed_out" };
-    }
-    if (spawned.exitCode !== 0) {
-      await bestEffortRemove(issue.repo, worktreePath);
-      return { kind: "session_failed" };
+      return spawned.timedOut ? { kind: "timed_out" } : { kind: "session_failed" };
     }
 
     // Persisted as soon as the session itself completes — a review round found these
@@ -252,18 +258,12 @@ export async function runDeveloperEffect(
     }
 
     const localHead = await revParseHead(worktreePath);
-    const identity = await validatePrIdentity(prView, {
-      branchName,
-      baseBranch: issue.baseBranch,
-      priorPrNumber: issue.prNumber,
-      localHead,
-    });
+    const identityOpts = { branchName, baseBranch: issue.baseBranch, priorPrNumber: issue.prNumber, localHead };
+    const identity = await validatePrIdentity(prView, identityOpts);
     if (!identity.ok) {
       await bestEffortRemove(issue.repo, worktreePath);
       return { kind: "adapter_failure", reason: identity.reason };
     }
-
-    const baseSha = await mergeBase({ repo: worktreePath, base: prView.baseRefName, head: prView.headRefOid });
 
     const checks = await pollPrChecks(deps.github, {
       cwd: worktreePath,
@@ -271,6 +271,26 @@ export async function runDeveloperEffect(
       intervalMs: developerEffectConfig.checksPollIntervalMs,
       signal: ctx.signal,
     });
+
+    // The poll can run for up to checksPollTimeoutMs (default 10 minutes) — re-fetch and
+    // re-validate identity against the SAME localHead before trusting either the checks
+    // or the SHA about to be handed to the reviewer. A review round found the original
+    // code reused the pre-poll `prView` unconditionally: if the branch moved while this
+    // process was waiting (another push, a zombie retry from a reclaimed lease), the
+    // checks queried could describe a different commit than the one about to be recorded
+    // as the verified handoff, breaking the exact-current-SHA contract.
+    const postPollView = await deps.github.viewPr({ cwd: worktreePath });
+    if (!postPollView) {
+      await bestEffortRemove(issue.repo, worktreePath);
+      return { kind: "adapter_failure", reason: "PR could not be re-verified after the checks poll" };
+    }
+    const postPollIdentity = await validatePrIdentity(postPollView, identityOpts);
+    if (!postPollIdentity.ok) {
+      await bestEffortRemove(issue.repo, worktreePath);
+      return { kind: "adapter_failure", reason: `PR changed while waiting on checks: ${postPollIdentity.reason}` };
+    }
+    prView = postPollView;
+
     createIssueArtifact({
       issueId: issue.id,
       workerSessionId: sessionId,
@@ -286,6 +306,13 @@ export async function runDeveloperEffect(
       await bestEffortRemove(issue.repo, worktreePath);
       return { kind: "timed_out" };
     }
+
+    // Resolve the base SHA against the *fetched* base ref (design §"Verify handoff"), not
+    // whatever the local branch happened to point to before this session ran — a review
+    // round found a stale local base could record the wrong merge-base if origin's base
+    // branch had moved.
+    await fetchRef(worktreePath, prView.baseRefName);
+    const baseSha = await mergeBase({ repo: worktreePath, base: `origin/${prView.baseRefName}`, head: prView.headRefOid });
 
     await bestEffortRemove(issue.repo, worktreePath);
     return {

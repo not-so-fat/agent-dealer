@@ -120,13 +120,16 @@ function fakeGithub(opts: { checks?: "success" | "failure" | "pending"; createFa
   const prs = new Map<string, { number: number; url: string; base: string }>();
   let nextNumber = 100;
   const currentBranch = (cwd: string) => git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
-  const currentHead = (cwd: string) => git(cwd, "rev-parse", "HEAD");
+  // GitHub's view of a PR's head is the REMOTE branch tip, not the local worktree's
+  // checkout — reading it from `remote` (rather than `cwd`) lets a test simulate a
+  // concurrent push changing the head independently of this worktree.
+  const remoteHead = (branch: string) => git(remote, "rev-parse", branch);
   const adapter: GithubFn = {
     async viewPr({ cwd }) {
       const branch = currentBranch(cwd);
       const pr = prs.get(branch);
       if (!pr) return null;
-      return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: branch, headRefOid: currentHead(cwd), isDraft: true };
+      return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: branch, headRefOid: remoteHead(branch), isDraft: true };
     },
     async createDraftPr({ cwd, base }) {
       if (opts.createFails) return { ok: false, reason: "gh: simulated failure", noCommits: false };
@@ -231,6 +234,28 @@ test("session_failed: the agent process exits non-zero — retried like no_pr", 
   assert.equal(dev.status, "failed");
 });
 
+test("a crash that also leaves the worktree dirty escalates as dirty_worktree, not a blind retry that would collide on the next round", async () => {
+  // A review round found: crashingSpawn/timedOutSpawn returned session_failed/timed_out
+  // unconditionally, which routes as a round-consuming retry. But bestEffortRemove
+  // correctly refuses to remove a dirty checkout, so the branch stayed checked out there
+  // — and the very next round's `git worktree add` for that same branch would then fail,
+  // burning a round on a confusing adapter_failure two rounds later instead of the
+  // immediate policy_escalation a dirty handoff is supposed to get.
+  const issueId = await makeIssue();
+  const crashingDirtySpawn: SpawnFn = async (input) => {
+    fs.writeFileSync(path.join(input.cwd, "half-done.txt"), "oops\n");
+    return { exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: crashingDirtySpawn, github: fakeGithub() }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.currentRound, 1, "a dirty crash never consumes a round");
+  assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
+});
+
 test("timed_out (session): the spawn wall-clock timeout is reported distinctly from a crash", async () => {
   const issueId = await makeIssue();
   registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: timedOutSpawn, github: fakeGithub() }));
@@ -317,6 +342,45 @@ test("adapter_failure: a stale headRefOid (gh's view lags the actual push) is re
   assert.equal(getIssue(issueId)!.status, "needs_human");
 });
 
+test("adapter_failure: the PR head changing while checks were being polled is rejected, not silently handed to the reviewer at the old SHA", async () => {
+  // A review round found: validatePrIdentity only ran once, before a checks poll that can
+  // run for up to checksPollTimeoutMs. If the branch moved during that wait (a concurrent
+  // push, or a zombie retry from a reclaimed lease), the pre-poll prView was still reused
+  // for the final clean_handoff — pinning the reviewer to a SHA that might no longer be
+  // "current" per the exact-current-SHA contract. Simulates that race by pushing an extra
+  // commit to the remote branch, from a second clone, right when polling first checks.
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  const github = fakeGithub({ checks: "pending" });
+  let racedYet = false;
+  const realChecksSnapshot = github.checksSnapshot.bind(github);
+  github.checksSnapshot = async (opts) => {
+    if (!racedYet) {
+      racedYet = true;
+      const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-race-"));
+      execFileSync("git", ["clone", "-q", remote, other]);
+      git(other, "checkout", "-q", branch);
+      git(other, "config", "user.email", "test@example.com");
+      git(other, "config", "user.name", "Test");
+      fs.writeFileSync(path.join(other, "race.txt"), "x");
+      git(other, "add", ".");
+      git(other, "-c", "user.email=race@test", "-c", "user.name=Race", "commit", "-q", "-m", "concurrent push");
+      git(other, "push", "-q", "origin", branch);
+      fs.rmSync(other, { recursive: true, force: true });
+      return realChecksSnapshot(opts); // still "pending" — the poll continues
+    }
+    return "success"; // now resolves, but the head has moved underneath it
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.currentRound, 1, "a post-poll identity mismatch never consumes a round");
+  assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
+});
+
 test("adapter_failure: gh pr create itself fails — escalates, never silently retried as a crash", async () => {
   const issueId = await makeIssue();
   registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github: fakeGithub({ createFails: true }) }));
@@ -356,4 +420,93 @@ test("unpushed_commit: the coordinator's own push is rejected by a diverged remo
   assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
 
   execFileSync("git", ["push", "-q", remote, `:${branch}`], { cwd: repo }).toString();
+});
+
+test("baseSha is resolved against the fetched base ref, not a stale local branch", async () => {
+  // A review round found mergeBase used the local `main`, never fetched — if origin/main
+  // had moved since this repo checkout last fetched, the recorded baseSha would be the
+  // stale ancestor rather than the actual current base, and the reviewer would build the
+  // wrong diff. Uses its own isolated repo/remote so advancing "main" here can't affect
+  // any other test in this file that shares the module-level repo/remote fixture.
+  const isoRepo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-iso-repo-"));
+  const isoRemote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-iso-remote-"));
+  try {
+    git(isoRepo, "init", "-q", "-b", "main");
+    git(isoRepo, "config", "user.email", "test@example.com");
+    git(isoRepo, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(isoRepo, "README.md"), "hello\n");
+    git(isoRepo, "add", ".");
+    git(isoRepo, "commit", "-q", "-m", "init");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", isoRemote]);
+    git(isoRepo, "remote", "add", "origin", isoRemote);
+    git(isoRepo, "push", "-q", "origin", "main");
+
+    // Advance origin/main from a separate clone — isoRepo's own local "main" is never
+    // updated, so it stays stale relative to the remote exactly like the scenario found.
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-iso-other-"));
+    execFileSync("git", ["clone", "-q", isoRemote, other]);
+    git(other, "config", "user.email", "test@example.com");
+    git(other, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(other, "upstream-change.txt"), "z");
+    git(other, "add", ".");
+    git(other, "commit", "-q", "-m", "upstream change");
+    git(other, "push", "-q", "origin", "main");
+    const currentOriginMainSha = git(other, "rev-parse", "HEAD");
+    fs.rmSync(other, { recursive: true, force: true });
+    assert.notEqual(git(isoRepo, "rev-parse", "main"), currentOriginMainSha, "isoRepo's local main must stay stale for this test to mean anything");
+
+    const dev = createAgent({ name: `dev-iso-${Math.random()}`, runtime: "claude_code", workspaceRoot: isoRepo });
+    const rev = createAgent({ name: `rev-iso-${Math.random()}`, runtime: "claude_code", workspaceRoot: isoRepo });
+    const issueId = createIssue({
+      title: "Iso base sha",
+      acceptanceCriteria: "works",
+      repo: isoRepo,
+      baseBranch: "main",
+      developerAgentId: dev.id,
+      reviewerAgentId: rev.id,
+      maxReviewRounds: 3,
+      source: "manual",
+    }).id;
+
+    const isoCommittingSpawn: SpawnFn = async (input) => {
+      fs.writeFileSync(path.join(input.cwd, "feature.txt"), "implemented\n");
+      git(input.cwd, "add", ".");
+      git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "implement");
+      return { exitCode: 0, transcript: "conclusion", logPath: "/dev/null", timedOut: false };
+    };
+    const isoPrs = new Map<string, { number: number; url: string; base: string }>();
+    const isoGithub: GithubFn = {
+      async viewPr({ cwd }) {
+        const branch = git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
+        const pr = isoPrs.get(branch);
+        if (!pr) return null;
+        return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: branch, headRefOid: git(isoRemote, "rev-parse", branch), isDraft: true };
+      },
+      async createDraftPr({ cwd, base }) {
+        const branch = git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
+        const number = 1;
+        isoPrs.set(branch, { number, url: `https://github.com/o/r/pull/${number}`, base });
+        return { ok: true, number, url: `https://github.com/o/r/pull/${number}` };
+      },
+      async checksSnapshot() {
+        return "success";
+      },
+    };
+
+    registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: isoCommittingSpawn, github: isoGithub }));
+    startWorkflow(issueId);
+    await pump(1);
+
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.status, "reviewing");
+    // The developer's own branch was cut from the stale local main, so the true merge-base
+    // is the ORIGINAL commit both share — proves fetchRef ran (origin/main now includes
+    // "upstream change") without that unrelated commit corrupting the computed base.
+    const expectedBase = git(isoRepo, "merge-base", "origin/main", issue.headSha!);
+    assert.equal(issue.baseSha, expectedBase);
+    assert.notEqual(issue.baseSha, currentOriginMainSha, "sanity: the base is the shared ancestor, not the tip of the advanced origin/main");
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
 });
