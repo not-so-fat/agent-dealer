@@ -84,20 +84,13 @@ test("only a verdict carries review.submitted; a failed session does not", () =>
   assert.ok(ok.projection.events.includes("review.submitted"));
 });
 
-test("spawn_reviewer and a stale re-review advance no budget; a genuine repair round spends the review budget", () => {
+test("spawn_reviewer advances no budget; a genuine repair round spends the review budget", () => {
   const spawn = projectDeveloperRoute(
     routeDeveloperOutcome({ kind: "clean_handoff", branch: "br", headSha: "h", baseSha: "b", prNumber: 1, prUrl: "u" }, REVIEW_ROUNDS_LEFT),
     "developing",
     1
   );
   assert.equal(spawn.advance, "none");
-
-  const stale = projectReviewerRoute(
-    routeReviewerOutcome({ kind: "stale", currentHeadSha: "new" }, REVIEW_ROUNDS_LEFT, PINNED_HEAD),
-    1,
-    false
-  );
-  assert.equal(stale.advance, "none");
 
   const repair = projectReviewerRoute(
     routeReviewerOutcome({ kind: "verdict", result: verdict("changes_requested") }, REVIEW_ROUNDS_LEFT, PINNED_HEAD),
@@ -107,14 +100,14 @@ test("spawn_reviewer and a stale re-review advance no budget; a genuine repair r
   assert.equal(repair.advance, "review");
 });
 
-test("infra-class retries spend the infra budget, never the review-round budget", () => {
+test("infra-class retries — including a stale re-review — spend the infra budget, never the review-round budget", () => {
   const devRetry = projectDeveloperRoute(
     routeDeveloperOutcome({ kind: "session_failed" }, REVIEW_ROUNDS_LEFT),
     "developing",
     1
   );
   assert.equal(devRetry.advance, "infra");
-  assert.deepStrictEqual(devRetry.effect, { kind: "enqueue", workItem: "developer" });
+  assert.deepStrictEqual(devRetry.effect, { kind: "enqueue", workItem: "developer", retryReason: "Developer session failed or crashed." });
 
   const reviewerRetry = projectReviewerRoute(
     routeReviewerOutcome({ kind: "publish_failed" }, REVIEW_ROUNDS_LEFT, PINNED_HEAD),
@@ -124,4 +117,13 @@ test("infra-class retries spend the infra budget, never the review-round budget"
   assert.equal(reviewerRetry.advance, "infra");
   // The infra retry re-pins the SAME head — it is not a "the head moved" stale re-review.
   assert.deepStrictEqual(reviewerRetry.effect, { kind: "enqueue", workItem: "reviewer", atHeadSha: PINNED_HEAD });
+
+  // A stale re-review (the head genuinely moved) is also bounded on the infra budget —
+  // an unbounded chain of these could otherwise spawn reviewer sessions indefinitely.
+  const stale = projectReviewerRoute(
+    routeReviewerOutcome({ kind: "stale", currentHeadSha: "new" }, REVIEW_ROUNDS_LEFT, PINNED_HEAD),
+    1,
+    false
+  );
+  assert.equal(stale.advance, "infra");
 });

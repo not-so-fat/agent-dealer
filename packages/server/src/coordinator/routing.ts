@@ -39,8 +39,12 @@ function infraAttemptsRemain(limits: RouteLimits): boolean {
 export type DeveloperRouteResult =
   /** headSha is the coordinator-verified SHA (not agent self-report) the reviewer must be pinned to. */
   | { next: "spawn_reviewer"; headSha: string }
-  /** Bounded infra retry — a fresh developer session on the same branch, no review round spent. */
-  | { next: "retry_developer" }
+  /** Bounded infra retry — a fresh developer session on the same branch, no review round
+   * spent. `reason` carries WHY the prior attempt failed into the next session's prompt —
+   * without it, a retried developer can't tell checks_failed from adapter_failure from a
+   * plain crash, and (round 1 specifically) would be told to start on a "fresh branch"
+   * despite reusing one that already carries a failed attempt's commits. */
+  | { next: "retry_developer"; reason: string }
   | { next: "human_action"; actionType: "attempts_exhausted" | "policy_escalation"; reason: string };
 
 export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLimits): DeveloperRouteResult {
@@ -64,7 +68,7 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
       // from the review-round budget, then a human policy_escalation.
       const reason = infraFailureReason(outcome);
       return infraAttemptsRemain(limits)
-        ? { next: "retry_developer" }
+        ? { next: "retry_developer", reason }
         : { next: "human_action", actionType: "policy_escalation", reason: `${reason} (infra-attempt limit reached).` };
     }
   }
@@ -88,7 +92,10 @@ function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "sessi
 export type ReviewerRouteResult =
   | { next: "final_review" }
   | { next: "retry_developer_with_findings" }
-  /** Head moved mid-review — re-review at the freshly verified SHA, never the stale one. No budget spent. */
+  /** Head moved mid-review — re-review at the freshly verified SHA, never the stale one.
+   * Never spends a review round, but DOES spend an infra attempt: an unbounded chain of
+   * these (the head kept moving faster than the reviewer could catch up) would otherwise
+   * let the coordinator spawn reviewer sessions indefinitely. */
   | { next: "retry_reviewer_at_new_head"; headSha: string }
   /** Bounded infra retry — a fresh reviewer session at the SAME already-verified head. */
   | { next: "retry_reviewer"; headSha: string }
@@ -101,7 +108,13 @@ export function routeReviewerOutcome(
 ): ReviewerRouteResult {
   switch (outcome.kind) {
     case "stale":
-      return { next: "retry_reviewer_at_new_head", headSha: outcome.currentHeadSha };
+      return infraAttemptsRemain(limits)
+        ? { next: "retry_reviewer_at_new_head", headSha: outcome.currentHeadSha }
+        : {
+            next: "human_action",
+            actionType: "policy_escalation",
+            reason: "The PR head kept moving before the reviewer could evaluate it (infra-attempt limit reached).",
+          };
     case "session_failed":
     case "publish_failed": {
       const reason =

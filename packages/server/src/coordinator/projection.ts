@@ -20,7 +20,7 @@ export interface IssueProjection {
 
 /** The kind of the single next work item this decision enqueues, if any. */
 export type NextEffect =
-  | { kind: "enqueue"; workItem: WorkItemKind; atHeadSha?: string }
+  | { kind: "enqueue"; workItem: WorkItemKind; atHeadSha?: string; retryReason?: string }
   | { kind: "human_action"; actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision" | "final_review"; reason: string }
   | { kind: "none" };
 
@@ -59,10 +59,10 @@ export function projectDeveloperRoute(
           // an infra-retry developer failure stays in "repairing".
           issueStatus: currentStatus === "repairing" ? "repairing" : "developing",
           currentOwner: "developer",
-          currentIntent: `Developer retrying (infra attempt)`,
+          currentIntent: `Developer retrying (infra attempt) — ${route.reason}`,
           events: ["worker.failed"],
         },
-        effect: { kind: "enqueue", workItem: "developer" },
+        effect: { kind: "enqueue", workItem: "developer", retryReason: route.reason },
         advance: "infra",
       };
     case "human_action":
@@ -119,6 +119,8 @@ export function projectReviewerRoute(
         hasVerdict,
       };
     case "retry_reviewer_at_new_head":
+      // Spends an infra attempt (not a review round): an unbounded chain of these — the
+      // head kept moving faster than the reviewer could catch up — must still terminate.
       return {
         projection: {
           issueStatus: "reviewing",
@@ -127,7 +129,7 @@ export function projectReviewerRoute(
           events: ["worker.completed"],
         },
         effect: { kind: "enqueue", workItem: "reviewer", atHeadSha: route.headSha },
-        advance: "none",
+        advance: "infra",
         hasVerdict,
       };
     case "retry_reviewer":

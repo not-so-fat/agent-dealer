@@ -477,6 +477,7 @@ function applyEffect(
       round: issueNow.currentRound,
       payload: {
         ...(effect.atHeadSha ? { inputSha: effect.atHeadSha } : {}),
+        ...(effect.retryReason ? { retryReason: effect.retryReason } : {}),
         profileSnapshot: queuedProfileSnapshot(issue, kind),
       },
       idempotencyKey: `${instance.id}:${kind}:${issueNow.currentRound}${headSuffix}${attemptSuffix}`,
@@ -486,6 +487,12 @@ function applyEffect(
 
   if (effect.kind === "human_action") {
     const actionType = effect.actionType as HumanActionType;
+    // A reviewer-side infra exhaustion (session_failed/publish_failed — not a verdict) is
+    // the one policy_escalation flavor where nothing is wrong with the code/PR itself; the
+    // reviewer session/publish attempt just kept failing. Tag the continuation so resolving
+    // "resume" can re-queue a fresh REVIEWER at the still-valid pinned head instead of
+    // defaulting to a developer round (which would be a wasted, unrelated re-implementation).
+    const resumeAsReviewer = actionType === "policy_escalation" && reviewerOutcome !== undefined && reviewerOutcome.kind !== "verdict";
     const action = createHumanAction({
       issueId: issue.id,
       workflowInstanceId: instance.id,
@@ -493,6 +500,7 @@ function applyEffect(
       reason: effect.reason,
       question: questionFor(actionType, effect.reason),
       evidence: reviewerOutcome?.kind === "verdict" ? { review: reviewerOutcome.result } : undefined,
+      continuationPreview: resumeAsReviewer ? { resumeRole: "reviewer", resumeHeadSha: issue.headSha } : undefined,
       responseOptions: responseOptionsFor(actionType),
     });
     if (actionType === "final_review") ev.emit("final_review.requested");
@@ -536,6 +544,22 @@ function responseOptionsFor(actionType: HumanActionType): Array<{ choice: string
       ];
     case "product_scope_decision":
       return [{ choice: "resume", label: "Resume development" }];
+  }
+}
+
+/** The shape `applyEffect` writes into a policy_escalation's `continuationPreview` for a
+ * reviewer-origin infra exhaustion — read back by resolveHumanActionAndAdvance's "resume". */
+interface ResumeContinuation {
+  resumeRole?: "developer" | "reviewer";
+  resumeHeadSha?: string | null;
+}
+
+function parseContinuationPreview(json: string | null): ResumeContinuation | null {
+  if (!json) return null;
+  try {
+    return JSON.parse(json) as ResumeContinuation;
+  } catch {
+    return null;
   }
 }
 
@@ -613,6 +637,24 @@ export function resolveHumanActionAndAdvance(
 
   const outcome = resolveHumanActionOutcome(resolution);
 
+  // A reviewer-origin infra escalation (session_failed/publish_failed exhausted) tagged
+  // its continuation with where to resume: nothing was wrong with the code/PR, only the
+  // reviewer session/publish attempt kept failing, so "resume" must re-queue a reviewer
+  // at the still-valid pinned head — not default to an unrelated developer round.
+  const continuation = parseContinuationPreview(action.continuationPreviewJson);
+  const resumeAsReviewer =
+    action.actionType === "policy_escalation" &&
+    resolution.choice === "resume" &&
+    continuation?.resumeRole === "reviewer" &&
+    !!continuation.resumeHeadSha;
+
+  // "review"/"review_grant" advance current_round before the next session is queued;
+  // "infra"/"none" queue at the round current_round is already at. Computed up front so
+  // currentIntent's round number matches the round the queued work item actually carries
+  // (previously this always said currentRound + 1, which was wrong for infra/none).
+  const nextRound =
+    outcome.roundKind === "review" || outcome.roundKind === "review_grant" ? issue.currentRound + 1 : issue.currentRound;
+
   return getDb().transaction((): ResolveResult => {
     resolveHumanAction(actionId, resolvedBy, { choice });
     const ev = eventEmitter(issue, instance, null, outcome.issueStatus, issue.currentRound);
@@ -621,14 +663,18 @@ export function resolveHumanActionAndAdvance(
       payload: { actionType: action.actionType, choice },
     });
 
-    transitionIssue(issue.id, outcome.issueStatus, {
-      currentOwner: outcome.issueStatus === "done" || outcome.issueStatus === "closed" ? "system" : "developer",
+    const resumeStatus = resumeAsReviewer ? "reviewing" : outcome.issueStatus;
+    transitionIssue(issue.id, resumeStatus, {
+      currentOwner:
+        resumeStatus === "done" || resumeStatus === "closed" ? "system" : resumeAsReviewer ? "reviewer" : "developer",
       currentIntent:
-        outcome.issueStatus === "done"
+        resumeStatus === "done"
           ? "Complete"
-          : outcome.issueStatus === "closed"
+          : resumeStatus === "closed"
             ? "Closed"
-            : `Developer implementing round ${issue.currentRound + 1}`,
+            : resumeAsReviewer
+              ? `Reviewer re-evaluating at ${continuation!.resumeHeadSha!.slice(0, 8)}`
+              : `Developer implementing round ${nextRound}`,
     });
 
     if (outcome.workflowOutcome) {
@@ -643,8 +689,9 @@ export function resolveHumanActionAndAdvance(
       };
     }
 
-    // Another round: spend the budget this resolution's roundKind names, then queue a
-    // fresh developer work item.
+    // Another round: spend the budget this resolution's roundKind names, then queue the
+    // resumed effect — a reviewer at the pinned head for a reviewer-origin infra
+    // escalation, a fresh developer round otherwise.
     switch (outcome.roundKind) {
       case "review_grant":
         grantReviewRetry(issue.id);
@@ -664,14 +711,23 @@ export function resolveHumanActionAndAdvance(
     // Keyed on the resolved human action, not the round/attempt counters: a
     // "infra" resume resets infra_attempts to 0 every time, so a counter-based key would
     // collide across repeated escalate→resume cycles within the same round.
-    const next = enqueueWorkItem({
-      issueId: issue.id,
-      workflowInstanceId: instance.id,
-      kind: "developer",
-      round: issueNow.currentRound,
-      payload: { profileSnapshot: queuedProfileSnapshot(issue, "developer") },
-      idempotencyKey: `${instance.id}:developer:resume:${action.id}`,
-    });
+    const next = resumeAsReviewer
+      ? enqueueWorkItem({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          kind: "reviewer",
+          round: issueNow.currentRound,
+          payload: { inputSha: continuation!.resumeHeadSha, profileSnapshot: queuedProfileSnapshot(issue, "reviewer") },
+          idempotencyKey: `${instance.id}:reviewer:resume:${action.id}`,
+        })
+      : enqueueWorkItem({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          kind: "developer",
+          round: issueNow.currentRound,
+          payload: { profileSnapshot: queuedProfileSnapshot(issue, "developer") },
+          idempotencyKey: `${instance.id}:developer:resume:${action.id}`,
+        });
     return {
       ok: true,
       issueStatus: getIssue(issue.id)!.status,

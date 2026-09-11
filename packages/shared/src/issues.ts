@@ -80,7 +80,10 @@ export const ISSUE_STATUS_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   // reviewer at a newly verified head without leaving the "reviewing" stage.
   reviewing: ["reviewing", "repairing", "final_review", "needs_human", "closed"],
   repairing: ["repairing", "reviewing", "needs_human", "closed"],
-  needs_human: ["developing", "repairing", "final_review", "done", "closed"],
+  // "reviewing" lets a reviewer-side infra escalation (session_failed/publish_failed
+  // exhausted) resume with a fresh reviewer session at the still-valid pinned head,
+  // instead of always routing back through the developer.
+  needs_human: ["developing", "reviewing", "repairing", "final_review", "done", "closed"],
   final_review: ["done", "repairing", "needs_human", "closed"],
   done: [],
   closed: [],

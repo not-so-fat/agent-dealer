@@ -157,6 +157,13 @@ export async function runDeveloperEffect(
       }
     }
 
+    let payload: { retryReason?: string | null } = {};
+    try {
+      if (workItem.payloadJson) payload = JSON.parse(workItem.payloadJson);
+    } catch {
+      payload = {};
+    }
+
     const openFindings = listFindingsForIssue(issue.id).filter(
       (f) => f.status === "open" || f.status === "recurring"
     );
@@ -164,6 +171,7 @@ export async function runDeveloperEffect(
       taskSnapshot,
       round: workItem.round,
       findings: openFindings.length ? openFindings : undefined,
+      retryReason: payload.retryReason ?? undefined,
       worktreePath,
       deckId: snapshot?.deckId ?? null,
       playbookIds: snapshot?.playbookIds,

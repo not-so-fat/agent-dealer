@@ -198,8 +198,10 @@ test("no_pr: the agent makes no commits — retried, no reviewer work item", asy
 test("the branch created on a retried round is reused, not re-created — no 'branch already exists' collision", async () => {
   const issueId = await makeIssue();
   let call = 0;
+  const prompts: string[] = [];
   const flakyThenCommittingSpawn: SpawnFn = async (input) => {
     call++;
+    prompts.push(input.prompt);
     if (call === 1) return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false }; // round 1: no_pr
     return commitingSpawn(input); // round 2: implements for real
   };
@@ -217,6 +219,13 @@ test("the branch created on a retried round is reused, not re-created — no 'br
   const devSessions = listWorkerSessionsForIssue(issueId).filter((s) => s.role === "developer");
   assert.equal(devSessions.length, 2);
   assert.equal(devSessions[1].status, "done");
+
+  // The retried session's prompt must carry WHY the prior attempt failed and must NOT
+  // claim a fresh branch — it's still round 1 (no_pr is an infra retry, not a new round),
+  // and the branch already carries whatever the first attempt left behind.
+  assert.doesNotMatch(prompts[0], /previous attempt failed/);
+  assert.match(prompts[1], /retry of round 1 after the previous attempt failed: Developer session produced no PR\./);
+  assert.doesNotMatch(prompts[1], /fresh branch/);
 });
 
 test("dirty_worktree: an uncommitted file escalates without consuming a round", async () => {

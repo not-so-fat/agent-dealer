@@ -24,7 +24,10 @@ test("clean handoff routes to spawn_reviewer", () => {
 
 test("no PR with infra attempts remaining retries the developer without spending a review round", () => {
   const outcome: DeveloperOutcome = { kind: "no_pr" };
-  assert.deepStrictEqual(routeDeveloperOutcome(outcome, REVIEW_AT_LIMIT), { next: "retry_developer" });
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, REVIEW_AT_LIMIT), {
+    next: "retry_developer",
+    reason: "Developer session produced no PR.",
+  });
 });
 
 test("no PR at the infra-attempt limit escalates, not attempts_exhausted (that stays pure to review rounds)", () => {
@@ -36,7 +39,10 @@ test("no PR at the infra-attempt limit escalates, not attempts_exhausted (that s
 
 test("session_failed with infra attempts remaining also just retries (same bucket as no_pr)", () => {
   const outcome: DeveloperOutcome = { kind: "session_failed" };
-  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), { next: "retry_developer" });
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    next: "retry_developer",
+    reason: "Developer session failed or crashed.",
+  });
 });
 
 test("dirty worktree always escalates immediately — never retried, regardless of any budget", () => {
@@ -55,7 +61,10 @@ test("unpushed commit always escalates immediately — never retried, regardless
 
 test("adapter failure is bounded-retried on the infra budget (unified failure policy), not escalated on first occurrence", () => {
   const outcome: DeveloperOutcome = { kind: "adapter_failure", reason: "gh: command not found" };
-  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), { next: "retry_developer" });
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    next: "retry_developer",
+    reason: "Git/GitHub verification failed: gh: command not found",
+  });
 });
 
 test("adapter failure escalates once the infra-attempt limit is reached", () => {
@@ -67,12 +76,18 @@ test("adapter failure escalates once the infra-attempt limit is reached", () => 
 
 test("timed_out with infra attempts remaining retries (same bucket as session_failed/no_pr)", () => {
   const outcome: DeveloperOutcome = { kind: "timed_out" };
-  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), { next: "retry_developer" });
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    next: "retry_developer",
+    reason: "Developer session timed out.",
+  });
 });
 
 test("checks_failed with infra attempts remaining retries (same bucket as session_failed/no_pr)", () => {
   const outcome: DeveloperOutcome = { kind: "checks_failed", details: "lint failed" };
-  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), { next: "retry_developer" });
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    next: "retry_developer",
+    reason: "Developer's PR checks failed.",
+  });
 });
 
 test("checks_failed at the infra-attempt limit escalates", () => {
@@ -84,7 +99,10 @@ test("checks_failed at the infra-attempt limit escalates", () => {
 
 test("an infra-class developer failure never spends the review-round budget, even at the review-round limit", () => {
   const outcome: DeveloperOutcome = { kind: "session_failed" };
-  assert.deepStrictEqual(routeDeveloperOutcome(outcome, REVIEW_AT_LIMIT), { next: "retry_developer" });
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, REVIEW_AT_LIMIT), {
+    next: "retry_developer",
+    reason: "Developer session failed or crashed.",
+  });
 });
 
 // --- Reviewer outcomes ---
@@ -133,9 +151,21 @@ test("escalated without a product scope question routes to policy_escalation", (
   assert.equal((result as { actionType: string }).actionType, "policy_escalation");
 });
 
-test("stale review retries the reviewer at the freshly verified head without spending any budget", () => {
+test("stale review retries the reviewer at the freshly verified head while infra attempts remain", () => {
   const outcome: ReviewerOutcome = { kind: "stale", currentHeadSha: "new-head" };
-  assert.deepStrictEqual(routeReviewerOutcome(outcome, REVIEW_ROUNDS_LEFT, PINNED_HEAD), { next: "retry_reviewer_at_new_head", headSha: "new-head" });
+  assert.deepStrictEqual(routeReviewerOutcome(outcome, INFRA_ATTEMPTS_LEFT, PINNED_HEAD), { next: "retry_reviewer_at_new_head", headSha: "new-head" });
+});
+
+test("a stale review never spends a review round, even at the review-round limit", () => {
+  const outcome: ReviewerOutcome = { kind: "stale", currentHeadSha: "new-head" };
+  assert.deepStrictEqual(routeReviewerOutcome(outcome, REVIEW_AT_LIMIT, PINNED_HEAD), { next: "retry_reviewer_at_new_head", headSha: "new-head" });
+});
+
+test("a head that keeps moving faster than the reviewer can catch up eventually escalates, bounding the retry loop", () => {
+  const outcome: ReviewerOutcome = { kind: "stale", currentHeadSha: "new-head" };
+  const result = routeReviewerOutcome(outcome, INFRA_AT_LIMIT, PINNED_HEAD);
+  assert.equal(result.next, "human_action");
+  assert.equal((result as { actionType: string }).actionType, "policy_escalation");
 });
 
 test("reviewer session_failed is bounded-retried at the SAME pinned head, not the developer", () => {
