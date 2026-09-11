@@ -220,13 +220,29 @@ export async function runReviewerEffect(
       await bestEffortRemove(issue.repo, worktreePath);
       return { kind: "session_failed" };
     }
+    // The reviewer is told to echo these exact values (prompts.ts's reviewer contract);
+    // a result that doesn't cannot be trusted to have actually reviewed the pinned
+    // revision — reject it rather than let a wrong-SHA verdict approve or advance the
+    // issue (design's exact-SHA protocol applies to the reviewer's output too, not just
+    // the developer's handoff).
+    if (parsed.baseSha !== baseSha || parsed.headSha !== headSha) {
+      await bestEffortRemove(issue.repo, worktreePath);
+      return { kind: "session_failed" };
+    }
     result = parsed;
   } catch {
     return { kind: "session_failed" };
   }
 
+  if (issue.prNumber == null) {
+    // Can't identify which PR to re-verify/publish against — the detached worktree has
+    // no branch for `gh` to fall back to resolving this from.
+    await bestEffortRemove(issue.repo, worktreePath);
+    return { kind: "publish_failed" };
+  }
+
   try {
-    const prView = await deps.github.viewPr({ cwd: worktreePath, number: issue.prNumber ?? undefined });
+    const prView = await deps.github.viewPr({ cwd: worktreePath, number: issue.prNumber });
     if (!prView) {
       await bestEffortRemove(issue.repo, worktreePath);
       return { kind: "publish_failed" };
@@ -249,6 +265,8 @@ export async function runReviewerEffect(
     fs.writeFileSync(bodyFilePath, renderReviewBody(result));
     const published = await deps.github.publishReview({
       cwd: worktreePath,
+      number: issue.prNumber,
+      headSha,
       event: EVENT_FOR_VERDICT[result.verdict],
       bodyFilePath,
     });

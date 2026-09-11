@@ -108,14 +108,47 @@ function reviewerContractSection(baseSha: string, headSha: string): string[] {
   ];
 }
 
-/** The 4000-char cap mirrors `extractConclusion` in developer-effect.ts — the tail is where the actual changes are. */
-function capDiff(diff: string): string {
+const PER_FILE_DIFF_LIMIT = 8_000;
+const TOTAL_DIFF_LIMIT = 80_000;
+
+/**
+ * Per-file capping, not one flat cut over the whole diff: a flat cap spends its entire
+ * budget on the first file(s) it hits and silently drops every later file's changes
+ * entirely from what the reviewer ever sees — a review round demonstrated exactly this
+ * on this PR's own diff (a flat 12,000-char cap ended inside the second changed file,
+ * so the reviewer prompt never contained several of the changed files at all). Every
+ * file gets its own budget, and the manifest lists every changed file up front so a
+ * file that still has to be dropped for total length is at least visible as changed,
+ * not silently absent — the reviewer is told to flag any omitted file as unreviewed
+ * rather than treat its absence as "no changes there."
+ */
+function formatDiffForPrompt(diff: string): string {
   const trimmed = diff.trim();
   if (!trimmed) return "(empty diff)";
-  const LIMIT = 12_000;
-  return trimmed.length > LIMIT
-    ? `${trimmed.slice(0, LIMIT)}\n\n... [diff truncated at ${LIMIT} chars]`
-    : trimmed;
+
+  const blocks = trimmed.split(/(?=^diff --git )/m).filter(Boolean);
+  const manifest = blocks.map((b) => b.slice(0, b.indexOf("\n"))).join("\n");
+
+  const pieces: string[] = [];
+  let total = 0;
+  let omittedFiles = 0;
+  for (const block of blocks) {
+    const piece =
+      block.length > PER_FILE_DIFF_LIMIT
+        ? `${block.slice(0, PER_FILE_DIFF_LIMIT)}\n... [this file's diff truncated at ${PER_FILE_DIFF_LIMIT} chars]\n`
+        : block;
+    if (total + piece.length > TOTAL_DIFF_LIMIT) {
+      omittedFiles++;
+      continue;
+    }
+    pieces.push(piece);
+    total += piece.length;
+  }
+
+  const footer = omittedFiles
+    ? `\n... [${omittedFiles} additional changed file(s) omitted for length — see the file list above; treat those as unreviewed in your assessment, not as unchanged]`
+    : "";
+  return `Changed files (${blocks.length}):\n${manifest}\n\n${pieces.join("\n")}${footer}`;
 }
 
 export function buildReviewerPrompt(input: ReviewerPromptInput): string {
@@ -133,7 +166,7 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
     ``,
     `## Diff (base ${input.baseSha.slice(0, 8)} → head ${input.headSha.slice(0, 8)})`,
     "```diff",
-    capDiff(input.diff),
+    formatDiffForPrompt(input.diff),
     "```",
     ``,
   ];

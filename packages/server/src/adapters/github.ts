@@ -101,13 +101,22 @@ export interface GithubAdapter {
   /** One-shot read of the current check rollup for the PR's head. */
   checksSnapshot(opts: { cwd: string }): Promise<ChecksSnapshot>;
   /**
-   * Publishes the reviewer's validated verdict. `event` "APPROVE"/"REQUEST_CHANGES" falls
-   * back to a plain comment review carrying the same body when GitHub rejects it because
-   * the identity running `gh` authored the PR — expected in this system's single-ambient-
-   * identity setup (design §"Role permissions": developer and coordinator share one `gh
-   * auth`), not an edge case. The internal verdict stays the workflow authority either way.
+   * Publishes the reviewer's validated verdict against `number` explicitly — required for
+   * a detached-HEAD reviewer worktree, same reason as `viewPr`'s `number`. `event`
+   * "APPROVE"/"REQUEST_CHANGES" falls back to a plain comment review carrying the same
+   * body when GitHub rejects it because the identity running `gh` authored the PR —
+   * expected in this system's single-ambient-identity setup (design §"Role permissions":
+   * developer and coordinator share one `gh auth`), not an edge case. The internal verdict
+   * stays the workflow authority either way.
+   *
+   * Idempotent on `(number, headSha)`: first checks whether a review already exists from
+   * this identity at exactly `headSha` — the same "check current state before mutating"
+   * idiom `createDraftPr`'s callers already use for the PR itself — so a crash between
+   * `gh` accepting the review and the work item's completion CAS, followed by recovery
+   * re-running the same work item, reports the existing review instead of submitting a
+   * second one.
    */
-  publishReview(opts: { cwd: string; event: ReviewEvent; bodyFilePath: string }): Promise<PublishReviewResult>;
+  publishReview(opts: { cwd: string; number: number; headSha: string; event: ReviewEvent; bodyFilePath: string }): Promise<PublishReviewResult>;
 }
 
 async function ghPrView(cwd: string, fields: string, number?: number): Promise<Record<string, unknown> | null> {
@@ -153,12 +162,17 @@ export const realGithubAdapter: GithubAdapter = {
     return summarizeChecks(rollup);
   },
 
-  async publishReview({ cwd, event, bodyFilePath }) {
-    const result = await runReview(cwd, event, bodyFilePath);
+  async publishReview({ cwd, number, headSha, event, bodyFilePath }) {
+    const existing = await findOwnReviewAtSha(cwd, number, headSha);
+    if (existing) {
+      return { ok: true, event: existing, usedCommentFallback: existing !== event };
+    }
+
+    const result = await runReview(cwd, number, event, bodyFilePath);
     if (result.ok || event === "COMMENT" || !OWN_PR_REVIEW_PATTERN.test(result.reason)) {
       return result.ok ? { ok: true, event, usedCommentFallback: false } : result;
     }
-    const fallback = await runReview(cwd, "COMMENT", bodyFilePath);
+    const fallback = await runReview(cwd, number, "COMMENT", bodyFilePath);
     return fallback.ok
       ? { ok: true, event: "COMMENT", usedCommentFallback: true }
       : { ok: false, reason: `${event} rejected as self-review, and comment fallback also failed: ${fallback.reason}` };
@@ -176,15 +190,53 @@ const OWN_PR_REVIEW_PATTERN = /own pull request/i;
 
 async function runReview(
   cwd: string,
+  number: number,
   event: ReviewEvent,
   bodyFilePath: string
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   try {
-    await run("gh", ["pr", "review", REVIEW_FLAG[event], "--body-file", bodyFilePath], { cwd });
+    // The PR is targeted explicitly by number — the reviewer's worktree is a detached-HEAD
+    // checkout with no current branch for a bare `gh pr review` to resolve against.
+    await run("gh", ["pr", "review", String(number), REVIEW_FLAG[event], "--body-file", bodyFilePath], { cwd });
     return { ok: true };
   } catch (err) {
     const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
     return { ok: false, reason: message };
+  }
+}
+
+interface RawReview {
+  user?: { login?: string };
+  commit_id?: string;
+  state?: string;
+}
+
+const STATE_TO_EVENT: Record<string, ReviewEvent> = {
+  APPROVED: "APPROVE",
+  CHANGES_REQUESTED: "REQUEST_CHANGES",
+  COMMENTED: "COMMENT",
+};
+
+/**
+ * Whether the authenticated identity has already submitted a review on `number` at
+ * exactly `headSha` — checked via the REST API (`commit_id` isn't exposed by `gh pr
+ * view --json reviews`) so a retried publish can recognize its own prior effect instead
+ * of submitting a duplicate. Best-effort: any failure (offline, `gh api` unavailable)
+ * returns null and lets the caller proceed to publish normally.
+ */
+async function findOwnReviewAtSha(cwd: string, number: number, headSha: string): Promise<ReviewEvent | null> {
+  try {
+    const { stdout: login } = await run("gh", ["api", "user", "--jq", ".login"], { cwd });
+    const me = login.trim();
+    if (!me) return null;
+    const { stdout } = await run("gh", ["api", `repos/{owner}/{repo}/pulls/${number}/reviews`, "--paginate"], { cwd });
+    const reviews = JSON.parse(stdout) as RawReview[];
+    // Last-matching wins — a later review from the same identity/commit supersedes an
+    // earlier one (e.g. a COMMENT fallback recorded before a since-changed policy).
+    const mine = [...reviews].reverse().find((r) => r.user?.login === me && r.commit_id === headSha);
+    return mine?.state ? STATE_TO_EVENT[mine.state] ?? null : null;
+  } catch {
+    return null;
   }
 }
 

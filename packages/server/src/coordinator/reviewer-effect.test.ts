@@ -12,6 +12,8 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { GithubAdapter, ReviewEvent } from "../adapters/github.js";
+import type { EffectContext } from "./effect-registry.js";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-reveff-home-"));
 process.env.MAX_COORDINATOR_CONCURRENCY = "2";
@@ -29,6 +31,8 @@ const { listWorkItemsForIssue } = await import("../repository/work-items.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue } = await import("../repository/findings.js");
+const { getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
+const { createWorkerSession } = await import("../repository/worker-sessions.js");
 const { startWorkflow } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
 const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
@@ -109,15 +113,17 @@ const commitingSpawn: SpawnFn = async (input) => {
 
 type Verdict = "approved" | "changes_requested" | "escalated";
 
-function reviewerTranscript(opts: {
+interface VerdictOpts {
   verdict: Verdict;
   findings?: Array<{ fingerprint: string; severity: "blocking" | "non_blocking"; title: string; rationale: string }>;
   productScopeQuestion?: string;
-}): string {
+}
+
+function reviewerTranscript(opts: VerdictOpts & { baseSha: string; headSha: string }): string {
   const body = {
     verdict: opts.verdict,
-    baseSha: "0000000000000000000000000000000000face",
-    headSha: "0000000000000000000000000000000000cafe",
+    baseSha: opts.baseSha,
+    headSha: opts.headSha,
     acceptanceCriteriaAssessment: "Assessed.",
     evidenceAssessment: "Evidence checked.",
     findings: opts.findings ?? [],
@@ -127,9 +133,30 @@ function reviewerTranscript(opts: {
   return `Some preamble.\n\`\`\`json\n${JSON.stringify(body)}\n\`\`\`\n`;
 }
 
-function verdictSpawn(opts: Parameters<typeof reviewerTranscript>[0]): ReviewerSpawnFn {
-  return async () => ({ exitCode: 0, transcript: reviewerTranscript(opts), logPath: "/dev/null", timedOut: false });
+/** The reviewer prompt echoes the exact SHAs it must report (prompts.ts) — pulling them
+ * back out of the prompt keeps this fake honest against reviewer-effect.ts's own SHA
+ * validation, instead of hardcoding values that would now be rejected. */
+function shasFromPrompt(prompt: string): { baseSha: string; headSha: string } {
+  const baseSha = prompt.match(/"baseSha" to exactly "([0-9a-f]+)"/)?.[1];
+  const headSha = prompt.match(/"headSha" to exactly "([0-9a-f]+)"/)?.[1];
+  if (!baseSha || !headSha) throw new Error("could not extract SHAs from reviewer prompt");
+  return { baseSha, headSha };
 }
+
+function verdictSpawn(opts: VerdictOpts): ReviewerSpawnFn {
+  return async (input) => {
+    const { baseSha, headSha } = shasFromPrompt(input.prompt);
+    return { exitCode: 0, transcript: reviewerTranscript({ ...opts, baseSha, headSha }), logPath: "/dev/null", timedOut: false };
+  };
+}
+
+/** Reports SHAs that do not match what the coordinator actually pinned/verified. */
+const wrongShaSpawn: ReviewerSpawnFn = async () => ({
+  exitCode: 0,
+  transcript: reviewerTranscript({ verdict: "approved", baseSha: "0".repeat(40), headSha: "1".repeat(40) }),
+  logPath: "/dev/null",
+  timedOut: false,
+});
 
 const garbageSpawn: ReviewerSpawnFn = async () => ({ exitCode: 0, transcript: "not json at all", logPath: "/dev/null", timedOut: false });
 const crashingReviewerSpawn: ReviewerSpawnFn = async () => ({ exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: false });
@@ -141,14 +168,24 @@ interface FakeGithubOpts {
   rejectSelfReview?: boolean;
 }
 
-/** In-memory PR store — real git tells it the branch/head, nothing hits real GitHub. */
-function fakeGithub(opts: FakeGithubOpts = {}): GithubFn {
+/**
+ * In-memory PR store — real git tells it the branch/head, nothing hits real GitHub.
+ * `publishReview` tracks what it has already recorded per `(number, headSha)`, mirroring
+ * the real adapter's idempotency contract (github.ts's `findOwnReviewAtSha`): a second
+ * call for the same PR at the same head returns the already-recorded event without
+ * incrementing `publishCallCount()`, so a test can simulate the effect handler being
+ * re-run (a crash before the work item's completion CAS, followed by recovery) and
+ * assert GitHub was only actually mutated once.
+ */
+function fakeGithub(opts: FakeGithubOpts = {}): GithubFn & { publishCallCount(): number } {
   const prsByBranch = new Map<string, { number: number; url: string; base: string }>();
   const branchByNumber = new Map<number, string>();
+  const publishedReviews = new Map<string, ReviewEvent>();
   let nextNumber = 100;
+  let publishCalls = 0;
   const currentBranch = (cwd: string) => git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
   const remoteHead = (branch: string) => git(remote, "rev-parse", branch);
-  const adapter: GithubFn = {
+  const adapter: GithubAdapter = {
     async viewPr({ cwd, number }) {
       const branch = number != null ? branchByNumber.get(number) : currentBranch(cwd);
       if (!branch) return null;
@@ -167,15 +204,19 @@ function fakeGithub(opts: FakeGithubOpts = {}): GithubFn {
     async checksSnapshot() {
       return opts.checks ?? "success";
     },
-    async publishReview({ event }) {
+    async publishReview({ number, headSha, event }) {
+      const key = `${number}:${headSha}`;
+      const existing = publishedReviews.get(key);
+      if (existing) return { ok: true, event: existing, usedCommentFallback: existing !== event };
+
+      publishCalls++;
       if (opts.publishFails) return { ok: false, reason: "boom" };
-      if (opts.rejectSelfReview && event !== "COMMENT") {
-        return { ok: true, event: "COMMENT", usedCommentFallback: true };
-      }
-      return { ok: true, event, usedCommentFallback: false };
+      const finalEvent: ReviewEvent = opts.rejectSelfReview && event !== "COMMENT" ? "COMMENT" : event;
+      publishedReviews.set(key, finalEvent);
+      return { ok: true, event: finalEvent, usedCommentFallback: finalEvent !== event };
     },
   };
-  return adapter;
+  return Object.assign(adapter, { publishCallCount: () => publishCalls });
 }
 
 /** Advances the issue to "reviewing" with a real coordinator-verified head SHA. */
@@ -219,6 +260,56 @@ test("same-identity fallback: GitHub rejecting APPROVE as a self-review still re
   const published = listArtifactsForIssue(issueId).find((a) => a.kind === "review_published");
   assert.equal(JSON.parse(published!.contentJson!).event, "COMMENT");
   assert.equal(JSON.parse(published!.contentJson!).usedCommentFallback, true);
+});
+
+test("session_failed: a verdict reporting SHAs that don't match the coordinator-verified revision is rejected, not accepted", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: wrongShaSpawn, github }));
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human", "a wrong-SHA verdict must never reach final_review");
+  assert.equal(issue.currentRound, 1, "a rejected verdict never consumes a round");
+  assert.equal(github.publishCallCount(), 0, "a rejected verdict is never published");
+});
+
+test("publish is idempotent: re-running the effect for the same PR/head (simulating a crash before the work item's completion CAS, then recovery) does not submit a second review", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+
+  const issue = getIssue(issueId)!;
+  const instance = getActiveWorkflowInstance(issueId)!;
+  const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  const deps = { spawn: verdictSpawn({ verdict: "approved" }), github };
+
+  // A real worker_sessions row per attempt — createIssueArtifact's FK requires one, and
+  // this also matches what worker-loop.ts's processWorkItem actually does on each attempt
+  // (a fresh session per claim of the same work item).
+  const ctxFor = (): EffectContext => {
+    const session = createWorkerSession({
+      issueId: issue.id,
+      role: "reviewer",
+      round: workItem.round,
+      agentId: issue.reviewerAgentId,
+      runtime: "claude_code",
+    });
+    return {
+      workItem: { ...workItem, workerSessionId: session.id },
+      issue,
+      instance,
+      signal: new AbortController().signal,
+    };
+  };
+
+  const first = await runReviewerEffect(ctxFor(), deps);
+  const second = await runReviewerEffect(ctxFor(), deps);
+
+  assert.equal(first.kind, "verdict");
+  assert.equal(second.kind, "verdict");
+  assert.equal(github.publishCallCount(), 1, "GitHub must only actually be mutated once");
 });
 
 test("changes_requested: findings thread onto the issue and a fresh developer repair round is queued", async () => {
