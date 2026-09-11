@@ -20,6 +20,7 @@ export interface PrView {
   baseRefName: string;
   headRefName: string;
   headRefOid: string;
+  isDraft: boolean;
 }
 
 interface RawPrView {
@@ -28,6 +29,7 @@ interface RawPrView {
   baseRefName: string;
   headRefName: string;
   headRefOid: string;
+  isDraft: boolean;
 }
 
 export function parsePrView(json: string): PrView {
@@ -38,10 +40,11 @@ export function parsePrView(json: string): PrView {
     baseRefName: raw.baseRefName,
     headRefName: raw.headRefName,
     headRefOid: raw.headRefOid,
+    isDraft: raw.isDraft,
   };
 }
 
-const PR_VIEW_FIELDS = "number,url,baseRefName,headRefName,headRefOid";
+const PR_VIEW_FIELDS = "number,url,baseRefName,headRefName,headRefOid,isDraft";
 
 /** Raw per-check state as `gh` reports it — provider vocabulary varies (checks vs statuses). */
 interface RawCheck {
@@ -58,15 +61,22 @@ const FAILURE_STATES = new Set([
   "cancelled",
   "timed_out",
   "action_required",
+  "stale",
+  "startup_failure",
 ]);
-const PENDING_STATES = new Set(["pending", "queued", "in_progress", "expected", "waiting"]);
+const PENDING_STATES = new Set(["pending", "queued", "in_progress", "expected", "waiting", "requested"]);
+/** Every terminal-and-genuinely-ok conclusion `gh` can report — anything else fails closed. */
+const SUCCESS_STATES = new Set(["success", "neutral", "skipped"]);
 
 export function summarizeChecks(rollup: RawCheck[]): ChecksSnapshot {
   if (rollup.length === 0) return "none";
-  const stateOf = (c: RawCheck): string => (c.conclusion || c.state || c.status || "").toLowerCase();
-  if (rollup.some((c) => FAILURE_STATES.has(stateOf(c)))) return "failure";
-  if (rollup.some((c) => PENDING_STATES.has(stateOf(c)))) return "pending";
-  return "success";
+  const states = rollup.map((c) => (c.conclusion || c.state || c.status || "").toLowerCase());
+  if (states.some((s) => FAILURE_STATES.has(s))) return "failure";
+  if (states.some((s) => PENDING_STATES.has(s))) return "pending";
+  if (states.every((s) => SUCCESS_STATES.has(s))) return "success";
+  // An unrecognized terminal conclusion is never treated as success — fail closed rather
+  // than silently waving a handoff through on a vocabulary this code doesn't know yet.
+  return "failure";
 }
 
 export type CreatePrResult = { ok: true; number: number; url: string } | { ok: false; reason: string; noCommits: boolean };
@@ -126,21 +136,39 @@ export const realGithubAdapter: GithubAdapter = {
 
 export type PollChecksResult = "success" | "failure" | "timeout" | "none";
 
+/** Consecutive "none" reads required before concluding no checks are configured at all. */
+const NONE_STREAK_REQUIRED = 2;
+
 /**
  * Bounded poll for CI checks to resolve — the confirmed scope call for NOT-61 (vs a
- * one-shot read): "pending" keeps polling, "none"/"success" return immediately, "failure"
- * returns immediately, and the poll gives up as "timeout" if nothing resolves in time or
- * the lease is lost (`signal` aborts) mid-poll.
+ * one-shot read): "pending" keeps polling, "success"/"failure" return immediately once
+ * seen, and the poll gives up as "timeout" if nothing resolves in time or the lease is
+ * lost (`signal` aborts) mid-poll.
+ *
+ * "none" is NOT returned on the first read: GitHub can briefly report an empty
+ * statusCheckRollup before Actions has created its check runs, so a one-shot "empty
+ * rollup ⇒ no checks configured" read races a PR straight past CI — a review round caught
+ * this letting a real handoff through before its checks even appeared. `none` is only
+ * accepted once it has been read `NONE_STREAK_REQUIRED` times in a row (any "pending" in
+ * between resets the streak); if the deadline is hit before that streak completes, the
+ * poll fails closed as "timeout" rather than silently waving the handoff through.
  */
 export async function pollPrChecks(
   adapter: GithubAdapter,
   opts: { cwd: string; timeoutMs: number; intervalMs: number; signal?: AbortSignal }
 ): Promise<PollChecksResult> {
   const deadline = Date.now() + opts.timeoutMs;
+  let noneStreak = 0;
   for (;;) {
     if (opts.signal?.aborted) return "timeout";
     const snapshot = await adapter.checksSnapshot({ cwd: opts.cwd });
-    if (snapshot !== "pending") return snapshot;
+    if (snapshot === "failure" || snapshot === "success") return snapshot;
+    if (snapshot === "none") {
+      noneStreak++;
+      if (noneStreak >= NONE_STREAK_REQUIRED) return "none";
+    } else {
+      noneStreak = 0;
+    }
     if (Date.now() >= deadline) return "timeout";
     await new Promise((resolve) => setTimeout(resolve, Math.min(opts.intervalMs, deadline - Date.now())));
   }

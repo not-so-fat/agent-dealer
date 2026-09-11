@@ -132,10 +132,11 @@ test("developer clean handoff → reviewing + a reviewer work item + PR recorded
   assert.equal(issue.status, "reviewing");
   assert.equal(issue.headSha, "abc123");
   assert.equal(issue.prNumber, 42);
-  assert.equal(
-    listWorkItemsForIssue(issueId).filter((i) => i.status === "pending" && i.kind === "reviewer").length,
-    1
-  );
+  const reviewerItems = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending" && i.kind === "reviewer");
+  assert.equal(reviewerItems.length, 1);
+  // The reviewer must be pinned to the coordinator-verified head SHA, not left to a live
+  // resolve — a review round found the initial spawn_reviewer projection omitted this.
+  assert.deepEqual(JSON.parse(reviewerItems[0].payloadJson!).inputSha, "abc123");
   const types = listWorkflowEventsForIssue(issueId).map((e) => e.type);
   assert.ok(types.includes("worker.completed") && types.includes("pull_request.opened"));
 });

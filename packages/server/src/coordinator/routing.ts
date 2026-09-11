@@ -30,14 +30,15 @@ function roundsRemain(limits: RoundLimits): boolean {
 }
 
 export type DeveloperRouteResult =
-  | { next: "spawn_reviewer" }
+  /** headSha is the coordinator-verified SHA (not agent self-report) the reviewer must be pinned to. */
+  | { next: "spawn_reviewer"; headSha: string }
   | { next: "retry_developer" }
   | { next: "human_action"; actionType: "attempts_exhausted" | "policy_escalation"; reason: string };
 
 export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RoundLimits): DeveloperRouteResult {
   switch (outcome.kind) {
     case "clean_handoff":
-      return { next: "spawn_reviewer" };
+      return { next: "spawn_reviewer", headSha: outcome.headSha };
     case "dirty_worktree":
       // Never spends a round — an unclean handoff is preserved for inspection, not retried blindly.
       return { next: "human_action", actionType: "policy_escalation", reason: "Developer worktree has uncommitted changes after the session ended." };

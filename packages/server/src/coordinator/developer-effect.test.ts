@@ -32,6 +32,7 @@ const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js"
 const { runDeveloperEffect } = await import("./developer-effect.js");
 const { realDeveloperSpawn } = await import("./spawn.js");
 const { realGithubAdapter } = await import("../adapters/github.js");
+const { branchExists } = await import("../adapters/git-worktree.js");
 type SpawnFn = typeof realDeveloperSpawn;
 type GithubFn = typeof realGithubAdapter;
 
@@ -120,12 +121,12 @@ function fakeGithub(opts: { checks?: "success" | "failure" | "pending"; createFa
   let nextNumber = 100;
   const currentBranch = (cwd: string) => git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
   const currentHead = (cwd: string) => git(cwd, "rev-parse", "HEAD");
-  return {
+  const adapter: GithubFn = {
     async viewPr({ cwd }) {
       const branch = currentBranch(cwd);
       const pr = prs.get(branch);
       if (!pr) return null;
-      return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: branch, headRefOid: currentHead(cwd) };
+      return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: branch, headRefOid: currentHead(cwd), isDraft: true };
     },
     async createDraftPr({ cwd, base }) {
       if (opts.createFails) return { ok: false, reason: "gh: simulated failure", noCommits: false };
@@ -138,7 +139,8 @@ function fakeGithub(opts: { checks?: "success" | "failure" | "pending"; createFa
     async checksSnapshot() {
       return opts.checks ?? "success";
     },
-  } as GithubFn;
+  };
+  return adapter;
 }
 
 test("clean handoff: real worktree, real push, fake GitHub — issue moves to reviewing with a reviewer work item queued", async () => {
@@ -179,6 +181,30 @@ test("no_pr: the agent makes no commits — retried, no reviewer work item", asy
   assert.equal(issue.status, "developing");
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 0);
   assert.equal(listWorkItemsForIssue(issueId).some((i) => i.kind === "developer" && i.round === 2), true);
+});
+
+test("the branch created on a retried round is reused, not re-created — no 'branch already exists' collision", async () => {
+  const issueId = await makeIssue();
+  let call = 0;
+  const flakyThenCommittingSpawn: SpawnFn = async (input) => {
+    call++;
+    if (call === 1) return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false }; // round 1: no_pr
+    return commitingSpawn(input); // round 2: implements for real
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: flakyThenCommittingSpawn, github: fakeGithub() }));
+  startWorkflow(issueId);
+
+  await pump(1); // round 1: no_pr, removes the worktree but leaves the branch ref behind
+  assert.equal(getIssue(issueId)!.status, "developing");
+  assert.equal(await branchExists(repo, issueBranchName(issueId)), true, "branch persists across the retry");
+
+  await pump(1); // round 2: must reuse that branch, not fail with "already exists"
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing");
+  assert.equal(issue.branch, issueBranchName(issueId));
+  const devSessions = listWorkerSessionsForIssue(issueId).filter((s) => s.role === "developer");
+  assert.equal(devSessions.length, 2);
+  assert.equal(devSessions[1].status, "done");
 });
 
 test("dirty_worktree: an uncommitted file escalates without consuming a round", async () => {
@@ -224,9 +250,14 @@ test("checks_failed: CI failure after a clean push/PR retries without a human ac
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "developing");
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 0);
+  const kinds = listArtifactsForIssue(issueId).map((a) => a.kind);
   const evidence = listArtifactsForIssue(issueId).find((a) => a.kind === "checks_evidence");
   assert.ok(evidence, "checks_failed still persists check evidence for the issue evidence API");
   assert.equal(JSON.parse(evidence!.contentJson!).snapshot, "failure");
+  // A review round found these dropped whenever verification failed after a successful
+  // session — they must survive a checks failure too, not just a clean handoff.
+  assert.ok(kinds.includes("implementation_conclusion"), "conclusion must survive a post-session verification failure");
+  assert.ok(kinds.includes("developer_transcript"), "raw trace must survive a post-session verification failure");
 });
 
 test("timed_out (checks poll): checks stay pending past the poll deadline", async () => {
@@ -236,6 +267,54 @@ test("timed_out (checks poll): checks stay pending past the poll deadline", asyn
   await pump(1);
 
   assert.equal(getIssue(issueId)!.status, "developing");
+});
+
+test("adapter_failure: a non-draft PR is rejected rather than accepted as a clean handoff", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  const realViewPr = github.viewPr.bind(github);
+  github.viewPr = async (opts) => {
+    const view = await realViewPr(opts);
+    return view ? { ...view, isDraft: false } : view;
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.currentRound, 1, "a rejected PR identity never consumes a round");
+  assert.equal(issue.prNumber, null, "a rejected identity must never be recorded as the verified handoff");
+});
+
+test("adapter_failure: a PR based against the wrong branch is rejected rather than accepted", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  const realViewPr = github.viewPr.bind(github);
+  github.viewPr = async (opts) => {
+    const view = await realViewPr(opts);
+    return view ? { ...view, baseRefName: "some-other-branch" } : view;
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+});
+
+test("adapter_failure: a stale headRefOid (gh's view lags the actual push) is rejected rather than accepted", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  const realViewPr = github.viewPr.bind(github);
+  github.viewPr = async (opts) => {
+    const view = await realViewPr(opts);
+    return view ? { ...view, headRefOid: "0000000000000000000000000000000000dead" } : view;
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.equal(getIssue(issueId)!.status, "needs_human");
 });
 
 test("adapter_failure: gh pr create itself fails — escalates, never silently retried as a crash", async () => {

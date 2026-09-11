@@ -57,8 +57,24 @@ export async function mergeBase(opts: { repo: string; base: string; head: string
   return stdout.trim();
 }
 
+/** The worktree's actual local HEAD — compared against what `gh` reports to catch a stale/wrong view. */
+export async function revParseHead(worktreePath: string): Promise<string> {
+  const { stdout } = await git(worktreePath, ["rev-parse", "HEAD"]);
+  return stdout.trim();
+}
+
 export async function pruneWorktrees(repo: string): Promise<void> {
   await git(repo, ["worktree", "prune"]);
+}
+
+/** Whether a local branch already exists — a retry must reuse it, never re-create with -b. */
+export async function branchExists(repo: string, branch: string): Promise<boolean> {
+  try {
+    await git(repo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export { withRepoLock };

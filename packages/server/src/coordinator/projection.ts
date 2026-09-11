@@ -45,7 +45,9 @@ export function projectDeveloperRoute(
           currentIntent: `Reviewer evaluating round ${round}`,
           events: ["worker.completed", "pull_request.opened"],
         },
-        effect: { kind: "enqueue", workItem: "reviewer" },
+        // Pins the reviewer's input_sha to the coordinator-verified head, exactly like
+        // retry_reviewer_at_new_head below — a reviewer must never be queued unpinned.
+        effect: { kind: "enqueue", workItem: "reviewer", atHeadSha: route.headSha },
         advanceRound: false,
       };
     case "retry_developer":

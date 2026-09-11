@@ -10,7 +10,7 @@ const LIMITS_AT_LIMIT = { currentRound: 3, maxReviewRounds: 3 };
 
 test("clean handoff routes to spawn_reviewer", () => {
   const outcome: DeveloperOutcome = { kind: "clean_handoff", branch: "br", headSha: "h", baseSha: "b", prNumber: 1, prUrl: "u" };
-  assert.deepStrictEqual(routeDeveloperOutcome(outcome, LIMITS_ROUNDS_LEFT), { next: "spawn_reviewer" });
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, LIMITS_ROUNDS_LEFT), { next: "spawn_reviewer", headSha: "h" });
 });
 
 test("no PR with rounds remaining retries the developer without consuming a reviewer verdict", () => {

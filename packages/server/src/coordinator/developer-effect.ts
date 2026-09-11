@@ -29,9 +29,11 @@ import {
   commitsAhead,
   pushBranch,
   mergeBase,
+  branchExists,
+  revParseHead,
 } from "../adapters/git-worktree.js";
 import { bindAndVerify, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
-import { realGithubAdapter, pollPrChecks, type GithubAdapter } from "../adapters/github.js";
+import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact } from "../repository/artifacts.js";
@@ -74,6 +76,36 @@ function extractConclusion(transcript: string): string {
   return trimmed.length > 4000 ? trimmed.slice(-4000) : trimmed;
 }
 
+/**
+ * The ticket requires verifying "draft PR identity, base SHA, and current head SHA" —
+ * not just accepting whatever `gh pr view` returns. A review round found the original
+ * code took `prView` on faith: wrong base, a non-draft PR, a PR number that silently
+ * changed between rounds, or a stale `headRefOid` would all have been accepted as a
+ * clean handoff. `localHead` is this process's own `git rev-parse HEAD` right after the
+ * push it just performed — the actual ground truth `gh`'s view is checked against.
+ */
+async function validatePrIdentity(
+  prView: PrView,
+  opts: { branchName: string; baseBranch: string; priorPrNumber: number | null; localHead: string }
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!prView.isDraft) {
+    return { ok: false, reason: `PR #${prView.number} is not a draft PR` };
+  }
+  if (prView.headRefName !== opts.branchName) {
+    return { ok: false, reason: `PR head branch ${prView.headRefName} does not match the issue branch ${opts.branchName}` };
+  }
+  if (prView.baseRefName !== opts.baseBranch) {
+    return { ok: false, reason: `PR base ${prView.baseRefName} does not match the issue base branch ${opts.baseBranch}` };
+  }
+  if (opts.priorPrNumber != null && opts.priorPrNumber !== prView.number) {
+    return { ok: false, reason: `PR number changed from #${opts.priorPrNumber} to #${prView.number}` };
+  }
+  if (prView.headRefOid !== opts.localHead) {
+    return { ok: false, reason: `gh reports head ${prView.headRefOid}, but the locally pushed HEAD is ${opts.localHead}` };
+  }
+  return { ok: true };
+}
+
 export async function runDeveloperEffect(
   ctx: EffectContext,
   deps: DeveloperEffectDeps = defaultDeps
@@ -87,9 +119,15 @@ export async function runDeveloperEffect(
   const taskSnapshot = getTaskSnapshot(issue);
   const runtime = snapshot?.runtime ?? "claude_code";
 
-  const isRepair = Boolean(issue.branch);
-  const newBranchName = isRepair ? undefined : `issue-${issue.id}`;
-  const branchName = issue.branch ?? newBranchName!;
+  // issue.branch is only ever written on a verified clean_handoff (design: it's ground
+  // truth, not agent self-report), so a first-round attempt after an earlier retryable
+  // failure in the SAME round (no_pr/session_failed/timed_out/checks_failed all remove
+  // their worktree but leave the local branch ref behind) would otherwise re-run
+  // `git worktree add -b <same name>` and fail with "branch already exists" — a review
+  // round reproduced this directly. Check the branch itself, not just issue.branch, and
+  // reuse it (preserving whatever local commits it already carries) when it's there.
+  const branchName = issue.branch ?? `issue-${issue.id}`;
+  const reuseBranch = issue.branch != null || (await branchExists(issue.repo, branchName));
 
   let worktreePath: string;
   try {
@@ -97,8 +135,8 @@ export async function runDeveloperEffect(
       repo: issue.repo,
       role: "developer",
       sessionId,
-      ref: isRepair ? issue.branch! : issue.baseBranch,
-      newBranch: newBranchName,
+      ref: reuseBranch ? branchName : issue.baseBranch,
+      newBranch: reuseBranch ? undefined : branchName,
     });
     worktreePath = worktree.path;
   } catch (err) {
@@ -149,6 +187,25 @@ export async function runDeveloperEffect(
       return { kind: "session_failed" };
     }
 
+    // Persisted as soon as the session itself completes — a review round found these
+    // dropped on any later verification failure (checks failing, a gh error), even though
+    // NOT-61 requires the conclusion/raw trace to stay available through the evidence API
+    // regardless of how the handoff subsequently resolves.
+    createIssueArtifact({
+      issueId: issue.id,
+      workerSessionId: sessionId,
+      kind: "implementation_conclusion",
+      author: "agent",
+      content: { text: extractConclusion(spawned.transcript) },
+    });
+    createIssueArtifact({
+      issueId: issue.id,
+      workerSessionId: sessionId,
+      kind: "developer_transcript",
+      author: "system",
+      blobPath: spawned.logPath,
+    });
+
     if (!(await isWorktreeClean(worktreePath))) {
       return { kind: "dirty_worktree" };
     }
@@ -166,10 +223,13 @@ export async function runDeveloperEffect(
         ? { kind: "unpushed_commit", reason: pushed.reason }
         : { kind: "adapter_failure", reason: pushed.reason };
     }
+    // From here on the branch is safely on the remote — a worktree removal on any
+    // subsequent failure path loses nothing (bestEffortRemove is safe to call).
 
     let prView = await deps.github.viewPr({ cwd: worktreePath });
     if (!prView) {
-      const bodyFilePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-pr-body-")), "body.md");
+      const bodyDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-pr-body-"));
+      const bodyFilePath = path.join(bodyDir, "body.md");
       fs.writeFileSync(bodyFilePath, extractConclusion(spawned.transcript) || taskSnapshot.description);
       const created = await deps.github.createDraftPr({
         cwd: worktreePath,
@@ -177,16 +237,30 @@ export async function runDeveloperEffect(
         title: taskSnapshot.title,
         bodyFilePath,
       });
-      fs.rmSync(path.dirname(bodyFilePath), { recursive: true, force: true });
+      fs.rmSync(bodyDir, { recursive: true, force: true });
       if (!created.ok) {
+        await bestEffortRemove(issue.repo, worktreePath);
         return created.noCommits
           ? { kind: "no_pr" }
           : { kind: "adapter_failure", reason: created.reason };
       }
       prView = await deps.github.viewPr({ cwd: worktreePath });
       if (!prView) {
+        await bestEffortRemove(issue.repo, worktreePath);
         return { kind: "adapter_failure", reason: "PR created but could not be re-verified via gh pr view" };
       }
+    }
+
+    const localHead = await revParseHead(worktreePath);
+    const identity = await validatePrIdentity(prView, {
+      branchName,
+      baseBranch: issue.baseBranch,
+      priorPrNumber: issue.prNumber,
+      localHead,
+    });
+    if (!identity.ok) {
+      await bestEffortRemove(issue.repo, worktreePath);
+      return { kind: "adapter_failure", reason: identity.reason };
     }
 
     const baseSha = await mergeBase({ repo: worktreePath, base: prView.baseRefName, head: prView.headRefOid });
@@ -212,21 +286,6 @@ export async function runDeveloperEffect(
       await bestEffortRemove(issue.repo, worktreePath);
       return { kind: "timed_out" };
     }
-
-    createIssueArtifact({
-      issueId: issue.id,
-      workerSessionId: sessionId,
-      kind: "implementation_conclusion",
-      author: "agent",
-      content: { text: extractConclusion(spawned.transcript) },
-    });
-    createIssueArtifact({
-      issueId: issue.id,
-      workerSessionId: sessionId,
-      kind: "developer_transcript",
-      author: "system",
-      blobPath: spawned.logPath,
-    });
 
     await bestEffortRemove(issue.repo, worktreePath);
     return {
