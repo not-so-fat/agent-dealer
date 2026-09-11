@@ -19,25 +19,25 @@ export type AgentConfigValue = {
   defaultBudget: BudgetFormValue;
   playbookIds: string[];
   externalMemoryRefs: string;
-  /** Developer capabilities this profile allows — unchecking pins the capability off. */
+  /**
+   * Worktree write access this profile allows — unchecking pins it off, enforced by the
+   * CLI's own tool grant (no Write/Edit/Bash, or a read-only sandbox). There is no
+   * push/open-PR toggle: a PR review round proved every mechanism tried for those
+   * bypassable by a session that already holds Bash, so they aren't offered as a
+   * profile capability (see profile-snapshot.ts's PermissionPolicy doc comment).
+   */
   allowWorktreeWrite: boolean;
-  allowPush: boolean;
-  allowOpenPr: boolean;
 };
 
 /** Form capability flags → the tighten-only override the API stores (null when unchanged). */
 export function permissionOverride(v: AgentConfigValue): PermissionPolicyOverride | null {
   const o: PermissionPolicyOverride = {};
   if (!v.allowWorktreeWrite) o.worktreeWrite = false;
-  if (!v.allowPush) o.push = false;
-  if (!v.allowOpenPr) o.openPr = false;
   return Object.keys(o).length ? o : null;
 }
 
 export function permissionFlagsFromJson(json: string | null | undefined): {
   allowWorktreeWrite: boolean;
-  allowPush: boolean;
-  allowOpenPr: boolean;
 } {
   let ov: PermissionPolicyOverride = {};
   try {
@@ -45,11 +45,7 @@ export function permissionFlagsFromJson(json: string | null | undefined): {
   } catch {
     ov = {};
   }
-  return {
-    allowWorktreeWrite: ov.worktreeWrite !== false,
-    allowPush: ov.push !== false,
-    allowOpenPr: ov.openPr !== false,
-  };
+  return { allowWorktreeWrite: ov.worktreeWrite !== false };
 }
 
 type Deck = { id: string; name: string };
@@ -252,27 +248,21 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
         <div className="space-y-1">
           <span className="text-xs text-[#A8C4C0] uppercase">Developer capabilities</span>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-white/70">
-            {(
-              [
-                ["allowWorktreeWrite", "Write files"],
-                ["allowPush", "git push"],
-                ["allowOpenPr", "Open / update PR"],
-              ] as const
-            ).map(([key, label]) => (
-              <label key={key} className="flex items-center gap-1.5">
-                <input
-                  type="checkbox"
-                  disabled={disabled}
-                  checked={value[key]}
-                  onChange={(e) => set({ [key]: e.target.checked } as Partial<AgentConfigValue>)}
-                />
-                {label}
-              </label>
-            ))}
+            <label className="flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                disabled={disabled}
+                checked={value.allowWorktreeWrite}
+                onChange={(e) => set({ allowWorktreeWrite: e.target.checked })}
+              />
+              Write files
+            </label>
           </div>
           <p className="text-xs text-white/40">
-            Unchecking pins the capability off at the runtime boundary. Reviewer sessions are
-            always read-only.
+            Unchecking runs the developer read-only (no Write/Edit/Bash grant), same as a
+            reviewer. There is no separate push / open-PR toggle — a session with file-write
+            access can already push and open PRs, and no mechanism here can restrict just
+            that without also removing write access.
           </p>
         </div>
       </div>

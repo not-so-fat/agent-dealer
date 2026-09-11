@@ -118,7 +118,6 @@ test("the reviewer session snapshot yields a read-only permission policy and rea
   const revSession = listWorkerSessionsForIssue(issueId).find((s) => s.role === "reviewer")!;
   const snap = parseProfileSnapshot(revSession.profileSnapshotJson)!;
   assert.equal(snap.permissionPolicy.worktreeWrite, false);
-  assert.equal(snap.permissionPolicy.push, false);
   assert.equal(snap.permissionPolicy.publishReview, false);
 
   const args = buildWorkerArgs({

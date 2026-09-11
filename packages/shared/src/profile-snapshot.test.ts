@@ -19,15 +19,23 @@ test("serializeStringList trims, drops blanks, and returns null when empty", () 
 });
 
 test("resolvePermissionPolicy: override only tightens, never loosens", () => {
-  assert.equal(resolvePermissionPolicy("developer", { push: false }).push, false);
-  assert.equal(resolvePermissionPolicy("developer", { push: false }).worktreeWrite, true);
+  assert.equal(resolvePermissionPolicy("developer", { outboundMutation: false }).outboundMutation, false);
+  assert.equal(resolvePermissionPolicy("developer", { outboundMutation: false }).worktreeWrite, true);
   assert.equal(resolvePermissionPolicy("reviewer", { worktreeWrite: true }).worktreeWrite, false);
 });
 
 test("permission-policy override serialization round-trips; parse rejects unknown keys", () => {
-  assert.equal(serializePermissionPolicyOverride({ push: false }), JSON.stringify({ push: false }));
+  assert.equal(
+    serializePermissionPolicyOverride({ worktreeWrite: false }),
+    JSON.stringify({ worktreeWrite: false })
+  );
   assert.equal(serializePermissionPolicyOverride(null), null);
-  assert.deepEqual(parsePermissionPolicyOverride(JSON.stringify({ push: false })), { push: false });
+  assert.deepEqual(parsePermissionPolicyOverride(JSON.stringify({ worktreeWrite: false })), {
+    worktreeWrite: false,
+  });
+  // push/openPr are not a recognized override key (never modeled — see PermissionPolicy
+  // doc comment) and resolveHumanAction is not overridable either; both are rejected.
+  assert.equal(parsePermissionPolicyOverride(JSON.stringify({ push: false })), null);
   assert.equal(parsePermissionPolicyOverride(JSON.stringify({ resolveHumanAction: true })), null);
 });
 

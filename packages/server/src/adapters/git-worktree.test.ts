@@ -114,38 +114,34 @@ test("withRepoLock serializes concurrent worktree operations on one repo", async
   assert.deepEqual(order, ["a:start", "a:end", "b:start", "b:end"]);
 });
 
-test("createRoleWorktree with pushBlocked denies git push however it's invoked, without touching the original checkout", async () => {
-  const dev = await createRoleWorktree({
-    repo,
-    role: "developer",
-    sessionId: "s-dev-pushblock",
-    ref: "issue-1",
-    pushBlocked: true,
-  });
+test("reviewer worktrees redirect origin's pushurl as hygiene — an ordinary push fails, reads are unaffected", async () => {
+  const rev = await createRoleWorktree({ repo, role: "reviewer", sessionId: "s-rev-pushblock", ref: "HEAD" });
   try {
-    assert.equal(dev.pushBlocked, true);
-
-    // Ordinary invocation
-    assert.throws(() => git(dev.path, "push", "origin", "HEAD:refs/heads/issue-1"));
-    // Invocation forms an argv denylist would miss: -C, absolute git, a shell wrapper.
-    assert.throws(() => execFileSync("git", ["-C", dev.path, "push", "origin", "HEAD"]));
-    const gitBin = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
-    assert.throws(() => execFileSync(gitBin, ["push", "origin", "HEAD"], { cwd: dev.path }));
-
-    // Read operations are unaffected.
-    assert.doesNotThrow(() => git(dev.path, "fetch", "origin"));
-    // The block is scoped to this worktree — the original checkout's own pushurl is untouched.
+    assert.throws(() => git(rev.path, "push", "origin", "HEAD:refs/heads/reviewer-accident"));
+    assert.doesNotThrow(() => git(rev.path, "fetch", "origin"));
+    // Scoped to this worktree — the original checkout's own pushurl is untouched.
     assert.equal(git(repo, "remote", "get-url", "--push", "origin"), remote);
   } finally {
-    fs.rmSync(dev.path, { recursive: true, force: true });
-    await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+    await safeRemoveWorktree({ repo, path: rev.path, role: "reviewer" });
   }
 });
 
-test("reviewer worktrees are always push-blocked regardless of the pushBlocked argument", async () => {
-  const rev = await createRoleWorktree({ repo, role: "reviewer", sessionId: "s-rev-pushblock", ref: "HEAD" });
-  assert.equal(rev.pushBlocked, true);
-  await safeRemoveWorktree({ repo, path: rev.path, role: "reviewer" });
+test("the pushurl redirect is NOT a security boundary — it does not survive a targeted bypass", async () => {
+  // Documents the exact bypasses a PR review round found, so this limitation can't
+  // silently regress into being treated as enforcement again: reviewer worktrees get no
+  // Bash/write tool grant at all (args.ts), which is the actual reason a reviewer can't
+  // push — this git-config redirect alone would not stop a session that could edit files.
+  const rev = await createRoleWorktree({ repo, role: "reviewer", sessionId: "s-rev-bypass", ref: "HEAD" });
+  try {
+    // Bypass 1: push straight to the remote URL instead of the configured name.
+    assert.doesNotThrow(() => git(rev.path, "push", remote, "HEAD:refs/heads/bypass-1"));
+    // Bypass 2: the config lives inside the worktree the same process can already write.
+    git(rev.path, "config", "--worktree", "--unset-all", "remote.origin.pushurl");
+    assert.doesNotThrow(() => git(rev.path, "push", "origin", "HEAD:refs/heads/bypass-2"));
+  } finally {
+    // Throwaway bare remote is removed wholesale in after() — no branch cleanup needed.
+    await safeRemoveWorktree({ repo, path: rev.path, role: "reviewer" });
+  }
 });
 
 test("inspectLeftoverWorktree classifies missing / clean / dirty", async () => {

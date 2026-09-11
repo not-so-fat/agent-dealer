@@ -8,16 +8,24 @@ import { WorkerSessionRole } from "./worker-sessions.js";
  * into `worker_sessions.profile_snapshot_json` — a later profile edit never changes a
  * queued or running session.
  *
+ * Every field here is backed by a control this codebase can actually enforce from
+ * outside the worker process — a CLI tool-permission grant (`--allowedTools` /
+ * `-s read-only`) or a config-loading boundary (`--ignore-user-config`) — never a
+ * denylist over arguments to a capability (e.g. Bash) the worker already holds
+ * unrestricted, which a review round proved bypassable (absolute paths, `-C`, wrapper
+ * commands, or — for `push` — simply editing the very git config meant to restrict it,
+ * since that config lives inside the worktree the same process can already write).
+ * `push` / `openPr` are NOT modeled here for that reason: real enforcement needs those
+ * credentialed effects to move to a call the worker never makes itself (the coordinator,
+ * which already owns "the only component that publishes" for reviews) — developer→PR
+ * handoff scope (NOT-61+), not a profile toggle this ticket can honestly ship.
+ *
  * Role defaults are the ceiling: a profile's `permissionPolicy` override may only
  * *tighten* a capability (turn it off), never grant one the role does not have.
  */
 export const PermissionPolicy = z.object({
-  /** developer only: read/write files in its own worktree. */
+  /** developer only: read/write files in its own worktree — CLI tool-grant enforced. */
   worktreeWrite: z.boolean(),
-  /** developer only: `git push` the issue branch. */
-  push: z.boolean(),
-  /** developer only: create / update the draft PR. */
-  openPr: z.boolean(),
   /** never true in v1 — the coordinator, not the reviewer, publishes the review. */
   publishReview: z.boolean(),
   /** call outbound-mutation deck tools (`call_service_tool`). Off for both roles in v1. */
@@ -31,8 +39,6 @@ export type PermissionPolicy = z.infer<typeof PermissionPolicy>;
 export const PermissionPolicyOverride = z
   .object({
     worktreeWrite: z.boolean().optional(),
-    push: z.boolean().optional(),
-    openPr: z.boolean().optional(),
     outboundMutation: z.boolean().optional(),
   })
   .strict();
@@ -40,8 +46,6 @@ export type PermissionPolicyOverride = z.infer<typeof PermissionPolicyOverride>;
 
 export const DEVELOPER_ROLE_CEILING: PermissionPolicy = {
   worktreeWrite: true,
-  push: true,
-  openPr: true,
   publishReview: false,
   outboundMutation: false,
   resolveHumanAction: false,
@@ -49,8 +53,6 @@ export const DEVELOPER_ROLE_CEILING: PermissionPolicy = {
 
 export const REVIEWER_ROLE_CEILING: PermissionPolicy = {
   worktreeWrite: false,
-  push: false,
-  openPr: false,
   publishReview: false,
   outboundMutation: false,
   resolveHumanAction: false,
@@ -138,7 +140,7 @@ export function resolvePermissionPolicy(
   const ceiling = roleCeiling(role);
   if (!override) return { ...ceiling };
   const resolved: PermissionPolicy = { ...ceiling };
-  for (const key of ["worktreeWrite", "push", "openPr", "outboundMutation"] as const) {
+  for (const key of ["worktreeWrite", "outboundMutation"] as const) {
     if (override[key] === false) resolved[key] = false;
     // override[key] === true can never raise the ceiling — ignored.
   }

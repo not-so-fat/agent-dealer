@@ -10,21 +10,6 @@ import { roleCeiling } from "@agent-dealer/shared";
 const DECK_READ_TOOLS =
   "mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace,mcp__agent-deck__list_service_tools";
 const DENY_SEND_TOOL = "mcp__agent-deck__call_service_tool";
-/**
- * Bash command-prefix denials for claude_code, kept as defense-in-depth only. A prefix
- * denylist is bypassable by construction (`git -C . push`, an absolute path, `command
- * git push`, a shell alias, `curl`/`gh api` against the same endpoint) and provides no
- * coverage at all for codex_local/cursor_local, which have no per-command gate. The
- * load-bearing, runtime-agnostic control for `push` is the git-level worktree
- * `pushurl` block in `adapters/git-worktree.ts` (`createRoleWorktree({ pushBlocked })`),
- * which `git` itself enforces however push is invoked. `openPr` (`gh pr create`) has no
- * equivalent non-bypassable control yet — real enforcement needs push/PR-creation to move
- * to a credentialed call the worker never makes itself (the coordinator already owns
- * "the only component that publishes"), which is developer→PR handoff scope (NOT-61+),
- * not this ticket's execution-environment primitives.
- */
-const DENY_PUSH = ["Bash(git push:*)"];
-const DENY_OPEN_PR = ["Bash(gh pr create:*)", "Bash(gh pr edit:*)", "Bash(gh pr ready:*)"];
 
 const WRITE_TOOLS = "Read,Write,Edit,Glob,Grep,Bash";
 const READ_ONLY_TOOLS = "Read,Glob,Grep";
@@ -35,15 +20,14 @@ function allowedTools(policy: PermissionPolicy): string {
 }
 
 function claudeDisallowedTools(policy: PermissionPolicy): string[] {
-  const deny: string[] = [];
-  if (!policy.outboundMutation) deny.push(DENY_SEND_TOOL);
-  // Bash is granted whole for a writing developer; deny the specific commands a
-  // tightened policy forbids so push / PR creation are unavailable at the boundary.
-  if (policy.worktreeWrite) {
-    if (!policy.push) deny.push(...DENY_PUSH);
-    if (!policy.openPr) deny.push(...DENY_OPEN_PR);
-  }
-  return deny;
+  // No push/openPr denial here: a Bash-argv prefix denylist over a capability the
+  // session already holds unrestricted (Bash) is bypassable by construction — a review
+  // round proved it (`git -C`, absolute paths) and then proved the git-config-based
+  // follow-up bypassable too (the worker can edit the very config meant to restrict it,
+  // or target the remote URL directly instead of the configured remote name). See
+  // profile-snapshot.ts's PermissionPolicy doc comment: push/openPr are not modeled as
+  // enforceable capabilities here on purpose.
+  return policy.outboundMutation ? [] : [DENY_SEND_TOOL];
 }
 
 function buildArgs(

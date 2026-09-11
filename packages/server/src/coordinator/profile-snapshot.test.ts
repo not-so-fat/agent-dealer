@@ -33,7 +33,6 @@ test("developer and reviewer snapshots carry different permission policies", () 
   const rev = buildProfileSnapshot(agent, "reviewer");
   assert.equal(dev.permissionPolicy.worktreeWrite, true);
   assert.equal(rev.permissionPolicy.worktreeWrite, false);
-  assert.equal(rev.permissionPolicy.push, false);
 });
 
 test("playbookIds falls back to the single legacy playbook_id, then honours the multi list", () => {

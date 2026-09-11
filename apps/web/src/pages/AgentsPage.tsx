@@ -34,8 +34,6 @@ const emptyConfig = (): AgentConfigValue => ({
   playbookIds: [],
   externalMemoryRefs: "",
   allowWorktreeWrite: true,
-  allowPush: true,
-  allowOpenPr: true,
 });
 
 export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props) {

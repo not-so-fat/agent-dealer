@@ -13,35 +13,40 @@ test("reviewer role resolves to an all-off policy", () => {
   const p = resolveSessionPermissionPolicy("reviewer", null);
   assert.deepEqual(p, {
     worktreeWrite: false,
-    push: false,
-    openPr: false,
     publishReview: false,
     outboundMutation: false,
     resolveHumanAction: false,
   });
 });
 
-test("developer role grants write/push/openPr by default", () => {
+test("developer role grants worktree write by default", () => {
   const p = resolveSessionPermissionPolicy("developer", null);
   assert.equal(p.worktreeWrite, true);
-  assert.equal(p.push, true);
-  assert.equal(p.openPr, true);
   assert.equal(p.publishReview, false);
 });
 
 test("a profile override can only tighten a developer policy, never loosen a reviewer one", () => {
   const tightened = resolveSessionPermissionPolicy(
     "developer",
-    serializePermissionPolicyOverride({ push: false })
+    serializePermissionPolicyOverride({ worktreeWrite: false })
   );
-  assert.equal(tightened.push, false);
-  assert.equal(tightened.worktreeWrite, true);
+  assert.equal(tightened.worktreeWrite, false);
 
   const loosened = resolveSessionPermissionPolicy(
     "reviewer",
     serializePermissionPolicyOverride({ worktreeWrite: true })
   );
   assert.equal(loosened.worktreeWrite, false, "override cannot raise the reviewer ceiling");
+});
+
+test("PermissionPolicy has no push/openPr field — see profile-snapshot.ts for why", () => {
+  // A PR review round proved every push/openPr control we tried (a Bash-argv denylist,
+  // then a git-config pushurl redirect) bypassable by the very worker it restricted, once
+  // that worker already holds an unrestricted write/Bash grant. Rather than ship a policy
+  // field that promises a restriction this layer cannot enforce, it isn't modeled here.
+  const p = resolveSessionPermissionPolicy("developer", null);
+  assert.ok(!("push" in p));
+  assert.ok(!("openPr" in p));
 });
 
 test("assertReviewerReadOnly passes for generated reviewer args across every runtime", () => {
@@ -64,24 +69,6 @@ test("a tightened developer policy drops the write tools from claude args", () =
   const tools = args[args.indexOf("--allowedTools") + 1].split(",");
   assert.ok(!tools.includes("Write"));
   assert.ok(!tools.includes("Bash"));
-});
-
-test("push / open-PR flags gate the corresponding Bash commands for a claude developer", () => {
-  const open = buildDeveloperArgs("claude_code", "impl");
-  const openDeny = (open[open.indexOf("--disallowedTools") + 1] ?? "");
-  assert.ok(!openDeny.includes("git push"), "default developer may push");
-  assert.ok(!openDeny.includes("gh pr create"));
-
-  const locked = resolveSessionPermissionPolicy(
-    "developer",
-    serializePermissionPolicyOverride({ push: false, openPr: false })
-  );
-  const args = buildDeveloperArgs("claude_code", "impl", undefined, locked);
-  const deny = args[args.indexOf("--disallowedTools") + 1];
-  assert.match(deny, /Bash\(git push:\*\)/);
-  assert.match(deny, /Bash\(gh pr create:\*\)/);
-  // Bash itself is still granted (the developer still needs it to build/test).
-  assert.ok(args[args.indexOf("--allowedTools") + 1].split(",").includes("Bash"));
 });
 
 test("a codex reviewer invocation isolates configured MCP servers via --ignore-user-config", () => {
