@@ -11,12 +11,23 @@ const DECK_READ_TOOLS =
   "mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace,mcp__agent-deck__list_service_tools";
 const DENY_SEND_TOOL = "mcp__agent-deck__call_service_tool";
 
-const WRITE_TOOLS = "Read,Write,Edit,Glob,Grep,Bash";
-const READ_ONLY_TOOLS = "Read,Glob,Grep";
+// Built-in tool names (no MCP tools — --tools only governs the built-in set) passed to
+// --tools, which is a hard availability list (a name it omits is not nameable by the
+// model at all), unlike
+// --allowedTools, which only pre-approves matching calls: a tool --allowedTools omits
+// is NOT unavailable, it falls through to the active --permission-mode / any
+// .claude/settings.json in the worktree/project/home — confirmed against
+// https://code.claude.com/docs/en/agent-sdk/permissions and the installed CLI's own
+// --help after a PR review round proved the previous allowedTools-only approach let a
+// permissive ambient settings file re-grant Write/Edit/Bash regardless. --tools is the
+// load-bearing restriction; --allowedTools below is kept so --permission-mode dontAsk
+// (which denies anything not pre-approved) still lets the legitimate calls through.
+const WRITE_BUILTIN_TOOLS = "Read,Write,Edit,Glob,Grep,Bash,Skill";
+const READ_ONLY_BUILTIN_TOOLS = "Read,Glob,Grep,Skill";
 
-function allowedTools(policy: PermissionPolicy): string {
-  const base = policy.worktreeWrite ? WRITE_TOOLS : READ_ONLY_TOOLS;
-  return `${base},Skill,${DECK_READ_TOOLS}`;
+function claudeToolSets(policy: PermissionPolicy): { builtins: string; allowed: string } {
+  const builtins = policy.worktreeWrite ? WRITE_BUILTIN_TOOLS : READ_ONLY_BUILTIN_TOOLS;
+  return { builtins, allowed: `${builtins},${DECK_READ_TOOLS}` };
 }
 
 function claudeDisallowedTools(policy: PermissionPolicy): string[] {
@@ -64,6 +75,7 @@ function buildArgs(
       prompt,
     ];
   }
+  const { builtins, allowed } = claudeToolSets(policy);
   const args = [
     ...(model ? ["--model", model] : []),
     "-p",
@@ -71,8 +83,19 @@ function buildArgs(
     "--output-format",
     "stream-json",
     "--verbose",
+    "--tools",
+    builtins,
     "--allowedTools",
-    allowedTools(policy),
+    allowed,
+    // Ignores user/project/local settings files (so a .claude/settings.json anywhere
+    // can't re-grant a tool this invocation omitted) and refuses bypassPermissions.
+    "--restricted",
+    // Auto-denies any tool call that isn't pre-approved instead of falling through to
+    // the ambient permission mode/settings when there's no one to answer a prompt.
+    "--permission-mode",
+    "dontAsk",
+    "--permission-prompts",
+    "none",
   ];
   const deny = claudeDisallowedTools(policy);
   if (deny.length) args.push("--disallowedTools", deny.join(","));

@@ -38,15 +38,31 @@ export function assertReviewerReadOnly(args: string[]): void {
     }
   }
 
-  // Claude-style: the allowed-tool set must not include a write tool, and the
-  // outbound-mutation tool must be explicitly denied.
-  const allowed = (flagValue(args, "--allowedTools") ?? "").split(",").filter(Boolean);
-  if (allowed.length) {
+  // Claude: --allowedTools alone is NOT a restriction — it only auto-approves matching
+  // calls; a tool it omits is still reachable if the active --permission-mode or any
+  // ambient .claude/settings.json would otherwise grant it (confirmed against
+  // https://code.claude.com/docs/en/agent-sdk/permissions after a PR review round found
+  // exactly this gap). So the load-bearing checks are: --tools (a hard availability
+  // list) excludes every write tool, --restricted is present (ignores ambient settings
+  // files, refuses bypassPermissions), and --permission-mode is dontAsk (auto-denies
+  // anything not pre-approved instead of falling through). --allowedTools/
+  // --disallowedTools are checked too, but only as defense-in-depth on top of those.
+  const allowedTools = (flagValue(args, "--allowedTools") ?? "").split(",").filter(Boolean);
+  const isClaude = allowedTools.length > 0;
+  if (isClaude) {
+    const hardTools = (flagValue(args, "--tools") ?? "").split(",").filter(Boolean);
     for (const tool of WRITE_TOOL_NAMES) {
-      if (allowed.includes(tool)) throw new Error(`reviewer args grant a write tool: ${tool}`);
+      if (hardTools.includes(tool)) throw new Error(`reviewer args make a write tool available: ${tool}`);
+      if (allowedTools.includes(tool)) throw new Error(`reviewer args pre-approve a write tool: ${tool}`);
+    }
+    if (!args.includes("--restricted")) {
+      throw new Error("reviewer claude args do not isolate ambient settings (missing --restricted)");
+    }
+    if (flagValue(args, "--permission-mode") !== "dontAsk") {
+      throw new Error("reviewer claude args do not auto-deny un-pre-approved tools (missing --permission-mode dontAsk)");
     }
     const denied = (flagValue(args, "--disallowedTools") ?? "").split(",").filter(Boolean);
-    if (allowed.includes(OUTBOUND_MUTATION_TOOL) || !denied.includes(OUTBOUND_MUTATION_TOOL)) {
+    if (allowedTools.includes(OUTBOUND_MUTATION_TOOL) || !denied.includes(OUTBOUND_MUTATION_TOOL)) {
       throw new Error("reviewer args do not deny the outbound-mutation tool");
     }
   }
@@ -72,7 +88,7 @@ export function assertReviewerReadOnly(args: string[]): void {
     }
   }
 
-  if (!allowed.length && !isCursor && !isCodex) {
+  if (!isClaude && !isCursor && !isCodex) {
     throw new Error("reviewer args do not constrain the runtime to a read-only mode");
   }
 }

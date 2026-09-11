@@ -60,6 +60,28 @@ test("assertReviewerReadOnly rejects developer args (write tools present)", () =
   assert.equal(isReviewerReadOnly(buildDeveloperArgs("codex_local", "implement")), false);
 });
 
+test("assertReviewerReadOnly rejects a claude invocation that merely omits write tools from --allowedTools", () => {
+  // This is the exact shape NOT-60 shipped before this review round: --allowedTools
+  // omits Write/Edit/Bash, but nothing stops the active permission mode / an ambient
+  // .claude/settings.json from granting them anyway. The invariant must catch it even
+  // though --allowedTools itself "looks" read-only.
+  const looksReadOnlyButIsnt = [
+    "-p",
+    "review the diff",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--allowedTools",
+    "Read,Glob,Grep,Skill",
+    "--disallowedTools",
+    "mcp__agent-deck__call_service_tool",
+  ];
+  assert.throws(
+    () => assertReviewerReadOnly(looksReadOnlyButIsnt),
+    /--tools|--restricted|dontAsk/
+  );
+});
+
 test("a tightened developer policy drops the write tools from claude args", () => {
   const policy = resolveSessionPermissionPolicy(
     "developer",

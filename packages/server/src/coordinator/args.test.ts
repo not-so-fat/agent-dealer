@@ -49,3 +49,27 @@ test("buildReviewerArgs for cursor_local runs in ask mode", () => {
   assert.ok(args.includes("--mode"));
   assert.ok(args.includes("ask"));
 });
+
+test("buildReviewerArgs for claude_code hard-removes write tools via --tools and isolates ambient settings", () => {
+  // --allowedTools alone is only an auto-approve hint (a review round proved a tool it
+  // omits still falls through to the active permission mode / any ambient
+  // .claude/settings.json) — --tools, --restricted, and --permission-mode dontAsk are
+  // the load-bearing flags.
+  const args = buildReviewerArgs("claude_code", "review the diff");
+  const hardTools = args[args.indexOf("--tools") + 1].split(",");
+  assert.ok(!hardTools.includes("Write"));
+  assert.ok(!hardTools.includes("Edit"));
+  assert.ok(!hardTools.includes("Bash"));
+  assert.ok(args.includes("--restricted"));
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
+  assert.equal(args[args.indexOf("--permission-prompts") + 1], "none");
+});
+
+test("buildDeveloperArgs for claude_code makes Bash/Write/Edit available via --tools, still isolates ambient settings", () => {
+  const args = buildDeveloperArgs("claude_code", "implement");
+  const hardTools = args[args.indexOf("--tools") + 1].split(",");
+  assert.ok(hardTools.includes("Write"));
+  assert.ok(hardTools.includes("Bash"));
+  assert.ok(args.includes("--restricted"));
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
+});
