@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Runtime } from "@agent-dealer/shared";
+import type { PermissionPolicyOverride, Runtime } from "@agent-dealer/shared";
 import { CURSOR_DEFAULT_MODEL } from "@agent-dealer/shared";
 import { fetchDeckPlaybooks, fetchDecks } from "./api";
 import PhaseConfigRow from "./components/agents/PhaseConfigRow";
@@ -19,7 +19,38 @@ export type AgentConfigValue = {
   defaultBudget: BudgetFormValue;
   playbookIds: string[];
   externalMemoryRefs: string;
+  /** Developer capabilities this profile allows — unchecking pins the capability off. */
+  allowWorktreeWrite: boolean;
+  allowPush: boolean;
+  allowOpenPr: boolean;
 };
+
+/** Form capability flags → the tighten-only override the API stores (null when unchanged). */
+export function permissionOverride(v: AgentConfigValue): PermissionPolicyOverride | null {
+  const o: PermissionPolicyOverride = {};
+  if (!v.allowWorktreeWrite) o.worktreeWrite = false;
+  if (!v.allowPush) o.push = false;
+  if (!v.allowOpenPr) o.openPr = false;
+  return Object.keys(o).length ? o : null;
+}
+
+export function permissionFlagsFromJson(json: string | null | undefined): {
+  allowWorktreeWrite: boolean;
+  allowPush: boolean;
+  allowOpenPr: boolean;
+} {
+  let ov: PermissionPolicyOverride = {};
+  try {
+    if (json?.trim()) ov = JSON.parse(json);
+  } catch {
+    ov = {};
+  }
+  return {
+    allowWorktreeWrite: ov.worktreeWrite !== false,
+    allowPush: ov.push !== false,
+    allowOpenPr: ov.openPr !== false,
+  };
+}
 
 type Deck = { id: string; name: string };
 type Playbook = { id: string; title: string };
@@ -96,7 +127,7 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
         className="field"
         disabled={disabled || !agentDeckOnline}
         value={value.deckId}
-        onChange={(e) => set({ deckId: e.target.value, playbookId: "" })}
+        onChange={(e) => set({ deckId: e.target.value, playbookId: "", playbookIds: [] })}
       >
         <option value="">{agentDeckOnline ? "No deck — degraded mode" : "Agent Deck offline"}</option>
         {decks.map((d) => (
@@ -218,6 +249,32 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
             onChange={(e) => set({ externalMemoryRefs: e.target.value })}
           />
         </label>
+        <div className="space-y-1">
+          <span className="text-xs text-[#A8C4C0] uppercase">Developer capabilities</span>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-white/70">
+            {(
+              [
+                ["allowWorktreeWrite", "Write files"],
+                ["allowPush", "git push"],
+                ["allowOpenPr", "Open / update PR"],
+              ] as const
+            ).map(([key, label]) => (
+              <label key={key} className="flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  disabled={disabled}
+                  checked={value[key]}
+                  onChange={(e) => set({ [key]: e.target.checked } as Partial<AgentConfigValue>)}
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-white/40">
+            Unchecking pins the capability off at the runtime boundary. Reviewer sessions are
+            always read-only.
+          </p>
+        </div>
       </div>
     </div>
   );

@@ -60,8 +60,14 @@ export function assertReviewerReadOnly(args: string[]): void {
     throw new Error("reviewer cursor args are not constrained to ask mode");
   }
   const isCodex = args[0] === "exec";
-  if (isCodex && flagValue(args, "-s") !== "read-only") {
-    throw new Error("reviewer codex args are not constrained to a read-only sandbox");
+  if (isCodex) {
+    if (flagValue(args, "-s") !== "read-only") {
+      throw new Error("reviewer codex args are not constrained to a read-only sandbox");
+    }
+    // codex's read-only sandbox does not gate configured MCP/plugin calls.
+    if (!args.some((a, i) => a === "-c" && args[i + 1] === "mcp_servers={}")) {
+      throw new Error("reviewer codex args do not disable configured MCP servers");
+    }
   }
 
   if (!allowed.length && !isCursor && !isCodex) {

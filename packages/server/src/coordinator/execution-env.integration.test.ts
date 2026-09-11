@@ -64,32 +64,38 @@ function issueWith(developerAgentId: string, reviewerAgentId: string): string {
   }).id;
 }
 
-test("a later profile edit does not change a session's frozen execution snapshot", async () => {
+test("editing the profile after the work is queued does not change the eventual session", async () => {
   const dev = createAgent({
     name: "dev-freeze",
     runtime: "claude_code",
     workspaceRoot: "/repo",
-    defaultModel: "model-v1",
+    defaultModel: "model-when-queued",
   });
   const rev = createAgent({ name: "rev-freeze", runtime: "claude_code", workspaceRoot: "/repo" });
   const issueId = issueWith(dev.id, rev.id);
 
-  registerEffectHandler("developer", async () => {
-    // Mutate the profile mid-flight — the running session must not see it.
-    updateAgent(dev.id, { defaultModel: "model-v2" });
-    return { kind: "clean_handoff" as const, headSha: "head1", baseSha: "base1", prNumber: 7, prUrl: "u" };
-  });
+  registerEffectHandler("developer", async () => ({
+    kind: "clean_handoff" as const,
+    headSha: "head1",
+    baseSha: "base1",
+    prNumber: 7,
+    prUrl: "u",
+  }));
   registerEffectHandler("reviewer", async () => approvedVerdict);
 
+  // Queue the work, THEN edit the profile before any dispatcher tick runs — the
+  // reviewer's boundary repro for NOT-60's "later profile edits do not change a
+  // queued/running session" criterion.
   startWorkflow(issueId);
+  updateAgent(dev.id, { defaultModel: "model-after-queue" });
   await pump();
 
   const devSession = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
   const snap = parseProfileSnapshot(devSession.profileSnapshotJson);
   assert.ok(snap, "developer session carries a profile snapshot");
-  assert.equal(snap!.model, "model-v1", "snapshot frozen at session creation");
-  assert.equal(devSession.model, "model-v1", "denormalized session model also frozen");
-  assert.equal(updateAgent(dev.id, {})!.defaultModel, "model-v2", "the live profile did move on");
+  assert.equal(snap!.model, "model-when-queued", "snapshot frozen when the item was queued");
+  assert.equal(devSession.model, "model-when-queued", "denormalized session model also frozen");
+  assert.equal(updateAgent(dev.id, {})!.defaultModel, "model-after-queue", "the live profile moved on");
 });
 
 test("the reviewer session snapshot yields a read-only permission policy and read-only args", async () => {

@@ -1,7 +1,12 @@
 import { useState } from "react";
 import type { AgentWithHealth, CreateAgentInput, UpdateAgentInput } from "@agent-dealer/shared";
 import { parseStringList } from "@agent-dealer/shared";
-import AgentConfigFields, { parseRefList, type AgentConfigValue } from "../AgentConfigFields";
+import AgentConfigFields, {
+  parseRefList,
+  permissionFlagsFromJson,
+  permissionOverride,
+  type AgentConfigValue,
+} from "../AgentConfigFields";
 import { createAgent, deleteAgent, updateAgent } from "../api";
 import { runtimeLabel } from "../lib/display";
 import { agentPhaseBudgetFromJson, budgetFormEmpty, phaseBudgetFromForm } from "../lib/budgetForm";
@@ -28,6 +33,9 @@ const emptyConfig = (): AgentConfigValue => ({
   defaultBudget: budgetFormEmpty(),
   playbookIds: [],
   externalMemoryRefs: "",
+  allowWorktreeWrite: true,
+  allowPush: true,
+  allowOpenPr: true,
 });
 
 export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props) {
@@ -61,6 +69,7 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         purpose: config.purpose.trim() || null,
         playbookIds: config.playbookIds,
         externalMemoryRefs: parseRefList(config.externalMemoryRefs),
+        permissionPolicy: permissionOverride(config),
       };
       await createAgent(body);
       setName("");
@@ -92,6 +101,7 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
       defaultBudget: agentPhaseBudgetFromJson(agent.defaultBudgetJson),
       playbookIds: parseStringList(agent.playbookIdsJson),
       externalMemoryRefs: parseStringList(agent.externalMemoryRefsJson).join("\n"),
+      ...permissionFlagsFromJson(agent.permissionPolicyJson),
     });
   };
 
@@ -118,6 +128,7 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         purpose: editConfig.purpose.trim() || null,
         playbookIds: editConfig.playbookIds,
         externalMemoryRefs: parseRefList(editConfig.externalMemoryRefs),
+        permissionPolicy: permissionOverride(editConfig),
       };
       await updateAgent(agent.id, body);
       cancelEdit();

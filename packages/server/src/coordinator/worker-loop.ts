@@ -36,6 +36,7 @@ import {
 } from "../repository/work-items.js";
 import { applyCompletion, routeAppliedOutcome } from "./commands.js";
 import { getEffectHandler } from "./effect-registry.js";
+import { parseProfileSnapshot } from "@agent-dealer/shared";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 
@@ -129,21 +130,26 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     return;
   }
 
-  let inputSha: string | null = null;
+  let payload: { inputSha?: string | null; profileSnapshot?: string | null } = {};
   try {
-    inputSha = claimed.payloadJson ? (JSON.parse(claimed.payloadJson).inputSha ?? null) : null;
+    if (claimed.payloadJson) payload = JSON.parse(claimed.payloadJson);
   } catch {
-    inputSha = null;
+    payload = {};
   }
+  const inputSha = payload.inputSha ?? null;
 
-  // Freeze the selected profile into an immutable execution contract for this session.
-  // Resolved here, once, so a later edit to the agent profile never rewrites a queued or
-  // running session (design §"Immutable execution-profile snapshot"). The effect handler
-  // (placeholder until NOT-61/62) reads this snapshot rather than the live profile.
+  // The execution-profile snapshot was frozen into the work-item payload when the item
+  // was *queued* (commands.ts), so a profile edit between enqueue and claim can never
+  // change this session (design §"Immutable execution-profile snapshot" / NOT-60
+  // acceptance criteria). Fall back to a live resolve only for a legacy item queued
+  // before the snapshot was carried on the payload.
   const role = roleFor[claimed.kind];
   const agentId = claimed.kind === "developer" ? issue.developerAgentId : issue.reviewerAgentId;
-  const agent = agentId ? getAgent(agentId) : null;
-  const snapshot = agent ? buildProfileSnapshot(agent, role) : null;
+  let snapshot = parseProfileSnapshot(payload.profileSnapshot);
+  if (!snapshot) {
+    const agent = agentId ? getAgent(agentId) : null;
+    snapshot = agent ? buildProfileSnapshot(agent, role) : null;
+  }
 
   // Create + bind + start the session and emit worker.started atomically, so a crash never
   // leaves a running session that recovery (which keys off work_items) cannot locate. The

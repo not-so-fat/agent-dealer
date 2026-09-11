@@ -65,3 +65,29 @@ test("a tightened developer policy drops the write tools from claude args", () =
   assert.ok(!tools.includes("Write"));
   assert.ok(!tools.includes("Bash"));
 });
+
+test("push / open-PR flags gate the corresponding Bash commands for a claude developer", () => {
+  const open = buildDeveloperArgs("claude_code", "impl");
+  const openDeny = (open[open.indexOf("--disallowedTools") + 1] ?? "");
+  assert.ok(!openDeny.includes("git push"), "default developer may push");
+  assert.ok(!openDeny.includes("gh pr create"));
+
+  const locked = resolveSessionPermissionPolicy(
+    "developer",
+    serializePermissionPolicyOverride({ push: false, openPr: false })
+  );
+  const args = buildDeveloperArgs("claude_code", "impl", undefined, locked);
+  const deny = args[args.indexOf("--disallowedTools") + 1];
+  assert.match(deny, /Bash\(git push:\*\)/);
+  assert.match(deny, /Bash\(gh pr create:\*\)/);
+  // Bash itself is still granted (the developer still needs it to build/test).
+  assert.ok(args[args.indexOf("--allowedTools") + 1].split(",").includes("Bash"));
+});
+
+test("a codex reviewer invocation disables configured MCP servers", () => {
+  const args = buildReviewerArgs("codex_local", "review");
+  assert.ok(args.some((a, i) => a === "-c" && args[i + 1] === "mcp_servers={}"));
+  // a codex developer keeps MCP (deck reads)
+  const dev = buildDeveloperArgs("codex_local", "impl");
+  assert.ok(!dev.some((a, i) => a === "-c" && dev[i + 1] === "mcp_servers={}"));
+});

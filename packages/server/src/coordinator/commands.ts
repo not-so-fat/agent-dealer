@@ -33,12 +33,15 @@ import {
   resolveHumanAction,
 } from "../repository/human-actions.js";
 import { reconcileFinding } from "../repository/findings.js";
+import { getAgent } from "../repository/agents.js";
 import {
   enqueueWorkItem,
   finishWorkItem,
   getWorkItem,
   type WorkItem,
+  type WorkItemKind,
 } from "../repository/work-items.js";
+import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import {
   routeDeveloperOutcome,
   routeReviewerOutcome,
@@ -49,6 +52,18 @@ import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } fro
 import { parseHumanResolution, resolveHumanActionOutcome } from "./human-resolution.js";
 
 export const WORKFLOW_VERSION = "dev_reviewer_v1";
+
+/**
+ * Freeze the role's execution profile at the moment the work item is enqueued (NOT-60):
+ * an edit to the agent profile after this — even before a dispatcher claims the item —
+ * never changes the eventual session. The worker loop consumes this off the payload and
+ * only falls back to a live resolve for a legacy item queued before snapshots were carried.
+ */
+function queuedProfileSnapshot(issue: Issue, kind: WorkItemKind): string | null {
+  const agentId = kind === "developer" ? issue.developerAgentId : issue.reviewerAgentId;
+  const agent = agentId ? getAgent(agentId) : null;
+  return agent ? serializeProfileSnapshot(buildProfileSnapshot(agent, kind)) : null;
+}
 
 export type StartResult =
   | { ok: true; instance: WorkflowInstance; workItem: WorkItem }
@@ -114,6 +129,7 @@ function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workI
     workflowInstanceId: instance.id,
     kind: "developer",
     round: 1,
+    payload: { profileSnapshot: queuedProfileSnapshot(issue, "developer") },
     idempotencyKey: `${instance.id}:developer:1`,
   });
   return { instance, workItem };
@@ -382,7 +398,10 @@ function applyEffect(
       workflowInstanceId: instance.id,
       kind,
       round: roundNow,
-      payload: effect.atHeadSha ? { inputSha: effect.atHeadSha } : undefined,
+      payload: {
+        ...(effect.atHeadSha ? { inputSha: effect.atHeadSha } : {}),
+        profileSnapshot: queuedProfileSnapshot(issue, kind),
+      },
       idempotencyKey: `${instance.id}:${kind}:${roundNow}${suffix}`,
     });
     return { ...base, issueStatus: getIssue(issue.id)!.status, nextWorkItemId: next.id };
@@ -556,6 +575,7 @@ export function resolveHumanActionAndAdvance(
       workflowInstanceId: instance.id,
       kind: "developer",
       round: roundNow,
+      payload: { profileSnapshot: queuedProfileSnapshot(issue, "developer") },
       idempotencyKey: `${instance.id}:developer:${roundNow}`,
     });
     return {
