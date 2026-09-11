@@ -182,6 +182,18 @@ export async function commitsAhead(opts: { worktreePath: string; baseRef: string
   return Number(stdout.trim());
 }
 
+/**
+ * The base→head diff, computed by the coordinator (not the reviewer worker — a claude
+ * reviewer has no Bash tool at all, see prompts.ts's module doc) and embedded in the
+ * reviewer prompt. Both SHAs must already be present as objects in `worktreePath`'s repo
+ * — true for a reviewer worktree, since it shares object storage with the repo the
+ * developer round already fetched/merge-based against.
+ */
+export async function diffShas(opts: { worktreePath: string; baseSha: string; headSha: string }): Promise<string> {
+  const { stdout } = await git(opts.worktreePath, ["diff", opts.baseSha, opts.headSha]);
+  return stdout;
+}
+
 export type WorktreeRemoval =
   | { removed: true }
   | { removed: false; preserved: true; path: string; reason: string; recoveryCommands: string[] };

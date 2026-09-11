@@ -47,6 +47,7 @@ function fakeAdapter(sequence: ChecksSnapshot[]): GithubAdapter {
       if (queue.length) last = queue.shift()!;
       return last;
     },
+    publishReview: async () => ({ ok: false, reason: "unused" }),
   };
 }
 

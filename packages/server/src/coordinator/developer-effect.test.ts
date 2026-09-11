@@ -142,6 +142,9 @@ function fakeGithub(opts: { checks?: "success" | "failure" | "pending"; createFa
     async checksSnapshot() {
       return opts.checks ?? "success";
     },
+    async publishReview() {
+      throw new Error("publishReview is unused by the developer effect");
+    },
   };
   return adapter;
 }
@@ -499,6 +502,9 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
       },
       async checksSnapshot() {
         return "success";
+      },
+      async publishReview() {
+        throw new Error("publishReview is unused by the developer effect");
       },
     };
 

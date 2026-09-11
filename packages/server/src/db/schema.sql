@@ -277,3 +277,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_work_items_idempotency ON work_items(idemp
 -- for one workflow instance (design: "exactly one next effect").
 CREATE UNIQUE INDEX IF NOT EXISTS idx_work_items_one_active ON work_items(workflow_instance_id)
   WHERE status IN ('pending', 'leased');
+
+-- A durable claim + result for the reviewer effect's GitHub publication (NOT-62 review
+-- rounds 2-3). Unlike a push, a `gh pr review` submission is not naturally idempotent,
+-- and a read-only "does a review already exist" check alone is a check-then-publish
+-- race: two overlapping attempts on the same work item (a crash-and-recover, or a
+-- genuine zombie still running past its reclaimed lease) could both read "not found"
+-- before either has published. One row per work item is inserted here atomically before
+-- either attempt is allowed to call `gh` — whichever insert wins the primary key is the
+-- only attempt allowed to publish. Critically, the row also carries the *actual*
+-- normalized result that was published (`result_json`/`event`): a losing attempt that
+-- ran its own independent reviewer session must report what its rival actually
+-- published, never its own (possibly different) locally-parsed verdict — round 3 found
+-- exactly this gap ("GitHub and workflow state can disagree" when the two sessions
+-- disagree). `state` lets a loser distinguish "still in flight, wait" from "published,
+-- take its result" from "the winner failed, safe to reclaim and retry."
+CREATE TABLE IF NOT EXISTS review_publications (
+  work_item_id TEXT PRIMARY KEY REFERENCES work_items(id),
+  state TEXT NOT NULL,             -- 'claimed' | 'published' | 'failed'
+  result_json TEXT,                -- the ReviewerResult actually published (state = 'published')
+  event TEXT,                      -- the ReviewEvent actually published
+  used_comment_fallback INTEGER,
+  claimed_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);

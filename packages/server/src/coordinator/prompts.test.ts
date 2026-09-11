@@ -1,7 +1,7 @@
 // packages/server/src/coordinator/prompts.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildDeveloperPrompt } from "./prompts.js";
+import { buildDeveloperPrompt, buildReviewerPrompt } from "./prompts.js";
 
 const taskSnapshot = {
   title: "Add widget",
@@ -44,4 +44,49 @@ test("deck section lists every playbook id, not just the first", () => {
 test("no deck section when the profile has no deckId", () => {
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, worktreePath: "/wt", deckId: null });
   assert.doesNotMatch(prompt, /bind_workspace/);
+});
+
+const reviewerBase = {
+  taskSnapshot,
+  round: 1,
+  baseSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  headSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  diff: "diff --git a/x b/x\n+added line\n",
+};
+
+test("reviewer prompt embeds the diff, echoes the exact SHAs to report, and forbids editing", () => {
+  const prompt = buildReviewerPrompt(reviewerBase);
+  assert.match(prompt, /\+added line/);
+  assert.match(prompt, /"baseSha" to exactly "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/);
+  assert.match(prompt, /"headSha" to exactly "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/);
+  assert.match(prompt, /You cannot edit files, push, or publish anything/);
+});
+
+test("reviewer prompt includes the developer's conclusion, checks summary, and prior findings when given", () => {
+  const prompt = buildReviewerPrompt({
+    ...reviewerBase,
+    implementationConclusion: "Added the widget per spec.",
+    checksSummary: "success (at deadbeef)",
+    findings: [
+      { id: "f1", issueId: "i", fingerprint: "fp1", severity: "blocking", title: "Bug", rationale: "It breaks", evidenceRef: null, file: "a.ts", line: 10, status: "recurring", firstRound: 1, lastRound: 1 },
+    ],
+  });
+  assert.match(prompt, /Added the widget per spec\./);
+  assert.match(prompt, /success \(at deadbeef\)/);
+  assert.match(prompt, /\[recurring\/blocking\] Bug \(a\.ts:10\): It breaks/);
+});
+
+test("reviewer prompt omits optional sections when absent", () => {
+  const prompt = buildReviewerPrompt(reviewerBase);
+  assert.doesNotMatch(prompt, /Developer's implementation conclusion/);
+  assert.doesNotMatch(prompt, /## CI checks/);
+  assert.doesNotMatch(prompt, /Findings from prior rounds/);
+  assert.doesNotMatch(prompt, /bind_workspace/);
+});
+
+test("reviewer prompt deck section lists every playbook id, matching the developer prompt's pattern", () => {
+  const prompt = buildReviewerPrompt({ ...reviewerBase, worktreePath: "/wt", deckId: "deck-1", playbookIds: ["pb-a", "pb-b"] });
+  assert.match(prompt, /bind_workspace\(\{ deckId: "deck-1", workspaceRoot: "\/wt" \}\)/);
+  assert.match(prompt, /get_playbook\("pb-a"\)/);
+  assert.match(prompt, /get_playbook\("pb-b"\)/);
 });
