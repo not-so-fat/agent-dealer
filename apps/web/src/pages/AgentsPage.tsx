@@ -1,6 +1,12 @@
 import { useState } from "react";
 import type { AgentWithHealth, CreateAgentInput, UpdateAgentInput } from "@agent-dealer/shared";
-import AgentConfigFields, { type AgentConfigValue } from "../AgentConfigFields";
+import { parseStringList } from "@agent-dealer/shared";
+import AgentConfigFields, {
+  parseRefList,
+  permissionFlagsFromJson,
+  permissionOverride,
+  type AgentConfigValue,
+} from "../AgentConfigFields";
 import { createAgent, deleteAgent, updateAgent } from "../api";
 import { runtimeLabel } from "../lib/display";
 import { agentPhaseBudgetFromJson, budgetFormEmpty, phaseBudgetFromForm } from "../lib/budgetForm";
@@ -22,6 +28,12 @@ const emptyConfig = (): AgentConfigValue => ({
   defaultExecuteModel: "",
   defaultPlanBudget: budgetFormEmpty(),
   defaultExecuteBudget: budgetFormEmpty(),
+  purpose: "",
+  defaultModel: "",
+  defaultBudget: budgetFormEmpty(),
+  playbookIds: [],
+  externalMemoryRefs: "",
+  allowWorktreeWrite: true,
 });
 
 export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props) {
@@ -50,6 +62,12 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         defaultExecuteModel: config.defaultExecuteModel || null,
         defaultPlanBudget: phaseBudgetFromForm(config.defaultPlanBudget),
         defaultExecuteBudget: phaseBudgetFromForm(config.defaultExecuteBudget),
+        defaultModel: config.defaultModel.trim() || null,
+        defaultBudget: phaseBudgetFromForm(config.defaultBudget),
+        purpose: config.purpose.trim() || null,
+        playbookIds: config.playbookIds,
+        externalMemoryRefs: parseRefList(config.externalMemoryRefs),
+        permissionPolicy: permissionOverride(config),
       };
       await createAgent(body);
       setName("");
@@ -76,6 +94,12 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
       defaultExecuteModel: agent.defaultExecuteModel ?? "",
       defaultPlanBudget: agentPhaseBudgetFromJson(agent.defaultPlanBudgetJson),
       defaultExecuteBudget: agentPhaseBudgetFromJson(agent.defaultExecuteBudgetJson),
+      purpose: agent.purpose ?? "",
+      defaultModel: agent.defaultModel ?? "",
+      defaultBudget: agentPhaseBudgetFromJson(agent.defaultBudgetJson),
+      playbookIds: parseStringList(agent.playbookIdsJson),
+      externalMemoryRefs: parseStringList(agent.externalMemoryRefsJson).join("\n"),
+      ...permissionFlagsFromJson(agent.permissionPolicyJson),
     });
   };
 
@@ -97,6 +121,12 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         defaultExecuteModel: editConfig.defaultExecuteModel || null,
         defaultPlanBudget: phaseBudgetFromForm(editConfig.defaultPlanBudget),
         defaultExecuteBudget: phaseBudgetFromForm(editConfig.defaultExecuteBudget),
+        defaultModel: editConfig.defaultModel.trim() || null,
+        defaultBudget: phaseBudgetFromForm(editConfig.defaultBudget),
+        purpose: editConfig.purpose.trim() || null,
+        playbookIds: editConfig.playbookIds,
+        externalMemoryRefs: parseRefList(editConfig.externalMemoryRefs),
+        permissionPolicy: permissionOverride(editConfig),
       };
       await updateAgent(agent.id, body);
       cancelEdit();

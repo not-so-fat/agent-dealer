@@ -10,6 +10,7 @@
 // server — index.ts integration lands with NOT-60.
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
+import { getAgent } from "../repository/agents.js";
 import { getIssue } from "../repository/issues.js";
 import {
   getWorkflowInstance,
@@ -35,6 +36,8 @@ import {
 } from "../repository/work-items.js";
 import { applyCompletion, routeAppliedOutcome } from "./commands.js";
 import { getEffectHandler } from "./effect-registry.js";
+import { parseProfileSnapshot } from "@agent-dealer/shared";
+import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
@@ -127,11 +130,25 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     return;
   }
 
-  let inputSha: string | null = null;
+  let payload: { inputSha?: string | null; profileSnapshot?: string | null } = {};
   try {
-    inputSha = claimed.payloadJson ? (JSON.parse(claimed.payloadJson).inputSha ?? null) : null;
+    if (claimed.payloadJson) payload = JSON.parse(claimed.payloadJson);
   } catch {
-    inputSha = null;
+    payload = {};
+  }
+  const inputSha = payload.inputSha ?? null;
+
+  // The execution-profile snapshot was frozen into the work-item payload when the item
+  // was *queued* (commands.ts), so a profile edit between enqueue and claim can never
+  // change this session (design §"Immutable execution-profile snapshot" / NOT-60
+  // acceptance criteria). Fall back to a live resolve only for a legacy item queued
+  // before the snapshot was carried on the payload.
+  const role = roleFor[claimed.kind];
+  const agentId = claimed.kind === "developer" ? issue.developerAgentId : issue.reviewerAgentId;
+  let snapshot = parseProfileSnapshot(payload.profileSnapshot);
+  if (!snapshot) {
+    const agent = agentId ? getAgent(agentId) : null;
+    snapshot = agent ? buildProfileSnapshot(agent, role) : null;
   }
 
   // Create + bind + start the session and emit worker.started atomically, so a crash never
@@ -143,12 +160,15 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     session = getDb().transaction(() => {
       const s = createWorkerSession({
         issueId: claimed.issueId,
-        role: roleFor[claimed.kind],
+        role,
         round: claimed.round,
-        agentId: claimed.kind === "developer" ? issue.developerAgentId : issue.reviewerAgentId,
-        runtime: null,
+        agentId,
+        runtime: snapshot?.runtime ?? null,
+        model: snapshot?.model ?? null,
+        budgetJson: snapshot?.budgetJson ?? null,
         inputSha,
         metadataJson: JSON.stringify({ workItemId: claimed.id }),
+        profileSnapshotJson: snapshot ? serializeProfileSnapshot(snapshot) : null,
       });
       if (!bindWorkItemSession(claimed.id, s.id, leaseToken)) {
         throw new Error("lease lost before session setup");

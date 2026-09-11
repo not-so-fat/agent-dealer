@@ -20,6 +20,7 @@ interface WorkerSessionRow {
   exit_code: number | null;
   error_json: string | null;
   metadata_json: string | null;
+  profile_snapshot_json: string | null;
   created_at: string;
   started_at: string | null;
   heartbeat_at: string | null;
@@ -45,6 +46,7 @@ function rowToSession(row: WorkerSessionRow): WorkerSession {
     exitCode: row.exit_code,
     errorJson: row.error_json,
     metadataJson: row.metadata_json,
+    profileSnapshotJson: row.profile_snapshot_json,
     createdAt: row.created_at,
     startedAt: row.started_at,
     heartbeatAt: row.heartbeat_at,
@@ -73,6 +75,7 @@ export function createWorkerSession(input: CreateWorkerSessionInput): WorkerSess
     exit_code: null,
     error_json: null,
     metadata_json: input.metadataJson ?? null,
+    profile_snapshot_json: input.profileSnapshotJson ?? null,
     created_at: now,
     started_at: null,
     heartbeat_at: null,
@@ -83,11 +86,11 @@ export function createWorkerSession(input: CreateWorkerSessionInput): WorkerSess
     INSERT INTO worker_sessions (
       id, issue_id, role, round, agent_id, runtime, model, budget_json, worktree_path,
       input_sha, status, session_ref, log_path, exit_code, error_json, metadata_json,
-      created_at, started_at, heartbeat_at, completed_at, updated_at
+      profile_snapshot_json, created_at, started_at, heartbeat_at, completed_at, updated_at
     ) VALUES (
       @id, @issue_id, @role, @round, @agent_id, @runtime, @model, @budget_json, @worktree_path,
       @input_sha, @status, @session_ref, @log_path, @exit_code, @error_json, @metadata_json,
-      @created_at, @started_at, @heartbeat_at, @completed_at, @updated_at
+      @profile_snapshot_json, @created_at, @started_at, @heartbeat_at, @completed_at, @updated_at
     )
   `).run(row);
   return rowToSession(row);

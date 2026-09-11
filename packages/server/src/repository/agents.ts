@@ -1,5 +1,9 @@
 import type { AgentProfile, CreateAgentInput, Runtime, UpdateAgentInput } from "@agent-dealer/shared";
-import { serializePhaseBudget } from "@agent-dealer/shared";
+import {
+  serializePermissionPolicyOverride,
+  serializePhaseBudget,
+  serializeStringList,
+} from "@agent-dealer/shared";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
 
@@ -15,6 +19,12 @@ interface AgentRow {
   default_execute_model: string | null;
   default_plan_budget_json: string | null;
   default_execute_budget_json: string | null;
+  default_model: string | null;
+  default_budget_json: string | null;
+  purpose: string | null;
+  playbook_ids_json: string | null;
+  external_memory_refs_json: string | null;
+  permission_policy_json: string | null;
   is_builtin: number;
   created_at: string;
   updated_at: string;
@@ -33,6 +43,12 @@ function rowToAgent(row: AgentRow): AgentProfile {
     defaultExecuteModel: row.default_execute_model,
     defaultPlanBudgetJson: row.default_plan_budget_json,
     defaultExecuteBudgetJson: row.default_execute_budget_json,
+    defaultModel: row.default_model,
+    defaultBudgetJson: row.default_budget_json,
+    purpose: row.purpose,
+    playbookIdsJson: row.playbook_ids_json,
+    externalMemoryRefsJson: row.external_memory_refs_json,
+    permissionPolicyJson: row.permission_policy_json,
     isBuiltin: row.is_builtin === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -56,8 +72,13 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
   const now = new Date().toISOString();
   const id = uuid();
   db.prepare(`
-    INSERT INTO agents (id, name, runtime, deck_id, deck_name, playbook_id, workspace_root, default_plan_model, default_execute_model, default_plan_budget_json, default_execute_budget_json, is_builtin, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    INSERT INTO agents (
+      id, name, runtime, deck_id, deck_name, playbook_id, workspace_root,
+      default_plan_model, default_execute_model, default_plan_budget_json, default_execute_budget_json,
+      default_model, default_budget_json, purpose, playbook_ids_json, external_memory_refs_json, permission_policy_json,
+      is_builtin, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
   `).run(
     id,
     input.name.trim(),
@@ -70,6 +91,12 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
     input.defaultExecuteModel ?? null,
     serializePhaseBudget(input.defaultPlanBudget),
     serializePhaseBudget(input.defaultExecuteBudget),
+    input.defaultModel ?? null,
+    serializePhaseBudget(input.defaultBudget),
+    input.purpose?.trim() || null,
+    serializeStringList(input.playbookIds),
+    serializeStringList(input.externalMemoryRefs),
+    serializePermissionPolicyOverride(input.permissionPolicy),
     now,
     now
   );
@@ -99,13 +126,32 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
     input.defaultExecuteBudget !== undefined
       ? serializePhaseBudget(input.defaultExecuteBudget)
       : existing.defaultExecuteBudgetJson;
+  const defaultModel = input.defaultModel !== undefined ? input.defaultModel : existing.defaultModel;
+  const defaultBudgetJson =
+    input.defaultBudget !== undefined
+      ? serializePhaseBudget(input.defaultBudget)
+      : existing.defaultBudgetJson;
+  const purpose =
+    input.purpose !== undefined ? input.purpose?.trim() || null : existing.purpose;
+  const playbookIdsJson =
+    input.playbookIds !== undefined ? serializeStringList(input.playbookIds) : existing.playbookIdsJson;
+  const externalMemoryRefsJson =
+    input.externalMemoryRefs !== undefined
+      ? serializeStringList(input.externalMemoryRefs)
+      : existing.externalMemoryRefsJson;
+  const permissionPolicyJson =
+    input.permissionPolicy !== undefined
+      ? serializePermissionPolicyOverride(input.permissionPolicy)
+      : existing.permissionPolicyJson;
   const resolvedDeckName =
     input.deckId !== undefined ? (input.deckId ? (deckName ?? null) : null) : existing.deckName;
 
   getDb()
     .prepare(`
       UPDATE agents SET name = ?, runtime = ?, deck_id = ?, deck_name = ?, playbook_id = ?, workspace_root = ?,
-        default_plan_model = ?, default_execute_model = ?, default_plan_budget_json = ?, default_execute_budget_json = ?, updated_at = ?
+        default_plan_model = ?, default_execute_model = ?, default_plan_budget_json = ?, default_execute_budget_json = ?,
+        default_model = ?, default_budget_json = ?, purpose = ?, playbook_ids_json = ?, external_memory_refs_json = ?, permission_policy_json = ?,
+        updated_at = ?
       WHERE id = ?
     `)
     .run(
@@ -119,6 +165,12 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
       defaultExecuteModel,
       defaultPlanBudgetJson,
       defaultExecuteBudgetJson,
+      defaultModel,
+      defaultBudgetJson,
+      purpose,
+      playbookIdsJson,
+      externalMemoryRefsJson,
+      permissionPolicyJson,
       now,
       id
     );

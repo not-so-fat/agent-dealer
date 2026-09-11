@@ -35,6 +35,11 @@ export const WorkerSession = z.object({
   errorJson: z.string().nullable(),
   /** Migration/provider metadata (e.g. original legacy run id). */
   metadataJson: z.string().nullable(),
+  /**
+   * Immutable execution-profile snapshot (serialized ProfileSnapshot) frozen when the
+   * session is created, so a later profile edit never rewrites this session's contract.
+   */
+  profileSnapshotJson: z.string().nullable(),
   createdAt: z.string(),
   startedAt: z.string().nullable(),
   heartbeatAt: z.string().nullable(),
@@ -53,5 +58,6 @@ export const CreateWorkerSessionInput = z.object({
   budgetJson: z.string().nullable().optional(),
   inputSha: z.string().nullable().optional(),
   metadataJson: z.string().nullable().optional(),
+  profileSnapshotJson: z.string().nullable().optional(),
 });
 export type CreateWorkerSessionInput = z.infer<typeof CreateWorkerSessionInput>;

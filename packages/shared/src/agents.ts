@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { PhaseBudget } from "./budget.js";
 import { Runtime } from "./runtime.js";
+import { PermissionPolicyOverride } from "./profile-snapshot.js";
 
 /** Built-in agent IDs — stable across installs. */
 export const BUILTIN_AGENT_CLAUDE_ID = "00000000-0000-4000-a000-000000000001";
@@ -35,6 +36,18 @@ export const AgentProfile = z.object({
   defaultPlanBudgetJson: z.string().nullable(),
   /** Serialized PhaseBudget; null = runtime default (no CLI caps) */
   defaultExecuteBudgetJson: z.string().nullable(),
+  /** Role-neutral CLI model id for issue-centric developer/reviewer sessions; null = runtime default. */
+  defaultModel: z.string().nullable(),
+  /** Serialized PhaseBudget for issue-centric sessions; null = runtime default. */
+  defaultBudgetJson: z.string().nullable(),
+  /** Free-text description of what this profile is for (shown in the picker, snapshotted). */
+  purpose: z.string().nullable(),
+  /** Serialized string[] of Agent Deck playbook ids the worker may load. */
+  playbookIdsJson: z.string().nullable(),
+  /** Serialized string[] of external-memory references (vault paths, doc urls). */
+  externalMemoryRefsJson: z.string().nullable(),
+  /** Serialized PermissionPolicyOverride — may only tighten the role's capabilities. */
+  permissionPolicyJson: z.string().nullable(),
   isBuiltin: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -57,6 +70,12 @@ export const CreateAgentInput = z.object({
   defaultExecuteModel: z.string().nullable().optional(),
   defaultPlanBudget: PhaseBudget.nullable().optional(),
   defaultExecuteBudget: PhaseBudget.nullable().optional(),
+  defaultModel: z.string().nullable().optional(),
+  defaultBudget: PhaseBudget.nullable().optional(),
+  purpose: z.string().nullable().optional(),
+  playbookIds: z.array(z.string()).nullable().optional(),
+  externalMemoryRefs: z.array(z.string()).nullable().optional(),
+  permissionPolicy: PermissionPolicyOverride.nullable().optional(),
 });
 export type CreateAgentInput = z.infer<typeof CreateAgentInput>;
 
@@ -70,6 +89,12 @@ export const UpdateAgentInput = z.object({
   defaultExecuteModel: z.string().nullable().optional(),
   defaultPlanBudget: PhaseBudget.nullable().optional(),
   defaultExecuteBudget: PhaseBudget.nullable().optional(),
+  defaultModel: z.string().nullable().optional(),
+  defaultBudget: PhaseBudget.nullable().optional(),
+  purpose: z.string().nullable().optional(),
+  playbookIds: z.array(z.string()).nullable().optional(),
+  externalMemoryRefs: z.array(z.string()).nullable().optional(),
+  permissionPolicy: PermissionPolicyOverride.nullable().optional(),
 });
 export type UpdateAgentInput = z.infer<typeof UpdateAgentInput>;
 
