@@ -71,7 +71,7 @@ function issueBranchName(issueId: string): string {
   return `issue-${issueId}`;
 }
 
-async function makeIssue(): Promise<string> {
+async function makeIssue(opts: { maxInfraAttempts?: number } = {}): Promise<string> {
   const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
   const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
   return createIssue({
@@ -83,6 +83,7 @@ async function makeIssue(): Promise<string> {
     developerAgentId: dev.id,
     reviewerAgentId: rev.id,
     maxReviewRounds: 3,
+    maxInfraAttempts: opts.maxInfraAttempts ?? 3,
     source: "manual",
   }).id;
 }
@@ -185,8 +186,13 @@ test("no_pr: the agent makes no commits — retried, no reviewer work item", asy
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "developing");
+  assert.equal(issue.currentRound, 1, "no_pr is an infra failure — it must not spend a review round");
+  assert.equal(issue.infraAttempts, 1);
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 0);
-  assert.equal(listWorkItemsForIssue(issueId).some((i) => i.kind === "developer" && i.round === 2), true);
+  assert.equal(
+    listWorkItemsForIssue(issueId).filter((i) => i.kind === "developer" && i.status === "pending").length,
+    1
+  );
 });
 
 test("the branch created on a retried round is reused, not re-created — no 'branch already exists' collision", async () => {
@@ -298,7 +304,7 @@ test("timed_out (checks poll): checks stay pending past the poll deadline", asyn
 });
 
 test("adapter_failure: a non-draft PR is rejected rather than accepted as a clean handoff", async () => {
-  const issueId = await makeIssue();
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   const realViewPr = github.viewPr.bind(github);
   github.viewPr = async (opts) => {
@@ -316,7 +322,7 @@ test("adapter_failure: a non-draft PR is rejected rather than accepted as a clea
 });
 
 test("adapter_failure: a PR based against the wrong branch is rejected rather than accepted", async () => {
-  const issueId = await makeIssue();
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   const realViewPr = github.viewPr.bind(github);
   github.viewPr = async (opts) => {
@@ -331,7 +337,7 @@ test("adapter_failure: a PR based against the wrong branch is rejected rather th
 });
 
 test("adapter_failure: a stale headRefOid (gh's view lags the actual push) is rejected rather than accepted", async () => {
-  const issueId = await makeIssue();
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   const realViewPr = github.viewPr.bind(github);
   github.viewPr = async (opts) => {
@@ -352,7 +358,7 @@ test("adapter_failure: the PR head changing while checks were being polled is re
   // for the final clean_handoff — pinning the reviewer to a SHA that might no longer be
   // "current" per the exact-current-SHA contract. Simulates that race by pushing an extra
   // commit to the remote branch, from a second clone, right when polling first checks.
-  const issueId = await makeIssue();
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const branch = issueBranchName(issueId);
   const github = fakeGithub({ checks: "pending" });
   let racedYet = false;
@@ -384,15 +390,20 @@ test("adapter_failure: the PR head changing while checks were being polled is re
   assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
 });
 
-test("adapter_failure: gh pr create itself fails — escalates, never silently retried as a crash", async () => {
-  const issueId = await makeIssue();
+test("adapter_failure: gh pr create itself fails — never silently treated as a code-crash review round; escalates once infra attempts run out", async () => {
+  // adapter_failure is bounded-retried on the infra budget like any other infra-class
+  // failure (routing.test.ts covers the retry step in isolation); a real repeat here
+  // would need a real, changing commit each attempt to avoid "nothing to commit" on a
+  // reused worktree, so this end-to-end case pins maxInfraAttempts to 0 to exercise the
+  // immediate-exhaustion edge of the same policy.
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
   registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github: fakeGithub({ createFails: true }) }));
   startWorkflow(issueId);
   await pump(1);
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "needs_human");
-  assert.equal(issue.currentRound, 1, "adapter failure never consumes a round");
+  assert.equal(issue.currentRound, 1, "adapter failure never consumes a review round");
   assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
 });
 
@@ -468,6 +479,7 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
       developerAgentId: dev.id,
       reviewerAgentId: rev.id,
       maxReviewRounds: 3,
+      maxInfraAttempts: 3,
       source: "manual",
     }).id;
 

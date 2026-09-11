@@ -42,6 +42,8 @@ test("Issue schema parses a well-formed issue", () => {
     reviewerAgentId: "33333333-3333-3333-3333-333333333333",
     maxReviewRounds: 3,
     currentRound: 1,
+    maxInfraAttempts: 3,
+    infraAttempts: 0,
     branch: null,
     baseSha: null,
     headSha: null,

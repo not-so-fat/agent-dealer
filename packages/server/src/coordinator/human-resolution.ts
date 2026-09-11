@@ -10,6 +10,16 @@ export interface HumanResolutionResult {
   issueStatus: "done" | "repairing" | "closed" | "developing";
   workflowOutcome?: "done" | "closed";
   startNewRound?: boolean;
+  /**
+   * Which budget resuming spends, when startNewRound is set:
+   * "review" bumps current_round only (final_review:repair — a genuine repair cycle);
+   * "review_grant" bumps current_round AND max_review_rounds (attempts_exhausted:retry —
+   * a retry must grant one more round or the very next changes_requested re-exhausts);
+   * "infra" resets infra_attempts to 0, no round change (policy_escalation:resume — an
+   * infra hiccup, not a review-round spend);
+   * "none" touches neither (product_scope_decision — just unblocks a paused workflow).
+   */
+  roundKind?: "review" | "review_grant" | "infra" | "none";
   triggerReflect?: boolean;
 }
 
@@ -46,18 +56,21 @@ export function resolveHumanActionOutcome(resolution: HumanResolution): HumanRes
   switch (resolution.actionType) {
     case "final_review":
       if (resolution.choice === "complete") return { issueStatus: "done", workflowOutcome: "done", triggerReflect: true };
-      if (resolution.choice === "repair") return { issueStatus: "repairing", startNewRound: true };
+      if (resolution.choice === "repair") return { issueStatus: "repairing", startNewRound: true, roundKind: "review" };
       if (resolution.choice === "close") return { issueStatus: "closed", workflowOutcome: "closed" };
       throw new Error(`Unrecognized final_review choice: ${resolution.choice}`);
     case "attempts_exhausted":
-      if (resolution.choice === "retry") return { issueStatus: "repairing", startNewRound: true };
+      // A "retry" must grant one more round, not just re-spend the exhausted one —
+      // otherwise the very next changes_requested re-creates attempts_exhausted immediately.
+      if (resolution.choice === "retry") return { issueStatus: "repairing", startNewRound: true, roundKind: "review_grant" };
       if (resolution.choice === "close") return { issueStatus: "closed", workflowOutcome: "closed" };
       throw new Error(`Unrecognized attempts_exhausted choice: ${resolution.choice}`);
     case "policy_escalation":
-      if (resolution.choice === "resume") return { issueStatus: "developing", startNewRound: true };
+      // An infra escalation resuming is not a review-round spend — reset the infra budget instead.
+      if (resolution.choice === "resume") return { issueStatus: "developing", startNewRound: true, roundKind: "infra" };
       if (resolution.choice === "close") return { issueStatus: "closed", workflowOutcome: "closed" };
       throw new Error(`Unrecognized policy_escalation choice: ${resolution.choice}`);
     case "product_scope_decision":
-      return { issueStatus: "developing", startNewRound: true };
+      return { issueStatus: "developing", startNewRound: true, roundKind: "none" };
   }
 }

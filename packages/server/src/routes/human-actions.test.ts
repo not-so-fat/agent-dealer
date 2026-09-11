@@ -24,7 +24,7 @@ async function buildApp() {
 }
 
 function seedIssueAwaitingFinalReview() {
-  const issue = createIssue({ title: "Awaiting review", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, maxReviewRounds: 3, source: "manual" });
+  const issue = createIssue({ title: "Awaiting review", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
   transitionIssue(issue.id, "developing");
   transitionIssue(issue.id, "reviewing");
   transitionIssue(issue.id, "final_review", { currentOwner: "human" });

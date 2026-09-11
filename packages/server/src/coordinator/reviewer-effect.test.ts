@@ -84,7 +84,7 @@ function issueBranchName(issueId: string): string {
   return `issue-${issueId}`;
 }
 
-async function makeIssue(): Promise<string> {
+async function makeIssue(opts: { maxInfraAttempts?: number } = {}): Promise<string> {
   const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
   const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
   return createIssue({
@@ -96,6 +96,7 @@ async function makeIssue(): Promise<string> {
     developerAgentId: dev.id,
     reviewerAgentId: rev.id,
     maxReviewRounds: 3,
+    maxInfraAttempts: opts.maxInfraAttempts ?? 3,
     source: "manual",
   }).id;
 }
@@ -300,7 +301,7 @@ test("same-identity fallback: GitHub rejecting APPROVE as a self-review still re
 });
 
 test("session_failed: a verdict reporting SHAs that don't match the coordinator-verified revision is rejected, not accepted", async () => {
-  const issueId = await makeIssue();
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
   registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: wrongShaSpawn, github }));
@@ -310,6 +311,25 @@ test("session_failed: a verdict reporting SHAs that don't match the coordinator-
   assert.equal(issue.status, "needs_human", "a wrong-SHA verdict must never reach final_review");
   assert.equal(issue.currentRound, 1, "a rejected verdict never consumes a round");
   assert.equal(github.publishCallCount(), 0, "a rejected verdict is never published");
+});
+
+test("session_failed: bounded infra retry re-queues a fresh reviewer session at the SAME pinned head before any escalation", async () => {
+  const issueId = await makeIssue(); // default maxInfraAttempts: 3
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const before = getIssue(issueId)!;
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: garbageSpawn, github }));
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "one infra failure with attempts left retries, it does not escalate");
+  assert.equal(issue.infraAttempts, 1);
+  assert.equal(issue.currentRound, before.currentRound, "an infra retry never spends a review round");
+  assert.equal(issue.headSha, before.headSha, "the retry is pinned to the SAME head, not a new one");
+  assert.equal(
+    listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer" && i.status === "pending").length,
+    1
+  );
 });
 
 test("publish is idempotent: re-running the effect for the same PR/head (simulating a crash before the work item's completion CAS, then recovery) does not submit a second review", async () => {
@@ -535,7 +555,7 @@ test("stale: a head that moved since the reviewer was queued is re-reviewed at t
 });
 
 test("session_failed: an unparseable transcript escalates without consuming a round", async () => {
-  const issueId = await makeIssue();
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
   registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: garbageSpawn, github }));
@@ -550,7 +570,7 @@ test("session_failed: an unparseable transcript escalates without consuming a ro
 });
 
 test("session_failed: the reviewer process exits non-zero", async () => {
-  const issueId = await makeIssue();
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
   registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: crashingReviewerSpawn, github }));
@@ -560,7 +580,7 @@ test("session_failed: the reviewer process exits non-zero", async () => {
 });
 
 test("session_failed: the reviewer's own wall-clock timeout is folded into session_failed (no separate timed_out kind for reviewers)", async () => {
-  const issueId = await makeIssue();
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
   registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: timedOutReviewerSpawn, github }));
@@ -572,7 +592,7 @@ test("session_failed: the reviewer's own wall-clock timeout is folded into sessi
 });
 
 test("publish_failed: gh pr review itself fails — escalates as infrastructure, not a code finding", async () => {
-  const issueId = await makeIssue();
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub({ publishFails: true });
   await advanceToReviewing(issueId, github);
   registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
@@ -585,7 +605,7 @@ test("publish_failed: gh pr review itself fails — escalates as infrastructure,
 });
 
 test("publish_failed: the PR cannot be re-verified after the reviewer session ends", async () => {
-  const issueId = await makeIssue();
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
   github.viewPr = async () => null;

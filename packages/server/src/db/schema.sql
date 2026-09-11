@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS issues (
   reviewer_agent_id TEXT REFERENCES agents(id),
   max_review_rounds INTEGER NOT NULL DEFAULT 3,
   current_round INTEGER NOT NULL DEFAULT 1,
+  max_infra_attempts INTEGER NOT NULL DEFAULT 3,
+  infra_attempts INTEGER NOT NULL DEFAULT 0,
   branch TEXT,
   base_sha TEXT,
   head_sha TEXT,

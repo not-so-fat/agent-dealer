@@ -40,6 +40,7 @@ function freshLeasedWorkItem(): { id: string; leaseToken: string } {
     reviewerAgentId: rev.id,
     baseBranch: "main",
     maxReviewRounds: 3,
+    maxInfraAttempts: 3,
     source: "manual",
   });
   const instance = startWorkflowInstance(issue.id, "dev_reviewer_v1");

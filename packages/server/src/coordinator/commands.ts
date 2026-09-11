@@ -17,6 +17,9 @@ import { getDb } from "../db/index.js";
 import {
   getIssue,
   incrementIssueRound,
+  incrementIssueInfraAttempts,
+  resetIssueInfraAttempts,
+  grantReviewRetry,
   transitionIssue,
   type TransitionIssuePatch,
 } from "../repository/issues.js";
@@ -339,8 +342,10 @@ function applyDeveloper(
   const route = routeDeveloperOutcome(outcome, {
     currentRound: issue.currentRound,
     maxReviewRounds: issue.maxReviewRounds,
+    infraAttempts: issue.infraAttempts,
+    maxInfraAttempts: issue.maxInfraAttempts,
   });
-  const { projection, effect, advanceRound } = projectDeveloperRoute(route, issue.status, issue.currentRound);
+  const { projection, effect, advance } = projectDeveloperRoute(route, issue.status, issue.currentRound);
   const ev = eventEmitter(issue, instance, item.workerSessionId, projection.issueStatus, issue.currentRound);
 
   const patch: TransitionIssuePatch = {};
@@ -368,10 +373,11 @@ function applyDeveloper(
   }
 
   applyProjectionTransition(issue, projection, patch);
-  if (advanceRound) incrementIssueRound(issue.id);
-  const roundNow = getIssue(issue.id)!.currentRound;
+  if (advance === "review") incrementIssueRound(issue.id);
+  else if (advance === "infra") incrementIssueInfraAttempts(issue.id);
+  const issueNow = getIssue(issue.id)!;
 
-  return applyEffect(issue, instance, effect, route, roundNow, ev);
+  return applyEffect(issue, instance, effect, route, issueNow, ev);
 }
 
 function applyReviewer(
@@ -380,12 +386,18 @@ function applyReviewer(
   item: WorkItem,
   outcome: ReviewerOutcome
 ): ApplyResult {
-  const route = routeReviewerOutcome(outcome, {
-    currentRound: issue.currentRound,
-    maxReviewRounds: issue.maxReviewRounds,
-  });
+  const route = routeReviewerOutcome(
+    outcome,
+    {
+      currentRound: issue.currentRound,
+      maxReviewRounds: issue.maxReviewRounds,
+      infraAttempts: issue.infraAttempts,
+      maxInfraAttempts: issue.maxInfraAttempts,
+    },
+    issue.headSha!
+  );
   const hasVerdict = outcome.kind === "verdict";
-  const { projection, effect, advanceRound } = projectReviewerRoute(route, issue.currentRound, hasVerdict);
+  const { projection, effect, advance } = projectReviewerRoute(route, issue.currentRound, hasVerdict);
   const ev = eventEmitter(issue, instance, item.workerSessionId, projection.issueStatus, issue.currentRound);
 
   const patch: TransitionIssuePatch = {};
@@ -419,28 +431,35 @@ function applyReviewer(
   }
 
   applyProjectionTransition(issue, projection, patch);
-  if (advanceRound) incrementIssueRound(issue.id);
-  const roundNow = getIssue(issue.id)!.currentRound;
+  if (advance === "review") incrementIssueRound(issue.id);
+  else if (advance === "infra") incrementIssueInfraAttempts(issue.id);
+  const issueNow = getIssue(issue.id)!;
 
-  return applyEffect(issue, instance, effect, route, roundNow, ev, outcome);
+  return applyEffect(issue, instance, effect, route, issueNow, ev, outcome);
 }
 
 type AnyRoute =
   | ReturnType<typeof routeDeveloperOutcome>
   | ReturnType<typeof routeReviewerOutcome>;
 
+/** Infra-bounded retries repeat the same round; the attempt number keeps their
+ * idempotency key from colliding with the previous (terminal) attempt's key. */
+function isInfraRetry(route: AnyRoute): boolean {
+  return route.next === "retry_developer" || route.next === "retry_reviewer";
+}
+
 function applyEffect(
   issue: Issue,
   instance: WorkflowInstance,
   effect: ReturnType<typeof projectDeveloperRoute>["effect"],
   route: AnyRoute,
-  roundNow: number,
+  issueNow: Issue,
   ev: EventEmitter,
   reviewerOutcome?: ReviewerOutcome
 ): ApplyResult {
   const base = {
     applied: true as const,
-    issueStatus: getIssue(issue.id)!.status,
+    issueStatus: issueNow.status,
     nextWorkItemId: null as string | null,
     humanActionId: null as string | null,
     instanceCompleted: false,
@@ -448,20 +467,21 @@ function applyEffect(
 
   if (effect.kind === "enqueue") {
     const kind = effect.workItem;
-    const suffix = effect.atHeadSha ? `:${effect.atHeadSha}` : "";
+    const headSuffix = effect.atHeadSha ? `:${effect.atHeadSha}` : "";
+    const attemptSuffix = isInfraRetry(route) ? `:infra${issueNow.infraAttempts}` : "";
     if (route.next === "retry_developer_with_findings") ev.emit("repair.started");
     const next = enqueueWorkItem({
       issueId: issue.id,
       workflowInstanceId: instance.id,
       kind,
-      round: roundNow,
+      round: issueNow.currentRound,
       payload: {
         ...(effect.atHeadSha ? { inputSha: effect.atHeadSha } : {}),
         profileSnapshot: queuedProfileSnapshot(issue, kind),
       },
-      idempotencyKey: `${instance.id}:${kind}:${roundNow}${suffix}`,
+      idempotencyKey: `${instance.id}:${kind}:${issueNow.currentRound}${headSuffix}${attemptSuffix}`,
     });
-    return { ...base, issueStatus: getIssue(issue.id)!.status, nextWorkItemId: next.id };
+    return { ...base, nextWorkItemId: next.id };
   }
 
   if (effect.kind === "human_action") {
@@ -477,7 +497,7 @@ function applyEffect(
     });
     if (actionType === "final_review") ev.emit("final_review.requested");
     ev.emit("human_action.requested", { payload: { actionType, actionId: action.id } });
-    return { ...base, issueStatus: getIssue(issue.id)!.status, humanActionId: action.id };
+    return { ...base, humanActionId: action.id };
   }
 
   return base;
@@ -623,17 +643,34 @@ export function resolveHumanActionAndAdvance(
       };
     }
 
-    // Another round: advance the round and queue a fresh developer work item.
-    incrementIssueRound(issue.id);
-    const roundNow = getIssue(issue.id)!.currentRound;
+    // Another round: spend the budget this resolution's roundKind names, then queue a
+    // fresh developer work item.
+    switch (outcome.roundKind) {
+      case "review_grant":
+        grantReviewRetry(issue.id);
+        break;
+      case "review":
+        incrementIssueRound(issue.id);
+        break;
+      case "infra":
+        resetIssueInfraAttempts(issue.id);
+        break;
+      case "none":
+      case undefined:
+        break;
+    }
+    const issueNow = getIssue(issue.id)!;
     ev.emit("repair.started");
+    // Keyed on the resolved human action, not the round/attempt counters: a
+    // "infra" resume resets infra_attempts to 0 every time, so a counter-based key would
+    // collide across repeated escalate→resume cycles within the same round.
     const next = enqueueWorkItem({
       issueId: issue.id,
       workflowInstanceId: instance.id,
       kind: "developer",
-      round: roundNow,
+      round: issueNow.currentRound,
       payload: { profileSnapshot: queuedProfileSnapshot(issue, "developer") },
-      idempotencyKey: `${instance.id}:developer:${roundNow}`,
+      idempotencyKey: `${instance.id}:developer:resume:${action.id}`,
     });
     return {
       ok: true,

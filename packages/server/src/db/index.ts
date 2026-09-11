@@ -195,6 +195,15 @@ export function migrate(): void {
     `);
   }
 
+  // NOT-63: infra-attempt budget, separate from the review-round budget above — a flaky
+  // session/git/gh/Agent Deck/publish failure must not spend the same counter as a
+  // reviewer's genuine `changes_requested`.
+  const issueCols = db.prepare("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+  if (!issueCols.some((c) => c.name === "max_infra_attempts")) {
+    db.exec("ALTER TABLE issues ADD COLUMN max_infra_attempts INTEGER NOT NULL DEFAULT 3");
+    db.exec("ALTER TABLE issues ADD COLUMN infra_attempts INTEGER NOT NULL DEFAULT 0");
+  }
+
   seedBuiltinAgents(db);
   seedIntakeSettings(db);
   migrateLegacyAgentDeckPort(db);

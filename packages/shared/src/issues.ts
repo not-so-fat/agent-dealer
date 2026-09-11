@@ -37,6 +37,9 @@ export const Issue = z.object({
   reviewerAgentId: z.string().uuid().nullable(),
   maxReviewRounds: z.number().int().min(1),
   currentRound: z.number().int().min(1),
+  /** 0 is a valid policy: no automatic infra retry, escalate to a human immediately. */
+  maxInfraAttempts: z.number().int().min(0),
+  infraAttempts: z.number().int().min(0),
   branch: z.string().nullable(),
   baseSha: z.string().nullable(),
   headSha: z.string().nullable(),
@@ -56,6 +59,7 @@ export const CreateIssueInput = z.object({
   developerAgentId: z.string().uuid(),
   reviewerAgentId: z.string().uuid(),
   maxReviewRounds: z.number().int().min(1).default(3),
+  maxInfraAttempts: z.number().int().min(0).default(3),
   source: IssueSource.default("manual"),
   externalId: z.string().optional(),
   externalLabel: z.string().optional(),

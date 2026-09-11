@@ -26,6 +26,7 @@ beforeEach(() => getDb().exec("DELETE FROM work_items"));
 interface Opts {
   acceptanceCriteria?: string | null;
   maxReviewRounds?: number;
+  maxInfraAttempts?: number;
 }
 function newIssue(opts: Opts = {}): string {
   return createIssue({
@@ -37,6 +38,7 @@ function newIssue(opts: Opts = {}): string {
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: opts.maxReviewRounds ?? 3,
+    maxInfraAttempts: opts.maxInfraAttempts ?? 3,
     source: "manual",
   }).id;
 }
@@ -214,16 +216,73 @@ test("reviewer changes_requested at the round limit → attempts_exhausted", () 
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0);
 });
 
-test("developer failure with rounds left retries; the reviewer is never involved", () => {
+test("developer infra failure retries on the infra budget, not the review-round budget; the reviewer is never involved", () => {
   const issueId = newIssue({ maxReviewRounds: 3 });
   startWorkflow(issueId);
   complete(issueId, { kind: "session_failed" });
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "developing");
-  assert.equal(issue.currentRound, 2);
+  assert.equal(issue.currentRound, 1, "an infra failure must not spend a review round");
+  assert.equal(issue.infraAttempts, 1);
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.deepEqual(pending.map((i) => [i.kind, i.round]), [["developer", 1]]);
+});
+
+test("developer infra failures escalate as policy_escalation (not attempts_exhausted) once the infra-attempt limit is reached", () => {
+  const issueId = newIssue({ maxInfraAttempts: 0 });
+  startWorkflow(issueId);
+  complete(issueId, { kind: "session_failed" });
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.currentRound, 1, "review-round budget is untouched by infra exhaustion");
+  assert.equal(
+    listHumanActionsForIssue(issueId).find((a) => a.status === "open")!.actionType,
+    "policy_escalation"
+  );
+});
+
+test("resolving attempts_exhausted:retry grants one more round instead of instantly re-exhausting", () => {
+  const issueId = newIssue({ maxReviewRounds: 1 });
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff);
+  complete(issueId, { kind: "verdict", result: okReview("changes_requested") });
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  assert.deepEqual([getIssue(issueId)!.currentRound, getIssue(issueId)!.maxReviewRounds], [1, 1]);
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "attempts_exhausted")!;
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "retry");
+  assert.equal(resolved.ok, true);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "repairing");
+  // A "retry" must grant a fresh round, not just re-spend the one that was already
+  // exhausted — otherwise the very next changes_requested re-creates attempts_exhausted.
+  assert.deepEqual([issue.currentRound, issue.maxReviewRounds], [2, 2]);
   const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
   assert.deepEqual(pending.map((i) => [i.kind, i.round]), [["developer", 2]]);
+});
+
+test("resolving policy_escalation:resume resets the infra-attempt budget without spending a review round", () => {
+  const issueId = newIssue({ maxInfraAttempts: 1 });
+  startWorkflow(issueId);
+  complete(issueId, { kind: "session_failed" }); // attempt 1: retries (0 < 1)
+  complete(issueId, { kind: "session_failed" }); // attempt 2: exhausts (1 < 1 is false)
+  const before = getIssue(issueId)!;
+  assert.equal(before.status, "needs_human");
+  assert.equal(before.infraAttempts, 1);
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing");
+  assert.equal(issue.infraAttempts, 0, "resuming past an infra escalation resets the infra budget");
+  assert.equal(issue.currentRound, before.currentRound, "an infra resume must not spend a review round");
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.deepEqual(pending.map((i) => i.kind), ["developer"]);
 });
 
 test("a stale review re-queues a reviewer at the new head without consuming a round", () => {

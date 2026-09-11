@@ -65,6 +65,7 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
         developerAgentId,
         reviewerAgentId,
         maxReviewRounds: 3,
+        maxInfraAttempts: 3,
         source: "manual",
       });
       setShowCreate(false);

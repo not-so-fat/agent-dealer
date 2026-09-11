@@ -32,7 +32,7 @@ const FUTURE = () => Date.now() + 3_600_000; // a clock well past any test lease
 before(() => migrate());
 beforeEach(() => getDb().exec("DELETE FROM work_items"));
 
-function newIssue(maxReviewRounds = 3): string {
+function newIssue(maxReviewRounds = 3, maxInfraAttempts = 3): string {
   return createIssue({
     title: "Recover me",
     acceptanceCriteria: "It works",
@@ -41,6 +41,7 @@ function newIssue(maxReviewRounds = 3): string {
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds,
+    maxInfraAttempts,
     source: "manual",
   }).id;
 }
@@ -94,11 +95,14 @@ test("recovery leaves a lease alone when a heartbeat renewed it after the snapsh
 });
 
 test("an expired lease past the attempt cap is dead-lettered AND routed in one step", () => {
-  const issueId = newIssue(1); // at the round limit → a dead developer item exhausts attempts
+  // A dead-lettered developer work item routes as an infra failure (session_failed), not a
+  // review-round spend — pin maxInfraAttempts to 0 so the very first dead-letter escalates,
+  // matching this test's "one step" intent.
+  const issueId = newIssue(3, 0);
   startWorkflow(issueId);
   const devItem = listWorkItemsForIssue(issueId)[0];
 
-  // Exhaust the attempts (max_attempts default 3): claim + expire, three times.
+  // Exhaust the work item's own lease-crash attempts (max_attempts default 3): claim + expire, three times.
   for (let i = 0; i < 3; i++) {
     claimWorkItem("o", { leaseMs: 1 });
     recoverCoordinator({ now: FUTURE() });
@@ -108,7 +112,7 @@ test("an expired lease past the attempt cap is dead-lettered AND routed in one s
   assert.equal(getIssue(issueId)!.status, "needs_human");
   assert.equal(
     listHumanActionsForIssue(issueId).find((a) => a.status === "open")!.actionType,
-    "attempts_exhausted"
+    "policy_escalation"
   );
 
   // A second recovery pass is a no-op — the item is already dead, nothing to reclaim.
