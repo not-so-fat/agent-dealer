@@ -1,21 +1,23 @@
 // packages/server/src/coordinator/spawn.ts
 //
-// The real per-runtime developer CLI spawn wrapper. `runners/claude.ts`'s runClaude/
-// runCursor/runCodex are hardcoded to the legacy `Run` shape and a closed
+// The real per-runtime developer/reviewer CLI spawn wrapper. `runners/claude.ts`'s
+// runClaude/runCursor/runCodex are hardcoded to the legacy `Run` shape and a closed
 // plan|execute|reflect|qa mode union (design doc §Coordinator) — they cannot take a
-// developer session's prompt/policy directly, so this is new spawn glue reusing only the
-// generic, already-role-agnostic pieces: `spawnCli` (process lifecycle) and
-// `buildDeveloperArgs` (per-runtime arg/permission generation, NOT-60).
+// developer/reviewer session's prompt/policy directly, so this is new spawn glue reusing
+// only the generic, already-role-agnostic pieces: `spawnCli` (process lifecycle) and
+// `buildDeveloperArgs`/`buildReviewerArgs` (per-runtime arg/permission generation, NOT-60).
 //
-// `DeveloperSpawn` is the injectable seam — production code uses `realDeveloperSpawn`,
-// tests inject a fake so no paid CLI is ever spawned in CI (the confirmed NOT-61 scope
-// call: fake the agent session, keep worktree/push/PR verification real).
+// `DeveloperSpawn`/`ReviewerSpawn` are the injectable seams — production code uses
+// `realDeveloperSpawn`/`realReviewerSpawn`, tests inject a fake so no paid CLI is ever
+// spawned in CI (the confirmed NOT-61/62 scope call: fake the agent session, keep
+// worktree/push/PR/review verification real).
 import path from "node:path";
 import type { PermissionPolicy, Runtime } from "@agent-dealer/shared";
 import { getTemporalLogsDir } from "../paths.js";
 import { resolveClaudeBin, resolveCodexBin, resolveCursorBin } from "../cli-env.js";
 import { spawnCli } from "../runners/spawn-cli.js";
-import { buildDeveloperArgs } from "./args.js";
+import { buildDeveloperArgs, buildReviewerArgs } from "./args.js";
+import { assertReviewerReadOnly } from "./permissions.js";
 
 export interface DeveloperSpawnResult {
   exitCode: number;
@@ -36,6 +38,11 @@ export interface DeveloperSpawnInput {
 
 export type DeveloperSpawn = (input: DeveloperSpawnInput) => Promise<DeveloperSpawnResult>;
 
+/** Same shape as a developer spawn — the reviewer session is a one-shot CLI run too. */
+export type ReviewerSpawnResult = DeveloperSpawnResult;
+export type ReviewerSpawnInput = DeveloperSpawnInput;
+export type ReviewerSpawn = (input: ReviewerSpawnInput) => Promise<ReviewerSpawnResult>;
+
 const BIN_FOR: Record<Runtime, () => string> = {
   claude_code: resolveClaudeBin,
   cursor_local: resolveCursorBin,
@@ -46,9 +53,32 @@ function developerLogPath(sessionId: string): string {
   return path.join(getTemporalLogsDir(), `${sessionId}-developer-${Date.now()}.ndjson`);
 }
 
+function reviewerLogPath(sessionId: string): string {
+  return path.join(getTemporalLogsDir(), `${sessionId}-reviewer-${Date.now()}.ndjson`);
+}
+
 export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
   const args = buildDeveloperArgs(input.runtime, input.prompt, input.model ?? undefined, input.policy);
   const logPath = developerLogPath(input.sessionId);
+  const { exitCode, transcript, timedOut } = await spawnCli(
+    input.sessionId,
+    BIN_FOR[input.runtime](),
+    args,
+    input.cwd,
+    { logPath, timeoutMs: input.timeoutMs }
+  );
+  return { exitCode, transcript, logPath, timedOut };
+};
+
+/**
+ * Asserts the read-only invariant on the generated args before every real reviewer spawn
+ * — not just in tests — so a future change to `buildReviewerArgs`/`roleCeiling` that
+ * loosens a reviewer's tools can never silently reach a live spawn.
+ */
+export const realReviewerSpawn: ReviewerSpawn = async (input) => {
+  const args = buildReviewerArgs(input.runtime, input.prompt, input.model ?? undefined, input.policy);
+  assertReviewerReadOnly(args);
+  const logPath = reviewerLogPath(input.sessionId);
   const { exitCode, transcript, timedOut } = await spawnCli(
     input.sessionId,
     BIN_FOR[input.runtime](),

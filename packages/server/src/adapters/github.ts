@@ -2,9 +2,10 @@
 //
 // The coordinator's read/verify boundary onto GitHub via `gh`. Review bodies and PR
 // bodies are always written to a file and passed with `--body-file`, never shell-
-// interpolated (design §"Role permissions and GitHub access"). Only the developer-handoff
-// slice lives here for NOT-61 — `publishReview`'s same-identity-comment fallback is NOT-62
-// scope and is added when the reviewer effect handler needs it.
+// interpolated (design §"Role permissions and GitHub access"). `publishReview` (NOT-62)
+// is called from the coordinator process itself, never the reviewer worker — the reviewer
+// profile's `publishReview` PermissionPolicy flag is always false; "the coordinator... is
+// the only component that publishes the review result" (design §"Role permissions").
 //
 // `GithubAdapter` is the injectable seam: production code uses `realGithubAdapter` (shells
 // out to the real `gh` CLI), while tests inject a fake — no real GitHub calls, matching the
@@ -83,17 +84,36 @@ export type CreatePrResult = { ok: true; number: number; url: string } | { ok: f
 
 const NO_COMMITS_PATTERN = /no commits between/i;
 
+export type ReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
+
+export type PublishReviewResult =
+  | { ok: true; event: ReviewEvent; usedCommentFallback: boolean }
+  | { ok: false; reason: string };
+
 export interface GithubAdapter {
-  /** null when no PR exists yet for the current branch. */
-  viewPr(opts: { cwd: string }): Promise<PrView | null>;
+  /**
+   * null when no PR exists yet for the current branch. `number`, when given, views that
+   * PR explicitly instead of resolving "the PR for the current branch" — required for a
+   * detached-HEAD reviewer worktree, which has no current branch for `gh` to infer from.
+   */
+  viewPr(opts: { cwd: string; number?: number }): Promise<PrView | null>;
   createDraftPr(opts: { cwd: string; base: string; title: string; bodyFilePath: string }): Promise<CreatePrResult>;
   /** One-shot read of the current check rollup for the PR's head. */
   checksSnapshot(opts: { cwd: string }): Promise<ChecksSnapshot>;
+  /**
+   * Publishes the reviewer's validated verdict. `event` "APPROVE"/"REQUEST_CHANGES" falls
+   * back to a plain comment review carrying the same body when GitHub rejects it because
+   * the identity running `gh` authored the PR — expected in this system's single-ambient-
+   * identity setup (design §"Role permissions": developer and coordinator share one `gh
+   * auth`), not an edge case. The internal verdict stays the workflow authority either way.
+   */
+  publishReview(opts: { cwd: string; event: ReviewEvent; bodyFilePath: string }): Promise<PublishReviewResult>;
 }
 
-async function ghPrView(cwd: string, fields: string): Promise<Record<string, unknown> | null> {
+async function ghPrView(cwd: string, fields: string, number?: number): Promise<Record<string, unknown> | null> {
+  const args = ["pr", "view", ...(number != null ? [String(number)] : []), "--json", fields];
   try {
-    const { stdout } = await run("gh", ["pr", "view", "--json", fields], { cwd });
+    const { stdout } = await run("gh", args, { cwd });
     return JSON.parse(stdout) as Record<string, unknown>;
   } catch (err) {
     const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
@@ -103,8 +123,8 @@ async function ghPrView(cwd: string, fields: string): Promise<Record<string, unk
 }
 
 export const realGithubAdapter: GithubAdapter = {
-  async viewPr({ cwd }) {
-    const raw = await ghPrView(cwd, PR_VIEW_FIELDS);
+  async viewPr({ cwd, number }) {
+    const raw = await ghPrView(cwd, PR_VIEW_FIELDS, number);
     return raw ? parsePrView(JSON.stringify(raw)) : null;
   },
 
@@ -132,7 +152,41 @@ export const realGithubAdapter: GithubAdapter = {
     const rollup = (raw?.statusCheckRollup as RawCheck[] | undefined) ?? [];
     return summarizeChecks(rollup);
   },
+
+  async publishReview({ cwd, event, bodyFilePath }) {
+    const result = await runReview(cwd, event, bodyFilePath);
+    if (result.ok || event === "COMMENT" || !OWN_PR_REVIEW_PATTERN.test(result.reason)) {
+      return result.ok ? { ok: true, event, usedCommentFallback: false } : result;
+    }
+    const fallback = await runReview(cwd, "COMMENT", bodyFilePath);
+    return fallback.ok
+      ? { ok: true, event: "COMMENT", usedCommentFallback: true }
+      : { ok: false, reason: `${event} rejected as self-review, and comment fallback also failed: ${fallback.reason}` };
+  },
 };
+
+const REVIEW_FLAG: Record<ReviewEvent, string> = {
+  APPROVE: "--approve",
+  REQUEST_CHANGES: "--request-changes",
+  COMMENT: "--comment",
+};
+
+/** GitHub's self-review rejection, worded per event ("approve" / "request changes"). */
+const OWN_PR_REVIEW_PATTERN = /own pull request/i;
+
+async function runReview(
+  cwd: string,
+  event: ReviewEvent,
+  bodyFilePath: string
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    await run("gh", ["pr", "review", REVIEW_FLAG[event], "--body-file", bodyFilePath], { cwd });
+    return { ok: true };
+  } catch (err) {
+    const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
+    return { ok: false, reason: message };
+  }
+}
 
 export type PollChecksResult = "success" | "failure" | "timeout" | "none";
 
