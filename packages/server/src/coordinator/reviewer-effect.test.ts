@@ -22,6 +22,8 @@ process.env.COORDINATOR_FAIL_BACKOFF_MS = "0";
 process.env.CHECKS_POLL_TIMEOUT_MS = "60";
 process.env.CHECKS_POLL_INTERVAL_MS = "10";
 process.env.REVIEWER_TIMEOUT_MS = "5000";
+process.env.REVIEWER_PUBLISH_WAIT_ATTEMPTS = "3";
+process.env.REVIEWER_PUBLISH_WAIT_INTERVAL_MS = "10";
 
 const { migrate, getDb } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
@@ -33,6 +35,7 @@ const { listHumanActionsForIssue } = await import("../repository/human-actions.j
 const { listFindingsForIssue } = await import("../repository/findings.js");
 const { getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
 const { createWorkerSession } = await import("../repository/worker-sessions.js");
+const { claimReviewPublication, recordReviewPublishFailed } = await import("../repository/review-publications.js");
 const { startWorkflow } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
 const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
@@ -174,19 +177,17 @@ interface FakeGithubOpts {
  * In-memory PR store — real git tells it the branch/head, nothing hits real GitHub.
  *
  * `publishReview` always actually "submits" (increments `publishCallCount()`) — it does
- * NOT independently deduplicate by `(number, headSha)`. That's deliberate: the real
- * duplicate-submission guard now lives in `reviewer-effect.ts` itself (the durable
- * `review_publications` claim, gating entry before `publishReview` is ever called), not
- * in the adapter. Keeping the fake's own bookkeeping this simple means a test asserting
- * `publishCallCount() === 1` after two effect runs is actually exercising the caller's
- * claim, not a dedup the fake would have papered over on its own. `findOwnReview` reports
- * by `(number, headSha, marker)`, matching the real adapter's own narrower-than-identity
- * lookup.
+ * NOT deduplicate on its own. That's deliberate: the real duplicate-submission guard now
+ * lives entirely in `reviewer-effect.ts` (the durable `review_publications` claim,
+ * gating entry before `publishReview` is ever called), not in the adapter — matching
+ * round 3's fix removing the GitHub-side existence check from `github.ts` altogether.
+ * Keeping the fake this simple means a test asserting `publishCallCount() === 1` after
+ * two effect runs is actually exercising the caller's claim, not a dedup the fake would
+ * have papered over on its own.
  */
 function fakeGithub(opts: FakeGithubOpts = {}): GithubFn & { publishCallCount(): number } {
   const prsByBranch = new Map<string, { number: number; url: string; base: string }>();
   const branchByNumber = new Map<number, string>();
-  const publishedReviews = new Map<string, { event: ReviewEvent; marker: string }>();
   let nextNumber = 100;
   let publishCalls = 0;
   const currentBranch = (cwd: string) => git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
@@ -210,15 +211,10 @@ function fakeGithub(opts: FakeGithubOpts = {}): GithubFn & { publishCallCount():
     async checksSnapshot() {
       return opts.checks ?? "success";
     },
-    async findOwnReview({ number, headSha, marker }) {
-      const existing = publishedReviews.get(`${number}:${headSha}`);
-      return existing && existing.marker === marker ? existing.event : null;
-    },
-    async publishReview({ number, headSha, marker, event }) {
+    async publishReview({ event }) {
       publishCalls++;
       if (opts.publishFails) return { ok: false, reason: "boom" };
       const finalEvent: ReviewEvent = opts.rejectSelfReview && event !== "COMMENT" ? "COMMENT" : event;
-      publishedReviews.set(`${number}:${headSha}`, { event: finalEvent, marker });
       return { ok: true, event: finalEvent, usedCommentFallback: finalEvent !== event };
     },
   };
@@ -289,7 +285,6 @@ test("publish is idempotent: re-running the effect for the same PR/head (simulat
   const issue = getIssue(issueId)!;
   const instance = getActiveWorkflowInstance(issueId)!;
   const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
-  const deps = { spawn: verdictSpawn({ verdict: "approved" }), github };
 
   // A real worker_sessions row per attempt — createIssueArtifact's FK requires one, and
   // this also matches what worker-loop.ts's processWorkItem actually does on each attempt
@@ -310,12 +305,60 @@ test("publish is idempotent: re-running the effect for the same PR/head (simulat
     };
   };
 
-  const first = await runReviewerEffect(ctxFor(), deps);
-  const second = await runReviewerEffect(ctxFor(), deps);
+  // Two genuinely independent reviewer sessions can disagree (they're two separate model
+  // calls over the same diff) — this is exactly what round 3 found unhandled: the loser
+  // must report what the winner actually published, not its own different verdict.
+  const first = await runReviewerEffect(ctxFor(), { spawn: verdictSpawn({ verdict: "approved" }), github });
+  const second = await runReviewerEffect(ctxFor(), {
+    spawn: verdictSpawn({
+      verdict: "changes_requested",
+      findings: [{ fingerprint: "disagreement", severity: "blocking", title: "Second session found this", rationale: "..." }],
+    }),
+    github,
+  });
 
   assert.equal(first.kind, "verdict");
   assert.equal(second.kind, "verdict");
   assert.equal(github.publishCallCount(), 1, "GitHub must only actually be mutated once");
+  if (first.kind === "verdict" && second.kind === "verdict") {
+    assert.equal(second.result.verdict, first.result.verdict, "the loser must report the winner's verdict, not its own conflicting one");
+    assert.deepEqual(second.result.findings, first.result.findings, "the loser must report the winner's findings, not its own");
+  }
+});
+
+test("publish claim: a stuck in-flight claim (winner never settles) is waited on, then given up on as publish_failed", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+
+  // Simulates another attempt that claimed publication and then never recorded any
+  // outcome (crashed mid-flight) — this attempt must wait, not immediately assume failure.
+  assert.equal(claimReviewPublication(workItem.id), true);
+
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
+  await pump(1);
+
+  assert.equal(getIssue(issueId)!.status, "needs_human", "a claim that never settles must escalate, never silently approve");
+  assert.equal(github.publishCallCount(), 0, "this attempt must never call gh while the claim is held elsewhere");
+});
+
+test("publish claim: a prior claimant that recorded failure is safely reclaimed and the review is published normally", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+
+  // Simulates a prior attempt that claimed publication and then genuinely failed (its
+  // own `gh` call errored) — a fresh attempt must be able to take over from `failed`.
+  assert.equal(claimReviewPublication(workItem.id), true);
+  recordReviewPublishFailed(workItem.id);
+
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
+  await pump(1);
+
+  assert.equal(getIssue(issueId)!.status, "final_review", "reclaiming a failed prior claim must let publication proceed normally");
+  assert.equal(github.publishCallCount(), 1);
 });
 
 test("diff truncated: an oversized diff forces the verdict to escalate in code, regardless of what the reviewer reports", async () => {

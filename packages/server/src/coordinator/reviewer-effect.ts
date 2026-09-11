@@ -29,7 +29,7 @@ import type { ReviewerOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
 import { buildReviewerPrompt, formatDiffForPrompt, TOTAL_DIFF_LIMIT } from "./prompts.js";
 import { realReviewerSpawn, type ReviewerSpawn } from "./spawn.js";
-import { parseReviewerResult, type ReviewerResult, type ReviewerVerdict } from "./reviewer-result.js";
+import { parseReviewerResult, ReviewerResult as ReviewerResultSchema, type ReviewerResult, type ReviewerVerdict } from "./reviewer-result.js";
 import {
   createRoleWorktree,
   safeRemoveWorktree,
@@ -42,7 +42,14 @@ import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adap
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
-import { claimReviewPublication } from "../repository/review-publications.js";
+import {
+  claimReviewPublication,
+  getReviewPublication,
+  reclaimFailedReviewPublication,
+  recordReviewPublished,
+  recordReviewPublishFailed,
+  type ReviewPublicationRow,
+} from "../repository/review-publications.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -50,7 +57,44 @@ export const reviewerEffectConfig = {
   get sessionTimeoutMs(): number {
     return num("REVIEWER_TIMEOUT_MS", 30 * 60_000);
   },
+  /** How long a loser waits for an in-flight claimant before giving up as `publish_failed`. */
+  get publicationWaitAttempts(): number {
+    return num("REVIEWER_PUBLISH_WAIT_ATTEMPTS", 5);
+  },
+  get publicationWaitIntervalMs(): number {
+    return num("REVIEWER_PUBLISH_WAIT_INTERVAL_MS", 200);
+  },
 };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type PublicationClaim = { owns: true } | { owns: false; row: ReviewPublicationRow | null };
+
+/**
+ * Serializes entry into the actual `gh pr review` call across overlapping attempts on
+ * the same work item (round 2/3): a read-only "does a review already exist" lookup
+ * alone is a check-then-publish race two such attempts could both pass before either
+ * has published. This loops because a loser may find the winner still `claimed` (in
+ * flight) rather than settled yet — it waits, bounded, rather than guessing; if the
+ * winner instead already failed, this attempt safely reclaims and becomes the new
+ * winner itself.
+ */
+async function acquireOrAwaitPublication(workItemId: string): Promise<PublicationClaim> {
+  for (let attempt = 0; attempt < reviewerEffectConfig.publicationWaitAttempts; attempt++) {
+    if (claimReviewPublication(workItemId)) return { owns: true };
+    const row = getReviewPublication(workItemId);
+    if (row?.state === "published") return { owns: false, row };
+    if (row?.state === "failed") {
+      if (reclaimFailedReviewPublication(workItemId)) return { owns: true };
+      continue; // someone else reclaimed it in the same instant — loop and re-check
+    }
+    // row is null (raced right at the insert boundary) or still 'claimed' (in flight).
+    await sleep(reviewerEffectConfig.publicationWaitIntervalMs);
+  }
+  return { owns: false, row: getReviewPublication(workItemId) };
+}
 
 export interface ReviewerEffectDeps {
   spawn: ReviewerSpawn;
@@ -98,10 +142,11 @@ function readChecksSummary(issueId: string): string | null {
 }
 
 /**
- * Unique per queued reviewer work item (a retry_reviewer_at_new_head or a repair round
- * always enqueues a fresh work item, never reuses this one) — embedded in the published
- * review body so `findOwnReview`/`publishReview` can recognize agent-dealer's own prior
- * publication for this exact intended review, not just any review by the same identity.
+ * Unique per queued reviewer work item — embedded in the published review body purely
+ * as a human-readable audit trail back to the exact work item that produced it.
+ * Duplicate-publication prevention itself is the `review_publications` DB claim
+ * (`acquireOrAwaitPublication`), not this marker; round 3 moved that guarantee off a
+ * GitHub-side lookup entirely (see `github.ts`'s `publishReview` doc comment).
  */
 function reviewMarker(workItemId: string): string {
   return `<!-- agent-dealer:review:${workItemId} -->`;
@@ -288,45 +333,46 @@ export async function runReviewerEffect(
       return { kind: "stale", currentHeadSha: prView.headRefOid };
     }
 
-    const marker = reviewMarker(workItem.id);
     const requestedEvent = EVENT_FOR_VERDICT[result.verdict];
 
-    // Serializes entry into the actual `gh` call across overlapping attempts on the same
-    // work item (a crash-and-recover, or a genuine zombie still running past its
-    // reclaimed lease) — a read-only "does a review already exist" lookup alone is a
-    // check-then-publish race that two such attempts could both pass before either has
-    // published. Whichever attempt's insert wins is the only one allowed to proceed.
-    if (!claimReviewPublication(workItem.id)) {
-      const already = await deps.github.findOwnReview({ cwd: worktreePath, number: issue.prNumber, headSha, marker });
+    const claim = await acquireOrAwaitPublication(workItem.id);
+    if (!claim.owns) {
       await bestEffortRemove(issue.repo, worktreePath);
-      if (!already) return { kind: "publish_failed" };
-      createIssueArtifact({
-        issueId: issue.id,
-        workerSessionId: sessionId,
-        kind: "review_published",
-        author: "system",
-        content: { event: already, usedCommentFallback: already !== requestedEvent, verdict: result.verdict, viaConcurrentAttempt: true },
-      });
-      return { kind: "verdict", result };
+      // The winner's *actual* published result is authoritative here — never this
+      // attempt's own independently-parsed `result`, which a review round found could
+      // genuinely disagree with the winner's (two separate reviewer sessions are two
+      // separate model calls, and can produce different verdicts/findings for the same
+      // diff). A `row` with no recorded result (still `claimed` after every wait
+      // attempt, or the winner itself failed) has nothing safe to report — escalate.
+      if (claim.row?.state === "published" && claim.row.resultJson) {
+        const winnerResult = ReviewerResultSchema.parse(JSON.parse(claim.row.resultJson));
+        return { kind: "verdict", result: winnerResult };
+      }
+      return { kind: "publish_failed" };
     }
 
+    const marker = reviewMarker(workItem.id);
     const bodyDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-review-body-"));
     const bodyFilePath = path.join(bodyDir, "body.md");
     fs.writeFileSync(bodyFilePath, renderReviewBody(result, marker));
     const published = await deps.github.publishReview({
       cwd: worktreePath,
       number: issue.prNumber,
-      headSha,
-      marker,
       event: requestedEvent,
       bodyFilePath,
     });
     fs.rmSync(bodyDir, { recursive: true, force: true });
     if (!published.ok) {
+      recordReviewPublishFailed(workItem.id);
       await bestEffortRemove(issue.repo, worktreePath);
       return { kind: "publish_failed" };
     }
 
+    recordReviewPublished(workItem.id, {
+      resultJson: JSON.stringify(result),
+      event: published.event,
+      usedCommentFallback: published.usedCommentFallback,
+    });
     createIssueArtifact({
       issueId: issue.id,
       workerSessionId: sessionId,
