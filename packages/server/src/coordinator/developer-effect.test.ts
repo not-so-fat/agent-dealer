@@ -117,31 +117,40 @@ const dirtySpawn: SpawnFn = async (input) => {
 const crashingSpawn: SpawnFn = async () => ({ exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: false });
 const timedOutSpawn: SpawnFn = async () => ({ exitCode: 1, transcript: "", logPath: "/dev/null", timedOut: true });
 
-/** In-memory PR store keyed by branch — real git tells it the branch/head, nothing hits real GitHub. */
+/**
+ * In-memory PR store keyed by branch — real git tells it the head SHA, nothing hits real
+ * GitHub. `viewPr`/`createDraftPr` deliberately require an explicit `branch`/`head` and
+ * never fall back to inspecting the worktree's current branch: NOT-82's bug was exactly
+ * that fallback (`gh`'s bare current-branch/upstream inference), and a fake that still
+ * tolerated it would let a regression back in silently.
+ */
 function fakeGithub(opts: { checks?: "success" | "failure" | "pending"; createFails?: boolean } = {}): GithubFn {
   const prs = new Map<string, { number: number; url: string; base: string }>();
   let nextNumber = 100;
-  const currentBranch = (cwd: string) => git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
   // GitHub's view of a PR's head is the REMOTE branch tip, not the local worktree's
   // checkout — reading it from `remote` (rather than `cwd`) lets a test simulate a
   // concurrent push changing the head independently of this worktree.
   const remoteHead = (branch: string) => git(remote, "rev-parse", branch);
   const adapter: GithubFn = {
-    async viewPr({ cwd }) {
-      const branch = currentBranch(cwd);
+    async viewPr({ branch, number }) {
+      if (!branch) throw new Error("fakeGithub.viewPr requires an explicit branch — bare current-branch lookup is the NOT-82 bug");
       const pr = prs.get(branch);
       if (!pr) return null;
+      if (number != null && number !== pr.number) return null;
       return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: branch, headRefOid: remoteHead(branch), isDraft: true };
     },
-    async createDraftPr({ cwd, base }) {
+    async createDraftPr({ base, head }) {
       if (opts.createFails) return { ok: false, reason: "gh: simulated failure", noCommits: false };
-      const branch = currentBranch(cwd);
+      if (!head) throw new Error("fakeGithub.createDraftPr requires an explicit --head — bare create is the NOT-82 bug");
       const number = nextNumber++;
       const url = `https://github.com/o/r/pull/${number}`;
-      prs.set(branch, { number, url, base });
+      prs.set(head, { number, url, base });
       return { ok: true, number, url };
     },
-    async checksSnapshot() {
+    async checksSnapshot({ number, branch }) {
+      if (number == null && !branch) {
+        throw new Error("fakeGithub.checksSnapshot requires an explicit number or branch — bare checks lookup is the NOT-82 bug");
+      }
       return opts.checks ?? "success";
     },
     async publishReview() {
@@ -522,19 +531,22 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
     };
     const isoPrs = new Map<string, { number: number; url: string; base: string }>();
     const isoGithub: GithubFn = {
-      async viewPr({ cwd }) {
-        const branch = git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
+      async viewPr({ branch }) {
+        if (!branch) throw new Error("isoGithub.viewPr requires an explicit branch — bare current-branch lookup is the NOT-82 bug");
         const pr = isoPrs.get(branch);
         if (!pr) return null;
         return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: branch, headRefOid: git(isoRemote, "rev-parse", branch), isDraft: true };
       },
-      async createDraftPr({ cwd, base }) {
-        const branch = git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
+      async createDraftPr({ base, head }) {
+        if (!head) throw new Error("isoGithub.createDraftPr requires an explicit --head — bare create is the NOT-82 bug");
         const number = 1;
-        isoPrs.set(branch, { number, url: `https://github.com/o/r/pull/${number}`, base });
+        isoPrs.set(head, { number, url: `https://github.com/o/r/pull/${number}`, base });
         return { ok: true, number, url: `https://github.com/o/r/pull/${number}` };
       },
-      async checksSnapshot() {
+      async checksSnapshot({ number, branch }) {
+        if (number == null && !branch) {
+          throw new Error("isoGithub.checksSnapshot requires an explicit number or branch — bare checks lookup is the NOT-82 bug");
+        }
         return "success";
       },
       async publishReview() {

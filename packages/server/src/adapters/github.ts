@@ -45,7 +45,7 @@ export function parsePrView(json: string): PrView {
   };
 }
 
-const PR_VIEW_FIELDS = "number,url,baseRefName,headRefName,headRefOid,isDraft";
+export const PR_VIEW_FIELDS = "number,url,baseRefName,headRefName,headRefOid,isDraft";
 
 /** Raw per-check state as `gh` reports it — provider vocabulary varies (checks vs statuses). */
 interface RawCheck {
@@ -90,16 +90,33 @@ export type PublishReviewResult =
   | { ok: true; event: ReviewEvent; usedCommentFallback: boolean }
   | { ok: false; reason: string };
 
+/**
+ * `number` targets a PR directly — required for a detached-HEAD reviewer worktree, which
+ * has no current branch for `gh` to infer from. `branch` targets it by the coordinator's
+ * generated issue branch name — required when that branch exists on `origin` but the
+ * local checkout isn't reliably left with configured upstream after `pushBranch`'s push
+ * (NOT-82). Exactly one is required at the type level: the coordinator always knows one of
+ * them by the time it calls `gh`, and this shape is what rules out a bare, unselected `gh
+ * pr view`/`pr create --head`-less call re-appearing at some future call site.
+ */
+type PrSelector = { number: number; branch?: string } | { number?: number; branch: string };
+
 export interface GithubAdapter {
+  /** Looks up an existing PR by an explicit selector (see `PrSelector`); null if none exists yet for it. */
+  viewPr(opts: { cwd: string } & PrSelector): Promise<PrView | null>;
   /**
-   * null when no PR exists yet for the current branch. `number`, when given, views that
-   * PR explicitly instead of resolving "the PR for the current branch" — required for a
-   * detached-HEAD reviewer worktree, which has no current branch for `gh` to infer from.
+   * `head` is always the coordinator-owned issue branch, passed explicitly as `--head` —
+   * `gh pr create` refuses to infer it from the current branch when that branch has no
+   * configured upstream, even though it was just pushed (NOT-82).
    */
-  viewPr(opts: { cwd: string; number?: number }): Promise<PrView | null>;
-  createDraftPr(opts: { cwd: string; base: string; title: string; bodyFilePath: string }): Promise<CreatePrResult>;
-  /** One-shot read of the current check rollup for the PR's head. */
-  checksSnapshot(opts: { cwd: string }): Promise<ChecksSnapshot>;
+  createDraftPr(opts: { cwd: string; base: string; head: string; title: string; bodyFilePath: string }): Promise<CreatePrResult>;
+  /**
+   * One-shot read of the current check rollup for the PR's head, selected the same way as
+   * `viewPr` — `pollPrChecks` forwards whichever selector its caller already pinned once
+   * the PR's identity is known, so the checks-polling phase can't regress to the same bare
+   * current-branch inference `viewPr`/`createDraftPr` were fixed for (NOT-82).
+   */
+  checksSnapshot(opts: { cwd: string; number?: number; branch?: string }): Promise<ChecksSnapshot>;
   /**
    * Publishes the reviewer's validated verdict against `number` explicitly — required for
    * a detached-HEAD reviewer worktree, same reason as `viewPr`'s `number`. `event`
@@ -119,10 +136,15 @@ export interface GithubAdapter {
   publishReview(opts: { cwd: string; number: number; event: ReviewEvent; bodyFilePath: string }): Promise<PublishReviewResult>;
 }
 
-async function ghPrView(cwd: string, fields: string, number?: number): Promise<Record<string, unknown> | null> {
-  const args = ["pr", "view", ...(number != null ? [String(number)] : []), "--json", fields];
+/** The `gh` shell-out, as a seam: production uses `run("gh", ...)`, tests inject a fake that records exact args. */
+export type GhExec = (args: string[], opts: { cwd: string }) => Promise<{ stdout: string }>;
+
+const defaultExec: GhExec = (args, opts) => run("gh", args, opts);
+
+async function ghPrView(exec: GhExec, cwd: string, fields: string, selector?: string): Promise<Record<string, unknown> | null> {
+  const args = ["pr", "view", ...(selector != null ? [selector] : []), "--json", fields];
   try {
-    const { stdout } = await run("gh", args, { cwd });
+    const { stdout } = await exec(args, { cwd });
     return JSON.parse(stdout) as Record<string, unknown>;
   } catch (err) {
     const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
@@ -131,48 +153,56 @@ async function ghPrView(cwd: string, fields: string, number?: number): Promise<R
   }
 }
 
-export const realGithubAdapter: GithubAdapter = {
-  async viewPr({ cwd, number }) {
-    const raw = await ghPrView(cwd, PR_VIEW_FIELDS, number);
-    return raw ? parsePrView(JSON.stringify(raw)) : null;
-  },
+/** Real `gh` adapter, parameterized over the shell-out so tests can assert exact CLI args without a real `gh`. */
+export function createGithubAdapter(exec: GhExec = defaultExec): GithubAdapter {
+  return {
+    async viewPr({ cwd, number, branch }) {
+      const selector = number != null ? String(number) : branch;
+      const raw = await ghPrView(exec, cwd, PR_VIEW_FIELDS, selector);
+      return raw ? parsePrView(JSON.stringify(raw)) : null;
+    },
 
-  async createDraftPr({ cwd, base, title, bodyFilePath }) {
-    try {
-      const { stdout } = await run(
-        "gh",
-        ["pr", "create", "--draft", "--base", base, "--title", title, "--body-file", bodyFilePath],
-        { cwd }
-      );
-      const view = await ghPrView(cwd, "number,url");
-      if (view) return { ok: true, number: Number(view.number), url: String(view.url) };
-      // Fallback: `gh pr create` prints the PR URL on its last stdout line.
-      const url = stdout.trim().split("\n").pop() ?? "";
-      const match = url.match(/\/pull\/(\d+)/);
-      return { ok: true, number: match ? Number(match[1]) : 0, url };
-    } catch (err) {
-      const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
-      return { ok: false, reason: message, noCommits: NO_COMMITS_PATTERN.test(message) };
-    }
-  },
+    async createDraftPr({ cwd, base, head, title, bodyFilePath }) {
+      try {
+        const { stdout } = await exec(
+          ["pr", "create", "--draft", "--base", base, "--head", head, "--title", title, "--body-file", bodyFilePath],
+          { cwd }
+        );
+        // Re-verified by the same explicit branch — a bare `gh pr view` right after this
+        // can hit the identical no-upstream failure `gh pr create` needed `--head` for.
+        const view = await ghPrView(exec, cwd, "number,url", head);
+        if (view) return { ok: true, number: Number(view.number), url: String(view.url) };
+        // Fallback: `gh pr create` prints the PR URL on its last stdout line.
+        const url = stdout.trim().split("\n").pop() ?? "";
+        const match = url.match(/\/pull\/(\d+)/);
+        return { ok: true, number: match ? Number(match[1]) : 0, url };
+      } catch (err) {
+        const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
+        return { ok: false, reason: message, noCommits: NO_COMMITS_PATTERN.test(message) };
+      }
+    },
 
-  async checksSnapshot({ cwd }) {
-    const raw = await ghPrView(cwd, "statusCheckRollup");
-    const rollup = (raw?.statusCheckRollup as RawCheck[] | undefined) ?? [];
-    return summarizeChecks(rollup);
-  },
+    async checksSnapshot({ cwd, number, branch }) {
+      const selector = number != null ? String(number) : branch;
+      const raw = await ghPrView(exec, cwd, "statusCheckRollup", selector);
+      const rollup = (raw?.statusCheckRollup as RawCheck[] | undefined) ?? [];
+      return summarizeChecks(rollup);
+    },
 
-  async publishReview({ cwd, number, event, bodyFilePath }) {
-    const result = await runReview(cwd, number, event, bodyFilePath);
-    if (result.ok || event === "COMMENT" || !OWN_PR_REVIEW_PATTERN.test(result.reason)) {
-      return result.ok ? { ok: true, event, usedCommentFallback: false } : result;
-    }
-    const fallback = await runReview(cwd, number, "COMMENT", bodyFilePath);
-    return fallback.ok
-      ? { ok: true, event: "COMMENT", usedCommentFallback: true }
-      : { ok: false, reason: `${event} rejected as self-review, and comment fallback also failed: ${fallback.reason}` };
-  },
-};
+    async publishReview({ cwd, number, event, bodyFilePath }) {
+      const result = await runReview(exec, cwd, number, event, bodyFilePath);
+      if (result.ok || event === "COMMENT" || !OWN_PR_REVIEW_PATTERN.test(result.reason)) {
+        return result.ok ? { ok: true, event, usedCommentFallback: false } : result;
+      }
+      const fallback = await runReview(exec, cwd, number, "COMMENT", bodyFilePath);
+      return fallback.ok
+        ? { ok: true, event: "COMMENT", usedCommentFallback: true }
+        : { ok: false, reason: `${event} rejected as self-review, and comment fallback also failed: ${fallback.reason}` };
+    },
+  };
+}
+
+export const realGithubAdapter: GithubAdapter = createGithubAdapter();
 
 const REVIEW_FLAG: Record<ReviewEvent, string> = {
   APPROVE: "--approve",
@@ -184,6 +214,7 @@ const REVIEW_FLAG: Record<ReviewEvent, string> = {
 const OWN_PR_REVIEW_PATTERN = /own pull request/i;
 
 async function runReview(
+  exec: GhExec,
   cwd: string,
   number: number,
   event: ReviewEvent,
@@ -192,7 +223,7 @@ async function runReview(
   try {
     // The PR is targeted explicitly by number — the reviewer's worktree is a detached-HEAD
     // checkout with no current branch for a bare `gh pr review` to resolve against.
-    await run("gh", ["pr", "review", String(number), REVIEW_FLAG[event], "--body-file", bodyFilePath], { cwd });
+    await exec(["pr", "review", String(number), REVIEW_FLAG[event], "--body-file", bodyFilePath], { cwd });
     return { ok: true };
   } catch (err) {
     const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
@@ -221,13 +252,13 @@ const NONE_STREAK_REQUIRED = 2;
  */
 export async function pollPrChecks(
   adapter: GithubAdapter,
-  opts: { cwd: string; timeoutMs: number; intervalMs: number; signal?: AbortSignal }
+  opts: { cwd: string; timeoutMs: number; intervalMs: number; signal?: AbortSignal; number?: number; branch?: string }
 ): Promise<PollChecksResult> {
   const deadline = Date.now() + opts.timeoutMs;
   let noneStreak = 0;
   for (;;) {
     if (opts.signal?.aborted) return "timeout";
-    const snapshot = await adapter.checksSnapshot({ cwd: opts.cwd });
+    const snapshot = await adapter.checksSnapshot({ cwd: opts.cwd, number: opts.number, branch: opts.branch });
     if (snapshot === "failure" || snapshot === "success") return snapshot;
     if (snapshot === "none") {
       noneStreak++;
