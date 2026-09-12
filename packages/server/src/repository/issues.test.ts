@@ -22,6 +22,7 @@ function makeInput(title: string) {
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
+    maxInfraAttempts: 3,
     source: "manual" as const,
   };
 }

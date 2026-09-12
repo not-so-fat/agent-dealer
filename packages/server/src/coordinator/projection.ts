@@ -20,15 +20,17 @@ export interface IssueProjection {
 
 /** The kind of the single next work item this decision enqueues, if any. */
 export type NextEffect =
-  | { kind: "enqueue"; workItem: WorkItemKind; atHeadSha?: string }
+  | { kind: "enqueue"; workItem: WorkItemKind; atHeadSha?: string; retryReason?: string }
   | { kind: "human_action"; actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision" | "final_review"; reason: string }
   | { kind: "none" };
+
+/** Which budget (if any) this transition spends before enqueueing the next effect. */
+export type BudgetAdvance = "review" | "infra" | "none";
 
 export interface DeveloperProjection {
   projection: IssueProjection;
   effect: NextEffect;
-  /** True when the coordinator should incrementIssueRound before enqueueing. */
-  advanceRound: boolean;
+  advance: BudgetAdvance;
 }
 
 export function projectDeveloperRoute(
@@ -48,20 +50,20 @@ export function projectDeveloperRoute(
         // Pins the reviewer's input_sha to the coordinator-verified head, exactly like
         // retry_reviewer_at_new_head below — a reviewer must never be queued unpinned.
         effect: { kind: "enqueue", workItem: "reviewer", atHeadSha: route.headSha },
-        advanceRound: false,
+        advance: "none",
       };
     case "retry_developer":
       return {
         projection: {
           // developing → developing and repairing → repairing are both self-loops;
-          // a repair-round developer failure stays in "repairing".
+          // an infra-retry developer failure stays in "repairing".
           issueStatus: currentStatus === "repairing" ? "repairing" : "developing",
           currentOwner: "developer",
-          currentIntent: `Developer implementing round ${round + 1}`,
+          currentIntent: `Developer retrying (infra attempt) — ${route.reason}`,
           events: ["worker.failed"],
         },
-        effect: { kind: "enqueue", workItem: "developer" },
-        advanceRound: true,
+        effect: { kind: "enqueue", workItem: "developer", retryReason: route.reason },
+        advance: "infra",
       };
     case "human_action":
       return {
@@ -72,7 +74,7 @@ export function projectDeveloperRoute(
           events: ["worker.failed"],
         },
         effect: { kind: "human_action", actionType: route.actionType, reason: route.reason },
-        advanceRound: false,
+        advance: "none",
       };
   }
 }
@@ -80,7 +82,7 @@ export function projectDeveloperRoute(
 export interface ReviewerProjection {
   projection: IssueProjection;
   effect: NextEffect;
-  advanceRound: boolean;
+  advance: BudgetAdvance;
   /** review.submitted / findings only apply when the reviewer actually returned a verdict. */
   hasVerdict: boolean;
 }
@@ -101,7 +103,7 @@ export function projectReviewerRoute(
           events: ["worker.completed", ...verdictEvents],
         },
         effect: { kind: "human_action", actionType: "final_review", reason: "Reviewer approved the PR" },
-        advanceRound: false,
+        advance: "none",
         hasVerdict,
       };
     case "retry_developer_with_findings":
@@ -113,10 +115,12 @@ export function projectReviewerRoute(
           events: ["worker.completed", ...verdictEvents],
         },
         effect: { kind: "enqueue", workItem: "developer" },
-        advanceRound: true,
+        advance: "review",
         hasVerdict,
       };
     case "retry_reviewer_at_new_head":
+      // Spends an infra attempt (not a review round): an unbounded chain of these — the
+      // head kept moving faster than the reviewer could catch up — must still terminate.
       return {
         projection: {
           issueStatus: "reviewing",
@@ -125,7 +129,22 @@ export function projectReviewerRoute(
           events: ["worker.completed"],
         },
         effect: { kind: "enqueue", workItem: "reviewer", atHeadSha: route.headSha },
-        advanceRound: false,
+        advance: "infra",
+        hasVerdict,
+      };
+    case "retry_reviewer":
+      // Bounded infra retry — a fresh reviewer session at the SAME already-verified head
+      // (unlike retry_reviewer_at_new_head, the head hasn't moved; the prior session/
+      // publish attempt just failed to produce a usable result).
+      return {
+        projection: {
+          issueStatus: "reviewing",
+          currentOwner: "reviewer",
+          currentIntent: `Reviewer retrying (infra attempt) at ${route.headSha.slice(0, 8)}`,
+          events: ["worker.failed"],
+        },
+        effect: { kind: "enqueue", workItem: "reviewer", atHeadSha: route.headSha },
+        advance: "infra",
         hasVerdict,
       };
     case "human_action":
@@ -137,7 +156,7 @@ export function projectReviewerRoute(
           events: [hasVerdict ? "worker.completed" : "worker.failed", ...verdictEvents],
         },
         effect: { kind: "human_action", actionType: route.actionType, reason: route.reason },
-        advanceRound: false,
+        advance: "none",
         hasVerdict,
       };
   }

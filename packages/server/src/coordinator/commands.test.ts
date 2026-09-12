@@ -26,6 +26,7 @@ beforeEach(() => getDb().exec("DELETE FROM work_items"));
 interface Opts {
   acceptanceCriteria?: string | null;
   maxReviewRounds?: number;
+  maxInfraAttempts?: number;
 }
 function newIssue(opts: Opts = {}): string {
   return createIssue({
@@ -37,6 +38,7 @@ function newIssue(opts: Opts = {}): string {
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: opts.maxReviewRounds ?? 3,
+    maxInfraAttempts: opts.maxInfraAttempts ?? 3,
     source: "manual",
   }).id;
 }
@@ -214,16 +216,217 @@ test("reviewer changes_requested at the round limit → attempts_exhausted", () 
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0);
 });
 
-test("developer failure with rounds left retries; the reviewer is never involved", () => {
+test("developer infra failure retries on the infra budget, not the review-round budget; the reviewer is never involved", () => {
   const issueId = newIssue({ maxReviewRounds: 3 });
   startWorkflow(issueId);
   complete(issueId, { kind: "session_failed" });
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "developing");
-  assert.equal(issue.currentRound, 2);
+  assert.equal(issue.currentRound, 1, "an infra failure must not spend a review round");
+  assert.equal(issue.infraAttempts, 1);
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.deepEqual(pending.map((i) => [i.kind, i.round]), [["developer", 1]]);
+});
+
+test("developer infra failures escalate as policy_escalation (not attempts_exhausted) once the infra-attempt limit is reached", () => {
+  const issueId = newIssue({ maxInfraAttempts: 0 });
+  startWorkflow(issueId);
+  complete(issueId, { kind: "session_failed" });
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.currentRound, 1, "review-round budget is untouched by infra exhaustion");
+  assert.equal(
+    listHumanActionsForIssue(issueId).find((a) => a.status === "open")!.actionType,
+    "policy_escalation"
+  );
+});
+
+test("resolving attempts_exhausted:retry grants one more round instead of instantly re-exhausting", () => {
+  const issueId = newIssue({ maxReviewRounds: 1 });
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff);
+  complete(issueId, { kind: "verdict", result: okReview("changes_requested") });
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  assert.deepEqual([getIssue(issueId)!.currentRound, getIssue(issueId)!.maxReviewRounds], [1, 1]);
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "attempts_exhausted")!;
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "retry");
+  assert.equal(resolved.ok, true);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "repairing");
+  // A "retry" must grant a fresh round, not just re-spend the one that was already
+  // exhausted — otherwise the very next changes_requested re-creates attempts_exhausted.
+  assert.deepEqual([issue.currentRound, issue.maxReviewRounds], [2, 2]);
   const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
   assert.deepEqual(pending.map((i) => [i.kind, i.round]), [["developer", 2]]);
+  // currentIntent's round number must match the round the queued item actually carries.
+  assert.equal(issue.currentIntent, "Developer implementing round 2");
+});
+
+test("resolving policy_escalation:resume resets the infra-attempt budget without spending a review round", () => {
+  const issueId = newIssue({ maxInfraAttempts: 1 });
+  startWorkflow(issueId);
+  complete(issueId, { kind: "session_failed" }); // attempt 1: retries (0 < 1)
+  complete(issueId, { kind: "session_failed" }); // attempt 2: exhausts (1 < 1 is false)
+  const before = getIssue(issueId)!;
+  assert.equal(before.status, "needs_human");
+  assert.equal(before.infraAttempts, 1);
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing");
+  assert.equal(issue.infraAttempts, 0, "resuming past an infra escalation resets the infra budget");
+  assert.equal(issue.currentRound, before.currentRound, "an infra resume must not spend a review round");
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.deepEqual(pending.map((i) => i.kind), ["developer"]);
+  // currentIntent must say the round that's actually queued (unchanged), not currentRound + 1.
+  assert.equal(issue.currentIntent, `Developer implementing round ${before.currentRound}`);
+});
+
+test("resolving policy_escalation:resume after a reviewer-side infra exhaustion re-queues a REVIEWER at the pinned head, not a developer", () => {
+  const issueId = newIssue({ maxInfraAttempts: 0 });
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff); // -> reviewing, headSha pinned to cleanHandoff.headSha
+  complete(issueId, { kind: "session_failed" }); // 0 infra attempts allowed -> exhausts immediately
+
+  const before = getIssue(issueId)!;
+  assert.equal(before.status, "needs_human");
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  assert.deepEqual(JSON.parse(action.continuationPreviewJson!), {
+    resumeRole: "reviewer",
+    resumeHeadSha: cleanHandoff.headSha,
+  });
+
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "nothing was wrong with the code — resuming re-reviews, it doesn't restart development");
+  assert.equal(issue.currentOwner, "reviewer");
+  assert.equal(issue.currentRound, before.currentRound, "an infra resume must not spend a review round");
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.deepEqual(pending.map((i) => i.kind), ["reviewer"]);
+  assert.equal(JSON.parse(pending[0].payloadJson!).inputSha, cleanHandoff.headSha);
+  // The action's own labels must match the operation it actually resumes.
+  assert.match(action.question, /Retry the review/);
+  assert.deepEqual(JSON.parse(action.responseOptionsJson!), [
+    { choice: "resume", label: "Retry review" },
+    { choice: "close", label: "Close" },
+  ]);
+});
+
+test("resolving a reviewer-origin escalation records human_action.resolved under 'reviewing' and never emits repair.started", () => {
+  const issueId = newIssue({ maxInfraAttempts: 0 });
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff);
+  complete(issueId, { kind: "session_failed" });
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+
+  const events = listWorkflowEventsForIssue(issueId);
+  const resolvedEvent = [...events].reverse().find((e) => e.type === "human_action.resolved")!;
+  assert.equal(resolvedEvent.stage, "reviewing", "the resume's own events must reflect the status it actually resumes to");
+  assert.ok(!events.some((e) => e.type === "repair.started"), "a reviewer resume is a review retry, not a repair round");
+});
+
+test("a reviewer head that cycles A→B→A does not collide with the original A enqueue's idempotency key", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff); // reviewer queued pinned to cleanHandoff.headSha ("A")
+  complete(issueId, { kind: "stale", currentHeadSha: "head-B" }); // -> reviewing at B, infraAttempts 1
+
+  const afterB = getIssue(issueId)!;
+  assert.equal(afterB.headSha, "head-B");
+  assert.equal(afterB.infraAttempts, 1);
+
+  complete(issueId, { kind: "stale", currentHeadSha: cleanHandoff.headSha }); // cycles back to A
+  const afterA = getIssue(issueId)!;
+  assert.equal(afterA.headSha, cleanHandoff.headSha);
+  assert.equal(afterA.infraAttempts, 2);
+  assert.equal(afterA.status, "reviewing");
+
+  // Without an attempt number in the key, this enqueue would derive the SAME idempotency
+  // key as the original A enqueue (same instance/round/head) and collide with that now-
+  // terminal work item, silently returning it instead of creating a new pending one.
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer" && i.status === "pending");
+  assert.equal(pending.length, 1, "a fresh reviewer item must be queued at the re-cycled head, not dropped via a key collision");
+  assert.equal(JSON.parse(pending[0].payloadJson!).inputSha, cleanHandoff.headSha);
+});
+
+test("a stale review that exhausts the infra budget still records the newly observed head; resuming queues the reviewer there, not at the old pinned SHA", () => {
+  const issueId = newIssue({ maxInfraAttempts: 0 });
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff); // reviewing at cleanHandoff.headSha ("A")
+  complete(issueId, { kind: "stale", currentHeadSha: "head-B" }); // 0 infra attempts allowed -> exhausts on this very stale event
+
+  const before = getIssue(issueId)!;
+  assert.equal(before.status, "needs_human");
+  assert.equal(before.headSha, "head-B", "the newly observed head must be recorded even though no reviewer ran there yet");
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  assert.deepEqual(JSON.parse(action.continuationPreviewJson!), { resumeRole: "reviewer", resumeHeadSha: "head-B" });
+
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].kind, "reviewer");
+  assert.equal(
+    JSON.parse(pending[0].payloadJson!).inputSha,
+    "head-B",
+    "resuming must review the newly observed head, not the stale SHA that was pinned before the head moved"
+  );
+});
+
+test("fail → retry → exhaust → resume → fail again does not collide with the pre-escalation retry's idempotency key", () => {
+  // Reproduces the reviewer's report: policy_escalation:resume resets infraAttempts to 0,
+  // so an automatic retry after resuming can re-derive the exact (round, infraAttempts)
+  // pair an earlier, now-terminal, PRE-escalation retry already used — an
+  // infraAttempts-keyed enqueue would then collide and silently return that old row.
+  const issueId = newIssue({ maxInfraAttempts: 1 });
+  startWorkflow(issueId);
+
+  complete(issueId, { kind: "session_failed" }); // attempt 1: retries (infraAttempts 0 -> 1)
+  const firstRetryItem = listWorkItemsForIssue(issueId).find((i) => i.status === "pending")!;
+  assert.equal(getIssue(issueId)!.infraAttempts, 1);
+
+  complete(issueId, { kind: "session_failed" }); // attempt 2: exhausts (1 < 1 is false) -> policy_escalation
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  resolveHumanActionAndAdvance(action.id, "yusuke", "resume"); // resets infraAttempts to 0
+  assert.equal(getIssue(issueId)!.infraAttempts, 0);
+
+  complete(issueId, { kind: "session_failed" }); // attempt after resume: retries again (0 -> 1) — SAME (round, infraAttempts) pair as the very first retry above
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing", "must still have live work, not silently stranded");
+  assert.equal(issue.infraAttempts, 1);
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1, "a fresh item must be enqueued — the old (round, infraAttempts)-keyed row must not be silently reused");
+  assert.notEqual(pending[0].id, firstRetryItem.id, "must be a NEW work item, not the pre-escalation retry's now-terminal row");
+});
+
+test("resolving policy_escalation:resume after a reviewer's escalated verdict (a real code-level question) still resumes as the developer", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff);
+  complete(issueId, { kind: "verdict", result: okReview("escalated") });
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  assert.equal(action.continuationPreviewJson, null, "an escalated-verdict policy_escalation carries no reviewer-resume continuation");
+
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing");
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.deepEqual(pending.map((i) => i.kind), ["developer"]);
 });
 
 test("a stale review re-queues a reviewer at the new head without consuming a round", () => {

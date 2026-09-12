@@ -23,6 +23,11 @@ export interface DeveloperPromptInput {
   taskSnapshot: TaskSnapshot;
   round: number;
   findings?: Finding[];
+  /** Set when this session is a bounded infra retry of the SAME round (the prior attempt
+   * crashed, timed out, produced no PR, failed checks, or hit a git/gh adapter error) —
+   * the branch/worktree may already carry that attempt's partial work, so the opening
+   * instruction must say so instead of claiming a fresh start. */
+  retryReason?: string;
   /** The generated worktree the agent is actually running in — binding must target this, not the original repo checkout. */
   worktreePath?: string;
   deckId?: string | null;
@@ -39,10 +44,13 @@ function agentDeckSection(worktreePath: string | undefined, deckId: string | nul
 }
 
 export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
-  const parts = [
-    input.round === 1
+  const opening = input.retryReason
+    ? `This is a retry of round ${input.round} after the previous attempt failed: ${input.retryReason} The branch off ${input.taskSnapshot.baseBranch} may already carry partial work from that attempt — check \`git status\`/\`git log\` before starting, and continue rather than assuming a clean slate.`
+    : input.round === 1
       ? `Implement this issue on a fresh branch off ${input.taskSnapshot.baseBranch}.`
-      : `This is repair round ${input.round}. Address every blocking finding below, then commit your changes.`,
+      : `This is repair round ${input.round}. Address every blocking finding below, then commit your changes.`;
+  const parts = [
+    opening,
     ``,
     `## Task`,
     input.taskSnapshot.title,

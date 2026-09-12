@@ -36,6 +36,7 @@ function freshInstance(): { issueId: string; instanceId: string } {
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
+    maxInfraAttempts: 3,
     source: "manual",
   });
   const instance = startWorkflowInstance(issue.id, "dev_reviewer_v1");

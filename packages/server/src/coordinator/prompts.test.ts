@@ -28,6 +28,19 @@ test("repair round includes findings and references the round number", () => {
   assert.match(prompt, /\[blocking\] Bug \(a\.ts:10\): It breaks/);
 });
 
+test("a round-1 infra retry never claims a fresh branch — it says the branch may already carry partial work", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, retryReason: "Developer session failed or crashed." });
+  assert.doesNotMatch(prompt, /fresh branch/);
+  assert.match(prompt, /retry of round 1 after the previous attempt failed: Developer session failed or crashed\./);
+  assert.match(prompt, /may already carry partial work/);
+});
+
+test("an infra retry on a repair round still surfaces the failure reason, not the generic repair framing", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 2, retryReason: "Developer's PR checks failed." });
+  assert.match(prompt, /retry of round 2 after the previous attempt failed: Developer's PR checks failed\./);
+  assert.doesNotMatch(prompt, /^This is repair round 2\./m);
+});
+
 test("deck section lists every playbook id, not just the first", () => {
   const prompt = buildDeveloperPrompt({
     taskSnapshot,

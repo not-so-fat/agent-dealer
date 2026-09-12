@@ -60,6 +60,7 @@ function issueWith(developerAgentId: string, reviewerAgentId: string): string {
     reviewerAgentId,
     baseBranch: "main",
     maxReviewRounds: 3,
+    maxInfraAttempts: 3,
     source: "manual",
   }).id;
 }

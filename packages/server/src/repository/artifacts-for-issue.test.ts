@@ -18,7 +18,7 @@ before(() => {
 });
 
 test("lists artifacts for an issue newest first, respects limit", () => {
-  const issue = createIssue({ title: "T", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, maxReviewRounds: 3, source: "manual" });
+  const issue = createIssue({ title: "T", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
   const db = getDb();
   const now = Date.now();
   for (let i = 0; i < 3; i++) {
@@ -36,7 +36,7 @@ test("lists artifacts for an issue newest first, respects limit", () => {
 
 test("listUsageEventsForIssue returns recorded events", async () => {
   const { listUsageEventsForIssue } = await import("./usage-events.js");
-  const issue = createIssue({ title: "U", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, maxReviewRounds: 3, source: "manual" });
+  const issue = createIssue({ title: "U", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
   const session = createWorkerSession({ issueId: issue.id, role: "developer", round: 1, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
   recordUsageEvent({ issueId: issue.id, workerSessionId: session.id, role: "developer", costUsd: 1 });
   const events = listUsageEventsForIssue(issue.id);

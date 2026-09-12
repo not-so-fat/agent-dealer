@@ -24,6 +24,7 @@ test("records events and sums them per issue", () => {
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
+    maxInfraAttempts: 3,
     source: "manual",
   });
   const session = createWorkerSession({

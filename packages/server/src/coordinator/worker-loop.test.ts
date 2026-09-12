@@ -46,6 +46,7 @@ function newIssue(maxReviewRounds = 3): string {
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds,
+    maxInfraAttempts: 3,
     source: "manual",
   }).id;
 }
@@ -294,13 +295,14 @@ function restoreEnv(key: string, prev: string | undefined): void {
 
 test("placeholder handlers escalate rather than fabricating a PR", async () => {
   const issueId = newIssue();
-  // no handlers registered → defaults return session_failed
+  // no handlers registered → defaults return session_failed, an infra-class outcome
   startWorkflow(issueId);
   await pump();
-  // maxReviewRounds 3 → session_failed retries until exhausted, then attempts_exhausted
+  // maxInfraAttempts 3 → session_failed retries until exhausted, then policy_escalation
+  // (never attempts_exhausted — that stays pure to a reviewer's changes_requested).
   assert.equal(getIssue(issueId)!.status, "needs_human");
   assert.equal(
     listHumanActionsForIssue(issueId).find((a) => a.status === "open")!.actionType,
-    "attempts_exhausted"
+    "policy_escalation"
   );
 });
