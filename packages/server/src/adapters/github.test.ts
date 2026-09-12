@@ -132,6 +132,43 @@ test("viewPr: a retry can find the already-created PR by explicit branch even wi
   assert.equal(view?.number, 42);
 });
 
+test("checksSnapshot looks up the PR's check rollup by explicit selector (number preferred), never a bare `gh pr view`", async () => {
+  const success = { stdout: JSON.stringify({ statusCheckRollup: [{ conclusion: "success" }] }) };
+
+  const byNumber = queuedExec([success]);
+  await createGithubAdapter(byNumber.exec).checksSnapshot({ cwd: "/repo", number: 42 });
+  assert.deepEqual(byNumber.calls[0], ["pr", "view", "42", "--json", "statusCheckRollup"]);
+
+  const byBranch = queuedExec([success]);
+  await createGithubAdapter(byBranch.exec).checksSnapshot({ cwd: "/repo", branch: "issue-x" });
+  assert.deepEqual(byBranch.calls[0], ["pr", "view", "issue-x", "--json", "statusCheckRollup"]);
+
+  const preferNumber = queuedExec([success]);
+  await createGithubAdapter(preferNumber.exec).checksSnapshot({ cwd: "/repo", number: 42, branch: "issue-x" });
+  assert.deepEqual(preferNumber.calls[0], ["pr", "view", "42", "--json", "statusCheckRollup"]);
+
+  // Bare, unselected lookup — the shape NOT-82's checks-poll stage must never fall back
+  // to now that pollPrChecks always forwards the identity-validated PR number.
+  const bare = queuedExec([success]);
+  await createGithubAdapter(bare.exec).checksSnapshot({ cwd: "/repo" });
+  assert.deepEqual(bare.calls[0], ["pr", "view", "--json", "statusCheckRollup"]);
+});
+
+test("pollPrChecks forwards its selector to checksSnapshot on every poll iteration", async () => {
+  const seen: Array<{ number?: number; branch?: string }> = [];
+  const adapter: GithubAdapter = {
+    viewPr: async () => null,
+    createDraftPr: async () => ({ ok: false, reason: "unused", noCommits: false }),
+    checksSnapshot: async ({ number, branch }) => {
+      seen.push({ number, branch });
+      return "success";
+    },
+    publishReview: async () => ({ ok: false, reason: "unused" }),
+  };
+  await pollPrChecks(adapter, { cwd: "/repo", timeoutMs: 1000, intervalMs: 5, number: 42 });
+  assert.deepEqual(seen, [{ number: 42, branch: undefined }]);
+});
+
 function fakeAdapter(sequence: ChecksSnapshot[]): GithubAdapter {
   const queue = [...sequence];
   let last: ChecksSnapshot = "pending";

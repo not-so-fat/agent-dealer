@@ -147,7 +147,10 @@ function fakeGithub(opts: { checks?: "success" | "failure" | "pending"; createFa
       prs.set(head, { number, url, base });
       return { ok: true, number, url };
     },
-    async checksSnapshot() {
+    async checksSnapshot({ number, branch }) {
+      if (number == null && !branch) {
+        throw new Error("fakeGithub.checksSnapshot requires an explicit number or branch — bare checks lookup is the NOT-82 bug");
+      }
       return opts.checks ?? "success";
     },
     async publishReview() {
@@ -540,7 +543,10 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
         isoPrs.set(head, { number, url: `https://github.com/o/r/pull/${number}`, base });
         return { ok: true, number, url: `https://github.com/o/r/pull/${number}` };
       },
-      async checksSnapshot() {
+      async checksSnapshot({ number, branch }) {
+        if (number == null && !branch) {
+          throw new Error("isoGithub.checksSnapshot requires an explicit number or branch — bare checks lookup is the NOT-82 bug");
+        }
         return "success";
       },
       async publishReview() {

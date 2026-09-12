@@ -90,26 +90,33 @@ export type PublishReviewResult =
   | { ok: true; event: ReviewEvent; usedCommentFallback: boolean }
   | { ok: false; reason: string };
 
+/**
+ * `number` targets a PR directly — required for a detached-HEAD reviewer worktree, which
+ * has no current branch for `gh` to infer from. `branch` targets it by the coordinator's
+ * generated issue branch name — required when that branch exists on `origin` but the
+ * local checkout isn't reliably left with configured upstream after `pushBranch`'s push
+ * (NOT-82). Exactly one is required at the type level: the coordinator always knows one of
+ * them by the time it calls `gh`, and this shape is what rules out a bare, unselected `gh
+ * pr view`/`pr create --head`-less call re-appearing at some future call site.
+ */
+type PrSelector = { number: number; branch?: string } | { number?: number; branch: string };
+
 export interface GithubAdapter {
-  /**
-   * null when no PR exists yet for the current branch. `number`, when given, views that
-   * PR explicitly instead of resolving "the PR for the current branch" — required for a
-   * detached-HEAD reviewer worktree, which has no current branch for `gh` to infer from.
-   * `branch`, when given (and `number` is not), views the PR by that explicit branch name
-   * instead of relying on `gh`'s current-branch/upstream inference — required when the
-   * coordinator's generated branch exists on `origin` but the local checkout has no
-   * configured upstream (NOT-82); the coordinator always knows this branch name already
-   * and must never ask `gh` to infer it.
-   */
-  viewPr(opts: { cwd: string; number?: number; branch?: string }): Promise<PrView | null>;
+  /** Looks up an existing PR by an explicit selector (see `PrSelector`); null if none exists yet for it. */
+  viewPr(opts: { cwd: string } & PrSelector): Promise<PrView | null>;
   /**
    * `head` is always the coordinator-owned issue branch, passed explicitly as `--head` —
    * `gh pr create` refuses to infer it from the current branch when that branch has no
    * configured upstream, even though it was just pushed (NOT-82).
    */
   createDraftPr(opts: { cwd: string; base: string; head: string; title: string; bodyFilePath: string }): Promise<CreatePrResult>;
-  /** One-shot read of the current check rollup for the PR's head. */
-  checksSnapshot(opts: { cwd: string }): Promise<ChecksSnapshot>;
+  /**
+   * One-shot read of the current check rollup for the PR's head, selected the same way as
+   * `viewPr` — `pollPrChecks` forwards whichever selector its caller already pinned once
+   * the PR's identity is known, so the checks-polling phase can't regress to the same bare
+   * current-branch inference `viewPr`/`createDraftPr` were fixed for (NOT-82).
+   */
+  checksSnapshot(opts: { cwd: string; number?: number; branch?: string }): Promise<ChecksSnapshot>;
   /**
    * Publishes the reviewer's validated verdict against `number` explicitly — required for
    * a detached-HEAD reviewer worktree, same reason as `viewPr`'s `number`. `event`
@@ -175,8 +182,9 @@ export function createGithubAdapter(exec: GhExec = defaultExec): GithubAdapter {
       }
     },
 
-    async checksSnapshot({ cwd }) {
-      const raw = await ghPrView(exec, cwd, "statusCheckRollup");
+    async checksSnapshot({ cwd, number, branch }) {
+      const selector = number != null ? String(number) : branch;
+      const raw = await ghPrView(exec, cwd, "statusCheckRollup", selector);
       const rollup = (raw?.statusCheckRollup as RawCheck[] | undefined) ?? [];
       return summarizeChecks(rollup);
     },
@@ -244,13 +252,13 @@ const NONE_STREAK_REQUIRED = 2;
  */
 export async function pollPrChecks(
   adapter: GithubAdapter,
-  opts: { cwd: string; timeoutMs: number; intervalMs: number; signal?: AbortSignal }
+  opts: { cwd: string; timeoutMs: number; intervalMs: number; signal?: AbortSignal; number?: number; branch?: string }
 ): Promise<PollChecksResult> {
   const deadline = Date.now() + opts.timeoutMs;
   let noneStreak = 0;
   for (;;) {
     if (opts.signal?.aborted) return "timeout";
-    const snapshot = await adapter.checksSnapshot({ cwd: opts.cwd });
+    const snapshot = await adapter.checksSnapshot({ cwd: opts.cwd, number: opts.number, branch: opts.branch });
     if (snapshot === "failure" || snapshot === "success") return snapshot;
     if (snapshot === "none") {
       noneStreak++;

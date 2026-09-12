@@ -301,6 +301,10 @@ export async function runDeveloperEffect(
       timeoutMs: developerEffectConfig.checksPollTimeoutMs,
       intervalMs: developerEffectConfig.checksPollIntervalMs,
       signal: ctx.signal,
+      // prView.number is already identity-validated above — prefer it over branch (same
+      // reviewer blocker as NOT-82's original fix: never let the checks-poll stage fall
+      // back to a bare `gh pr view` either).
+      number: prView.number,
     });
 
     // The poll can run for up to checksPollTimeoutMs (default 10 minutes) — re-fetch and
