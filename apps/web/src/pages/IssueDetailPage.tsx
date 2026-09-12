@@ -229,7 +229,14 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
           </div>
         )}
 
-        {issue.status === "ready" && (
+        {/* "ready" is the normal path; a "needs_human" issue with no open action left is
+            reachable after resolving a migrated (legacy-cutover) final_review/
+            attempts_exhausted action with repair/retry — that resolution deliberately
+            never reactivates the completed legacy_v0 instance, so this Start button is
+            the "explicit new workflow start" the migration design promises. The backend
+            (startWorkflow's preStart check) already accepts needs_human the same as
+            ready; this just stops the resolution from being a dead end in the UI. */}
+        {(issue.status === "ready" || (issue.status === "needs_human" && openActions.length === 0)) && (
           <button type="button" className="btn-gold px-4 py-2 mb-4 disabled:opacity-50" disabled={!readiness.ok || busy} onClick={doStart}>
             Start
           </button>

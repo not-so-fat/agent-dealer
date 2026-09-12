@@ -5,7 +5,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { claimPidMarker, releasePidMarker, readPidMarkerOwner } from "./pid-marker.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const childScript = path.join(__dirname, "pid-marker-claim-child.ts");
+const tsxBin = path.join(__dirname, "..", "..", "..", "node_modules", ".bin", "tsx");
+
+/** Resolves once the child has actually exited — killing it alone isn't enough to keep
+ * the test process from hanging afterward: an unresolved 'exit' event leaves the child's
+ * handle open, and node:test won't let the process exit while one is outstanding. */
+function waitForExit(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => child.once("exit", () => resolve()));
+}
 
 function tempMarkerPath(): string {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-pid-marker-")), "marker.json");
@@ -95,4 +108,85 @@ test("readPidMarkerOwner distinguishes absent from stale", () => {
   const owner = readPidMarkerOwner(filePath);
   assert.equal(owner?.pid, 999999);
   assert.equal(owner?.alive, false);
+});
+
+test(
+  "concurrent reclaim of the same stale marker: exactly one real process wins, never a corrupted mix of both",
+  { timeout: 20000 },
+  () => {
+    // Real child processes, not an in-process simulation — a fake interleaving inside one
+    // JS event loop can't actually exercise the OS-level race between two independent
+    // processes both reading "stale", both deciding to reclaim, and both replacing the
+    // marker. Before the reclaim-lock fix, this reliably produced runs where more than one
+    // child reported claimed:true for the same marker.
+    const filePath = tempMarkerPath();
+    fs.writeFileSync(filePath, JSON.stringify({ pid: 999999, startedAt: "x" })); // stale
+
+    const N = 8;
+    const children = Array.from({ length: N }, () =>
+      spawn(tsxBin, [childScript, filePath], { stdio: ["ignore", "pipe", "inherit"] })
+    );
+
+    // The winner(s) stay alive on purpose (see the helper script) — so wait for each
+    // child's single result line, not for the process to exit.
+    const firstLines = children.map(
+      (child) =>
+        new Promise<string>((resolve) => {
+          let buf = "";
+          child.stdout.on("data", (d) => {
+            buf += d.toString();
+            const nl = buf.indexOf("\n");
+            if (nl !== -1) resolve(buf.slice(0, nl));
+          });
+        })
+    );
+
+    return Promise.all(firstLines)
+      .then((lines) => {
+        const results = lines.map((l) => JSON.parse(l) as { pid: number; claimed: boolean });
+        const winners = results.filter((r) => r.claimed);
+        assert.equal(winners.length, 1, `expected exactly one winner, got: ${JSON.stringify(results)}`);
+
+        const finalOwner = readPidMarkerOwner(filePath);
+        assert.equal(finalOwner?.pid, winners[0].pid, "the file must name the one process that actually won");
+
+        // No leftover reclaim-lock from any of the N attempts.
+        assert.equal(fs.existsSync(`${filePath}.reclaim-lock`), false);
+      })
+      .finally(() => {
+        // SIGTERM, not SIGKILL: the tsx launcher forwards SIGTERM to the real node process
+        // it forks to actually run the script before exiting; SIGKILL only kills the
+        // launcher itself (an unblockable signal it never gets to react to), orphaning
+        // that grandchild — which is exactly the live process holding server.pid's
+        // real-world equivalent open, so it (and this whole test process) would hang.
+        for (const child of children) child.kill("SIGTERM");
+        return Promise.all(children.map(waitForExit));
+      });
+  }
+);
+
+test("acquireReclaimLock's own lock never lingers after a normal claim", () => {
+  const filePath = tempMarkerPath();
+  fs.writeFileSync(filePath, JSON.stringify({ pid: 999999, startedAt: "x" }));
+  claimPidMarker(filePath);
+  assert.equal(fs.existsSync(`${filePath}.reclaim-lock`), false);
+});
+
+test("sanity: the child helper script actually claims when run alone", async () => {
+  const filePath = tempMarkerPath();
+  const child = spawn(tsxBin, [childScript, filePath], { stdio: ["ignore", "pipe", "inherit"] });
+  await new Promise<void>((resolve) => {
+    let buf = "";
+    child.stdout.on("data", (d) => {
+      buf += d.toString();
+      const nl = buf.indexOf("\n");
+      if (nl === -1) return;
+      const parsed = JSON.parse(buf.slice(0, nl));
+      assert.equal(parsed.claimed, true);
+      assert.equal(readPidMarkerOwner(filePath)?.pid, parsed.pid);
+      resolve();
+    });
+  });
+  child.kill("SIGTERM"); // see the concurrent-reclaim test for why SIGTERM, not SIGKILL
+  await waitForExit(child);
 });

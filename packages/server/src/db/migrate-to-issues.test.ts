@@ -20,7 +20,7 @@ const { listWorkflowEventsForIssue, listWorkflowInstancesForIssue } = await impo
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { createRun, addArtifact } = await import("../repository/runs.js");
-const { resolveHumanActionAndAdvance, responseOptionsFor } = await import("../coordinator/commands.js");
+const { resolveHumanActionAndAdvance, responseOptionsFor, startWorkflow } = await import("../coordinator/commands.js");
 
 const NOW = "2026-01-01T00:00:00.000Z";
 
@@ -193,7 +193,13 @@ test("a migrated final_review action is resolvable end to end through the real c
 
     const resolvedAction = listHumanActionsForIssue(issue.id)[0];
     assert.equal(resolvedAction.status, "resolved");
-    assert.equal(getIssue(issue.id)!.status, expectedStatus);
+    const resolvedIssue = getIssue(issue.id)!;
+    assert.equal(resolvedIssue.status, expectedStatus);
+    // needs_human still means a human owns getting this moving again — never "system",
+    // which would wrongly claim nothing is waiting on a person.
+    if (expectedStatus === "needs_human") {
+      assert.equal(resolvedIssue.currentOwner, "human");
+    }
 
     // The legacy_v0 instance itself is never touched by this resolution — it was already
     // terminal ('migrated') when the migration created it.
@@ -201,6 +207,32 @@ test("a migrated final_review action is resolvable end to end through the real c
     assert.equal(instances.length, 1);
     assert.equal(instances[0].outcome, "migrated");
   }
+});
+
+test("'repair' on a migrated final_review action leaves the issue genuinely startable — not a dead end", () => {
+  // Exercises the exact path the "Start" button (now shown for needs_human with no open
+  // actions — see IssueDetailPage.tsx) relies on: startWorkflow()'s own preStart gate,
+  // not just that the issue *looks* like it's in the right status.
+  freshHome();
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO runs (id, source, external_id, task_category, title, repo, agent_id, status,
+      lineage_id, acceptance_criteria, created_at, updated_at)
+     VALUES ('run-r1', 'manual', 'run-r1', 'code', 'Review task', '/repo', ?, 'review', NULL,
+       'Must still pass CI', ?, ?)`
+  ).run(BUILTIN_AGENT_CLAUDE_ID, NOW, NOW);
+  const dbPath = getDbPath();
+  runMigration(dbPath, { skipServiceCheck: true });
+
+  const issue = listIssues().find((i) => i.title === "Review task")!;
+  const action = listHumanActionsForIssue(issue.id)[0];
+  resolveHumanActionAndAdvance(action.id, "tester@example.com", "repair");
+
+  assert.equal(listHumanActionsForIssue(issue.id).filter((a) => a.status === "open").length, 0);
+  assert.equal(getIssue(issue.id)!.status, "needs_human");
+
+  const started = startWorkflow(issue.id);
+  assert.ok(started.ok === true, `expected startWorkflow to succeed, got: ${JSON.stringify(started)}`);
 });
 
 test("after a restart, a fresh legacy run can still write an artifact without a foreign-key violation", () => {
@@ -798,7 +830,89 @@ test("rollback refuses a backup missing the runs table (does not look like a pre
 
   const result = rollbackMigration(dbPath, { skipServiceCheck: true });
   assert.equal(result.rolledBack, false);
-  assert.match(result.detail, /"runs" table is missing/);
+  assert.match(result.detail, /missing legacy table "runs"/);
+});
+
+test("rollback refuses a completely unrelated database that happens to have a table named runs", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  const backupPath = `${dbPath}.pre-issue-migration-backup`;
+  const unrelated = new Database(backupPath);
+  // Same table name, none of the expected legacy columns — an unrelated app's own "runs".
+  unrelated.exec("CREATE TABLE runs (id TEXT PRIMARY KEY, whatever TEXT)");
+  unrelated.close();
+
+  const result = rollbackMigration(dbPath, { skipServiceCheck: true });
+  assert.equal(result.rolledBack, false);
+  assert.match(result.detail, /missing expected legacy column/);
+});
+
+test("rollback refuses a post-restart database copied over the backup path (already migrated, schema recreated)", () => {
+  // Reproduces the reviewer's exact false-success repro: migrate a legacy DB, run the
+  // ordinary migrate() a real restart performs (recreating a fresh runtime "runs" table),
+  // then copy *that* current, already-migrated database over the backup path — before this
+  // fix, a bare "does it have a runs table" check accepted it, silently reporting a rollback
+  // that restored nothing (the live database still carried legacy_v0_runs afterward).
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  runMigration(dbPath, { skipServiceCheck: true });
+  migrate(); // the restart every real cutover is followed by — recreates a fresh "runs"
+
+  const backupPath = `${dbPath}.pre-issue-migration-backup`;
+  closeDb();
+  fs.copyFileSync(dbPath, backupPath); // overwrite the real backup with the post-restart db (operator error)
+
+  const result = rollbackMigration(dbPath, { skipServiceCheck: true });
+  assert.equal(result.rolledBack, false);
+  assert.match(result.detail, /post-migration database|cutover-only table/);
+
+  // The live database is untouched — still exactly the post-migration/post-restart state.
+  const live = new Database(dbPath, { readonly: true });
+  const tables = (live.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+    (t) => t.name
+  );
+  assert.ok(tables.includes("legacy_v0_runs"), "the live database must still be the migrated one — no rollback occurred");
+  const freshRunCount = (live.prepare("SELECT COUNT(*) AS c FROM runs").get() as { c: number }).c;
+  assert.equal(freshRunCount, 0, "the fresh post-restart runs table should still be empty, not the restored legacy data");
+  live.close();
+});
+
+test("rollback claims and releases server.pid across the whole validate/stage/rename sequence", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  runMigration(dbPath, { skipServiceCheck: true });
+  closeDb();
+
+  const serverPidPath = path.join(path.dirname(dbPath), "server.pid");
+  const result = rollbackMigration(dbPath); // no skipServiceCheck — exercises the real claim/release path
+  assert.equal(result.rolledBack, true);
+  assert.equal(fs.existsSync(serverPidPath), false, "rollback's own claim must be released once it finishes");
+});
+
+test("rollback refuses when server.pid names a different, live process, and never touches the live database", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  runMigration(dbPath, { skipServiceCheck: true });
+  closeDb();
+
+  const other = spawnLiveChild();
+  try {
+    const serverPidPath = path.join(path.dirname(dbPath), "server.pid");
+    fs.writeFileSync(serverPidPath, JSON.stringify({ pid: other.pid, port: 3221, startedAt: NOW }));
+
+    const result = rollbackMigration(dbPath);
+    assert.equal(result.rolledBack, false);
+    assert.match(result.detail, /service is running/);
+
+    const live = new Database(dbPath, { readonly: true });
+    const tables = (live.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+      (t) => t.name
+    );
+    assert.ok(tables.includes("legacy_v0_runs"), "the live database must be untouched");
+    live.close();
+  } finally {
+    other.kill();
+  }
 });
 
 test("rollback leaves no staging file behind after a successful restore", () => {

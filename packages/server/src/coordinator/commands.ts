@@ -882,7 +882,11 @@ function resolveLegacyTerminalAction(
     });
     if (nextStatus !== issue.status) {
       transitionIssue(issue.id, nextStatus, {
-        currentOwner: "system",
+        // needs_human still means a human owns getting this issue moving again (an
+        // explicit new workflow start) — matching the migration's own owner:"human" for
+        // that status, not "system", which would wrongly claim nothing is waiting on a
+        // person.
+        currentOwner: nextStatus === "needs_human" ? "human" : "system",
         currentIntent:
           nextStatus === "done"
             ? "Complete"

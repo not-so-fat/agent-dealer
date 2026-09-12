@@ -788,6 +788,35 @@ function runMigrationBody(dbPath: string, opts?: RunMigrationOptions): Migration
  * check (it must look like a pre-migration snapshot, i.e. still have "runs" — a backup is
  * only ever taken *before* the rename). Returns null when the file is a usable rollback
  * source, or a description of the first problem found. */
+/** A full pre-cutover schema fingerprint, not just "has a runs table": a post-restart
+ * database also has a "runs" table (schema.sql recreates it fresh), so that check alone
+ * accepts an unrelated or already-migrated-then-restarted database as a valid rollback
+ * source — reproduced by migrating, running the ordinary migrate() a real restart runs,
+ * and copying *that* live file over the backup path. A genuine pre-cutover snapshot has
+ * every legacy column this script depends on and none of the cutover-only legacy_v0_*
+ * tables (which only ever exist after a completed migration, never before one). */
+function looksLikePreCutoverDatabase(db: Database.Database): string | null {
+  for (const [table, cols] of Object.entries(REQUIRED_LEGACY_COLUMNS)) {
+    if (!tableExists(db, table)) {
+      return `missing legacy table "${table}"`;
+    }
+    const present = columnsOf(db, table);
+    const missing = cols.filter((c) => !present.has(c));
+    if (missing.length > 0) {
+      return `table "${table}" is missing expected legacy column(s): ${missing.join(", ")}`;
+    }
+  }
+  const cutoverTables = (
+    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'legacy_v0_%'").all() as Array<{
+      name: string;
+    }>
+  ).map((r) => r.name);
+  if (cutoverTables.length > 0) {
+    return `carries cutover-only table(s) ${cutoverTables.join(", ")} — this looks like a post-migration database, not a pre-cutover snapshot`;
+  }
+  return null;
+}
+
 function validateRollbackSource(path_: string): string | null {
   // A malformed file (not a SQLite database at all, or truncated/corrupt) does not
   // necessarily fail at open time — better-sqlite3/SQLite reads the header lazily, so the
@@ -802,8 +831,9 @@ function validateRollbackSource(path_: string): string | null {
     if (problems.length > 0) {
       return `${path_} failed SQLite's integrity check: ${problems.join("; ")}`;
     }
-    if (!tableExists(db, "runs")) {
-      return `${path_} does not look like a pre-migration backup — its "runs" table is missing`;
+    const schemaProblem = looksLikePreCutoverDatabase(db);
+    if (schemaProblem) {
+      return `${path_} does not look like a pre-migration backup — ${schemaProblem}`;
     }
     return null;
   } catch (err) {
@@ -836,51 +866,75 @@ export function rollbackMigration(
   if (!fs.existsSync(backupPath)) {
     return { rolledBack: false, detail: `no backup found at ${backupPath} — nothing to roll back to` };
   }
+
+  // run.json (CLI daemon) is a read-only signal this script never claims — same as
+  // runMigration(), a live entry there blocks unconditionally.
   if (!opts?.skipServiceCheck) {
-    const liveness = isServiceRunning(dbPath);
-    if (liveness.running) {
+    const cliOwner = readRunStateOwner(dbPath);
+    if (cliOwner?.alive) {
       return {
         rolledBack: false,
-        detail: `refusing rollback while the service is running (${liveness.detail}) — stop it first`,
+        detail: `refusing rollback while the service is running (serverPid ${cliOwner.pid} from ${runStatePathFor(dbPath)}) — stop it first`,
       };
     }
   }
 
-  const sourceProblem = validateRollbackSource(backupPath);
-  // Opening the backup read-only for validation can itself create -wal/-shm sidecars next
-  // to it; tidy those up regardless of the outcome — the backup file itself is untouched.
-  removeWalSidecars(backupPath);
-  if (sourceProblem) {
-    return { rolledBack: false, detail: `refusing rollback — ${sourceProblem}` };
+  // Atomically claim server.pid for the duration of the restore, exactly as
+  // runMigration() does — a plain read-then-act liveness check leaves the same TOCTOU
+  // window a forward migration would: a server could start between the check and the
+  // rename below and have the file replaced out from under it mid-run.
+  const serverPidPath = serverPidPathFor(dbPath);
+  let claimedLock = false;
+  if (!opts?.skipServiceCheck) {
+    claimedLock = claimPidMarker(serverPidPath, { role: "rollback" });
+    if (!claimedLock) {
+      const owner = readPidMarkerOwner(serverPidPath);
+      return {
+        rolledBack: false,
+        detail: `refusing rollback while the service is running (pid ${owner?.pid} from ${serverPidPath}) — stop it first`,
+      };
+    }
   }
 
-  const stagedPath = `${dbPath}.rollback-staging-${process.pid}-${Date.now()}`;
   try {
-    fs.copyFileSync(backupPath, stagedPath);
-    const stagedProblem = validateRollbackSource(stagedPath);
-    if (stagedProblem) {
-      return { rolledBack: false, detail: `refusing rollback — staged copy is unusable: ${stagedProblem}` };
+    const sourceProblem = validateRollbackSource(backupPath);
+    // Opening the backup read-only for validation can itself create -wal/-shm sidecars
+    // next to it; tidy those up regardless of outcome — the backup file itself is untouched.
+    removeWalSidecars(backupPath);
+    if (sourceProblem) {
+      return { rolledBack: false, detail: `refusing rollback — ${sourceProblem}` };
     }
-    // Same-directory rename is atomic on the same filesystem — dbPath is either the fully
-    // restored file or (on any failure above) untouched; never a partially-written one.
-    fs.renameSync(stagedPath, dbPath);
-  } finally {
-    // validateRollbackSource() opens stagedPath (even read-only), which can create its own
-    // -wal/-shm sidecars — clean those up alongside the main staged file, not just the one.
-    try {
-      fs.unlinkSync(stagedPath);
-    } catch {
-      // already renamed away on success, or never created on an early failure — fine
-    }
-    removeWalSidecars(stagedPath);
-  }
 
-  // The restored main file is a complete snapshot (the backup was made from a
-  // checkpointed, WAL-truncated database) — any WAL/SHM sidecar still sitting next to
-  // dbPath from the post-migration state describes pages that no longer match this
-  // now-older main file, so it must not be replayed against it.
-  removeWalSidecars(dbPath);
-  return { rolledBack: true, detail: `restored ${dbPath} from ${backupPath}` };
+    const stagedPath = `${dbPath}.rollback-staging-${process.pid}-${Date.now()}`;
+    try {
+      fs.copyFileSync(backupPath, stagedPath);
+      const stagedProblem = validateRollbackSource(stagedPath);
+      if (stagedProblem) {
+        return { rolledBack: false, detail: `refusing rollback — staged copy is unusable: ${stagedProblem}` };
+      }
+      // Same-directory rename is atomic on the same filesystem — dbPath is either the
+      // fully restored file or (on any failure above) untouched; never a partial write.
+      fs.renameSync(stagedPath, dbPath);
+    } finally {
+      // validateRollbackSource() opens stagedPath (even read-only), which can create its
+      // own -wal/-shm sidecars — clean those up alongside the main staged file too.
+      try {
+        fs.unlinkSync(stagedPath);
+      } catch {
+        // already renamed away on success, or never created on an early failure — fine
+      }
+      removeWalSidecars(stagedPath);
+    }
+
+    // The restored main file is a complete snapshot (the backup was made from a
+    // checkpointed, WAL-truncated database) — any WAL/SHM sidecar still sitting next to
+    // dbPath from the post-migration state describes pages that no longer match this
+    // now-older main file, so it must not be replayed against it.
+    removeWalSidecars(dbPath);
+    return { rolledBack: true, detail: `restored ${dbPath} from ${backupPath}` };
+  } finally {
+    if (claimedLock) releasePidMarker(serverPidPath);
+  }
 }
 
 function printUsage(): void {
