@@ -43,6 +43,8 @@ import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adap
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
+import { recordUsageEvent } from "../repository/usage-events.js";
+import { extractSpawnUsage } from "./usage.js";
 import {
   claimReviewPublication,
   getReviewPublication,
@@ -256,6 +258,7 @@ export async function runReviewerEffect(
       guidance: guidance.length ? guidance : undefined,
     });
 
+    const spawnStartedAt = Date.now();
     const spawned = await deps.spawn({
       sessionId,
       runtime,
@@ -264,6 +267,18 @@ export async function runReviewerEffect(
       prompt,
       cwd: worktreePath,
       timeoutMs: reviewerEffectConfig.sessionTimeoutMs,
+    });
+
+    // See developer-effect.ts's identical call: recorded before any early return so a
+    // failed/timed-out reviewer session still attributes its incurred cost.
+    const usage = extractSpawnUsage(spawned.logPath, runtime);
+    recordUsageEvent({
+      issueId: issue.id,
+      workerSessionId: sessionId,
+      role: "reviewer",
+      runtime,
+      durationMs: Date.now() - spawnStartedAt,
+      ...usage,
     });
 
     if (spawned.timedOut || spawned.exitCode !== 0) {

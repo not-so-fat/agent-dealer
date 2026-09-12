@@ -39,6 +39,8 @@ import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact } from "../repository/artifacts.js";
+import { recordUsageEvent } from "../repository/usage-events.js";
+import { extractSpawnUsage } from "./usage.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -180,6 +182,7 @@ export async function runDeveloperEffect(
       guidance: guidance.length ? guidance : undefined,
     });
 
+    const spawnStartedAt = Date.now();
     const spawned = await deps.spawn({
       sessionId,
       runtime,
@@ -188,6 +191,19 @@ export async function runDeveloperEffect(
       prompt,
       cwd: worktreePath,
       timeoutMs: developerEffectConfig.sessionTimeoutMs,
+    });
+
+    // Recorded unconditionally, before any early return below: cost is incurred the
+    // moment the process runs, whether or not the session subsequently timed out,
+    // exited non-zero, or failed later-stage verification.
+    const usage = extractSpawnUsage(spawned.logPath, runtime);
+    recordUsageEvent({
+      issueId: issue.id,
+      workerSessionId: sessionId,
+      role: "developer",
+      runtime,
+      durationMs: Date.now() - spawnStartedAt,
+      ...usage,
     });
 
     if (spawned.timedOut || spawned.exitCode !== 0) {

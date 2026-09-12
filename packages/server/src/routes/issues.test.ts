@@ -48,19 +48,131 @@ test("POST /api/issues is idempotent on (source, externalId)", async () => {
   await app.close();
 });
 
-test("GET /api/issues/:id returns header, timeline, actions, findings, usage", async () => {
+test("GET /api/issues/:id returns header, timeline, actions, findings, usage, readiness, metrics", async () => {
   const app = await buildApp();
   const created = (
     await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Detail issue", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
   const res = await app.inject({ method: "GET", url: `/api/issues/${created.id}` });
   assert.equal(res.statusCode, 200);
-  const body = res.json() as { issue: { id: string }; timeline: unknown[]; humanActions: unknown[]; findings: unknown[]; usageSummary: unknown };
+  const body = res.json() as {
+    issue: { id: string };
+    timeline: unknown[];
+    humanActions: unknown[];
+    findings: unknown[];
+    usageSummary: unknown;
+    readiness: { ok: boolean; missing: string[] };
+    humanWaitMs: number;
+    interventionCount: number;
+    latestWorkflowInstance: unknown;
+  };
   assert.equal(body.issue.id, created.id);
   assert.ok(Array.isArray(body.timeline));
   assert.ok(Array.isArray(body.humanActions));
   assert.ok(Array.isArray(body.findings));
   assert.ok(body.usageSummary);
+  // No acceptanceCriteria was given at create time — not startable yet.
+  assert.equal(body.readiness.ok, false);
+  assert.ok(body.readiness.missing.includes("acceptance criteria"));
+  assert.equal(body.humanWaitMs, 0);
+  assert.equal(body.interventionCount, 0);
+  assert.equal(body.latestWorkflowInstance, null);
+  await app.close();
+});
+
+test("PATCH /api/issues/:id updates editable fields and satisfies the readiness gate", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Underspecified", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+  ).json() as { id: string };
+
+  const patchRes = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${created.id}`,
+    payload: { acceptanceCriteria: "It compiles and tests pass" },
+  });
+  assert.equal(patchRes.statusCode, 200);
+  const patched = patchRes.json() as { acceptanceCriteria: string | null };
+  assert.equal(patched.acceptanceCriteria, "It compiles and tests pass");
+
+  const detail = (await app.inject({ method: "GET", url: `/api/issues/${created.id}` })).json() as {
+    readiness: { ok: boolean };
+  };
+  assert.equal(detail.readiness.ok, true);
+  await app.close();
+});
+
+test("PATCH /api/issues/:id rejects an edit while a workflow is active", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Active workflow",
+        repo: "/repo",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "Ready to go",
+      },
+    })
+  ).json() as { id: string };
+  const startRes = await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` });
+  assert.equal(startRes.statusCode, 200);
+
+  const patchRes = await app.inject({ method: "PATCH", url: `/api/issues/${created.id}`, payload: { title: "Renamed" } });
+  assert.equal(patchRes.statusCode, 409);
+  await app.close();
+});
+
+test("POST /api/issues/:id/start with acceptance criteria starts the workflow", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Startable",
+        repo: "/repo",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { instance: { id: string }; workItem: { id: string; kind: string } };
+  assert.ok(body.instance.id);
+  assert.equal(body.workItem.kind, "developer");
+
+  const detail = (await app.inject({ method: "GET", url: `/api/issues/${created.id}` })).json() as {
+    issue: { status: string };
+  };
+  assert.equal(detail.issue.status, "developing");
+  await app.close();
+});
+
+test("POST /api/issues/:id/start without acceptance criteria opens a product_scope_decision", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Underspecified start", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+  ).json() as { id: string };
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { needsScopeDecision: { actionType: string } };
+  assert.equal(body.needsScopeDecision.actionType, "product_scope_decision");
+  await app.close();
+});
+
+test("POST /api/issues/:id/start 404s for an unknown id", async () => {
+  const app = await buildApp();
+  const res = await app.inject({ method: "POST", url: "/api/issues/does-not-exist/start" });
+  assert.equal(res.statusCode, 404);
   await app.close();
 });
 

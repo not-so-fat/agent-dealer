@@ -26,6 +26,7 @@ const { listWorkerSessionsForIssue } = await import("../repository/worker-sessio
 const { listWorkItemsForIssue } = await import("../repository/work-items.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
+const { listUsageEventsForIssue } = await import("../repository/usage-events.js");
 const { startWorkflow } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
 const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
@@ -176,6 +177,12 @@ test("clean handoff: real worktree, real push, fake GitHub — issue moves to re
   assert.ok(kinds.includes("checks_evidence"));
 
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer" && i.status === "pending").length, 1);
+
+  const usage = listUsageEventsForIssue(issueId);
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].role, "developer");
+  assert.equal(usage[0].workerSessionId, devSession.id);
+  assert.ok(usage[0].durationMs !== null && usage[0].durationMs! >= 0);
 });
 
 test("no_pr: the agent makes no commits — retried, no reviewer work item", async () => {
@@ -250,6 +257,12 @@ test("session_failed: the agent process exits non-zero — retried like no_pr", 
   assert.equal(getIssue(issueId)!.status, "developing");
   const dev = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
   assert.equal(dev.status, "failed");
+
+  // Cost is incurred the moment the process runs — a failed session still gets a
+  // usage_events row (see developer-effect.ts: recorded before the early return).
+  const usage = listUsageEventsForIssue(issueId);
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].workerSessionId, dev.id);
 });
 
 test("a crash that also leaves the worktree dirty escalates as dirty_worktree, not a blind retry that would collide on the next round", async () => {

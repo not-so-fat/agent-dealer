@@ -10,6 +10,8 @@ import { registerRoutes } from "./routes/index.js";
 import { registerIssueRoutes } from "./routes/issues.js";
 import { registerHumanActionRoutes } from "./routes/human-actions.js";
 import { startQueue, recoverOrphanedRuns } from "./queue/dispatcher.js";
+import { recoverCoordinator } from "./coordinator/recovery.js";
+import { startCoordinatorLoop } from "./coordinator/worker-loop.js";
 import { registerStaticUi } from "./static-ui.js";
 
 const { mode, envFile } = loadAgentDealerEnv();
@@ -33,6 +35,14 @@ async function main(): Promise<void> {
     console.warn(`[startup] recovered ${orphans} orphaned running run(s) → failed`);
   }
   startQueue();
+
+  const coordinatorRecovery = recoverCoordinator();
+  if (coordinatorRecovery.reclaimed.length || coordinatorRecovery.deadLettered.length) {
+    console.warn(
+      `[startup] coordinator recovery: reclaimed ${coordinatorRecovery.reclaimed.length}, dead-lettered ${coordinatorRecovery.deadLettered.length}`
+    );
+  }
+  startCoordinatorLoop();
 
   await app.listen({ port, host: "127.0.0.1" });
   const base = `http://127.0.0.1:${port}`;

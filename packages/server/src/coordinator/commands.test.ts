@@ -16,7 +16,14 @@ const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue } = await import("../repository/findings.js");
 const { claimWorkItem, listWorkItemsForIssue, getWorkItem } = await import("../repository/work-items.js");
-const { startWorkflow, applyCompletion, resolveHumanActionAndAdvance, getTaskSnapshot, TASK_SNAPSHOT_ARTIFACT_KIND } = await import("./commands.js");
+const {
+  startWorkflow,
+  applyCompletion,
+  resolveHumanActionAndAdvance,
+  getTaskSnapshot,
+  TASK_SNAPSHOT_ARTIFACT_KIND,
+  checkIssueReadiness,
+} = await import("./commands.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 
@@ -105,6 +112,16 @@ test("getTaskSnapshot falls back to live issue fields when no snapshot artifact 
   const snapshot = getTaskSnapshot(getIssue(issueId)!);
   assert.equal(snapshot.title, "Coordinate me");
   assert.equal(snapshot.acceptanceCriteria, "It works");
+});
+
+test("checkIssueReadiness reports missing acceptance criteria and is silent once satisfied", () => {
+  const issueId = newIssue({ acceptanceCriteria: null });
+  const before = checkIssueReadiness(getIssue(issueId)!);
+  assert.equal(before.ok, false);
+  assert.deepEqual(before.missing, ["acceptance criteria"]);
+
+  const ready = checkIssueReadiness(getIssue(newIssue())!);
+  assert.deepEqual(ready, { ok: true, missing: [] });
 });
 
 test("startWorkflow with no acceptance criteria asks for a product scope decision and starts nothing", () => {

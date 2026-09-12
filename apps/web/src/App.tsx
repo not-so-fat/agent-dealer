@@ -7,7 +7,8 @@ import IntakePage from "./pages/IntakePage";
 import OperationsPage from "./pages/OperationsPage";
 import IssuesListPage from "./pages/IssuesListPage";
 import IssueDetailPage from "./pages/IssueDetailPage";
-import { fetchSnapshot, subscribeEvents } from "./api";
+import HumanActionsPage from "./pages/HumanActionsPage";
+import { fetchHumanActions, fetchSnapshot, subscribeEvents } from "./api";
 import { nextInQueue, queueIndex, reviewQueueForRun } from "./lib/reviewQueue";
 import AmbientBackground from "./components/ui/AmbientBackground";
 import AlertIcon from "./components/ui/AlertIcon";
@@ -16,17 +17,31 @@ import Logo from "./components/ui/Logo";
 
 // NOT-58: the issue-centric shell ("issues") is the new primary surface. The
 // run-oriented views (Operations / Inbox / Done) stay available for existing
-// plan/review/running work until the legacy→issue cutover lands in NOT-66.
-type View = "issues" | "ops" | "intake" | "done" | "agents";
+// plan/review/running work until the legacy→issue cutover lands in NOT-66 — this ticket
+// (NOT-65) only adds "Human actions" alongside them, it does not remove any of these.
+type View = "issues" | "ops" | "intake" | "done" | "agents" | "human-actions";
 
 export default function App() {
   const [view, setView] = useState<View>("issues");
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<QueueSnapshot | null>(null);
   const [selectedRun, setSelectedRun] = useState<Run | null>(null);
+  const [openHumanActionCount, setOpenHumanActionCount] = useState(0);
 
   const refresh = useCallback(() => {
     fetchSnapshot().then(setSnapshot).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    const poll = () => fetchHumanActions().then((a) => setOpenHumanActionCount(a.length)).catch(() => undefined);
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  const goToIssueFromAction = useCallback((issueId: string) => {
+    setView("issues");
+    setSelectedIssueId(issueId);
   }, []);
 
   useEffect(() => {
@@ -126,6 +141,18 @@ export default function App() {
               <button type="button" onClick={goIssues} className={navClass("issues")}>
                 Issues
               </button>
+              <button type="button" onClick={() => setView("human-actions")} className={navClass("human-actions")}>
+                Human actions
+                {openHumanActionCount > 0 && (
+                  <span
+                    className="ml-1.5 inline-flex items-center gap-0.5 text-xs leading-none bg-red-500/20 text-red-300 px-1.5 py-0.5 rounded tabular-nums border border-red-400/30 align-middle"
+                    title={`${openHumanActionCount} open human action${openHumanActionCount === 1 ? "" : "s"}`}
+                  >
+                    <AlertIcon className="w-3 h-3 shrink-0" />
+                    {openHumanActionCount}
+                  </span>
+                )}
+              </button>
               <button type="button" onClick={() => setView("ops")} className={navClass("ops")}>
                 Operations
                 {actionTotal > 0 && (
@@ -196,6 +223,7 @@ export default function App() {
           {view === "issues" && selectedIssueId && (
             <IssueDetailPage issueId={selectedIssueId} onBack={() => setSelectedIssueId(null)} />
           )}
+          {view === "human-actions" && <HumanActionsPage onSelectIssue={goToIssueFromAction} />}
           {view === "ops" && (
             <OperationsPage
               snapshot={snapshot}

@@ -1,13 +1,20 @@
 // packages/server/src/routes/issues.ts
 import type { FastifyInstance } from "fastify";
-import { CreateIssueInput, IssueStatus } from "@agent-dealer/shared";
-import { createIssue, getIssue, listIssues, findIssueByExternalId } from "../repository/issues.js";
+import { CreateIssueInput, IssueStatus, UpdateIssueInput } from "@agent-dealer/shared";
+import { createIssue, getIssue, listIssues, findIssueByExternalId, updateIssue } from "../repository/issues.js";
 import { listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
 import { listArtifactsForIssue } from "../repository/artifacts-for-issue.js";
 import { listUsageEventsForIssue, summarizeIssueUsage } from "../repository/usage-events.js";
-import { listWorkflowEventsForIssue, appendWorkflowEvent } from "../repository/workflow-events.js";
+import {
+  listWorkflowEventsForIssue,
+  appendWorkflowEvent,
+  listWorkflowInstancesForIssue,
+  getActiveWorkflowInstance,
+} from "../repository/workflow-events.js";
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
+import { checkIssueReadiness, startWorkflow } from "../coordinator/commands.js";
+import { computeHumanWaitMs } from "../coordinator/metrics.js";
 
 export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/issues", async (req) => {
@@ -29,12 +36,20 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const issue = getIssue(id);
     if (!issue) return reply.status(404).send({ error: "Not found" });
+    const humanActions = listHumanActionsForIssue(id);
+    const instances = listWorkflowInstancesForIssue(id);
     return {
       issue,
       timeline: listWorkflowEventsForIssue(id),
-      humanActions: listHumanActionsForIssue(id),
+      humanActions,
       findings: listFindingsForIssue(id),
       usageSummary: summarizeIssueUsage(id),
+      readiness: checkIssueReadiness(issue),
+      humanWaitMs: computeHumanWaitMs(humanActions),
+      interventionCount: humanActions.length,
+      // Last element, not the active one: a completed/closed issue's duration is still
+      // wall-clock start→completion of its (now-finished) workflow instance.
+      latestWorkflowInstance: instances.length ? instances[instances.length - 1] : null,
     };
   });
 
@@ -61,6 +76,29 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     const issue = createIssue(input);
     appendWorkflowEvent({ issueId: issue.id, type: "issue.created", actorType: "human", stage: issue.status });
     return issue;
+  });
+
+  app.patch("/api/issues/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const issue = getIssue(id);
+    if (!issue) return reply.status(404).send({ error: "Not found" });
+    const parsed = UpdateIssueInput.safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ error: parsed.error.message });
+    // Editable only pre-start or parked back on needs_human — a running workflow owns
+    // the frozen task snapshot (commands.ts's freezeTaskSnapshot), so an edit here must
+    // never race or silently diverge from what a queued/running session already saw.
+    if (getActiveWorkflowInstance(id)) {
+      return reply.status(409).send({ error: "Cannot edit an issue with an active workflow" });
+    }
+    return updateIssue(id, parsed.data);
+  });
+
+  app.post("/api/issues/:id/start", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const result = startWorkflow(id);
+    if (result.ok === true) return { instance: result.instance, workItem: result.workItem };
+    if (result.ok === "needs_scope_decision") return { needsScopeDecision: result.action };
+    return reply.status(result.code).send({ error: result.error });
   });
 
   app.post("/api/issues/:id/guidance", async (req, reply) => {

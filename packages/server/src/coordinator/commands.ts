@@ -143,6 +143,31 @@ class StartPreconditionError extends Error {
   }
 }
 
+export interface IssueReadiness {
+  ok: boolean;
+  missing: string[];
+}
+
+/**
+ * Pure readiness check reused by startWorkflowCore's hard precondition (throws below)
+ * and by GET /api/issues/:id's read-only `readiness` field, so "what makes an issue
+ * startable" has exactly one definition instead of drifting between the write and
+ * read paths.
+ */
+export function checkIssueReadiness(issue: Issue): IssueReadiness {
+  const missing: string[] = [];
+  for (const [field, label] of REQUIRED_FIELDS) {
+    const value = issue[field];
+    if (value === null || value === undefined || String(value).trim() === "") {
+      missing.push(label);
+    }
+  }
+  if (!issue.acceptanceCriteria || !issue.acceptanceCriteria.trim()) {
+    missing.push("acceptance criteria");
+  }
+  return { ok: missing.length === 0, missing };
+}
+
 /**
  * The instance + `workflow.started` event + issue transition + round-1 developer work item,
  * all as unconditional writes. Throws on any precondition failure so a caller that runs this
@@ -158,14 +183,9 @@ function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workI
   if (getActiveWorkflowInstance(issueId)) {
     throw new StartPreconditionError(409, "Issue already has an active workflow");
   }
-  for (const [field, label] of REQUIRED_FIELDS) {
-    const value = issue[field];
-    if (value === null || value === undefined || String(value).trim() === "") {
-      throw new StartPreconditionError(400, `Missing required field: ${label}`);
-    }
-  }
-  if (!issue.acceptanceCriteria || !issue.acceptanceCriteria.trim()) {
-    throw new StartPreconditionError(400, "Issue has no acceptance criteria");
+  const readiness = checkIssueReadiness(issue);
+  if (!readiness.ok) {
+    throw new StartPreconditionError(400, `Missing required field(s): ${readiness.missing.join(", ")}`);
   }
 
   const instance = startWorkflowInstance(issueId, WORKFLOW_VERSION);

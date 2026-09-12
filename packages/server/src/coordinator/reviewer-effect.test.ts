@@ -33,6 +33,7 @@ const { listWorkItemsForIssue } = await import("../repository/work-items.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue } = await import("../repository/findings.js");
+const { listUsageEventsForIssue } = await import("../repository/usage-events.js");
 const { getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
 const { createWorkerSession } = await import("../repository/worker-sessions.js");
 const { claimReviewPublication, recordReviewPublishFailed } = await import("../repository/review-publications.js");
@@ -285,6 +286,10 @@ test("approved: the coordinator verifies the pinned SHA, publishes the review, a
   const published = listArtifactsForIssue(issueId).find((a) => a.kind === "review_published");
   assert.ok(published);
   assert.equal(JSON.parse(published!.contentJson!).event, "APPROVE");
+
+  const usage = listUsageEventsForIssue(issueId).filter((u) => u.role === "reviewer");
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].workerSessionId, revSession.id);
 });
 
 test("same-identity fallback: GitHub rejecting APPROVE as a self-review still records the internal verdict and moves to final_review", async () => {
@@ -330,6 +335,10 @@ test("session_failed: bounded infra retry re-queues a fresh reviewer session at 
     listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer" && i.status === "pending").length,
     1
   );
+
+  // Cost is incurred the moment the process runs — recorded even though the transcript
+  // could not be parsed as a verdict (see reviewer-effect.ts: recorded before that check).
+  assert.equal(listUsageEventsForIssue(issueId).filter((u) => u.role === "reviewer").length, 1);
 });
 
 test("publish is idempotent: re-running the effect for the same PR/head (simulating a crash before the work item's completion CAS, then recovery) does not submit a second review", async () => {
