@@ -1,17 +1,11 @@
-import { readRunState } from "./runtime-state.js";
-import { loadProdEnvFile, resolveBundledListenPort } from "./env.js";
-
-export function resolveApiBase(): string {
-  loadProdEnvFile();
-  const state = readRunState();
-  const port = state?.port ?? resolveBundledListenPort();
-  return `http://127.0.0.1:${port}`;
-}
+import { apiFetch } from "./http.js";
 
 export type ParsedIssueArgs =
   | { subcommand: "create"; title: string; repo: string; developerAgentId: string; reviewerAgentId: string; description?: string; acceptanceCriteria?: string; baseBranch?: string }
   | { subcommand: "import"; externalId: string; externalLabel?: string; title: string; repo: string; developerAgentId: string; reviewerAgentId: string }
+  | { subcommand: "list"; status?: string }
   | { subcommand: "show"; id: string; includeEvidence: boolean }
+  | { subcommand: "start"; id: string }
   | { subcommand: "guide"; id: string; message: string };
 
 function flag(args: string[], name: string): string | undefined {
@@ -38,10 +32,18 @@ export function parseIssueArgs(args: string[]): ParsedIssueArgs {
       }
       return { subcommand: "create", title, repo, developerAgentId, reviewerAgentId, description: flag(rest, "--description"), acceptanceCriteria: flag(rest, "--acceptance-criteria"), baseBranch: flag(rest, "--base-branch") };
     }
+    case "list": {
+      return { subcommand: "list", status: flag(rest, "--status") };
+    }
     case "show": {
       const id = rest[0];
       if (!id) throw new Error("show requires an issue id");
       return { subcommand: "show", id, includeEvidence: rest.includes("--include") && rest[rest.indexOf("--include") + 1] === "evidence" };
+    }
+    case "start": {
+      const id = rest[0];
+      if (!id) throw new Error("start requires an issue id");
+      return { subcommand: "start", id };
     }
     case "guide": {
       const id = rest[0];
@@ -52,17 +54,6 @@ export function parseIssueArgs(args: string[]): ParsedIssueArgs {
     default:
       throw new Error(`Unknown issue subcommand: ${subcommand}`);
   }
-}
-
-async function apiFetch(path: string, opts?: { method?: string; body?: unknown }): Promise<unknown> {
-  const res = await fetch(`${resolveApiBase()}${path}`, {
-    method: opts?.method ?? "GET",
-    headers: opts?.body ? { "content-type": "application/json" } : undefined,
-    body: opts?.body ? JSON.stringify(opts.body) : undefined,
-  });
-  const json = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(`API error ${res.status}: ${JSON.stringify(json)}`);
-  return json;
 }
 
 export async function runIssueCommand(args: string[]): Promise<number> {
@@ -86,6 +77,12 @@ export async function runIssueCommand(args: string[]): Promise<number> {
         console.log(JSON.stringify(result, null, 2));
         return 0;
       }
+      case "list": {
+        const query = parsed.status ? `?status=${encodeURIComponent(parsed.status)}` : "";
+        const result = await apiFetch(`/api/issues${query}`);
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
       case "show": {
         const result = await apiFetch(`/api/issues/${parsed.id}`);
         if (parsed.includeEvidence) {
@@ -94,6 +91,11 @@ export async function runIssueCommand(args: string[]): Promise<number> {
         } else {
           console.log(JSON.stringify(result, null, 2));
         }
+        return 0;
+      }
+      case "start": {
+        const result = await apiFetch(`/api/issues/${parsed.id}/start`, { method: "POST" });
+        console.log(JSON.stringify(result, null, 2));
         return 0;
       }
       case "guide": {
