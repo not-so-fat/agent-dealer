@@ -830,7 +830,7 @@ test("rollback refuses a backup missing the runs table (does not look like a pre
 
   const result = rollbackMigration(dbPath, { skipServiceCheck: true });
   assert.equal(result.rolledBack, false);
-  assert.match(result.detail, /missing legacy table "runs"/);
+  assert.match(result.detail, /expected legacy table "runs" not found/);
 });
 
 test("rollback refuses a completely unrelated database that happens to have a table named runs", () => {
@@ -844,7 +844,37 @@ test("rollback refuses a completely unrelated database that happens to have a ta
 
   const result = rollbackMigration(dbPath, { skipServiceCheck: true });
   assert.equal(result.rolledBack, false);
-  assert.match(result.detail, /missing expected legacy column/);
+  assert.match(result.detail, /expected legacy table "artifacts" not found/);
+});
+
+test("rollback refuses a near-miss unrelated database with the legacy tables/columns but missing approval_gates and the target tables", () => {
+  // The reviewer's exact repro: an otherwise-plausible database carrying runs/artifacts/
+  // events with every expected legacy column, but neither approval_gates nor any of the
+  // issue-centric target tables migrate() would already have created in a genuine
+  // pre-cutover snapshot — a near miss the narrower, ad hoc check previously used here did
+  // not catch, but the full validateLegacySchema() (reused as of this fix) does.
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  const backupPath = `${dbPath}.pre-issue-migration-backup`;
+  const nearMiss = new Database(backupPath);
+  nearMiss.exec(`
+    CREATE TABLE runs (
+      id TEXT PRIMARY KEY, source TEXT, external_id TEXT, external_label TEXT, title TEXT,
+      description TEXT, repo TEXT, agent_id TEXT, status TEXT, lineage_id TEXT,
+      acceptance_criteria TEXT, runtime TEXT, plan_model TEXT, execute_model TEXT,
+      budget_json TEXT, created_at TEXT, updated_at TEXT
+    );
+    CREATE TABLE artifacts (
+      id TEXT PRIMARY KEY, run_id TEXT, kind TEXT, content_json TEXT, blob_path TEXT,
+      author TEXT, created_at TEXT, issue_id TEXT, worker_session_id TEXT
+    );
+    CREATE TABLE events (id TEXT PRIMARY KEY, run_id TEXT, type TEXT, payload_json TEXT, ts TEXT);
+  `);
+  nearMiss.close();
+
+  const result = rollbackMigration(dbPath, { skipServiceCheck: true });
+  assert.equal(result.rolledBack, false);
+  assert.match(result.detail, /expected legacy table "approval_gates" not found/);
 });
 
 test("rollback refuses a post-restart database copied over the backup path (already migrated, schema recreated)", () => {

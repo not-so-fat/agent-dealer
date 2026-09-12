@@ -10,6 +10,7 @@ import { claimPidMarker, releasePidMarker, readPidMarkerOwner } from "./pid-mark
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const childScript = path.join(__dirname, "pid-marker-claim-child.ts");
+const holdArbiterScript = path.join(__dirname, "pid-marker-hold-arbiter-child.ts");
 const tsxBin = path.join(__dirname, "..", "..", "..", "node_modules", ".bin", "tsx");
 
 /** Resolves once the child has actually exited — killing it alone isn't enough to keep
@@ -149,9 +150,6 @@ test(
 
         const finalOwner = readPidMarkerOwner(filePath);
         assert.equal(finalOwner?.pid, winners[0].pid, "the file must name the one process that actually won");
-
-        // No leftover reclaim-lock from any of the N attempts.
-        assert.equal(fs.existsSync(`${filePath}.reclaim-lock`), false);
       })
       .finally(() => {
         // SIGTERM, not SIGKILL: the tsx launcher forwards SIGTERM to the real node process
@@ -165,12 +163,62 @@ test(
   }
 );
 
-test("acquireReclaimLock's own lock never lingers after a normal claim", () => {
+test("the arbiter lock does not linger after a normal claim — a second claim proceeds immediately", () => {
   const filePath = tempMarkerPath();
   fs.writeFileSync(filePath, JSON.stringify({ pid: 999999, startedAt: "x" }));
   claimPidMarker(filePath);
-  assert.equal(fs.existsSync(`${filePath}.reclaim-lock`), false);
+  releasePidMarker(filePath);
+  fs.writeFileSync(filePath, JSON.stringify({ pid: 999998, startedAt: "x" }));
+  const start = Date.now();
+  assert.equal(claimPidMarker(filePath), true);
+  assert.ok(Date.now() - start < 500, "a second claim must not be blocked by a stale arbiter lock");
 });
+
+test(
+  "a process that crashes while holding the arbiter lock does not wedge it — the OS releases it, no lease timeout needed",
+  { timeout: 20000 },
+  async () => {
+    // This is the regression the reviewer asked for: instead of a hand-rolled
+    // ".reclaim-lock" file with its own "is it stale" heuristic (which had the exact same
+    // check-then-delete race the main marker's reclaim did), the arbiter lock is a real
+    // OS-level advisory lock (via SQLite's BEGIN EXCLUSIVE) that the kernel releases the
+    // instant its holder dies, for any reason — including SIGKILL, simulating a crash
+    // mid-decision. Proves this empirically rather than by argument: hold the lock in a
+    // real child process, kill it, and confirm a subsequent claim succeeds promptly
+    // instead of waiting out the full busy_timeout (or hanging forever).
+    const filePath = tempMarkerPath();
+    fs.writeFileSync(filePath, JSON.stringify({ pid: 999999, startedAt: "x" })); // stale main marker
+
+    const holder = spawn(tsxBin, [holdArbiterScript, filePath], { stdio: ["ignore", "pipe", "inherit"] });
+    const realHolderPid = await new Promise<number>((resolve) => {
+      let buf = "";
+      holder.stdout.on("data", (d) => {
+        buf += d.toString();
+        const nl = buf.indexOf("\n");
+        if (nl === -1) return;
+        const msg = JSON.parse(buf.slice(0, nl)) as { event: string; pid: number };
+        resolve(msg.pid);
+      });
+    });
+
+    // Kill the *actual* process holding the lock, not the tsx launcher — see the helper
+    // script's comment for why those are different pids and why SIGKILL specifically
+    // (an unblockable signal the launcher cannot forward) has to target the real one.
+    process.kill(realHolderPid, "SIGKILL");
+    holder.kill("SIGTERM"); // clean up the launcher wrapper too
+    await waitForExit(holder);
+
+    const start = Date.now();
+    const claimed = claimPidMarker(filePath);
+    const elapsedMs = Date.now() - start;
+    assert.equal(claimed, true);
+    assert.equal(readPidMarkerOwner(filePath)?.pid, process.pid);
+    assert.ok(
+      elapsedMs < 1000,
+      `claim should succeed promptly once the OS releases the dead holder's lock, took ${elapsedMs}ms`
+    );
+  }
+);
 
 test("sanity: the child helper script actually claims when run alone", async () => {
   const filePath = tempMarkerPath();

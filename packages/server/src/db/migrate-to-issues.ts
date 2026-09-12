@@ -788,35 +788,6 @@ function runMigrationBody(dbPath: string, opts?: RunMigrationOptions): Migration
  * check (it must look like a pre-migration snapshot, i.e. still have "runs" — a backup is
  * only ever taken *before* the rename). Returns null when the file is a usable rollback
  * source, or a description of the first problem found. */
-/** A full pre-cutover schema fingerprint, not just "has a runs table": a post-restart
- * database also has a "runs" table (schema.sql recreates it fresh), so that check alone
- * accepts an unrelated or already-migrated-then-restarted database as a valid rollback
- * source — reproduced by migrating, running the ordinary migrate() a real restart runs,
- * and copying *that* live file over the backup path. A genuine pre-cutover snapshot has
- * every legacy column this script depends on and none of the cutover-only legacy_v0_*
- * tables (which only ever exist after a completed migration, never before one). */
-function looksLikePreCutoverDatabase(db: Database.Database): string | null {
-  for (const [table, cols] of Object.entries(REQUIRED_LEGACY_COLUMNS)) {
-    if (!tableExists(db, table)) {
-      return `missing legacy table "${table}"`;
-    }
-    const present = columnsOf(db, table);
-    const missing = cols.filter((c) => !present.has(c));
-    if (missing.length > 0) {
-      return `table "${table}" is missing expected legacy column(s): ${missing.join(", ")}`;
-    }
-  }
-  const cutoverTables = (
-    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'legacy_v0_%'").all() as Array<{
-      name: string;
-    }>
-  ).map((r) => r.name);
-  if (cutoverTables.length > 0) {
-    return `carries cutover-only table(s) ${cutoverTables.join(", ")} — this looks like a post-migration database, not a pre-cutover snapshot`;
-  }
-  return null;
-}
-
 function validateRollbackSource(path_: string): string | null {
   // A malformed file (not a SQLite database at all, or truncated/corrupt) does not
   // necessarily fail at open time — better-sqlite3/SQLite reads the header lazily, so the
@@ -831,9 +802,29 @@ function validateRollbackSource(path_: string): string | null {
     if (problems.length > 0) {
       return `${path_} failed SQLite's integrity check: ${problems.join("; ")}`;
     }
-    const schemaProblem = looksLikePreCutoverDatabase(db);
+    // Reuse the exact same validation that gates creating a backup in the first place — a
+    // genuine pre-cutover snapshot must satisfy every bit of it too (all legacy tables and
+    // columns, all issue-centric target tables, no unrecognized run status), not a
+    // narrower ad hoc subset that a post-restart or unrelated database could pass by
+    // accident (e.g. one with only "runs"/"artifacts"/"events" but no "approval_gates" or
+    // target tables — a near-miss the previous, narrower check here did not catch).
+    const schemaProblem = validateLegacySchema(db);
     if (schemaProblem) {
       return `${path_} does not look like a pre-migration backup — ${schemaProblem}`;
+    }
+    // validateLegacySchema() doesn't check this — it runs on a live, not-yet-migrated
+    // database in the forward direction, where legacy_v0_* tables couldn't exist yet
+    // anyway. A rollback source additionally must not carry them: a post-restart database
+    // (schema.sql recreates a fresh "runs" after a real cutover) would otherwise pass the
+    // shape check above and be silently accepted as if it were the original pre-cutover
+    // snapshot.
+    const cutoverTables = (
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'legacy_v0_%'").all() as Array<{
+        name: string;
+      }>
+    ).map((r) => r.name);
+    if (cutoverTables.length > 0) {
+      return `${path_} does not look like a pre-migration backup — carries cutover-only table(s) ${cutoverTables.join(", ")}, meaning this looks like a post-migration database, not a pre-cutover snapshot`;
     }
     return null;
   } catch (err) {
