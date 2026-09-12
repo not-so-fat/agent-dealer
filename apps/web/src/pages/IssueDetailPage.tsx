@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  fetchIssueArtifactTrace,
   fetchIssueDetail,
   fetchIssueEvidence,
   guideIssue,
@@ -58,6 +59,7 @@ function nextActionLabel(detail: IssueDetail): string {
 export default function IssueDetailPage({ issueId, onBack }: Props) {
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [evidence, setEvidence] = useState<IssueEvidence | null>(null);
+  const [traces, setTraces] = useState<Record<string, { content: string; loading: boolean; error?: string }>>({});
   const [guidance, setGuidance] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -144,6 +146,14 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
 
   const loadEvidence = () => {
     if (!evidence) fetchIssueEvidence(issueId).then(setEvidence).catch((e) => setError(String(e)));
+  };
+
+  const loadTrace = (artifactId: string) => {
+    if (traces[artifactId]) return; // already loaded or loading
+    setTraces((prev) => ({ ...prev, [artifactId]: { content: "", loading: true } }));
+    fetchIssueArtifactTrace(issueId, artifactId)
+      .then((t) => setTraces((prev) => ({ ...prev, [artifactId]: { content: t.content, loading: false } })))
+      .catch((e) => setTraces((prev) => ({ ...prev, [artifactId]: { content: "", loading: false, error: String(e) } })));
   };
 
   return (
@@ -267,18 +277,30 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
               </div>
               <div>
                 <p className="text-white/45 mb-1">Artifacts</p>
-                {evidence.artifacts.map((a) => (
-                  <details key={a.id} className="mb-1.5">
-                    <summary className="cursor-pointer hover:text-white/80">
-                      {a.kind} · {new Date(a.createdAt).toLocaleString()}
-                    </summary>
-                    <div className="mt-1 pl-3 border-l border-white/10 space-y-1">
-                      {a.contentJson && <pre className="whitespace-pre-wrap break-words text-white/55">{formatArtifactContent(a.contentJson)}</pre>}
-                      {a.blobPath && <p className="text-white/40">Raw trace: {a.blobPath}</p>}
-                      {!a.contentJson && !a.blobPath && <p className="text-white/35">No content recorded.</p>}
-                    </div>
-                  </details>
-                ))}
+                {evidence.artifacts.map((a) => {
+                  const trace = traces[a.id];
+                  return (
+                    <details key={a.id} className="mb-1.5" onToggle={(e) => (e.currentTarget as HTMLDetailsElement).open && a.blobPath && loadTrace(a.id)}>
+                      <summary className="cursor-pointer hover:text-white/80">
+                        {a.kind} · {new Date(a.createdAt).toLocaleString()}
+                      </summary>
+                      <div className="mt-1 pl-3 border-l border-white/10 space-y-1">
+                        {a.contentJson && <pre className="whitespace-pre-wrap break-words text-white/55">{formatArtifactContent(a.contentJson)}</pre>}
+                        {a.blobPath && (
+                          <div>
+                            <p className="text-white/40">Raw trace: {a.blobPath}</p>
+                            {trace?.loading && <p className="text-white/35">Loading trace…</p>}
+                            {trace?.error && <p className="text-red-300/80">{trace.error}</p>}
+                            {trace && !trace.loading && !trace.error && (
+                              <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-white/50 bg-black/20 rounded p-2">{trace.content || "(empty)"}</pre>
+                            )}
+                          </div>
+                        )}
+                        {!a.contentJson && !a.blobPath && <p className="text-white/35">No content recorded.</p>}
+                      </div>
+                    </details>
+                  );
+                })}
                 {evidence.artifacts.length === 0 && <p className="text-white/35">None yet.</p>}
               </div>
             </div>

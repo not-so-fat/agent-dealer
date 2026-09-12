@@ -494,6 +494,15 @@ export async function fetchIssueEvidence(id: string): Promise<IssueEvidence> {
   return res.json();
 }
 
+export async function fetchIssueArtifactTrace(
+  issueId: string,
+  artifactId: string
+): Promise<{ content: string; path: string; kind: string }> {
+  const res = await fetch(`${API}/api/issues/${issueId}/artifacts/${artifactId}/trace`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 export async function createIssue(input: CreateIssueInput): Promise<Issue> {
   const res = await fetch(`${API}/api/issues`, {
     method: "POST",

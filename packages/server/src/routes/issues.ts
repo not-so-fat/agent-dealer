@@ -1,9 +1,10 @@
 // packages/server/src/routes/issues.ts
+import fs from "node:fs";
 import type { FastifyInstance } from "fastify";
 import { CreateIssueInput, IssueStatus, UpdateIssueInput } from "@agent-dealer/shared";
 import { createIssue, getIssue, listIssues, findIssueByExternalId, updateIssue } from "../repository/issues.js";
 import { listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
-import { listArtifactsForIssue } from "../repository/artifacts-for-issue.js";
+import { getIssueArtifact, listArtifactsForIssue } from "../repository/artifacts-for-issue.js";
 import { listUsageEventsForIssue, summarizeIssueUsage } from "../repository/usage-events.js";
 import {
   listWorkflowEventsForIssue,
@@ -63,6 +64,22 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       artifacts: listArtifactsForIssue(id, { limit: limit ? Number(limit) : undefined, before }),
       usageEvents: listUsageEventsForIssue(id),
     };
+  });
+
+  /** Tail an artifact's raw trace file (developer/reviewer transcript, etc.) — the
+   * issue-scoped analog of GET /api/runs/:id/log-tail, which only serves legacy run ids.
+   * The blobPath is never client-supplied: it's looked up from the artifact row, which
+   * this codebase's own runner/effect code writes (paths under the temporal logs dir),
+   * so this cannot be used to read an arbitrary file off the caller's request. */
+  app.get("/api/issues/:id/artifacts/:artifactId/trace", async (req, reply) => {
+    const { id, artifactId } = req.params as { id: string; artifactId: string };
+    const artifact = getIssueArtifact(id, artifactId);
+    if (!artifact) return reply.status(404).send({ error: "Not found" });
+    if (!artifact.blobPath) return reply.status(404).send({ error: "This artifact has no raw trace" });
+    if (!fs.existsSync(artifact.blobPath)) return reply.status(404).send({ error: "Trace file missing on disk" });
+    const max = Math.min(Number((req.query as { max?: string }).max ?? 50000), 200000);
+    const raw = fs.readFileSync(artifact.blobPath, "utf8");
+    return { content: raw.slice(-max), path: artifact.blobPath, kind: artifact.kind };
   });
 
   app.post("/api/issues", async (req, reply) => {

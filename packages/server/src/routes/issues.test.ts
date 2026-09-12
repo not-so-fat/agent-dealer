@@ -6,12 +6,20 @@ import os from "node:os";
 import path from "node:path";
 import Fastify from "fastify";
 
+function tmpTraceFile(content: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-issue-trace-"));
+  const file = path.join(dir, "session.ndjson");
+  fs.writeFileSync(file, content);
+  return file;
+}
+
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-issue-routes-"));
 
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { registerIssueRoutes } = await import("./issues.js");
 const { transitionIssue } = await import("../repository/issues.js");
+const { createIssueArtifact } = await import("../repository/artifacts.js");
 
 before(() => {
   migrate();
@@ -209,6 +217,51 @@ test("POST /api/issues/:id/start 404s for an unknown id", async () => {
 test("GET /api/issues/:id 404s for an unknown id", async () => {
   const app = await buildApp();
   const res = await app.inject({ method: "GET", url: "/api/issues/does-not-exist" });
+  assert.equal(res.statusCode, 404);
+  await app.close();
+});
+
+test("GET /api/issues/:id/artifacts/:artifactId/trace serves the artifact's raw log file", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Traceable", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+  ).json() as { id: string };
+  const logPath = tmpTraceFile('{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}\n');
+  const artifact = createIssueArtifact({ issueId: created.id, kind: "developer_transcript", author: "system", blobPath: logPath });
+
+  const res = await app.inject({ method: "GET", url: `/api/issues/${created.id}/artifacts/${artifact.id}/trace` });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { content: string; path: string; kind: string };
+  assert.match(body.content, /hello/);
+  assert.equal(body.path, logPath);
+  assert.equal(body.kind, "developer_transcript");
+  await app.close();
+});
+
+test("GET /api/issues/:id/artifacts/:artifactId/trace 404s for an artifact with no raw trace", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "No trace", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+  ).json() as { id: string };
+  const artifact = createIssueArtifact({ issueId: created.id, kind: "implementation_conclusion", author: "agent", content: { text: "done" } });
+
+  const res = await app.inject({ method: "GET", url: `/api/issues/${created.id}/artifacts/${artifact.id}/trace` });
+  assert.equal(res.statusCode, 404);
+  await app.close();
+});
+
+test("GET /api/issues/:id/artifacts/:artifactId/trace 404s when the artifact belongs to a different issue", async () => {
+  const app = await buildApp();
+  const issueA = (
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "A", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+  ).json() as { id: string };
+  const issueB = (
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "B", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+  ).json() as { id: string };
+  const logPath = tmpTraceFile("secret");
+  const artifact = createIssueArtifact({ issueId: issueA.id, kind: "developer_transcript", author: "system", blobPath: logPath });
+
+  const res = await app.inject({ method: "GET", url: `/api/issues/${issueB.id}/artifacts/${artifact.id}/trace` });
   assert.equal(res.statusCode, 404);
   await app.close();
 });
