@@ -31,8 +31,14 @@ function seedIssue(): string {
   }).id;
 }
 
+/** Mirrors worker-loop.ts's real transaction: create → startSession → the `worker.started`
+ * event, all before the effect handler (and this module) ever runs — so every session a
+ * test creates has the same rowid-cursor anchor `guidanceForNextSession` relies on. */
 function addSession(issueId: string, role: "developer" | "reviewer", round: number) {
-  return createWorkerSession({ issueId, role, round, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
+  const session = createWorkerSession({ issueId, role, round, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
+  startSession(session.id);
+  appendWorkflowEvent({ issueId, workerSessionId: session.id, type: "worker.started", actorType: "system", stage: "developing", round });
+  return session;
 }
 
 function sleep(ms: number) {
@@ -84,25 +90,40 @@ test("guidance added while a session is running is deferred to the next session,
   assert.deepStrictEqual(guidanceForNextSession(issueId, round1Reviewer.id), ["Mid-session note"]);
 });
 
-// PR #11 review: worker-loop.ts marks a session "running" (startSession) BEFORE its
-// worktree setup and deck bind, both of which take real wall-clock time before
+// PR #11 review round 1: worker-loop.ts marks a session "running" (startSession) BEFORE
+// its worktree setup and deck bind, both of which take real wall-clock time before
 // guidanceForNextSession is actually called to build the prompt. Guidance posted in that
 // gap must still be deferred to the *next* session, not swept into this one just because
 // the call happened a few seconds late.
 test("guidance posted after the session starts running (but before its prompt is actually built) is deferred to the next session", async () => {
   const issueId = seedIssue();
-  const round1Dev = addSession(issueId, "developer", 1);
-  startSession(round1Dev.id); // sets startedAt — the snapshot moment guidanceForNextSession must anchor to
-  await sleep(5);
+  const round1Dev = addSession(issueId, "developer", 1); // create + startSession + worker.started, atomically
   // Simulates guidance posted during worktree setup / deck bind, i.e. after the session
   // already started but before this function is actually invoked for it.
   appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "developing", payload: { markdown: "Posted during worktree setup" } });
 
   // Called "late", as if setup took a few seconds — must not see guidance posted after
-  // this session's own startedAt.
+  // this session's own worker.started event.
   assert.deepStrictEqual(guidanceForNextSession(issueId, round1Dev.id), []);
 
-  await sleep(5);
   const round1Reviewer = addSession(issueId, "reviewer", 1);
   assert.deepStrictEqual(guidanceForNextSession(issueId, round1Reviewer.id), ["Posted during worktree setup"]);
+});
+
+// PR #11 review round 2: `ts` only has millisecond precision, so a `ts <=` boundary can
+// wrongly include (or a `ts <` boundary wrongly exclude) a guidance event that lands in
+// the exact same millisecond as the session's own snapshot event. No sleeps here at all —
+// everything happens back-to-back so it's likely to collide on `ts` — proving the rowid
+// cursor is what actually decides the boundary, not wall-clock time.
+test("a millisecond-colliding guidance event is still correctly bucketed by insertion order, not timestamp", () => {
+  const issueId = seedIssue();
+  const round1Dev = addSession(issueId, "developer", 1);
+  appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "developing", payload: { markdown: "Right after round1Dev started" } });
+  const round1Reviewer = addSession(issueId, "reviewer", 1);
+  appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "reviewing", payload: { markdown: "Right after round1Reviewer started" } });
+  const round2Dev = addSession(issueId, "developer", 2);
+
+  assert.deepStrictEqual(guidanceForNextSession(issueId, round1Dev.id), []);
+  assert.deepStrictEqual(guidanceForNextSession(issueId, round1Reviewer.id), ["Right after round1Dev started"]);
+  assert.deepStrictEqual(guidanceForNextSession(issueId, round2Dev.id), ["Right after round1Reviewer started"]);
 });

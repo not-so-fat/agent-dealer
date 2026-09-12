@@ -121,6 +121,30 @@ test("falls back to the live agent profile when the developer session has no fro
   assert.deepStrictEqual(proposed, ["pb-live"]);
 });
 
+test("the legacy-row fallback also honors a profile with only the singular legacy playbookId (no playbookIdsJson)", async () => {
+  // Reviewer repro: an existing profile can legitimately have only `playbookId` set, never
+  // migrated to the list-shaped `playbookIds`. buildProfileSnapshot's profilePlaybookIds
+  // already falls back list-then-singular; resolveReflectTargets must go through that same
+  // function for its no-snapshot fallback rather than reading playbookIdsJson directly.
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: "/repo", deckId: "44444444-4444-4444-a444-444444444444", playbookId: "pb-legacy" });
+  const issue = seedIssue(dev.id);
+  createWorkerSession({ issueId: issue.id, role: "developer", round: 1, agentId: dev.id, runtime: "claude_code" }); // no profileSnapshotJson
+
+  const proposed: string[] = [];
+  const deps = {
+    checkHealth: async () => true,
+    fetchPlaybook: async (playbookId: string) => ({ id: playbookId, title: playbookId, body: "" }),
+    proposePatch: async (_deckId: string, _sourceRef: string, proposal: { playbook_id: string }) => {
+      proposed.push(proposal.playbook_id);
+      return { id: "patch", playbookId: proposal.playbook_id };
+    },
+  };
+
+  const result = await triggerIssueReflect(issue.id, deps as never);
+  assert.equal(result, "triggered");
+  assert.deepStrictEqual(proposed, ["pb-legacy"]);
+});
+
 test("skips when the deck is offline, and records why", async () => {
   const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: "/repo", deckId: "11111111-1111-4111-a111-111111111111", playbookIds: ["pb-1"] });
   const issue = seedIssue(dev.id);

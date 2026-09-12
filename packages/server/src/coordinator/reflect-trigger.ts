@@ -13,7 +13,7 @@
 // the review verdicts/findings accumulated across rounds — the "final implementation
 // conclusion + review history as input" the design doc calls for, minus the extra spawn.
 import type { Issue } from "@agent-dealer/shared";
-import { parseProfileSnapshot, parseStringList } from "@agent-dealer/shared";
+import { parseProfileSnapshot } from "@agent-dealer/shared";
 import { checkAgentDeckHealth, fetchPlaybook, proposePlaybookPatch } from "../adapters/agent-deck.js";
 import { getIssue } from "../repository/issues.js";
 import { getAgent } from "../repository/agents.js";
@@ -21,13 +21,18 @@ import { listFindingsForIssue } from "../repository/findings.js";
 import { listWorkflowEventsForIssue } from "../repository/workflow-events.js";
 import { listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
+import { buildProfileSnapshot } from "./profile-snapshot.js";
 
 /**
  * The reflect proposal must target the deck/playbooks the developer actually ran with —
  * not whatever the live, possibly-since-edited agent profile says now. The frozen
  * `profileSnapshotJson` on the issue's most recent developer session is the ground truth
  * (design §"Immutable execution-profile snapshot"); only a session with no snapshot
- * recorded (a legacy/pre-NOT-60 row) falls back to a live profile resolve.
+ * recorded (a legacy/pre-NOT-60 row) falls back to a live profile resolve — via
+ * `buildProfileSnapshot`, the SAME function that produces the frozen snapshot in the first
+ * place, so the singular-legacy-`playbookId` fallback it already implements
+ * (`profilePlaybookIds`) applies here too instead of being reimplemented (and getting
+ * missed) a second time.
  */
 function resolveReflectTargets(issue: Issue): { deckId: string | null; playbookIds: string[] } {
   const developerSessions = listWorkerSessionsForIssue(issue.id).filter((s) => s.role === "developer");
@@ -36,7 +41,9 @@ function resolveReflectTargets(issue: Issue): { deckId: string | null; playbookI
   if (snapshot) return { deckId: snapshot.deckId, playbookIds: snapshot.playbookIds };
 
   const developerAgent = issue.developerAgentId ? getAgent(issue.developerAgentId) : null;
-  return { deckId: developerAgent?.deckId ?? null, playbookIds: parseStringList(developerAgent?.playbookIdsJson) };
+  if (!developerAgent) return { deckId: null, playbookIds: [] };
+  const fallback = buildProfileSnapshot(developerAgent, "developer");
+  return { deckId: fallback.deckId, playbookIds: fallback.playbookIds };
 }
 
 export interface ReflectDeps {

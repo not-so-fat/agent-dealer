@@ -208,30 +208,62 @@ export function listWorkflowEventsForIssue(issueId: string): WorkflowEvent[] {
 }
 
 /**
- * `guidance.added` markdown for an issue, added after `sinceTs` (exclusive) and no later
- * than `untilTs` (inclusive, when given) — the raw material for NOT-64's guidance
- * injection. `sinceTs` is null for an issue's very first session (nothing has been shown
- * yet, so every guidance event up to `untilTs` applies). `untilTs` anchors the window to
- * the current session's own snapshot moment rather than "whenever this happens to be
- * called" — see guidance.ts's `guidanceForNextSession` doc comment.
+ * `workflow_events.id` is a TEXT (uuid) primary key, but SQLite still assigns every row
+ * an implicit, strictly monotonically-increasing `rowid` in insertion order (this table
+ * is never `WITHOUT ROWID` and nothing here ever deletes/reuses one). `ts` only has
+ * millisecond precision and can collide between two events inserted in the same
+ * millisecond (reproduced in review — a post-cutoff event with the same `ts` as the
+ * cutoff was wrongly included by a `ts <=` comparison); `rowid` never does. Use this as
+ * the stable ordering cursor for any window boundary, not `ts` comparisons.
+ */
+export function eventCursor(eventId: string): number | null {
+  const row = getDb().prepare("SELECT rowid AS rid FROM workflow_events WHERE id = ?").get(eventId) as
+    | { rid: number }
+    | undefined;
+  return row ? row.rid : null;
+}
+
+/**
+ * The rowid cursor of a worker session's `worker.started` event — recorded in the same
+ * transaction as `startSession` (worker-loop.ts), before that session's worktree setup
+ * and deck bind, and before its own prompt (and this query) actually run. This is the
+ * stable anchor `guidance.ts`'s `guidanceForNextSession` windows guidance around, instead
+ * of the session's own `created_at`/`started_at` timestamps.
+ */
+export function workerStartedEventCursor(workerSessionId: string): number | null {
+  const row = getDb()
+    .prepare(
+      "SELECT rowid AS rid FROM workflow_events WHERE worker_session_id = ? AND type = 'worker.started' ORDER BY rowid DESC LIMIT 1"
+    )
+    .get(workerSessionId) as { rid: number } | undefined;
+  return row ? row.rid : null;
+}
+
+/**
+ * `guidance.added` markdown for an issue, added after `sinceCursor` (exclusive) and no
+ * later than `untilCursor` (inclusive, when given) — the raw material for NOT-64's
+ * guidance injection. `sinceCursor` is null for an issue's very first session (nothing
+ * has been shown yet, so every guidance event up to `untilCursor` applies). Both bounds
+ * are `eventCursor`/`workerStartedEventCursor` values, not timestamps — see their doc
+ * comments for why.
  */
 export function listGuidanceMarkdownForIssue(
   issueId: string,
-  sinceTs: string | null,
-  untilTs?: string | null
+  sinceCursor: number | null,
+  untilCursor?: number | null
 ): string[] {
   const rows = (
-    untilTs
+    untilCursor != null
       ? getDb()
           .prepare(
-            "SELECT * FROM workflow_events WHERE issue_id = ? AND type = 'guidance.added' AND ts > ? AND ts <= ? ORDER BY ts ASC"
+            "SELECT * FROM workflow_events WHERE issue_id = ? AND type = 'guidance.added' AND rowid > ? AND rowid <= ? ORDER BY rowid ASC"
           )
-          .all(issueId, sinceTs ?? "", untilTs)
+          .all(issueId, sinceCursor ?? 0, untilCursor)
       : getDb()
           .prepare(
-            "SELECT * FROM workflow_events WHERE issue_id = ? AND type = 'guidance.added' AND ts > ? ORDER BY ts ASC"
+            "SELECT * FROM workflow_events WHERE issue_id = ? AND type = 'guidance.added' AND rowid > ? ORDER BY rowid ASC"
           )
-          .all(issueId, sinceTs ?? "")
+          .all(issueId, sinceCursor ?? 0)
   ) as WorkflowEventRow[];
   return rows
     .map((row) => {

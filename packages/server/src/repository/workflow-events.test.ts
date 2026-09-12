@@ -9,7 +9,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ev
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue } = await import("./issues.js");
-const { appendWorkflowEvent, listWorkflowEventsForIssue, listGuidanceMarkdownForIssue } =
+const { appendWorkflowEvent, listWorkflowEventsForIssue, listGuidanceMarkdownForIssue, eventCursor } =
   await import("./workflow-events.js");
 
 before(() => {
@@ -69,16 +69,27 @@ test("a repeated idempotency key does not create a duplicate event", () => {
   assert.equal(listWorkflowEventsForIssue(issueId).length, 1);
 });
 
-test("listGuidanceMarkdownForIssue returns only guidance added after the cutoff", async () => {
+test("listGuidanceMarkdownForIssue returns only guidance added after the cutoff cursor", () => {
+  // No sleeps: the cursor is a rowid, not a timestamp, so it must not depend on wall-clock
+  // spacing between events (see eventCursor's doc comment — this is the exact collision a
+  // ts-based cutoff got wrong in review).
   const issueId = seedIssue("Guidance issue");
-  appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "developing", payload: { markdown: "Before cutoff" } });
-  await new Promise((r) => setTimeout(r, 5));
-  const cutoff = new Date().toISOString();
-  await new Promise((r) => setTimeout(r, 5));
-  appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "developing", payload: { markdown: "After cutoff" } });
+  const before = appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "developing", payload: { markdown: "Before cutoff" } });
+  const cutoff = eventCursor(before.id);
+  const after = appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "developing", payload: { markdown: "After cutoff" } });
 
   assert.deepStrictEqual(listGuidanceMarkdownForIssue(issueId, cutoff), ["After cutoff"]);
   assert.deepStrictEqual(listGuidanceMarkdownForIssue(issueId, null), ["Before cutoff", "After cutoff"]);
+  assert.deepStrictEqual(listGuidanceMarkdownForIssue(issueId, null, cutoff), ["Before cutoff"]);
+  assert.deepStrictEqual(listGuidanceMarkdownForIssue(issueId, null, eventCursor(after.id)), ["Before cutoff", "After cutoff"]);
+});
+
+test("eventCursor is strictly increasing in insertion order and unknown ids return null", () => {
+  const issueId = seedIssue("Cursor issue");
+  const first = appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "developing" });
+  const second = appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "developing" });
+  assert.ok(eventCursor(first.id)! < eventCursor(second.id)!);
+  assert.equal(eventCursor("does-not-exist"), null);
 });
 
 test("listGuidanceMarkdownForIssue ignores non-guidance events and malformed payloads", () => {
