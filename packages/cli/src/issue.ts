@@ -1,7 +1,5 @@
 import { apiFetch } from "./http.js";
 
-export { resolveApiBase } from "./http.js";
-
 export type ParsedIssueArgs =
   | { subcommand: "create"; title: string; repo: string; developerAgentId: string; reviewerAgentId: string; description?: string; acceptanceCriteria?: string; baseBranch?: string }
   | { subcommand: "import"; externalId: string; externalLabel?: string; title: string; repo: string; developerAgentId: string; reviewerAgentId: string }
