@@ -35,6 +35,7 @@ import {
   createHumanAction,
   findOpenHumanAction,
   getHumanAction,
+  listHumanActionsForIssue,
   resolveHumanAction,
 } from "../repository/human-actions.js";
 import { reconcileFinding } from "../repository/findings.js";
@@ -183,7 +184,17 @@ function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workI
     throw new StartPreconditionError(409, `Issue is ${issue.status} — not startable`);
   }
   if (getActiveWorkflowInstance(issueId)) {
-    throw new StartPreconditionError(409, "Issue already has an active workflow");
+    // A bare 409 here is a dead end for a caller (UI hides Start in this state, but the CLI/
+    // API do not) — if a human action is already open, name it so the operator resolves that
+    // instead of retrying Start against the same active instance (ticket: Start must not be
+    // the only visible control that fails with an opaque conflict while a human gate is open).
+    const openAction = listHumanActionsForIssue(issueId).find((a) => a.status === "open");
+    throw new StartPreconditionError(
+      409,
+      openAction
+        ? `Issue already has an active workflow — resolve the open ${openAction.actionType} first (POST /api/human-actions/${openAction.id}/resolve): ${openAction.question}`
+        : "Issue already has an active workflow"
+    );
   }
   const readiness = checkIssueReadiness(issue);
   if (!readiness.ok) {

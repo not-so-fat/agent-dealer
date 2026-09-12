@@ -7,6 +7,9 @@ export type DeveloperOutcome =
   | { kind: "dirty_worktree" }
   /** Local commits exist but the coordinator's own push was rejected (e.g. non-fast-forward). */
   | { kind: "unpushed_commit"; reason: string }
+  /** A prior round's worktree still holds the issue branch and can't be safely reused/removed
+   * (dirty/unpushed, or not coordinator-managed) — see git-worktree.ts's resolveDeveloperWorktree. */
+  | { kind: "worktree_conflict"; path: string; reason: string; recoveryCommands: string[] }
   | { kind: "checks_failed"; details?: string }
   /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll. */
   | { kind: "timed_out" }
@@ -58,6 +61,17 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
       // Same bucket as dirty_worktree: local work exists that must not be silently discarded
       // or force-retried — a human decides how to resolve the rejected push.
       return { next: "human_action", actionType: "policy_escalation", reason: `Developer's commits could not be pushed: ${outcome.reason}` };
+    case "worktree_conflict":
+      // Never spends infra-attempt budget — the branch is provably still checked out
+      // somewhere, so a blind auto-retry would collide identically every time. Preserved
+      // for inspection, same bucket as dirty_worktree/unpushed_commit, with the path and
+      // recovery commands folded into the reason so the escalation is actionable instead
+      // of an opaque git error (design §"Worktree lifecycle and concurrency").
+      return {
+        next: "human_action",
+        actionType: "policy_escalation",
+        reason: `${outcome.reason} Recovery:\n${outcome.recoveryCommands.join("\n")}`,
+      };
     case "no_pr":
     case "session_failed":
     case "timed_out":

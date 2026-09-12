@@ -24,7 +24,7 @@ import { buildDeveloperPrompt } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realDeveloperSpawn, type DeveloperSpawn } from "./spawn.js";
 import {
-  createRoleWorktree,
+  resolveDeveloperWorktree,
   safeRemoveWorktree,
   isWorktreeClean,
   commitsAhead,
@@ -135,14 +135,21 @@ export async function runDeveloperEffect(
 
   let worktreePath: string;
   try {
-    const worktree = await createRoleWorktree({
+    // Detects a leftover worktree from an earlier round/escalation that still holds this
+    // branch (a plain `git worktree add` would collide with it and surface as an opaque
+    // adapter_failure — the exact loop this ticket fixes). A clean leftover is reused in
+    // place; a dirty/unpushed one is reported as a worktree_conflict escalation instead.
+    const resolved = await resolveDeveloperWorktree({
       repo: issue.repo,
-      role: "developer",
       sessionId,
-      ref: reuseBranch ? branchName : issue.baseBranch,
-      newBranch: reuseBranch ? undefined : branchName,
+      branchName,
+      baseBranch: issue.baseBranch,
+      reuseBranch,
     });
-    worktreePath = worktree.path;
+    if (resolved.kind === "conflict") {
+      return { kind: "worktree_conflict", path: resolved.path, reason: resolved.reason, recoveryCommands: resolved.recoveryCommands };
+    }
+    worktreePath = resolved.path;
   } catch (err) {
     return { kind: "adapter_failure", reason: `worktree setup failed: ${String(err)}` };
   }

@@ -59,6 +59,21 @@ test("unpushed commit always escalates immediately — never retried, regardless
   assert.equal((result as { actionType: string }).actionType, "policy_escalation");
 });
 
+test("worktree conflict always escalates immediately — never retried, regardless of any budget, and carries path/recovery in the reason", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "worktree_conflict",
+    path: "/data/worktrees/old-session-developer",
+    reason: "A previous developer worktree for branch issue-1 still holds it at /data/worktrees/old-session-developer with uncommitted or unpushed work.",
+    recoveryCommands: ["cd /data/worktrees/old-session-developer", "git status"],
+  };
+  const result = routeDeveloperOutcome(outcome, INFRA_AT_LIMIT);
+  assert.equal(result.next, "human_action");
+  assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+  const reason = (result as { reason: string }).reason;
+  assert.match(reason, /old-session-developer/);
+  assert.match(reason, /git status/);
+});
+
 test("adapter failure is bounded-retried on the infra budget (unified failure policy), not escalated on first occurrence", () => {
   const outcome: DeveloperOutcome = { kind: "adapter_failure", reason: "gh: command not found" };
   assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {

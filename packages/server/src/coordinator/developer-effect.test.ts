@@ -27,13 +27,13 @@ const { listWorkItemsForIssue } = await import("../repository/work-items.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listUsageEventsForIssue } = await import("../repository/usage-events.js");
-const { startWorkflow } = await import("./commands.js");
+const { startWorkflow, resolveHumanActionAndAdvance } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
 const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
 const { runDeveloperEffect } = await import("./developer-effect.js");
 const { realDeveloperSpawn } = await import("./spawn.js");
 const { realGithubAdapter } = await import("../adapters/github.js");
-const { branchExists } = await import("../adapters/git-worktree.js");
+const { branchExists, roleWorktreePath, withRepoLock } = await import("../adapters/git-worktree.js");
 type SpawnFn = typeof realDeveloperSpawn;
 type GithubFn = typeof realGithubAdapter;
 
@@ -465,6 +465,109 @@ test("unpushed_commit: the coordinator's own push is rejected by a diverged remo
   assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
 
   execFileSync("git", ["push", "-q", remote, `:${branch}`], { cwd: repo }).toString();
+});
+
+test("NOT-88: a leftover clean worktree from a resolved unpushed_commit escalation is reused on Resume, not a worktree-add collision", async () => {
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+
+  // Same setup as the unpushed_commit test above: pre-diverge the remote so round 1's own
+  // push is rejected. This leaves a CLEAN worktree behind (the push happens after the
+  // clean-check) at a path keyed by round 1's session id — exactly the leftover a plain
+  // `git worktree add` for round 2's NEW session id would collide with (the reported bug).
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-reuse-other-"));
+  execFileSync("git", ["clone", "-q", remote, other]);
+  git(other, "checkout", "-q", "-b", branch);
+  git(other, "config", "user.email", "test@example.com");
+  git(other, "config", "user.name", "Test");
+  fs.writeFileSync(path.join(other, "elsewhere.txt"), "y");
+  git(other, "add", ".");
+  git(other, "commit", "-q", "-m", "elsewhere");
+  git(other, "push", "-q", "origin", branch);
+  fs.rmSync(other, { recursive: true, force: true });
+
+  // Round 1 commits the feature and gets its push rejected. Round 2 reuses that SAME
+  // worktree — the commit is already there, so its spawn only needs to exit cleanly
+  // (re-running commitingSpawn's identical write+commit against an unchanged file would
+  // itself fail with "nothing to commit", which would test the fake, not the fix).
+  let call = 0;
+  const commitOnceThenNoop: SpawnFn = async (input) => (++call === 1 ? commitingSpawn(input) : noopSpawn(input));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitOnceThenNoop, github: fakeGithub() }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issueAfterEscalation = getIssue(issueId)!;
+  assert.equal(issueAfterEscalation.status, "needs_human");
+  const round1Session = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  const leftoverPath = roleWorktreePath(round1Session.id, "developer");
+  assert.ok(fs.existsSync(leftoverPath), "the clean worktree behind the rejected push must be preserved, not removed");
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation" && a.status === "open")!;
+  assert.ok(action);
+
+  // The human's actual fix for a diverged remote (out of scope for this ticket — see
+  // git-worktree.ts's blockPush doc comment on force-push policy): here, just remove the
+  // conflicting remote ref so round 2's push can fast-forward.
+  execFileSync("git", ["push", "-q", remote, `:${branch}`], { cwd: repo }).toString();
+  resolveHumanActionAndAdvance(action.id, "test", "resume");
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "round 2 must reuse the leftover worktree and complete the handoff, not crash on the collision");
+  assert.equal(issue.currentRound, 1, "a policy_escalation resume is an infra reset, not a review round");
+  assert.equal(issue.infraAttempts, 0, "resuming resets the infra budget");
+
+  const devSessions = listWorkerSessionsForIssue(issueId).filter((s) => s.role === "developer");
+  assert.equal(devSessions.length, 2);
+  assert.equal(devSessions[1].status, "done");
+  // Round 2 never created its OWN sessionId-keyed worktree — it reused round 1's leftover
+  // path in place, which the clean_handoff path then removes as part of a normal wrap-up.
+  assert.ok(!fs.existsSync(roleWorktreePath(devSessions[1].id, "developer")));
+  assert.ok(!fs.existsSync(leftoverPath), "the reused worktree is cleaned up after a successful handoff");
+});
+
+test("NOT-88: a leftover dirty worktree escalates as an actionable worktree_conflict on every Resume — no infra budget burned, no opaque crash loop", async () => {
+  const issueId = await makeIssue();
+
+  // Round 1 crashes AND leaves the worktree dirty — dirty_worktree escalation preserves the
+  // checkout (existing coverage above), which is the setup NOT-88's collision needs: round
+  // 2 must find that SAME dirty leftover still holding the branch.
+  const crashingDirtySpawn: SpawnFn = async (input) => {
+    fs.writeFileSync(path.join(input.cwd, "half-done.txt"), "oops\n");
+    return { exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: crashingDirtySpawn, github: fakeGithub() }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const round1Session = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  const leftoverPath = roleWorktreePath(round1Session.id, "developer");
+  assert.ok(fs.existsSync(path.join(leftoverPath, "half-done.txt")), "the dirty leftover must be preserved");
+
+  const firstAction = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation" && a.status === "open")!;
+  assert.ok(firstAction);
+
+  // Resume without actually cleaning the leftover: must re-detect the same conflict and
+  // escalate again immediately — never spend an infra attempt on a retry that's certain to
+  // collide identically, and never surface it as a generic/opaque adapter_failure.
+  resolveHumanActionAndAdvance(firstAction.id, "test", "resume");
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.infraAttempts, 0, "a worktree_conflict never spends the infra-attempt budget it was reset to");
+  assert.equal(issue.currentRound, 1);
+  assert.ok(fs.existsSync(path.join(leftoverPath, "half-done.txt")), "still never force-removed");
+
+  const secondAction = listHumanActionsForIssue(issueId).find(
+    (a) => a.actionType === "policy_escalation" && a.status === "open" && a.id !== firstAction.id
+  )!;
+  assert.ok(secondAction, "a fresh, actionable escalation — not silence and not a crash");
+  assert.match(secondAction.reason, /uncommitted or unpushed/);
+  assert.match(secondAction.reason, new RegExp(leftoverPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  fs.rmSync(leftoverPath, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
 });
 
 test("baseSha is resolved against the fetched base ref, not a stale local branch", async () => {

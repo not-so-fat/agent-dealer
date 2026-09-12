@@ -6,7 +6,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const home = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-home-"));
+// realpathSync: macOS's /tmp is a symlink to /private/tmp, and `git worktree list` reports
+// the resolved path — without this, a path built from AGENT_DEALER_HOME would never
+// string-equal what findWorktreeForBranch/resolveDeveloperWorktree read back from git.
+const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-home-")));
 process.env.AGENT_DEALER_HOME = home;
 
 const {
@@ -17,6 +20,8 @@ const {
   withRepoLock,
   pushBranch,
   commitsAhead,
+  findWorktreeForBranch,
+  resolveDeveloperWorktree,
 } = await import("./git-worktree.js");
 
 let repo: string;
@@ -212,5 +217,105 @@ test("inspectLeftoverWorktree classifies missing / clean / dirty", async () => {
   fs.writeFileSync(path.join(dev.path, "x.txt"), "y");
   assert.equal(await inspectLeftoverWorktree(dev.path), "dirty_or_unpushed");
   fs.rmSync(dev.path, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+test("findWorktreeForBranch finds the checkout holding a branch and returns null for an untouched one", async () => {
+  assert.equal(await findWorktreeForBranch(repo, "issue-1"), null);
+  const dev = await createRoleWorktree({ repo, role: "developer", sessionId: "s-find1", ref: "issue-1" });
+  assert.equal(await findWorktreeForBranch(repo, "issue-1"), dev.path);
+  // A detached (reviewer) checkout carries no `branch` line and must never match.
+  const rev = await createRoleWorktree({ repo, role: "reviewer", sessionId: "s-find2", ref: "HEAD" });
+  assert.equal(await findWorktreeForBranch(repo, "issue-1"), dev.path);
+  await safeRemoveWorktree({ repo, path: rev.path, role: "reviewer" });
+  fs.rmSync(dev.path, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+test("resolveDeveloperWorktree creates a fresh worktree when the branch isn't checked out anywhere", async () => {
+  const resolved = await resolveDeveloperWorktree({
+    repo,
+    sessionId: "s-resolve-new",
+    branchName: "issue-resolve-new",
+    baseBranch: "main",
+    reuseBranch: false,
+  });
+  assert.equal(resolved.kind, "created");
+  assert.ok(fs.existsSync(resolved.path));
+  fs.rmSync(resolved.path, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  execFileSync("git", ["branch", "-D", "issue-resolve-new"], { cwd: repo });
+});
+
+test("resolveDeveloperWorktree reuses a clean leftover worktree from an earlier session on the same branch", async () => {
+  // Simulates the exact NOT-88 repro: an earlier round's `createRoleWorktree` (keyed by its
+  // OLD sessionId) is still on disk, clean, holding the branch — a plain `git worktree add`
+  // for a NEW session id would collide with it ("already used by worktree").
+  const leftover = await createRoleWorktree({ repo, role: "developer", sessionId: "s-leftover-clean", ref: "issue-1" });
+  const resolved = await resolveDeveloperWorktree({
+    repo,
+    sessionId: "s-new-session",
+    branchName: "issue-1",
+    baseBranch: "main",
+    reuseBranch: true,
+  });
+  assert.equal(resolved.kind, "reused");
+  assert.equal(resolved.path, leftover.path);
+  fs.rmSync(leftover.path, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+test("resolveDeveloperWorktree reports a conflict — with recovery commands — for a dirty leftover, never force-removing it", async () => {
+  const leftover = await createRoleWorktree({ repo, role: "developer", sessionId: "s-leftover-dirty", ref: "issue-1" });
+  fs.writeFileSync(path.join(leftover.path, "uncommitted.txt"), "still here\n");
+
+  const resolved = await resolveDeveloperWorktree({
+    repo,
+    sessionId: "s-new-session-2",
+    branchName: "issue-1",
+    baseBranch: "main",
+    reuseBranch: true,
+  });
+  assert.equal(resolved.kind, "conflict");
+  if (resolved.kind === "conflict") {
+    assert.equal(resolved.path, leftover.path);
+    assert.match(resolved.reason, /uncommitted or unpushed/);
+    assert.ok(resolved.recoveryCommands.some((c) => c.includes(leftover.path)));
+  }
+  assert.ok(fs.existsSync(leftover.path), "a dirty leftover must never be force-removed by resolution");
+
+  // Calling it again with nothing changed must report the SAME conflict, not loop into a
+  // different failure mode or silently clear it — this is what breaks the "Resume loops"
+  // bug into an actionable, stable escalation instead of a fresh crash each time.
+  const resolvedAgain = await resolveDeveloperWorktree({
+    repo,
+    sessionId: "s-new-session-3",
+    branchName: "issue-1",
+    baseBranch: "main",
+    reuseBranch: true,
+  });
+  assert.equal(resolvedAgain.kind, "conflict");
+  if (resolvedAgain.kind === "conflict") assert.equal(resolvedAgain.path, leftover.path);
+
+  fs.rmSync(leftover.path, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+test("resolveDeveloperWorktree prunes a stale (directory-deleted) leftover and creates a fresh worktree", async () => {
+  const leftover = await createRoleWorktree({ repo, role: "developer", sessionId: "s-leftover-stale", ref: "issue-1" });
+  // Delete the directory directly, bypassing `git worktree remove` — leaves a stale
+  // administrative entry in `.git/worktrees` that `git worktree list` still reports.
+  fs.rmSync(leftover.path, { recursive: true, force: true });
+
+  const resolved = await resolveDeveloperWorktree({
+    repo,
+    sessionId: "s-new-session-4",
+    branchName: "issue-1",
+    baseBranch: "main",
+    reuseBranch: true,
+  });
+  assert.equal(resolved.kind, "created");
+  assert.ok(fs.existsSync(resolved.path));
+  fs.rmSync(resolved.path, { recursive: true, force: true });
   await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
 });

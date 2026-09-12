@@ -169,6 +169,24 @@ test("a second startWorkflow while active is rejected with 409", () => {
   if (again.ok === false) assert.equal(again.code, 409);
 });
 
+test("NOT-88: startWorkflow's 409 while an open human action is blocking names it, instead of an opaque dead end", () => {
+  const issueId = newIssue({ maxInfraAttempts: 0 });
+  startWorkflow(issueId);
+  complete(issueId, { kind: "session_failed" }); // infra-exhausted on the first attempt -> policy_escalation
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.status === "open")!;
+  assert.equal(action.actionType, "policy_escalation");
+
+  const again = startWorkflow(issueId);
+  assert.equal(again.ok, false);
+  if (again.ok === false) {
+    assert.equal(again.code, 409);
+    assert.match(again.error, /policy_escalation/);
+    assert.match(again.error, new RegExp(action.id));
+    assert.match(again.error, /resolve/i);
+  }
+});
+
 test("developer clean handoff → reviewing + a reviewer work item + PR recorded on the issue", () => {
   const issueId = newIssue();
   startWorkflow(issueId);
