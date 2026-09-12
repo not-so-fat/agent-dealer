@@ -34,6 +34,14 @@ export function getDb(): Database.Database {
   return dbInstance;
 }
 
+/** Tests only — drops the cached connection so a later getDb()/migrate() reopens against
+ * whatever AGENT_DEALER_HOME is set to next, instead of silently reusing a stale handle
+ * to the previous test's database. */
+export function closeDb(): void {
+  dbInstance?.close();
+  dbInstance = null;
+}
+
 export function migrate(): void {
   const db = getDb();
   const schema = readFileSync(path.join(__dirname, "schema.sql"), "utf8");
