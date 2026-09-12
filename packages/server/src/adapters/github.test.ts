@@ -1,7 +1,16 @@
 // packages/server/src/adapters/github.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePrView, summarizeChecks, pollPrChecks, type GithubAdapter, type ChecksSnapshot } from "./github.js";
+import {
+  parsePrView,
+  summarizeChecks,
+  pollPrChecks,
+  createGithubAdapter,
+  PR_VIEW_FIELDS,
+  type GithubAdapter,
+  type ChecksSnapshot,
+  type GhExec,
+} from "./github.js";
 
 test("parsePrView extracts the ground-truth handoff fields, including draft status", () => {
   const view = parsePrView(
@@ -35,6 +44,92 @@ test("summarizeChecks: empty rollup is none, any failure wins over pending, pend
 test("summarizeChecks accepts neutral/skipped as success but fails closed on an unrecognized conclusion", () => {
   assert.equal(summarizeChecks([{ conclusion: "neutral" }, { conclusion: "skipped" }]), "success");
   assert.equal(summarizeChecks([{ conclusion: "some_new_gh_conclusion_this_code_does_not_know" }]), "failure");
+});
+
+/** Records every `gh` invocation and returns responses off a queue — never calls real `gh`. */
+function queuedExec(responses: Array<{ stdout?: string; error?: string }>): { exec: GhExec; calls: string[][] } {
+  const calls: string[][] = [];
+  const queue = [...responses];
+  const exec: GhExec = async (args) => {
+    calls.push(args);
+    const next = queue.shift() ?? { stdout: "" };
+    if (next.error != null) throw Object.assign(new Error(next.error), { stderr: next.error });
+    return { stdout: next.stdout ?? "" };
+  };
+  return { exec, calls };
+}
+
+test("viewPr looks up the PR explicitly by branch, never a bare `gh pr view`", async () => {
+  const { exec, calls } = queuedExec([
+    { stdout: JSON.stringify({ number: 5, url: "u", baseRefName: "main", headRefName: "issue-x", headRefOid: "abc", isDraft: true }) },
+  ]);
+  const view = await createGithubAdapter(exec).viewPr({ cwd: "/repo", branch: "issue-x" });
+  assert.deepEqual(calls[0], ["pr", "view", "issue-x", "--json", PR_VIEW_FIELDS]);
+  assert.equal(view?.number, 5);
+});
+
+test("viewPr prefers an explicit PR number over branch when both are given", async () => {
+  const { exec, calls } = queuedExec([
+    { stdout: JSON.stringify({ number: 5, url: "u", baseRefName: "main", headRefName: "issue-x", headRefOid: "abc", isDraft: true }) },
+  ]);
+  await createGithubAdapter(exec).viewPr({ cwd: "/repo", number: 5, branch: "issue-x" });
+  assert.deepEqual(calls[0], ["pr", "view", "5", "--json", PR_VIEW_FIELDS]);
+});
+
+test("createDraftPr passes --head explicitly and re-verifies by that same branch, not a bare `gh pr view`", async () => {
+  const { exec, calls } = queuedExec([
+    { stdout: "https://github.com/o/r/pull/9\n" },
+    { stdout: JSON.stringify({ number: 9, url: "https://github.com/o/r/pull/9" }) },
+  ]);
+  const result = await createGithubAdapter(exec).createDraftPr({
+    cwd: "/repo",
+    base: "main",
+    head: "issue-x",
+    title: "Add widget",
+    bodyFilePath: "/tmp/body.md",
+  });
+  assert.deepEqual(calls[0], ["pr", "create", "--draft", "--base", "main", "--head", "issue-x", "--title", "Add widget", "--body-file", "/tmp/body.md"]);
+  assert.deepEqual(calls[1], ["pr", "view", "issue-x", "--json", "number,url"]);
+  assert.deepEqual(result, { ok: true, number: 9, url: "https://github.com/o/r/pull/9" });
+});
+
+// NOT-82 dogfood repro: a real Dev-review run pushed its generated branch to origin, but
+// the local worktree had no configured upstream — `gh pr create` (bare, no `--head`)
+// refused with exactly this error, and the coordinator must never hit it.
+const NO_UPSTREAM_ERROR = "aborted: you must first push the current branch to a remote, or use the --head flag";
+
+test("createDraftPr: a branch pushed to origin with no local upstream still opens a draft PR when --head is explicit", async () => {
+  const exec: GhExec = async (args) => {
+    if (args[0] === "pr" && args[1] === "create") {
+      if (!args.includes("--head")) throw Object.assign(new Error(NO_UPSTREAM_ERROR), { stderr: NO_UPSTREAM_ERROR });
+      return { stdout: "https://github.com/o/r/pull/42\n" };
+    }
+    if (args[0] === "pr" && args[1] === "view" && args[2] === "issue-4e5eb611") {
+      return { stdout: JSON.stringify({ number: 42, url: "https://github.com/o/r/pull/42" }) };
+    }
+    throw new Error(`unexpected gh invocation: ${args.join(" ")}`);
+  };
+  const result = await createGithubAdapter(exec).createDraftPr({
+    cwd: "/repo",
+    base: "main",
+    head: "issue-4e5eb611",
+    title: "Complete CLI surface",
+    bodyFilePath: "/tmp/body.md",
+  });
+  assert.deepEqual(result, { ok: true, number: 42, url: "https://github.com/o/r/pull/42" });
+});
+
+test("viewPr: a retry can find the already-created PR by explicit branch even with no local upstream", async () => {
+  const exec: GhExec = async (args) => {
+    // Bare `gh pr view` (no selector) can't resolve the current branch without upstream
+    // tracking — simulates the real failure mode this adapter must never hit.
+    if (args[1] === "view" && args[2] === "--json") {
+      throw Object.assign(new Error(), { stderr: 'no pull requests found for branch "HEAD"' });
+    }
+    return { stdout: JSON.stringify({ number: 42, url: "u", baseRefName: "main", headRefName: args[2], headRefOid: "abc", isDraft: true }) };
+  };
+  const view = await createGithubAdapter(exec).viewPr({ cwd: "/repo", branch: "issue-4e5eb611" });
+  assert.equal(view?.number, 42);
 });
 
 function fakeAdapter(sequence: ChecksSnapshot[]): GithubAdapter {

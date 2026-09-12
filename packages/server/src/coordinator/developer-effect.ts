@@ -259,7 +259,10 @@ export async function runDeveloperEffect(
     // From here on the branch is safely on the remote — a worktree removal on any
     // subsequent failure path loses nothing (bestEffortRemove is safe to call).
 
-    let prView = await deps.github.viewPr({ cwd: worktreePath });
+    // The coordinator already knows the exact generated branch — pass it explicitly
+    // rather than asking `gh` to infer "the current branch" from upstream tracking, which
+    // pushBranch's push does not reliably leave configured (NOT-82).
+    let prView = await deps.github.viewPr({ cwd: worktreePath, branch: branchName });
     if (!prView) {
       const bodyDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-pr-body-"));
       const bodyFilePath = path.join(bodyDir, "body.md");
@@ -267,6 +270,7 @@ export async function runDeveloperEffect(
       const created = await deps.github.createDraftPr({
         cwd: worktreePath,
         base: issue.baseBranch,
+        head: branchName,
         title: taskSnapshot.title,
         bodyFilePath,
       });
@@ -277,7 +281,7 @@ export async function runDeveloperEffect(
           ? { kind: "no_pr" }
           : { kind: "adapter_failure", reason: created.reason };
       }
-      prView = await deps.github.viewPr({ cwd: worktreePath });
+      prView = await deps.github.viewPr({ cwd: worktreePath, branch: branchName });
       if (!prView) {
         await bestEffortRemove(issue.repo, worktreePath);
         return { kind: "adapter_failure", reason: "PR created but could not be re-verified via gh pr view" };
@@ -306,7 +310,7 @@ export async function runDeveloperEffect(
     // process was waiting (another push, a zombie retry from a reclaimed lease), the
     // checks queried could describe a different commit than the one about to be recorded
     // as the verified handoff, breaking the exact-current-SHA contract.
-    const postPollView = await deps.github.viewPr({ cwd: worktreePath });
+    const postPollView = await deps.github.viewPr({ cwd: worktreePath, branch: branchName });
     if (!postPollView) {
       await bestEffortRemove(issue.repo, worktreePath);
       return { kind: "adapter_failure", reason: "PR could not be re-verified after the checks poll" };
