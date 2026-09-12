@@ -1,4 +1,4 @@
-import { test, before } from "node:test";
+import { test, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,15 +7,22 @@ import Fastify from "fastify";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-action-routes-"));
 
-const { migrate } = await import("../db/index.js");
+const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
-const { createIssue, transitionIssue } = await import("../repository/issues.js");
-const { createHumanAction } = await import("../repository/human-actions.js");
+const { createIssue, transitionIssue, getIssue } = await import("../repository/issues.js");
+const { createHumanAction, getHumanAction, listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { registerHumanActionRoutes } = await import("./human-actions.js");
+const { startWorkflow, applyCompletion } = await import("../coordinator/commands.js");
+const { ReviewerResult } = await import("../coordinator/reviewer-result.js");
+const { claimWorkItem } = await import("../repository/work-items.js");
+const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 
 before(() => {
   migrate();
 });
+// claimWorkItem is global FIFO, not issue-scoped — a leftover queued item from an earlier
+// test would otherwise be claimed instead of the issue this test just started.
+beforeEach(() => getDb().exec("DELETE FROM work_items"));
 
 async function buildApp() {
   const app = Fastify();
@@ -32,6 +39,45 @@ function seedIssueAwaitingFinalReview() {
   return { issue, action };
 }
 
+/** Drives a real issue through startWorkflow → clean developer handoff → reviewer
+ * approval, so the resulting final_review human action carries a real workflow instance
+ * (unlike seedIssueAwaitingFinalReview's hand-crafted transitions) — needed to exercise
+ * resolveHumanActionAndAdvance's actual transactional path through the route. */
+function seedRealIssueAwaitingFinalReview(): { issueId: string; actionId: string } {
+  const issue = createIssue({ title: "Real workflow", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
+  const start = startWorkflow(issue.id);
+  assert.equal(start.ok, true);
+
+  const devItem = claimWorkItem(`route-test-${issue.id}-dev`, { leaseMs: 60_000 })!;
+  applyCompletion(devItem.id, devItem.leaseToken!, {
+    kind: "clean_handoff",
+    branch: `issue-${issue.id}`,
+    headSha: "a".repeat(40),
+    baseSha: "b".repeat(40),
+    prNumber: 1,
+    prUrl: "https://gh/pr/1",
+  });
+
+  const reviewItem = claimWorkItem(`route-test-${issue.id}-rev`, { leaseMs: 60_000 })!;
+  applyCompletion(reviewItem.id, reviewItem.leaseToken!, {
+    kind: "verdict",
+    result: ReviewerResult.parse({
+      verdict: "approved",
+      baseSha: "b".repeat(40),
+      headSha: "a".repeat(40),
+      acceptanceCriteriaAssessment: "met",
+      evidenceAssessment: "fine",
+      findings: [],
+      risks: [],
+    }),
+  });
+
+  assert.ok(getIssue(issue.id));
+  const humanAction = listHumanActionsForIssue(issue.id).find((a) => a.actionType === "final_review")!;
+  assert.ok(humanAction, "expected a final_review human action");
+  return { issueId: issue.id, actionId: humanAction.id };
+}
+
 // NOT-58: the global queue is read-only. Typed resolution + continuation land in NOT-64.
 test("GET /api/human-actions lists only open actions", async () => {
   const app = await buildApp();
@@ -39,5 +85,77 @@ test("GET /api/human-actions lists only open actions", async () => {
   const res = await app.inject({ method: "GET", url: "/api/human-actions" });
   const list = res.json() as Array<{ id: string; status: string }>;
   assert.ok(list.some((a) => a.id === action.id && a.status === "open"));
+  await app.close();
+});
+
+test("POST resolve requires resolvedBy and choice", async () => {
+  const app = await buildApp();
+  const { action } = seedIssueAwaitingFinalReview();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: {} });
+  assert.equal(res.statusCode, 400);
+  await app.close();
+});
+
+test("POST resolve 400s (not 500) on non-string resolvedBy/choice values", async () => {
+  const app = await buildApp();
+  const { action } = seedIssueAwaitingFinalReview();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: 123, choice: "complete" } });
+  assert.equal(res.statusCode, 400);
+  const res2 = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: ["complete"] } });
+  assert.equal(res2.statusCode, 400);
+  await app.close();
+});
+
+test("POST resolve 404s for an unknown action", async () => {
+  const app = await buildApp();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/does-not-exist/resolve`, payload: { resolvedBy: "yusuke", choice: "complete" } });
+  assert.equal(res.statusCode, 404);
+  await app.close();
+});
+
+test("POST resolve 400s on a choice not valid for the action type", async () => {
+  const app = await buildApp();
+  const { action } = seedIssueAwaitingFinalReview();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "retry" } });
+  assert.equal(res.statusCode, 400);
+  await app.close();
+});
+
+test("POST resolve 409s on an already-resolved action", async () => {
+  const app = await buildApp();
+  const { actionId } = await seedRealIssueAwaitingFinalReview();
+  const first = await app.inject({ method: "POST", url: `/api/human-actions/${actionId}/resolve`, payload: { resolvedBy: "yusuke", choice: "close" } });
+  assert.equal(first.statusCode, 200);
+  const second = await app.inject({ method: "POST", url: `/api/human-actions/${actionId}/resolve`, payload: { resolvedBy: "yusuke", choice: "close" } });
+  assert.equal(second.statusCode, 409);
+  await app.close();
+});
+
+test("POST resolve final_review:repair sends the issue back to a fresh developer round, no reflect artifact", async () => {
+  const app = await buildApp();
+  const { issueId, actionId } = await seedRealIssueAwaitingFinalReview();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${actionId}/resolve`, payload: { resolvedBy: "yusuke", choice: "repair" } });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { issueStatus: string; nextWorkItemId: string | null; instanceCompleted: boolean };
+  assert.equal(body.issueStatus, "repairing");
+  assert.ok(body.nextWorkItemId);
+  assert.equal(body.instanceCompleted, false);
+  assert.ok(!listArtifactsForIssue(issueId).some((a) => a.kind === "reflect_status" || a.kind === "playbook_patch"));
+  await app.close();
+});
+
+test("POST resolve final_review:complete finishes the workflow and attempts reflect (skips: no deck configured)", async () => {
+  const app = await buildApp();
+  const { issueId, actionId } = await seedRealIssueAwaitingFinalReview();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${actionId}/resolve`, payload: { resolvedBy: "yusuke", choice: "complete" } });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { issueStatus: string; instanceCompleted: boolean };
+  assert.equal(body.issueStatus, "done");
+  assert.equal(body.instanceCompleted, true);
+  const action = getHumanAction(actionId)!;
+  assert.equal(action.status, "resolved");
+  // The seeded issue uses the built-in developer agent, which has no deck configured —
+  // triggerIssueReflect skips silently (no artifact) rather than throwing.
+  assert.ok(!listArtifactsForIssue(issueId).some((a) => a.kind === "playbook_patch"));
   await app.close();
 });

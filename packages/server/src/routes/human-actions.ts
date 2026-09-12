@@ -1,10 +1,45 @@
 import type { FastifyInstance } from "fastify";
-import { listOpenHumanActions } from "../repository/human-actions.js";
+import { getHumanAction, listOpenHumanActions } from "../repository/human-actions.js";
+import { resolveHumanActionAndAdvance } from "../coordinator/commands.js";
+import { triggerIssueReflect } from "../coordinator/reflect-trigger.js";
 
-/**
- * NOT-58 foundation: the global human-action queue is read-only here. Typed
- * resolution and workflow continuation land in NOT-64.
- */
 export async function registerHumanActionRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/human-actions", async () => listOpenHumanActions());
+
+  app.post("/api/human-actions/:id/resolve", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    // Runtime-validated, not just cast: an untyped body (e.g. resolvedBy as a number) must
+    // 400, not throw past `.trim()` into an uncaught 500.
+    const body = req.body as Record<string, unknown> | undefined;
+    const resolvedBy = typeof body?.resolvedBy === "string" ? body.resolvedBy.trim() : "";
+    const choice = typeof body?.choice === "string" ? body.choice.trim() : "";
+    if (!resolvedBy || !choice) {
+      return reply.status(400).send({ error: "resolvedBy and choice are required" });
+    }
+
+    // Read before resolving — the issue id this action belongs to, needed for the reflect
+    // trigger below and stable regardless of how resolution turns out.
+    const action = getHumanAction(id);
+    if (!action) return reply.status(404).send({ error: "Human action not found" });
+
+    const result = resolveHumanActionAndAdvance(id, resolvedBy, choice);
+    if (!result.ok) return reply.status(result.code).send({ error: result.error });
+
+    // Reflect is a best-effort network call to Agent Deck (health check + a sequential
+    // fetch/propose round trip per playbook) — resolution has already committed above, so
+    // this must not hold the HTTP response hostage behind it: a slow/offline deck would
+    // otherwise risk a client timeout on an already-resolved action, whose retry then gets
+    // a spurious 409. Fire-and-forget; triggerIssueReflect never throws (it records its own
+    // outcome as artifacts), so there is nothing here to await or react to.
+    if (result.triggerReflect) {
+      void triggerIssueReflect(action.issueId).catch(() => {});
+    }
+
+    return {
+      issueStatus: result.issueStatus,
+      nextWorkItemId: result.nextWorkItemId,
+      instanceCompleted: result.instanceCompleted,
+      restarted: result.restarted,
+    };
+  });
 }

@@ -21,6 +21,7 @@ import type { EffectContext } from "./effect-registry.js";
 import type { DeveloperOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
 import { buildDeveloperPrompt } from "./prompts.js";
+import { guidanceForNextSession } from "./guidance.js";
 import { realDeveloperSpawn, type DeveloperSpawn } from "./spawn.js";
 import {
   createRoleWorktree,
@@ -167,6 +168,7 @@ export async function runDeveloperEffect(
     const openFindings = listFindingsForIssue(issue.id).filter(
       (f) => f.status === "open" || f.status === "recurring"
     );
+    const guidance = guidanceForNextSession(issue.id, sessionId);
     const prompt = buildDeveloperPrompt({
       taskSnapshot,
       round: workItem.round,
@@ -175,6 +177,7 @@ export async function runDeveloperEffect(
       worktreePath,
       deckId: snapshot?.deckId ?? null,
       playbookIds: snapshot?.playbookIds,
+      guidance: guidance.length ? guidance : undefined,
     });
 
     const spawned = await deps.spawn({

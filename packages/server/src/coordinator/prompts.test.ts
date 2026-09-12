@@ -59,6 +59,30 @@ test("no deck section when the profile has no deckId", () => {
   assert.doesNotMatch(prompt, /bind_workspace/);
 });
 
+test("guidance since the last session is surfaced in the developer prompt", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 2, guidance: ["Use the new logging util instead."] });
+  assert.match(prompt, /## Guidance from the team/);
+  assert.match(prompt, /Use the new logging util instead\./);
+});
+
+test("no guidance section when there is none", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1 });
+  assert.doesNotMatch(prompt, /## Guidance from the team/);
+});
+
+test("guidance since the last session is surfaced in the reviewer prompt", () => {
+  const prompt = buildReviewerPrompt({
+    taskSnapshot,
+    round: 1,
+    baseSha: "a".repeat(40),
+    headSha: "b".repeat(40),
+    diff: "diff --git a/x b/x\n",
+    guidance: ["Pay extra attention to the auth module."],
+  });
+  assert.match(prompt, /## Guidance from the team/);
+  assert.match(prompt, /Pay extra attention to the auth module\./);
+});
+
 const reviewerBase = {
   taskSnapshot,
   round: 1,
