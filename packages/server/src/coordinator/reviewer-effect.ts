@@ -28,6 +28,7 @@ import type { EffectContext } from "./effect-registry.js";
 import type { ReviewerOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
 import { buildReviewerPrompt, formatDiffForPrompt, TOTAL_DIFF_LIMIT } from "./prompts.js";
+import { guidanceForNextSession } from "./guidance.js";
 import { realReviewerSpawn, type ReviewerSpawn } from "./spawn.js";
 import { parseReviewerResult, ReviewerResult as ReviewerResultSchema, type ReviewerResult, type ReviewerVerdict } from "./reviewer-result.js";
 import {
@@ -239,6 +240,7 @@ export async function runReviewerEffect(
     const openFindings = listFindingsForIssue(issue.id).filter(
       (f) => f.status === "open" || f.status === "recurring"
     );
+    const guidance = guidanceForNextSession(issue.id, sessionId);
     const prompt = buildReviewerPrompt({
       taskSnapshot,
       round: workItem.round,
@@ -251,6 +253,7 @@ export async function runReviewerEffect(
       worktreePath,
       deckId: snapshot?.deckId ?? null,
       playbookIds: snapshot?.playbookIds,
+      guidance: guidance.length ? guidance : undefined,
     });
 
     const spawned = await deps.spawn({

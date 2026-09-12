@@ -206,3 +206,25 @@ export function listWorkflowEventsForIssue(issueId: string): WorkflowEvent[] {
     .all(issueId) as WorkflowEventRow[];
   return rows.map(rowToEvent);
 }
+
+/**
+ * `guidance.added` markdown for an issue, added after `sinceTs` (exclusive) — the raw
+ * material for NOT-64's guidance injection. `sinceTs` is null for an issue's very first
+ * session (nothing has been shown yet, so every guidance event so far applies).
+ */
+export function listGuidanceMarkdownForIssue(issueId: string, sinceTs: string | null): string[] {
+  const rows = getDb()
+    .prepare(
+      "SELECT * FROM workflow_events WHERE issue_id = ? AND type = 'guidance.added' AND ts > ? ORDER BY ts ASC"
+    )
+    .all(issueId, sinceTs ?? "") as WorkflowEventRow[];
+  return rows
+    .map((row) => {
+      try {
+        return (JSON.parse(row.payload_json ?? "{}") as { markdown?: string }).markdown ?? null;
+      } catch {
+        return null;
+      }
+    })
+    .filter((m): m is string => !!m);
+}

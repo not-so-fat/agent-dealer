@@ -177,8 +177,21 @@ test("reviewer approved → final_review human action; resolving complete finish
   assert.equal(resolved.ok, true);
   assert.equal(getIssue(issueId)!.status, "done");
   assert.equal(getActiveWorkflowInstance(issueId), null);
+  assert.equal((resolved as { triggerReflect: boolean }).triggerReflect, true);
   const types = listWorkflowEventsForIssue(issueId).map((e) => e.type);
   assert.ok(types.includes("human_action.resolved") && types.includes("issue.completed"));
+});
+
+test("resolving final_review as repair never sets triggerReflect", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff);
+  complete(issueId, { kind: "verdict", result: okReview("approved") });
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review")!;
+
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "repair");
+  assert.equal(resolved.ok, true);
+  assert.equal((resolved as { triggerReflect: boolean }).triggerReflect, false);
 });
 
 test("reviewer changes_requested with rounds left → repair round with a fresh developer work item", () => {

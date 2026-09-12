@@ -592,6 +592,10 @@ export type ResolveResult =
       nextWorkItemId: string | null;
       instanceCompleted: boolean;
       restarted: boolean;
+      /** True only for final_review:complete — see human-resolution.ts's HumanResolutionResult.
+       * Reflect is a best-effort network call and cannot run inside this transaction, so the
+       * caller (routes/human-actions.ts) triggers it after this result is returned. */
+      triggerReflect: boolean;
     }
   | { ok: false; code: number; error: string };
 
@@ -643,6 +647,7 @@ export function resolveHumanActionAndAdvance(
           nextWorkItemId: workItem.id,
           instanceCompleted: false,
           restarted: true,
+          triggerReflect: false,
         };
       })();
     } catch (err) {
@@ -712,6 +717,7 @@ export function resolveHumanActionAndAdvance(
         nextWorkItemId: null,
         instanceCompleted: true,
         restarted: false,
+        triggerReflect: outcome.triggerReflect === true,
       };
     }
 
@@ -762,6 +768,7 @@ export function resolveHumanActionAndAdvance(
       nextWorkItemId: next.id,
       instanceCompleted: false,
       restarted: false,
+      triggerReflect: false,
     };
   })();
 }

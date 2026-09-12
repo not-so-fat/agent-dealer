@@ -9,7 +9,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ev
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue } = await import("./issues.js");
-const { appendWorkflowEvent, listWorkflowEventsForIssue } =
+const { appendWorkflowEvent, listWorkflowEventsForIssue, listGuidanceMarkdownForIssue } =
   await import("./workflow-events.js");
 
 before(() => {
@@ -67,4 +67,23 @@ test("a repeated idempotency key does not create a duplicate event", () => {
   });
   assert.equal(second.id, first.id);
   assert.equal(listWorkflowEventsForIssue(issueId).length, 1);
+});
+
+test("listGuidanceMarkdownForIssue returns only guidance added after the cutoff", async () => {
+  const issueId = seedIssue("Guidance issue");
+  appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "developing", payload: { markdown: "Before cutoff" } });
+  await new Promise((r) => setTimeout(r, 5));
+  const cutoff = new Date().toISOString();
+  await new Promise((r) => setTimeout(r, 5));
+  appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "developing", payload: { markdown: "After cutoff" } });
+
+  assert.deepStrictEqual(listGuidanceMarkdownForIssue(issueId, cutoff), ["After cutoff"]);
+  assert.deepStrictEqual(listGuidanceMarkdownForIssue(issueId, null), ["Before cutoff", "After cutoff"]);
+});
+
+test("listGuidanceMarkdownForIssue ignores non-guidance events and malformed payloads", () => {
+  const issueId = seedIssue("Guidance malformed issue");
+  appendWorkflowEvent({ issueId, type: "issue.created", actorType: "system", stage: "ready" });
+  appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "ready" }); // no payload
+  assert.deepStrictEqual(listGuidanceMarkdownForIssue(issueId, null), []);
 });

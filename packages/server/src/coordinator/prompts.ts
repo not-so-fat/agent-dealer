@@ -32,6 +32,20 @@ export interface DeveloperPromptInput {
   worktreePath?: string;
   deckId?: string | null;
   playbookIds?: string[];
+  /** Human guidance markdown added since this issue's previous worker session (design
+   * doc "Guidance semantics") — a one-shot CLI process never inherits a running session,
+   * so this is how guidance actually reaches the next developer/reviewer input. */
+  guidance?: string[];
+}
+
+function guidanceSection(guidance: string[] | undefined): string[] {
+  if (!guidance?.length) return [];
+  return [
+    `## Guidance from the team (added since your last session)`,
+    `Apply this unless it would require changing the frozen acceptance criteria, scope, or round limits — if it would, say so in your conclusion instead of deviating.`,
+    ``,
+    ...guidance.flatMap((g) => [g.trim(), ``]),
+  ];
 }
 
 function agentDeckSection(worktreePath: string | undefined, deckId: string | null | undefined, playbookIds: string[] | undefined): string[] {
@@ -70,6 +84,7 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
     parts.push(``);
   }
 
+  parts.push(...guidanceSection(input.guidance));
   parts.push(...agentDeckSection(input.worktreePath, input.deckId, input.playbookIds));
 
   parts.push(
@@ -96,6 +111,8 @@ export interface ReviewerPromptInput {
   worktreePath?: string;
   deckId?: string | null;
   playbookIds?: string[];
+  /** See DeveloperPromptInput.guidance. */
+  guidance?: string[];
 }
 
 const REVIEWER_RESULT_SHAPE =
@@ -200,6 +217,7 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
     parts.push(``);
   }
 
+  parts.push(...guidanceSection(input.guidance));
   parts.push(...agentDeckSection(input.worktreePath, input.deckId, input.playbookIds));
   parts.push(``, ...reviewerContractSection(input.baseSha, input.headSha));
 
