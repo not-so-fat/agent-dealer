@@ -23,3 +23,19 @@ test("parseIssueArgs: guide requires an id and --message", () => {
   assert.equal(parsed.subcommand, "guide");
   assert.equal((parsed as { id: string; message: string }).message, "prioritize this");
 });
+
+test("parseIssueArgs: list accepts an optional --status filter", () => {
+  const parsed = parseIssueArgs(["list"]);
+  assert.equal(parsed.subcommand, "list");
+  assert.equal((parsed as { status?: string }).status, undefined);
+
+  const filtered = parseIssueArgs(["list", "--status", "ready,needs_human"]);
+  assert.equal((filtered as { status?: string }).status, "ready,needs_human");
+});
+
+test("parseIssueArgs: start requires an id", () => {
+  const parsed = parseIssueArgs(["start", "issue-123"]);
+  assert.equal(parsed.subcommand, "start");
+  assert.equal((parsed as { id: string }).id, "issue-123");
+  assert.throws(() => parseIssueArgs(["start"]));
+});
