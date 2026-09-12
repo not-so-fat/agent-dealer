@@ -9,14 +9,21 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cm
 
 const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
-const { createIssue, getIssue } = await import("../repository/issues.js");
+const { createIssue, getIssue, updateIssue } = await import("../repository/issues.js");
 const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
   "../repository/workflow-events.js"
 );
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue } = await import("../repository/findings.js");
 const { claimWorkItem, listWorkItemsForIssue, getWorkItem } = await import("../repository/work-items.js");
-const { startWorkflow, applyCompletion, resolveHumanActionAndAdvance, getTaskSnapshot, TASK_SNAPSHOT_ARTIFACT_KIND } = await import("./commands.js");
+const {
+  startWorkflow,
+  applyCompletion,
+  resolveHumanActionAndAdvance,
+  getTaskSnapshot,
+  TASK_SNAPSHOT_ARTIFACT_KIND,
+  checkIssueReadiness,
+} = await import("./commands.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 
@@ -107,6 +114,16 @@ test("getTaskSnapshot falls back to live issue fields when no snapshot artifact 
   assert.equal(snapshot.acceptanceCriteria, "It works");
 });
 
+test("checkIssueReadiness reports missing acceptance criteria and is silent once satisfied", () => {
+  const issueId = newIssue({ acceptanceCriteria: null });
+  const before = checkIssueReadiness(getIssue(issueId)!);
+  assert.equal(before.ok, false);
+  assert.deepEqual(before.missing, ["acceptance criteria"]);
+
+  const ready = checkIssueReadiness(getIssue(newIssue())!);
+  assert.deepEqual(ready, { ok: true, missing: [] });
+});
+
 test("startWorkflow with no acceptance criteria asks for a product scope decision and starts nothing", () => {
   const issueId = newIssue({ acceptanceCriteria: null });
   const res = startWorkflow(issueId);
@@ -114,6 +131,34 @@ test("startWorkflow with no acceptance criteria asks for a product scope decisio
   assert.equal(getActiveWorkflowInstance(issueId), null);
   assert.equal(getIssue(issueId)!.status, "ready");
   assert.equal(listHumanActionsForIssue(issueId)[0].actionType, "product_scope_decision");
+});
+
+test("repeated startWorkflow calls before criteria are added never create a duplicate product_scope_decision", () => {
+  const issueId = newIssue({ acceptanceCriteria: null });
+  const first = startWorkflow(issueId);
+  const second = startWorkflow(issueId);
+  assert.equal(first.ok, "needs_scope_decision");
+  assert.equal(second.ok, "needs_scope_decision");
+  if (first.ok === "needs_scope_decision" && second.ok === "needs_scope_decision") {
+    assert.equal(first.action.id, second.action.id);
+  }
+  const scopeActions = listHumanActionsForIssue(issueId).filter((a) => a.actionType === "product_scope_decision");
+  assert.equal(scopeActions.length, 1);
+});
+
+test("starting directly (not via resolve) after criteria are added closes out the stale product_scope_decision instead of leaving it open", () => {
+  const issueId = newIssue({ acceptanceCriteria: null });
+  const opened = startWorkflow(issueId);
+  assert.equal(opened.ok, "needs_scope_decision");
+  const actionId = opened.ok === "needs_scope_decision" ? opened.action.id : assert.fail("expected needs_scope_decision");
+
+  updateIssue(issueId, { acceptanceCriteria: "It works now" });
+  const started = startWorkflow(issueId);
+  assert.equal(started.ok, true);
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.id === actionId)!;
+  assert.equal(action.status, "resolved");
+  assert.equal(getIssue(issueId)!.status, "developing");
 });
 
 test("a second startWorkflow while active is rejected with 409", () => {

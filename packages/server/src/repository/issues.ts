@@ -192,6 +192,59 @@ export function transitionIssue(id: string, to: IssueStatus, patch?: TransitionI
   return updated;
 }
 
+export interface UpdateIssuePatch {
+  title?: string;
+  description?: string | null;
+  acceptanceCriteria?: string | null;
+  repo?: string;
+  baseBranch?: string;
+  developerAgentId?: string;
+  reviewerAgentId?: string;
+  maxReviewRounds?: number;
+  maxInfraAttempts?: number;
+}
+
+/** Pre-start (or parked-on-`needs_human`) edits only — the route enforces no active
+ * workflow instance. Never touches status/owner/intent/branch/SHA/PR fields, which are
+ * coordinator-owned (see transitionIssue). */
+export function updateIssue(id: string, patch: UpdateIssuePatch): Issue {
+  const current = getIssue(id);
+  if (!current) throw new Error(`Issue not found: ${id}`);
+  const now = new Date().toISOString();
+  getDb()
+    .prepare(`
+      UPDATE issues SET
+        title = @title,
+        description = @description,
+        acceptance_criteria = @acceptance_criteria,
+        repo = @repo,
+        base_branch = @base_branch,
+        developer_agent_id = @developer_agent_id,
+        reviewer_agent_id = @reviewer_agent_id,
+        max_review_rounds = @max_review_rounds,
+        max_infra_attempts = @max_infra_attempts,
+        updated_at = @updated_at
+      WHERE id = @id
+    `)
+    .run({
+      id,
+      title: patch.title ?? current.title,
+      description: patch.description !== undefined ? patch.description : current.description,
+      acceptance_criteria:
+        patch.acceptanceCriteria !== undefined ? patch.acceptanceCriteria : current.acceptanceCriteria,
+      repo: patch.repo ?? current.repo,
+      base_branch: patch.baseBranch ?? current.baseBranch,
+      developer_agent_id: patch.developerAgentId ?? current.developerAgentId,
+      reviewer_agent_id: patch.reviewerAgentId ?? current.reviewerAgentId,
+      max_review_rounds: patch.maxReviewRounds ?? current.maxReviewRounds,
+      max_infra_attempts: patch.maxInfraAttempts ?? current.maxInfraAttempts,
+      updated_at: now,
+    });
+  const updated = getIssue(id);
+  if (!updated) throw new Error(`Issue vanished: ${id}`);
+  return updated;
+}
+
 export function incrementIssueRound(id: string): Issue {
   const current = getIssue(id);
   if (!current) throw new Error(`Issue not found: ${id}`);

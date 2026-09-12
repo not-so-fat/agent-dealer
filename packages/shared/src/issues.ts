@@ -67,6 +67,21 @@ export const CreateIssueInput = z.object({
 });
 export type CreateIssueInput = z.infer<typeof CreateIssueInput>;
 
+/** Pre-start (or parked-on-`needs_human`) edits only — the route enforces no active
+ * workflow instance; status/owner/intent/branch/SHA/PR stay coordinator-owned. */
+export const UpdateIssueInput = z.object({
+  title: z.string().min(1).optional(),
+  description: z.string().nullable().optional(),
+  acceptanceCriteria: z.string().nullable().optional(),
+  repo: z.string().min(1).optional(),
+  baseBranch: z.string().min(1).optional(),
+  developerAgentId: z.string().uuid().optional(),
+  reviewerAgentId: z.string().uuid().optional(),
+  maxReviewRounds: z.number().int().min(1).optional(),
+  maxInfraAttempts: z.number().int().min(0).optional(),
+});
+export type UpdateIssueInput = z.infer<typeof UpdateIssueInput>;
+
 /**
  * Guard rails only — which status the coordinator may move an issue to next.
  * The *specific* target within an allowed set (e.g. which needs_human resolution

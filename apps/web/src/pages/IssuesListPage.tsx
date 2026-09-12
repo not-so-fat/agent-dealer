@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AgentWithHealth, HumanAction, HumanActionType } from "@agent-dealer/shared";
-import { createIssue, fetchHumanActions, fetchIssues, type IssueListRow } from "../api";
+import { createIssue, fetchHumanActions, fetchIssues, startIssue, type IssueListRow } from "../api";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
 import AlertIcon from "../components/ui/AlertIcon";
 
@@ -56,12 +56,13 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
       return;
     }
     try {
-      await createIssue({
+      const trimmedAcceptance = acceptanceCriteria.trim();
+      const created = await createIssue({
         title,
         repo,
         baseBranch: baseBranch.trim() || "main",
         description: description.trim() || undefined,
-        acceptanceCriteria: acceptanceCriteria.trim() || undefined,
+        acceptanceCriteria: trimmedAcceptance || undefined,
         developerAgentId,
         reviewerAgentId,
         maxReviewRounds: 3,
@@ -73,6 +74,12 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
       setRepo("");
       setDescription("");
       setAcceptanceCriteria("");
+      // Startable the moment it's created — go straight to it and start it, rather than
+      // leaving it silently sitting in `ready` until someone opens it.
+      if (trimmedAcceptance) {
+        await startIssue(created.id);
+        onSelectIssue(created.id);
+      }
       refresh();
     } catch (e) {
       setError(String(e));

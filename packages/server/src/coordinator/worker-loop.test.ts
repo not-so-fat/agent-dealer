@@ -25,9 +25,8 @@ const { listWorkerSessionsForIssue } = await import("../repository/worker-sessio
 const { listWorkItemsForIssue, claimWorkItem, getWorkItem } = await import("../repository/work-items.js");
 const { startWorkflow, applyCompletion, resolveHumanActionAndAdvance } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
-const { runCoordinatorTick, drainCoordinator, activeAttemptCount } = await import(
-  "./worker-loop.js"
-);
+const { runCoordinatorTick, drainCoordinator, activeAttemptCount, startCoordinatorLoop, stopCoordinatorLoop } =
+  await import("./worker-loop.js");
 const { recoverCoordinator } = await import("./recovery.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
 
@@ -292,6 +291,34 @@ function restoreEnv(key: string, prev: string | undefined): void {
   if (prev === undefined) delete process.env[key];
   else process.env[key] = prev;
 }
+
+test("startCoordinatorLoop actually polls and drives an issue forward without any manual tick (NOT-65 wiring)", async () => {
+  const prevPoll = process.env.COORDINATOR_POLL_INTERVAL_MS;
+  process.env.COORDINATOR_POLL_INTERVAL_MS = "10";
+  try {
+    const issueId = newIssue();
+    registerEffectHandler("developer", async () => cleanHandoff());
+    registerEffectHandler("reviewer", async () => approvedVerdict);
+    startWorkflow(issueId);
+
+    startCoordinatorLoop();
+    try {
+      // Poll the DB (not runCoordinatorTick) — this is the same interval-driven loop
+      // index.ts wires into the real server, not a test harness calling the tick fn.
+      const deadline = Date.now() + 5000;
+      while (getIssue(issueId)!.status !== "final_review" && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    } finally {
+      stopCoordinatorLoop();
+      await drainCoordinator();
+    }
+
+    assert.equal(getIssue(issueId)!.status, "final_review");
+  } finally {
+    restoreEnv("COORDINATOR_POLL_INTERVAL_MS", prevPoll);
+  }
+});
 
 test("placeholder handlers escalate rather than fabricating a PR", async () => {
   const issueId = newIssue();

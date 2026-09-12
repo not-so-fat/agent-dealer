@@ -25,6 +25,15 @@ function rowToArtifact(row: ArtifactRow): IssueArtifact {
   };
 }
 
+/** Scoped to the issue so a caller can't fetch an artifact belonging to a different
+ * issue by guessing/incrementing an id — used by the raw-trace route. */
+export function getIssueArtifact(issueId: string, artifactId: string): IssueArtifact | null {
+  const row = getDb()
+    .prepare("SELECT * FROM artifacts WHERE id = ? AND issue_id = ?")
+    .get(artifactId, issueId) as ArtifactRow | undefined;
+  return row ? rowToArtifact(row) : null;
+}
+
 export function listArtifactsForIssue(
   issueId: string,
   opts?: { limit?: number; before?: string }

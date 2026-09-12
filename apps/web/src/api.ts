@@ -24,11 +24,13 @@ import type {
   Run,
   StreamTraceContent,
   UpdateAgentInput,
+  UpdateIssueInput,
   UsageContent,
   UsageEvent,
   UsageSummary,
   WorkerSession,
   WorkflowEvent,
+  WorkflowInstance,
 } from "@agent-dealer/shared";
 import { clearCachedRuntimeModels, fetchRuntimeModelsDeduped } from "./lib/runtimeModelsCache";
 
@@ -453,11 +455,23 @@ export interface IssueDetail {
   humanActions: HumanAction[];
   findings: Finding[];
   usageSummary: { totalCostUsd: number; totalDurationMs: number; totalTokensIn: number; totalTokensOut: number };
+  readiness: { ok: boolean; missing: string[] };
+  humanWaitMs: number;
+  interventionCount: number;
+  latestWorkflowInstance: WorkflowInstance | null;
 }
 
 export interface IssueEvidence {
   workerSessions: WorkerSession[];
-  artifacts: Array<{ id: string; kind: string; contentJson: string | null; createdAt: string }>;
+  artifacts: Array<{
+    id: string;
+    kind: string;
+    workerSessionId: string | null;
+    contentJson: string | null;
+    blobPath: string | null;
+    author: string;
+    createdAt: string;
+  }>;
   usageEvents: UsageEvent[];
 }
 
@@ -480,12 +494,41 @@ export async function fetchIssueEvidence(id: string): Promise<IssueEvidence> {
   return res.json();
 }
 
+export async function fetchIssueArtifactTrace(
+  issueId: string,
+  artifactId: string
+): Promise<{ content: string; path: string; kind: string }> {
+  const res = await fetch(`${API}/api/issues/${issueId}/artifacts/${artifactId}/trace`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 export async function createIssue(input: CreateIssueInput): Promise<Issue> {
   const res = await fetch(`${API}/api/issues`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export async function patchIssue(id: string, patch: UpdateIssueInput): Promise<Issue> {
+  const res = await fetch(`${API}/api/issues/${id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export type StartIssueResult =
+  | { instance: WorkflowInstance; workItem: { id: string; kind: string } }
+  | { needsScopeDecision: HumanAction };
+
+export async function startIssue(id: string): Promise<StartIssueResult> {
+  const res = await fetch(`${API}/api/issues/${id}/start`, { method: "POST" });
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
 }
@@ -502,6 +545,27 @@ export async function guideIssue(id: string, markdown: string): Promise<Workflow
 
 export async function fetchHumanActions(): Promise<HumanAction[]> {
   const res = await fetch(`${API}/api/human-actions`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export interface ResolveHumanActionResult {
+  issueStatus: IssueStatus;
+  nextWorkItemId: string | null;
+  instanceCompleted: boolean;
+  restarted: boolean;
+}
+
+export async function resolveHumanAction(
+  id: string,
+  resolvedBy: string,
+  choice: string
+): Promise<ResolveHumanActionResult> {
+  const res = await fetch(`${API}/api/human-actions/${id}/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ resolvedBy, choice }),
+  });
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
 }
