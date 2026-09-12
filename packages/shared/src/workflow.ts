@@ -30,6 +30,11 @@ export const WorkflowEventType = z.enum([
   "final_review.requested",
   "issue.completed",
   "issue.closed",
+  /** Migration-only — the NOT-66 cutover repoints a legacy `events` row under this type,
+   * preserving the original type/payload inside `payloadJson` (see `role: "legacy"` on
+   * `WorkerSessionRole` and `outcome: "migrated"` on `WorkflowInstanceOutcome` for the same
+   * migration-sentinel pattern). The new coordinator never emits it. */
+  "legacy.imported",
 ]);
 export type WorkflowEventType = z.infer<typeof WorkflowEventType>;
 

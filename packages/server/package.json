@@ -18,6 +18,7 @@
     "build": "tsc && cp src/db/schema.sql dist/db/schema.sql",
     "start": "node dist/index.js",
     "db:migrate": "tsx src/db/migrate.ts",
+    "db:migrate-to-issues": "tsx src/db/migrate-to-issues.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
