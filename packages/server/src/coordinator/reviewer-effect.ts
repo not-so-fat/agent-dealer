@@ -41,6 +41,7 @@ import {
 import { bindAndVerify, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adapters/github.js";
 import { getWorkerSession } from "../repository/worker-sessions.js";
+import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
@@ -257,6 +258,15 @@ export async function runReviewerEffect(
       playbookIds: snapshot?.playbookIds,
       guidance: guidance.length ? guidance : undefined,
     });
+
+    // NOT-83 review finding — see developer-effect.ts's identical check for the full
+    // rationale: re-verify this item is still leased right before the real spawn, since an
+    // abort during worktree/deck-bind setup above can cancel it before ctx.signal's
+    // heartbeat-driven abort would ever trip. Never remove the worktree here — nothing has
+    // run in it yet.
+    if (getWorkItem(workItem.id)?.status !== "leased") {
+      return { kind: "session_failed" };
+    }
 
     const spawnStartedAt = Date.now();
     const spawned = await deps.spawn({

@@ -22,11 +22,16 @@ process.env.CHECKS_POLL_INTERVAL_MS = "10";
 const { migrate, getDb } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
 const { createIssue, getIssue } = await import("../repository/issues.js");
-const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
-const { listWorkItemsForIssue } = await import("../repository/work-items.js");
+const { listWorkerSessionsForIssue, createWorkerSession, startSession } = await import(
+  "../repository/worker-sessions.js"
+);
+const { listWorkItemsForIssue, claimWorkItem, bindWorkItemSession, cancelWorkItem } = await import(
+  "../repository/work-items.js"
+);
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listUsageEventsForIssue } = await import("../repository/usage-events.js");
+const { getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
 const { startWorkflow, resolveHumanActionAndAdvance } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
 const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
@@ -677,4 +682,48 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
     fs.rmSync(isoRepo, { recursive: true, force: true });
     fs.rmSync(isoRemote, { recursive: true, force: true });
   }
+});
+
+test("NOT-83 review: an item cancelled during worktree/deck-bind setup (before spawn) is never spawned", async () => {
+  const issueId = await makeIssue();
+  startWorkflow(issueId);
+
+  // Replicates worker-loop.ts's own session setup (claim → create session → bind → start)
+  // instead of going through the real pump loop — this makes the "cancelled sometime after
+  // the session was marked running, but before this handler reaches spawn" window
+  // deterministic instead of racing real git subprocess timing.
+  const claimed = claimWorkItem(`test-${issueId}`, { leaseMs: 60_000 })!;
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: claimed.round,
+    agentId: null,
+    runtime: "claude_code",
+  });
+  assert.ok(bindWorkItemSession(claimed.id, session.id, claimed.leaseToken!));
+  startSession(session.id);
+
+  // Simulates an abort landing while this handler is still inside worktree/deck-bind setup
+  // (developer-effect.ts's guard runs after that, right before spawn) — cancelWorkItem is
+  // exactly what abortIssue (commands.ts) calls in that scenario.
+  assert.ok(cancelWorkItem(claimed.id));
+
+  let spawnCalled = false;
+  const spySpawn: SpawnFn = async (input) => {
+    spawnCalled = true;
+    return commitingSpawn(input);
+  };
+
+  const outcome = await runDeveloperEffect(
+    {
+      workItem: { ...claimed, workerSessionId: session.id },
+      issue: getIssue(issueId)!,
+      instance: getActiveWorkflowInstance(issueId)!,
+      signal: new AbortController().signal,
+    },
+    { spawn: spySpawn, github: fakeGithub() }
+  );
+
+  assert.equal(spawnCalled, false, "a cancelled item must never reach the real spawn");
+  assert.deepEqual(outcome, { kind: "session_failed" });
 });

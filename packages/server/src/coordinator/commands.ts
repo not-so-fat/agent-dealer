@@ -931,27 +931,37 @@ export interface AbortIssueDeps {
 
 const defaultAbortDeps: AbortIssueDeps = { killProcess: killRunProcess };
 
+interface AbortTxResult {
+  alreadyClosed: boolean;
+  issueStatus: Issue["status"];
+  runningSessionIds: string[];
+}
+
 /**
  * NOT-83: the operator escape hatch for one issue. Idempotent — a repeated call once the
- * issue is already `done`/`closed` returns that state with no transaction and no new
- * event (ISSUE_STATUS_TRANSITIONS has no outgoing edges from either, so transitionIssue
- * would otherwise throw). Otherwise, one transaction terminalizes every durable piece of
- * the workflow (work item, open human actions, worker sessions, the issue itself, and —
- * if one is active — the workflow instance), and only after that commits does it reach
- * outside the DB to SIGTERM a still-running session's child process. Fencing a late
- * completion needs no extra code here: cancelWorkItem flips the item off `leased`/
- * `pending`, so the in-flight attempt's own lease-token-fenced finishWorkItem CAS simply
- * stops matching when it eventually calls applyCompletion.
+ * issue is already `done`/`closed` returns that state with no new event
+ * (ISSUE_STATUS_TRANSITIONS has no outgoing edges from either, so transitionIssue would
+ * otherwise throw). That terminal re-check is done INSIDE the transaction (re-reading the
+ * issue there, not trusting the pre-transaction read above it) — otherwise two concurrent
+ * aborts on the same issue could both pass the outer check and the loser would crash on
+ * `transitionIssue`'s "closed → closed" instead of returning `alreadyClosed: true`.
+ * Otherwise, one transaction terminalizes every durable piece of the workflow (work item,
+ * open human actions, worker sessions, the issue itself, and — if one is active — the
+ * workflow instance), and only after that commits does it reach outside the DB to SIGTERM a
+ * still-running session's child process. Fencing a late completion needs no extra code
+ * here: cancelWorkItem flips the item off `leased`/`pending`, so the in-flight attempt's
+ * own lease-token-fenced finishWorkItem CAS simply stops matching when it eventually calls
+ * applyCompletion.
  */
 export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssueDeps = defaultAbortDeps): AbortResult {
-  const issue = getIssue(issueId);
-  if (!issue) return { ok: false, code: 404, error: "Issue not found" };
+  if (!getIssue(issueId)) return { ok: false, code: 404, error: "Issue not found" };
 
-  if (issue.status === "done" || issue.status === "closed") {
-    return { ok: true, issueStatus: issue.status, alreadyClosed: true };
-  }
+  const tx = getDb().transaction((): AbortTxResult => {
+    const issue = getIssue(issueId)!;
+    if (issue.status === "done" || issue.status === "closed") {
+      return { alreadyClosed: true, issueStatus: issue.status, runningSessionIds: [] };
+    }
 
-  const runningSessionIds = getDb().transaction((): string[] => {
     const instance = getActiveWorkflowInstance(issueId);
 
     for (const item of listWorkItemsForIssue(issueId)) {
@@ -987,12 +997,12 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
       payload: { reason: "aborted_by_user" },
     });
 
-    return running;
+    return { alreadyClosed: false, issueStatus: "closed", runningSessionIds: running };
   })();
 
   // Outside the transaction, per the ticket contract: terminating a child process is not
   // a DB write, and must happen only once the abort itself is durably committed.
-  for (const sessionId of runningSessionIds) deps.killProcess(sessionId);
+  for (const sessionId of tx.runningSessionIds) deps.killProcess(sessionId);
 
-  return { ok: true, issueStatus: "closed", alreadyClosed: false };
+  return { ok: true, issueStatus: tx.issueStatus, alreadyClosed: tx.alreadyClosed };
 }
