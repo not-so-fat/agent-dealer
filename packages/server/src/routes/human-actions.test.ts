@@ -96,6 +96,16 @@ test("POST resolve requires resolvedBy and choice", async () => {
   await app.close();
 });
 
+test("POST resolve 400s (not 500) on non-string resolvedBy/choice values", async () => {
+  const app = await buildApp();
+  const { action } = seedIssueAwaitingFinalReview();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: 123, choice: "complete" } });
+  assert.equal(res.statusCode, 400);
+  const res2 = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: ["complete"] } });
+  assert.equal(res2.statusCode, 400);
+  await app.close();
+});
+
 test("POST resolve 404s for an unknown action", async () => {
   const app = await buildApp();
   const res = await app.inject({ method: "POST", url: `/api/human-actions/does-not-exist/resolve`, payload: { resolvedBy: "yusuke", choice: "complete" } });

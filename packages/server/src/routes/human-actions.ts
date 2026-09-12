@@ -8,8 +8,12 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
 
   app.post("/api/human-actions/:id/resolve", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const body = req.body as { resolvedBy?: string; choice?: string };
-    if (!body?.resolvedBy?.trim() || !body?.choice?.trim()) {
+    // Runtime-validated, not just cast: an untyped body (e.g. resolvedBy as a number) must
+    // 400, not throw past `.trim()` into an uncaught 500.
+    const body = req.body as Record<string, unknown> | undefined;
+    const resolvedBy = typeof body?.resolvedBy === "string" ? body.resolvedBy.trim() : "";
+    const choice = typeof body?.choice === "string" ? body.choice.trim() : "";
+    if (!resolvedBy || !choice) {
       return reply.status(400).send({ error: "resolvedBy and choice are required" });
     }
 
@@ -18,15 +22,17 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
     const action = getHumanAction(id);
     if (!action) return reply.status(404).send({ error: "Human action not found" });
 
-    const result = resolveHumanActionAndAdvance(id, body.resolvedBy, body.choice);
+    const result = resolveHumanActionAndAdvance(id, resolvedBy, choice);
     if (!result.ok) return reply.status(result.code).send({ error: result.error });
 
-    // Reflect is a best-effort network call to Agent Deck — it cannot run inside
-    // resolveHumanActionAndAdvance's synchronous DB transaction, so it happens after the
-    // resolution has already committed. Its own outcome never changes this response; it
-    // only ever adds artifacts a caller can inspect via GET /api/issues/:id/evidence.
+    // Reflect is a best-effort network call to Agent Deck (health check + a sequential
+    // fetch/propose round trip per playbook) — resolution has already committed above, so
+    // this must not hold the HTTP response hostage behind it: a slow/offline deck would
+    // otherwise risk a client timeout on an already-resolved action, whose retry then gets
+    // a spurious 409. Fire-and-forget; triggerIssueReflect never throws (it records its own
+    // outcome as artifacts), so there is nothing here to await or react to.
     if (result.triggerReflect) {
-      await triggerIssueReflect(action.issueId).catch(() => "failed" as const);
+      void triggerIssueReflect(action.issueId).catch(() => {});
     }
 
     return {

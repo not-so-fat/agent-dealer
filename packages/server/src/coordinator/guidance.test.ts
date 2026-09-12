@@ -10,7 +10,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-gu
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue } = await import("../repository/issues.js");
-const { createWorkerSession } = await import("../repository/worker-sessions.js");
+const { createWorkerSession, startSession } = await import("../repository/worker-sessions.js");
 const { appendWorkflowEvent } = await import("../repository/workflow-events.js");
 const { guidanceForNextSession } = await import("./guidance.js");
 
@@ -82,4 +82,27 @@ test("guidance added while a session is running is deferred to the next session,
   const round1Reviewer = addSession(issueId, "reviewer", 1);
 
   assert.deepStrictEqual(guidanceForNextSession(issueId, round1Reviewer.id), ["Mid-session note"]);
+});
+
+// PR #11 review: worker-loop.ts marks a session "running" (startSession) BEFORE its
+// worktree setup and deck bind, both of which take real wall-clock time before
+// guidanceForNextSession is actually called to build the prompt. Guidance posted in that
+// gap must still be deferred to the *next* session, not swept into this one just because
+// the call happened a few seconds late.
+test("guidance posted after the session starts running (but before its prompt is actually built) is deferred to the next session", async () => {
+  const issueId = seedIssue();
+  const round1Dev = addSession(issueId, "developer", 1);
+  startSession(round1Dev.id); // sets startedAt — the snapshot moment guidanceForNextSession must anchor to
+  await sleep(5);
+  // Simulates guidance posted during worktree setup / deck bind, i.e. after the session
+  // already started but before this function is actually invoked for it.
+  appendWorkflowEvent({ issueId, type: "guidance.added", actorType: "human", stage: "developing", payload: { markdown: "Posted during worktree setup" } });
+
+  // Called "late", as if setup took a few seconds — must not see guidance posted after
+  // this session's own startedAt.
+  assert.deepStrictEqual(guidanceForNextSession(issueId, round1Dev.id), []);
+
+  await sleep(5);
+  const round1Reviewer = addSession(issueId, "reviewer", 1);
+  assert.deepStrictEqual(guidanceForNextSession(issueId, round1Reviewer.id), ["Posted during worktree setup"]);
 });

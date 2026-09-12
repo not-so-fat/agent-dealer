@@ -12,13 +12,32 @@
 // the coordinator already recorded: the developer's final implementation conclusion and
 // the review verdicts/findings accumulated across rounds — the "final implementation
 // conclusion + review history as input" the design doc calls for, minus the extra spawn.
-import { parseStringList } from "@agent-dealer/shared";
+import type { Issue } from "@agent-dealer/shared";
+import { parseProfileSnapshot, parseStringList } from "@agent-dealer/shared";
 import { checkAgentDeckHealth, fetchPlaybook, proposePlaybookPatch } from "../adapters/agent-deck.js";
 import { getIssue } from "../repository/issues.js";
 import { getAgent } from "../repository/agents.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { listWorkflowEventsForIssue } from "../repository/workflow-events.js";
+import { listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
+
+/**
+ * The reflect proposal must target the deck/playbooks the developer actually ran with —
+ * not whatever the live, possibly-since-edited agent profile says now. The frozen
+ * `profileSnapshotJson` on the issue's most recent developer session is the ground truth
+ * (design §"Immutable execution-profile snapshot"); only a session with no snapshot
+ * recorded (a legacy/pre-NOT-60 row) falls back to a live profile resolve.
+ */
+function resolveReflectTargets(issue: Issue): { deckId: string | null; playbookIds: string[] } {
+  const developerSessions = listWorkerSessionsForIssue(issue.id).filter((s) => s.role === "developer");
+  const finalSession = developerSessions[developerSessions.length - 1] ?? null;
+  const snapshot = finalSession ? parseProfileSnapshot(finalSession.profileSnapshotJson) : null;
+  if (snapshot) return { deckId: snapshot.deckId, playbookIds: snapshot.playbookIds };
+
+  const developerAgent = issue.developerAgentId ? getAgent(issue.developerAgentId) : null;
+  return { deckId: developerAgent?.deckId ?? null, playbookIds: parseStringList(developerAgent?.playbookIdsJson) };
+}
 
 export interface ReflectDeps {
   checkHealth: typeof checkAgentDeckHealth;
@@ -87,9 +106,7 @@ export async function triggerIssueReflect(
   const issue = getIssue(issueId);
   if (!issue) return "skipped";
 
-  const developerAgent = issue.developerAgentId ? getAgent(issue.developerAgentId) : null;
-  const deckId = developerAgent?.deckId ?? null;
-  const playbookIds = parseStringList(developerAgent?.playbookIdsJson);
+  const { deckId, playbookIds } = resolveReflectTargets(issue);
   if (!deckId || playbookIds.length === 0) return "skipped";
 
   const healthy = await deps.checkHealth().catch(() => false);

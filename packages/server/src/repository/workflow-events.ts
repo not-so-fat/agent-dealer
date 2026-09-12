@@ -208,16 +208,31 @@ export function listWorkflowEventsForIssue(issueId: string): WorkflowEvent[] {
 }
 
 /**
- * `guidance.added` markdown for an issue, added after `sinceTs` (exclusive) — the raw
- * material for NOT-64's guidance injection. `sinceTs` is null for an issue's very first
- * session (nothing has been shown yet, so every guidance event so far applies).
+ * `guidance.added` markdown for an issue, added after `sinceTs` (exclusive) and no later
+ * than `untilTs` (inclusive, when given) — the raw material for NOT-64's guidance
+ * injection. `sinceTs` is null for an issue's very first session (nothing has been shown
+ * yet, so every guidance event up to `untilTs` applies). `untilTs` anchors the window to
+ * the current session's own snapshot moment rather than "whenever this happens to be
+ * called" — see guidance.ts's `guidanceForNextSession` doc comment.
  */
-export function listGuidanceMarkdownForIssue(issueId: string, sinceTs: string | null): string[] {
-  const rows = getDb()
-    .prepare(
-      "SELECT * FROM workflow_events WHERE issue_id = ? AND type = 'guidance.added' AND ts > ? ORDER BY ts ASC"
-    )
-    .all(issueId, sinceTs ?? "") as WorkflowEventRow[];
+export function listGuidanceMarkdownForIssue(
+  issueId: string,
+  sinceTs: string | null,
+  untilTs?: string | null
+): string[] {
+  const rows = (
+    untilTs
+      ? getDb()
+          .prepare(
+            "SELECT * FROM workflow_events WHERE issue_id = ? AND type = 'guidance.added' AND ts > ? AND ts <= ? ORDER BY ts ASC"
+          )
+          .all(issueId, sinceTs ?? "", untilTs)
+      : getDb()
+          .prepare(
+            "SELECT * FROM workflow_events WHERE issue_id = ? AND type = 'guidance.added' AND ts > ? ORDER BY ts ASC"
+          )
+          .all(issueId, sinceTs ?? "")
+  ) as WorkflowEventRow[];
   return rows
     .map((row) => {
       try {
