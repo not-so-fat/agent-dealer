@@ -238,6 +238,53 @@ test("GET /api/issues/:id/artifacts/:artifactId/trace serves the artifact's raw 
   await app.close();
 });
 
+test("GET /api/issues/:id/artifacts/:artifactId/trace ignores a non-numeric max instead of returning the whole file", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Huge trace", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+  ).json() as { id: string };
+  // Reproduces the exact repro from review: a file well over the 200,000-char hard cap.
+  const logPath = tmpTraceFile("x".repeat(250_001));
+  const artifact = createIssueArtifact({ issueId: created.id, kind: "developer_transcript", author: "system", blobPath: logPath });
+
+  const res = await app.inject({ method: "GET", url: `/api/issues/${created.id}/artifacts/${artifact.id}/trace?max=not-a-number` });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { content: string };
+  // Falls back to the default (50,000), not NaN-collapsing to the entire 250,001-char file.
+  assert.equal(body.content.length, 50_000);
+  await app.close();
+});
+
+test("GET /api/issues/:id/artifacts/:artifactId/trace clamps a negative max to the default and an oversized max to the hard cap", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Bounds", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+  ).json() as { id: string };
+  const logPath = tmpTraceFile("y".repeat(250_001));
+  const artifact = createIssueArtifact({ issueId: created.id, kind: "developer_transcript", author: "system", blobPath: logPath });
+
+  const negative = await app.inject({ method: "GET", url: `/api/issues/${created.id}/artifacts/${artifact.id}/trace?max=-5` });
+  assert.equal((negative.json() as { content: string }).content.length, 50_000);
+
+  const oversized = await app.inject({ method: "GET", url: `/api/issues/${created.id}/artifacts/${artifact.id}/trace?max=999999999` });
+  assert.equal((oversized.json() as { content: string }).content.length, 200_000);
+  await app.close();
+});
+
+test("GET /api/issues/:id/artifacts/:artifactId/trace returns the actual tail, not zeroed/garbage bytes, for a large file", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Tail correctness", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+  ).json() as { id: string };
+  const logPath = tmpTraceFile(`${"z".repeat(300_000)}END-OF-TRACE`);
+  const artifact = createIssueArtifact({ issueId: created.id, kind: "developer_transcript", author: "system", blobPath: logPath });
+
+  const res = await app.inject({ method: "GET", url: `/api/issues/${created.id}/artifacts/${artifact.id}/trace?max=100` });
+  const body = res.json() as { content: string };
+  assert.equal(body.content, `${"z".repeat(88)}END-OF-TRACE`);
+  await app.close();
+});
+
 test("GET /api/issues/:id/artifacts/:artifactId/trace 404s for an artifact with no raw trace", async () => {
   const app = await buildApp();
   const created = (

@@ -17,6 +17,37 @@ import { listFindingsForIssue } from "../repository/findings.js";
 import { checkIssueReadiness, startWorkflow } from "../coordinator/commands.js";
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
 
+const TRACE_DEFAULT_MAX_CHARS = 50_000;
+const TRACE_HARD_MAX_CHARS = 200_000;
+
+/** Non-numeric, non-finite, zero, or negative all fall back to the default rather than
+ * disabling the cap — `Number("not-a-number")` is NaN, and `Math.min(NaN, N)` is NaN,
+ * which made the original `.slice(-NaN)` behave as `.slice(0)` (the whole file). */
+function parseTraceMaxChars(raw: string | undefined): number {
+  const n = raw !== undefined ? Number(raw) : TRACE_DEFAULT_MAX_CHARS;
+  if (!Number.isFinite(n) || n <= 0) return TRACE_DEFAULT_MAX_CHARS;
+  return Math.min(Math.floor(n), TRACE_HARD_MAX_CHARS);
+}
+
+/** Reads at most the last `maxChars` characters of a file without loading the whole
+ * file into memory first: seeks to a byte offset sized for the worst case (4 bytes per
+ * UTF-8 char) and reads only that tail, so a very large trace file never blocks the
+ * event loop or bloats the response regardless of `maxChars`. */
+function readTraceTail(filePath: string, maxChars: number): string {
+  const size = fs.statSync(filePath).size;
+  const start = Math.max(0, size - maxChars * 4);
+  const length = size - start;
+  if (length <= 0) return "";
+  const buf = Buffer.alloc(length);
+  const fd = fs.openSync(filePath, "r");
+  try {
+    fs.readSync(fd, buf, 0, length, start);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return buf.toString("utf8").slice(-maxChars);
+}
+
 export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/issues", async (req) => {
     const status = (req.query as { status?: string }).status;
@@ -77,9 +108,8 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     if (!artifact) return reply.status(404).send({ error: "Not found" });
     if (!artifact.blobPath) return reply.status(404).send({ error: "This artifact has no raw trace" });
     if (!fs.existsSync(artifact.blobPath)) return reply.status(404).send({ error: "Trace file missing on disk" });
-    const max = Math.min(Number((req.query as { max?: string }).max ?? 50000), 200000);
-    const raw = fs.readFileSync(artifact.blobPath, "utf8");
-    return { content: raw.slice(-max), path: artifact.blobPath, kind: artifact.kind };
+    const max = parseTraceMaxChars((req.query as { max?: string }).max);
+    return { content: readTraceTail(artifact.blobPath, max), path: artifact.blobPath, kind: artifact.kind };
   });
 
   app.post("/api/issues", async (req, reply) => {
