@@ -11,6 +11,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-is
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { registerIssueRoutes } = await import("./issues.js");
+const { transitionIssue } = await import("../repository/issues.js");
 
 before(() => {
   migrate();
@@ -120,6 +121,35 @@ test("PATCH /api/issues/:id rejects an edit while a workflow is active", async (
   ).json() as { id: string };
   const startRes = await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` });
   assert.equal(startRes.statusCode, 200);
+
+  const patchRes = await app.inject({ method: "PATCH", url: `/api/issues/${created.id}`, payload: { title: "Renamed" } });
+  assert.equal(patchRes.statusCode, 409);
+  await app.close();
+});
+
+test("PATCH /api/issues/:id rejects an edit to a terminal (done) issue even though it has no active workflow", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Completed issue",
+        repo: "/repo",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "Ready to go",
+      },
+    })
+  ).json() as { id: string };
+  // Drive it to a terminal status directly — a `done` issue has no active workflow
+  // instance either, which is exactly the gap: "no active instance" alone must not be
+  // read as "editable."
+  transitionIssue(created.id, "developing");
+  transitionIssue(created.id, "reviewing");
+  transitionIssue(created.id, "final_review");
+  transitionIssue(created.id, "done");
 
   const patchRes = await app.inject({ method: "PATCH", url: `/api/issues/${created.id}`, payload: { title: "Renamed" } });
   assert.equal(patchRes.statusCode, 409);

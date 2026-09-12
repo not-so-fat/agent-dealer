@@ -463,7 +463,15 @@ export interface IssueDetail {
 
 export interface IssueEvidence {
   workerSessions: WorkerSession[];
-  artifacts: Array<{ id: string; kind: string; contentJson: string | null; createdAt: string }>;
+  artifacts: Array<{
+    id: string;
+    kind: string;
+    workerSessionId: string | null;
+    contentJson: string | null;
+    blobPath: string | null;
+    author: string;
+    createdAt: string;
+  }>;
   usageEvents: UsageEvent[];
 }
 

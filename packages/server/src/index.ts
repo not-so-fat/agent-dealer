@@ -12,6 +12,9 @@ import { registerHumanActionRoutes } from "./routes/human-actions.js";
 import { startQueue, recoverOrphanedRuns } from "./queue/dispatcher.js";
 import { recoverCoordinator } from "./coordinator/recovery.js";
 import { startCoordinatorLoop } from "./coordinator/worker-loop.js";
+import { registerEffectHandler } from "./coordinator/effect-registry.js";
+import { runDeveloperEffect } from "./coordinator/developer-effect.js";
+import { runReviewerEffect } from "./coordinator/reviewer-effect.js";
 import { registerStaticUi } from "./static-ui.js";
 
 const { mode, envFile } = loadAgentDealerEnv();
@@ -35,6 +38,12 @@ async function main(): Promise<void> {
     console.warn(`[startup] recovered ${orphans} orphaned running run(s) → failed`);
   }
   startQueue();
+
+  // Without this, getEffectHandler() falls back to the always-session_failed placeholders
+  // (effect-registry.ts) and every started issue would burn its infra retries and
+  // escalate without ever launching an agent, creating a worktree, or opening a PR.
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx));
 
   const coordinatorRecovery = recoverCoordinator();
   if (coordinatorRecovery.reclaimed.length || coordinatorRecovery.deadLettered.length) {

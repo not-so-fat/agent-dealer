@@ -32,6 +32,7 @@ import {
 } from "../repository/workflow-events.js";
 import {
   createHumanAction,
+  findOpenHumanAction,
   getHumanAction,
   resolveHumanAction,
 } from "../repository/human-actions.js";
@@ -223,12 +224,19 @@ export function startWorkflow(issueId: string): StartResult {
   const issue = getIssue(issueId);
   if (!issue) return { ok: false, code: 404, error: "Issue not found" };
 
+  const preStart = (issue.status === "ready" || issue.status === "needs_human") && !getActiveWorkflowInstance(issueId);
+  // Looked up whenever a fresh start is even possible (not just when criteria are still
+  // missing): a PATCH can add acceptance criteria after this action was opened, and a
+  // caller may retry /start directly instead of going through the resolve endpoint —
+  // that path must still close out the stale action rather than leave it open forever
+  // alongside a running workflow.
+  const openScopeDecision = preStart ? findOpenHumanAction(issueId, "product_scope_decision") : null;
+
   // PRD §6.1: if required product intent cannot be normalized without guessing, ask.
-  if (
-    (issue.status === "ready" || issue.status === "needs_human") &&
-    !getActiveWorkflowInstance(issueId) &&
-    (!issue.acceptanceCriteria || !issue.acceptanceCriteria.trim())
-  ) {
+  if (preStart && (!issue.acceptanceCriteria || !issue.acceptanceCriteria.trim())) {
+    // Idempotent: a repeated pre-criteria /start must return the action already open,
+    // never pile up a duplicate every time it's called.
+    if (openScopeDecision) return { ok: "needs_scope_decision", action: openScopeDecision };
     const action = createHumanAction({
       issueId,
       actionType: "product_scope_decision",
@@ -240,7 +248,22 @@ export function startWorkflow(issueId: string): StartResult {
   }
 
   try {
-    const result = getDb().transaction(() => startWorkflowCore(issueId))();
+    const result = getDb().transaction((): { instance: WorkflowInstance; workItem: WorkItem } => {
+      // Criteria were added (e.g. via PATCH) since this action was opened, and the
+      // caller is starting directly rather than resolving it — close it out in the same
+      // transaction as the start it's unblocking, so it never dangles open indefinitely.
+      if (openScopeDecision) {
+        resolveHumanAction(openScopeDecision.id, "system", { choice: "resume" });
+        appendWorkflowEvent({
+          issueId,
+          type: "human_action.resolved",
+          actorType: "system",
+          stage: issue.status,
+          payload: { actionType: "product_scope_decision", choice: "resume" },
+        });
+      }
+      return startWorkflowCore(issueId);
+    })();
     return { ok: true, ...result };
   } catch (err) {
     if (err instanceof StartPreconditionError) return { ok: false, code: err.code, error: err.message };

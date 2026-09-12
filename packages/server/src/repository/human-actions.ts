@@ -113,6 +113,16 @@ export function listOpenHumanActions(): HumanAction[] {
   return rows.map(rowToAction);
 }
 
+/** The one open action of this type for the issue, if any — used to make re-raising a
+ * pre-start action (e.g. product_scope_decision) idempotent instead of piling up
+ * duplicates across repeated calls. */
+export function findOpenHumanAction(issueId: string, actionType: HumanActionType): HumanAction | null {
+  const row = getDb()
+    .prepare("SELECT * FROM human_actions WHERE issue_id = ? AND action_type = ? AND status = 'open' ORDER BY requested_at ASC LIMIT 1")
+    .get(issueId, actionType) as HumanActionRow | undefined;
+  return row ? rowToAction(row) : null;
+}
+
 export function listHumanActionsForIssue(issueId: string): HumanAction[] {
   const rows = getDb()
     .prepare("SELECT * FROM human_actions WHERE issue_id = ? ORDER BY requested_at ASC")

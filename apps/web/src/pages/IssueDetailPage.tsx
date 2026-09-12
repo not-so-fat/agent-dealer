@@ -19,6 +19,18 @@ type Props = {
 
 const RESOLVED_BY = "web";
 
+/** Pretty-print an artifact's contentJson for the evidence disclosure — prefers a plain
+ * "text" field (implementation conclusions, etc.) over a raw JSON dump. */
+function formatArtifactContent(contentJson: string): string {
+  try {
+    const parsed = JSON.parse(contentJson) as { text?: string };
+    if (typeof parsed.text === "string") return parsed.text;
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return contentJson;
+  }
+}
+
 function fmtDuration(ms: number): string {
   const min = Math.floor(ms / 60_000);
   if (min < 60) return `${min}m`;
@@ -238,18 +250,34 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
             <div className="mt-2 space-y-3 text-xs text-white/60">
               <div>
                 <p className="text-white/45 mb-1">Worker sessions</p>
-                {evidence.workerSessions.map((s) => (
-                  <p key={s.id}>
-                    {s.role} round {s.round} · {s.status}
-                    {s.startedAt && s.completedAt ? ` · ${fmtDuration(new Date(s.completedAt).getTime() - new Date(s.startedAt).getTime())}` : ""}
-                  </p>
-                ))}
+                {evidence.workerSessions.map((s) => {
+                  const usage = evidence.usageEvents.filter((u) => u.workerSessionId === s.id);
+                  const cost = usage.reduce((sum, u) => sum + (u.costUsd ?? 0), 0);
+                  const tokensIn = usage.reduce((sum, u) => sum + (u.tokensIn ?? 0), 0);
+                  const tokensOut = usage.reduce((sum, u) => sum + (u.tokensOut ?? 0), 0);
+                  return (
+                    <p key={s.id}>
+                      {s.role} round {s.round} · {s.status}
+                      {s.startedAt && s.completedAt ? ` · ${fmtDuration(new Date(s.completedAt).getTime() - new Date(s.startedAt).getTime())}` : ""}
+                      {usage.length > 0 ? ` · $${cost.toFixed(3)} · ${tokensIn}→${tokensOut} tok` : ""}
+                    </p>
+                  );
+                })}
                 {evidence.workerSessions.length === 0 && <p className="text-white/35">None yet.</p>}
               </div>
               <div>
                 <p className="text-white/45 mb-1">Artifacts</p>
                 {evidence.artifacts.map((a) => (
-                  <p key={a.id}>{a.kind} · {new Date(a.createdAt).toLocaleString()}</p>
+                  <details key={a.id} className="mb-1.5">
+                    <summary className="cursor-pointer hover:text-white/80">
+                      {a.kind} · {new Date(a.createdAt).toLocaleString()}
+                    </summary>
+                    <div className="mt-1 pl-3 border-l border-white/10 space-y-1">
+                      {a.contentJson && <pre className="whitespace-pre-wrap break-words text-white/55">{formatArtifactContent(a.contentJson)}</pre>}
+                      {a.blobPath && <p className="text-white/40">Raw trace: {a.blobPath}</p>}
+                      {!a.contentJson && !a.blobPath && <p className="text-white/35">No content recorded.</p>}
+                    </div>
+                  </details>
                 ))}
                 {evidence.artifacts.length === 0 && <p className="text-white/35">None yet.</p>}
               </div>

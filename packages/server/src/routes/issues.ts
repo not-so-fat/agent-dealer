@@ -84,9 +84,15 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     if (!issue) return reply.status(404).send({ error: "Not found" });
     const parsed = UpdateIssueInput.safeParse(req.body);
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.message });
-    // Editable only pre-start or parked back on needs_human — a running workflow owns
-    // the frozen task snapshot (commands.ts's freezeTaskSnapshot), so an edit here must
-    // never race or silently diverge from what a queued/running session already saw.
+    // Editable only pre-start or parked back on needs_human — the same statuses
+    // startWorkflow itself accepts (commands.ts). A running workflow owns the frozen
+    // task snapshot (freezeTaskSnapshot), so an edit must never race or diverge from
+    // what a queued/running session already saw — and "no active instance" alone isn't
+    // enough to allow it: a completed/closed issue also has none, but its history must
+    // stay immutable too.
+    if (issue.status !== "ready" && issue.status !== "needs_human") {
+      return reply.status(409).send({ error: `Cannot edit an issue that is ${issue.status}` });
+    }
     if (getActiveWorkflowInstance(id)) {
       return reply.status(409).send({ error: "Cannot edit an issue with an active workflow" });
     }
