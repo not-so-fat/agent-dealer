@@ -410,8 +410,13 @@ function applyReviewer(
       ev.emit(type);
     }
   }
-  if (route.next === "retry_reviewer_at_new_head") {
-    patch.headSha = route.headSha;
+  // Record the newly observed head whenever the outcome IS a stale report — whether it's
+  // being retried (retry_reviewer_at_new_head) or the infra budget is exhausted on this
+  // very stale event (human_action). Gating on route.next alone missed the exhausted
+  // case, leaving issue.headSha pointing at the stale pinned SHA a human "resume" would
+  // then re-queue, going stale again immediately and escalating forever.
+  if (outcome.kind === "stale") {
+    patch.headSha = outcome.currentHeadSha;
   }
 
   // Thread reviewer findings across rounds (PRD §6.4) — every blocking/non-blocking finding.
@@ -442,10 +447,14 @@ type AnyRoute =
   | ReturnType<typeof routeDeveloperOutcome>
   | ReturnType<typeof routeReviewerOutcome>;
 
-/** Infra-bounded retries repeat the same round; the attempt number keeps their
- * idempotency key from colliding with the previous (terminal) attempt's key. */
+/** Every route that spends an infra attempt (projection.ts's advance === "infra") repeats
+ * the same round/head; the attempt number keeps its idempotency key from colliding with
+ * the previous (terminal) attempt's key. retry_reviewer_at_new_head belongs here too — a
+ * head that cycles A→B→A would otherwise re-derive attempt A's ORIGINAL key (same round,
+ * same head, no attempt suffix) and collide with that now-terminal work item, leaving the
+ * issue "reviewing" with no pending item (reproduced by the reviewer). */
 function isInfraRetry(route: AnyRoute): boolean {
-  return route.next === "retry_developer" || route.next === "retry_reviewer";
+  return route.next === "retry_developer" || route.next === "retry_reviewer" || route.next === "retry_reviewer_at_new_head";
 }
 
 function applyEffect(
@@ -498,10 +507,13 @@ function applyEffect(
       workflowInstanceId: instance.id,
       actionType,
       reason: effect.reason,
-      question: questionFor(actionType, effect.reason),
+      question: questionFor(actionType, effect.reason, resumeAsReviewer),
       evidence: reviewerOutcome?.kind === "verdict" ? { review: reviewerOutcome.result } : undefined,
-      continuationPreview: resumeAsReviewer ? { resumeRole: "reviewer", resumeHeadSha: issue.headSha } : undefined,
-      responseOptions: responseOptionsFor(actionType),
+      // issueNow.headSha, not issue.headSha: a stale outcome that itself exhausted the
+      // infra budget already patched the newly observed head onto the issue above — the
+      // pre-transition issue param would still carry the stale SHA a "resume" must not reuse.
+      continuationPreview: resumeAsReviewer ? { resumeRole: "reviewer", resumeHeadSha: issueNow.headSha } : undefined,
+      responseOptions: responseOptionsFor(actionType, resumeAsReviewer),
     });
     if (actionType === "final_review") ev.emit("final_review.requested");
     ev.emit("human_action.requested", { payload: { actionType, actionId: action.id } });
@@ -511,20 +523,22 @@ function applyEffect(
   return base;
 }
 
-function questionFor(actionType: HumanActionType, reason: string): string {
+function questionFor(actionType: HumanActionType, reason: string, resumeAsReviewer = false): string {
   switch (actionType) {
     case "final_review":
       return "Accept this work, send it back for another repair round, or close it?";
     case "attempts_exhausted":
       return "The review-round limit is reached. Retry with a fresh round, or close the issue?";
     case "policy_escalation":
-      return `${reason} Resume development, or close the issue?`;
+      return resumeAsReviewer
+        ? `${reason} Retry the review, or close the issue?`
+        : `${reason} Resume development, or close the issue?`;
     case "product_scope_decision":
       return `${reason} Provide the missing decision to resume.`;
   }
 }
 
-function responseOptionsFor(actionType: HumanActionType): Array<{ choice: string; label: string }> {
+function responseOptionsFor(actionType: HumanActionType, resumeAsReviewer = false): Array<{ choice: string; label: string }> {
   switch (actionType) {
     case "final_review":
       return [
@@ -539,7 +553,7 @@ function responseOptionsFor(actionType: HumanActionType): Array<{ choice: string
       ];
     case "policy_escalation":
       return [
-        { choice: "resume", label: "Resume development" },
+        { choice: "resume", label: resumeAsReviewer ? "Retry review" : "Resume development" },
         { choice: "close", label: "Close" },
       ];
     case "product_scope_decision":
@@ -654,16 +668,20 @@ export function resolveHumanActionAndAdvance(
   // (previously this always said currentRound + 1, which was wrong for infra/none).
   const nextRound =
     outcome.roundKind === "review" || outcome.roundKind === "review_grant" ? issue.currentRound + 1 : issue.currentRound;
+  const resumeStatus = resumeAsReviewer ? "reviewing" : outcome.issueStatus;
 
   return getDb().transaction((): ResolveResult => {
     resolveHumanAction(actionId, resolvedBy, { choice });
-    const ev = eventEmitter(issue, instance, null, outcome.issueStatus, issue.currentRound);
+    // stage must be the status this resolution actually lands on (resumeStatus), not the
+    // generic developer-resume outcome.issueStatus — otherwise a reviewer resume's own
+    // human_action.resolved/repair.started events would be recorded under "developing"
+    // even though the issue transitions to "reviewing".
+    const ev = eventEmitter(issue, instance, null, resumeStatus, issue.currentRound);
     ev.emit("human_action.resolved", {
       actorType: "human",
       payload: { actionType: action.actionType, choice },
     });
 
-    const resumeStatus = resumeAsReviewer ? "reviewing" : outcome.issueStatus;
     transitionIssue(issue.id, resumeStatus, {
       currentOwner:
         resumeStatus === "done" || resumeStatus === "closed" ? "system" : resumeAsReviewer ? "reviewer" : "developer",
@@ -707,7 +725,9 @@ export function resolveHumanActionAndAdvance(
         break;
     }
     const issueNow = getIssue(issue.id)!;
-    ev.emit("repair.started");
+    // A reviewer resume is a retry of the review, not a repair round — mirrors
+    // projection.ts's own retry_reviewer, which likewise emits no "started" marker.
+    if (!resumeAsReviewer) ev.emit("repair.started");
     // Keyed on the resolved human action, not the round/attempt counters: a
     // "infra" resume resets infra_attempts to 0 every time, so a counter-based key would
     // collide across repeated escalate→resume cycles within the same round.

@@ -313,6 +313,74 @@ test("resolving policy_escalation:resume after a reviewer-side infra exhaustion 
   const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
   assert.deepEqual(pending.map((i) => i.kind), ["reviewer"]);
   assert.equal(JSON.parse(pending[0].payloadJson!).inputSha, cleanHandoff.headSha);
+  // The action's own labels must match the operation it actually resumes.
+  assert.match(action.question, /Retry the review/);
+  assert.deepEqual(JSON.parse(action.responseOptionsJson!), [
+    { choice: "resume", label: "Retry review" },
+    { choice: "close", label: "Close" },
+  ]);
+});
+
+test("resolving a reviewer-origin escalation records human_action.resolved under 'reviewing' and never emits repair.started", () => {
+  const issueId = newIssue({ maxInfraAttempts: 0 });
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff);
+  complete(issueId, { kind: "session_failed" });
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+
+  const events = listWorkflowEventsForIssue(issueId);
+  const resolvedEvent = [...events].reverse().find((e) => e.type === "human_action.resolved")!;
+  assert.equal(resolvedEvent.stage, "reviewing", "the resume's own events must reflect the status it actually resumes to");
+  assert.ok(!events.some((e) => e.type === "repair.started"), "a reviewer resume is a review retry, not a repair round");
+});
+
+test("a reviewer head that cycles A→B→A does not collide with the original A enqueue's idempotency key", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff); // reviewer queued pinned to cleanHandoff.headSha ("A")
+  complete(issueId, { kind: "stale", currentHeadSha: "head-B" }); // -> reviewing at B, infraAttempts 1
+
+  const afterB = getIssue(issueId)!;
+  assert.equal(afterB.headSha, "head-B");
+  assert.equal(afterB.infraAttempts, 1);
+
+  complete(issueId, { kind: "stale", currentHeadSha: cleanHandoff.headSha }); // cycles back to A
+  const afterA = getIssue(issueId)!;
+  assert.equal(afterA.headSha, cleanHandoff.headSha);
+  assert.equal(afterA.infraAttempts, 2);
+  assert.equal(afterA.status, "reviewing");
+
+  // Without an attempt number in the key, this enqueue would derive the SAME idempotency
+  // key as the original A enqueue (same instance/round/head) and collide with that now-
+  // terminal work item, silently returning it instead of creating a new pending one.
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer" && i.status === "pending");
+  assert.equal(pending.length, 1, "a fresh reviewer item must be queued at the re-cycled head, not dropped via a key collision");
+  assert.equal(JSON.parse(pending[0].payloadJson!).inputSha, cleanHandoff.headSha);
+});
+
+test("a stale review that exhausts the infra budget still records the newly observed head; resuming queues the reviewer there, not at the old pinned SHA", () => {
+  const issueId = newIssue({ maxInfraAttempts: 0 });
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff); // reviewing at cleanHandoff.headSha ("A")
+  complete(issueId, { kind: "stale", currentHeadSha: "head-B" }); // 0 infra attempts allowed -> exhausts on this very stale event
+
+  const before = getIssue(issueId)!;
+  assert.equal(before.status, "needs_human");
+  assert.equal(before.headSha, "head-B", "the newly observed head must be recorded even though no reviewer ran there yet");
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  assert.deepEqual(JSON.parse(action.continuationPreviewJson!), { resumeRole: "reviewer", resumeHeadSha: "head-B" });
+
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].kind, "reviewer");
+  assert.equal(
+    JSON.parse(pending[0].payloadJson!).inputSha,
+    "head-B",
+    "resuming must review the newly observed head, not the stale SHA that was pinned before the head moved"
+  );
 });
 
 test("resolving policy_escalation:resume after a reviewer's escalated verdict (a real code-level question) still resumes as the developer", () => {
