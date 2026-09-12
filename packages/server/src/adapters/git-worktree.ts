@@ -9,6 +9,7 @@
 // Lifted from archive/not-57-full-p0-slice and extended with role-aware creation,
 // safe (non-destructive) removal, and leftover inspection for crash recovery.
 import { execFile } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { WorkerSessionRole } from "@agent-dealer/shared";
@@ -245,4 +246,117 @@ export async function inspectLeftoverWorktree(worktreePath: string): Promise<Lef
   } catch {
     return "missing";
   }
+}
+
+/**
+ * The checkout path currently holding `branch` in `repo`'s worktree list, if any — `git
+ * worktree add`/checkout refuses a branch already checked out elsewhere, and the failure
+ * message alone doesn't tell the caller whether that other checkout is safe to reuse. Reads
+ * `git worktree list --porcelain`: entries are blank-line-separated blocks of `worktree
+ * <path>` / `HEAD <sha>` / `branch refs/heads/<name>` (omitted entirely for a detached
+ * checkout, which can never be the collision this looks for).
+ */
+export async function findWorktreeForBranch(repo: string, branch: string): Promise<string | null> {
+  const { stdout } = await git(repo, ["worktree", "list", "--porcelain"]);
+  const ref = `refs/heads/${branch}`;
+  let currentPath: string | null = null;
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("worktree ")) currentPath = line.slice("worktree ".length).trim();
+    else if (line.startsWith("branch ") && line.slice("branch ".length).trim() === ref) return currentPath;
+  }
+  return null;
+}
+
+/** `git worktree list` resolves symlinks in the paths it reports (e.g. macOS's /tmp →
+ * /private/tmp); comparing that against a literally-constructed path would misclassify a
+ * coordinator-owned worktree as external. Falls back to the raw path if it doesn't exist. */
+function tryRealpath(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+export type DeveloperWorktreeResolution =
+  | { kind: "created" | "reused"; path: string }
+  | { kind: "conflict"; path: string; reason: string; recoveryCommands: string[] };
+
+/**
+ * The developer-setup half of design §"Worktree lifecycle and concurrency"'s crash-recovery
+ * requirement: a leftover worktree from an earlier round/escalation on the SAME issue branch
+ * must be detected before a fresh `git worktree add` collides with it, not left to surface as
+ * an opaque git error. A clean leftover under this coordinator's own worktrees root is reused
+ * in place (whatever commits it already carries are preserved); a dirty/unpushed one, or one
+ * outside the coordinator's management, is reported as a conflict for a human to resolve
+ * instead of being blindly retried — reusing or force-removing it here would silently discard
+ * or hide work exactly like the dirty-handoff case this mirrors (`safeRemoveWorktree`).
+ */
+export async function resolveDeveloperWorktree(opts: {
+  repo: string;
+  sessionId: string;
+  branchName: string;
+  baseBranch: string;
+  reuseBranch: boolean;
+}): Promise<DeveloperWorktreeResolution> {
+  return withRepoLock(opts.repo, async () => {
+    await pruneWorktrees(opts.repo);
+    const existing = await findWorktreeForBranch(opts.repo, opts.branchName);
+    if (existing) {
+      const underRoot = tryRealpath(existing).startsWith(tryRealpath(worktreesRoot()) + path.sep);
+      if (!underRoot) {
+        return {
+          kind: "conflict",
+          path: existing,
+          reason: `Branch ${opts.branchName} is already checked out at ${existing}, outside the coordinator's managed worktrees — it cannot be safely reused or removed automatically.`,
+          recoveryCommands: [`git -C ${opts.repo} worktree list`, `# free the branch, then Resume: cd ${existing} && git status`],
+        };
+      }
+      const state = await inspectLeftoverWorktree(existing);
+      if (state === "clean") {
+        return { kind: "reused", path: existing };
+      }
+      if (state === "dirty_or_unpushed") {
+        return {
+          kind: "conflict",
+          path: existing,
+          reason: `A previous developer worktree for branch ${opts.branchName} still holds it at ${existing} with uncommitted changes.`,
+          recoveryCommands: [
+            `cd ${existing}`,
+            "git status",
+            "git log --oneline -5",
+            `# once the work there is safe (pushed or intentionally discarded): git -C ${opts.repo} worktree remove ${existing} --force`,
+          ],
+        };
+      }
+      // inspectLeftoverWorktree reports "missing" for ANY `git status` failure, not just a
+      // deleted directory (a review round flagged this: a corrupt/unreadable checkout that's
+      // still on disk and still registered would otherwise be silently reinterpreted as a
+      // harmless stale entry, pruned as a no-op, and immediately re-collide on the `addWorktree`
+      // below — a narrower repeat of the exact loop this function exists to close). Only a
+      // truly gone directory is safe to treat as a stale administrative entry.
+      if (fs.existsSync(existing)) {
+        return {
+          kind: "conflict",
+          path: existing,
+          reason: `A previous developer worktree for branch ${opts.branchName} exists at ${existing} but its status could not be determined.`,
+          recoveryCommands: [
+            `cd ${existing}`,
+            "git status",
+            `# once resolved: git -C ${opts.repo} worktree remove ${existing} --force`,
+          ],
+        };
+      }
+      await pruneWorktrees(opts.repo);
+    }
+    const worktreePath = roleWorktreePath(opts.sessionId, "developer");
+    await addWorktree({
+      repo: opts.repo,
+      path: worktreePath,
+      ref: opts.reuseBranch ? opts.branchName : opts.baseBranch,
+      detach: false,
+      newBranch: opts.reuseBranch ? undefined : opts.branchName,
+    });
+    return { kind: "created", path: worktreePath };
+  });
 }
