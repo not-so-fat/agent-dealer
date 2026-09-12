@@ -279,7 +279,7 @@ test("resolveDeveloperWorktree reports a conflict — with recovery commands —
   assert.equal(resolved.kind, "conflict");
   if (resolved.kind === "conflict") {
     assert.equal(resolved.path, leftover.path);
-    assert.match(resolved.reason, /uncommitted or unpushed/);
+    assert.match(resolved.reason, /uncommitted changes/);
     assert.ok(resolved.recoveryCommands.some((c) => c.includes(leftover.path)));
   }
   assert.ok(fs.existsSync(leftover.path), "a dirty leftover must never be force-removed by resolution");
@@ -318,4 +318,59 @@ test("resolveDeveloperWorktree prunes a stale (directory-deleted) leftover and c
   assert.ok(fs.existsSync(resolved.path));
   fs.rmSync(resolved.path, { recursive: true, force: true });
   await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+test("resolveDeveloperWorktree treats an on-disk leftover whose git status can't be read as a conflict, never as a safe-to-recreate stale entry", async () => {
+  // A review round found: inspectLeftoverWorktree maps ANY `git status` failure to
+  // "missing" — including a leftover that is very much still on disk but whose checkout is
+  // corrupt/unreadable for some other reason. Treating that as a harmless stale entry would
+  // prune (a no-op, since the directory IS there) and fall through to `addWorktree`, which
+  // collides identically with the still-registered worktree — a narrower repeat of the exact
+  // loop this function exists to close.
+  const leftover = await createRoleWorktree({ repo, role: "developer", sessionId: "s-leftover-corrupt", ref: "issue-1" });
+  // Overwriting (not deleting) the worktree's `.git` file pointer keeps `git worktree
+  // prune` from reclaiming the entry (its own liveness check passes — the file exists) while
+  // `git status` inside the worktree now fails outright, reproducing "still registered and
+  // on disk, but status unreadable" without deleting anything prune itself would notice.
+  fs.writeFileSync(path.join(leftover.path, ".git"), "gitdir: /nonexistent/path/that/does/not/exist\n");
+  assert.equal(await inspectLeftoverWorktree(leftover.path), "missing", "sanity: a broken .git link reports as 'missing' too, not just a deleted directory");
+
+  const resolved = await resolveDeveloperWorktree({
+    repo,
+    sessionId: "s-new-session-5",
+    branchName: "issue-1",
+    baseBranch: "main",
+    reuseBranch: true,
+  });
+  assert.equal(resolved.kind, "conflict");
+  if (resolved.kind === "conflict") {
+    assert.equal(resolved.path, leftover.path);
+    assert.match(resolved.reason, /could not be determined/);
+  }
+  assert.ok(fs.existsSync(leftover.path), "never removed out from under an undetermined leftover");
+
+  fs.rmSync(leftover.path, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+test("resolveDeveloperWorktree reports a conflict for a branch checked out outside the coordinator's managed worktrees, without touching it", async () => {
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-external-"));
+  execFileSync("git", ["worktree", "add", external, "issue-1"], { cwd: repo });
+  try {
+    const resolved = await resolveDeveloperWorktree({
+      repo,
+      sessionId: "s-new-session-external",
+      branchName: "issue-1",
+      baseBranch: "main",
+      reuseBranch: true,
+    });
+    assert.equal(resolved.kind, "conflict");
+    if (resolved.kind === "conflict") {
+      assert.equal(fs.realpathSync(resolved.path), fs.realpathSync(external));
+      assert.match(resolved.reason, /outside the coordinator/);
+    }
+    assert.ok(fs.existsSync(external), "an externally managed worktree must never be touched or removed");
+  } finally {
+    execFileSync("git", ["worktree", "remove", "--force", external], { cwd: repo });
+  }
 });

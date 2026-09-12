@@ -563,7 +563,7 @@ test("NOT-88: a leftover dirty worktree escalates as an actionable worktree_conf
     (a) => a.actionType === "policy_escalation" && a.status === "open" && a.id !== firstAction.id
   )!;
   assert.ok(secondAction, "a fresh, actionable escalation — not silence and not a crash");
-  assert.match(secondAction.reason, /uncommitted or unpushed/);
+  assert.match(secondAction.reason, /uncommitted changes/);
   assert.match(secondAction.reason, new RegExp(leftoverPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 
   fs.rmSync(leftoverPath, { recursive: true, force: true });

@@ -320,7 +320,7 @@ export async function resolveDeveloperWorktree(opts: {
         return {
           kind: "conflict",
           path: existing,
-          reason: `A previous developer worktree for branch ${opts.branchName} still holds it at ${existing} with uncommitted or unpushed work.`,
+          reason: `A previous developer worktree for branch ${opts.branchName} still holds it at ${existing} with uncommitted changes.`,
           recoveryCommands: [
             `cd ${existing}`,
             "git status",
@@ -329,8 +329,24 @@ export async function resolveDeveloperWorktree(opts: {
           ],
         };
       }
-      // "missing": a stale worktree-administration entry (its directory is gone but git
-      // hasn't pruned it yet) — prune and fall through to a normal add below.
+      // inspectLeftoverWorktree reports "missing" for ANY `git status` failure, not just a
+      // deleted directory (a review round flagged this: a corrupt/unreadable checkout that's
+      // still on disk and still registered would otherwise be silently reinterpreted as a
+      // harmless stale entry, pruned as a no-op, and immediately re-collide on the `addWorktree`
+      // below — a narrower repeat of the exact loop this function exists to close). Only a
+      // truly gone directory is safe to treat as a stale administrative entry.
+      if (fs.existsSync(existing)) {
+        return {
+          kind: "conflict",
+          path: existing,
+          reason: `A previous developer worktree for branch ${opts.branchName} exists at ${existing} but its status could not be determined.`,
+          recoveryCommands: [
+            `cd ${existing}`,
+            "git status",
+            `# once resolved: git -C ${opts.repo} worktree remove ${existing} --force`,
+          ],
+        };
+      }
       await pruneWorktrees(opts.repo);
     }
     const worktreePath = roleWorktreePath(opts.sessionId, "developer");
