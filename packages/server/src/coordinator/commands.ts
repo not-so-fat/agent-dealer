@@ -42,12 +42,16 @@ import { reconcileFinding } from "../repository/findings.js";
 import { getAgent } from "../repository/agents.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import {
+  cancelWorkItem,
   enqueueWorkItem,
   finishWorkItem,
   getWorkItem,
+  listWorkItemsForIssue,
   type WorkItem,
   type WorkItemKind,
 } from "../repository/work-items.js";
+import { completeSession, listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
+import { killRunProcess } from "../runners/spawn-cli.js";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import {
   routeDeveloperOutcome,
@@ -309,7 +313,7 @@ export function applyCompletion(
   return getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
     if (!before) return { applied: false, reason: "not_found" };
-    if (before.status === "done" || before.status === "dead") {
+    if (before.status === "done" || before.status === "dead" || before.status === "cancelled") {
       return { applied: false, reason: "already_terminal" };
     }
 
@@ -915,4 +919,80 @@ function resolveLegacyTerminalAction(
       triggerReflect: false,
     };
   })();
+}
+
+export type AbortResult =
+  | { ok: true; issueStatus: Issue["status"]; alreadyClosed: boolean }
+  | { ok: false; code: number; error: string };
+
+export interface AbortIssueDeps {
+  killProcess: (sessionId: string) => boolean;
+}
+
+const defaultAbortDeps: AbortIssueDeps = { killProcess: killRunProcess };
+
+/**
+ * NOT-83: the operator escape hatch for one issue. Idempotent — a repeated call once the
+ * issue is already `done`/`closed` returns that state with no transaction and no new
+ * event (ISSUE_STATUS_TRANSITIONS has no outgoing edges from either, so transitionIssue
+ * would otherwise throw). Otherwise, one transaction terminalizes every durable piece of
+ * the workflow (work item, open human actions, worker sessions, the issue itself, and —
+ * if one is active — the workflow instance), and only after that commits does it reach
+ * outside the DB to SIGTERM a still-running session's child process. Fencing a late
+ * completion needs no extra code here: cancelWorkItem flips the item off `leased`/
+ * `pending`, so the in-flight attempt's own lease-token-fenced finishWorkItem CAS simply
+ * stops matching when it eventually calls applyCompletion.
+ */
+export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssueDeps = defaultAbortDeps): AbortResult {
+  const issue = getIssue(issueId);
+  if (!issue) return { ok: false, code: 404, error: "Issue not found" };
+
+  if (issue.status === "done" || issue.status === "closed") {
+    return { ok: true, issueStatus: issue.status, alreadyClosed: true };
+  }
+
+  const runningSessionIds = getDb().transaction((): string[] => {
+    const instance = getActiveWorkflowInstance(issueId);
+
+    for (const item of listWorkItemsForIssue(issueId)) {
+      if (item.status === "pending" || item.status === "leased") cancelWorkItem(item.id);
+    }
+
+    for (const action of listHumanActionsForIssue(issueId)) {
+      if (action.status === "open") {
+        resolveHumanAction(action.id, resolvedBy, { reason: "aborted_by_user" });
+      }
+    }
+
+    const running: string[] = [];
+    for (const session of listWorkerSessionsForIssue(issueId)) {
+      if (session.status === "queued" || session.status === "running") {
+        if (session.status === "running") running.push(session.id);
+        completeSession(session.id, {
+          status: "cancelled",
+          errorJson: JSON.stringify({ reason: "aborted_by_user" }),
+        });
+      }
+    }
+
+    transitionIssue(issueId, "closed", { currentOwner: "system", currentIntent: "Aborted by operator" });
+    if (instance) completeWorkflowInstance(instance.id, "closed");
+    appendWorkflowEvent({
+      issueId,
+      workflowInstanceId: instance?.id ?? null,
+      type: "issue.closed",
+      actorType: "human",
+      actorRef: resolvedBy,
+      stage: "closed",
+      payload: { reason: "aborted_by_user" },
+    });
+
+    return running;
+  })();
+
+  // Outside the transaction, per the ticket contract: terminating a child process is not
+  // a DB write, and must happen only once the abort itself is durably committed.
+  for (const sessionId of runningSessionIds) deps.killProcess(sessionId);
+
+  return { ok: true, issueStatus: "closed", alreadyClosed: false };
 }

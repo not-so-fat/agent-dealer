@@ -256,7 +256,7 @@ CREATE TABLE IF NOT EXISTS work_items (
   kind TEXT NOT NULL,                 -- 'developer' | 'reviewer'
   round INTEGER NOT NULL,
   payload_json TEXT,
-  status TEXT NOT NULL,               -- pending | leased | done | dead
+  status TEXT NOT NULL,               -- pending | leased | done | dead | cancelled
   attempt_count INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 3,
   lease_owner TEXT,

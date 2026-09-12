@@ -14,7 +14,7 @@ import {
 } from "../repository/workflow-events.js";
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
-import { checkIssueReadiness, startWorkflow } from "../coordinator/commands.js";
+import { abortIssue, checkIssueReadiness, startWorkflow } from "../coordinator/commands.js";
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
 
 const TRACE_DEFAULT_MAX_CHARS = 50_000;
@@ -152,6 +152,14 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     if (result.ok === true) return { instance: result.instance, workItem: result.workItem };
     if (result.ok === "needs_scope_decision") return { needsScopeDecision: result.action };
     return reply.status(result.code).send({ error: result.error });
+  });
+
+  app.post("/api/issues/:id/abort", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { resolvedBy?: string } | undefined;
+    const result = abortIssue(id, body?.resolvedBy?.trim() || "human");
+    if (!result.ok) return reply.status(result.code).send({ error: result.error });
+    return { issueStatus: result.issueStatus, alreadyClosed: result.alreadyClosed };
   });
 
   app.post("/api/issues/:id/guidance", async (req, reply) => {

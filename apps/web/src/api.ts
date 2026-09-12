@@ -533,6 +533,21 @@ export async function startIssue(id: string): Promise<StartIssueResult> {
   return res.json();
 }
 
+export interface AbortIssueResult {
+  issueStatus: IssueStatus;
+  alreadyClosed: boolean;
+}
+
+export async function abortIssue(id: string, resolvedBy = "web"): Promise<AbortIssueResult> {
+  const res = await fetch(`${API}/api/issues/${id}/abort`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ resolvedBy }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 export async function guideIssue(id: string, markdown: string): Promise<WorkflowEvent> {
   const res = await fetch(`${API}/api/issues/${id}/guidance`, {
     method: "POST",

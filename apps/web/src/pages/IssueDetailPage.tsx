@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  abortIssue,
   fetchIssueArtifactTrace,
   fetchIssueDetail,
   fetchIssueEvidence,
@@ -85,6 +86,7 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
     : 0;
   const openActions = humanActions.filter((a) => a.status === "open");
   const canEdit = readiness.ok === false || openActions.some((a) => a.actionType === "product_scope_decision");
+  const hasActiveWorkflow = latestWorkflowInstance != null && latestWorkflowInstance.completedAt === null;
 
   const submitGuidance = async () => {
     if (!guidance.trim()) return;
@@ -123,6 +125,22 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
     setError(null);
     try {
       await startIssue(issueId);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doAbort = async () => {
+    if (!confirm("Abort this workflow? The current worker will stop and the issue will close. History and evidence are kept.")) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await abortIssue(issueId);
       refresh();
     } catch (e) {
       setError(String(e));
@@ -185,9 +203,16 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
         </div>
 
         {/* Workflow rail: current node/owner is above; next allowed action here. */}
-        <div className="mb-4 p-3 rounded border border-white/10 bg-panel-elevated/40">
-          <p className="text-xs text-white/45">Next</p>
-          <p className="text-sm text-white/85">{nextActionLabel(detail)}</p>
+        <div className="mb-4 p-3 rounded border border-white/10 bg-panel-elevated/40 flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs text-white/45">Next</p>
+            <p className="text-sm text-white/85">{nextActionLabel(detail)}</p>
+          </div>
+          {hasActiveWorkflow && (
+            <button type="button" className="btn-ghost-danger px-3 py-1.5 text-xs shrink-0 disabled:cursor-not-allowed disabled:opacity-60" disabled={busy} onClick={doAbort}>
+              Abort workflow
+            </button>
+          )}
         </div>
 
         {!readiness.ok && !openActions.some((a) => a.actionType === "product_scope_decision") && (

@@ -14,7 +14,7 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
 
 export type WorkItemKind = "developer" | "reviewer";
-export type WorkItemStatus = "pending" | "leased" | "done" | "dead";
+export type WorkItemStatus = "pending" | "leased" | "done" | "dead" | "cancelled";
 
 export interface WorkItem {
   id: string;
@@ -340,6 +340,31 @@ export function requeueWorkItem(
       now: new Date(now).toISOString(),
     });
   return info.changes > 0;
+}
+
+/**
+ * Force-terminalizes a still-in-flight item to `cancelled` (issue abort, NOT-83) —
+ * deliberately NOT lease-token-fenced, unlike every other terminal transition in this
+ * file: an abort is an operator override of whatever attempt currently holds the lease,
+ * not a completion by that attempt. Once `status` flips, the in-flight attempt's own
+ * token-fenced `finishWorkItem`/`refreshHeartbeat` calls stop matching (`WHERE status =
+ * 'leased' AND lease_token = ?`) on their own, so no other write path needs to change.
+ */
+export function cancelWorkItem(id: string): WorkItem | null {
+  const now = new Date().toISOString();
+  const row = getDb()
+    .prepare(`
+      UPDATE work_items SET
+        status = 'cancelled',
+        lease_owner = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        updated_at = @now
+      WHERE id = @id AND status IN ('pending', 'leased')
+      RETURNING *
+    `)
+    .get({ id, now }) as WorkItemRow | undefined;
+  return row ? rowToWorkItem(row) : null;
 }
 
 /**

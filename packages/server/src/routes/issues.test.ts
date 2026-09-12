@@ -324,3 +324,37 @@ test("POST /api/issues/:id/guidance appends a guidance.added event", async () =>
   assert.ok(detail.timeline.some((e) => e.type === "guidance.added"));
   await app.close();
 });
+
+test("POST /api/issues/:id/abort 404s for an unknown issue", async () => {
+  const app = await buildApp();
+  const res = await app.inject({ method: "POST", url: "/api/issues/does-not-exist/abort" });
+  assert.equal(res.statusCode, 404);
+  await app.close();
+});
+
+test("POST /api/issues/:id/abort closes a fresh issue and is idempotent on repeat", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Abort me", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+  ).json() as { id: string };
+
+  const first = await app.inject({ method: "POST", url: `/api/issues/${created.id}/abort`, payload: { resolvedBy: "yusuke" } });
+  assert.equal(first.statusCode, 200);
+  assert.deepEqual(first.json(), { issueStatus: "closed", alreadyClosed: false });
+
+  const detail = (await app.inject({ method: "GET", url: `/api/issues/${created.id}` })).json() as {
+    issue: { status: string };
+    timeline: Array<{ type: string }>;
+  };
+  assert.equal(detail.issue.status, "closed");
+  assert.equal(detail.timeline.filter((e) => e.type === "issue.closed").length, 1);
+
+  const second = await app.inject({ method: "POST", url: `/api/issues/${created.id}/abort` });
+  assert.equal(second.statusCode, 200);
+  assert.deepEqual(second.json(), { issueStatus: "closed", alreadyClosed: true });
+  const detailAfter = (await app.inject({ method: "GET", url: `/api/issues/${created.id}` })).json() as {
+    timeline: Array<{ type: string }>;
+  };
+  assert.equal(detailAfter.timeline.filter((e) => e.type === "issue.closed").length, 1, "a repeated abort must not append another event");
+  await app.close();
+});
