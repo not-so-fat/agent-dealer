@@ -20,6 +20,7 @@ const { listWorkflowEventsForIssue, listWorkflowInstancesForIssue } = await impo
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { createRun, addArtifact } = await import("../repository/runs.js");
+const { resolveHumanActionAndAdvance, responseOptionsFor } = await import("../coordinator/commands.js");
 
 const NOW = "2026-01-01T00:00:00.000Z";
 
@@ -159,6 +160,47 @@ test("a legacy run left in 'review' seeds an open final_review human action", ()
   assert.equal(actions.length, 1);
   assert.equal(actions[0].actionType, "final_review");
   HumanAction.parse(actions[0]);
+  // Populated from the exact same table the live coordinator uses — a null here means the
+  // production UI parses it as no options and renders nothing to resolve the action with.
+  assert.deepStrictEqual(JSON.parse(actions[0].responseOptionsJson!), responseOptionsFor("final_review"));
+});
+
+test("a migrated final_review action is resolvable end to end through the real coordinator function, for every choice", () => {
+  for (const [choice, expectedStatus] of [
+    ["complete", "done"],
+    ["repair", "needs_human"],
+    ["close", "closed"],
+  ] as const) {
+    freshHome();
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO runs (id, source, external_id, task_category, title, repo, agent_id, status,
+        lineage_id, created_at, updated_at)
+       VALUES ('run-r1', 'manual', 'run-r1', 'code', 'Review task', '/repo', ?, 'review', NULL, ?, ?)`
+    ).run(BUILTIN_AGENT_CLAUDE_ID, NOW, NOW);
+    const dbPath = getDbPath();
+    runMigration(dbPath, { skipServiceCheck: true });
+
+    const issue = listIssues().find((i) => i.title === "Review task")!;
+    const action = listHumanActionsForIssue(issue.id)[0];
+
+    const result = resolveHumanActionAndAdvance(action.id, "tester@example.com", choice);
+    assert.ok(result.ok, `choice "${choice}" should resolve successfully: ${JSON.stringify(result)}`);
+    if (result.ok) {
+      assert.equal(result.issueStatus, expectedStatus, `choice "${choice}"`);
+      assert.equal(result.nextWorkItemId, null, `choice "${choice}" must never queue a work item`);
+    }
+
+    const resolvedAction = listHumanActionsForIssue(issue.id)[0];
+    assert.equal(resolvedAction.status, "resolved");
+    assert.equal(getIssue(issue.id)!.status, expectedStatus);
+
+    // The legacy_v0 instance itself is never touched by this resolution — it was already
+    // terminal ('migrated') when the migration created it.
+    const instances = listWorkflowInstancesForIssue(issue.id);
+    assert.equal(instances.length, 1);
+    assert.equal(instances[0].outcome, "migrated");
+  }
 });
 
 test("after a restart, a fresh legacy run can still write an artifact without a foreign-key violation", () => {
@@ -229,10 +271,67 @@ test("a legacy run left in 'failed' seeds an open attempts_exhausted human actio
   assert.equal(actions.length, 1);
   assert.equal(actions[0].actionType, "attempts_exhausted");
   HumanAction.parse(actions[0]);
+  assert.deepStrictEqual(JSON.parse(actions[0].responseOptionsJson!), responseOptionsFor("attempts_exhausted"));
 
   const sessions = listWorkerSessionsForIssue(issue.id);
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].status, "failed");
+});
+
+test("a migrated attempts_exhausted action is resolvable end to end through the real coordinator function, for every choice", () => {
+  for (const [choice, expectedStatus] of [
+    ["retry", "needs_human"],
+    ["close", "closed"],
+  ] as const) {
+    freshHome();
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO runs (id, source, external_id, task_category, title, repo, agent_id, status,
+        lineage_id, created_at, updated_at)
+       VALUES ('run-f1', 'manual', 'run-f1', 'code', 'Failed task', '/repo', ?, 'failed', NULL, ?, ?)`
+    ).run(BUILTIN_AGENT_CLAUDE_ID, NOW, NOW);
+    const dbPath = getDbPath();
+    runMigration(dbPath, { skipServiceCheck: true });
+
+    const issue = listIssues().find((i) => i.title === "Failed task")!;
+    assert.equal(issue.status, "needs_human");
+    const action = listHumanActionsForIssue(issue.id)[0];
+
+    const result = resolveHumanActionAndAdvance(action.id, "tester@example.com", choice);
+    assert.ok(result.ok, `choice "${choice}" should resolve successfully: ${JSON.stringify(result)}`);
+    if (result.ok) {
+      assert.equal(result.issueStatus, expectedStatus, `choice "${choice}"`);
+      assert.equal(result.nextWorkItemId, null, `choice "${choice}" must never queue a work item`);
+    }
+
+    assert.equal(listHumanActionsForIssue(issue.id)[0].status, "resolved");
+    assert.equal(getIssue(issue.id)!.status, expectedStatus);
+  }
+});
+
+test("resolving a second time returns 409, and an invalid choice returns 400, for a migrated action", () => {
+  freshHome();
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO runs (id, source, external_id, task_category, title, repo, agent_id, status,
+      lineage_id, created_at, updated_at)
+     VALUES ('run-r1', 'manual', 'run-r1', 'code', 'Review task', '/repo', ?, 'review', NULL, ?, ?)`
+  ).run(BUILTIN_AGENT_CLAUDE_ID, NOW, NOW);
+  const dbPath = getDbPath();
+  runMigration(dbPath, { skipServiceCheck: true });
+  const issue = listIssues().find((i) => i.title === "Review task")!;
+  const action = listHumanActionsForIssue(issue.id)[0];
+
+  const badChoice = resolveHumanActionAndAdvance(action.id, "tester@example.com", "not-a-real-choice");
+  assert.equal(badChoice.ok, false);
+  if (!badChoice.ok) assert.equal(badChoice.code, 400);
+
+  const first = resolveHumanActionAndAdvance(action.id, "tester@example.com", "close");
+  assert.ok(first.ok);
+
+  const second = resolveHumanActionAndAdvance(action.id, "tester@example.com", "close");
+  assert.equal(second.ok, false);
+  if (!second.ok) assert.equal(second.code, 409);
 });
 
 test("a legacy run left in 'cancelled' maps to a closed issue with no human action", () => {
@@ -289,6 +388,87 @@ test("a legacy run whose agent was since deleted migrates with a null agent refe
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].agentId, null);
   WorkerSession.parse(sessions[0]);
+});
+
+test("preserves the legacy execution snapshot (runtime, model, budget, lineage) on the migrated session", () => {
+  freshHome();
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO runs (id, source, external_id, task_category, title, repo, agent_id, status,
+      lineage_id, runtime, plan_model, execute_model, budget_json, created_at, updated_at)
+     VALUES ('run-snap1', 'manual', 'run-snap1', 'code', 'Snapshot task', '/repo', ?, 'done',
+       'run-snap1', 'claude_code', 'claude-plan-1', 'claude-execute-1', '{"maxUsd":5}', ?, ?)`
+  ).run(BUILTIN_AGENT_CLAUDE_ID, NOW, NOW);
+  const dbPath = getDbPath();
+
+  const report = runMigration(dbPath, { skipServiceCheck: true });
+  assert.deepStrictEqual(report.mismatches, []);
+
+  const issue = listIssues().find((i) => i.title === "Snapshot task")!;
+  const session = listWorkerSessionsForIssue(issue.id)[0];
+  WorkerSession.parse(session);
+  assert.equal(session.runtime, "claude_code");
+  assert.equal(session.model, "claude-execute-1"); // execute_model wins over plan_model
+  assert.equal(session.budgetJson, '{"maxUsd":5}');
+  const metadata = JSON.parse(session.metadataJson!);
+  assert.equal(metadata.legacyLineageId, "run-snap1");
+  assert.equal(metadata.legacyPlanModel, "claude-plan-1");
+  assert.equal(metadata.legacyExecuteModel, "claude-execute-1");
+});
+
+test("falls back to plan_model when execute_model is absent", () => {
+  freshHome();
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO runs (id, source, external_id, task_category, title, repo, agent_id, status,
+      lineage_id, runtime, plan_model, execute_model, budget_json, created_at, updated_at)
+     VALUES ('run-snap2', 'manual', 'run-snap2', 'code', 'Plan-only task', '/repo', ?, 'done',
+       NULL, 'cursor_local', 'cursor-plan-1', NULL, NULL, ?, ?)`
+  ).run(BUILTIN_AGENT_CLAUDE_ID, NOW, NOW);
+  const dbPath = getDbPath();
+
+  runMigration(dbPath, { skipServiceCheck: true });
+  const issue = listIssues().find((i) => i.title === "Plan-only task")!;
+  const session = listWorkerSessionsForIssue(issue.id)[0];
+  assert.equal(session.model, "cursor-plan-1");
+});
+
+test("refuses via schema validation, before creating a backup, when a run has an unrecognized status", () => {
+  freshHome();
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO runs (id, source, external_id, task_category, title, repo, agent_id, status,
+      lineage_id, created_at, updated_at)
+     VALUES ('run-weird', 'manual', 'run-weird', 'code', 'Weird task', '/repo', ?, 'archived_v0', NULL, ?, ?)`
+  ).run(BUILTIN_AGENT_CLAUDE_ID, NOW, NOW);
+  const dbPath = getDbPath();
+
+  const report = runMigration(dbPath, { skipServiceCheck: true });
+  assert.ok(report.mismatches.length > 0);
+  assert.match(report.mismatches[0], /unrecognized status/);
+  assert.match(report.mismatches[0], /archived_v0/);
+  assert.match(report.mismatches[0], /run-weird/);
+  assert.equal(fs.existsSync(`${dbPath}.pre-issue-migration-backup`), false);
+});
+
+test("refuses to back up when the WAL checkpoint reports busy (a reader holds an older snapshot)", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+
+  // Open a second connection and start a read transaction without committing — this pins
+  // the reader's snapshot, so wal_checkpoint(TRUNCATE) cannot fold everything into the
+  // main file and reports busy.
+  const reader = new Database(dbPath);
+  reader.pragma("journal_mode = WAL");
+  reader.prepare("BEGIN").run();
+  reader.prepare("SELECT * FROM runs").all();
+  try {
+    assert.throws(() => runMigration(dbPath, { skipServiceCheck: true }), /WAL checkpoint could not complete/);
+    assert.equal(fs.existsSync(`${dbPath}.pre-issue-migration-backup`), false);
+  } finally {
+    reader.prepare("COMMIT").run();
+    reader.close();
+  }
 });
 
 test("does not touch a pre-existing genuine issue and its artifacts created before the migration ran", () => {
@@ -554,6 +734,109 @@ test("documented rollback: restores the pre-migration backup and undoes a comple
   const runCount = (restored.prepare("SELECT COUNT(*) AS c FROM runs").get() as { c: number }).c;
   assert.equal(runCount, beforeRunCount);
   restored.close();
+});
+
+test("rollback refuses a corrupt backup file and never touches the live database", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  runMigration(dbPath, { skipServiceCheck: true });
+  closeDb();
+
+  const backupPath = `${dbPath}.pre-issue-migration-backup`;
+  fs.writeFileSync(backupPath, "not a sqlite database");
+
+  const result = rollbackMigration(dbPath, { skipServiceCheck: true });
+  assert.equal(result.rolledBack, false);
+  assert.match(result.detail, /cannot open .* as a SQLite database/);
+
+  // The live (post-migration) database must be exactly as it was — never overwritten by
+  // an unvalidated copy of the corrupt "backup".
+  const live = new Database(dbPath, { readonly: true });
+  const tables = (live.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+    (t) => t.name
+  );
+  assert.ok(tables.includes("legacy_v0_runs"), "the live, already-migrated database must be untouched");
+  live.close();
+
+  // No leftover staging file either.
+  const dir = fs.readdirSync(path.dirname(dbPath));
+  assert.ok(!dir.some((f) => f.includes(".rollback-staging-")), `unexpected staging file left behind: ${dir}`);
+});
+
+test("rollback refuses a backup that fails SQLite's integrity check", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  runMigration(dbPath, { skipServiceCheck: true });
+  closeDb();
+
+  // A well-formed-but-truncated SQLite file: valid header, but body chopped off partway —
+  // integrity_check should catch this even though it opens without throwing.
+  const backupPath = `${dbPath}.pre-issue-migration-backup`;
+  const original = fs.readFileSync(backupPath);
+  fs.writeFileSync(backupPath, original.subarray(0, Math.floor(original.length / 2)));
+
+  const result = rollbackMigration(dbPath, { skipServiceCheck: true });
+  assert.equal(result.rolledBack, false);
+  assert.match(result.detail, /integrity check|cannot open/);
+
+  const live = new Database(dbPath, { readonly: true });
+  const tables = (live.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+    (t) => t.name
+  );
+  assert.ok(tables.includes("legacy_v0_runs"));
+  live.close();
+});
+
+test("rollback refuses a backup missing the runs table (does not look like a pre-migration snapshot)", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  const backupPath = `${dbPath}.pre-issue-migration-backup`;
+  // A valid SQLite database, just not a plausible pre-migration one.
+  const bogus = new Database(backupPath);
+  bogus.exec("CREATE TABLE not_runs (id TEXT)");
+  bogus.close();
+
+  const result = rollbackMigration(dbPath, { skipServiceCheck: true });
+  assert.equal(result.rolledBack, false);
+  assert.match(result.detail, /"runs" table is missing/);
+});
+
+test("rollback leaves no staging file behind after a successful restore", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  runMigration(dbPath, { skipServiceCheck: true });
+  closeDb();
+
+  const result = rollbackMigration(dbPath, { skipServiceCheck: true });
+  assert.equal(result.rolledBack, true);
+  const dir = fs.readdirSync(path.dirname(dbPath));
+  assert.ok(!dir.some((f) => f.includes(".rollback-staging-")), `unexpected staging file left behind: ${dir}`);
+});
+
+test("a migration pointed at a symlink to the real dealer.db derives server.pid next to the real file", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  const aliasDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-issue-migration-alias-"));
+  const aliasPath = path.join(aliasDir, "dealer-alias.db");
+  fs.symlinkSync(dbPath, aliasPath);
+
+  // A live "server" recorded next to the REAL file, not the alias.
+  const realServerPidPath = path.join(path.dirname(dbPath), "server.pid");
+  const other = spawnLiveChild();
+  try {
+    fs.writeFileSync(realServerPidPath, JSON.stringify({ pid: other.pid, port: 3221, startedAt: NOW }));
+
+    // Migrating through the alias must see that same live owner, not miss it by deriving
+    // server.pid next to the alias directory instead.
+    const report = runMigration(aliasPath);
+    assert.ok(report.mismatches.length > 0);
+    assert.match(report.mismatches[0], /service is running/);
+
+    // And no server.pid was created next to the alias — everything resolved to the real dir.
+    assert.equal(fs.existsSync(path.join(aliasDir, "server.pid")), false);
+  } finally {
+    other.kill();
+  }
 });
 
 test("rollback refuses when no backup exists", () => {

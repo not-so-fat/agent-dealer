@@ -27,6 +27,7 @@ import {
   appendWorkflowEvent,
   completeWorkflowInstance,
   getActiveWorkflowInstance,
+  getWorkflowInstance,
   startWorkflowInstance,
   WorkflowAlreadyActiveError,
 } from "../repository/workflow-events.js";
@@ -54,7 +55,7 @@ import {
   type ReviewerOutcome,
 } from "./routing.js";
 import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } from "./projection.js";
-import { parseHumanResolution, resolveHumanActionOutcome } from "./human-resolution.js";
+import { parseHumanResolution, resolveHumanActionOutcome, type HumanResolution } from "./human-resolution.js";
 
 export const WORKFLOW_VERSION = "dev_reviewer_v1";
 
@@ -589,7 +590,13 @@ function questionFor(actionType: HumanActionType, reason: string, resumeAsReview
   }
 }
 
-function responseOptionsFor(actionType: HumanActionType, resumeAsReviewer = false): Array<{ choice: string; label: string }> {
+/** Exported for db/migrate-to-issues.ts, which must populate the same response options on
+ * a migrated final_review/attempts_exhausted action — otherwise the UI parses a null
+ * response_options_json as no options and renders nothing to resolve it with. */
+export function responseOptionsFor(
+  actionType: HumanActionType,
+  resumeAsReviewer = false
+): Array<{ choice: string; label: string }> {
   switch (actionType) {
     case "final_review":
       return [
@@ -669,6 +676,13 @@ export function resolveHumanActionAndAdvance(
   // transaction. If the start still can't proceed (criteria not actually added), the whole
   // step rolls back and the action stays open — never a resolved action with no workflow.
   if (!instance) {
+    // A migration-imported final_review/attempts_exhausted action: its workflow_instance_id
+    // points at the completed legacy_v0 instance the cutover created (design
+    // §"Migration and cutover"), never an active one — resolveHumanActionOutcome's normal
+    // path (below) assumes an active instance to advance and cannot apply here.
+    if (action.actionType === "final_review" || action.actionType === "attempts_exhausted") {
+      return resolveLegacyTerminalAction(action, issue, resolvedBy, resolution);
+    }
     if (action.actionType !== "product_scope_decision") {
       return { ok: false, code: 409, error: "No active workflow for this action" };
     }
@@ -809,6 +823,78 @@ export function resolveHumanActionAndAdvance(
       ok: true,
       issueStatus: getIssue(issue.id)!.status,
       nextWorkItemId: next.id,
+      instanceCompleted: false,
+      restarted: false,
+      triggerReflect: false,
+    };
+  })();
+}
+
+/**
+ * Resolves a migration-imported final_review/attempts_exhausted action whose
+ * `workflowInstanceId` points at the completed `legacy_v0` instance the NOT-66 cutover
+ * created — never an active one, so resolveHumanActionOutcome's normal path (which assumes
+ * an active instance to advance a round within, or complete) does not apply. Design
+ * §"Migration and cutover": these actions are "resolved as legacy terminal decisions or
+ * followed by an explicit new workflow start—they never reactivate legacy_v0." This never
+ * queues a work item and never touches legacy_v0's completed_at/outcome (already set at
+ * migration time); "repair"/"retry" only moves the issue to (or leaves it at) `needs_human`,
+ * from which `POST /api/issues/:id/start` can begin a genuinely new `dev_reviewer_v1`
+ * instance — that request is a deliberate separate step, not something this resolution
+ * triggers itself.
+ */
+function resolveLegacyTerminalAction(
+  action: HumanAction,
+  issue: Issue,
+  resolvedBy: string,
+  resolution: HumanResolution
+): ResolveResult {
+  let nextStatus: Issue["status"];
+  if (resolution.choice === "close") {
+    nextStatus = "closed";
+  } else if (resolution.actionType === "final_review" && resolution.choice === "complete") {
+    nextStatus = "done";
+  } else if (resolution.actionType === "final_review" && resolution.choice === "repair") {
+    nextStatus = "needs_human";
+  } else if (resolution.actionType === "attempts_exhausted" && resolution.choice === "retry") {
+    nextStatus = "needs_human"; // already the issue's current status for a migrated attempts_exhausted action
+  } else {
+    // Unreachable given parseHumanResolution already validated `resolution` against this
+    // exact action type's choices — defense in depth, matching resolveHumanActionOutcome's
+    // own "every branch explicit" convention.
+    return { ok: false, code: 400, error: `Invalid choice "${resolution.choice}" for ${resolution.actionType}` };
+  }
+
+  // Referenced for audit continuity in the emitted event only — never completed again or
+  // otherwise mutated; it was already terminal when the migration created it.
+  const historicalInstance = action.workflowInstanceId ? getWorkflowInstance(action.workflowInstanceId) : null;
+
+  return getDb().transaction((): ResolveResult => {
+    resolveHumanAction(action.id, resolvedBy, { choice: resolution.choice });
+    appendWorkflowEvent({
+      issueId: issue.id,
+      workflowInstanceId: historicalInstance?.id ?? null,
+      type: "human_action.resolved",
+      actorType: "human",
+      actorRef: resolvedBy,
+      stage: nextStatus,
+      payload: { actionType: action.actionType, choice: resolution.choice, legacyTerminalResolution: true },
+    });
+    if (nextStatus !== issue.status) {
+      transitionIssue(issue.id, nextStatus, {
+        currentOwner: "system",
+        currentIntent:
+          nextStatus === "done"
+            ? "Complete"
+            : nextStatus === "closed"
+              ? "Closed"
+              : "Awaiting an explicit new workflow start",
+      });
+    }
+    return {
+      ok: true,
+      issueStatus: getIssue(issue.id)!.status,
+      nextWorkItemId: null,
       instanceCompleted: false,
       restarted: false,
       triggerReflect: false,

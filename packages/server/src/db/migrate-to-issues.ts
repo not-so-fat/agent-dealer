@@ -29,7 +29,9 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { v4 as uuid } from "uuid";
+import { RunStatus } from "@agent-dealer/shared";
 import { claimPidMarker, readPidMarkerOwner, releasePidMarker } from "../pid-marker.js";
+import { responseOptionsFor } from "../coordinator/commands.js";
 
 export interface MigrationReport {
   issuesCreated: number;
@@ -64,6 +66,10 @@ interface LegacyRunRow {
   status: string;
   lineage_id: string | null;
   acceptance_criteria: string | null;
+  runtime: string | null;
+  plan_model: string | null;
+  execute_model: string | null;
+  budget_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -139,7 +145,29 @@ function issueStatusForLatest(runStatus: string): {
 function checkpointAndTruncate(dbPath: string): void {
   const db = new Database(dbPath);
   try {
-    db.pragma("wal_checkpoint(TRUNCATE)");
+    // No point waiting on SQLite's default busy retry loop — a conflicting reader isn't
+    // expected to release its snapshot imminently, and this function's job is to fail
+    // fast and clearly rather than block the whole migration on an indeterminate wait.
+    db.pragma("busy_timeout = 0");
+    // wal_checkpoint(TRUNCATE) reports failure via its result row, not by throwing: `busy`
+    // is nonzero when some other connection's open read transaction pinned WAL frames the
+    // checkpoint could not fold into the main file. Copying the main file in that state
+    // produces a backup silently missing whatever those unfoldable frames contained —
+    // exactly the rollback guarantee this function exists to protect. Refuse rather than
+    // guess; the caller can retry once nothing else holds the database open.
+    const [result] = db.pragma("wal_checkpoint(TRUNCATE)") as Array<{
+      busy: number;
+      log: number;
+      checkpointed: number;
+    }>;
+    if (result.busy !== 0) {
+      throw new Error(
+        `refusing to back up: WAL checkpoint could not complete (busy=${result.busy}, ` +
+          `log=${result.log} frames, checkpointed=${result.checkpointed}) — another connection ` +
+          `is holding a conflicting read lock on ${dbPath}. A backup taken now could silently ` +
+          `miss recent commits. Retry once nothing else is reading the database.`
+      );
+    }
   } finally {
     db.close();
   }
@@ -179,6 +207,10 @@ const REQUIRED_LEGACY_COLUMNS: Record<string, string[]> = {
     "status",
     "lineage_id",
     "acceptance_criteria",
+    "runtime",
+    "plan_model",
+    "execute_model",
+    "budget_json",
     "created_at",
     "updated_at",
   ],
@@ -221,7 +253,45 @@ function validateLegacySchema(db: Database.Database): string | null {
       return `table "${table}" is missing expected column(s): ${missing.join(", ")}`;
     }
   }
+  // issueStatusForLatest()/legacySessionStatus() have a `default:` branch that folds any
+  // unrecognized status into "ready"/"cancelled" — appropriate for the *known* pre-terminal
+  // statuses that fall into it (queued/plan_pending/plan_approved/running), but silently
+  // wrong for a genuinely unexpected value (a future/older/corrupt status this script has
+  // never seen), which would otherwise be converted into ordinary runnable work instead of
+  // being flagged. Validate every distinct value up front against the full closed set.
+  const distinctStatuses = (db.prepare("SELECT DISTINCT status FROM runs").all() as Array<{ status: string }>).map(
+    (r) => r.status
+  );
+  const unknown = distinctStatuses.filter((s) => !RunStatus.safeParse(s).success);
+  if (unknown.length > 0) {
+    const offendingIds = (
+      db
+        .prepare(`SELECT id FROM runs WHERE status IN (${unknown.map(() => "?").join(",")})`)
+        .all(...unknown) as Array<{ id: string }>
+    ).map((r) => r.id);
+    return `runs table contains unrecognized status value(s) ${unknown.map((s) => `"${s}"`).join(", ")} (run ids: ${offendingIds.join(", ")}) — refusing to guess how to migrate them`;
+  }
   return null;
+}
+
+/**
+ * Resolves symlinks so every derived path (server.pid, run.json, the backup, WAL
+ * sidecars) is anchored to the database's *real* directory, not wherever a symlink to it
+ * happens to live. Without this, `tsx src/db/migrate-to-issues.ts /some/alias/dealer.db`
+ * (a symlink to the real, live dealer.db elsewhere) would derive server.pid next to the
+ * alias — a path the running server never wrote to — so both the live-service check and
+ * the exclusive claim would incorrectly see nothing there and proceed to mutate the very
+ * database the live server is using. Falls back to a plain absolute-path resolution when
+ * the target doesn't exist (rollbackMigration may be pointed at a path that hasn't been
+ * created yet in some caller), matching the old, unresolved-path behavior for that case
+ * rather than throwing.
+ */
+function canonicalDbPath(dbPath: string): string {
+  try {
+    return fs.realpathSync(dbPath);
+  } catch {
+    return path.resolve(dbPath);
+  }
 }
 
 function serverPidPathFor(dbPath: string): string {
@@ -272,7 +342,8 @@ function readRunStateOwner(dbPath: string): { pid: number; alive: boolean } | nu
  * migration, which is what actually closes that race (a server whose own claim then fails
  * is required — see index.ts — to refuse to start, rather than run unmonitored).
  */
-export function isServiceRunning(dbPath: string): { running: boolean; detail?: string } {
+export function isServiceRunning(rawDbPath: string): { running: boolean; detail?: string } {
+  const dbPath = canonicalDbPath(rawDbPath);
   const serverOwner = readPidMarkerOwner(serverPidPathFor(dbPath));
   if (serverOwner?.alive) {
     return { running: true, detail: `pid ${serverOwner.pid} (from ${serverPidPathFor(dbPath)})` };
@@ -298,7 +369,12 @@ export interface RunMigrationOptions {
   injectFailureAt?: InjectFailureAt;
 }
 
-export function runMigration(dbPath: string, opts?: RunMigrationOptions): MigrationReport {
+export function runMigration(rawDbPath: string, opts?: RunMigrationOptions): MigrationReport {
+  // Canonicalize once, up front — every path derived below (server.pid, run.json, the
+  // backup, WAL sidecars) must be anchored to the database's real location. See
+  // canonicalDbPath's doc comment.
+  const dbPath = canonicalDbPath(rawDbPath);
+
   // Phase 0: read-only probe — idempotent no-op check + schema validation, before anything
   // else touches the filesystem or the database.
   const probe = new Database(dbPath, { readonly: true, fileMustExist: true });
@@ -456,12 +532,18 @@ function runMigrationBody(dbPath: string, opts?: RunMigrationOptions): Migration
       `).run(instanceId, issueId, latest.created_at, latest.updated_at);
 
       if (mapped.humanAction) {
+        // response_options_json populated from the exact same table the live coordinator
+        // uses (commands.ts's responseOptionsFor) — left NULL, the production UI parses it
+        // as no options and renders nothing to resolve the action with.
+        const responseOptionsJson = JSON.stringify(
+          responseOptionsFor(mapped.humanAction.actionType as "final_review" | "attempts_exhausted")
+        );
         db.prepare(`
           INSERT INTO human_actions (
             id, issue_id, workflow_instance_id, action_type, reason, question, evidence_json,
             response_options_json, continuation_preview_json, status, resolution_json, resolved_by,
             requested_at, resolved_at
-          ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'open', NULL, NULL, ?, NULL)
+          ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, 'open', NULL, NULL, ?, NULL)
         `).run(
           uuid(),
           issueId,
@@ -469,6 +551,7 @@ function runMigrationBody(dbPath: string, opts?: RunMigrationOptions): Migration
           mapped.humanAction.actionType,
           mapped.humanAction.reason,
           mapped.humanAction.question,
+          responseOptionsJson,
           latest.updated_at
         );
       }
@@ -477,13 +560,19 @@ function runMigrationBody(dbPath: string, opts?: RunMigrationOptions): Migration
         const sessionId = uuid();
         const sessionStatus = legacySessionStatus(run.status);
         const sessionAgentId = agentExists(run.agent_id) ? run.agent_id : null;
+        // Design §"worker_sessions": runtime/model/budget "moved from runs" — preserve them
+        // on the migrated session rather than dropping them, since legacy_v0_runs (where
+        // they'd otherwise still live) is only retained for one release. execute_model
+        // wins over plan_model when both are set, matching the same execute-first
+        // precedence migrate() already uses when backfilling agents.default_model.
+        const model = run.execute_model ?? run.plan_model;
         db.prepare(`
           INSERT INTO worker_sessions (
             id, issue_id, role, round, agent_id, runtime, model, budget_json, worktree_path,
             input_sha, status, session_ref, log_path, exit_code, error_json, metadata_json,
             profile_snapshot_json, created_at, started_at, heartbeat_at, completed_at, updated_at
           ) VALUES (
-            ?, ?, 'legacy', 1, ?, NULL, NULL, NULL, NULL,
+            ?, ?, 'legacy', 1, ?, ?, ?, ?, NULL,
             NULL, ?, NULL, NULL, NULL, NULL, ?,
             NULL, ?, NULL, NULL, ?, ?
           )
@@ -491,8 +580,17 @@ function runMigrationBody(dbPath: string, opts?: RunMigrationOptions): Migration
           sessionId,
           issueId,
           sessionAgentId,
+          run.runtime,
+          model,
+          run.budget_json,
           sessionStatus,
-          JSON.stringify({ legacyRunId: run.id, legacyStatus: run.status }),
+          JSON.stringify({
+            legacyRunId: run.id,
+            legacyStatus: run.status,
+            legacyLineageId: run.lineage_id,
+            legacyPlanModel: run.plan_model,
+            legacyExecuteModel: run.execute_model,
+          }),
           run.created_at,
           run.updated_at,
           run.updated_at
@@ -686,10 +784,54 @@ function runMigrationBody(dbPath: string, opts?: RunMigrationOptions): Migration
  * Refuses while the service is running, for the same reason the forward migration does.
  * Refuses when no backup exists rather than silently doing nothing that looks like success.
  */
+/** Opens `path` read-only and runs an integrity check plus a minimal legacy-schema sanity
+ * check (it must look like a pre-migration snapshot, i.e. still have "runs" — a backup is
+ * only ever taken *before* the rename). Returns null when the file is a usable rollback
+ * source, or a description of the first problem found. */
+function validateRollbackSource(path_: string): string | null {
+  // A malformed file (not a SQLite database at all, or truncated/corrupt) does not
+  // necessarily fail at open time — better-sqlite3/SQLite reads the header lazily, so the
+  // actual SQLITE_NOTADB/SQLITE_CORRUPT throw can happen on the first real statement
+  // (integrity_check below) just as easily as on the constructor. Both must be caught the
+  // same way: this is a "not a usable rollback source" verdict either way, not a crash.
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(path_, { readonly: true, fileMustExist: true });
+    const rows = db.pragma("integrity_check") as Array<{ integrity_check: string }>;
+    const problems = rows.filter((r) => r.integrity_check !== "ok").map((r) => r.integrity_check);
+    if (problems.length > 0) {
+      return `${path_} failed SQLite's integrity check: ${problems.join("; ")}`;
+    }
+    if (!tableExists(db, "runs")) {
+      return `${path_} does not look like a pre-migration backup — its "runs" table is missing`;
+    }
+    return null;
+  } catch (err) {
+    return `cannot open ${path_} as a SQLite database: ${err instanceof Error ? err.message : String(err)}`;
+  } finally {
+    db?.close();
+  }
+}
+
+/**
+ * Restores the pre-migration backup over the live database, undoing a completed cutover.
+ * Refuses while the service is running, for the same reason the forward migration does.
+ * Refuses when no backup exists rather than silently doing nothing that looks like success.
+ *
+ * Never trusts the backup file blindly: a truncated, corrupted, or unrelated file at that
+ * path (a bad disk during the original backup, or manual tampering) is validated — opened
+ * read-only, integrity-checked, and schema-sanity-checked — *before* it ever touches the
+ * live database. The restore itself copies to a temporary file in the same directory,
+ * validates that copy too (protects against a corrupted copy, e.g. a disk failing
+ * mid-write), and only then atomically renames it over the live path — an interrupted
+ * copy leaves the original live database untouched rather than a half-written file in
+ * its place.
+ */
 export function rollbackMigration(
-  dbPath: string,
+  rawDbPath: string,
   opts?: { skipServiceCheck?: boolean }
 ): { rolledBack: boolean; detail: string } {
+  const dbPath = canonicalDbPath(rawDbPath);
   const backupPath = `${dbPath}.pre-issue-migration-backup`;
   if (!fs.existsSync(backupPath)) {
     return { rolledBack: false, detail: `no backup found at ${backupPath} — nothing to roll back to` };
@@ -703,7 +845,36 @@ export function rollbackMigration(
       };
     }
   }
-  fs.copyFileSync(backupPath, dbPath);
+
+  const sourceProblem = validateRollbackSource(backupPath);
+  // Opening the backup read-only for validation can itself create -wal/-shm sidecars next
+  // to it; tidy those up regardless of the outcome — the backup file itself is untouched.
+  removeWalSidecars(backupPath);
+  if (sourceProblem) {
+    return { rolledBack: false, detail: `refusing rollback — ${sourceProblem}` };
+  }
+
+  const stagedPath = `${dbPath}.rollback-staging-${process.pid}-${Date.now()}`;
+  try {
+    fs.copyFileSync(backupPath, stagedPath);
+    const stagedProblem = validateRollbackSource(stagedPath);
+    if (stagedProblem) {
+      return { rolledBack: false, detail: `refusing rollback — staged copy is unusable: ${stagedProblem}` };
+    }
+    // Same-directory rename is atomic on the same filesystem — dbPath is either the fully
+    // restored file or (on any failure above) untouched; never a partially-written one.
+    fs.renameSync(stagedPath, dbPath);
+  } finally {
+    // validateRollbackSource() opens stagedPath (even read-only), which can create its own
+    // -wal/-shm sidecars — clean those up alongside the main staged file, not just the one.
+    try {
+      fs.unlinkSync(stagedPath);
+    } catch {
+      // already renamed away on success, or never created on an early failure — fine
+    }
+    removeWalSidecars(stagedPath);
+  }
+
   // The restored main file is a complete snapshot (the backup was made from a
   // checkpointed, WAL-truncated database) — any WAL/SHM sidecar still sitting next to
   // dbPath from the post-migration state describes pages that no longer match this
