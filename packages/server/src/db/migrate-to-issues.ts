@@ -29,6 +29,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { v4 as uuid } from "uuid";
+import { claimPidMarker, readPidMarkerOwner, releasePidMarker } from "../pid-marker.js";
 
 export interface MigrationReport {
   issuesCreated: number;
@@ -223,6 +224,38 @@ function validateLegacySchema(db: Database.Database): string | null {
   return null;
 }
 
+function serverPidPathFor(dbPath: string): string {
+  return path.join(path.dirname(dbPath), "server.pid");
+}
+
+function runStatePathFor(dbPath: string): string {
+  return path.join(path.dirname(dbPath), "run.json");
+}
+
+/** run.json uses `serverPid`, not `pid` — packages/cli/src/runtime-state.ts's RunState
+ * shape, kept as its own reader since it is a different file this script never claims. */
+function readRunStateOwner(dbPath: string): { pid: number; alive: boolean } | null {
+  const owner = readPidMarkerOwner(runStatePathFor(dbPath));
+  if (owner) return owner;
+  // readPidMarkerOwner() only understands the `pid` field; re-check run.json's own
+  // `serverPid` field directly rather than duplicating the alive-probe logic here.
+  const filePath = runStatePathFor(dbPath);
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as { serverPid?: unknown };
+    const pid = raw.serverPid;
+    if (typeof pid !== "number" || !Number.isFinite(pid) || pid <= 0) return null;
+    try {
+      process.kill(pid, 0);
+      return { pid, alive: true };
+    } catch {
+      return { pid, alive: false };
+    }
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Real liveness check, not a placeholder: the running service is tracked via
  * `server.pid` (packages/server/src/server-liveness.ts — written directly by the server's
@@ -230,39 +263,25 @@ function validateLegacySchema(db: Database.Database): string | null {
  * which spawns that exact same entrypoint as a child) and, as a fallback,
  * `run.json` (packages/cli/src/runtime-state.ts's RunState, written only by the CLI
  * daemon supervisor). Checking server.pid first is what makes this guard hold for a
- * directly-launched dev/start server, which never writes run.json at all. Reimplemented
- * locally rather than imported: packages/cli depends on @agent-dealer/server, never the
- * reverse, so this package cannot import from cli, and importing server-liveness.ts's
- * getDataDir()-bound path would tie this arbitrary-dbPath script to the process's own
- * AGENT_DEALER_HOME instead of the target database's directory.
+ * directly-launched dev/start server, which never writes run.json at all.
+ *
+ * This is a read-only inspection, useful on its own (e.g. reporting), but runMigration()
+ * below does not rely on it alone for its own safety: between this check returning "not
+ * running" and the migration actually acting, a server could start. runMigration()
+ * instead atomically *claims* server.pid via pid-marker.ts for the duration of the
+ * migration, which is what actually closes that race (a server whose own claim then fails
+ * is required — see index.ts — to refuse to start, rather than run unmonitored).
  */
 export function isServiceRunning(dbPath: string): { running: boolean; detail?: string } {
-  const dir = path.dirname(dbPath);
-  return (
-    checkPidFile(path.join(dir, "server.pid"), "pid") ??
-    checkPidFile(path.join(dir, "run.json"), "serverPid") ?? { running: false }
-  );
-}
-
-/** Returns a concrete result only when this file holds evidence of a live pid; null lets
- * the caller fall through to check another liveness source instead of concluding "not
- * running" just because this one file was absent or stale. */
-function checkPidFile(filePath: string, pidField: string): { running: boolean; detail?: string } | null {
-  if (!fs.existsSync(filePath)) return null;
-  let state: Record<string, unknown>;
-  try {
-    state = JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return null;
+  const serverOwner = readPidMarkerOwner(serverPidPathFor(dbPath));
+  if (serverOwner?.alive) {
+    return { running: true, detail: `pid ${serverOwner.pid} (from ${serverPidPathFor(dbPath)})` };
   }
-  const pid = state[pidField];
-  if (typeof pid !== "number" || !Number.isFinite(pid) || pid <= 0) return null;
-  try {
-    process.kill(pid, 0);
-    return { running: true, detail: `${pidField} ${pid} (from ${filePath})` };
-  } catch {
-    return null;
+  const cliOwner = readRunStateOwner(dbPath);
+  if (cliOwner?.alive) {
+    return { running: true, detail: `serverPid ${cliOwner.pid} (from ${runStatePathFor(dbPath)})` };
   }
+  return { running: false };
 }
 
 export type InjectFailureAt =
@@ -295,16 +314,48 @@ export function runMigration(dbPath: string, opts?: RunMigrationOptions): Migrat
     probe.close();
   }
 
+  // run.json (the CLI daemon's own marker) is a read-only signal this script never
+  // claims — a live entry there blocks unconditionally, the same as before.
   if (!opts?.skipServiceCheck) {
-    const liveness = isServiceRunning(dbPath);
-    if (liveness.running) {
+    const cliOwner = readRunStateOwner(dbPath);
+    if (cliOwner?.alive) {
       return {
         ...emptyReport(),
-        mismatches: [`refusing to migrate while the service is running (${liveness.detail}) — stop it first`],
+        mismatches: [
+          `refusing to migrate while the service is running (serverPid ${cliOwner.pid} from ${runStatePathFor(dbPath)}) — stop it first`,
+        ],
       };
     }
   }
 
+  // Atomically claim server.pid for the duration of this migration (see pid-marker.ts).
+  // This is what actually closes the TOCTOU window a plain read-then-act check could
+  // not: a server trying to start concurrently sees this migration's own live pid as the
+  // current owner and — index.ts treats a failed claim as fatal — refuses to start, while
+  // this claim itself fails if a server won the race first.
+  const serverPidPath = serverPidPathFor(dbPath);
+  let claimedLock = false;
+  if (!opts?.skipServiceCheck) {
+    claimedLock = claimPidMarker(serverPidPath, { role: "migration" });
+    if (!claimedLock) {
+      const owner = readPidMarkerOwner(serverPidPath);
+      return {
+        ...emptyReport(),
+        mismatches: [
+          `refusing to migrate while the service is running (pid ${owner?.pid} from ${serverPidPath}) — stop it first`,
+        ],
+      };
+    }
+  }
+
+  try {
+    return runMigrationBody(dbPath, opts);
+  } finally {
+    if (claimedLock) releasePidMarker(serverPidPath);
+  }
+}
+
+function runMigrationBody(dbPath: string, opts?: RunMigrationOptions): MigrationReport {
   if (opts?.injectFailureAt === "before-backup") {
     throw new Error("injected failure: before-backup");
   }

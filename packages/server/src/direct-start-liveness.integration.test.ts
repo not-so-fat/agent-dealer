@@ -20,7 +20,8 @@ const repoRoot = path.resolve(__dirname, "..", "..", "..");
 const tsxBin = path.join(repoRoot, "node_modules", ".bin", "tsx");
 const serverEntry = path.join(repoRoot, "packages", "server", "src", "index.ts");
 
-const { isServiceRunning } = await import("./db/migrate-to-issues.js");
+const { isServiceRunning, runMigration } = await import("./db/migrate-to-issues.js");
+const Database = (await import("better-sqlite3")).default;
 
 async function getEphemeralPort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -153,6 +154,116 @@ test(
         serverB.kill("SIGKILL");
       }
       serverA.kill("SIGKILL");
+    }
+  }
+);
+
+test(
+  "a second server on a different port is refused at startup rather than running unmonitored",
+  { timeout: 45000 },
+  async () => {
+    // Reproduces the reviewer's exact third-round finding: with a *different* port, B is
+    // no longer stopped by app.listen()'s EADDRINUSE. Before treating a failed claim as
+    // fatal, B ran to completion fully healthy but untracked (A owns server.pid), so once
+    // A stopped — correctly removing its own marker — B kept running with no liveness
+    // marker at all, and isServiceRunning() returned false despite B being very much alive.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-direct-start-diffport-"));
+    const dbPath = path.join(home, "dealer.db");
+    const portA = await getEphemeralPort();
+    const portB = await getEphemeralPort();
+
+    const serverA = spawnServer(home, portA);
+    let serverB: ReturnType<typeof spawnServer> | undefined;
+
+    try {
+      const aHealthy = await waitForHealth(portA, 20000);
+      assert.ok(aHealthy, "server A should become healthy within 20s");
+      const stateBeforeB = JSON.parse(fs.readFileSync(path.join(home, "server.pid"), "utf8"));
+
+      serverB = spawnServer(home, portB);
+      const bExited = await waitUntil(
+        () => serverB!.exitCode !== null || serverB!.signalCode !== null,
+        20000
+      );
+      assert.ok(bExited, "server B should exit within 20s of failing to claim the liveness marker");
+      assert.notEqual(serverB.exitCode, 0, "server B should exit non-zero, having refused to start");
+
+      // B must never have become healthy on its own port — it should have aborted before
+      // ever reaching app.listen().
+      const bEverHealthy = await waitUntil(async () => {
+        try {
+          const res = await fetch(`http://127.0.0.1:${portB}/health`);
+          return res.ok;
+        } catch {
+          return false;
+        }
+      }, 1500);
+      assert.equal(bEverHealthy, false, "server B must never have started serving on its own port");
+
+      // A is unaffected, and the marker still names A.
+      const aStillHealthy = await waitForHealth(portA, 5000);
+      assert.ok(aStillHealthy);
+      const stateAfterB = JSON.parse(fs.readFileSync(path.join(home, "server.pid"), "utf8"));
+      assert.equal(stateAfterB.pid, stateBeforeB.pid);
+
+      // And once A stops (removing its own marker as intended), isServiceRunning correctly
+      // reports nothing running — B never having claimed the marker means there is no
+      // now-invisible second server left behind for this check to miss.
+      assert.equal(isServiceRunning(dbPath).running, true);
+    } finally {
+      if (serverB && serverB.exitCode === null && serverB.signalCode === null) {
+        serverB.kill("SIGKILL");
+      }
+      serverA.kill("SIGTERM");
+      await waitUntil(() => serverA.exitCode !== null || serverA.signalCode !== null, 10000);
+    }
+    assert.equal(isServiceRunning(dbPath).running, false, "nothing should be left running or tracked after A stops");
+  }
+);
+
+test(
+  "a real running server blocks the migration end to end, and the migration succeeds once the server is stopped",
+  { timeout: 45000 },
+  async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-direct-start-migration-"));
+    const dbPath = path.join(home, "dealer.db");
+    const port = await getEphemeralPort();
+
+    const server = spawnServer(home, port);
+    try {
+      const healthy = await waitForHealth(port, 20000);
+      assert.ok(healthy, "the server should become healthy within 20s (this also runs migrate(), creating the schema)");
+
+      // Seed one legacy lineage directly — a separate connection to the same file is fine
+      // alongside the server's own WAL-mode connection.
+      const now = new Date().toISOString();
+      const seedDb = new Database(dbPath);
+      seedDb
+        .prepare(
+          `INSERT INTO runs (id, source, external_id, task_category, title, repo, agent_id, status,
+            lineage_id, created_at, updated_at)
+           VALUES ('run-live-block', 'manual', 'run-live-block', 'code', 'Blocked task', '/repo', NULL, 'done', NULL, ?, ?)`
+        )
+        .run(now, now);
+      seedDb.close();
+
+      const refused = runMigration(dbPath);
+      assert.ok(refused.mismatches.length > 0);
+      assert.match(refused.mismatches[0], /service is running/);
+      assert.equal(fs.existsSync(`${dbPath}.pre-issue-migration-backup`), false);
+
+      server.kill("SIGTERM");
+      const exited = await waitUntil(() => server.exitCode !== null || server.signalCode !== null, 10000);
+      assert.ok(exited, "the server should exit within 10s of SIGTERM");
+      await waitUntil(() => !isServiceRunning(dbPath).running, 5000);
+
+      const succeeded = runMigration(dbPath);
+      assert.deepStrictEqual(succeeded.mismatches, []);
+      assert.equal(succeeded.issuesCreated, 1);
+    } finally {
+      if (server.exitCode === null && server.signalCode === null) {
+        server.kill("SIGKILL");
+      }
     }
   }
 );

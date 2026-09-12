@@ -13,87 +13,28 @@
 // server's own main(), before it touches the database, makes the guard hold in every
 // launch mode: dev, `npm start`, and the CLI daemon (which runs this exact same entrypoint
 // as a spawned child).
-import fs from "node:fs";
+//
+// Thin wrapper over pid-marker.ts's generic exclusive-claim primitive — see that module
+// for why the claim/release semantics are ownership-aware rather than a plain overwrite,
+// and for why the migration script (db/migrate-to-issues.ts) claims this *same* file for
+// the duration of a cutover.
 import path from "node:path";
 import { getDataDir } from "./db/index.js";
-
-export interface ServerLivenessState {
-  pid: number;
-  port: number;
-  startedAt: string;
-}
+import { claimPidMarker, releasePidMarker } from "./pid-marker.js";
 
 export function serverPidFilePath(): string {
   return path.join(getDataDir(), "server.pid");
 }
 
-function isPidAlive(pid: number): boolean {
-  if (!Number.isFinite(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function readRecordedPid(filePath: string): number | null {
-  if (!fs.existsSync(filePath)) return null;
-  try {
-    const state = JSON.parse(fs.readFileSync(filePath, "utf8")) as { pid?: unknown };
-    return typeof state.pid === "number" ? state.pid : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Claims the marker for this process — but never by clobbering a different, still-alive
- * owner. Two servers launched against the same AGENT_DEALER_HOME (e.g. two direct `npm run
- * dev` invocations racing the same port) must not corrupt each other's liveness signal: a
- * plain unconditional overwrite would let the loser's write replace the winner's pid, and
- * the loser's later cleanup would then delete the marker out from under a still-healthy
- * winner — reopening the exact live-service race this file exists to close. `wx` makes the
- * create atomic; on EEXIST, a *stale* marker (dead pid, or unreadable) is safe to reclaim,
- * but a live different pid means this process backs off and returns false without touching
- * the file at all.
- */
+/** Claims the marker for this server process. A false return means a different, live
+ * process already owns this AGENT_DEALER_HOME — the caller (index.ts) must treat that as
+ * fatal and refuse to start, not merely warn and continue, or this server would run
+ * fully unmonitored: untracked by the marker, invisible to isServiceRunning(), and free
+ * to write to the same database a migration might concurrently believe is safe to touch. */
 export function writeServerPidFile(port: number): boolean {
-  const filePath = serverPidFilePath();
-  const state: ServerLivenessState = { pid: process.pid, port, startedAt: new Date().toISOString() };
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      fs.writeFileSync(filePath, JSON.stringify(state, null, 2), { flag: "wx" });
-      return true;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      const recordedPid = readRecordedPid(filePath);
-      if (recordedPid !== null && recordedPid !== process.pid && isPidAlive(recordedPid)) {
-        return false; // a different, live owner holds this marker — do not touch it
-      }
-      // Stale — dead pid or unreadable content. Safe to reclaim; loop once to retry the
-      // exclusive create (a concurrent reclaimer racing the same stale file is the only
-      // way this second attempt can itself hit EEXIST again, which just falls through to
-      // returning false below rather than looping forever).
-      try {
-        fs.unlinkSync(filePath);
-      } catch {
-        /* another process may have already removed or reclaimed it — fine either way */
-      }
-    }
-  }
-  return false;
+  return claimPidMarker(serverPidFilePath(), { port });
 }
 
-/** Removes the marker only if it currently names *this* process — never a different
- * (possibly still-alive) owner's marker, including one left behind after this process
- * lost the write race in writeServerPidFile() and therefore never actually owned it. */
 export function removeServerPidFile(): void {
-  const filePath = serverPidFilePath();
-  if (readRecordedPid(filePath) !== process.pid) return;
-  try {
-    fs.unlinkSync(filePath);
-  } catch {
-    // already gone — fine on a second cleanup call
-  }
+  releasePidMarker(serverPidFilePath());
 }

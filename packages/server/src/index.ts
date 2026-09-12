@@ -29,15 +29,21 @@ async function main(): Promise<void> {
   // Written before migrate() touches the database, and independent of how this process
   // was launched — see server-liveness.ts for why this exists alongside the CLI's own
   // run.json. Cleaned up on a normal shutdown; a stale file from a crash is harmless since
-  // every reader checks the pid is actually alive, not just that the file exists. A false
-  // return means a different, still-alive server already owns this AGENT_DEALER_HOME —
-  // writeServerPidFile() never clobbers that owner's marker, so it's just logged here
-  // rather than treated as fatal (this process will most likely fail shortly anyway, e.g.
-  // at app.listen() if it's also racing the same port).
+  // every reader checks the pid is actually alive, not just that the file exists.
+  //
+  // A false return means a different, still-alive process already owns this
+  // AGENT_DEALER_HOME — this must be fatal, not merely logged: a server that continued
+  // unmonitored (e.g. on a different port than the owner, so app.listen() below would
+  // have succeeded) would run invisibly to isServiceRunning()/the migration guard, and to
+  // the owner's own eventual shutdown, which only ever removes a marker it still owns —
+  // so a second, unclaimed server surviving past the first one's clean exit would leave
+  // nothing recording that it is still running against this same database.
   if (!writeServerPidFile(port)) {
-    console.warn(
-      "[startup] another live server already owns this AGENT_DEALER_HOME's liveness marker — not overwriting it"
+    console.error(
+      "[startup] another live process already owns this AGENT_DEALER_HOME's liveness marker — refusing to start. " +
+        "Stop it first, or point AGENT_DEALER_HOME at a different directory."
     );
+    process.exit(1);
   }
   process.on("SIGINT", () => {
     removeServerPidFile();

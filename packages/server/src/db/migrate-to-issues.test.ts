@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
+import { spawn } from "node:child_process";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-issue-migration-"));
 
@@ -21,6 +22,13 @@ const { listArtifactsForIssue } = await import("../repository/artifacts-for-issu
 const { createRun, addArtifact } = await import("../repository/runs.js");
 
 const NOW = "2026-01-01T00:00:00.000Z";
+
+/** A genuinely alive, same-user child pid — safe to signal, unlike e.g. pid 1 (which is
+ * alive but throws EPERM rather than ESRCH for an unprivileged process.kill probe). */
+function spawnLiveChild(): { pid: number; kill: () => void } {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  return { pid: child.pid!, kill: () => child.kill("SIGKILL") };
+}
 
 /** Every test gets its own AGENT_DEALER_HOME + a freshly migrated (current schema) db,
  * matching how the rest of this repo's repository tests isolate state — but reopened per
@@ -412,6 +420,58 @@ test("refuses to migrate while the service is running, before any backup is made
   assert.ok(report.mismatches.length > 0);
   assert.match(report.mismatches[0], /service is running/);
   assert.equal(fs.existsSync(`${dbPath}.pre-issue-migration-backup`), false);
+});
+
+test("refuses to migrate when server.pid names a different, live process, and never touches that marker", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  const other = spawnLiveChild();
+  try {
+    const serverPidPath = path.join(path.dirname(dbPath), "server.pid");
+    fs.writeFileSync(serverPidPath, JSON.stringify({ pid: other.pid, port: 3221, startedAt: NOW }));
+
+    const report = runMigration(dbPath); // no skipServiceCheck — production path
+    assert.ok(report.mismatches.length > 0);
+    assert.match(report.mismatches[0], /service is running/);
+    assert.equal(fs.existsSync(`${dbPath}.pre-issue-migration-backup`), false);
+
+    // The other process's marker must be exactly as it was — not stolen, not modified.
+    const stillThere = JSON.parse(fs.readFileSync(serverPidPath, "utf8"));
+    assert.equal(stillThere.pid, other.pid);
+  } finally {
+    other.kill();
+  }
+});
+
+test("a successful migration claims and releases server.pid — no marker is left behind afterward", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  const serverPidPath = path.join(path.dirname(dbPath), "server.pid");
+
+  const report = runMigration(dbPath); // no skipServiceCheck — exercises the real claim/release path
+  assert.deepStrictEqual(report.mismatches, []);
+  assert.equal(
+    fs.existsSync(serverPidPath),
+    false,
+    "the migration's own claim on server.pid must be released once it finishes, so a server can start normally afterward"
+  );
+});
+
+test("a rolled-back migration still releases server.pid", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  getDb()
+    .prepare(
+      `INSERT INTO runs (id, source, external_id, task_category, title, repo, agent_id, status,
+        lineage_id, created_at, updated_at)
+       VALUES ('run-orphan', 'manual', 'run-orphan', 'code', 'Orphan', '/repo', ?, 'done', 'does-not-exist', ?, ?)`
+    )
+    .run(BUILTIN_AGENT_CLAUDE_ID, NOW, NOW);
+  const serverPidPath = path.join(path.dirname(dbPath), "server.pid");
+
+  const report = runMigration(dbPath); // no skipServiceCheck
+  assert.ok(report.mismatches.length > 0);
+  assert.equal(fs.existsSync(serverPidPath), false, "a failed migration must still release its own claim");
 });
 
 test("injected failure inside the transaction rolls back the database and leaves the backup usable", () => {
