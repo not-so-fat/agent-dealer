@@ -383,6 +383,35 @@ test("a stale review that exhausts the infra budget still records the newly obse
   );
 });
 
+test("fail → retry → exhaust → resume → fail again does not collide with the pre-escalation retry's idempotency key", () => {
+  // Reproduces the reviewer's report: policy_escalation:resume resets infraAttempts to 0,
+  // so an automatic retry after resuming can re-derive the exact (round, infraAttempts)
+  // pair an earlier, now-terminal, PRE-escalation retry already used — an
+  // infraAttempts-keyed enqueue would then collide and silently return that old row.
+  const issueId = newIssue({ maxInfraAttempts: 1 });
+  startWorkflow(issueId);
+
+  complete(issueId, { kind: "session_failed" }); // attempt 1: retries (infraAttempts 0 -> 1)
+  const firstRetryItem = listWorkItemsForIssue(issueId).find((i) => i.status === "pending")!;
+  assert.equal(getIssue(issueId)!.infraAttempts, 1);
+
+  complete(issueId, { kind: "session_failed" }); // attempt 2: exhausts (1 < 1 is false) -> policy_escalation
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  resolveHumanActionAndAdvance(action.id, "yusuke", "resume"); // resets infraAttempts to 0
+  assert.equal(getIssue(issueId)!.infraAttempts, 0);
+
+  complete(issueId, { kind: "session_failed" }); // attempt after resume: retries again (0 -> 1) — SAME (round, infraAttempts) pair as the very first retry above
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing", "must still have live work, not silently stranded");
+  assert.equal(issue.infraAttempts, 1);
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1, "a fresh item must be enqueued — the old (round, infraAttempts)-keyed row must not be silently reused");
+  assert.notEqual(pending[0].id, firstRetryItem.id, "must be a NEW work item, not the pre-escalation retry's now-terminal row");
+});
+
 test("resolving policy_escalation:resume after a reviewer's escalated verdict (a real code-level question) still resumes as the developer", () => {
   const issueId = newIssue();
   startWorkflow(issueId);

@@ -377,7 +377,7 @@ function applyDeveloper(
   else if (advance === "infra") incrementIssueInfraAttempts(issue.id);
   const issueNow = getIssue(issue.id)!;
 
-  return applyEffect(issue, instance, effect, route, issueNow, ev);
+  return applyEffect(issue, instance, effect, route, issueNow, ev, item.id);
 }
 
 function applyReviewer(
@@ -440,7 +440,7 @@ function applyReviewer(
   else if (advance === "infra") incrementIssueInfraAttempts(issue.id);
   const issueNow = getIssue(issue.id)!;
 
-  return applyEffect(issue, instance, effect, route, issueNow, ev, outcome);
+  return applyEffect(issue, instance, effect, route, issueNow, ev, item.id, outcome);
 }
 
 type AnyRoute =
@@ -448,11 +448,11 @@ type AnyRoute =
   | ReturnType<typeof routeReviewerOutcome>;
 
 /** Every route that spends an infra attempt (projection.ts's advance === "infra") repeats
- * the same round/head; the attempt number keeps its idempotency key from colliding with
- * the previous (terminal) attempt's key. retry_reviewer_at_new_head belongs here too — a
- * head that cycles A→B→A would otherwise re-derive attempt A's ORIGINAL key (same round,
- * same head, no attempt suffix) and collide with that now-terminal work item, leaving the
- * issue "reviewing" with no pending item (reproduced by the reviewer). */
+ * the same round/head, so its enqueue needs a suffix the plain round/head key doesn't
+ * provide to avoid colliding with the previous (terminal) attempt's key.
+ * retry_reviewer_at_new_head belongs here too — a head that cycles A→B→A would otherwise
+ * re-derive attempt A's ORIGINAL key (same round, same head) and collide with that
+ * now-terminal work item, leaving the issue "reviewing" with no pending item. */
 function isInfraRetry(route: AnyRoute): boolean {
   return route.next === "retry_developer" || route.next === "retry_reviewer" || route.next === "retry_reviewer_at_new_head";
 }
@@ -464,6 +464,7 @@ function applyEffect(
   route: AnyRoute,
   issueNow: Issue,
   ev: EventEmitter,
+  causativeItemId: string,
   reviewerOutcome?: ReviewerOutcome
 ): ApplyResult {
   const base = {
@@ -477,7 +478,14 @@ function applyEffect(
   if (effect.kind === "enqueue") {
     const kind = effect.workItem;
     const headSuffix = effect.atHeadSha ? `:${effect.atHeadSha}` : "";
-    const attemptSuffix = isInfraRetry(route) ? `:infra${issueNow.infraAttempts}` : "";
+    // Keyed on the causative (just-completed) work item's own id, not the infraAttempts
+    // counter — that counter RESETS on a human policy_escalation:resume, so a post-resume
+    // retry can re-derive the exact (round, infraAttempts) pair an earlier, now-terminal,
+    // pre-escalation retry already used. A work-item id is a UUID, so keying on it can
+    // never collide, regardless of any counter reset (reported and reproduced by the
+    // reviewer: fail→retry→exhaust→resume→fail previously returned the stale pre-escalation
+    // row instead of enqueueing a new one, stranding the issue with zero pending work).
+    const attemptSuffix = isInfraRetry(route) ? `:retry-of:${causativeItemId}` : "";
     if (route.next === "retry_developer_with_findings") ev.emit("repair.started");
     const next = enqueueWorkItem({
       issueId: issue.id,
