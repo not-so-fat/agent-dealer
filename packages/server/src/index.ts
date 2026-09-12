@@ -6,6 +6,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { enrichPathForCliTools } from "./cli-env.js";
 import { migrate } from "./db/index.js";
+import { writeServerPidFile, removeServerPidFile } from "./server-liveness.js";
 import { registerRoutes } from "./routes/index.js";
 import { registerIssueRoutes } from "./routes/issues.js";
 import { registerHumanActionRoutes } from "./routes/human-actions.js";
@@ -24,6 +25,22 @@ const port = Number(process.env.PORT ?? 2221);
 
 async function main(): Promise<void> {
   enrichPathForCliTools();
+
+  // Written before migrate() touches the database, and independent of how this process
+  // was launched — see server-liveness.ts for why this exists alongside the CLI's own
+  // run.json. Cleaned up on a normal shutdown; a stale file from a crash is harmless since
+  // every reader checks the pid is actually alive, not just that the file exists.
+  writeServerPidFile(port);
+  process.on("SIGINT", () => {
+    removeServerPidFile();
+    process.exit(0);
+  });
+  process.on("SIGTERM", () => {
+    removeServerPidFile();
+    process.exit(0);
+  });
+  process.on("exit", removeServerPidFile);
+
   migrate();
 
   const app = Fastify({ logger: true });

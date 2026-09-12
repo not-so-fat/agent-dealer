@@ -18,6 +18,7 @@ const { listWorkerSessionsForIssue } = await import("../repository/worker-sessio
 const { listWorkflowEventsForIssue, listWorkflowInstancesForIssue } = await import("../repository/workflow-events.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
+const { createRun, addArtifact } = await import("../repository/runs.js");
 
 const NOW = "2026-01-01T00:00:00.000Z";
 
@@ -150,6 +151,54 @@ test("a legacy run left in 'review' seeds an open final_review human action", ()
   assert.equal(actions.length, 1);
   assert.equal(actions[0].actionType, "final_review");
   HumanAction.parse(actions[0]);
+});
+
+test("after a restart, a fresh legacy run can still write an artifact without a foreign-key violation", () => {
+  // Reproduces the exact reviewer-reported regression: runMigration -> migrate() (the
+  // ordinary additive migration a real restart runs, which recreates a fresh, empty
+  // "runs" table via CREATE TABLE IF NOT EXISTS) -> createRun -> addArtifact. Before the
+  // artifacts-rebuild fix, the rename of runs -> legacy_v0_runs left artifacts.run_id's FK
+  // declaration pointed at legacy_v0_runs, so this exact sequence failed with
+  // "FOREIGN KEY constraint failed".
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  const report = runMigration(dbPath, { skipServiceCheck: true });
+  assert.deepStrictEqual(report.mismatches, []);
+
+  migrate(); // the restart every real cutover is followed by
+
+  const freshRun = createRun({
+    title: "Fresh post-cutover run",
+    taskCategory: "code",
+    status: "plan_pending",
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    repo: "/repo",
+  });
+  assert.doesNotThrow(() => addArtifact(freshRun.id, "task_snapshot", { hello: "world" }, "system"));
+});
+
+test("after a restart, the fresh runs/events/approval_gates tables have their secondary indexes back", () => {
+  freshHome();
+  const dbPath = seedLegacyLineages();
+  const report = runMigration(dbPath, { skipServiceCheck: true });
+  assert.deepStrictEqual(report.mismatches, []);
+
+  migrate();
+
+  const db = getDb();
+  const indexNames = (table: string) =>
+    (db.prepare(`PRAGMA index_list(${table})`).all() as Array<{ name: string }>).map((i) => i.name);
+
+  assert.ok(indexNames("runs").includes("idx_runs_status"), "fresh runs table should have idx_runs_status");
+  assert.ok(indexNames("runs").includes("idx_runs_external"), "fresh runs table should have idx_runs_external");
+  assert.ok(indexNames("events").includes("idx_events_run"), "fresh events table should have idx_events_run");
+  assert.ok(
+    indexNames("approval_gates").includes("idx_gates_run"),
+    "fresh approval_gates table should have idx_gates_run"
+  );
+
+  // And the legacy data is still indexed too, just under a renamed index.
+  assert.ok(indexNames("legacy_v0_runs").includes("legacy_v0_idx_runs_status"));
 });
 
 test("a legacy run left in 'failed' seeds an open attempts_exhausted human action", () => {
@@ -490,4 +539,27 @@ test("isServiceRunning: run.json with a live pid means running", () => {
   const result = isServiceRunning(dbPath);
   assert.equal(result.running, true);
   assert.ok(result.detail?.includes(String(process.pid)));
+});
+
+test("isServiceRunning: server.pid (written by a directly-launched server, no run.json at all) means running", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-liveness-"));
+  const dbPath = path.join(dir, "dealer.db");
+  fs.writeFileSync(dbPath, "");
+  // No run.json — this is exactly what `npm run dev` / `npm run start` leave behind,
+  // since only the CLI daemon supervisor writes run.json.
+  fs.writeFileSync(path.join(dir, "server.pid"), JSON.stringify({ pid: process.pid, port: 3221 }));
+  const result = isServiceRunning(dbPath);
+  assert.equal(result.running, true);
+  assert.ok(result.detail?.includes(String(process.pid)));
+});
+
+test("isServiceRunning: a dead server.pid falls through to a live run.json instead of reporting not-running", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-liveness-"));
+  const dbPath = path.join(dir, "dealer.db");
+  fs.writeFileSync(dbPath, "");
+  fs.writeFileSync(path.join(dir, "server.pid"), JSON.stringify({ pid: 999999, port: 3221 }));
+  fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify({ serverPid: process.pid, port: 2221 }));
+  const result = isServiceRunning(dbPath);
+  assert.equal(result.running, true);
+  assert.ok(result.detail?.includes("run.json"));
 });

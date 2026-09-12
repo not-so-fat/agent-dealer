@@ -225,27 +225,43 @@ function validateLegacySchema(db: Database.Database): string | null {
 
 /**
  * Real liveness check, not a placeholder: the running service is tracked via
- * `run.json` (packages/cli/src/runtime-state.ts's RunState — a sibling of dealer.db in
- * the same AGENT_DEALER_HOME directory), not a lock file this codebase never creates.
- * Reimplemented locally rather than imported: packages/cli depends on
- * @agent-dealer/server, never the reverse, so this package cannot import from cli.
+ * `server.pid` (packages/server/src/server-liveness.ts — written directly by the server's
+ * own entrypoint on every launch mode: `npm run dev`, `npm run start`, and the CLI daemon,
+ * which spawns that exact same entrypoint as a child) and, as a fallback,
+ * `run.json` (packages/cli/src/runtime-state.ts's RunState, written only by the CLI
+ * daemon supervisor). Checking server.pid first is what makes this guard hold for a
+ * directly-launched dev/start server, which never writes run.json at all. Reimplemented
+ * locally rather than imported: packages/cli depends on @agent-dealer/server, never the
+ * reverse, so this package cannot import from cli, and importing server-liveness.ts's
+ * getDataDir()-bound path would tie this arbitrary-dbPath script to the process's own
+ * AGENT_DEALER_HOME instead of the target database's directory.
  */
 export function isServiceRunning(dbPath: string): { running: boolean; detail?: string } {
-  const runStatePath = path.join(path.dirname(dbPath), "run.json");
-  if (!fs.existsSync(runStatePath)) return { running: false };
-  let state: { serverPid?: number; port?: number };
+  const dir = path.dirname(dbPath);
+  return (
+    checkPidFile(path.join(dir, "server.pid"), "pid") ??
+    checkPidFile(path.join(dir, "run.json"), "serverPid") ?? { running: false }
+  );
+}
+
+/** Returns a concrete result only when this file holds evidence of a live pid; null lets
+ * the caller fall through to check another liveness source instead of concluding "not
+ * running" just because this one file was absent or stale. */
+function checkPidFile(filePath: string, pidField: string): { running: boolean; detail?: string } | null {
+  if (!fs.existsSync(filePath)) return null;
+  let state: Record<string, unknown>;
   try {
-    state = JSON.parse(fs.readFileSync(runStatePath, "utf8"));
+    state = JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch {
-    return { running: false };
+    return null;
   }
-  const pid = state.serverPid;
-  if (!pid || !Number.isFinite(pid) || pid <= 0) return { running: false };
+  const pid = state[pidField];
+  if (typeof pid !== "number" || !Number.isFinite(pid) || pid <= 0) return null;
   try {
     process.kill(pid, 0);
-    return { running: true, detail: `serverPid ${pid} (from ${runStatePath})` };
+    return { running: true, detail: `${pidField} ${pid} (from ${filePath})` };
   } catch {
-    return { running: false };
+    return null;
   }
 }
 
@@ -525,6 +541,59 @@ export function runMigration(dbPath: string, opts?: RunMigrationOptions): Migrat
 
     if (opts?.injectFailureAt === "after-rename") {
       throw new Error("injected failure: after-rename");
+    }
+
+    // The rename above makes SQLite rewrite artifacts.run_id's FK target to
+    // "legacy_v0_runs" (a foreign key follows a RENAME of the table it references).
+    // schema.sql recreates a *fresh*, empty "runs" table on the very next startup — but
+    // the legacy `/api/runs` writers keep running per this ticket's scope, and the first
+    // fresh run's addArtifact() would then fail with "FOREIGN KEY constraint failed"
+    // because the live artifacts table's declared FK target no longer matches the table
+    // schema.sql just (re)created. Rebuild `artifacts` with run_id as a plain, unconstrained
+    // column instead — re-declaring `REFERENCES runs(id)` here does not work: SQLite
+    // requires the referenced table to exist by the time a row is *inserted* into the
+    // child (not merely at CREATE TABLE time), and this same transaction has to copy rows
+    // into the rebuilt table before schema.sql ever gets a chance to recreate "runs".
+    // Given "runs" itself now cycles between the renamed legacy table and a freshly
+    // recreated empty one across every cutover, a declared FK into it is unenforceable by
+    // construction; dropping the constraint (the column and its data are untouched) is the
+    // correct fix, not a workaround. Same rebuild-in-place technique migrate() already uses
+    // in ./index.ts for the analogous "SQLite can't ALTER a column's FK target" limitation.
+    db.exec(`
+      CREATE TABLE artifacts_new (
+        id TEXT PRIMARY KEY,
+        run_id TEXT,
+        kind TEXT NOT NULL,
+        content_json TEXT,
+        blob_path TEXT,
+        author TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        issue_id TEXT REFERENCES issues(id),
+        worker_session_id TEXT REFERENCES worker_sessions(id)
+      );
+      INSERT INTO artifacts_new (id, run_id, kind, content_json, blob_path, author, created_at, issue_id, worker_session_id)
+        SELECT id, run_id, kind, content_json, blob_path, author, created_at, issue_id, worker_session_id FROM artifacts;
+      DROP TABLE artifacts;
+      ALTER TABLE artifacts_new RENAME TO artifacts;
+      CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
+    `);
+
+    // The same rename-follows-reference behavior applies to each legacy table's own
+    // secondary indexes: SQLite keeps an index's original name attached through a table
+    // rename, so schema.sql's `CREATE INDEX IF NOT EXISTS idx_runs_status ...` (index
+    // names are unique database-wide, not per-table) finds that name already taken and
+    // silently skips creating it against the fresh "runs" table — leaving the live legacy
+    // write path with only its primary-key autoindex. Free the original names by giving
+    // the legacy copies new ones.
+    const LEGACY_INDEXES = [
+      { name: "idx_runs_status", table: "runs", columns: "status" },
+      { name: "idx_runs_external", table: "runs", columns: "source, external_id" },
+      { name: "idx_events_run", table: "events", columns: "run_id" },
+      { name: "idx_gates_run", table: "approval_gates", columns: "run_id" },
+    ];
+    for (const idx of LEGACY_INDEXES) {
+      db.exec(`DROP INDEX IF EXISTS ${idx.name}`);
+      db.exec(`CREATE INDEX legacy_v0_${idx.name} ON legacy_v0_${idx.table}(${idx.columns})`);
     }
 
     // Post-rename assertion: query "artifacts" exactly the way the live API does (by
