@@ -18,6 +18,7 @@ import {
   type MintAuthorityInput,
   type MintAuthorityResult,
 } from "../adapters/execution-authority.js";
+import { acquireAuthorityForAttempt, releaseAuthority } from "../adapters/authority-lifecycle.js";
 import { syncLinearForRun } from "../adapters/linear-sync.js";
 import { addArtifact, appendEvent, getRun, transitionRun } from "../repository/runs.js";
 import {
@@ -191,7 +192,9 @@ export async function approveRunWithDeliver(
     }
     const idempotencyKey = `${draftArtifactId}:${attemptCount}`;
 
-    const minted = await mint({
+    const acquired = await acquireAuthorityForAttempt({
+      ownerKind: "outbound_delivery",
+      ownerId: runId,
       runId,
       attemptId: draftArtifactId,
       deckId: run.deckId,
@@ -199,30 +202,22 @@ export async function approveRunWithDeliver(
       idempotencyKey,
       // Narrowed to exactly this draft's tool — an off-scope call is denied by Deck.
       toolScopeHint: [{ serviceId: toolCall.serviceName, toolName: toolCall.toolName }],
+      mint,
+      revoke,
     });
-    if (!minted.ok) {
+    if (!acquired.ok) {
       revertOutboundDraftToPending(draftArtifactId);
-      appendEvent(runId, "deliver_failed", { error: minted.message, errorCode: minted.code });
-      if (minted.code === "INTERACTION_REQUIRED") {
-        parkOnInteractionRequired(runId, draftArtifactId, toolCall, minted.message, minted.requestId);
+      const errorCode = acquired.kind === "interaction_required" ? "INTERACTION_REQUIRED" : "INFRA_FAILURE";
+      appendEvent(runId, "deliver_failed", { error: acquired.reason, errorCode });
+      if (acquired.kind === "interaction_required") {
+        parkOnInteractionRequired(runId, draftArtifactId, toolCall, acquired.reason, acquired.requestId);
       }
-      return { ok: false, code: 502, error: minted.message, errorCode: minted.code };
+      return { ok: false, code: 502, error: acquired.reason, errorCode };
     }
-    const { authority: mintedAuthority } = minted;
-    if (!mintedAuthority.authoritySecret) {
-      // Idempotent remint of a still-live authority never re-issues the secret — this
-      // attempt has none to use. Each real attempt mints with a fresh idempotencyKey above,
-      // so this should not happen in normal operation; surface as infra rather than
-      // silently proceeding secret-less (same guard as agent-deck-bind.ts's
-      // acquireWorkerAuthority).
-      revertOutboundDraftToPending(draftArtifactId);
-      const reason = `authority ${mintedAuthority.authorityId} minted without a secret (idempotent remint)`;
-      appendEvent(runId, "deliver_failed", { error: reason, errorCode: "INVALID_MINT_REQUEST" });
-      return { ok: false, code: 502, error: reason, errorCode: "INVALID_MINT_REQUEST" };
-    }
+    const { authority: mintedAuthority, attemptRowId } = acquired;
     const authority: DeliveryAuthority = {
       authorityId: mintedAuthority.authorityId,
-      authoritySecret: mintedAuthority.authoritySecret,
+      authoritySecret: mintedAuthority.authoritySecret!,
     };
 
     let result: DeliverOutboundResult;
@@ -231,15 +226,19 @@ export async function approveRunWithDeliver(
     } finally {
       // Revoke after every settled attempt — success, ordinary failure, or
       // interaction-required all count as "settled" here; a retry always mints fresh.
-      await revoke(authority.authorityId);
+      await releaseAuthority(attemptRowId, authority.authorityId, revoke);
     }
 
     if (!result.ok) {
       revertOutboundDraftToPending(draftArtifactId);
-      const errorCode = result.kind === "interaction_required" ? "INTERACTION_REQUIRED" : "DELIVERY_FAILED";
+      const errorCode =
+        result.kind === "interaction_required" ? "INTERACTION_REQUIRED" : result.kind === "ambiguous" ? "AMBIGUOUS_RESULT" : "DELIVERY_FAILED";
       appendEvent(runId, "deliver_failed", { error: result.reason, errorCode });
-      if (result.kind === "interaction_required") {
-        parkOnInteractionRequired(runId, draftArtifactId, toolCall, result.reason, result.requestId);
+      // Both park: an ambiguous timeout is never safe to silently bounded-retry (NOT-91) —
+      // it needs the same explicit "retry send or reject" human decision as a Deck-side
+      // INTERACTION_REQUIRED, distinguished only by the reason text an operator reads.
+      if (result.kind === "interaction_required" || result.kind === "ambiguous") {
+        parkOnInteractionRequired(runId, draftArtifactId, toolCall, result.reason, "requestId" in result ? result.requestId : undefined);
       }
       return { ok: false, code: 502, error: result.reason, errorCode };
     }

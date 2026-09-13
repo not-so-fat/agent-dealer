@@ -85,7 +85,12 @@ export function createHumanAction(input: CreateHumanActionInput): HumanAction {
     requested_at: now,
     resolved_at: null,
   };
-  db.prepare(`
+  // ON CONFLICT's target must repeat the partial index's predicate verbatim (schema.sql's
+  // idx_human_actions_open_request) — a bare `ON CONFLICT (issue_id, action_type,
+  // request_id)` throws SQLITE_ERROR against a partial unique index. A request_id-less
+  // insert (the vast majority of action types) never matches this partial index at all, so
+  // it always proceeds as a plain insert.
+  const info = db.prepare(`
     INSERT INTO human_actions (
       id, issue_id, run_id, workflow_instance_id, action_type, reason, question, evidence_json,
       response_options_json, continuation_preview_json, request_id, status, resolution_json, resolved_by,
@@ -95,7 +100,17 @@ export function createHumanAction(input: CreateHumanActionInput): HumanAction {
       @response_options_json, @continuation_preview_json, @request_id, @status, @resolution_json, @resolved_by,
       @requested_at, @resolved_at
     )
+    ON CONFLICT (issue_id, action_type, request_id) WHERE status = 'open' AND request_id IS NOT NULL DO NOTHING
   `).run(row);
+
+  if (info.changes === 0 && input.requestId && input.issueId) {
+    // Lost the race to dedupe onto an already-open action for this exact request — return
+    // the winner, never a phantom row this insert never actually created. (The partial
+    // index's NULL-issue_id rows — Run-scoped actions — never collide with each other at
+    // all under standard SQL NULL semantics, so this race is only reachable Issue-scoped.)
+    const existing = findOpenHumanActionByRequestId(input.issueId, input.actionType, input.requestId);
+    if (existing) return existing;
+  }
   return rowToAction(row);
 }
 
@@ -140,8 +155,10 @@ export function findOpenHumanAction(issueId: string, actionType: HumanActionType
 
 /** Dedupe key for a repeated Deck INTERACTION_REQUIRED signal that names a request id
  * (NOT-93) — a second signal for the same request must land on the one open action it
- * already raised, never a duplicate. Full duplicate-delivery/race-proofing across
- * concurrent writers is NOT-91's job; this is a plain read-then-create check. */
+ * already raised, never a duplicate. Callers (reflect-trigger.ts, commands.ts) still read
+ * this first to decide whether to raise at all; the actual race-proofing against a
+ * concurrent duplicate insert is `createHumanAction`'s own `ON CONFLICT ... DO NOTHING`
+ * against `idx_human_actions_open_request` (NOT-91) — this function alone is not atomic. */
 export function findOpenHumanActionByRequestId(
   issueId: string,
   actionType: HumanActionType,

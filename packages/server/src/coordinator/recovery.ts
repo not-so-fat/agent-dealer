@@ -20,7 +20,11 @@ import {
   finishWorkItem,
   listExpiredLeases,
   requeueWorkItem,
+  type WorkItem,
 } from "../repository/work-items.js";
+import { listOpenAcquiringAuthorityAttempts, revokeOpenActiveAuthorityAttempts } from "../repository/authority-attempts.js";
+import { revokeAuthority } from "../adapters/execution-authority.js";
+import { resolveAcquiringAttempts } from "../adapters/authority-lifecycle.js";
 import { routeAppliedOutcome } from "./commands.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
@@ -30,6 +34,24 @@ export interface RecoverResult {
   reclaimed: string[];
   /** Work items past the attempt cap — dead-lettered and routed to a human action. */
   deadLettered: string[];
+}
+
+/** Revokes (best-effort, fire-and-forget) whatever `authority_attempts` rows are still open
+ * for a reclaimed/dead-lettered work item. The ledger's owner_id for a developer/reviewer
+ * attempt is `${issueId}:${kind}` — stable across that item's own retry rollover, never the
+ * work-item row's own UUID (NOT-91 review, round 5: keying on the work-item id let a fresh
+ * enqueued retry item see no predecessor and mint beside one that was never actually
+ * resolved). An `active` row (known authorityId) revokes immediately; an `acquiring` row with
+ * none yet is resolved via its stored idempotencyKey rather than dropped on a guess (NOT-91
+ * review, round 3) — also fire-and-forget, since recovery's own CAS loop must stay
+ * synchronous and not block on Deck's availability. */
+function revokeStaleAuthoritiesForItem(item: WorkItem): void {
+  const ownerId = `${item.issueId}:${item.kind}`;
+  for (const row of revokeOpenActiveAuthorityAttempts(item.kind, ownerId)) {
+    if (row.authorityId) revokeAuthority(row.authorityId).catch(() => {});
+  }
+  const acquiring = listOpenAcquiringAuthorityAttempts(item.kind, ownerId);
+  if (acquiring.length > 0) resolveAcquiringAttempts(acquiring).catch(() => {});
 }
 
 /** Fail a worker_session still `running` for an item whose worker is gone. */
@@ -92,8 +114,16 @@ export function recoverCoordinator(opts?: { now?: number }): RecoverResult {
         }
         return "dead";
       })();
-      if (kind === "reclaimed") reclaimed.push(item.id);
-      else if (kind === "dead") deadLettered.push(item.id);
+      if (kind === "reclaimed" || kind === "dead") {
+        if (kind === "reclaimed") reclaimed.push(item.id);
+        else deadLettered.push(item.id);
+        // Worker death (NOT-91): whatever execution authority this attempt held has no
+        // further legitimate use once its lease is reclaimed or it's dead-lettered — revoke
+        // it rather than let it sit live until TTL. Fire-and-forget: revokeAuthority is
+        // already best-effort/never-throws, and recovery's own CAS loop must stay
+        // synchronous and not block on Deck's availability.
+        revokeStaleAuthoritiesForItem(item);
+      }
     } catch (err) {
       // One item's routing failure must not abort recovery of the rest — it stays leased
       // and the next recovery pass retries it.

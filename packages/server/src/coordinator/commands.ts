@@ -52,6 +52,13 @@ import {
   type WorkItemKind,
 } from "../repository/work-items.js";
 import { completeSession, listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
+import {
+  listOpenAcquiringAuthorityAttempts,
+  revokeOpenActiveAuthorityAttempts,
+  type AuthorityAttempt,
+} from "../repository/authority-attempts.js";
+import { revokeAuthority } from "../adapters/execution-authority.js";
+import { resolveAcquiringAttempts } from "../adapters/authority-lifecycle.js";
 import { killRunProcess } from "../runners/spawn-cli.js";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import {
@@ -1024,6 +1031,16 @@ interface AbortTxResult {
 export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssueDeps = defaultAbortDeps): AbortResult {
   if (!getIssue(issueId)) return { ok: false, code: 404, error: "Issue not found" };
 
+  // Populated inside the transaction below, revoked/resolved (best-effort, network) only
+  // after it commits — same "DB write now, effect outside" split as `killProcess` below
+  // (NOT-91: a cancelled work item's execution authority has no further legitimate use, and
+  // must not be left live until TTL for what is now a "late approval after cancellation"
+  // no-op). An `acquiring` row with no authorityId yet can't be revoked directly — it's
+  // gathered separately and resolved via its idempotencyKey after commit, never terminalized
+  // on a guess inside the transaction (NOT-91 review, round 3).
+  const authorityIdsToRevoke: string[] = [];
+  const acquiringAttemptsToResolve: AuthorityAttempt[] = [];
+
   const tx = getDb().transaction((): AbortTxResult => {
     const issue = getIssue(issueId)!;
     if (issue.status === "done" || issue.status === "closed") {
@@ -1033,7 +1050,17 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
     const instance = getActiveWorkflowInstance(issueId);
 
     for (const item of listWorkItemsForIssue(issueId)) {
-      if (item.status === "pending" || item.status === "leased") cancelWorkItem(item.id);
+      if (item.status === "pending" || item.status === "leased") {
+        cancelWorkItem(item.id);
+        // The ledger's owner_id for a developer/reviewer attempt is `${issueId}:${kind}` —
+        // stable across that item's own retry rollover, never the work-item row's own UUID
+        // (NOT-91 review, round 5).
+        const ownerId = `${issueId}:${item.kind}`;
+        for (const row of revokeOpenActiveAuthorityAttempts(item.kind, ownerId)) {
+          if (row.authorityId) authorityIdsToRevoke.push(row.authorityId);
+        }
+        acquiringAttemptsToResolve.push(...listOpenAcquiringAuthorityAttempts(item.kind, ownerId));
+      }
     }
 
     for (const action of listHumanActionsForIssue(issueId)) {
@@ -1071,6 +1098,8 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
   // Outside the transaction, per the ticket contract: terminating a child process is not
   // a DB write, and must happen only once the abort itself is durably committed.
   for (const sessionId of tx.runningSessionIds) deps.killProcess(sessionId);
+  for (const authorityId of authorityIdsToRevoke) revokeAuthority(authorityId).catch(() => {});
+  if (acquiringAttemptsToResolve.length > 0) resolveAcquiringAttempts(acquiringAttemptsToResolve).catch(() => {});
 
   return { ok: true, issueStatus: tx.issueStatus, alreadyClosed: tx.alreadyClosed };
 }

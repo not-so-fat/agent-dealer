@@ -215,7 +215,7 @@ export async function runReviewerEffect(
 
   let worktreePath: string;
   let result: ReviewerResult;
-  let workerAuthority: { authorityId: string; mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
+  let workerAuthority: { authorityId: string; attemptRowId: string; mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   try {
    try {
     const worktree = await createRoleWorktree({
@@ -228,6 +228,8 @@ export async function runReviewerEffect(
 
     if (snapshot?.deckId) {
       const acquired = await acquireWorkerAuthority({
+        ownerKind: "reviewer",
+        ownerId: `${issue.id}:reviewer`,
         deckId: snapshot.deckId,
         runId: ctx.instance.id,
         attemptId: workItem.id,
@@ -249,7 +251,12 @@ export async function runReviewerEffect(
         }
         return { kind: "session_failed" };
       }
-      workerAuthority = { authorityId: acquired.authorityId, mcpConfigPath: acquired.mcpConfigPath, mcpEnv: acquired.mcpEnv };
+      workerAuthority = {
+        authorityId: acquired.authorityId,
+        attemptRowId: acquired.attemptRowId,
+        mcpConfigPath: acquired.mcpConfigPath,
+        mcpEnv: acquired.mcpEnv,
+      };
     }
 
     // Recomputed here rather than trusted off `issue.baseSha`: a retry_reviewer_at_new_head

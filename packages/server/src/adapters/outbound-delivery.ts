@@ -34,10 +34,34 @@ export type DeliverOutboundResult =
    * NOT-87's developer/reviewer outcomes). `requestId` is Deck's own correlation id, when
    * supplied, for dedupe against the human action it raises. */
   | { ok: false; kind: "interaction_required"; reason: string; requestId?: string }
-  /** Ordinary failure — network/timeout, or a provider-level (Slack/etc.) error surfaced
-   * through a successful-looking MCP result. Bounded infra-retry (an explicit re-approve or
-   * "retry send"), never parked. */
+  /** The call timed out waiting for `call_service_tool`'s response — whether the provider
+   * (Slack/etc.) actually received and executed the send is genuinely unknown, unlike an
+   * ordinary connection failure where the request never reached it (NOT-91). Never silently
+   * auto-retried: a blind "retry send" here risks a duplicate provider effect, so this parks
+   * for an explicit human decision exactly like `interaction_required`, distinguished only
+   * by its reason text. */
+  | { ok: false; kind: "ambiguous"; reason: string }
+  /** Ordinary failure — a connection error before the request reached Deck, or a
+   * provider-level (Slack/etc.) error surfaced through a successful-looking MCP result.
+   * Bounded infra-retry (an explicit re-approve or "retry send"), never parked. */
   | { ok: false; kind: "infra_failure"; reason: string };
+
+const TIMEOUT_MESSAGE_RE = /timed out after \d+ms$/;
+
+/** Thrown by `callServiceToolUnderAuthority` for every failure, typed by whether the request
+ * may already have reached Deck's `call_service_tool` (NOT-91 review). `dispatched: true`
+ * covers a `client.callTool` failure or the race timeout — Deck may already have forwarded
+ * the call to the provider before this connection failed, so the effect is unknown. `false`
+ * is reserved for a failure before that point (the initial MCP handshake), where the request
+ * is known to have never reached Deck at all. */
+export class OutboundDeliveryTransportError extends Error {
+  readonly dispatched: boolean;
+  constructor(message: string, dispatched: boolean) {
+    super(message);
+    this.name = "OutboundDeliveryTransportError";
+    this.dispatched = dispatched;
+  }
+}
 
 /** Connects with `authority` as the session's only credential and calls `call_service_tool`
  * exactly once. No `bind_workspace`. */
@@ -54,17 +78,26 @@ export async function callServiceToolUnderAuthority(opts: {
   });
   const client = new Client({ name: "agent-dealer-deliver", version: "0.0.1" });
   const connectAndCall = async () => {
-    await client.connect(transport);
+    try {
+      await client.connect(transport);
+    } catch (e) {
+      throw new OutboundDeliveryTransportError(e instanceof Error ? e.message : String(e), false);
+    }
     try {
       return await client.callTool({ name: "call_service_tool", arguments: opts.payload });
+    } catch (e) {
+      throw new OutboundDeliveryTransportError(e instanceof Error ? e.message : String(e), true);
     } finally {
-      await client.close();
+      await client.close().catch(() => {});
     }
   };
   return await Promise.race([
     connectAndCall(),
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Outbound deliver timed out after ${opts.timeoutMs}ms`)), opts.timeoutMs)
+      setTimeout(
+        () => reject(new OutboundDeliveryTransportError(`Outbound deliver timed out after ${opts.timeoutMs}ms`, true)),
+        opts.timeoutMs
+      )
     ),
   ]);
 }
@@ -95,7 +128,23 @@ export async function deliverOutboundDraft(
   try {
     toolResult = await callTool(payload);
   } catch (err) {
-    return { ok: false, kind: "infra_failure", reason: err instanceof Error ? err.message : String(err) };
+    if (err instanceof OutboundDeliveryTransportError) {
+      // `dispatched` means the request may already have reached Deck's call_service_tool
+      // (the callTool phase, or the race timeout) — the provider effect is unknown, so this
+      // must never be silently auto-retried. `false` means it failed before that (the MCP
+      // handshake) — the request never reached Deck, so it's an ordinary retryable failure.
+      if (err.dispatched) {
+        return { ok: false, kind: "ambiguous", reason: `${err.message} — whether the message was actually sent is unknown` };
+      }
+      return { ok: false, kind: "infra_failure", reason: err.message };
+    }
+    // Legacy shape for callers/tests that inject a plain Error via opts.callTool instead of
+    // the typed error above — fall back to the original timeout-text heuristic.
+    const reason = err instanceof Error ? err.message : String(err);
+    if (TIMEOUT_MESSAGE_RE.test(reason)) {
+      return { ok: false, kind: "ambiguous", reason: `${reason} — whether the message was actually sent is unknown` };
+    }
+    return { ok: false, kind: "infra_failure", reason };
   }
 
   const interaction = parseInteractionRequired(toolResult);

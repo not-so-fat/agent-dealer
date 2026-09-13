@@ -29,7 +29,8 @@ import type { Issue } from "@agent-dealer/shared";
 import { parseProfileSnapshot } from "@agent-dealer/shared";
 import { randomUUID } from "node:crypto";
 import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
-import { mintAuthority, revokeAuthority, type MintAuthorityResult } from "../adapters/execution-authority.js";
+import { mintAuthority, revokeAuthority } from "../adapters/execution-authority.js";
+import { acquireAuthorityForAttempt, releaseAuthority } from "../adapters/authority-lifecycle.js";
 import { callAuthorizedDeckTool, type AuthorizedDeckCallResult } from "../adapters/reflect-authority.js";
 import { getIssue } from "../repository/issues.js";
 import { getAgent } from "../repository/agents.js";
@@ -208,35 +209,34 @@ export async function triggerIssueReflect(
   // §8): it doubles as the mint idempotency key and as the correlation Deck's own audit
   // trail and this attempt's artifacts share.
   const attemptId = randomUUID();
-  const minted: MintAuthorityResult = await deps.mintAuthority({
+  // ownerId = issueId (stable across attempts): a crashed prior attempt's still-open
+  // authority_attempts row (NOT-91) is revoked before this one starts, and — since
+  // acquireAuthorityForAttempt handles a secret-less idempotent remint / AUTHORITY_EXPIRED
+  // internally — this call never needs to branch on either.
+  const acquired = await acquireAuthorityForAttempt({
+    ownerKind: "reflect",
+    ownerId: issueId,
     runId: issueId,
     attemptId,
     deckId,
     ttlMs: REFLECT_AUTHORITY_TTL_MS,
     idempotencyKey: attemptId,
+    mint: deps.mintAuthority,
+    revoke: deps.revokeAuthority,
   });
-  if (!minted.ok) {
-    if (minted.code === "INTERACTION_REQUIRED") {
-      parkReflectAttempt(issueId, minted.message, minted.requestId);
-      recordStatus(issueId, { status: "parked", attemptId, reason: minted.message });
+  if (!acquired.ok) {
+    if (acquired.kind === "interaction_required") {
+      parkReflectAttempt(issueId, acquired.reason, acquired.requestId);
+      recordStatus(issueId, { status: "parked", attemptId, reason: acquired.reason });
       return "parked";
     }
-    recordStatus(issueId, { status: "failed", attemptId, error: `${minted.code}: ${minted.message}` });
+    recordStatus(issueId, { status: "failed", attemptId, error: acquired.reason });
     return "failed";
   }
-  const { authority } = minted;
-  if (!authority.authoritySecret) {
-    // Idempotent remint of a still-live authority under the same idempotency key never
-    // re-issues the secret (NOT-85 §7) — shouldn't happen since attemptId is fresh every
-    // call, but surface as infra rather than silently proceeding secret-less.
-    await deps.revokeAuthority(authority.authorityId);
-    recordStatus(issueId, {
-      status: "failed",
-      attemptId,
-      error: `authority ${authority.authorityId} minted without a secret (idempotent remint)`,
-    });
-    return "failed";
-  }
+  const { authority, attemptRowId } = acquired;
+  // acquireAuthorityForAttempt never returns ok:true without a secret — it resolves a
+  // secret-less idempotent remint internally (NOT-91).
+  const authoritySecret = authority.authoritySecret!;
 
   const rationale = buildRationale(issueId);
   const alreadyProposed = alreadyProposedPlaybookIds(issueId);
@@ -266,7 +266,7 @@ export async function triggerIssueReflect(
 
       const playbook = await deps.callTool<{ id: string; title: string; body: string }>({
         authorityId: authority.authorityId,
-        authoritySecret: authority.authoritySecret,
+        authoritySecret,
         toolName: "get_playbook",
         arguments: { playbook_id: playbookId },
         timeoutMs: REFLECT_TOOL_TIMEOUT_MS,
@@ -282,7 +282,7 @@ export async function triggerIssueReflect(
 
       const proposed = await deps.callTool<{ id: string; playbookId: string | null }>({
         authorityId: authority.authorityId,
-        authoritySecret: authority.authoritySecret,
+        authoritySecret,
         toolName: "propose_playbook_patch",
         arguments: {
           kind: "update",
@@ -316,7 +316,7 @@ export async function triggerIssueReflect(
       anySucceeded = true;
     }
   } finally {
-    await deps.revokeAuthority(authority.authorityId);
+    await releaseAuthority(attemptRowId, authority.authorityId, deps.revokeAuthority);
   }
 
   if (parked) {
