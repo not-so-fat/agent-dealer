@@ -77,7 +77,15 @@ test("scenario: cancellation revokes an in-flight attempt's execution authority"
   startWorkflow(issueId);
   const item = listWorkItemsForIssue(issueId)[0];
 
-  const row = createAuthorityAttempt({ ownerKind: item.kind, ownerId: item.id, idempotencyKey: `${item.id}:1`, deckId: DECK });
+  const row = createAuthorityAttempt({
+    ownerKind: item.kind,
+    ownerId: item.id,
+    idempotencyKey: `${item.id}:1`,
+    deckId: DECK,
+    runId: item.id,
+    attemptId: `${item.id}:1`,
+    ttlMs: 60_000,
+  });
   activateAuthorityAttempt(row.id, { authorityId: "authz_cancel", expiresAt: "2099-01-01T00:00:00Z" });
 
   const result = abortIssue(issueId, "tester");
@@ -162,7 +170,15 @@ test("scenario: coordinator restart revokes every attempt a crashed process left
   const liveItem = listWorkItemsForIssue(liveIssueId)[0];
   claimWorkItem("leaseholder", { leaseMs: 600_000 });
   assert.equal(getWorkItem(liveItem.id)!.status, "leased");
-  const liveActive = createAuthorityAttempt({ ownerKind: liveItem.kind, ownerId: liveItem.id, idempotencyKey: `${liveItem.id}:1`, deckId: DECK });
+  const liveActive = createAuthorityAttempt({
+    ownerKind: liveItem.kind,
+    ownerId: liveItem.id,
+    idempotencyKey: `${liveItem.id}:1`,
+    deckId: DECK,
+    runId: liveItem.id,
+    attemptId: `${liveItem.id}:1`,
+    ttlMs: 60_000,
+  });
   activateAuthorityAttempt(liveActive.id, { authorityId: "authz_live", expiresAt: "2099-01-01T00:00:00Z" });
 
   // Item is `pending`, not `leased` — simulates "the coordinator crashed before this
@@ -171,21 +187,86 @@ test("scenario: coordinator restart revokes every attempt a crashed process left
   startWorkflow(staleIssueId);
   const staleItem = listWorkItemsForIssue(staleIssueId)[0];
   assert.equal(getWorkItem(staleItem.id)!.status, "pending");
-  const staleActive = createAuthorityAttempt({ ownerKind: staleItem.kind, ownerId: staleItem.id, idempotencyKey: `${staleItem.id}:1`, deckId: DECK });
+  const staleActive = createAuthorityAttempt({
+    ownerKind: staleItem.kind,
+    ownerId: staleItem.id,
+    idempotencyKey: `${staleItem.id}:1`,
+    deckId: DECK,
+    runId: staleItem.id,
+    attemptId: `${staleItem.id}:1`,
+    ttlMs: 60_000,
+  });
   activateAuthorityAttempt(staleActive.id, { authorityId: "authz_stale", expiresAt: "2099-01-01T00:00:00Z" });
 
-  const stillAcquiring = createAuthorityAttempt({ ownerKind: "reflect", ownerId: staleIssueId, idempotencyKey: "reflect-1", deckId: DECK });
+  // Still `acquiring` with no ledger authorityId — models a crash between "Deck committed
+  // the mint" and "this row got activated." Reconciliation must not assume there's nothing
+  // to revoke just because the ledger never recorded an id; it must resolve by replaying the
+  // stored idempotencyKey, discover the live authority the mint stub hands back, and revoke
+  // that instead of silently dropping it (NOT-91 review).
+  const stillAcquiring = createAuthorityAttempt({
+    ownerKind: "reflect",
+    ownerId: staleIssueId,
+    idempotencyKey: "reflect-1",
+    deckId: DECK,
+    runId: staleIssueId,
+    attemptId: "reflect-1",
+    ttlMs: 60_000,
+  });
 
   const revokedIds: string[] = [];
-  const result = await reconcileAuthoritiesAtStartup({ revoke: async (id) => void revokedIds.push(id) });
+  const result = await reconcileAuthoritiesAtStartup({
+    revoke: async (id) => void revokedIds.push(id),
+    mint: async () => ({
+      ok: true,
+      authority: {
+        authorityId: "authz_resolved_reflect",
+        authoritySecret: null,
+        deckId: DECK,
+        audience: "dealer-worker",
+        allowedServices: [],
+        allowedTools: [],
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+    }),
+  });
 
   assert.ok(result.revoked.includes(staleActive.id));
   assert.ok(result.revoked.includes(stillAcquiring.id));
   assert.ok(!result.revoked.includes(liveActive.id), "a still-leased owner's authority must not be revoked by the startup sweep");
-  assert.deepEqual(new Set(revokedIds), new Set(["authz_stale"]), "reflect rows mint no authorityId here, so only the worker one is actually revoked on Deck's side");
+  assert.deepEqual(
+    new Set(revokedIds),
+    new Set(["authz_stale", "authz_resolved_reflect"]),
+    "an acquiring row with no ledger authorityId is resolved via its idempotency key before being terminalized, not skipped"
+  );
   assert.equal(getAuthorityAttempt(staleActive.id)!.status, "revoked");
   assert.equal(getAuthorityAttempt(stillAcquiring.id)!.status, "revoked");
   assert.equal(getAuthorityAttempt(liveActive.id)!.status, "active");
+});
+
+test("scenario: coordinator restart leaves an unresolved acquiring attempt open when Deck is unreachable, rather than guessing it's safe to drop", async () => {
+  const issueId = newIssue();
+  const row = createAuthorityAttempt({
+    ownerKind: "reflect",
+    ownerId: issueId,
+    idempotencyKey: "reflect-unreachable",
+    deckId: DECK,
+    runId: issueId,
+    attemptId: "reflect-unreachable",
+    ttlMs: 60_000,
+  });
+
+  const result = await reconcileAuthoritiesAtStartup({
+    revoke: async () => {},
+    mint: async () => ({ ok: false, code: "DECK_UNAVAILABLE", message: "ECONNREFUSED" }),
+  });
+
+  assert.ok(result.unresolved.includes(row.id));
+  assert.ok(!result.revoked.includes(row.id));
+  assert.equal(
+    getAuthorityAttempt(row.id)!.status,
+    "acquiring",
+    "left open for a later sweep instead of being guessed-terminalized while Deck is unreachable"
+  );
 });
 
 test("scenario: worker death (lease expiry) revokes the attempt's authority and returns the item to pending, never permanently occupied", () => {
@@ -194,7 +275,15 @@ test("scenario: worker death (lease expiry) revokes the attempt's authority and 
   const item = listWorkItemsForIssue(issueId)[0];
   claimWorkItem("crashed-worker", { leaseMs: 1 });
 
-  const row = createAuthorityAttempt({ ownerKind: item.kind, ownerId: item.id, idempotencyKey: `${item.id}:1`, deckId: DECK });
+  const row = createAuthorityAttempt({
+    ownerKind: item.kind,
+    ownerId: item.id,
+    idempotencyKey: `${item.id}:1`,
+    deckId: DECK,
+    runId: item.id,
+    attemptId: `${item.id}:1`,
+    ttlMs: 60_000,
+  });
   activateAuthorityAttempt(row.id, { authorityId: "authz_deadworker", expiresAt: "2099-01-01T00:00:00Z" });
 
   const res = recoverCoordinator({ now: Date.now() + 3_600_000 });

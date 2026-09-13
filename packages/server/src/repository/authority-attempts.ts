@@ -12,6 +12,11 @@ import { getDb } from "../db/index.js";
 export type AuthorityAttemptOwnerKind = "developer" | "reviewer" | "reflect" | "outbound_delivery";
 export type AuthorityAttemptStatus = "acquiring" | "active" | "closed" | "revoked" | "failed";
 
+export interface AuthorityAttemptToolScopeHint {
+  serviceId: string;
+  toolName: string;
+}
+
 export interface AuthorityAttempt {
   id: string;
   ownerKind: AuthorityAttemptOwnerKind;
@@ -19,6 +24,10 @@ export interface AuthorityAttempt {
   idempotencyKey: string;
   authorityId: string | null;
   deckId: string;
+  runId: string;
+  attemptId: string;
+  ttlMs: number;
+  toolScopeHint: AuthorityAttemptToolScopeHint[] | null;
   status: AuthorityAttemptStatus;
   expiresAt: string | null;
   createdAt: string;
@@ -32,6 +41,10 @@ interface AuthorityAttemptRow {
   idempotency_key: string;
   authority_id: string | null;
   deck_id: string;
+  run_id: string;
+  attempt_id: string;
+  ttl_ms: number;
+  tool_scope_hint_json: string | null;
   status: string;
   expires_at: string | null;
   created_at: string;
@@ -46,6 +59,10 @@ function rowToAttempt(row: AuthorityAttemptRow): AuthorityAttempt {
     idempotencyKey: row.idempotency_key,
     authorityId: row.authority_id,
     deckId: row.deck_id,
+    runId: row.run_id,
+    attemptId: row.attempt_id,
+    ttlMs: row.ttl_ms,
+    toolScopeHint: row.tool_scope_hint_json ? JSON.parse(row.tool_scope_hint_json) : null,
     status: row.status as AuthorityAttemptStatus,
     expiresAt: row.expires_at,
     createdAt: row.created_at,
@@ -58,6 +75,14 @@ export interface CreateAuthorityAttemptInput {
   ownerId: string;
   idempotencyKey: string;
   deckId: string;
+  /** Stored verbatim so a row stuck `acquiring` with no authorityId (a crash between "Deck
+   * committed the mint" and "this row was activated") can be resolved on restart by replaying
+   * the exact original mint request under the same idempotencyKey, instead of being
+   * terminalized on a guess (NOT-91 review). */
+  runId: string;
+  attemptId: string;
+  ttlMs: number;
+  toolScopeHint?: AuthorityAttemptToolScopeHint[];
 }
 
 /** Inserted BEFORE the mint call — `acquiring` must never survive a process boundary. */
@@ -70,6 +95,10 @@ export function createAuthorityAttempt(input: CreateAuthorityAttemptInput): Auth
     idempotency_key: input.idempotencyKey,
     authority_id: null,
     deck_id: input.deckId,
+    run_id: input.runId,
+    attempt_id: input.attemptId,
+    ttl_ms: input.ttlMs,
+    tool_scope_hint_json: input.toolScopeHint ? JSON.stringify(input.toolScopeHint) : null,
     status: "acquiring",
     expires_at: null,
     created_at: now,
@@ -78,9 +107,11 @@ export function createAuthorityAttempt(input: CreateAuthorityAttemptInput): Auth
   getDb()
     .prepare(`
       INSERT INTO authority_attempts (
-        id, owner_kind, owner_id, idempotency_key, authority_id, deck_id, status, expires_at, created_at, updated_at
+        id, owner_kind, owner_id, idempotency_key, authority_id, deck_id, run_id, attempt_id,
+        ttl_ms, tool_scope_hint_json, status, expires_at, created_at, updated_at
       ) VALUES (
-        @id, @owner_kind, @owner_id, @idempotency_key, @authority_id, @deck_id, @status, @expires_at, @created_at, @updated_at
+        @id, @owner_kind, @owner_id, @idempotency_key, @authority_id, @deck_id, @run_id, @attempt_id,
+        @ttl_ms, @tool_scope_hint_json, @status, @expires_at, @created_at, @updated_at
       )
     `)
     .run(row);

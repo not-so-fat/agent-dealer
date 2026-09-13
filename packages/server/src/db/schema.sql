@@ -336,6 +336,10 @@ CREATE TABLE IF NOT EXISTS authority_attempts (
   idempotency_key TEXT NOT NULL,
   authority_id TEXT,               -- Deck's id; null until mint succeeds
   deck_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  ttl_ms INTEGER NOT NULL,
+  tool_scope_hint_json TEXT,       -- the original mint's AllowedTool[] hint, when one was given
   status TEXT NOT NULL,            -- 'acquiring' | 'active' | 'closed' | 'revoked' | 'failed'
   expires_at TEXT,
   created_at TEXT NOT NULL,

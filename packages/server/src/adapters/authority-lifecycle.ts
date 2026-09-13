@@ -93,6 +93,10 @@ export async function acquireAuthorityForAttempt(
       ownerId: input.ownerId,
       idempotencyKey,
       deckId: input.deckId,
+      runId: input.runId,
+      attemptId: input.attemptId,
+      ttlMs: input.ttlMs,
+      toolScopeHint: input.toolScopeHint,
     });
 
     const minted = await mint({
@@ -176,6 +180,10 @@ export async function failAuthority(
 
 export interface ReconcileAuthoritiesResult {
   revoked: string[];
+  /** `acquiring` rows with no ledger `authorityId` that Deck couldn't resolve right now
+   * (DECK_UNAVAILABLE) — left open rather than guessed-terminalized, so a later sweep can
+   * still find and close them once Deck is reachable again. */
+  unresolved: string[];
 }
 
 /**
@@ -191,23 +199,61 @@ export interface ReconcileAuthoritiesResult {
  * - `reflect`/`outbound_delivery` rows are always one-shot, coordinator-process-local calls
  *   with no lease of their own — if one is still open at startup, the process that opened it
  *   is definitionally gone.
+ *
+ * A stale `acquiring` row with no `authorityId` is the one ambiguous case: a coordinator can
+ * crash after Deck committed the mint but before this row was activated with the resulting
+ * id, so the ledger alone can't tell "nothing was ever minted" from "a live authority exists
+ * that only this row's idempotencyKey can still find." Resolve it the same way a live caller
+ * recovers from a secret-less idempotent remint (NOT-85 §7): replay the original mint request
+ * under its stored idempotencyKey/runId/attemptId/ttlMs/toolScopeHint. A mint success means a
+ * live authority exists (whether it's the original or one just freshly minted by this replay)
+ * — revoke it. Every typed mint failure other than DECK_UNAVAILABLE means Deck has nothing
+ * live to hand back under this key, so the row is safe to terminalize. DECK_UNAVAILABLE alone
+ * leaves the row `acquiring` rather than guessing — terminalizing it would be exactly the
+ * leak this sweep exists to close.
  */
 export async function reconcileAuthoritiesAtStartup(deps?: {
   revoke?: RevokeFn;
+  mint?: MintFn;
   isWorkItemLeased?: (workItemId: string) => boolean;
 }): Promise<ReconcileAuthoritiesResult> {
   const revoke = deps?.revoke ?? defaultRevokeAuthority;
+  const mint = deps?.mint ?? defaultMintAuthority;
   const isWorkItemLeased = deps?.isWorkItemLeased ?? ((id: string) => getWorkItem(id)?.status === "leased");
 
   const revoked: string[] = [];
+  const unresolved: string[] = [];
   for (const row of listAllOpenAuthorityAttempts()) {
     const stale =
       row.status === "acquiring" ||
       (row.ownerKind === "developer" || row.ownerKind === "reviewer" ? !isWorkItemLeased(row.ownerId) : true);
     if (!stale) continue;
+
+    if (row.status === "acquiring" && !row.authorityId) {
+      const resolved = await mint({
+        runId: row.runId,
+        attemptId: row.attemptId,
+        deckId: row.deckId,
+        ttlMs: row.ttlMs,
+        idempotencyKey: row.idempotencyKey,
+        ...(row.toolScopeHint ? { toolScopeHint: row.toolScopeHint } : {}),
+      });
+      if (resolved.ok) {
+        await revoke(resolved.authority.authorityId);
+        markAuthorityAttemptRevoked(row.id);
+        revoked.push(row.id);
+      } else if (resolved.code === "DECK_UNAVAILABLE") {
+        unresolved.push(row.id);
+      } else {
+        markAuthorityAttemptRevoked(row.id);
+        revoked.push(row.id);
+      }
+      continue;
+    }
+
     if (row.authorityId) await revoke(row.authorityId);
     markAuthorityAttemptRevoked(row.id);
     revoked.push(row.id);
   }
-  return { revoked };
+  return { revoked, unresolved };
 }
