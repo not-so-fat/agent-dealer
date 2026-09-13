@@ -35,7 +35,7 @@ const { createWorkerSession } = await import("../repository/worker-sessions.js")
 const { buildProfileSnapshot, serializeProfileSnapshot } = await import("./profile-snapshot.js");
 const { appendWorkflowEvent } = await import("../repository/workflow-events.js");
 const { createIssueArtifact } = await import("../repository/artifacts.js");
-const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
+const { listArtifactsForIssue, listArtifactsForIssueByKind } = await import("../repository/artifacts-for-issue.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { triggerIssueReflect, resolveReflectionInteractionAction } = await import("./reflect-trigger.js");
 
@@ -401,6 +401,60 @@ test("a retry after a mid-loop park does not re-propose a playbook that already 
   // Retry skips pb-ok (already has a playbook_patch artifact) and only re-attempts pb-park.
   assert.deepStrictEqual(proposedCalls, ["pb-ok", "pb-park", "pb-park"]);
   assert.equal(listArtifactsForIssue(issue.id).filter((a) => a.kind === "playbook_patch").length, 2);
+});
+
+// NOT-96: the already-proposed scan must query playbook_patch rows by kind, not rely on
+// the newest-first, all-kinds `listArtifactsForIssue` window — otherwise a very
+// artifact-heavy issue can push pb-ok's playbook_patch row outside that window and
+// re-propose it on retry (the same duplicate-Notes failure mode NOT-94/PR #21 fixed).
+test("a retry after a mid-loop park skips an already-proposed playbook even behind a flood of other artifacts", async () => {
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: "/repo" });
+  const issue = seedIssue(dev.id);
+  seedFinalDeveloperSession(issue.id, dev, { deckId: "11111111-1111-4111-a111-111111111111", playbookIds: ["pb-ok", "pb-park"] });
+
+  const proposedCalls: string[] = [];
+  let parkPbPark = true;
+  let revokedCount = 0;
+  const deps: ReflectDeps = {
+    checkHealth: async () => true,
+    mintAuthority: async () => MINT_OK,
+    revokeAuthority: async () => {
+      revokedCount += 1;
+    },
+    callTool: (async (opts: { toolName: string; arguments: Record<string, unknown> }) => {
+      if (opts.toolName === "get_playbook") {
+        return { ok: true, data: { id: opts.arguments.playbook_id, title: "pb", body: "" } };
+      }
+      const playbookId = opts.arguments.playbook_id as string;
+      proposedCalls.push(playbookId);
+      if (playbookId === "pb-park" && parkPbPark) {
+        return { ok: false, kind: "interaction_required", reason: "Playbook mutation needs review.", requestId: "req_mid_park_flood" };
+      }
+      return { ok: true, data: { id: `patch-${playbookId}`, playbookId } };
+    }) as ReflectDeps["callTool"],
+  };
+
+  const first = await triggerIssueReflect(issue.id, deps);
+  assert.equal(first, "parked");
+  assert.deepStrictEqual(proposedCalls, ["pb-ok", "pb-park"]);
+
+  // Flood the issue with far more than the old `limit: 200` scan window's worth of
+  // newer, non-`playbook_patch` artifacts before the retry runs.
+  for (let i = 0; i < 250; i++) {
+    createIssueArtifact({ issueId: issue.id, kind: "reflect_status", author: "system", content: { i } });
+  }
+
+  const parkedAction = listHumanActionsForIssue(issue.id).find((a) => a.actionType === "reflection_interaction_required" && a.status === "open")!;
+  parkPbPark = false;
+  const resolved = resolveReflectionInteractionAction(parkedAction.id, "operator", "retry", deps);
+  assert.ok(resolved.ok);
+  await waitFor(() => revokedCount === 2);
+
+  // Still skips pb-ok despite it being buried behind 250 newer artifacts of another kind.
+  // (Asserted via the kind-filtered query — `listArtifactsForIssue`'s default 50-row,
+  // all-kinds window would itself now miss pb-ok's older patch behind the flood.)
+  assert.deepStrictEqual(proposedCalls, ["pb-ok", "pb-park", "pb-park"]);
+  assert.equal(listArtifactsForIssueByKind(issue.id, "playbook_patch").length, 2);
 });
 
 test("a repeated INTERACTION_REQUIRED for the same requestId dedupes onto the one open action", async () => {

@@ -9,7 +9,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ar
 const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue } = await import("./issues.js");
-const { listArtifactsForIssue } = await import("./artifacts-for-issue.js");
+const { listArtifactsForIssue, listArtifactsForIssueByKind } = await import("./artifacts-for-issue.js");
 const { recordUsageEvent } = await import("./usage-events.js");
 const { createWorkerSession } = await import("./worker-sessions.js");
 
@@ -32,6 +32,23 @@ test("lists artifacts for an issue newest first, respects limit", () => {
 
   const limited = listArtifactsForIssue(issue.id, { limit: 2 });
   assert.equal(limited.length, 2);
+});
+
+test("listArtifactsForIssueByKind finds a matching row regardless of how many newer rows of other kinds exist", () => {
+  const issue = createIssue({ title: "K", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
+  const db = getDb();
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO artifacts (id, issue_id, run_id, kind, content_json, author, created_at) VALUES (?, ?, NULL, 'playbook_patch', '{}', 'system', ?)`
+  ).run("patch-1", issue.id, new Date(now).toISOString());
+  for (let i = 0; i < 250; i++) {
+    db.prepare(
+      `INSERT INTO artifacts (id, issue_id, run_id, kind, content_json, author, created_at) VALUES (?, ?, NULL, 'reflect_status', '{}', 'system', ?)`
+    ).run(`status-${i}`, issue.id, new Date(now + (i + 1) * 1000).toISOString());
+  }
+  const matches = listArtifactsForIssueByKind(issue.id, "playbook_patch");
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].id, "patch-1");
 });
 
 test("listUsageEventsForIssue returns recorded events", async () => {
