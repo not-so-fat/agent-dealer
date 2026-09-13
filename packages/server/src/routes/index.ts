@@ -58,7 +58,7 @@ import { recordPlanDelegation } from "../queue/plan-delegation.js";
 import { askResultQuestion } from "../queue/result-qa.js";
 import { rejectPendingOutboundDrafts, deliverInFlight } from "../repository/outbound-drafts.js";
 import { getActiveLogPath } from "../runners/claude.js";
-import { fetchAgentDeckDecks } from "../adapters/agent-deck.js";
+import { fetchAuthorizedDecks } from "../adapters/agent-deck.js";
 import { testAgentDeckConnection } from "../adapters/agent-deck.js";
 import {
   getLinearIssue,
@@ -80,14 +80,9 @@ import { listRuntimeModels } from "../runners/models.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
   if (!deckId) return null;
-  try {
-    const decksRes = (await fetchAgentDeckDecks()) as {
-      data?: Array<{ id: string; name: string }>;
-    };
-    return decksRes.data?.find((d) => d.id === deckId)?.name ?? null;
-  } catch {
-    return null;
-  }
+  const result = await fetchAuthorizedDecks();
+  if (!result.ok) return null;
+  return result.decks.find((d) => d.id === deckId)?.name ?? null;
 }
 
 function assertAgentConfigured(run: NonNullable<ReturnType<typeof getRun>>): void {
@@ -642,11 +637,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/api/agent-deck/decks", async (_req, reply) => {
-    try {
-      return await fetchAgentDeckDecks();
-    } catch (e) {
-      return reply.status(502).send({ error: String(e), data: [] });
+    const result = await fetchAuthorizedDecks();
+    if (!result.ok) {
+      const status = result.code === "NOT_ENROLLED" ? 409 : result.code === "DECK_UNAVAILABLE" ? 502 : 403;
+      return reply.status(status).send({ error: result.message, code: result.code, data: [] });
     }
+    return { data: result.decks };
   });
 
   app.get("/api/agent-deck/decks/:deckId/playbooks", async (req, reply) => {

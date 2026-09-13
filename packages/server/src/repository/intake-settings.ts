@@ -116,12 +116,28 @@ function parseEnvAgentDeckUrl(): { host: string; port: number } | null {
   }
 }
 
+/**
+ * Coordinator enrollment (NOT-85/86) is env-configured only, never persisted to the DB —
+ * the enrollment secret must not land in Dealer storage. Set via `agent-deck coordinator
+ * enroll` output: AGENT_DECK_COORDINATOR_ID / AGENT_DECK_ENROLLMENT_ID / AGENT_DECK_ENROLLMENT_SECRET.
+ */
+export function getAgentDeckEnrollmentBearer(): string | null {
+  const enrollmentId = process.env.AGENT_DECK_ENROLLMENT_ID;
+  const secret = process.env.AGENT_DECK_ENROLLMENT_SECRET;
+  if (!enrollmentId || !secret) return null;
+  return `${enrollmentId}:${secret}`;
+}
+
 export function getAgentDeckConfig(): AgentDeckConfig {
   const fromEnv = parseEnvAgentDeckUrl();
+  const enrollmentId = process.env.AGENT_DECK_ENROLLMENT_ID ?? null;
   return {
     host: getJson<string>("agentDeck.host", fromEnv?.host ?? "127.0.0.1"),
     port: getJson<number>("agentDeck.port", fromEnv?.port ?? 1111),
     envOverride: Boolean(process.env.AGENT_DECK_API_URL),
+    coordinatorId: process.env.AGENT_DECK_COORDINATOR_ID ?? null,
+    enrollmentId,
+    enrollmentConfigured: Boolean(getAgentDeckEnrollmentBearer()),
   };
 }
 
@@ -131,6 +147,7 @@ export function patchAgentDeckConfig(patch: AgentDeckConfigPatch): AgentDeckConf
   }
   const current = getAgentDeckConfig();
   const next: AgentDeckConfig = {
+    ...current,
     host: patch.host?.trim() || current.host,
     port: patch.port ?? current.port,
     envOverride: false,
