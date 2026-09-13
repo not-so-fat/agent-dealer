@@ -29,7 +29,7 @@ const { migrate, getDb } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
 const { createIssue, getIssue } = await import("../repository/issues.js");
 const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
-const { listWorkItemsForIssue } = await import("../repository/work-items.js");
+const { listWorkItemsForIssue, cancelWorkItem } = await import("../repository/work-items.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue } = await import("../repository/findings.js");
@@ -622,4 +622,30 @@ test("publish_failed: the PR cannot be re-verified after the reviewer session en
   await pump(1);
 
   assert.equal(getIssue(issueId)!.status, "needs_human");
+});
+
+test("NOT-83 review: a reviewer item cancelled during worktree/deck-bind setup (before spawn) is never spawned", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  // Captured before cancelling — the factory's own internal lookup requires `status ===
+  // "pending"`, which cancelWorkItem below no longer satisfies.
+  const ctxWithLease = reviewerCtxFactory(issueId);
+
+  setWorkItemLease(workItem.id, "token-1");
+  // Simulates an abort landing while this handler is still inside worktree/deck-bind setup
+  // (reviewer-effect.ts's guard runs after that, right before spawn) — cancelWorkItem is
+  // exactly what abortIssue (commands.ts) calls in that scenario.
+  assert.ok(cancelWorkItem(workItem.id), "expected the leased item to still be cancellable");
+
+  let spawnCalled = false;
+  const spySpawn: ReviewerSpawnFn = async (input) => {
+    spawnCalled = true;
+    return verdictSpawn({ verdict: "approved" })(input);
+  };
+
+  const outcome = await runReviewerEffect(ctxWithLease("token-1"), { spawn: spySpawn, github });
+  assert.equal(spawnCalled, false, "a cancelled item must never reach the real spawn");
+  assert.deepEqual(outcome, { kind: "session_failed" });
 });

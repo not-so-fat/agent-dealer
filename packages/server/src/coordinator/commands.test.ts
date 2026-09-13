@@ -16,6 +16,9 @@ const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue } = await import("../repository/findings.js");
 const { claimWorkItem, listWorkItemsForIssue, getWorkItem } = await import("../repository/work-items.js");
+const { createWorkerSession, startSession, listWorkerSessionsForIssue } = await import(
+  "../repository/worker-sessions.js"
+);
 const {
   startWorkflow,
   applyCompletion,
@@ -23,6 +26,7 @@ const {
   getTaskSnapshot,
   TASK_SNAPSHOT_ARTIFACT_KIND,
   checkIssueReadiness,
+  abortIssue,
 } = await import("./commands.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
@@ -556,3 +560,105 @@ test("pre-start product_scope_decision: resolving without criteria leaves the ac
   assert.equal(listHumanActionsForIssue(issueId)[0].status, "resolved");
   assert.equal(getActiveWorkflowInstance(issueId)!.workflowVersion, "dev_reviewer_v1");
 });
+
+test("abortIssue closes a pre-start issue with no active workflow", () => {
+  const issueId = newIssue();
+  const result = abortIssue(issueId, "yusuke");
+  assert.deepEqual(result, { ok: true, issueStatus: "closed", alreadyClosed: false });
+  assert.equal(getIssue(issueId)!.status, "closed");
+  const events = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "issue.closed");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].payloadJson, JSON.stringify({ reason: "aborted_by_user" }));
+});
+
+test("abortIssue mid-workflow cancels the pending work item, closes the instance, and emits one issue.closed event", () => {
+  const issueId = newIssue();
+  const started = startWorkflow(issueId);
+  assert.equal(started.ok, true);
+  const pendingItemId = listWorkItemsForIssue(issueId)[0].id;
+
+  const result = abortIssue(issueId, "yusuke");
+  assert.deepEqual(result, { ok: true, issueStatus: "closed", alreadyClosed: false });
+
+  assert.equal(getWorkItem(pendingItemId)!.status, "cancelled");
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "closed");
+  assert.equal(getActiveWorkflowInstance(issueId), null);
+  assert.equal(events(issueId).filter((e) => e.type === "issue.closed").length, 1);
+});
+
+test("abortIssue resolves an open human action and drops it out of the open set", () => {
+  const issueId = newIssue({ acceptanceCriteria: null });
+  const started = startWorkflow(issueId);
+  assert.equal(started.ok, "needs_scope_decision");
+  if (started.ok !== "needs_scope_decision") return;
+  assert.equal(started.action.status, "open");
+
+  const result = abortIssue(issueId, "yusuke");
+  assert.deepEqual(result, { ok: true, issueStatus: "closed", alreadyClosed: false });
+  assert.equal(listHumanActionsForIssue(issueId).every((a) => a.status !== "open"), true);
+});
+
+test("abortIssue is idempotent once the issue is already closed", () => {
+  const issueId = newIssue();
+  abortIssue(issueId, "yusuke");
+  const before = events(issueId).length;
+
+  const result = abortIssue(issueId, "yusuke");
+  assert.deepEqual(result, { ok: true, issueStatus: "closed", alreadyClosed: true });
+  assert.equal(events(issueId).length, before, "a repeated abort must not append another event");
+});
+
+test("abortIssue on an already-done issue is a no-op", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff);
+  complete(issueId, { kind: "verdict", result: okReview("approved") });
+  const finalReviewAction = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review" && a.status === "open")!;
+  const resolved = resolveHumanActionAndAdvance(finalReviewAction.id, "yusuke", "complete");
+  assert.equal(resolved.ok, true);
+  assert.equal(getIssue(issueId)!.status, "done");
+
+  const result = abortIssue(issueId, "yusuke");
+  assert.deepEqual(result, { ok: true, issueStatus: "done", alreadyClosed: true });
+  assert.equal(getIssue(issueId)!.status, "done");
+});
+
+test("abortIssue cancels a running worker session and terminates its registered process", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const item = claim(issueId);
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: 1,
+    agentId: null,
+    runtime: "claude_code",
+  });
+  startSession(session.id);
+
+  const killed: string[] = [];
+  const result = abortIssue(issueId, "yusuke", { killProcess: (id) => (killed.push(id), true) });
+  assert.deepEqual(result, { ok: true, issueStatus: "closed", alreadyClosed: false });
+  assert.deepEqual(killed, [session.id]);
+  assert.equal(listWorkerSessionsForIssue(issueId).find((s) => s.id === session.id)!.status, "cancelled");
+  assert.equal(getWorkItem(item.id)!.status, "cancelled");
+});
+
+test("a late completion after abort is fenced — applyCompletion is a no-op", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const item = claim(issueId); // simulates the effect worker already holding the lease
+
+  abortIssue(issueId, "yusuke");
+  assert.equal(getIssue(issueId)!.status, "closed");
+
+  // The zombie attempt's own completion arrives after the abort already committed.
+  const res = applyCompletion(item.id, item.leaseToken!, cleanHandoff);
+  assert.equal(res.applied, false);
+  assert.equal(getIssue(issueId)!.status, "closed", "a late completion must never reopen or mutate a closed issue");
+});
+
+function events(issueId: string) {
+  return listWorkflowEventsForIssue(issueId);
+}

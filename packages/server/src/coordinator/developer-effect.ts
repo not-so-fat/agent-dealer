@@ -37,6 +37,7 @@ import {
 import { bindAndVerify, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
 import { getWorkerSession } from "../repository/worker-sessions.js";
+import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact } from "../repository/artifacts.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
@@ -188,6 +189,18 @@ export async function runDeveloperEffect(
       playbookIds: snapshot?.playbookIds,
       guidance: guidance.length ? guidance : undefined,
     });
+
+    // NOT-83 review finding: the session is marked `running` (worker-loop.ts) before this
+    // handler ever runs, so an abort landing during worktree setup/deck-bind above already
+    // cancelled this item in the DB while nothing here had noticed yet — the heartbeat-
+    // driven ctx.signal only trips on its next tick (up to COORDINATOR_HEARTBEAT_MS later),
+    // which is too slow to reliably catch this before the real spawn. Re-check the item's
+    // live status right before incurring that cost, and never remove the worktree here —
+    // nothing has run in it yet, so leaving it is always safe, and force-removing it is
+    // exactly what the abort contract (NOT-83) says never to do.
+    if (getWorkItem(workItem.id)?.status !== "leased") {
+      return { kind: "session_failed" };
+    }
 
     const spawnStartedAt = Date.now();
     const spawned = await deps.spawn({
