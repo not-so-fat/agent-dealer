@@ -62,6 +62,7 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
   const [decks, setDecks] = useState<Deck[]>([]);
   const [deckError, setDeckError] = useState<string | null>(null);
   const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
+  const [playbookError, setPlaybookError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchDecks().then((result) => {
@@ -78,11 +79,18 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
   useEffect(() => {
     if (!value.deckId) {
       setPlaybooks([]);
+      setPlaybookError(null);
       return;
     }
-    fetchDeckPlaybooks(value.deckId)
-      .then(setPlaybooks)
-      .catch(() => setPlaybooks([]));
+    fetchDeckPlaybooks(value.deckId).then((result) => {
+      if (result.ok) {
+        setPlaybooks(result.playbooks);
+        setPlaybookError(null);
+      } else {
+        setPlaybooks([]);
+        setPlaybookError(result.message);
+      }
+    });
   }, [value.deckId]);
 
   const set = (patch: Partial<AgentConfigValue>) => onChange({ ...value, ...patch });
@@ -145,6 +153,9 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
       </select>
       {agentDeckOnline && deckError && (
         <p className="text-xs text-amber-300/90">{deckError}</p>
+      )}
+      {value.deckId && playbookError && (
+        <p className="text-xs text-amber-300/90">Playbooks unavailable: {playbookError}</p>
       )}
       {value.deckId && playbooks.length > 0 && (
         <>

@@ -357,20 +357,37 @@ export type DeckListResult =
   | { ok: false; code?: DeckAccessErrorCode; message: string };
 
 export async function fetchDecks(): Promise<DeckListResult> {
-  const res = await fetch(`${API}/api/agent-deck/decks`);
-  const json = (await res.json().catch(() => null)) as
-    | { data?: Array<{ id: string; name: string }>; error?: string; code?: DeckAccessErrorCode }
-    | null;
-  if (!res.ok) {
-    return { ok: false, code: json?.code, message: json?.error ?? `Agent Deck error (${res.status})` };
+  try {
+    const res = await fetch(`${API}/api/agent-deck/decks`);
+    const json = (await res.json().catch(() => null)) as
+      | { data?: Array<{ id: string; name: string }>; error?: string; code?: DeckAccessErrorCode }
+      | null;
+    if (!res.ok) {
+      return { ok: false, code: json?.code, message: json?.error ?? `Agent Deck error (${res.status})` };
+    }
+    return { ok: true, decks: json?.data ?? [] };
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : String(e) };
   }
-  return { ok: true, decks: json?.data ?? [] };
 }
 
-export async function fetchDeckPlaybooks(deckId: string): Promise<Array<{ id: string; title: string }>> {
-  const res = await fetch(`${API}/api/agent-deck/decks/${deckId}/playbooks`);
-  const json = (await res.json()) as { data?: Array<{ id: string; title: string }> };
-  return json.data ?? [];
+export type PlaybookListResult =
+  | { ok: true; playbooks: Array<{ id: string; title: string }> }
+  | { ok: false; message: string };
+
+export async function fetchDeckPlaybooks(deckId: string): Promise<PlaybookListResult> {
+  try {
+    const res = await fetch(`${API}/api/agent-deck/decks/${deckId}/playbooks`);
+    const json = (await res.json().catch(() => null)) as
+      | { data?: Array<{ id: string; title: string }>; error?: string }
+      | null;
+    if (!res.ok) {
+      return { ok: false, message: json?.error ?? `Agent Deck error (${res.status})` };
+    }
+    return { ok: true, playbooks: json?.data ?? [] };
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export function subscribeEvents(onSnapshot: (s: QueueSnapshot) => void): () => void {

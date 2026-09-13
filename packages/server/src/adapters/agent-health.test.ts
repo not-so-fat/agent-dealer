@@ -1,15 +1,18 @@
 // packages/server/src/adapters/agent-health.test.ts
 //
 // NOT-77: an agent bound to a deck that Agent Deck is reachable for (agentDeckOnline) but
-// whose authenticated metadata call fails (missing/revoked enrollment, auth error) must
-// surface a distinct issue — resolveDeckName silently swallows the same failure to null
-// elsewhere, so this is the one place an operator can see why deck resolution is broken.
+// whose authenticated metadata call fails (missing/revoked enrollment, auth error) — or
+// succeeds but simply no longer includes this deck (deleted, or out of scope after
+// re-enrollment) — must surface a distinct issue. resolveDeckName silently swallows both
+// of the same failures to null elsewhere, so this is the one place an operator can see why
+// deck resolution is broken.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import type { DeckAccessResult } from "./agent-deck.js";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-agenthealth-"));
 
@@ -19,9 +22,11 @@ const { healthForAgent } = await import("./agent-health.js");
 
 migrate();
 
+const FAILURE: DeckAccessResult = { ok: false, code: "ENROLLMENT_REVOKED", message: "enrollment is revoked" };
+
 test("agentDeckOnline but no deckId configured: no deck-related issue", async () => {
   const agent = createAgent({ name: "no-deck", runtime: "claude_code", workspaceRoot: "/tmp" });
-  const result = await healthForAgent(agent, true, new Map(), true, "authority secret invalid");
+  const result = await healthForAgent(agent, true, new Map(), true, FAILURE);
   assert.equal(
     result.issues.some((i) => i.code === "deck_unauthorized" || i.code === "deck_offline"),
     false
@@ -35,7 +40,7 @@ test("agent deck offline: reports deck_offline, not deck_unauthorized", async ()
     workspaceRoot: "/tmp",
     deckId: randomUUID(),
   });
-  const result = await healthForAgent(agent, false, new Map(), true, "irrelevant while offline");
+  const result = await healthForAgent(agent, false, new Map(), true, FAILURE);
   assert.deepEqual(
     result.issues.map((i) => i.code).sort(),
     ["deck_offline"]
@@ -49,15 +54,35 @@ test("agent deck online but enrollment revoked: reports deck_unauthorized with t
     workspaceRoot: "/tmp",
     deckId: randomUUID(),
   });
-  const result = await healthForAgent(agent, true, new Map(), true, "enrollment is revoked");
+  const result = await healthForAgent(agent, true, new Map(), true, FAILURE);
   const issue = result.issues.find((i) => i.code === "deck_unauthorized");
   assert.ok(issue, "expected a deck_unauthorized issue");
   assert.equal(issue?.message, "enrollment is revoked");
 });
 
-test("agent deck online with no access error: healthy on the deck axis", async () => {
+test("agent deck online, metadata call succeeds, but this deck isn't in the returned set: reports deck_unauthorized", async () => {
+  const deckId = randomUUID();
+  const agent = createAgent({ name: "stale-deck", runtime: "claude_code", workspaceRoot: "/tmp", deckId });
+  const deckAccessResult: DeckAccessResult = { ok: true, decks: [{ id: randomUUID(), name: "some-other-deck" }] };
+  const result = await healthForAgent(agent, true, new Map(), true, deckAccessResult);
+  const issue = result.issues.find((i) => i.code === "deck_unauthorized");
+  assert.ok(issue, "expected a deck_unauthorized issue for a deck missing from the authorized set");
+});
+
+test("agent deck online and this deck is in the returned set: healthy on the deck axis", async () => {
+  const deckId = randomUUID();
+  const agent = createAgent({ name: "healthy", runtime: "claude_code", workspaceRoot: "/tmp", deckId });
+  const deckAccessResult: DeckAccessResult = { ok: true, decks: [{ id: deckId, name: "healthy-deck" }] };
+  const result = await healthForAgent(agent, true, new Map(), true, deckAccessResult);
+  assert.equal(
+    result.issues.some((i) => i.code === "deck_unauthorized" || i.code === "deck_offline"),
+    false
+  );
+});
+
+test("agent deck online with no deck-access result computed (e.g. no agent needed it): no false positive", async () => {
   const agent = createAgent({
-    name: "healthy",
+    name: "no-result",
     runtime: "claude_code",
     workspaceRoot: "/tmp",
     deckId: randomUUID(),
