@@ -213,6 +213,11 @@ CREATE TABLE IF NOT EXISTS human_actions (
 
 CREATE INDEX IF NOT EXISTS idx_human_actions_issue ON human_actions(issue_id);
 CREATE INDEX IF NOT EXISTS idx_human_actions_status ON human_actions(status);
+-- idx_human_actions_open_request (NOT-91) is created in migrate() (db/index.ts) instead of
+-- here, for the same reason idx_human_actions_run is: request_id is itself only added by an
+-- ALTER later in migrate() on a database from before NOT-93, and this file's statements run
+-- unconditionally, before that ALTER, whenever CREATE TABLE IF NOT EXISTS above no-ops
+-- against a pre-existing legacy table.
 -- idx_human_actions_run is created in migrate() (db/index.ts) instead of here: run_id is a
 -- brand-new column, and this file's CREATE INDEX statements run unconditionally on every
 -- migrate() even when CREATE TABLE IF NOT EXISTS above no-ops against a pre-existing legacy
@@ -313,3 +318,29 @@ CREATE TABLE IF NOT EXISTS review_publications (
   claimed_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- NOT-91: a durable checkout ledger for short-lived Agent Deck execution authority
+-- (NOT-85/87). Everything that mints an authority — a worker's own attempt
+-- (owner_kind 'developer'/'reviewer', owner_id = the work_item id), a coordinator-side
+-- reflection call (owner_kind 'reflect', owner_id = the issue id), or an outbound-draft
+-- delivery (owner_kind 'outbound_delivery', owner_id = the run id) — records a row here
+-- BEFORE the mint call, not after: the whole point is to survive a crash between "asked
+-- Deck for authority" and "released it," which previously left nothing to reconcile
+-- against on restart. `acquiring` is a transient pre-mint state that must never survive a
+-- process boundary — reconcileAuthoritiesAtStartup() (authority-lifecycle.ts) treats any
+-- row still `acquiring` at boot as orphaned by definition.
+CREATE TABLE IF NOT EXISTS authority_attempts (
+  id TEXT PRIMARY KEY,
+  owner_kind TEXT NOT NULL,        -- 'developer' | 'reviewer' | 'reflect' | 'outbound_delivery'
+  owner_id TEXT NOT NULL,          -- work_item id | issue id | run id, per owner_kind
+  idempotency_key TEXT NOT NULL,
+  authority_id TEXT,               -- Deck's id; null until mint succeeds
+  deck_id TEXT NOT NULL,
+  status TEXT NOT NULL,            -- 'acquiring' | 'active' | 'closed' | 'revoked' | 'failed'
+  expires_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_authority_attempts_owner ON authority_attempts(owner_kind, owner_id);
+CREATE INDEX IF NOT EXISTS idx_authority_attempts_status ON authority_attempts(status);

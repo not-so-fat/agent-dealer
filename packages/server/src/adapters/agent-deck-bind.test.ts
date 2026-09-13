@@ -45,6 +45,7 @@ function errorResult(msg: string) {
 }
 
 const BASE_OPTS = {
+  ownerKind: "developer" as const,
   deckId: DECK,
   runId: "run-1",
   attemptId: "wi-1",
@@ -77,7 +78,7 @@ test("acquireWorkerAuthority mints, verifies, and writes a per-attempt MCP confi
     const written = JSON.parse(fs.readFileSync(result.mcpConfigPath, "utf8"));
     assert.equal(written.mcpServers["agent-deck"].headers.Authorization, "Bearer authz_1:authzs_secret");
     assert.equal(written.mcpServers["agent-deck"].headers["x-agent-deck-workspace"], WT);
-    await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
+    await releaseWorkerAuthority({ authorityId: result.authorityId, attemptRowId: result.attemptRowId, mcpConfigPath: result.mcpConfigPath });
     assert.equal(fs.existsSync(result.mcpConfigPath), false);
   }
 });
@@ -277,7 +278,7 @@ test("acquireWorkerAuthority materializes a CODEX_HOME directory, wiring both CO
     // to its default (ambient, unscoped) config root and never reads this file at all.
     assert.equal(result.mcpEnv?.CODEX_HOME, result.mcpConfigPath);
     assert.equal(result.mcpEnv?.AGENT_DECK_AUTHORITY_BEARER, "authz_1:authzs_secret");
-    await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
+    await releaseWorkerAuthority({ authorityId: result.authorityId, attemptRowId: result.attemptRowId, mcpConfigPath: result.mcpConfigPath });
     assert.equal(fs.existsSync(result.mcpConfigPath), false);
   }
 });
@@ -334,7 +335,7 @@ test("acquireWorkerAuthority for codex_local symlinks (never copies) the ambient
       assert.equal(isolated.forced_chatgpt_workspace_id, "ws_123");
       assert.equal(isolated.model, undefined);
 
-      await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
+      await releaseWorkerAuthority({ authorityId: result.authorityId, attemptRowId: result.attemptRowId, mcpConfigPath: result.mcpConfigPath });
       // Releasing (deleting) the isolated dir must remove only the symlink, never the
       // real ambient credential it points at.
       assert.equal(fs.existsSync(result.mcpConfigPath), false);
@@ -377,7 +378,7 @@ test("acquireWorkerAuthority for codex_local correctly reads cli_auth_credential
     if (result.ok) {
       const isolated = parseToml(fs.readFileSync(path.join(result.mcpConfigPath, "config.toml"), "utf8")) as Record<string, unknown>;
       assert.equal(isolated.cli_auth_credentials_store, "file");
-      await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
+      await releaseWorkerAuthority({ authorityId: result.authorityId, attemptRowId: result.attemptRowId, mcpConfigPath: result.mcpConfigPath });
     }
   } finally {
     if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -400,7 +401,7 @@ test("acquireWorkerAuthority for codex_local tolerates no ambient auth.json (e.g
     assert.equal(result.ok, true);
     if (result.ok) {
       assert.equal(fs.existsSync(path.join(result.mcpConfigPath, "auth.json")), false);
-      await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
+      await releaseWorkerAuthority({ authorityId: result.authorityId, attemptRowId: result.attemptRowId, mcpConfigPath: result.mcpConfigPath });
     }
   } finally {
     if (prevCodexHome === undefined) delete process.env.CODEX_HOME;

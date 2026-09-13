@@ -220,6 +220,36 @@ export function migrate(): void {
     db.exec("ALTER TABLE human_actions ADD COLUMN request_id TEXT");
   }
 
+  // NOT-91: findOpenHumanActionByRequestId's dedupe was a plain read-then-create check —
+  // two concurrent duplicate INTERACTION_REQUIRED deliveries could both see "no open
+  // action" and both insert. Tighten to a real constraint enforced via createHumanAction's
+  // `ON CONFLICT ... DO NOTHING` (repository/human-actions.ts). A pre-fix database may
+  // already hold a duplicate open pair from exactly that race — dedupe first (keep the
+  // earliest per (issue_id, action_type, request_id), auto-resolve any later duplicate),
+  // then create the index, all in one transaction so a failure never leaves the table
+  // indexless.
+  const humanActionIdx = db.prepare("PRAGMA index_list(human_actions)").all() as Array<{ name: string }>;
+  if (!humanActionIdx.some((i) => i.name === "idx_human_actions_open_request")) {
+    db.transaction(() => {
+      db.exec(`
+        UPDATE human_actions SET
+          status = 'resolved',
+          resolution_json = '{"choice":"resolved_via_dedupe_migration"}',
+          resolved_by = 'system',
+          resolved_at = datetime('now')
+        WHERE status = 'open' AND request_id IS NOT NULL AND rowid NOT IN (
+          SELECT MIN(rowid) FROM human_actions
+          WHERE status = 'open' AND request_id IS NOT NULL
+          GROUP BY issue_id, action_type, request_id
+        )
+      `);
+      db.exec(`
+        CREATE UNIQUE INDEX idx_human_actions_open_request ON human_actions(issue_id, action_type, request_id)
+        WHERE status = 'open' AND request_id IS NOT NULL
+      `);
+    })();
+  }
+
   // NOT-95: a Run-scoped action (outbound-draft delivery parking) has no Issue, so issue_id
   // must become nullable — SQLite can't ALTER a column's NOT NULL away, so rebuild the table
   // for any database created before schema.sql dropped the constraint (fresh databases from

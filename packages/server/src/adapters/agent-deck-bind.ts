@@ -23,7 +23,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Runtime } from "@agent-dealer/shared";
 import { getAgentDeckMcpUrl } from "./agent-deck.js";
-import { mintAuthority as defaultMintAuthority, revokeAuthority, type MintAuthorityInput, type MintAuthorityResult } from "./execution-authority.js";
+import { revokeAuthority } from "./execution-authority.js";
+import { acquireAuthorityForAttempt, failAuthority, releaseAuthority, type MintFn, type RevokeFn } from "./authority-lifecycle.js";
 import { getExecutionAuthorityConfigDir } from "../paths.js";
 import { resolveAmbientCodexHome } from "../cli-env.js";
 
@@ -65,6 +66,9 @@ export type WorkerAuthorityOutcome =
   | {
       ok: true;
       authorityId: string;
+      /** The `authority_attempts` ledger row backing this authority (NOT-91) — pass to
+       * `releaseWorkerAuthority` so it closes the row, not just Deck's own record. */
+      attemptRowId: string;
       /** Runtime-specific: a claude `--mcp-config` file, or a codex `CODEX_HOME`
        * directory — see `materializeWorkerMcpConfig`. */
       mcpConfigPath: string;
@@ -366,6 +370,9 @@ function interactionRequiredReason(result: { message?: string }): string {
 }
 
 export async function acquireWorkerAuthority(opts: {
+  /** Which work-item kind this attempt belongs to — the `authority_attempts` ledger's
+   * owner_kind (NOT-91), so restart/worker-death recovery can find it by work item id. */
+  ownerKind: "developer" | "reviewer";
   deckId: string;
   runId: string;
   attemptId: string;
@@ -373,7 +380,8 @@ export async function acquireWorkerAuthority(opts: {
   worktreePath: string;
   runtime: Runtime;
   ttlMs?: number;
-  mint?: (input: MintAuthorityInput) => Promise<MintAuthorityResult>;
+  mint?: MintFn;
+  revoke?: RevokeFn;
   verifyCallTool?: DeckToolCaller;
   timeoutMs?: number;
 }): Promise<WorkerAuthorityOutcome> {
@@ -385,47 +393,42 @@ export async function acquireWorkerAuthority(opts: {
     };
   }
 
-  const mint = opts.mint ?? defaultMintAuthority;
   const timeoutMs = opts.timeoutMs ?? Number(process.env.DECK_BIND_TIMEOUT_MS ?? 30_000);
 
-  const minted = await mint({
+  const acquired = await acquireAuthorityForAttempt({
+    ownerKind: opts.ownerKind,
+    ownerId: opts.attemptId,
     runId: opts.runId,
     attemptId: opts.attemptId,
     deckId: opts.deckId,
     ttlMs: opts.ttlMs ?? DEFAULT_TTL_MS,
     idempotencyKey: opts.idempotencyKey,
+    mint: opts.mint,
+    revoke: opts.revoke,
   });
-  if (!minted.ok) {
-    if (minted.code === "INTERACTION_REQUIRED") {
-      return { ok: false, kind: "interaction_required", reason: interactionRequiredReason(minted), requestId: minted.requestId };
+  if (!acquired.ok) {
+    if (acquired.kind === "interaction_required") {
+      return { ok: false, kind: "interaction_required", reason: acquired.reason, requestId: acquired.requestId };
     }
-    return { ok: false, kind: "infra_failure", reason: `${minted.code}: ${minted.message}` };
+    return { ok: false, kind: "infra_failure", reason: acquired.reason };
   }
-  const { authority } = minted;
-  if (!authority.authoritySecret) {
-    // Idempotent remint of a still-live authority under the same (enrollmentId,
-    // idempotencyKey) never re-issues the secret (NOT-85 §7) — this attempt has none to
-    // use. Each physical claim mints with a fresh idempotency key, so this should not
-    // happen in normal operation; surface it as infra rather than silently proceeding
-    // secret-less.
-    return {
-      ok: false,
-      kind: "infra_failure",
-      reason: `authority ${authority.authorityId} minted without a secret (idempotent remint) — retry with a fresh attempt`,
-    };
-  }
+  const { authority, attemptRowId } = acquired;
+  // acquireAuthorityForAttempt never returns ok:true without a secret — it resolves a
+  // secret-less idempotent remint internally (NOT-91) — so authority.authoritySecret is
+  // always present here.
+  const authoritySecret = authority.authoritySecret!;
 
   const verified = await verifyAuthority({
     authorityId: authority.authorityId,
-    authoritySecret: authority.authoritySecret,
+    authoritySecret,
     deckId: opts.deckId,
     callTool: opts.verifyCallTool,
     timeoutMs,
   });
   if (!verified.ok) {
-    // Revoked either way — a minted authority that failed preflight (whatever the
-    // reason) has no further legitimate use (NOT-85 §6.3).
-    await revokeAuthority(authority.authorityId);
+    // Failed either way — a minted authority that failed preflight (whatever the reason)
+    // has no further legitimate use (NOT-85 §6.3).
+    await failAuthority(attemptRowId, authority.authorityId, opts.revoke);
     if (verified.kind === "interaction_required") {
       return { ok: false, kind: "interaction_required", reason: verified.reason, requestId: verified.requestId };
     }
@@ -437,16 +440,16 @@ export async function acquireWorkerAuthority(opts: {
     const { mcpConfigPath, mcpEnv } = await materializeWorkerMcpConfig({
       runtime: opts.runtime as "claude_code" | "codex_local",
       authorityId: authority.authorityId,
-      authoritySecret: authority.authoritySecret,
+      authoritySecret,
       worktreePath: opts.worktreePath,
     });
-    return { ok: true, authorityId: authority.authorityId, mcpConfigPath, mcpEnv, expiresAt: authority.expiresAt };
+    return { ok: true, authorityId: authority.authorityId, attemptRowId, mcpConfigPath, mcpEnv, expiresAt: authority.expiresAt };
   } catch (err) {
     // Same contract as a verify failure just above: a minted authority the caller never
     // learns the id of (because this function never returned it) would otherwise sit
     // live until TTL, unrevoked, for the full developer/reviewer session length (PR #19
     // review round 5).
-    await revokeAuthority(authority.authorityId);
+    await failAuthority(attemptRowId, authority.authorityId, opts.revoke);
     return { ok: false, kind: "infra_failure", reason: `authority materialization failed: ${(err as Error).message}` };
   }
 }
@@ -454,13 +457,20 @@ export async function acquireWorkerAuthority(opts: {
 /**
  * Best-effort — never leaves a live authority or its on-disk config around after a spawn
  * ends. `recursive: true` covers codex's directory-shaped `CODEX_HOME` as well as
- * claude's single file.
+ * claude's single file. Closes the `authority_attempts` ledger row (NOT-91) as well as
+ * Deck's own record, so a normal release never looks like something restart recovery needs
+ * to clean up.
  */
-export async function releaseWorkerAuthority(opts: { authorityId: string; mcpConfigPath: string }): Promise<void> {
+export async function releaseWorkerAuthority(opts: {
+  authorityId: string;
+  attemptRowId: string;
+  mcpConfigPath: string;
+  revoke?: RevokeFn;
+}): Promise<void> {
   try {
     fs.rmSync(opts.mcpConfigPath, { recursive: true, force: true });
   } catch {
     // best-effort
   }
-  await revokeAuthority(opts.authorityId);
+  await releaseAuthority(opts.attemptRowId, opts.authorityId, opts.revoke);
 }

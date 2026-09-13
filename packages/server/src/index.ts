@@ -12,6 +12,7 @@ import { registerIssueRoutes } from "./routes/issues.js";
 import { registerHumanActionRoutes } from "./routes/human-actions.js";
 import { startQueue, recoverOrphanedRuns } from "./queue/dispatcher.js";
 import { recoverCoordinator } from "./coordinator/recovery.js";
+import { reconcileAuthoritiesAtStartup } from "./adapters/authority-lifecycle.js";
 import { startCoordinatorLoop } from "./coordinator/worker-loop.js";
 import { registerEffectHandler } from "./coordinator/effect-registry.js";
 import { runDeveloperEffect } from "./coordinator/developer-effect.js";
@@ -83,6 +84,13 @@ async function main(): Promise<void> {
     console.warn(
       `[startup] coordinator recovery: reclaimed ${coordinatorRecovery.reclaimed.length}, dead-lettered ${coordinatorRecovery.deadLettered.length}`
     );
+  }
+  // NOT-91: revoke every execution-authority ledger row a crashed coordinator left open —
+  // a fresh process boundary means nothing still `acquiring`/`active` from before this
+  // boot can be legitimately in flight (see reconcileAuthoritiesAtStartup's doc comment).
+  const authorityRecovery = await reconcileAuthoritiesAtStartup();
+  if (authorityRecovery.revoked.length) {
+    console.warn(`[startup] revoked ${authorityRecovery.revoked.length} orphaned execution authority attempt(s)`);
   }
   startCoordinatorLoop();
 

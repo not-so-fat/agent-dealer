@@ -34,10 +34,19 @@ export type DeliverOutboundResult =
    * NOT-87's developer/reviewer outcomes). `requestId` is Deck's own correlation id, when
    * supplied, for dedupe against the human action it raises. */
   | { ok: false; kind: "interaction_required"; reason: string; requestId?: string }
-  /** Ordinary failure — network/timeout, or a provider-level (Slack/etc.) error surfaced
-   * through a successful-looking MCP result. Bounded infra-retry (an explicit re-approve or
-   * "retry send"), never parked. */
+  /** The call timed out waiting for `call_service_tool`'s response — whether the provider
+   * (Slack/etc.) actually received and executed the send is genuinely unknown, unlike an
+   * ordinary connection failure where the request never reached it (NOT-91). Never silently
+   * auto-retried: a blind "retry send" here risks a duplicate provider effect, so this parks
+   * for an explicit human decision exactly like `interaction_required`, distinguished only
+   * by its reason text. */
+  | { ok: false; kind: "ambiguous"; reason: string }
+  /** Ordinary failure — a connection error before the request reached Deck, or a
+   * provider-level (Slack/etc.) error surfaced through a successful-looking MCP result.
+   * Bounded infra-retry (an explicit re-approve or "retry send"), never parked. */
   | { ok: false; kind: "infra_failure"; reason: string };
+
+const TIMEOUT_MESSAGE_RE = /timed out after \d+ms$/;
 
 /** Connects with `authority` as the session's only credential and calls `call_service_tool`
  * exactly once. No `bind_workspace`. */
@@ -95,7 +104,15 @@ export async function deliverOutboundDraft(
   try {
     toolResult = await callTool(payload);
   } catch (err) {
-    return { ok: false, kind: "infra_failure", reason: err instanceof Error ? err.message : String(err) };
+    const reason = err instanceof Error ? err.message : String(err);
+    // The Promise.race timeout in callServiceToolUnderAuthority means the request was sent
+    // but the response never arrived in time — the provider side may have executed it
+    // anyway. Any other thrown error (connection refused, DNS failure, MCP handshake
+    // failure) means the request never reached Deck at all, so it is an ordinary failure.
+    if (TIMEOUT_MESSAGE_RE.test(reason)) {
+      return { ok: false, kind: "ambiguous", reason: `${reason} — whether the message was actually sent is unknown` };
+    }
+    return { ok: false, kind: "infra_failure", reason };
   }
 
   const interaction = parseInteractionRequired(toolResult);

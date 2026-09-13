@@ -52,6 +52,8 @@ import {
   type WorkItemKind,
 } from "../repository/work-items.js";
 import { completeSession, listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
+import { markOpenAuthorityAttemptsRevoked } from "../repository/authority-attempts.js";
+import { revokeAuthority } from "../adapters/execution-authority.js";
 import { killRunProcess } from "../runners/spawn-cli.js";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import {
@@ -1024,6 +1026,12 @@ interface AbortTxResult {
 export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssueDeps = defaultAbortDeps): AbortResult {
   if (!getIssue(issueId)) return { ok: false, code: 404, error: "Issue not found" };
 
+  // Populated inside the transaction below, revoked (best-effort, network) only after it
+  // commits — same "DB write now, effect outside" split as `killProcess` below (NOT-91: a
+  // cancelled work item's execution authority has no further legitimate use, and must not
+  // be left live until TTL for what is now a "late approval after cancellation" no-op).
+  const authorityIdsToRevoke: string[] = [];
+
   const tx = getDb().transaction((): AbortTxResult => {
     const issue = getIssue(issueId)!;
     if (issue.status === "done" || issue.status === "closed") {
@@ -1033,7 +1041,12 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
     const instance = getActiveWorkflowInstance(issueId);
 
     for (const item of listWorkItemsForIssue(issueId)) {
-      if (item.status === "pending" || item.status === "leased") cancelWorkItem(item.id);
+      if (item.status === "pending" || item.status === "leased") {
+        cancelWorkItem(item.id);
+        for (const row of markOpenAuthorityAttemptsRevoked(item.kind, item.id)) {
+          if (row.authorityId) authorityIdsToRevoke.push(row.authorityId);
+        }
+      }
     }
 
     for (const action of listHumanActionsForIssue(issueId)) {
@@ -1071,6 +1084,7 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
   // Outside the transaction, per the ticket contract: terminating a child process is not
   // a DB write, and must happen only once the abort itself is durably committed.
   for (const sessionId of tx.runningSessionIds) deps.killProcess(sessionId);
+  for (const authorityId of authorityIdsToRevoke) revokeAuthority(authorityId).catch(() => {});
 
   return { ok: true, issueStatus: tx.issueStatus, alreadyClosed: tx.alreadyClosed };
 }

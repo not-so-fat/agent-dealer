@@ -155,10 +155,11 @@ export async function runDeveloperEffect(
     return { kind: "adapter_failure", reason: `worktree setup failed: ${String(err)}` };
   }
 
-  let workerAuthority: { authorityId: string; mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
+  let workerAuthority: { authorityId: string; attemptRowId: string; mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   try {
     if (snapshot?.deckId) {
       const acquired = await acquireWorkerAuthority({
+        ownerKind: "developer",
         deckId: snapshot.deckId,
         runId: ctx.instance.id,
         attemptId: workItem.id,
@@ -181,7 +182,12 @@ export async function runDeveloperEffect(
         }
         return { kind: "adapter_failure", reason: `deck authority acquisition failed: ${acquired.reason}` };
       }
-      workerAuthority = { authorityId: acquired.authorityId, mcpConfigPath: acquired.mcpConfigPath, mcpEnv: acquired.mcpEnv };
+      workerAuthority = {
+        authorityId: acquired.authorityId,
+        attemptRowId: acquired.attemptRowId,
+        mcpConfigPath: acquired.mcpConfigPath,
+        mcpEnv: acquired.mcpEnv,
+      };
     }
 
     let payload: { retryReason?: string | null } = {};

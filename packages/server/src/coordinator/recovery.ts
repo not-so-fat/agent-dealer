@@ -20,7 +20,10 @@ import {
   finishWorkItem,
   listExpiredLeases,
   requeueWorkItem,
+  type WorkItem,
 } from "../repository/work-items.js";
+import { markOpenAuthorityAttemptsRevoked } from "../repository/authority-attempts.js";
+import { revokeAuthority } from "../adapters/execution-authority.js";
 import { routeAppliedOutcome } from "./commands.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
@@ -30,6 +33,15 @@ export interface RecoverResult {
   reclaimed: string[];
   /** Work items past the attempt cap — dead-lettered and routed to a human action. */
   deadLettered: string[];
+}
+
+/** Revokes (best-effort, fire-and-forget) whatever `authority_attempts` rows are still open
+ * for a reclaimed/dead-lettered work item — `work_items.kind` ('developer' | 'reviewer') is
+ * exactly the ledger's owner_kind for this item's own id (NOT-91). */
+function revokeStaleAuthoritiesForItem(item: WorkItem): void {
+  for (const row of markOpenAuthorityAttemptsRevoked(item.kind, item.id)) {
+    if (row.authorityId) revokeAuthority(row.authorityId).catch(() => {});
+  }
 }
 
 /** Fail a worker_session still `running` for an item whose worker is gone. */
@@ -92,8 +104,16 @@ export function recoverCoordinator(opts?: { now?: number }): RecoverResult {
         }
         return "dead";
       })();
-      if (kind === "reclaimed") reclaimed.push(item.id);
-      else if (kind === "dead") deadLettered.push(item.id);
+      if (kind === "reclaimed" || kind === "dead") {
+        if (kind === "reclaimed") reclaimed.push(item.id);
+        else deadLettered.push(item.id);
+        // Worker death (NOT-91): whatever execution authority this attempt held has no
+        // further legitimate use once its lease is reclaimed or it's dead-lettered — revoke
+        // it rather than let it sit live until TTL. Fire-and-forget: revokeAuthority is
+        // already best-effort/never-throws, and recovery's own CAS loop must stay
+        // synchronous and not block on Deck's availability.
+        revokeStaleAuthoritiesForItem(item);
+      }
     } catch (err) {
       // One item's routing failure must not abort recovery of the rest — it stays leased
       // and the next recovery pass retries it.
