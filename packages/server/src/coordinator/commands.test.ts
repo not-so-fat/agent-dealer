@@ -15,7 +15,7 @@ const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
 );
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue } = await import("../repository/findings.js");
-const { claimWorkItem, listWorkItemsForIssue, getWorkItem } = await import("../repository/work-items.js");
+const { claimWorkItem, listWorkItemsForIssue, getWorkItem, enqueueWorkItem } = await import("../repository/work-items.js");
 const { createWorkerSession, startSession, listWorkerSessionsForIssue } = await import(
   "../repository/worker-sessions.js"
 );
@@ -399,6 +399,57 @@ test("resolving deck_interaction_required:close ends the workflow without mintin
   assert.equal(resolved.instanceCompleted, true);
   assert.equal(getIssue(issueId)!.status, "closed");
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0);
+});
+
+// PR #20 review: the requestId dedupe lookup in applyEffect ran AFTER
+// applyProjectionTransition had already tried to re-transition the issue to
+// needs_human — which has no needs_human -> needs_human self-loop in
+// ISSUE_STATUS_TRANSITIONS, so a second completion with the same request id threw
+// "Invalid transition: needs_human -> needs_human" instead of ever reaching the dedupe
+// check. Fixed by moving the check before any event/transition in applyDeveloper/
+// applyReviewer. This reproduces the duplicate-delivery shape directly (the normal
+// routing path never enqueues a second item while an issue is needs_human) by forcing
+// a second work item onto the same still-active instance through the repository.
+test("a repeated interaction_required with the same requestId while already parked dedupes instead of throwing an invalid transition", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const first = complete(issueId, {
+    kind: "interaction_required",
+    reason: "Control-plane decision required",
+    requestId: "req_dup_park",
+  });
+  assert.equal(first.result.applied, true);
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  const parkedAction = listHumanActionsForIssue(issueId).find((a) => a.actionType === "deck_interaction_required")!;
+
+  const instance = getActiveWorkflowInstance(issueId)!;
+  const dup = enqueueWorkItem({
+    issueId,
+    workflowInstanceId: instance.id,
+    kind: "developer",
+    round: getIssue(issueId)!.currentRound,
+    idempotencyKey: `${instance.id}:developer:duplicate-delivery`,
+  });
+  const claimed = claimWorkItem(`test-${issueId}-dup`, { leaseMs: 60_000 });
+  assert.ok(claimed && claimed.id === dup.id, "expected to lease the forced duplicate item");
+
+  const second = applyCompletion(claimed!.id, claimed!.leaseToken!, {
+    kind: "interaction_required",
+    reason: "Control-plane decision required",
+    requestId: "req_dup_park",
+  });
+
+  assert.equal(second.applied, true);
+  if (second.applied) {
+    assert.equal(second.humanActionId, parkedAction.id, "must land on the already-open action, not throw or create a duplicate");
+    assert.equal(second.issueStatus, "needs_human");
+  }
+  assert.equal(getIssue(issueId)!.status, "needs_human", "still parked, never re-transitioned");
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.actionType === "deck_interaction_required").length,
+    1,
+    "no duplicate human action created"
+  );
 });
 
 test("developer infra failures escalate as policy_escalation (not attempts_exhausted) once the infra-attempt limit is reached", () => {
