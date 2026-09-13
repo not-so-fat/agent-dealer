@@ -46,7 +46,27 @@ export type ApproveDeliverResult =
  * trip, never a session-long grant (same reasoning as NOT-87's worker authorities). */
 const DELIVERY_AUTHORITY_TTL_MS = 5 * 60_000;
 
-function finalizeRunWithoutDelivery(runId: string): Run {
+/** Who/what resolved a parked `outbound_delivery_interaction_required` action when
+ * `finalizeRunWithoutDelivery` auto-closes it — `resolveOutboundDeliveryAction`'s
+ * `retry_send` passes the real operator + "retry_send" through; every other caller (a plain
+ * `/api/runs/:id/approve`, which carries no operator identity) gets this generic marker. */
+const DEFAULT_ACTION_RESOLUTION = { resolvedBy: "system", choice: "resolved_via_approve" } as const;
+
+/**
+ * Finalizes a run that has no more delivery work to do (no pending draft, or the pending
+ * draft was just sent). Also auto-resolves any still-open `outbound_delivery_interaction_required`
+ * action for this run: an operator can clear a park either by resolving it directly
+ * (`retry_send`/`reject`) or by simply re-approving from Ops once Deck's control-plane issue
+ * is fixed out of band — either path must close the queue item, not just the run.
+ */
+function finalizeRunWithoutDelivery(
+  runId: string,
+  actionResolution: { resolvedBy: string; choice: string } = DEFAULT_ACTION_RESOLUTION
+): Run {
+  const openAction = findOpenHumanActionForRun(runId, "outbound_delivery_interaction_required");
+  if (openAction) {
+    resolveHumanAction(openAction.id, actionResolution.resolvedBy, { choice: actionResolution.choice });
+  }
   const updated = transitionRun(runId, "done");
   syncLinearForRun(updated, "done").catch((e) => console.error("[linear-sync] done:", e));
   scheduleReflect(updated, { trigger: "approve" });
@@ -90,6 +110,11 @@ export async function approveRunWithDeliver(
     mint?: (input: MintAuthorityInput) => Promise<MintAuthorityResult>;
     revoke?: (authorityId: string) => Promise<void>;
     outboundBody?: string;
+    /** Who/what to record as having resolved an open `outbound_delivery_interaction_required`
+     * action for this run, if one is auto-closed on success (see `finalizeRunWithoutDelivery`).
+     * `resolveOutboundDeliveryAction`'s `retry_send` passes the real operator + "retry_send";
+     * omitted for a plain approve, which has no operator identity to record. */
+    actionResolution?: { resolvedBy: string; choice: string };
   }
 ): Promise<ApproveDeliverResult> {
   const run = getRun(runId);
@@ -116,7 +141,7 @@ export async function approveRunWithDeliver(
     }
   }
   if (!pending) {
-    return { ok: true, run: finalizeRunWithoutDelivery(runId), delivered: false };
+    return { ok: true, run: finalizeRunWithoutDelivery(runId, deps?.actionResolution), delivered: false };
   }
 
   if (!run.deckId) {
@@ -216,7 +241,7 @@ export async function approveRunWithDeliver(
       "system"
     );
 
-    return { ok: true, run: finalizeRunWithoutDelivery(runId), delivered: true };
+    return { ok: true, run: finalizeRunWithoutDelivery(runId, deps?.actionResolution), delivered: true };
   } finally {
     deliverInFlight.delete(runId);
   }
@@ -270,12 +295,14 @@ export async function resolveOutboundDeliveryAction(
 
   // retry_send — the draft is still pending; an ordinary approve re-attempt mints a fresh
   // authority/attempt (a distinct idempotencyKey — see incrementOutboundDeliveryAttempt).
-  const result = await approveRunWithDeliver(action.runId, deps);
+  // actionResolution carries the real operator identity through to
+  // finalizeRunWithoutDelivery's auto-close on success, so this action (not a generic
+  // "system" marker) records who actually resolved it and how.
+  const result = await approveRunWithDeliver(action.runId, { ...deps, actionResolution: { resolvedBy, choice } });
   if (!result.ok) {
     // Left open on purpose — see the doc comment above. The operator still sees this item
     // in the queue (and can retry again, or reject) instead of it disappearing on failure.
     return { ok: false, code: result.code, error: result.error };
   }
-  resolveHumanAction(actionId, resolvedBy, { choice });
   return { ok: true, runStatus: result.run.status, delivered: result.delivered };
 }

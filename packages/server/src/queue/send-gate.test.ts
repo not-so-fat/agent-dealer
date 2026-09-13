@@ -288,7 +288,30 @@ test("resolveOutboundDeliveryAction:retry_send mints a distinct idempotencyKey t
   assert.equal(res.ok && res.delivered, true);
   assert.notEqual(secondIdempotencyKey, firstIdempotencyKey);
   assert.equal(getRun(run.id)!.status, "done");
-  assert.equal(getHumanAction(actionId)!.status, "resolved");
+  const resolved = getHumanAction(actionId)!;
+  assert.equal(resolved.status, "resolved");
+  // Resolved with the real operator identity/choice (threaded through as actionResolution),
+  // not the generic "system"/"resolved_via_approve" marker a plain Ops re-approve gets.
+  assert.equal(resolved.resolvedBy, "yusuke");
+  assert.deepEqual(JSON.parse(resolved.resolutionJson!), { choice: "retry_send" });
+});
+
+test("a plain re-approve (not via retry_send) closes an open delivery park too, with a generic system resolution", async () => {
+  const { run, actionId } = await seedParkedRunViaInteractionRequired();
+  // Simulates an operator fixing the Deck-side control-plane issue out of band and just
+  // re-approving from Ops, never touching the Human Actions queue item directly.
+  const res = await approveRunWithDeliver(run.id, {
+    mint: mintOk(),
+    revoke: noopRevoke,
+    deliver: async () => ({ ok: true, toolResult: { ok: true } }),
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.ok && res.delivered, true);
+  assert.equal(getRun(run.id)!.status, "done");
+  const resolved = getHumanAction(actionId)!;
+  assert.equal(resolved.status, "resolved");
+  assert.equal(resolved.resolvedBy, "system");
+  assert.deepEqual(JSON.parse(resolved.resolutionJson!), { choice: "resolved_via_approve" });
 });
 
 test("resolveOutboundDeliveryAction:retry_send that fails leaves the action open, not resolved", async () => {
