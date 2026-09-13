@@ -35,6 +35,7 @@ import {
   fetchRef,
 } from "../adapters/git-worktree.js";
 import { acquireWorkerAuthority, releaseWorkerAuthority, AUTHORITY_TTL_HEADROOM_MS, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
+import type { MintFn, RevokeFn } from "../adapters/authority-lifecycle.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { getWorkItem } from "../repository/work-items.js";
@@ -61,6 +62,10 @@ export interface DeveloperEffectDeps {
   spawn: DeveloperSpawn;
   github: GithubAdapter;
   deckCallTool?: DeckToolCaller;
+  /** Test-only seam (NOT-79): a fixture mint/revoke so a deckId-bearing profile can
+   * exercise the real authority-acquisition path without a reachable Agent Deck. */
+  mint?: MintFn;
+  revoke?: RevokeFn;
 }
 
 const defaultDeps: DeveloperEffectDeps = { spawn: realDeveloperSpawn, github: realGithubAdapter };
@@ -172,6 +177,8 @@ export async function runDeveloperEffect(
         // out from under a still-running, legitimate session.
         ttlMs: developerEffectConfig.sessionTimeoutMs + AUTHORITY_TTL_HEADROOM_MS,
         verifyCallTool: deps.deckCallTool,
+        mint: deps.mint,
+        revoke: deps.revoke,
       });
       if (!acquired.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
@@ -259,7 +266,7 @@ export async function runDeveloperEffect(
     // worktree (agent-deck-bind.ts), so it must be gone before that worktree is ever
     // pushed, not merely by the time this function eventually returns.
     if (workerAuthority) {
-      await releaseWorkerAuthority(workerAuthority);
+      await releaseWorkerAuthority({ ...workerAuthority, revoke: deps.revoke });
       workerAuthority = null;
     }
 
@@ -422,6 +429,6 @@ export async function runDeveloperEffect(
     // try block — its authority has no further legitimate use, so it's revoked here
     // rather than left to expire by TTL (NOT-85 §6.3: "no further calls" after an
     // attempt ends).
-    if (workerAuthority) await releaseWorkerAuthority(workerAuthority);
+    if (workerAuthority) await releaseWorkerAuthority({ ...workerAuthority, revoke: deps.revoke });
   }
 }

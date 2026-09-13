@@ -39,6 +39,7 @@ import {
   diffShas,
 } from "../adapters/git-worktree.js";
 import { acquireWorkerAuthority, releaseWorkerAuthority, AUTHORITY_TTL_HEADROOM_MS, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
+import type { MintFn, RevokeFn } from "../adapters/authority-lifecycle.js";
 import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adapters/github.js";
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { getWorkItem } from "../repository/work-items.js";
@@ -108,6 +109,10 @@ export interface ReviewerEffectDeps {
   spawn: ReviewerSpawn;
   github: GithubAdapter;
   deckCallTool?: DeckToolCaller;
+  /** Test-only seam (NOT-79): a fixture mint/revoke so a deckId-bearing profile can
+   * exercise the real authority-acquisition path without a reachable Agent Deck. */
+  mint?: MintFn;
+  revoke?: RevokeFn;
 }
 
 const defaultDeps: ReviewerEffectDeps = { spawn: realReviewerSpawn, github: realGithubAdapter };
@@ -240,6 +245,8 @@ export async function runReviewerEffect(
         // session's own (configurable) timeout.
         ttlMs: reviewerEffectConfig.sessionTimeoutMs + AUTHORITY_TTL_HEADROOM_MS,
         verifyCallTool: deps.deckCallTool,
+        mint: deps.mint,
+        revoke: deps.revoke,
       });
       if (!acquired.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
@@ -325,7 +332,7 @@ export async function runReviewerEffect(
     // worktree-local MCP config must be gone well before this worktree could ever be
     // reused — don't wait for this function's own return to clean it up.
     if (workerAuthority) {
-      await releaseWorkerAuthority(workerAuthority);
+      await releaseWorkerAuthority({ ...workerAuthority, revoke: deps.revoke });
       workerAuthority = null;
     }
 
@@ -463,6 +470,6 @@ export async function runReviewerEffect(
     // See developer-effect.ts's identical finally: the worker's subprocess is done (or
     // never started) by every path through this function, so its authority is revoked
     // here rather than left to expire by TTL (NOT-85 section 6.3).
-    if (workerAuthority) await releaseWorkerAuthority(workerAuthority);
+    if (workerAuthority) await releaseWorkerAuthority({ ...workerAuthority, revoke: deps.revoke });
   }
 }
