@@ -45,7 +45,7 @@ export async function spawnCli(
   cmd: string,
   args: string[],
   cwd: string,
-  opts: { logPath: string; timeoutMs: number }
+  opts: { logPath: string; timeoutMs: number; env?: Record<string, string> }
 ): Promise<{ exitCode: number; transcript: string; timedOut: boolean }> {
   await acquireSpawnSlot();
   try {
@@ -59,7 +59,10 @@ export async function spawnCli(
 
       const child = spawn(cmd, args, {
         cwd,
-        env: { ...process.env },
+        // Extra vars (e.g. codex's bearer-token env var for its per-attempt CODEX_HOME
+        // MCP config, agent-deck-bind.ts) are added on top of, never in place of, the
+        // process env the CLI itself needs to run.
+        env: { ...process.env, ...opts.env },
         stdio: ["ignore", "pipe", "pipe"],
       });
       registerChild(runId, child, opts.logPath);

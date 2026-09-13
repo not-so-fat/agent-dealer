@@ -38,7 +38,7 @@ import {
   fetchRef,
   diffShas,
 } from "../adapters/git-worktree.js";
-import { bindAndVerify, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
+import { acquireWorkerAuthority, releaseWorkerAuthority, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adapters/github.js";
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { getWorkItem } from "../repository/work-items.js";
@@ -215,7 +215,9 @@ export async function runReviewerEffect(
 
   let worktreePath: string;
   let result: ReviewerResult;
+  let workerAuthority: { authorityId: string; mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   try {
+   try {
     const worktree = await createRoleWorktree({
       repo: issue.repo,
       role: "reviewer",
@@ -225,11 +227,23 @@ export async function runReviewerEffect(
     worktreePath = worktree.path;
 
     if (snapshot?.deckId) {
-      const bind = await bindAndVerify({ deckId: snapshot.deckId, worktreePath, callTool: deps.deckCallTool });
-      if (!bind.ok) {
+      const acquired = await acquireWorkerAuthority({
+        deckId: snapshot.deckId,
+        runId: ctx.instance.id,
+        attemptId: workItem.id,
+        idempotencyKey: `${workItem.id}:${workItem.attemptCount}`,
+        worktreePath,
+        runtime,
+        verifyCallTool: deps.deckCallTool,
+      });
+      if (!acquired.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
+        if (acquired.kind === "interaction_required") {
+          return { kind: "interaction_required", reason: acquired.reason };
+        }
         return { kind: "session_failed" };
       }
+      workerAuthority = { authorityId: acquired.authorityId, mcpConfigPath: acquired.mcpConfigPath, mcpEnv: acquired.mcpEnv };
     }
 
     // Recomputed here rather than trusted off `issue.baseSha`: a retry_reviewer_at_new_head
@@ -277,6 +291,8 @@ export async function runReviewerEffect(
       prompt,
       cwd: worktreePath,
       timeoutMs: reviewerEffectConfig.sessionTimeoutMs,
+      mcpConfigPath: workerAuthority?.mcpConfigPath,
+      mcpEnv: workerAuthority?.mcpEnv,
     });
 
     // See developer-effect.ts's identical call: recorded before any early return so a
@@ -290,6 +306,15 @@ export async function runReviewerEffect(
       durationMs: Date.now() - spawnStartedAt,
       ...usage,
     });
+
+    // See developer-effect.ts's identical release: the worker's own subprocess has
+    // exited, so its authority has no further legitimate use, and (cursor) its
+    // worktree-local MCP config must be gone well before this worktree could ever be
+    // reused — don't wait for this function's own return to clean it up.
+    if (workerAuthority) {
+      await releaseWorkerAuthority(workerAuthority);
+      workerAuthority = null;
+    }
 
     if (spawned.timedOut || spawned.exitCode !== 0) {
       await bestEffortRemove(issue.repo, worktreePath);
@@ -337,9 +362,9 @@ export async function runReviewerEffect(
       });
       result = { ...result, verdict: "escalated" };
     }
-  } catch {
+   } catch {
     return { kind: "session_failed" };
-  }
+   }
 
   if (issue.prNumber == null) {
     // Can't identify which PR to re-verify/publish against — the detached worktree has
@@ -420,5 +445,11 @@ export async function runReviewerEffect(
   } catch {
     await bestEffortRemove(issue.repo, worktreePath);
     return { kind: "publish_failed" };
+  }
+  } finally {
+    // See developer-effect.ts's identical finally: the worker's subprocess is done (or
+    // never started) by every path through this function, so its authority is revoked
+    // here rather than left to expire by TTL (NOT-85 section 6.3).
+    if (workerAuthority) await releaseWorkerAuthority(workerAuthority);
   }
 }

@@ -14,6 +14,7 @@ const ACTION_LABELS: Record<HumanActionType, string> = {
   attempts_exhausted: "Attempts exhausted",
   policy_escalation: "Policy escalation",
   product_scope_decision: "Product scope decision",
+  deck_interaction_required: "Agent Deck interaction required",
 };
 
 function timeAgo(iso: string): string {

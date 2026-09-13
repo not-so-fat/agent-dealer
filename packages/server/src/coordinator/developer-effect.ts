@@ -34,7 +34,7 @@ import {
   revParseHead,
   fetchRef,
 } from "../adapters/git-worktree.js";
-import { bindAndVerify, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
+import { acquireWorkerAuthority, releaseWorkerAuthority, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { getWorkItem } from "../repository/work-items.js";
@@ -155,17 +155,26 @@ export async function runDeveloperEffect(
     return { kind: "adapter_failure", reason: `worktree setup failed: ${String(err)}` };
   }
 
+  let workerAuthority: { authorityId: string; mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   try {
     if (snapshot?.deckId) {
-      const bind = await bindAndVerify({
+      const acquired = await acquireWorkerAuthority({
         deckId: snapshot.deckId,
+        runId: ctx.instance.id,
+        attemptId: workItem.id,
+        idempotencyKey: `${workItem.id}:${workItem.attemptCount}`,
         worktreePath,
-        callTool: deps.deckCallTool,
+        runtime,
+        verifyCallTool: deps.deckCallTool,
       });
-      if (!bind.ok) {
+      if (!acquired.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
-        return { kind: "adapter_failure", reason: `deck bind failed: ${bind.reason}` };
+        if (acquired.kind === "interaction_required") {
+          return { kind: "interaction_required", reason: acquired.reason };
+        }
+        return { kind: "adapter_failure", reason: `deck authority acquisition failed: ${acquired.reason}` };
       }
+      workerAuthority = { authorityId: acquired.authorityId, mcpConfigPath: acquired.mcpConfigPath, mcpEnv: acquired.mcpEnv };
     }
 
     let payload: { retryReason?: string | null } = {};
@@ -211,6 +220,8 @@ export async function runDeveloperEffect(
       prompt,
       cwd: worktreePath,
       timeoutMs: developerEffectConfig.sessionTimeoutMs,
+      mcpConfigPath: workerAuthority?.mcpConfigPath,
+      mcpEnv: workerAuthority?.mcpEnv,
     });
 
     // Recorded unconditionally, before any early return below: cost is incurred the
@@ -225,6 +236,18 @@ export async function runDeveloperEffect(
       durationMs: Date.now() - spawnStartedAt,
       ...usage,
     });
+
+    // Released here, right after the worker's own subprocess has exited, rather than
+    // waiting for this function to return: the authority has no legitimate further use
+    // once the worker session is done, and everything below this point (push, PR
+    // creation) is coordinator-side git/gh, not a deck call. This is also load-bearing
+    // for cursor specifically — its per-attempt MCP config is a file *inside* the
+    // worktree (agent-deck-bind.ts), so it must be gone before that worktree is ever
+    // pushed, not merely by the time this function eventually returns.
+    if (workerAuthority) {
+      await releaseWorkerAuthority(workerAuthority);
+      workerAuthority = null;
+    }
 
     if (spawned.timedOut || spawned.exitCode !== 0) {
       // A crash/timeout must not be routed as a blind retry without checking the
@@ -380,5 +403,11 @@ export async function runDeveloperEffect(
     };
   } catch (err) {
     return { kind: "adapter_failure", reason: String(err) };
+  } finally {
+    // The worker's own subprocess is done (or never started) by every path through this
+    // try block — its authority has no further legitimate use, so it's revoked here
+    // rather than left to expire by TTL (NOT-85 §6.3: "no further calls" after an
+    // attempt ends).
+    if (workerAuthority) await releaseWorkerAuthority(workerAuthority);
   }
 }

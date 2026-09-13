@@ -69,6 +69,19 @@ export async function revParseHead(worktreePath: string): Promise<string> {
   return stdout.trim();
 }
 
+/**
+ * This worktree's own private git-dir (`.git/worktrees/<name>` for a linked worktree,
+ * never shared with the main checkout or any other worktree) — used to write a
+ * worktree-scoped `info/exclude` entry (NOT-92: keeping a per-attempt secret file, e.g.
+ * cursor's in-worktree MCP config, out of `git add -A` without touching the target
+ * repo's own tracked `.gitignore`).
+ */
+export async function worktreeGitDir(worktreePath: string): Promise<string> {
+  const { stdout } = await git(worktreePath, ["rev-parse", "--git-dir"]);
+  const dir = stdout.trim();
+  return path.isAbsolute(dir) ? dir : path.join(worktreePath, dir);
+}
+
 export async function pruneWorktrees(repo: string): Promise<void> {
   await git(repo, ["worktree", "prune"]);
 }

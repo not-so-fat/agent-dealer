@@ -7,8 +7,12 @@
 import type { PermissionPolicy, Runtime, WorkerSessionRole } from "@agent-dealer/shared";
 import { roleCeiling } from "@agent-dealer/shared";
 
+// `bind_workspace` is deliberately absent (NOT-87/92): under execution authority Deck
+// returns INTERACTION_REQUIRED for it unconditionally — the deck/scope is already pinned
+// by the authority at mint time — so offering it to the model is dead weight, not a
+// capability.
 const DECK_READ_TOOLS =
-  "mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__bind_workspace,mcp__agent-deck__list_service_tools";
+  "mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__list_service_tools";
 const DENY_SEND_TOOL = "mcp__agent-deck__call_service_tool";
 
 // Built-in tool names (no MCP tools — --tools only governs the built-in set) passed to
@@ -45,20 +49,25 @@ function buildArgs(
   runtime: Runtime,
   policy: PermissionPolicy,
   prompt: string,
-  model?: string
+  model?: string,
+  mcpConfigPath?: string
 ): string[] {
   if (runtime === "codex_local") {
     const args = ["exec", "--json", "-s", policy.worktreeWrite ? "workspace-write" : "read-only"];
     // codex's read-only sandbox constrains shell/files but NOT configured MCP/plugin
-    // calls, and `-c mcp_servers={}` does NOT clear the loaded table — codex merges CLI
-    // overrides into `~/.codex/config.toml` rather than replacing it, so
-    // `call_service_tool` (and every other configured server) stays reachable for a
-    // reviewer; confirmed directly against the installed CLI (`codex mcp list` shows
-    // `agent-deck` enabled with or without that override). `--ignore-user-config` instead
-    // skips loading `$CODEX_HOME/config.toml` — where `mcp_servers` is defined — entirely,
-    // so a read-only session genuinely has none configured. (A codex *developer* keeps
-    // MCP for deck reads; a finer per-tool gate is a NOT-61+ refinement.)
-    if (!policy.worktreeWrite) args.push("--ignore-user-config");
+    // calls, so a read-only session with no execution authority (no deck configured)
+    // must have `--ignore-user-config` to skip `$CODEX_HOME/config.toml` entirely —
+    // otherwise the ambient `~/.codex/config.toml` MCP table (if any) stays reachable
+    // regardless of role; confirmed directly against the installed CLI (`codex mcp list`
+    // shows configured servers enabled with or without a `-c mcp_servers={}` override,
+    // since codex merges CLI overrides into the loaded config rather than replacing it).
+    // When execution authority *is* wired (mcpConfigPath set), `CODEX_HOME` is pointed at
+    // a per-attempt directory whose `config.toml` defines exactly one, authority-scoped
+    // MCP server (agent-deck-bind.ts) — `--ignore-user-config` would skip loading that
+    // scoped file too, so it is never passed once an authority exists, for either role;
+    // the deck's own allowedTools scope (not this CLI flag) is what still keeps a
+    // reviewer's authority read-only server-side.
+    if (!policy.worktreeWrite && !mcpConfigPath) args.push("--ignore-user-config");
     if (model) args.push("-m", model);
     args.push(prompt);
     return args;
@@ -72,6 +81,11 @@ function buildArgs(
       "--stream-partial-output",
       ...(policy.worktreeWrite ? [] : ["--mode", "ask"]),
       ...(model ? ["--model", model] : []),
+      // A scoped `.cursor/mcp.json` is written per-attempt inside the worktree itself
+      // (agent-deck-bind.ts) — cursor-agent has no flag to point it at a config outside
+      // the workspace it's already operating in — so headless approval is needed for
+      // that one freshly-materialized server; there is nothing else in it to approve.
+      ...(mcpConfigPath ? ["--approve-mcps"] : []),
       prompt,
     ];
   }
@@ -99,6 +113,12 @@ function buildArgs(
   ];
   const deny = claudeDisallowedTools(policy);
   if (deny.length) args.push("--disallowedTools", deny.join(","));
+  if (mcpConfigPath) {
+    // `--strict-mcp-config` makes this file the *only* MCP source for the session —
+    // without it claude still merges in any ambient user/project `.mcp.json`, which
+    // would defeat the point of a freshly-minted, single-server scoped authority.
+    args.push("--mcp-config", mcpConfigPath, "--strict-mcp-config");
+  }
   return args;
 }
 
@@ -108,24 +128,27 @@ export function buildWorkerArgs(opts: {
   prompt: string;
   model?: string;
   policy?: PermissionPolicy;
+  mcpConfigPath?: string;
 }): string[] {
-  return buildArgs(opts.runtime, opts.policy ?? roleCeiling(opts.role), opts.prompt, opts.model);
+  return buildArgs(opts.runtime, opts.policy ?? roleCeiling(opts.role), opts.prompt, opts.model, opts.mcpConfigPath);
 }
 
 export function buildDeveloperArgs(
   runtime: Runtime,
   prompt: string,
   model?: string,
-  policy?: PermissionPolicy
+  policy?: PermissionPolicy,
+  mcpConfigPath?: string
 ): string[] {
-  return buildArgs(runtime, policy ?? roleCeiling("developer"), prompt, model);
+  return buildArgs(runtime, policy ?? roleCeiling("developer"), prompt, model, mcpConfigPath);
 }
 
 export function buildReviewerArgs(
   runtime: Runtime,
   prompt: string,
   model?: string,
-  policy?: PermissionPolicy
+  policy?: PermissionPolicy,
+  mcpConfigPath?: string
 ): string[] {
-  return buildArgs(runtime, policy ?? roleCeiling("reviewer"), prompt, model);
+  return buildArgs(runtime, policy ?? roleCeiling("reviewer"), prompt, model, mcpConfigPath);
 }

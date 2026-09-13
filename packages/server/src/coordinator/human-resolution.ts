@@ -4,7 +4,8 @@ export type HumanResolution =
   | { actionType: "final_review"; choice: "complete" | "repair" | "close" }
   | { actionType: "attempts_exhausted"; choice: "retry" | "close" }
   | { actionType: "policy_escalation"; choice: "resume" | "close" }
-  | { actionType: "product_scope_decision"; choice: "resume"; note?: string };
+  | { actionType: "product_scope_decision"; choice: "resume"; note?: string }
+  | { actionType: "deck_interaction_required"; choice: "resume" | "close" };
 
 export interface HumanResolutionResult {
   issueStatus: "done" | "repairing" | "closed" | "developing";
@@ -29,6 +30,7 @@ const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
   attempts_exhausted: ["retry", "close"],
   policy_escalation: ["resume", "close"],
   product_scope_decision: ["resume"],
+  deck_interaction_required: ["resume", "close"],
 };
 
 /**
@@ -72,5 +74,11 @@ export function resolveHumanActionOutcome(resolution: HumanResolution): HumanRes
       throw new Error(`Unrecognized policy_escalation choice: ${resolution.choice}`);
     case "product_scope_decision":
       return { issueStatus: "developing", startNewRound: true, roundKind: "none" };
+    case "deck_interaction_required":
+      // Same semantics as policy_escalation:resume — an authority/control-plane hiccup is
+      // not a review-round spend; a fresh attempt mints its own new authority when it runs.
+      if (resolution.choice === "resume") return { issueStatus: "developing", startNewRound: true, roundKind: "infra" };
+      if (resolution.choice === "close") return { issueStatus: "closed", workflowOutcome: "closed" };
+      throw new Error(`Unrecognized deck_interaction_required choice: ${resolution.choice}`);
   }
 }
