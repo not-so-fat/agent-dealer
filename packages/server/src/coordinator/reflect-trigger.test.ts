@@ -77,6 +77,18 @@ function seedFinalDeveloperSession(
   });
 }
 
+/** Polls `predicate` instead of a fixed sleep — a `retry` resolution fires
+ * `triggerIssueReflect` fire-and-forget (matches the real route), so a test observing its
+ * effect can't await it directly. A single fixed-duration sleep flakes under load (PR #21
+ * review finding #2); polling every 5ms up to a generous 2s bound does not. */
+async function waitFor(predicate: () => boolean, timeoutMs = 2000, intervalMs = 5): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor: timed out waiting for predicate");
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 const MINT_OK = {
   ok: true as const,
   authority: {
@@ -346,6 +358,51 @@ test("a propose_playbook_patch INTERACTION_REQUIRED parks the attempt after a su
   assert.equal(actions[0].reason, "Playbook mutation needs review.");
 });
 
+// PR #21 review finding #1: a park after playbooks 1..N-1 already succeeded must not
+// re-propose those on retry — that would duplicate their Notes items.
+test("a retry after a mid-loop park does not re-propose a playbook that already succeeded", async () => {
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: "/repo" });
+  const issue = seedIssue(dev.id);
+  seedFinalDeveloperSession(issue.id, dev, { deckId: "11111111-1111-4111-a111-111111111111", playbookIds: ["pb-ok", "pb-park"] });
+
+  const proposedCalls: string[] = [];
+  let parkPbPark = true;
+  let revokedCount = 0;
+  const deps: ReflectDeps = {
+    checkHealth: async () => true,
+    mintAuthority: async () => MINT_OK,
+    revokeAuthority: async () => {
+      revokedCount += 1;
+    },
+    callTool: (async (opts: { toolName: string; arguments: Record<string, unknown> }) => {
+      if (opts.toolName === "get_playbook") {
+        return { ok: true, data: { id: opts.arguments.playbook_id, title: "pb", body: "" } };
+      }
+      const playbookId = opts.arguments.playbook_id as string;
+      proposedCalls.push(playbookId);
+      if (playbookId === "pb-park" && parkPbPark) {
+        return { ok: false, kind: "interaction_required", reason: "Playbook mutation needs review.", requestId: "req_mid_park" };
+      }
+      return { ok: true, data: { id: `patch-${playbookId}`, playbookId } };
+    }) as ReflectDeps["callTool"],
+  };
+
+  const first = await triggerIssueReflect(issue.id, deps);
+  assert.equal(first, "parked");
+  assert.deepStrictEqual(proposedCalls, ["pb-ok", "pb-park"]);
+  assert.equal(listArtifactsForIssue(issue.id).filter((a) => a.kind === "playbook_patch").length, 1);
+
+  const parkedAction = listHumanActionsForIssue(issue.id).find((a) => a.actionType === "reflection_interaction_required" && a.status === "open")!;
+  parkPbPark = false;
+  const resolved = resolveReflectionInteractionAction(parkedAction.id, "operator", "retry", deps);
+  assert.ok(resolved.ok);
+  await waitFor(() => revokedCount === 2);
+
+  // Retry skips pb-ok (already has a playbook_patch artifact) and only re-attempts pb-park.
+  assert.deepStrictEqual(proposedCalls, ["pb-ok", "pb-park", "pb-park"]);
+  assert.equal(listArtifactsForIssue(issue.id).filter((a) => a.kind === "playbook_patch").length, 2);
+});
+
 test("a repeated INTERACTION_REQUIRED for the same requestId dedupes onto the one open action", async () => {
   const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: "/repo" });
   const issue = seedIssue(dev.id);
@@ -372,6 +429,7 @@ test("acceptance: final-review completion → authorized playbook read → contr
   seedFinalDeveloperSession(issue.id, dev, { deckId: "11111111-1111-4111-a111-111111111111", playbookIds: ["pb-1"] });
 
   const mintedAttemptIds: string[] = [];
+  let revokedCount = 0;
   let proposeShouldPark = true;
   const deps: ReflectDeps = {
     checkHealth: async () => true,
@@ -379,7 +437,12 @@ test("acceptance: final-review completion → authorized playbook read → contr
       mintedAttemptIds.push(input.attemptId);
       return MINT_OK;
     },
-    revokeAuthority: async () => {},
+    // revokeAuthority runs in triggerIssueReflect's `finally`, after every artifact for the
+    // attempt has already been written — waiting for it (rather than mintedAttemptIds
+    // alone) guarantees the whole fire-and-forget retry attempt has settled.
+    revokeAuthority: async () => {
+      revokedCount += 1;
+    },
     callTool: (async (opts: { toolName: string; arguments: Record<string, unknown> }) => {
       if (opts.toolName === "get_playbook") {
         return { ok: true, data: { id: opts.arguments.playbook_id, title: "pb", body: "" } };
@@ -408,7 +471,7 @@ test("acceptance: final-review completion → authorized playbook read → contr
   proposeShouldPark = false;
   const resolved = resolveReflectionInteractionAction(parkedAction.id, "operator", "retry", deps);
   assert.ok(resolved.ok);
-  await new Promise((r) => setTimeout(r, 50)); // triggerIssueReflect runs fire-and-forget
+  await waitFor(() => revokedCount === 2); // triggerIssueReflect runs fire-and-forget
 
   assert.equal(mintedAttemptIds.length, 2);
   assert.notEqual(mintedAttemptIds[0], mintedAttemptIds[1]);

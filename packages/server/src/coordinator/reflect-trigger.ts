@@ -37,6 +37,7 @@ import { listFindingsForIssue } from "../repository/findings.js";
 import { listWorkflowEventsForIssue } from "../repository/workflow-events.js";
 import { listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
+import { listArtifactsForIssue } from "../repository/artifacts-for-issue.js";
 import {
   createHumanAction,
   findOpenHumanActionByRequestId,
@@ -129,6 +130,29 @@ function buildRationale(issueId: string): string {
 }
 
 /**
+ * Playbook ids this issue already has a `playbook_patch` artifact for, from any earlier
+ * reflect attempt (i.e. a prior attempt that parked partway through, before a `retry`).
+ * The retry loop skips these instead of re-proposing — otherwise a park on playbook N
+ * after playbooks `1..N-1` already succeeded would duplicate their Notes items on retry
+ * (PR #21 review finding #1). Reflect fires at most once per issue outside of retries, so
+ * every artifact this finds genuinely belongs to this same reflection, never a later
+ * unrelated one.
+ */
+function alreadyProposedPlaybookIds(issueId: string): Set<string> {
+  const ids = new Set<string>();
+  for (const artifact of listArtifactsForIssue(issueId, { limit: 200 })) {
+    if (artifact.kind !== "playbook_patch") continue;
+    try {
+      const playbookId = (JSON.parse(artifact.contentJson ?? "{}") as { playbookId?: string }).playbookId;
+      if (playbookId) ids.add(playbookId);
+    } catch {
+      // malformed content — nothing to skip on its account
+    }
+  }
+  return ids;
+}
+
+/**
  * Raises (or dedupes onto) the one open `reflection_interaction_required` action for this
  * issue/requestId (NOT-93's requestId-dedupe pattern, mirrored here for reflection instead
  * of a worker attempt). Deliberately never touches issue status or workflow instances —
@@ -215,6 +239,7 @@ export async function triggerIssueReflect(
   }
 
   const rationale = buildRationale(issueId);
+  const alreadyProposed = alreadyProposedPlaybookIds(issueId);
   let anySucceeded = false;
   let anyFailed = false;
   let parked = false;
@@ -232,6 +257,13 @@ export async function triggerIssueReflect(
 
   try {
     for (const playbookId of playbookIds) {
+      if (alreadyProposed.has(playbookId)) {
+        // A prior attempt for this issue already proposed this playbook's patch — a retry
+        // must not duplicate it (PR #21 review finding #1).
+        anySucceeded = true;
+        continue;
+      }
+
       const playbook = await deps.callTool<{ id: string; title: string; body: string }>({
         authorityId: authority.authorityId,
         authoritySecret: authority.authoritySecret,
