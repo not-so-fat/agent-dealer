@@ -64,7 +64,7 @@ test("acquireWorkerAuthority mints, verifies, and writes a per-attempt MCP confi
     verifyCallTool: async (name) => {
       verifyCalled = true;
       assert.equal(name, "get_bound_deck");
-      return textResult({ deckId: DECK });
+      return textResult({ id: DECK, name: "personal-dev" }); // real get_bound_deck shape: deck identity is `id`
     },
   });
   assert.equal(result.ok, true);
@@ -77,6 +77,33 @@ test("acquireWorkerAuthority mints, verifies, and writes a per-attempt MCP confi
     assert.equal(written.mcpServers["agent-deck"].headers["x-agent-deck-workspace"], WT);
     await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
     assert.equal(fs.existsSync(result.mcpConfigPath), false);
+  }
+});
+
+test("acquireWorkerAuthority revokes and rejects when get_bound_deck reports a different deck than requested", async () => {
+  let revokeUrl: string | undefined;
+  const fetchMock = (await import("node:test")).mock.method(globalThis, "fetch", async (url: string) => {
+    revokeUrl = String(url);
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  });
+  process.env.AGENT_DECK_ENROLLMENT_ID = "enr_abc";
+  process.env.AGENT_DECK_ENROLLMENT_SECRET = "enrs_secret";
+  try {
+    const result = await acquireWorkerAuthority({
+      ...BASE_OPTS,
+      mint: async () => MINT_OK,
+      verifyCallTool: async () => textResult({ id: "some-other-deck-id" }),
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.kind, "infra_failure");
+      assert.match(result.reason, /returned deck some-other-deck-id, expected/);
+    }
+    assert.match(revokeUrl ?? "", /\/authorities\/authz_1\/revoke$/);
+  } finally {
+    fetchMock.mock.restore();
+    delete process.env.AGENT_DECK_ENROLLMENT_ID;
+    delete process.env.AGENT_DECK_ENROLLMENT_SECRET;
   }
 });
 
@@ -144,12 +171,12 @@ test("mintAuthority import stays wired for the release path (sanity)", () => {
   assert.equal(typeof mintAuthority, "function");
 });
 
-test("acquireWorkerAuthority materializes a CODEX_HOME directory with a bearer-env-var config for codex_local", async () => {
+test("acquireWorkerAuthority materializes a CODEX_HOME directory, wiring both CODEX_HOME and the bearer env var for the spawned process", async () => {
   const result = await acquireWorkerAuthority({
     ...BASE_OPTS,
     runtime: "codex_local",
     mint: async () => MINT_OK,
-    verifyCallTool: async () => textResult({ deckId: DECK }),
+    verifyCallTool: async () => textResult({ id: DECK }),
   });
   assert.equal(result.ok, true);
   if (result.ok) {
@@ -158,38 +185,31 @@ test("acquireWorkerAuthority materializes a CODEX_HOME directory with a bearer-e
     assert.match(toml, /\[mcp_servers\.agent-deck\]/);
     assert.match(toml, /bearer_token_env_var = "AGENT_DECK_AUTHORITY_BEARER"/);
     assert.doesNotMatch(toml, /authzs_secret/); // the secret itself never touches disk
+    // Both vars are required: without CODEX_HOME the spawned codex process falls back
+    // to its default (ambient, unscoped) config root and never reads this file at all.
+    assert.equal(result.mcpEnv?.CODEX_HOME, result.mcpConfigPath);
     assert.equal(result.mcpEnv?.AGENT_DECK_AUTHORITY_BEARER, "authz_1:authzs_secret");
     await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
     assert.equal(fs.existsSync(result.mcpConfigPath), false);
   }
 });
 
-test("acquireWorkerAuthority writes a scoped .cursor/mcp.json inside the worktree for cursor_local, excluded from git add -A", async () => {
-  const worktreePath = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cursor-wt-"));
-  const { execFileSync } = await import("node:child_process");
-  execFileSync("git", ["init", "-q"], { cwd: worktreePath });
-  try {
-    const result = await acquireWorkerAuthority({
-      ...BASE_OPTS,
-      worktreePath,
-      runtime: "cursor_local",
-      mint: async () => MINT_OK,
-      verifyCallTool: async () => textResult({ deckId: DECK }),
-    });
-    assert.equal(result.ok, true);
-    if (result.ok) {
-      assert.equal(result.mcpConfigPath, path.join(worktreePath, ".cursor", "mcp.json"));
-      const written = JSON.parse(fs.readFileSync(result.mcpConfigPath, "utf8"));
-      assert.equal(written.mcpServers["agent-deck"].headers.Authorization, "Bearer authz_1:authzs_secret");
-      assert.equal(result.mcpEnv, undefined);
-      // The worker's own `git add -A` (its normal way of committing/pushing its change)
-      // must never be able to stage this secret file.
-      const status = execFileSync("git", ["status", "--porcelain", "--ignored"], { cwd: worktreePath }).toString();
-      assert.match(status, /!! \.cursor\//);
-      await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
-      assert.equal(fs.existsSync(result.mcpConfigPath), false);
-    }
-  } finally {
-    fs.rmSync(worktreePath, { recursive: true, force: true });
+test("acquireWorkerAuthority refuses cursor_local — no mechanism isolates its MCP config from ambient/global servers", async () => {
+  let mintCalled = false;
+  const result = await acquireWorkerAuthority({
+    ...BASE_OPTS,
+    runtime: "cursor_local",
+    mint: async () => {
+      mintCalled = true;
+      return MINT_OK;
+    },
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.kind, "infra_failure");
+    assert.match(result.reason, /not supported for runtime cursor_local/);
   }
+  // Rejected before ever minting — no authority is issued (and left unrevoked) for a
+  // runtime that can't use one safely.
+  assert.equal(mintCalled, false);
 });

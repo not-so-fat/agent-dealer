@@ -22,15 +22,39 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Runtime } from "@agent-dealer/shared";
 import { getAgentDeckMcpUrl } from "./agent-deck.js";
-import { worktreeGitDir } from "./git-worktree.js";
 import { mintAuthority as defaultMintAuthority, revokeAuthority, type MintAuthorityInput, type MintAuthorityResult } from "./execution-authority.js";
 import { getExecutionAuthorityConfigDir } from "../paths.js";
 
 export { revokeAuthority };
 
+// Fallback only — every real caller (developer-effect.ts, reviewer-effect.ts) passes an
+// explicit ttlMs derived from that role's own session timeout. A fixed default here would
+// otherwise be silently shorter than a configurable session timeout and expire the
+// authority mid-session (PR #19 review).
 const DEFAULT_TTL_MS = 30 * 60_000;
 
+/**
+ * Added on top of a role's own (configurable) session timeout to get the authority's
+ * ttlMs — covers the mint + live `get_bound_deck` verify round-trip that happens
+ * *before* the spawned session's own timeout clock starts, so the authority can't
+ * expire mid-session even at that timeout's exact edge.
+ */
+export const AUTHORITY_TTL_HEADROOM_MS = 5 * 60_000;
+
 const CODEX_BEARER_ENV_VAR = "AGENT_DECK_AUTHORITY_BEARER";
+const CODEX_HOME_ENV_VAR = "CODEX_HOME";
+
+/**
+ * Runtimes execution authority can materialize an isolated, single-server MCP config
+ * for. `cursor_local` is deliberately excluded (PR #19 review): cursor-agent loads
+ * project *and* global `.cursor/mcp.json` and has no flag to isolate one from the
+ * other, so `--approve-mcps` would auto-approve every ambient MCP server on the
+ * machine, not just a freshly-scoped one — a worse hole than the ambient access cursor
+ * already had before this ticket. Until cursor ships a real isolation mechanism,
+ * `acquireWorkerAuthority` refuses to mint for it rather than claim a scoping
+ * guarantee it cannot enforce.
+ */
+const AUTHORITY_SUPPORTED_RUNTIMES: ReadonlySet<Runtime> = new Set(["claude_code", "codex_local"]);
 
 /** One tool call within a single connected MCP session. */
 export type DeckToolCaller = (name: string, args: Record<string, unknown>) => Promise<unknown>;
@@ -39,12 +63,12 @@ export type WorkerAuthorityOutcome =
   | {
       ok: true;
       authorityId: string;
-      /** Runtime-specific: a claude `--mcp-config` file, a codex `CODEX_HOME` directory,
-       * or (cursor) a scoped `.cursor/mcp.json` written *inside* the worktree — see
-       * `materializeWorkerMcpConfig`. */
+      /** Runtime-specific: a claude `--mcp-config` file, or a codex `CODEX_HOME`
+       * directory — see `materializeWorkerMcpConfig`. */
       mcpConfigPath: string;
-      /** Extra env the spawned CLI needs to resolve mcpConfigPath — only codex uses this
-       * (its bearer token is read from an env var, never written to config.toml). */
+      /** Extra env the spawned CLI needs to resolve mcpConfigPath — codex needs both
+       * `CODEX_HOME` (pointed at the scoped directory) and its bearer-token env var
+       * (read from the environment, never written to config.toml). */
       mcpEnv?: Record<string, string>;
       expiresAt: string;
     }
@@ -80,7 +104,7 @@ interface MaterializedMcpConfig {
   mcpEnv?: Record<string, string>;
 }
 
-/** Shared by claude's `--mcp-config` file and cursor's `.cursor/mcp.json` — same schema. */
+/** claude's `--mcp-config` file schema. */
 function urlHeaderMcpConfig(mcpUrl: string, authorityId: string, authoritySecret: string, worktreePath: string) {
   return {
     mcpServers: {
@@ -105,46 +129,21 @@ function urlHeaderMcpConfig(mcpUrl: string, authorityId: string, authoritySecret
  * - codex: a per-attempt `CODEX_HOME` directory outside the worktree, whose
  *   `config.toml` names the server and an env-var to read the bearer token from —
  *   the secret itself is passed via that env var at spawn time, never written to disk.
- * - cursor: cursor-agent has no flag to source MCP config from outside the directory
- *   it's already operating in, so the scoped config is written to the worktree's own
- *   `.cursor/mcp.json` and removed by `releaseWorkerAuthority` before the worktree is
- *   ever pushed or reused (owner-accepted tradeoff — see NOT-92).
+ *   Both `CODEX_HOME` and the bearer env var are returned in `mcpEnv` for `spawn.ts` to
+ *   set on the child process; without `CODEX_HOME` set, codex would silently fall back
+ *   to its default (ambient, unscoped) config root.
+ *
+ * `runtime` is asserted supported by the caller (`acquireWorkerAuthority`) — cursor is
+ * never passed here.
  */
 async function materializeWorkerMcpConfig(opts: {
-  runtime: Runtime;
+  runtime: "claude_code" | "codex_local";
   authorityId: string;
   authoritySecret: string;
   worktreePath: string;
 }): Promise<MaterializedMcpConfig> {
   const mcpBase = getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "");
   const mcpUrl = `${mcpBase}/mcp`;
-
-  if (opts.runtime === "cursor_local") {
-    const cursorDir = path.join(opts.worktreePath, ".cursor");
-    fs.mkdirSync(cursorDir, { recursive: true });
-    const filePath = path.join(cursorDir, "mcp.json");
-    fs.writeFileSync(
-      filePath,
-      JSON.stringify(urlHeaderMcpConfig(mcpUrl, opts.authorityId, opts.authoritySecret, opts.worktreePath)),
-      { mode: 0o600 }
-    );
-    // A developer worktree is writable and has ordinary Bash/git access — the worker's
-    // own `git add -A && git push` (its normal way of delivering the change, see
-    // git-worktree.ts's `createRoleWorktree` doc comment) could otherwise stage and push
-    // this secret before the coordinator ever gets a chance to revoke and delete it
-    // post-spawn. `info/exclude` is this worktree's own private git metadata — never
-    // committed, never shared with the target repo's tracked `.gitignore` — so this is
-    // safe to do unconditionally, including against a repo the worker also controls.
-    try {
-      const gitDir = await worktreeGitDir(opts.worktreePath);
-      const infoDir = path.join(gitDir, "info");
-      fs.mkdirSync(infoDir, { recursive: true });
-      fs.appendFileSync(path.join(infoDir, "exclude"), "\n/.cursor/mcp.json\n");
-    } catch {
-      // best-effort: worst case the file is merely untracked, not un-stageable
-    }
-    return { mcpConfigPath: filePath };
-  }
 
   if (opts.runtime === "codex_local") {
     const codexHome = path.join(getExecutionAuthorityConfigDir(), `codex-home-${opts.authorityId}-${randomUUID()}`);
@@ -158,7 +157,10 @@ async function materializeWorkerMcpConfig(opts: {
     fs.writeFileSync(path.join(codexHome, "config.toml"), toml, { mode: 0o600 });
     return {
       mcpConfigPath: codexHome,
-      mcpEnv: { [CODEX_BEARER_ENV_VAR]: `${opts.authorityId}:${opts.authoritySecret}` },
+      mcpEnv: {
+        [CODEX_HOME_ENV_VAR]: codexHome,
+        [CODEX_BEARER_ENV_VAR]: `${opts.authorityId}:${opts.authoritySecret}`,
+      },
     };
   }
 
@@ -172,9 +174,19 @@ async function materializeWorkerMcpConfig(opts: {
   return { mcpConfigPath: filePath };
 }
 
+/** `get_bound_deck`'s own deck-identity field (confirmed against the live tool result: `{"id": "<deckId>", "name": ..., ...}`). */
+function assertBoundDeckMatches(result: unknown, expectedDeckId: string): void {
+  const payload = parseDeckToolResult(result);
+  const boundDeckId = typeof payload.id === "string" ? payload.id : undefined;
+  if (boundDeckId !== expectedDeckId) {
+    throw new Error(`get_bound_deck returned deck ${boundDeckId ?? "(missing id)"}, expected ${expectedDeckId}`);
+  }
+}
+
 async function verifyAuthority(opts: {
   authorityId: string;
   authoritySecret: string;
+  deckId: string;
   callTool?: DeckToolCaller;
   timeoutMs: number;
 }): Promise<{ ok: true } | { ok: false; reason: string }> {
@@ -182,6 +194,7 @@ async function verifyAuthority(opts: {
     try {
       const result = await opts.callTool("get_bound_deck", {});
       assertToolResultOk(result, "get_bound_deck");
+      assertBoundDeckMatches(result, opts.deckId);
       return { ok: true };
     } catch (err) {
       return { ok: false, reason: (err as Error).message };
@@ -202,6 +215,7 @@ async function verifyAuthority(opts: {
         ),
       ]);
       assertToolResultOk(result, "get_bound_deck");
+      assertBoundDeckMatches(result, opts.deckId);
       return { ok: true };
     } finally {
       await client.close();
@@ -227,6 +241,14 @@ export async function acquireWorkerAuthority(opts: {
   verifyCallTool?: DeckToolCaller;
   timeoutMs?: number;
 }): Promise<WorkerAuthorityOutcome> {
+  if (!AUTHORITY_SUPPORTED_RUNTIMES.has(opts.runtime)) {
+    return {
+      ok: false,
+      kind: "infra_failure",
+      reason: `execution authority is not supported for runtime ${opts.runtime} — no isolation mechanism for its MCP config exists yet`,
+    };
+  }
+
   const mint = opts.mint ?? defaultMintAuthority;
   const timeoutMs = opts.timeoutMs ?? Number(process.env.DECK_BIND_TIMEOUT_MS ?? 30_000);
 
@@ -260,6 +282,7 @@ export async function acquireWorkerAuthority(opts: {
   const verified = await verifyAuthority({
     authorityId: authority.authorityId,
     authoritySecret: authority.authoritySecret,
+    deckId: opts.deckId,
     callTool: opts.verifyCallTool,
     timeoutMs,
   });
@@ -268,8 +291,9 @@ export async function acquireWorkerAuthority(opts: {
     return { ok: false, kind: "infra_failure", reason: `authority preflight failed: ${verified.reason}` };
   }
 
+  // AUTHORITY_SUPPORTED_RUNTIMES was already checked above, so this narrowing is sound.
   const { mcpConfigPath, mcpEnv } = await materializeWorkerMcpConfig({
-    runtime: opts.runtime,
+    runtime: opts.runtime as "claude_code" | "codex_local",
     authorityId: authority.authorityId,
     authoritySecret: authority.authoritySecret,
     worktreePath: opts.worktreePath,
@@ -279,9 +303,8 @@ export async function acquireWorkerAuthority(opts: {
 
 /**
  * Best-effort — never leaves a live authority or its on-disk config around after a spawn
- * ends. `recursive: true` covers codex's directory-shaped config as well as claude/
- * cursor's single file; cursor's is removed from inside the worktree specifically so it
- * never reaches a push or a later reused worktree.
+ * ends. `recursive: true` covers codex's directory-shaped `CODEX_HOME` as well as
+ * claude's single file.
  */
 export async function releaseWorkerAuthority(opts: { authorityId: string; mcpConfigPath: string }): Promise<void> {
   try {

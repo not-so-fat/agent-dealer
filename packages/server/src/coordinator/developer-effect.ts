@@ -34,7 +34,7 @@ import {
   revParseHead,
   fetchRef,
 } from "../adapters/git-worktree.js";
-import { acquireWorkerAuthority, releaseWorkerAuthority, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
+import { acquireWorkerAuthority, releaseWorkerAuthority, AUTHORITY_TTL_HEADROOM_MS, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { getWorkItem } from "../repository/work-items.js";
@@ -165,6 +165,10 @@ export async function runDeveloperEffect(
         idempotencyKey: `${workItem.id}:${workItem.attemptCount}`,
         worktreePath,
         runtime,
+        // Must outlive the developer session itself (PR #19 review) — a fixed default
+        // shorter than a configurable DEVELOPER_TIMEOUT_MS would expire the authority
+        // out from under a still-running, legitimate session.
+        ttlMs: developerEffectConfig.sessionTimeoutMs + AUTHORITY_TTL_HEADROOM_MS,
         verifyCallTool: deps.deckCallTool,
       });
       if (!acquired.ok) {

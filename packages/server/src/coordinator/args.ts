@@ -73,6 +73,11 @@ function buildArgs(
     return args;
   }
   if (runtime === "cursor_local") {
+    // No execution-authority MCP wiring for cursor (agent-deck-bind.ts's
+    // AUTHORITY_SUPPORTED_RUNTIMES, PR #19 review): cursor-agent loads project *and*
+    // global `.cursor/mcp.json` with no flag to isolate one from the other, so
+    // `--approve-mcps` would auto-approve every ambient MCP server on the machine, not
+    // just a freshly-scoped one. `mcpConfigPath` is intentionally never consulted here.
     return [
       "-p",
       "--trust",
@@ -81,11 +86,6 @@ function buildArgs(
       "--stream-partial-output",
       ...(policy.worktreeWrite ? [] : ["--mode", "ask"]),
       ...(model ? ["--model", model] : []),
-      // A scoped `.cursor/mcp.json` is written per-attempt inside the worktree itself
-      // (agent-deck-bind.ts) — cursor-agent has no flag to point it at a config outside
-      // the workspace it's already operating in — so headless approval is needed for
-      // that one freshly-materialized server; there is nothing else in it to approve.
-      ...(mcpConfigPath ? ["--approve-mcps"] : []),
       prompt,
     ];
   }

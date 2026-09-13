@@ -38,7 +38,7 @@ import {
   fetchRef,
   diffShas,
 } from "../adapters/git-worktree.js";
-import { acquireWorkerAuthority, releaseWorkerAuthority, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
+import { acquireWorkerAuthority, releaseWorkerAuthority, AUTHORITY_TTL_HEADROOM_MS, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adapters/github.js";
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { getWorkItem } from "../repository/work-items.js";
@@ -234,6 +234,9 @@ export async function runReviewerEffect(
         idempotencyKey: `${workItem.id}:${workItem.attemptCount}`,
         worktreePath,
         runtime,
+        // See developer-effect.ts's identical comment: must outlive the reviewer
+        // session's own (configurable) timeout.
+        ttlMs: reviewerEffectConfig.sessionTimeoutMs + AUTHORITY_TTL_HEADROOM_MS,
         verifyCallTool: deps.deckCallTool,
       });
       if (!acquired.ok) {
