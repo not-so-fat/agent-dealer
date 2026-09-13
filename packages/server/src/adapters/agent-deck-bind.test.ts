@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { parse as parseToml } from "smol-toml";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deckbind-"));
 
@@ -201,13 +202,20 @@ test("acquireWorkerAuthority materializes a CODEX_HOME directory, wiring both CO
 // (b) leave a live second copy of the credential on disk if the coordinator crashes
 // before release runs. auth.json is symlinked, not copied, so there is exactly one real
 // credential file at all times and writes through the link land on it directly.
-test("acquireWorkerAuthority for codex_local symlinks (never copies) the ambient auth.json, preserves cli_auth_credentials_store, and leaves config.toml otherwise untouched", async () => {
+test("acquireWorkerAuthority for codex_local symlinks (never copies) the ambient auth.json, preserves the full auth policy, and leaves everything else out of config.toml", async () => {
   const ambientCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ambient-codex-"));
   const ambientAuthPath = path.join(ambientCodexHome, "auth.json");
   fs.writeFileSync(ambientAuthPath, JSON.stringify({ tokens: { access_token: "real-secret-token" } }));
   fs.writeFileSync(
     path.join(ambientCodexHome, "config.toml"),
-    'cli_auth_credentials_store = "file"\nmodel = "should-not-be-copied"\n'
+    [
+      'cli_auth_credentials_store = "file"',
+      'chatgpt_base_url = "https://chatgpt.example.com"',
+      'forced_login_method = "chatgpt"',
+      'forced_chatgpt_workspace_id = "ws_123"',
+      'model = "should-not-be-copied"',
+      "",
+    ].join("\n")
   );
   const prevCodexHome = process.env.CODEX_HOME;
   process.env.CODEX_HOME = ambientCodexHome;
@@ -230,10 +238,14 @@ test("acquireWorkerAuthority for codex_local symlinks (never copies) the ambient
       fs.writeFileSync(ambientAuthPath, JSON.stringify({ tokens: { access_token: "refreshed-token" } }));
       assert.match(fs.readFileSync(isolatedAuthPath, "utf8"), /refreshed-token/);
 
-      // The credential-store *mode* is preserved even though mcp_servers/model are not.
-      const isolatedToml = fs.readFileSync(path.join(result.mcpConfigPath, "config.toml"), "utf8");
-      assert.match(isolatedToml, /cli_auth_credentials_store = "file"/);
-      assert.doesNotMatch(isolatedToml, /should-not-be-copied/);
+      // The full auth-enforcement policy is preserved even though mcp_servers/model are
+      // not — parsed as real TOML, not carried over as raw text.
+      const isolated = parseToml(fs.readFileSync(path.join(result.mcpConfigPath, "config.toml"), "utf8")) as Record<string, unknown>;
+      assert.equal(isolated.cli_auth_credentials_store, "file");
+      assert.equal(isolated.chatgpt_base_url, "https://chatgpt.example.com");
+      assert.equal(isolated.forced_login_method, "chatgpt");
+      assert.equal(isolated.forced_chatgpt_workspace_id, "ws_123");
+      assert.equal(isolated.model, undefined);
 
       await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
       // Releasing (deleting) the isolated dir must remove only the symlink, never the
@@ -241,6 +253,44 @@ test("acquireWorkerAuthority for codex_local symlinks (never copies) the ambient
       assert.equal(fs.existsSync(result.mcpConfigPath), false);
       assert.ok(fs.existsSync(ambientAuthPath));
       assert.match(fs.readFileSync(ambientAuthPath, "utf8"), /refreshed-token/);
+    }
+  } finally {
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevCodexHome;
+    fs.rmSync(ambientCodexHome, { recursive: true, force: true });
+  }
+});
+
+// PR #19 review round 4: a regex over config.toml text missed valid TOML the earlier fix
+// didn't anticipate — single-quoted (literal) strings and a trailing inline comment —
+// and could mistake a same-named key nested in a later table for the root-level setting.
+// A real parser (smol-toml) handles all of these correctly by construction.
+test("acquireWorkerAuthority for codex_local correctly reads cli_auth_credentials_store past single-quoted strings, trailing comments, and a same-named nested key", async () => {
+  const ambientCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ambient-codex-tomledge-"));
+  fs.writeFileSync(
+    path.join(ambientCodexHome, "config.toml"),
+    [
+      "cli_auth_credentials_store = 'file' # keep credentials local",
+      "",
+      "[some_other_table]",
+      'cli_auth_credentials_store = "keyring"', // must NOT be mistaken for the root-level setting
+      "",
+    ].join("\n")
+  );
+  const prevCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = ambientCodexHome;
+  try {
+    const result = await acquireWorkerAuthority({
+      ...BASE_OPTS,
+      runtime: "codex_local",
+      mint: async () => MINT_OK,
+      verifyCallTool: async () => textResult({ id: DECK }),
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      const isolated = parseToml(fs.readFileSync(path.join(result.mcpConfigPath, "config.toml"), "utf8")) as Record<string, unknown>;
+      assert.equal(isolated.cli_auth_credentials_store, "file");
+      await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
     }
   } finally {
     if (prevCodexHome === undefined) delete process.env.CODEX_HOME;

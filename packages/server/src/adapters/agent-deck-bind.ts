@@ -18,6 +18,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Runtime } from "@agent-dealer/shared";
@@ -111,19 +112,42 @@ interface MaterializedMcpConfig {
 }
 
 /**
- * Extracts just the top-level `cli_auth_credentials_store` key from the ambient codex
- * `config.toml`, if present — a single scalar read, not a general TOML parse (pulling in
- * a parser dependency for one key isn't worth it, and this deliberately never touches
- * `mcp_servers` or anything else in that file). Returns `null` if the file or key is
- * absent, or the value isn't a plain quoted string.
+ * Codex's top-level authentication-policy keys (docs: "Enforce a login method or
+ * workspace") — carried verbatim from the ambient `config.toml` into the isolated one so
+ * a worker authenticates under the *same* policy `agent-health.ts`'s `codex login status`
+ * already verified against the ambient host, never a looser one. `forced_login_method`/
+ * `forced_chatgpt_workspace_id` make codex exit rather than silently proceed when cached
+ * credentials don't match, so dropping them wouldn't just risk a wrong-context login —
+ * it would let a per-attempt isolated session skip an enforcement the ambient host relies
+ * on entirely.
  */
-function readAmbientCredentialsStore(ambientCodexHome: string): string | null {
+const CODEX_AUTH_POLICY_KEYS = [
+  "cli_auth_credentials_store",
+  "chatgpt_base_url",
+  "forced_login_method",
+  "forced_chatgpt_workspace_id",
+] as const;
+
+/**
+ * Real TOML parse (PR #19 review round 4 — a regex over `config.toml` text missed valid
+ * single-quoted strings, trailing comments, and had no table-scoping), reading only
+ * `CODEX_AUTH_POLICY_KEYS` off the *root* table. Deliberately ignores everything else in
+ * the file, `mcp_servers` most of all — that table is what execution authority exists to
+ * replace, never to inherit.
+ */
+function readAmbientCodexAuthPolicy(ambientCodexHome: string): Record<string, unknown> {
   try {
     const raw = fs.readFileSync(path.join(ambientCodexHome, "config.toml"), "utf8");
-    const match = raw.match(/^\s*cli_auth_credentials_store\s*=\s*"([^"]*)"\s*$/m);
-    return match ? match[1] : null;
+    const root = parseToml(raw) as Record<string, unknown>;
+    const policy: Record<string, unknown> = {};
+    for (const key of CODEX_AUTH_POLICY_KEYS) {
+      if (key in root && (typeof root[key] === "string" || typeof root[key] === "number" || typeof root[key] === "boolean")) {
+        policy[key] = root[key];
+      }
+    }
+    return policy;
   } catch {
-    return null;
+    return {};
   }
 }
 
@@ -155,13 +179,19 @@ function urlHeaderMcpConfig(mcpUrl: string, authorityId: string, authoritySecret
  *   Both `CODEX_HOME` and the bearer env var are returned in `mcpEnv` for `spawn.ts` to
  *   set on the child process; without `CODEX_HOME` set, codex would silently fall back
  *   to its default (ambient, unscoped) config root. `CODEX_HOME` also owns codex's own
- *   login credentials and their storage-mode selection (PR #19 review round 3):
- *   - `cli_auth_credentials_store` (ambient `config.toml`) is copied into the isolated
- *     `config.toml` verbatim if set. Without it, an isolated home defaults to `"auto"`,
- *     which prefers the OS credential store over `auth.json` whenever one is *available*
- *     — on a keyring-capable host explicitly configured for `"file"` storage, that would
- *     make the isolated session ignore the copied `auth.json` and launch logged out even
- *     though the ambient host is not actually using the keychain.
+ *   login credentials and authentication policy (PR #19 review rounds 3-4):
+ *   - `CODEX_AUTH_POLICY_KEYS` (`cli_auth_credentials_store`, `chatgpt_base_url`,
+ *     `forced_login_method`, `forced_chatgpt_workspace_id`) are read out of the ambient
+ *     `config.toml` with a real TOML parser (`readAmbientCodexAuthPolicy` — a regex
+ *     misses valid single-quoted strings/trailing comments and has no table-scoping) and
+ *     `smol-toml`-stringified into the isolated one, so the worker authenticates under
+ *     the *same* enforced policy `agent-health.ts`'s `codex login status` already
+ *     verified — nothing else from the ambient file (`mcp_servers` most of all) crosses
+ *     over. Without `cli_auth_credentials_store` specifically, an isolated home defaults
+ *     to `"auto"`, which prefers the OS credential store over `auth.json` whenever one is
+ *     *available* — on a keyring-capable host explicitly configured for `"file"`
+ *     storage, that would make the isolated session ignore the symlinked `auth.json` and
+ *     launch logged out even though the ambient host isn't actually using the keychain.
  *   - `auth.json` (the credential itself) is *symlinked*, not copied: codex refreshes it
  *     during normal use, and a plain copy would (a) silently drop those refreshes once
  *     this per-attempt directory is deleted at release — the opposite of "durable and
@@ -196,14 +226,12 @@ async function materializeWorkerMcpConfig(opts: {
       // best-effort — a host using OS-keychain-backed auth (not file-backed) has no
       // auth.json to link at all, and codex's keychain lookup isn't home-dir-scoped.
     }
-    const credentialsStore = readAmbientCredentialsStore(ambientHome);
-    const toml = [
-      ...(credentialsStore ? [`cli_auth_credentials_store = ${JSON.stringify(credentialsStore)}`, ""] : []),
-      "[mcp_servers.agent-deck]",
-      `url = ${JSON.stringify(mcpUrl)}`,
-      `bearer_token_env_var = ${JSON.stringify(CODEX_BEARER_ENV_VAR)}`,
-      "",
-    ].join("\n");
+    const toml = stringifyToml({
+      ...readAmbientCodexAuthPolicy(ambientHome),
+      mcp_servers: {
+        "agent-deck": { url: mcpUrl, bearer_token_env_var: CODEX_BEARER_ENV_VAR },
+      },
+    });
     fs.writeFileSync(path.join(codexHome, "config.toml"), toml, { mode: 0o600 });
     return {
       mcpConfigPath: codexHome,
