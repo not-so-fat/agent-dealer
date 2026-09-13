@@ -56,6 +56,15 @@ export async function spawnCli(
       let settled = false;
 
       const logStream = fs.createWriteStream(opts.logPath, { flags: "w" });
+      // A WriteStream's 'error' event has no default handler — left unguarded, any
+      // stream error (a write after end, ENOSPC, a permissions problem) is an uncaught
+      // exception that crashes this entire process, taking down every other in-flight
+      // issue's coordinator work along with it. Best-effort: the transcript this
+      // function resolves with is already buffered in memory regardless of whether the
+      // log file write succeeds.
+      logStream.on("error", (err) => {
+        console.error(`[spawn-cli] log stream error for ${opts.logPath}`, err);
+      });
 
       const child = spawn(cmd, args, {
         cwd,
@@ -72,11 +81,15 @@ export async function spawnCli(
         settled = true;
         clearTimeout(timer);
         unregisterChild(runId);
-        logStream.end();
+        // Write any stderr BEFORE ending the stream — writing after end() throws
+        // ERR_STREAM_WRITE_AFTER_END (this crashed the whole process on any real CLI
+        // invocation that produced stderr output; every fixture-based test's fake spawn
+        // never wrote stderr, so this path went unexercised until a real session hit it).
         const stderr = stderrChunks.join("");
         if (stderr.trim()) {
           logStream.write(`\n--- stderr ---\n${stderr}`);
         }
+        logStream.end();
         resolve({
           exitCode,
           transcript: stdoutChunks.join(""),
