@@ -15,7 +15,14 @@ export const CURSOR_DEFAULT_MODEL = "auto";
 export const CURSOR_SUBSCRIPTION_MODEL_IDS = ["auto", "composer-2.5", "composer-2.5-fast"] as const;
 
 export const AgentHealthIssue = z.object({
-  code: z.enum(["cli_missing", "runtime_auth", "deck_offline", "workspace_missing", "mcp_not_registered"]),
+  code: z.enum([
+    "cli_missing",
+    "runtime_auth",
+    "deck_offline",
+    "deck_unauthorized",
+    "workspace_missing",
+    "mcp_not_registered",
+  ]),
   message: z.string(),
 });
 export type AgentHealthIssue = z.infer<typeof AgentHealthIssue>;

@@ -1,7 +1,5 @@
 import { listLinearCandidates } from "./linear-inbox.js";
 
-export { checkAgentDeckHealth, fetchAgentDeckDecks } from "./agent-deck.js";
-
 export async function pollLinearIssues(): Promise<number> {
   if (process.env.LINEAR_AUTO_ENQUEUE === "1") {
     console.warn("[linear] LINEAR_AUTO_ENQUEUE=1 is deprecated — use Intake promote");

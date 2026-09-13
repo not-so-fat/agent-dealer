@@ -60,20 +60,37 @@ type Props = {
 
 export default function AgentConfigFields({ value, onChange, agentDeckOnline, disabled }: Props) {
   const [decks, setDecks] = useState<Deck[]>([]);
+  const [deckError, setDeckError] = useState<string | null>(null);
   const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
+  const [playbookError, setPlaybookError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchDecks().then(setDecks).catch(() => setDecks([]));
+    fetchDecks().then((result) => {
+      if (result.ok) {
+        setDecks(result.decks);
+        setDeckError(null);
+      } else {
+        setDecks([]);
+        setDeckError(result.message);
+      }
+    });
   }, []);
 
   useEffect(() => {
     if (!value.deckId) {
       setPlaybooks([]);
+      setPlaybookError(null);
       return;
     }
-    fetchDeckPlaybooks(value.deckId)
-      .then(setPlaybooks)
-      .catch(() => setPlaybooks([]));
+    fetchDeckPlaybooks(value.deckId).then((result) => {
+      if (result.ok) {
+        setPlaybooks(result.playbooks);
+        setPlaybookError(null);
+      } else {
+        setPlaybooks([]);
+        setPlaybookError(result.message);
+      }
+    });
   }, [value.deckId]);
 
   const set = (patch: Partial<AgentConfigValue>) => onChange({ ...value, ...patch });
@@ -121,17 +138,25 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
       <label className="text-xs text-[#A8C4C0] uppercase">Agent Deck (optional)</label>
       <select
         className="field"
-        disabled={disabled || !agentDeckOnline}
+        disabled={disabled || !agentDeckOnline || !!deckError}
         value={value.deckId}
         onChange={(e) => set({ deckId: e.target.value, playbookId: "", playbookIds: [] })}
       >
-        <option value="">{agentDeckOnline ? "No deck — degraded mode" : "Agent Deck offline"}</option>
+        <option value="">
+          {!agentDeckOnline ? "Agent Deck offline" : deckError ? "Agent Deck error — see below" : "No deck — degraded mode"}
+        </option>
         {decks.map((d) => (
           <option key={d.id} value={d.id}>
             ◆ {d.name}
           </option>
         ))}
       </select>
+      {agentDeckOnline && deckError && (
+        <p className="text-xs text-amber-300/90">{deckError}</p>
+      )}
+      {value.deckId && playbookError && (
+        <p className="text-xs text-amber-300/90">Playbooks unavailable: {playbookError}</p>
+      )}
       {value.deckId && playbooks.length > 0 && (
         <>
           <label className="text-xs text-[#A8C4C0] uppercase">Playbook (optional)</label>

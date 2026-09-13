@@ -10,7 +10,7 @@ import {
   resolveCodexBin,
   codexBinExists,
 } from "../cli-env.js";
-import { checkAgentDeckHealth, isAgentDeckMcpRegistered } from "./agent-deck.js";
+import { checkAgentDeckHealth, fetchAuthorizedDecks, isAgentDeckMcpRegistered, type DeckAccessResult } from "./agent-deck.js";
 
 const RUNTIME_CACHE_MS = 60_000;
 const runtimeIssueCache = new Map<Runtime, { at: number; issues: AgentHealthIssue[] }>();
@@ -110,7 +110,8 @@ async function runtimeIssues(runtime: Runtime): Promise<AgentHealthIssue[]> {
 function agentSpecificIssues(
   agent: AgentProfile,
   agentDeckOnline: boolean,
-  mcpRegistered: boolean
+  mcpRegistered: boolean,
+  deckAccessResult: DeckAccessResult | null
 ): AgentHealthIssue[] {
   const issues: AgentHealthIssue[] = [];
   if (!agent.workspaceRoot) {
@@ -123,6 +124,20 @@ function agentSpecificIssues(
   }
   if (agent.deckId && !agentDeckOnline) {
     issues.push({ code: "deck_offline", message: "Agent Deck offline — deck MCP unavailable" });
+  }
+  // resolveDeckName silently returns null on this same failure elsewhere (route/index.ts) —
+  // surface it here so a bound deck that can no longer be read isn't just a quiet no-op. A
+  // *successful* metadata call that simply doesn't include this deck (deleted, or out of
+  // scope after re-enrollment) is the same user-visible failure as the call itself failing.
+  if (agent.deckId && agentDeckOnline && deckAccessResult) {
+    if (!deckAccessResult.ok) {
+      issues.push({ code: "deck_unauthorized", message: deckAccessResult.message });
+    } else if (!deckAccessResult.decks.some((d) => d.id === agent.deckId)) {
+      issues.push({
+        code: "deck_unauthorized",
+        message: `Deck ${agent.deckName ?? agent.deckId} is not in this coordinator's authorized deck set (deleted, or out of scope after re-enrollment)`,
+      });
+    }
   }
   if (agent.deckId && agent.runtime === "claude_code" && agentDeckOnline && !mcpRegistered) {
     issues.push({
@@ -138,7 +153,8 @@ export async function healthForAgent(
   agent: AgentProfile,
   agentDeckOnline: boolean,
   runtimeIssuesByRuntime?: Map<Runtime, AgentHealthIssue[]>,
-  mcpRegistered?: boolean
+  mcpRegistered?: boolean,
+  deckAccessResult: DeckAccessResult | null = null
 ): Promise<AgentWithHealth> {
   const runtime =
     runtimeIssuesByRuntime !== undefined
@@ -147,7 +163,7 @@ export async function healthForAgent(
   const deckMcpOk = mcpRegistered ?? isAgentDeckMcpRegistered();
   const issues: AgentHealthIssue[] = [
     ...runtime,
-    ...agentSpecificIssues(agent, agentDeckOnline, deckMcpOk),
+    ...agentSpecificIssues(agent, agentDeckOnline, deckMcpOk, deckAccessResult),
   ];
   return {
     ...agent,
@@ -159,6 +175,8 @@ export async function healthForAgent(
 export async function listAgentsWithHealth(agents: AgentProfile[]): Promise<AgentWithHealth[]> {
   const agentDeckOnline = await checkAgentDeckHealth();
   const mcpRegistered = isAgentDeckMcpRegistered();
+  const needsDeckAccess = agents.some((a) => a.deckId);
+  const deckAccessResult = agentDeckOnline && needsDeckAccess ? await fetchAuthorizedDecks() : null;
   const runtimes = [...new Set(agents.map((a) => a.runtime))];
   const runtimeIssuesByRuntime = new Map<Runtime, AgentHealthIssue[]>();
   await Promise.all(
@@ -167,6 +185,8 @@ export async function listAgentsWithHealth(agents: AgentProfile[]): Promise<Agen
     })
   );
   return Promise.all(
-    agents.map((a) => healthForAgent(a, agentDeckOnline, runtimeIssuesByRuntime, mcpRegistered))
+    agents.map((a) =>
+      healthForAgent(a, agentDeckOnline, runtimeIssuesByRuntime, mcpRegistered, deckAccessResult)
+    )
   );
 }

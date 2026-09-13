@@ -365,6 +365,11 @@ export const AgentDeckConfig = z.object({
   host: z.string(),
   port: z.number().int().min(1).max(65535),
   envOverride: z.boolean(),
+  /** Coordinator identity for the NOT-85/86 unattended execution contract — env-configured only. */
+  coordinatorId: z.string().nullable(),
+  enrollmentId: z.string().nullable(),
+  /** True when both enrollmentId and its (never-persisted) secret are present. */
+  enrollmentConfigured: z.boolean(),
 });
 export type AgentDeckConfig = z.infer<typeof AgentDeckConfig>;
 
@@ -374,6 +379,16 @@ export const AgentDeckConfigPatch = z.object({
 });
 export type AgentDeckConfigPatch = z.infer<typeof AgentDeckConfigPatch>;
 
+/** Typed outcomes for the authenticated deck-metadata call — never collapse to an empty list. */
+export const DeckAccessErrorCode = z.enum([
+  "NOT_ENROLLED",
+  "COORDINATOR_NOT_ENROLLED",
+  "ENROLLMENT_REVOKED",
+  "UNAUTHORIZED",
+  "DECK_UNAVAILABLE",
+]);
+export type DeckAccessErrorCode = z.infer<typeof DeckAccessErrorCode>;
+
 export const AgentDeckStatus = z.object({
   connected: z.boolean(),
   apiUrl: z.string(),
@@ -381,6 +396,9 @@ export const AgentDeckStatus = z.object({
   deckCount: z.number().optional(),
   envOverride: z.boolean(),
   error: z.string().optional(),
+  enrollmentConfigured: z.boolean(),
+  deckAccessError: DeckAccessErrorCode.optional(),
+  deckAccessErrorMessage: z.string().optional(),
 });
 export type AgentDeckStatus = z.infer<typeof AgentDeckStatus>;
 

@@ -2,9 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { OutboundToolCall } from "@agent-dealer/shared";
+import type { OutboundToolCall, DeckAccessErrorCode } from "@agent-dealer/shared";
 import type { ReflectProposal } from "@agent-dealer/shared";
-import { getAgentDeckConfig } from "../repository/intake-settings.js";
+import { getAgentDeckConfig, getAgentDeckEnrollmentBearer } from "../repository/intake-settings.js";
 
 export function getAgentDeckApiUrl(): string {
   if (process.env.AGENT_DECK_API_URL) {
@@ -45,10 +45,14 @@ export async function testAgentDeckConnection(): Promise<{
   deckCount?: number;
   envOverride: boolean;
   error?: string;
+  enrollmentConfigured: boolean;
+  deckAccessError?: DeckAccessErrorCode;
+  deckAccessErrorMessage?: string;
 }> {
   const apiUrl = getAgentDeckApiUrl();
   const mcpUrl = getAgentDeckMcpUrl();
   const envOverride = Boolean(process.env.AGENT_DECK_API_URL);
+  const enrollmentConfigured = Boolean(getAgentDeckEnrollmentBearer());
 
   try {
     const health = await fetch(`${apiUrl}/health`, { signal: AbortSignal.timeout(2000) });
@@ -58,35 +62,93 @@ export async function testAgentDeckConnection(): Promise<{
         apiUrl,
         mcpUrl,
         envOverride,
+        enrollmentConfigured,
         error: `HTTP ${health.status}`,
       };
     }
-    let deckCount: number | undefined;
-    try {
-      const decksRes = await fetch(`${apiUrl}/api/decks`, { signal: AbortSignal.timeout(5000) });
-      if (decksRes.ok) {
-        const json = (await decksRes.json()) as { data?: unknown[] };
-        deckCount = json.data?.length;
-      }
-    } catch {
-      /* decks optional */
+    const decksResult = await fetchAuthorizedDecks();
+    if (decksResult.ok) {
+      return { connected: true, apiUrl, mcpUrl, deckCount: decksResult.decks.length, envOverride, enrollmentConfigured };
     }
-    return { connected: true, apiUrl, mcpUrl, deckCount, envOverride };
+    return {
+      connected: true,
+      apiUrl,
+      mcpUrl,
+      envOverride,
+      enrollmentConfigured,
+      deckAccessError: decksResult.code,
+      deckAccessErrorMessage: decksResult.message,
+    };
   } catch (e) {
     return {
       connected: false,
       apiUrl,
       mcpUrl,
       envOverride,
+      enrollmentConfigured,
       error: String(e),
     };
   }
 }
 
-export async function fetchAgentDeckDecks(): Promise<unknown> {
-  const res = await fetch(`${getAgentDeckApiUrl()}/api/decks`, { signal: AbortSignal.timeout(5000) });
-  if (!res.ok) throw new Error(`Agent Deck API error: ${res.status}`);
-  return res.json();
+export type DeckAccessResult =
+  | { ok: true; decks: Array<{ id: string; name: string }> }
+  | { ok: false; code: DeckAccessErrorCode; message: string };
+
+type ContractErrorBody = {
+  ok?: boolean;
+  error_code?: string;
+  message?: string;
+};
+
+function mapContractErrorCode(errorCode: string | undefined, status: number): DeckAccessErrorCode {
+  switch (errorCode) {
+    case "ENROLLMENT_REVOKED":
+      return "ENROLLMENT_REVOKED";
+    case "COORDINATOR_NOT_ENROLLED":
+      return "COORDINATOR_NOT_ENROLLED";
+    default:
+      return status === 404 ? "COORDINATOR_NOT_ENROLLED" : "UNAUTHORIZED";
+  }
+}
+
+/**
+ * Authenticated deck-metadata discovery for the coordinator (NOT-85 §11, NOT-86 as-built).
+ * Replaces the old bare, unauthenticated `GET /api/decks` — that endpoint now requires an
+ * interactive workspace grant the Dealer server process never holds, so it always 401s.
+ * A missing/invalid/revoked enrollment is reported as a distinct typed outcome, never as
+ * an empty deck list.
+ */
+export async function fetchAuthorizedDecks(): Promise<DeckAccessResult> {
+  const bearer = getAgentDeckEnrollmentBearer();
+  if (!bearer) {
+    return {
+      ok: false,
+      code: "NOT_ENROLLED",
+      message:
+        "Agent Deck coordinator is not enrolled — run `agent-deck coordinator enroll` and set " +
+        "AGENT_DECK_COORDINATOR_ID / AGENT_DECK_ENROLLMENT_ID / AGENT_DECK_ENROLLMENT_SECRET.",
+    };
+  }
+  try {
+    const res = await fetch(`${getAgentDeckApiUrl()}/api/execution-authority/decks`, {
+      headers: { Authorization: `Bearer ${bearer}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    const json = (await res.json().catch(() => null)) as
+      | (ContractErrorBody & { data?: { decks?: Array<{ id: string; name: string }> } })
+      | null;
+    if (!res.ok || !json || json.ok === false) {
+      return {
+        ok: false,
+        code: mapContractErrorCode(json?.error_code, res.status),
+        message: json?.message ?? `Agent Deck API error: ${res.status}`,
+      };
+    }
+    return { ok: true, decks: json.data?.decks ?? [] };
+  } catch (e) {
+    return { ok: false, code: "DECK_UNAVAILABLE", message: String(e) };
+  }
 }
 
 const DASHBOARD_HEADERS = { "x-agent-deck-client": "dashboard" };
