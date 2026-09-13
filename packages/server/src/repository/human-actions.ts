@@ -12,6 +12,7 @@ interface HumanActionRow {
   evidence_json: string | null;
   response_options_json: string | null;
   continuation_preview_json: string | null;
+  request_id: string | null;
   status: string;
   resolution_json: string | null;
   resolved_by: string | null;
@@ -30,6 +31,7 @@ function rowToAction(row: HumanActionRow): HumanAction {
     evidenceJson: row.evidence_json,
     responseOptionsJson: row.response_options_json,
     continuationPreviewJson: row.continuation_preview_json,
+    requestId: row.request_id,
     status: row.status as HumanAction["status"],
     resolutionJson: row.resolution_json,
     resolvedBy: row.resolved_by,
@@ -47,6 +49,9 @@ export interface CreateHumanActionInput {
   evidence?: unknown;
   responseOptions?: unknown;
   continuationPreview?: unknown;
+  /** Deck's correlation id for the INTERACTION_REQUIRED response that raised this
+   * action, when Deck supplied one (NOT-93). */
+  requestId?: string | null;
 }
 
 export function createHumanAction(input: CreateHumanActionInput): HumanAction {
@@ -64,6 +69,7 @@ export function createHumanAction(input: CreateHumanActionInput): HumanAction {
       input.responseOptions !== undefined ? JSON.stringify(input.responseOptions) : null,
     continuation_preview_json:
       input.continuationPreview !== undefined ? JSON.stringify(input.continuationPreview) : null,
+    request_id: input.requestId ?? null,
     status: "open",
     resolution_json: null,
     resolved_by: null,
@@ -73,11 +79,11 @@ export function createHumanAction(input: CreateHumanActionInput): HumanAction {
   db.prepare(`
     INSERT INTO human_actions (
       id, issue_id, workflow_instance_id, action_type, reason, question, evidence_json,
-      response_options_json, continuation_preview_json, status, resolution_json, resolved_by,
+      response_options_json, continuation_preview_json, request_id, status, resolution_json, resolved_by,
       requested_at, resolved_at
     ) VALUES (
       @id, @issue_id, @workflow_instance_id, @action_type, @reason, @question, @evidence_json,
-      @response_options_json, @continuation_preview_json, @status, @resolution_json, @resolved_by,
+      @response_options_json, @continuation_preview_json, @request_id, @status, @resolution_json, @resolved_by,
       @requested_at, @resolved_at
     )
   `).run(row);
@@ -120,6 +126,23 @@ export function findOpenHumanAction(issueId: string, actionType: HumanActionType
   const row = getDb()
     .prepare("SELECT * FROM human_actions WHERE issue_id = ? AND action_type = ? AND status = 'open' ORDER BY requested_at ASC LIMIT 1")
     .get(issueId, actionType) as HumanActionRow | undefined;
+  return row ? rowToAction(row) : null;
+}
+
+/** Dedupe key for a repeated Deck INTERACTION_REQUIRED signal that names a request id
+ * (NOT-93) — a second signal for the same request must land on the one open action it
+ * already raised, never a duplicate. Full duplicate-delivery/race-proofing across
+ * concurrent writers is NOT-91's job; this is a plain read-then-create check. */
+export function findOpenHumanActionByRequestId(
+  issueId: string,
+  actionType: HumanActionType,
+  requestId: string
+): HumanAction | null {
+  const row = getDb()
+    .prepare(
+      "SELECT * FROM human_actions WHERE issue_id = ? AND action_type = ? AND request_id = ? AND status = 'open' ORDER BY requested_at ASC LIMIT 1"
+    )
+    .get(issueId, actionType, requestId) as HumanActionRow | undefined;
   return row ? rowToAction(row) : null;
 }
 

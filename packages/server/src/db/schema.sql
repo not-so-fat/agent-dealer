@@ -199,6 +199,7 @@ CREATE TABLE IF NOT EXISTS human_actions (
   evidence_json TEXT,
   response_options_json TEXT,
   continuation_preview_json TEXT,
+  request_id TEXT,
   status TEXT NOT NULL,
   resolution_json TEXT,
   resolved_by TEXT,

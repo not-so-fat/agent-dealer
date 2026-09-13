@@ -30,6 +30,9 @@ export type NextEffect =
         | "final_review"
         | "deck_interaction_required";
       reason: string;
+      /** Deck's own correlation id for the INTERACTION_REQUIRED response, when supplied
+       * (NOT-93) — only ever set for actionType "deck_interaction_required". */
+      requestId?: string;
     }
   | { kind: "none" };
 
@@ -82,7 +85,7 @@ export function projectDeveloperRoute(
           currentIntent: route.reason,
           events: ["worker.failed"],
         },
-        effect: { kind: "human_action", actionType: route.actionType, reason: route.reason },
+        effect: { kind: "human_action", actionType: route.actionType, reason: route.reason, requestId: route.requestId },
         advance: "none",
       };
   }
@@ -164,7 +167,7 @@ export function projectReviewerRoute(
           currentIntent: route.reason,
           events: [hasVerdict ? "worker.completed" : "worker.failed", ...verdictEvents],
         },
-        effect: { kind: "human_action", actionType: route.actionType, reason: route.reason },
+        effect: { kind: "human_action", actionType: route.actionType, reason: route.reason, requestId: route.requestId },
         advance: "none",
         hasVerdict,
       };

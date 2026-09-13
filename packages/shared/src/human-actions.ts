@@ -26,6 +26,10 @@ export const HumanAction = z.object({
   evidenceJson: z.string().nullable(),
   responseOptionsJson: z.string().nullable(),
   continuationPreviewJson: z.string().nullable(),
+  /** Agent Deck's own correlation id for the INTERACTION_REQUIRED response that raised
+   * this action (deck_interaction_required only) — null for every other action type and
+   * for a deck_interaction_required Deck raised without one (NOT-93). */
+  requestId: z.string().nullable(),
   status: HumanActionStatus,
   resolutionJson: z.string().nullable(),
   resolvedBy: z.string().nullable(),

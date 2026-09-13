@@ -121,11 +121,12 @@ test("an infra-class developer failure never spends the review-round budget, eve
 });
 
 test("interaction_required routes straight to a deck_interaction_required human action, never retried, regardless of infra attempts remaining", () => {
-  const outcome: DeveloperOutcome = { kind: "interaction_required", reason: "Control-plane decision required" };
+  const outcome: DeveloperOutcome = { kind: "interaction_required", reason: "Control-plane decision required", requestId: "req_abc" };
   assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
     next: "human_action",
     actionType: "deck_interaction_required",
     reason: "Control-plane decision required",
+    requestId: "req_abc",
   });
 });
 
@@ -234,11 +235,12 @@ test("a reviewer infra-class failure never spends the review-round budget, even 
 });
 
 test("reviewer interaction_required routes straight to a deck_interaction_required human action, never retried", () => {
-  const outcome: ReviewerOutcome = { kind: "interaction_required", reason: "Control-plane decision required" };
+  const outcome: ReviewerOutcome = { kind: "interaction_required", reason: "Control-plane decision required", requestId: "req_xyz" };
   assert.deepStrictEqual(routeReviewerOutcome(outcome, INFRA_ATTEMPTS_LEFT, PINNED_HEAD), {
     next: "human_action",
     actionType: "deck_interaction_required",
     reason: "Control-plane decision required",
+    requestId: "req_xyz",
   });
 });
 

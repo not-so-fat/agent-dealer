@@ -27,6 +27,7 @@ function openAction(
     evidenceJson: null,
     responseOptionsJson: JSON.stringify(choices),
     continuationPreviewJson: null,
+    requestId: null,
     status: "open",
     resolutionJson: null,
     resolvedBy: null,

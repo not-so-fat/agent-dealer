@@ -21,6 +21,7 @@ test("HumanAction schema parses an open final_review action", () => {
     evidenceJson: null,
     responseOptionsJson: JSON.stringify(["complete", "repair", "close"]),
     continuationPreviewJson: null,
+    requestId: null,
     status: "open",
     resolutionJson: null,
     resolvedBy: null,

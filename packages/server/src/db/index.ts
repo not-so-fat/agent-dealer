@@ -212,6 +212,14 @@ export function migrate(): void {
     db.exec("ALTER TABLE issues ADD COLUMN infra_attempts INTEGER NOT NULL DEFAULT 0");
   }
 
+  // NOT-93: Deck's own correlation id for the INTERACTION_REQUIRED response that raised a
+  // deck_interaction_required action — lets a repeated signal for the same request dedupe
+  // to one open action instead of piling up duplicates.
+  const humanActionCols = db.prepare("PRAGMA table_info(human_actions)").all() as Array<{ name: string }>;
+  if (!humanActionCols.some((c) => c.name === "request_id")) {
+    db.exec("ALTER TABLE human_actions ADD COLUMN request_id TEXT");
+  }
+
   seedBuiltinAgents(db);
   seedIntakeSettings(db);
   migrateLegacyAgentDeckPort(db);

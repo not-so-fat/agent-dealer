@@ -15,7 +15,7 @@ const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
 );
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue } = await import("../repository/findings.js");
-const { claimWorkItem, listWorkItemsForIssue, getWorkItem } = await import("../repository/work-items.js");
+const { claimWorkItem, listWorkItemsForIssue, getWorkItem, enqueueWorkItem } = await import("../repository/work-items.js");
 const { createWorkerSession, startSession, listWorkerSessionsForIssue } = await import(
   "../repository/worker-sessions.js"
 );
@@ -307,6 +307,149 @@ test("developer infra failure retries on the infra budget, not the review-round 
   assert.equal(issue.infraAttempts, 1);
   const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
   assert.deepEqual(pending.map((i) => [i.kind, i.round]), [["developer", 1]]);
+});
+
+// NOT-93: a synthetic Agent Deck INTERACTION_REQUIRED must park the attempt as a durable
+// deck_interaction_required human action — never retried, never spending review/infra
+// budget — and release the attempt (the coordinator-side accounting for it) immediately,
+// resuming only as a genuinely new attempt.
+test("developer interaction_required parks immediately as deck_interaction_required, spending no round or infra budget, correlated by Deck's request id", () => {
+  const issueId = newIssue({ maxInfraAttempts: 3 });
+  startWorkflow(issueId);
+  complete(issueId, { kind: "interaction_required", reason: "Control-plane decision required", requestId: "req_dev1" });
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.infraAttempts, 0, "interaction_required is never an infra-retry spend");
+  assert.equal(issue.currentRound, 1, "interaction_required never spends a review round either");
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0);
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.status === "open")!;
+  assert.equal(action.actionType, "deck_interaction_required");
+  assert.equal(action.requestId, "req_dev1");
+  assert.deepEqual(JSON.parse(action.responseOptionsJson!), [
+    { choice: "resume", label: "Resume with a new attempt" },
+    { choice: "close", label: "Close" },
+  ]);
+});
+
+test("reviewer interaction_required parks identically and resume re-queues a REVIEWER at the pinned head, not a developer", () => {
+  const issueId = newIssue({ maxInfraAttempts: 3 });
+  startWorkflow(issueId);
+  complete(issueId, cleanHandoff); // -> reviewing, headSha pinned to cleanHandoff.headSha
+  complete(issueId, { kind: "interaction_required", reason: "Control-plane decision required", requestId: "req_rev1" });
+
+  const before = getIssue(issueId)!;
+  assert.equal(before.status, "needs_human");
+  assert.equal(before.infraAttempts, 0);
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "deck_interaction_required")!;
+  assert.equal(action.requestId, "req_rev1");
+  assert.deepEqual(JSON.parse(action.continuationPreviewJson!), {
+    resumeRole: "reviewer",
+    resumeHeadSha: cleanHandoff.headSha,
+  });
+
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "nothing was wrong with the code — resume re-reviews, it doesn't restart development");
+  assert.equal(issue.currentOwner, "reviewer");
+  assert.equal(issue.currentRound, before.currentRound, "an interaction_required resume must not spend a review round");
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.deepEqual(pending.map((i) => i.kind), ["reviewer"]);
+  assert.equal(JSON.parse(pending[0].payloadJson!).inputSha, cleanHandoff.headSha);
+});
+
+test("resolving deck_interaction_required:resume enqueues a genuinely new attempt (distinct work item), never continuing the parked one", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const parkedItem = claim(issueId);
+  applyCompletion(parkedItem.id, parkedItem.leaseToken!, {
+    kind: "interaction_required",
+    reason: "Control-plane decision required",
+    requestId: "req_new_attempt",
+  });
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "deck_interaction_required")!;
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+  if (resolved.ok !== true) return;
+
+  assert.notEqual(
+    resolved.nextWorkItemId,
+    parkedItem.id,
+    "resume must mint a new attempt (and therefore a new authority idempotency key), never resume the parked one"
+  );
+  assert.equal(getWorkItem(resolved.nextWorkItemId!)?.status, "pending");
+});
+
+test("resolving deck_interaction_required:close ends the workflow without minting again", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  complete(issueId, { kind: "interaction_required", reason: "Control-plane decision required", requestId: "req_close1" });
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "deck_interaction_required")!;
+
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "close");
+  assert.equal(resolved.ok, true);
+  if (resolved.ok !== true) return;
+
+  assert.equal(resolved.issueStatus, "closed");
+  assert.equal(resolved.nextWorkItemId, null);
+  assert.equal(resolved.instanceCompleted, true);
+  assert.equal(getIssue(issueId)!.status, "closed");
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0);
+});
+
+// PR #20 review: the requestId dedupe lookup in applyEffect ran AFTER
+// applyProjectionTransition had already tried to re-transition the issue to
+// needs_human — which has no needs_human -> needs_human self-loop in
+// ISSUE_STATUS_TRANSITIONS, so a second completion with the same request id threw
+// "Invalid transition: needs_human -> needs_human" instead of ever reaching the dedupe
+// check. Fixed by moving the check before any event/transition in applyDeveloper/
+// applyReviewer. This reproduces the duplicate-delivery shape directly (the normal
+// routing path never enqueues a second item while an issue is needs_human) by forcing
+// a second work item onto the same still-active instance through the repository.
+test("a repeated interaction_required with the same requestId while already parked dedupes instead of throwing an invalid transition", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const first = complete(issueId, {
+    kind: "interaction_required",
+    reason: "Control-plane decision required",
+    requestId: "req_dup_park",
+  });
+  assert.equal(first.result.applied, true);
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  const parkedAction = listHumanActionsForIssue(issueId).find((a) => a.actionType === "deck_interaction_required")!;
+
+  const instance = getActiveWorkflowInstance(issueId)!;
+  const dup = enqueueWorkItem({
+    issueId,
+    workflowInstanceId: instance.id,
+    kind: "developer",
+    round: getIssue(issueId)!.currentRound,
+    idempotencyKey: `${instance.id}:developer:duplicate-delivery`,
+  });
+  const claimed = claimWorkItem(`test-${issueId}-dup`, { leaseMs: 60_000 });
+  assert.ok(claimed && claimed.id === dup.id, "expected to lease the forced duplicate item");
+
+  const second = applyCompletion(claimed!.id, claimed!.leaseToken!, {
+    kind: "interaction_required",
+    reason: "Control-plane decision required",
+    requestId: "req_dup_park",
+  });
+
+  assert.equal(second.applied, true);
+  if (second.applied) {
+    assert.equal(second.humanActionId, parkedAction.id, "must land on the already-open action, not throw or create a duplicate");
+    assert.equal(second.issueStatus, "needs_human");
+  }
+  assert.equal(getIssue(issueId)!.status, "needs_human", "still parked, never re-transitioned");
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.actionType === "deck_interaction_required").length,
+    1,
+    "no duplicate human action created"
+  );
 });
 
 test("developer infra failures escalate as policy_escalation (not attempts_exhausted) once the infra-attempt limit is reached", () => {
