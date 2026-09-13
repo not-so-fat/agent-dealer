@@ -4,7 +4,8 @@ import { getDb } from "../db/index.js";
 
 interface HumanActionRow {
   id: string;
-  issue_id: string;
+  issue_id: string | null;
+  run_id: string | null;
   workflow_instance_id: string | null;
   action_type: string;
   reason: string;
@@ -24,6 +25,7 @@ function rowToAction(row: HumanActionRow): HumanAction {
   return {
     id: row.id,
     issueId: row.issue_id,
+    runId: row.run_id,
     workflowInstanceId: row.workflow_instance_id,
     actionType: row.action_type as HumanActionType,
     reason: row.reason,
@@ -41,7 +43,10 @@ function rowToAction(row: HumanActionRow): HumanAction {
 }
 
 export interface CreateHumanActionInput {
-  issueId: string;
+  /** Exactly one of issueId/runId must be set — an Issue-scoped action (the coordinator
+   * kernel) or a Run-scoped action (outbound-draft delivery parking, NOT-95). */
+  issueId?: string;
+  runId?: string;
   workflowInstanceId?: string | null;
   actionType: HumanActionType;
   reason: string;
@@ -55,11 +60,15 @@ export interface CreateHumanActionInput {
 }
 
 export function createHumanAction(input: CreateHumanActionInput): HumanAction {
+  if (Boolean(input.issueId) === Boolean(input.runId)) {
+    throw new Error("createHumanAction requires exactly one of issueId or runId");
+  }
   const db = getDb();
   const now = new Date().toISOString();
   const row: HumanActionRow = {
     id: uuid(),
-    issue_id: input.issueId,
+    issue_id: input.issueId ?? null,
+    run_id: input.runId ?? null,
     workflow_instance_id: input.workflowInstanceId ?? null,
     action_type: input.actionType,
     reason: input.reason,
@@ -78,11 +87,11 @@ export function createHumanAction(input: CreateHumanActionInput): HumanAction {
   };
   db.prepare(`
     INSERT INTO human_actions (
-      id, issue_id, workflow_instance_id, action_type, reason, question, evidence_json,
+      id, issue_id, run_id, workflow_instance_id, action_type, reason, question, evidence_json,
       response_options_json, continuation_preview_json, request_id, status, resolution_json, resolved_by,
       requested_at, resolved_at
     ) VALUES (
-      @id, @issue_id, @workflow_instance_id, @action_type, @reason, @question, @evidence_json,
+      @id, @issue_id, @run_id, @workflow_instance_id, @action_type, @reason, @question, @evidence_json,
       @response_options_json, @continuation_preview_json, @request_id, @status, @resolution_json, @resolved_by,
       @requested_at, @resolved_at
     )
@@ -150,5 +159,36 @@ export function listHumanActionsForIssue(issueId: string): HumanAction[] {
   const rows = getDb()
     .prepare("SELECT * FROM human_actions WHERE issue_id = ? ORDER BY requested_at ASC")
     .all(issueId) as HumanActionRow[];
+  return rows.map(rowToAction);
+}
+
+/** Run-scoped equivalent of `findOpenHumanAction` (NOT-95 — outbound-draft delivery
+ * parking has no Issue). */
+export function findOpenHumanActionForRun(runId: string, actionType: HumanActionType): HumanAction | null {
+  const row = getDb()
+    .prepare("SELECT * FROM human_actions WHERE run_id = ? AND action_type = ? AND status = 'open' ORDER BY requested_at ASC LIMIT 1")
+    .get(runId, actionType) as HumanActionRow | undefined;
+  return row ? rowToAction(row) : null;
+}
+
+/** Run-scoped equivalent of `findOpenHumanActionByRequestId` (NOT-95). */
+export function findOpenHumanActionByRequestIdForRun(
+  runId: string,
+  actionType: HumanActionType,
+  requestId: string
+): HumanAction | null {
+  const row = getDb()
+    .prepare(
+      "SELECT * FROM human_actions WHERE run_id = ? AND action_type = ? AND request_id = ? AND status = 'open' ORDER BY requested_at ASC LIMIT 1"
+    )
+    .get(runId, actionType, requestId) as HumanActionRow | undefined;
+  return row ? rowToAction(row) : null;
+}
+
+/** Run-scoped equivalent of `listHumanActionsForIssue` (NOT-95). */
+export function listHumanActionsForRun(runId: string): HumanAction[] {
+  const rows = getDb()
+    .prepare("SELECT * FROM human_actions WHERE run_id = ? ORDER BY requested_at ASC")
+    .all(runId) as HumanActionRow[];
   return rows.map(rowToAction);
 }

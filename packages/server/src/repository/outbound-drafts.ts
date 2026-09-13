@@ -6,6 +6,7 @@ import {
 } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 import { listArtifacts } from "./runs.js";
+import type { DeliveryAuthority, DeliverOutboundResult } from "../adapters/outbound-delivery.js";
 
 export type PendingOutboundDraft = {
   artifact: Artifact;
@@ -95,6 +96,34 @@ export function revertOutboundDraftToPending(artifactId: string): boolean {
   return result.changes === 1;
 }
 
+/** Atomic increment of the draft's delivery-attempt counter — feeds the execution authority
+ * idempotency key (`${draftArtifactId}:${deliveryAttempts}`, NOT-95). Returns the new count,
+ * or null if the artifact/content is missing. Safe to call before the draft's status has
+ * settled (claim happens separately via `markOutboundDraftSent`); a CAS retry loop guards
+ * against a lost update if something else touches the row concurrently. */
+export function incrementOutboundDeliveryAttempt(artifactId: string): number | null {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const db = getDb();
+    const row = db.prepare("SELECT content_json FROM artifacts WHERE id = ?").get(artifactId) as
+      | { content_json: string }
+      | undefined;
+    if (!row?.content_json) return null;
+    let content: OutboundDraftContent;
+    try {
+      content = JSON.parse(row.content_json) as OutboundDraftContent;
+    } catch {
+      return null;
+    }
+    const nextCount = (content.deliveryAttempts ?? 0) + 1;
+    const next: OutboundDraftContent = { ...content, deliveryAttempts: nextCount };
+    const result = db
+      .prepare("UPDATE artifacts SET content_json = ? WHERE id = ? AND content_json = ?")
+      .run(JSON.stringify(next), artifactId, row.content_json);
+    if (result.changes === 1) return nextCount;
+  }
+  return null;
+}
+
 /** Atomic pending → sent transition. Returns false if not pending. */
 export function markOutboundDraftSent(artifactId: string): boolean {
   const db = getDb();
@@ -119,7 +148,6 @@ export function markOutboundDraftSent(artifactId: string): boolean {
 export const deliverInFlight = new Set<string>();
 
 export type DeliverFn = (
-  deckId: string,
-  toolCall: OutboundToolCall,
-  ctx?: { workspaceRoot?: string }
-) => Promise<{ toolResult: unknown; permalink?: string }>;
+  authority: DeliveryAuthority,
+  toolCall: OutboundToolCall
+) => Promise<DeliverOutboundResult>;

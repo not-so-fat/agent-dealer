@@ -16,6 +16,12 @@ export const HumanActionType = z.enum([
    * resolving this action never reopens the issue or enqueues developer/reviewer work,
    * unlike `deck_interaction_required`'s "resume" choice. */
   "reflection_interaction_required",
+  /** Agent Deck returned INTERACTION_REQUIRED while minting or calling authority for an
+   * approved outbound draft's delivery (NOT-95) — parks that delivery attempt only, on the
+   * legacy Run model rather than an Issue (outbound drafts predate the issue/coordinator
+   * kernel and never go through it). Resolved outside `resolveHumanActionOutcome` by
+   * `resolveOutboundDeliveryAction`, same reasoning as `reflection_interaction_required`. */
+  "outbound_delivery_interaction_required",
 ]);
 export type HumanActionType = z.infer<typeof HumanActionType>;
 
@@ -24,7 +30,11 @@ export type HumanActionStatus = z.infer<typeof HumanActionStatus>;
 
 export const HumanAction = z.object({
   id: z.string().uuid(),
-  issueId: z.string().uuid(),
+  /** Null for a Run-scoped action (`runId` set instead) — outbound-draft delivery parking
+   * (NOT-95) has no Issue. Exactly one of issueId/runId is set. */
+  issueId: z.string().uuid().nullable(),
+  /** Null for an Issue-scoped action. See `issueId`. */
+  runId: z.string().uuid().nullable(),
   /** Nullable for pre-start product_scope_decision and imported legacy actions. */
   workflowInstanceId: z.string().uuid().nullable(),
   actionType: HumanActionType,

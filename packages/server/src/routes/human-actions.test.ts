@@ -16,9 +16,13 @@ const { startWorkflow, applyCompletion } = await import("../coordinator/commands
 const { ReviewerResult } = await import("../coordinator/reviewer-result.js");
 const { claimWorkItem } = await import("../repository/work-items.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
+const { createRun, getRun, transitionRun, addArtifact, updateRunFields } = await import("../repository/runs.js");
+const { pendingSendCount, getPendingOutboundDraft } = await import("../repository/outbound-drafts.js");
+const { updateAgent } = await import("../repository/agents.js");
 
 before(() => {
   migrate();
+  updateAgent(BUILTIN_AGENT_CLAUDE_ID, { workspaceRoot: process.env.AGENT_DEALER_HOME! });
 });
 // claimWorkItem is global FIFO, not issue-scoped — a leftover queued item from an earlier
 // test would otherwise be claimed instead of the issue this test just started.
@@ -192,6 +196,84 @@ test("POST resolve on a reflection_interaction_required action bypasses the work
   assert.equal(body.instanceCompleted, false);
   assert.equal(body.restarted, false);
   assert.equal(getHumanAction(reflectAction.id)!.status, "resolved");
+  await app.close();
+});
+
+/** Seeds a communication Run in review with a pending Slack draft and an open, Run-scoped
+ * outbound_delivery_interaction_required action against it (NOT-95) — mirrors an
+ * INTERACTION_REQUIRED park without needing a real Agent Deck to raise one. */
+function seedRunAwaitingDeliveryDecision() {
+  const run = createRun({
+    title: "Send gate action-route test",
+    taskCategory: "communication",
+    status: "plan_pending",
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+  });
+  updateRunFields(run.id, { deck_id: "6e825b59-13de-4ddd-ab7e-55ab5a1c279a" });
+  transitionRun(run.id, "plan_approved");
+  transitionRun(run.id, "running");
+  transitionRun(run.id, "review");
+  addArtifact(
+    run.id,
+    "slack_draft",
+    {
+      draft: {
+        actionType: "slack_message",
+        summary: { target: "#test", body: "Hello action-route test" },
+        toolCall: { serviceName: "svc-1", toolName: "chat_postMessage", arguments: { channel: "C1", text: "Hello action-route test" } },
+      },
+      status: "pending",
+    },
+    "agent"
+  );
+  const action = createHumanAction({
+    runId: run.id,
+    actionType: "outbound_delivery_interaction_required",
+    reason: "Agent Deck requires a control-plane decision before this draft can be delivered.",
+    question: "Retry the send or reject the draft?",
+    responseOptions: [
+      { choice: "retry_send", label: "Retry send" },
+      { choice: "reject", label: "Reject draft" },
+    ],
+    requestId: "req_delivery_route_test",
+  });
+  return { run, action };
+}
+
+test("POST resolve outbound_delivery_interaction_required:reject rejects the draft with no provider call, run ends done", async () => {
+  const app = await buildApp();
+  const { run, action } = seedRunAwaitingDeliveryDecision();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "reject" } });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { runStatus: string; delivered: boolean };
+  assert.equal(body.runStatus, "done");
+  assert.equal(body.delivered, false);
+  assert.equal(pendingSendCount(run.id), 0);
+  assert.equal(getRun(run.id)!.status, "done");
+  assert.equal(getHumanAction(action.id)!.status, "resolved");
+  await app.close();
+});
+
+test("POST resolve outbound_delivery_interaction_required:retry_send re-attempts delivery (no deck configured, typed infra failure, draft stays pending)", async () => {
+  const app = await buildApp();
+  const { run, action } = seedRunAwaitingDeliveryDecision();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "retry_send" } });
+  // No Agent Deck enrollment configured in this test environment, so the mint call fails —
+  // an ordinary bounded-retry failure, not a crash, and never a second park for the same
+  // already-resolved action.
+  assert.equal(res.statusCode, 502);
+  assert.equal(getRun(run.id)!.status, "review");
+  assert.equal(pendingSendCount(run.id), 1);
+  assert.equal(getPendingOutboundDraft(run.id)?.content.status, "pending");
+  assert.equal(getHumanAction(action.id)!.status, "resolved");
+  await app.close();
+});
+
+test("POST resolve 400s on a choice not valid for outbound_delivery_interaction_required", async () => {
+  const app = await buildApp();
+  const { action } = seedRunAwaitingDeliveryDecision();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "complete" } });
+  assert.equal(res.statusCode, 400);
   await app.close();
 });
 

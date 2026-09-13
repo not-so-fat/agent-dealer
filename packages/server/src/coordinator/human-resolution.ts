@@ -26,10 +26,12 @@ export interface HumanResolutionResult {
 
 /**
  * The only choices resolveHumanActionOutcome accepts per action type — the stored "response
- * options." `reflection_interaction_required` is listed here only so this map stays total
- * over `HumanActionType`; it is never routed through `resolveHumanActionOutcome` (NOT-94's
- * reflect-trigger.ts resolves it directly — reflection runs after the issue is already
- * `done`, and its choices must never reopen the issue or enqueue developer/reviewer work).
+ * options." `reflection_interaction_required` and `outbound_delivery_interaction_required`
+ * are listed here only so this map stays total over `HumanActionType`; neither is ever
+ * routed through `resolveHumanActionOutcome` (NOT-94's reflect-trigger.ts and NOT-95's
+ * `resolveOutboundDeliveryAction` resolve them directly — the former runs after the issue is
+ * already `done`, the latter is Run-scoped with no issue/workflow at all; both must never
+ * reopen an issue or enqueue developer/reviewer work).
  */
 const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
   final_review: ["complete", "repair", "close"],
@@ -38,6 +40,7 @@ const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
   product_scope_decision: ["resume"],
   deck_interaction_required: ["resume", "close"],
   reflection_interaction_required: ["retry", "dismiss"],
+  outbound_delivery_interaction_required: ["retry_send", "reject"],
 };
 
 /**
@@ -49,9 +52,14 @@ const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
  * `VALID_CHOICES` lists it (PR #21 review): it has no corresponding `HumanResolution`
  * variant, so casting it through would be a type lie, and its only legal resolver is
  * `resolveReflectionInteractionAction` (reflect-trigger.ts), never `resolveHumanActionOutcome`.
+ * `outbound_delivery_interaction_required` is rejected for the same reason (NOT-95): it is
+ * Run-scoped, has no Issue/workflow_instance to advance, and its only legal resolver is
+ * `resolveOutboundDeliveryAction` (queue/approve-deliver.ts).
  */
 export function parseHumanResolution(actionType: string, choice: string): HumanResolution | null {
-  if (actionType === "reflection_interaction_required") return null;
+  if (actionType === "reflection_interaction_required" || actionType === "outbound_delivery_interaction_required") {
+    return null;
+  }
   if (!(actionType in VALID_CHOICES)) return null;
   if (!VALID_CHOICES[actionType as HumanActionType].includes(choice)) return null;
   return { actionType, choice } as HumanResolution;

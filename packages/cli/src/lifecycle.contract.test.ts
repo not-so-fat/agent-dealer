@@ -20,6 +20,7 @@ function openAction(
   return {
     id,
     issueId: "00000000-0000-4000-a000-000000000010",
+    runId: null,
     workflowInstanceId: null,
     actionType,
     reason: "Operator decision required",

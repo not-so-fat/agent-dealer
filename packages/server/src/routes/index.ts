@@ -494,7 +494,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       outboundBody: input.outboundBody,
     });
     if (!result.ok) {
-      return reply.status(result.code).send({ error: result.error });
+      // Surface a typed authority/configuration failure (INTERACTION_REQUIRED, mint denial,
+      // etc.) rather than an opaque message alone (NOT-95).
+      return reply.status(result.code).send({ error: result.error, errorCode: result.errorCode });
     }
     return result.run;
   });

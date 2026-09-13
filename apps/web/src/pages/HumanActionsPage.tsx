@@ -13,6 +13,9 @@ const ACTION_LABELS: Record<HumanActionType, string> = {
   product_scope_decision: "Product scope decision",
   deck_interaction_required: "Agent Deck interaction required",
   reflection_interaction_required: "Reflection interaction required",
+  // Run-scoped (outbound-draft delivery, NOT-95) — no Issue to navigate to; see the
+  // issueId-guarded rendering below.
+  outbound_delivery_interaction_required: "Outbound delivery interaction required",
 };
 
 const RESOLVED_BY = "web";
@@ -92,13 +95,17 @@ export default function HumanActionsPage({ onSelectIssue }: Props) {
             return (
               <div key={action.id} className="p-4 rounded border border-red-400/30 bg-red-500/5">
                 <div className="flex items-center justify-between gap-2 mb-1">
-                  <button
-                    type="button"
-                    onClick={() => onSelectIssue(action.issueId)}
-                    className="text-xs uppercase tracking-wide text-red-300/80 hover:text-red-200"
-                  >
-                    {ACTION_LABELS[action.actionType]}
-                  </button>
+                  {action.issueId ? (
+                    <button
+                      type="button"
+                      onClick={() => onSelectIssue(action.issueId!)}
+                      className="text-xs uppercase tracking-wide text-red-300/80 hover:text-red-200"
+                    >
+                      {ACTION_LABELS[action.actionType]}
+                    </button>
+                  ) : (
+                    <span className="text-xs uppercase tracking-wide text-red-300/80">{ACTION_LABELS[action.actionType]}</span>
+                  )}
                   <span className="text-xs text-white/35">{new Date(action.requestedAt).toLocaleString()}</span>
                 </div>
                 <p className="text-sm text-white/85">{action.question}</p>
@@ -118,13 +125,15 @@ export default function HumanActionsPage({ onSelectIssue }: Props) {
                       {opt.label}
                     </button>
                   ))}
-                  <button
-                    type="button"
-                    onClick={() => onSelectIssue(action.issueId)}
-                    className="px-3 py-1.5 text-xs text-white/50 hover:text-white"
-                  >
-                    View issue →
-                  </button>
+                  {action.issueId && (
+                    <button
+                      type="button"
+                      onClick={() => onSelectIssue(action.issueId!)}
+                      className="px-3 py-1.5 text-xs text-white/50 hover:text-white"
+                    >
+                      View issue →
+                    </button>
+                  )}
                 </div>
               </div>
             );

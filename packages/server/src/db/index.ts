@@ -220,6 +220,59 @@ export function migrate(): void {
     db.exec("ALTER TABLE human_actions ADD COLUMN request_id TEXT");
   }
 
+  // NOT-95: a Run-scoped action (outbound-draft delivery parking) has no Issue, so issue_id
+  // must become nullable — SQLite can't ALTER a column's NOT NULL away, so rebuild the table
+  // for any database created before schema.sql dropped the constraint (fresh databases from
+  // the updated schema.sql never hit this branch). Same recipe as the artifacts_new rebuild
+  // above.
+  const humanActionIssueIdCol = (
+    db.prepare("PRAGMA table_info(human_actions)").all() as Array<{ name: string; notnull: number }>
+  ).find((c) => c.name === "issue_id");
+  if (humanActionIssueIdCol?.notnull === 1) {
+    db.exec(`
+      CREATE TABLE human_actions_new (
+        id TEXT PRIMARY KEY,
+        issue_id TEXT REFERENCES issues(id),
+        run_id TEXT REFERENCES runs(id),
+        workflow_instance_id TEXT REFERENCES workflow_instances(id),
+        action_type TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        question TEXT NOT NULL,
+        evidence_json TEXT,
+        response_options_json TEXT,
+        continuation_preview_json TEXT,
+        request_id TEXT,
+        status TEXT NOT NULL,
+        resolution_json TEXT,
+        resolved_by TEXT,
+        requested_at TEXT NOT NULL,
+        resolved_at TEXT
+      );
+      INSERT INTO human_actions_new (
+        id, issue_id, workflow_instance_id, action_type, reason, question, evidence_json,
+        response_options_json, continuation_preview_json, request_id, status, resolution_json,
+        resolved_by, requested_at, resolved_at
+      )
+        SELECT
+          id, issue_id, workflow_instance_id, action_type, reason, question, evidence_json,
+          response_options_json, continuation_preview_json, request_id, status, resolution_json,
+          resolved_by, requested_at, resolved_at
+        FROM human_actions;
+      DROP TABLE human_actions;
+      ALTER TABLE human_actions_new RENAME TO human_actions;
+      CREATE INDEX IF NOT EXISTS idx_human_actions_issue ON human_actions(issue_id);
+      CREATE INDEX IF NOT EXISTS idx_human_actions_status ON human_actions(status);
+    `);
+  } else if (!humanActionCols.some((c) => c.name === "run_id")) {
+    // Rebuild already happened in a prior migrate() run (or this is a fresh schema.sql
+    // database missing only this additive column for some other reason) — plain add.
+    db.exec("ALTER TABLE human_actions ADD COLUMN run_id TEXT REFERENCES runs(id)");
+  }
+  // Always last, once run_id is guaranteed to exist (fresh schema.sql create, the rebuild
+  // above, or the plain ALTER above) — see schema.sql's comment on why this index isn't
+  // declared there.
+  db.exec("CREATE INDEX IF NOT EXISTS idx_human_actions_run ON human_actions(run_id)");
+
   seedBuiltinAgents(db);
   seedIntakeSettings(db);
   migrateLegacyAgentDeckPort(db);

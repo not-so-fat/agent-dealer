@@ -16,6 +16,9 @@ const ACTION_LABELS: Record<HumanActionType, string> = {
   product_scope_decision: "Product scope decision",
   deck_interaction_required: "Agent Deck interaction required",
   reflection_interaction_required: "Reflection interaction required",
+  // Filtered out of this page's own `actions` state (issueId !== null) — kept here only so
+  // this map stays total over HumanActionType.
+  outbound_delivery_interaction_required: "Outbound delivery interaction required",
 };
 
 function timeAgo(iso: string): string {
@@ -43,7 +46,11 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
 
   const refresh = () => {
     fetchIssues().then(setIssues).catch((e) => setError(String(e)));
-    fetchHumanActions().then(setActions).catch(() => undefined);
+    // Issue-scoped only — a Run-scoped action (outbound-draft delivery parking, NOT-95)
+    // has no issue to navigate to and surfaces on the Human Actions page instead.
+    fetchHumanActions()
+      .then((all) => setActions(all.filter((a) => a.issueId !== null)))
+      .catch(() => undefined);
   };
 
   useEffect(() => {
@@ -112,7 +119,7 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
               <button
                 key={a.id}
                 type="button"
-                onClick={() => onSelectIssue(a.issueId)}
+                onClick={() => onSelectIssue(a.issueId!)}
                 className="w-full text-left px-4 py-2 hover:bg-white/5 transition-colors"
               >
                 <span className="text-xs uppercase tracking-wide text-red-300/80">{ACTION_LABELS[a.actionType]}</span>
