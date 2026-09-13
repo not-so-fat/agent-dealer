@@ -93,3 +93,42 @@ test("agent deck online with no deck-access result computed (e.g. no agent neede
     false
   );
 });
+
+// PR #19 review round 2: cursor_local + a bound deck has no execution-authority
+// isolation mechanism at all — surfacing it here (before a run ever starts) is what
+// actually avoids burning the infra-retry budget on an attempt that fails identically
+// every time.
+test("cursor_local with a bound deck: reports deck_runtime_unsupported", async () => {
+  const agent = createAgent({
+    name: "cursor-with-deck",
+    runtime: "cursor_local",
+    workspaceRoot: "/tmp",
+    deckId: randomUUID(),
+  });
+  const result = await healthForAgent(agent, true, new Map(), true, null);
+  assert.ok(result.issues.some((i) => i.code === "deck_runtime_unsupported"));
+  assert.equal(result.healthy, false);
+});
+
+test("cursor_local with no deck: no deck_runtime_unsupported issue", async () => {
+  const agent = createAgent({ name: "cursor-no-deck", runtime: "cursor_local", workspaceRoot: "/tmp" });
+  const result = await healthForAgent(agent, true, new Map(), true, null);
+  assert.equal(
+    result.issues.some((i) => i.code === "deck_runtime_unsupported"),
+    false
+  );
+});
+
+test("claude_code with a bound deck: no deck_runtime_unsupported issue (only cursor_local is affected)", async () => {
+  const agent = createAgent({
+    name: "claude-with-deck",
+    runtime: "claude_code",
+    workspaceRoot: "/tmp",
+    deckId: randomUUID(),
+  });
+  const result = await healthForAgent(agent, true, new Map(), true, null);
+  assert.equal(
+    result.issues.some((i) => i.code === "deck_runtime_unsupported"),
+    false
+  );
+});

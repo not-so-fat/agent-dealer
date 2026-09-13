@@ -5,6 +5,10 @@ export const HumanActionType = z.enum([
   "policy_escalation",
   "attempts_exhausted",
   "final_review",
+  /** Agent Deck returned a typed control-plane requirement (INTERACTION_REQUIRED) for a
+   * mint/tool call under execution authority (NOT-87) — the worker was released rather
+   * than left holding an in-flight call. */
+  "deck_interaction_required",
 ]);
 export type HumanActionType = z.infer<typeof HumanActionType>;
 

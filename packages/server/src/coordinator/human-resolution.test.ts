@@ -62,3 +62,16 @@ test("product_scope_decision resume continues development from the pre-start gat
   const result = resolveHumanActionOutcome({ actionType: "product_scope_decision", choice: "resume" });
   assert.equal(result.issueStatus, "developing");
 });
+
+test("deck_interaction_required resume starts a fresh infra round, not a review-round spend", () => {
+  const result = resolveHumanActionOutcome({ actionType: "deck_interaction_required", choice: "resume" });
+  assert.equal(result.issueStatus, "developing");
+  assert.equal(result.startNewRound, true);
+  assert.equal(result.roundKind, "infra");
+});
+
+test("deck_interaction_required close ends the issue", () => {
+  const result = resolveHumanActionOutcome({ actionType: "deck_interaction_required", choice: "close" });
+  assert.equal(result.issueStatus, "closed");
+  assert.equal(result.workflowOutcome, "closed");
+});

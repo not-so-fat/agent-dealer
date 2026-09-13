@@ -104,3 +104,14 @@ export function codexBinExists(): boolean {
   const bin = resolveCodexBin();
   return bin !== "codex" ? fs.existsSync(bin) : false;
 }
+
+/**
+ * Where codex itself would look for `config.toml` *and* its file-backed login
+ * credentials (`auth.json`) absent an override — mirrors codex's own default
+ * (`$CODEX_HOME`, else `~/.codex`). Used by `agent-deck-bind.ts` to find `auth.json` to
+ * carry into a per-attempt isolated `CODEX_HOME` (config.toml there is deliberately
+ * *not* copied — that's the ambient MCP config execution authority exists to replace).
+ */
+export function resolveAmbientCodexHome(): string {
+  return process.env.CODEX_HOME ?? path.join(process.env.HOME ?? os.homedir(), ".codex");
+}

@@ -15,13 +15,26 @@ export type DeveloperOutcome =
   | { kind: "timed_out" }
   /** git/gh tooling itself errored during verification — not the agent's fault. */
   | { kind: "adapter_failure"; reason: string }
-  | { kind: "session_failed" };
+  | { kind: "session_failed" }
+  /** Agent Deck returned a typed control-plane requirement (INTERACTION_REQUIRED) minting
+   * or verifying this attempt's execution authority — never retried with the same inputs
+   * (NOT-87). */
+  | { kind: "interaction_required"; reason: string }
+  /** This profile's (runtime, deckId) combination has no execution-authority isolation
+   * mechanism at all (agent-deck-bind.ts's AUTHORITY_SUPPORTED_RUNTIMES) — a permanent
+   * config mismatch, not a transient hiccup; retrying reproduces it identically. */
+  | { kind: "deck_runtime_unsupported"; reason: string };
 
 export type ReviewerOutcome =
   | { kind: "verdict"; result: ReviewerResult }
   | { kind: "stale"; currentHeadSha: string }
   | { kind: "session_failed" }
-  | { kind: "publish_failed" };
+  | { kind: "publish_failed" }
+  /** Agent Deck returned a typed control-plane requirement minting or verifying this
+   * attempt's execution authority — never retried with the same inputs (NOT-87). */
+  | { kind: "interaction_required"; reason: string }
+  /** See DeveloperOutcome's identical kind. */
+  | { kind: "deck_runtime_unsupported"; reason: string };
 
 export interface RouteLimits {
   currentRound: number;
@@ -48,12 +61,22 @@ export type DeveloperRouteResult =
    * plain crash, and (round 1 specifically) would be told to start on a "fresh branch"
    * despite reusing one that already carries a failed attempt's commits. */
   | { next: "retry_developer"; reason: string }
-  | { next: "human_action"; actionType: "attempts_exhausted" | "policy_escalation"; reason: string };
+  | { next: "human_action"; actionType: "attempts_exhausted" | "policy_escalation" | "deck_interaction_required"; reason: string };
 
 export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLimits): DeveloperRouteResult {
   switch (outcome.kind) {
     case "clean_handoff":
       return { next: "spawn_reviewer", headSha: outcome.headSha };
+    case "interaction_required":
+      // Never spends any budget — Deck denied this deterministically (a control-plane
+      // decision, not a transient hiccup); retrying with the same authority request
+      // would fail identically (NOT-87 §6.3).
+      return { next: "human_action", actionType: "deck_interaction_required", reason: outcome.reason };
+    case "deck_runtime_unsupported":
+      // Never spends any budget, same reasoning as interaction_required — this is a
+      // Dealer-side profile misconfiguration (not a Deck decision), so it's a plain
+      // policy_escalation rather than deck_interaction_required.
+      return { next: "human_action", actionType: "policy_escalation", reason: outcome.reason };
     case "dirty_worktree":
       // Never spends any budget — an unclean handoff is preserved for inspection, not retried blindly.
       return { next: "human_action", actionType: "policy_escalation", reason: "Developer worktree has uncommitted changes after the session ended." };
@@ -113,7 +136,11 @@ export type ReviewerRouteResult =
   | { next: "retry_reviewer_at_new_head"; headSha: string }
   /** Bounded infra retry — a fresh reviewer session at the SAME already-verified head. */
   | { next: "retry_reviewer"; headSha: string }
-  | { next: "human_action"; actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision"; reason: string };
+  | {
+      next: "human_action";
+      actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision" | "deck_interaction_required";
+      reason: string;
+    };
 
 export function routeReviewerOutcome(
   outcome: ReviewerOutcome,
@@ -121,6 +148,11 @@ export function routeReviewerOutcome(
   pinnedHeadSha: string
 ): ReviewerRouteResult {
   switch (outcome.kind) {
+    case "interaction_required":
+      return { next: "human_action", actionType: "deck_interaction_required", reason: outcome.reason };
+    case "deck_runtime_unsupported":
+      // See DeveloperOutcome's identical case — never spends any budget.
+      return { next: "human_action", actionType: "policy_escalation", reason: outcome.reason };
     case "stale":
       return infraAttemptsRemain(limits)
         ? { next: "retry_reviewer_at_new_head", headSha: outcome.currentHeadSha }

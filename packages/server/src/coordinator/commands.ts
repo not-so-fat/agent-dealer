@@ -563,12 +563,15 @@ function applyEffect(
 
   if (effect.kind === "human_action") {
     const actionType = effect.actionType as HumanActionType;
-    // A reviewer-side infra exhaustion (session_failed/publish_failed — not a verdict) is
-    // the one policy_escalation flavor where nothing is wrong with the code/PR itself; the
-    // reviewer session/publish attempt just kept failing. Tag the continuation so resolving
+    // A reviewer-side infra exhaustion (session_failed/publish_failed/interaction_required —
+    // not a verdict) is the flavor where nothing is wrong with the code/PR itself; the
+    // reviewer's own attempt just couldn't proceed. Tag the continuation so resolving
     // "resume" can re-queue a fresh REVIEWER at the still-valid pinned head instead of
     // defaulting to a developer round (which would be a wasted, unrelated re-implementation).
-    const resumeAsReviewer = actionType === "policy_escalation" && reviewerOutcome !== undefined && reviewerOutcome.kind !== "verdict";
+    const resumeAsReviewer =
+      (actionType === "policy_escalation" || actionType === "deck_interaction_required") &&
+      reviewerOutcome !== undefined &&
+      reviewerOutcome.kind !== "verdict";
     const action = createHumanAction({
       issueId: issue.id,
       workflowInstanceId: instance.id,
@@ -602,6 +605,10 @@ function questionFor(actionType: HumanActionType, reason: string, resumeAsReview
         : `${reason} Resume development, or close the issue?`;
     case "product_scope_decision":
       return `${reason} Provide the missing decision to resume.`;
+    case "deck_interaction_required":
+      return resumeAsReviewer
+        ? `${reason} Resolve it in Agent Deck, then retry the review, or close the issue?`
+        : `${reason} Resolve it in Agent Deck, then resume development, or close the issue?`;
   }
 }
 
@@ -631,6 +638,11 @@ export function responseOptionsFor(
       ];
     case "product_scope_decision":
       return [{ choice: "resume", label: "Resume development" }];
+    case "deck_interaction_required":
+      return [
+        { choice: "resume", label: resumeAsReviewer ? "Retry review" : "Resume with a new attempt" },
+        { choice: "close", label: "Close" },
+      ];
   }
 }
 
@@ -742,7 +754,7 @@ export function resolveHumanActionAndAdvance(
   // at the still-valid pinned head — not default to an unrelated developer round.
   const continuation = parseContinuationPreview(action.continuationPreviewJson);
   const resumeAsReviewer =
-    action.actionType === "policy_escalation" &&
+    (action.actionType === "policy_escalation" || action.actionType === "deck_interaction_required") &&
     resolution.choice === "resume" &&
     continuation?.resumeRole === "reviewer" &&
     !!continuation.resumeHeadSha;

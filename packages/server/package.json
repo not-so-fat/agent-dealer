@@ -29,6 +29,7 @@
     "better-sqlite3": "^12.11.1",
     "dotenv": "^16.5.0",
     "fastify": "^5.3.3",
+    "smol-toml": "^1.8.0",
     "uuid": "^11.1.0"
   },
   "devDependencies": {

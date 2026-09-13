@@ -21,7 +21,16 @@ export interface IssueProjection {
 /** The kind of the single next work item this decision enqueues, if any. */
 export type NextEffect =
   | { kind: "enqueue"; workItem: WorkItemKind; atHeadSha?: string; retryReason?: string }
-  | { kind: "human_action"; actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision" | "final_review"; reason: string }
+  | {
+      kind: "human_action";
+      actionType:
+        | "attempts_exhausted"
+        | "policy_escalation"
+        | "product_scope_decision"
+        | "final_review"
+        | "deck_interaction_required";
+      reason: string;
+    }
   | { kind: "none" };
 
 /** Which budget (if any) this transition spends before enqueueing the next effect. */

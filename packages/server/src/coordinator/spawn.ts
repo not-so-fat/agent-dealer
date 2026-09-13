@@ -34,6 +34,17 @@ export interface DeveloperSpawnInput {
   prompt: string;
   cwd: string;
   timeoutMs: number;
+  /**
+   * Path to the per-attempt Agent Deck MCP config carrying this attempt's minted
+   * execution authority (NOT-87/92) — absent when the profile has no deckId. Meaning is
+   * runtime-specific: a `--mcp-config` file for claude, a scoped `.cursor/mcp.json`
+   * (inside the worktree) for cursor, or a `CODEX_HOME` directory for codex. Never merged
+   * with any ambient/user config, so a spawned worker's only route to Agent Deck is this
+   * one short-lived, scoped server.
+   */
+  mcpConfigPath?: string;
+  /** Extra process env the spawned CLI needs to resolve mcpConfigPath (codex's bearer-token env var). */
+  mcpEnv?: Record<string, string>;
 }
 
 export type DeveloperSpawn = (input: DeveloperSpawnInput) => Promise<DeveloperSpawnResult>;
@@ -58,14 +69,14 @@ function reviewerLogPath(sessionId: string): string {
 }
 
 export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
-  const args = buildDeveloperArgs(input.runtime, input.prompt, input.model ?? undefined, input.policy);
+  const args = buildDeveloperArgs(input.runtime, input.prompt, input.model ?? undefined, input.policy, input.mcpConfigPath);
   const logPath = developerLogPath(input.sessionId);
   const { exitCode, transcript, timedOut } = await spawnCli(
     input.sessionId,
     BIN_FOR[input.runtime](),
     args,
     input.cwd,
-    { logPath, timeoutMs: input.timeoutMs }
+    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv }
   );
   return { exitCode, transcript, logPath, timedOut };
 };
@@ -76,7 +87,7 @@ export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
  * loosens a reviewer's tools can never silently reach a live spawn.
  */
 export const realReviewerSpawn: ReviewerSpawn = async (input) => {
-  const args = buildReviewerArgs(input.runtime, input.prompt, input.model ?? undefined, input.policy);
+  const args = buildReviewerArgs(input.runtime, input.prompt, input.model ?? undefined, input.policy, input.mcpConfigPath);
   assertReviewerReadOnly(args);
   const logPath = reviewerLogPath(input.sessionId);
   const { exitCode, transcript, timedOut } = await spawnCli(
@@ -84,7 +95,7 @@ export const realReviewerSpawn: ReviewerSpawn = async (input) => {
     BIN_FOR[input.runtime](),
     args,
     input.cwd,
-    { logPath, timeoutMs: input.timeoutMs }
+    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv }
   );
   return { exitCode, transcript, logPath, timedOut };
 };

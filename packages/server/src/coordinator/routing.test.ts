@@ -120,6 +120,27 @@ test("an infra-class developer failure never spends the review-round budget, eve
   });
 });
 
+test("interaction_required routes straight to a deck_interaction_required human action, never retried, regardless of infra attempts remaining", () => {
+  const outcome: DeveloperOutcome = { kind: "interaction_required", reason: "Control-plane decision required" };
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    next: "human_action",
+    actionType: "deck_interaction_required",
+    reason: "Control-plane decision required",
+  });
+});
+
+test("deck_runtime_unsupported routes straight to a policy_escalation human action, never retried, regardless of infra attempts remaining", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "deck_runtime_unsupported",
+    reason: "execution authority is not supported for runtime cursor_local",
+  };
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    next: "human_action",
+    actionType: "policy_escalation",
+    reason: "execution authority is not supported for runtime cursor_local",
+  });
+});
+
 // --- Reviewer outcomes ---
 
 test("approved verdict routes to final_review regardless of round", () => {
@@ -210,4 +231,25 @@ test("review publish_failed escalates once the infra-attempt limit is reached", 
 test("a reviewer infra-class failure never spends the review-round budget, even at the review-round limit", () => {
   const outcome: ReviewerOutcome = { kind: "session_failed" };
   assert.deepStrictEqual(routeReviewerOutcome(outcome, REVIEW_AT_LIMIT, PINNED_HEAD), { next: "retry_reviewer", headSha: PINNED_HEAD });
+});
+
+test("reviewer interaction_required routes straight to a deck_interaction_required human action, never retried", () => {
+  const outcome: ReviewerOutcome = { kind: "interaction_required", reason: "Control-plane decision required" };
+  assert.deepStrictEqual(routeReviewerOutcome(outcome, INFRA_ATTEMPTS_LEFT, PINNED_HEAD), {
+    next: "human_action",
+    actionType: "deck_interaction_required",
+    reason: "Control-plane decision required",
+  });
+});
+
+test("reviewer deck_runtime_unsupported routes straight to a policy_escalation human action, never retried", () => {
+  const outcome: ReviewerOutcome = {
+    kind: "deck_runtime_unsupported",
+    reason: "execution authority is not supported for runtime cursor_local",
+  };
+  assert.deepStrictEqual(routeReviewerOutcome(outcome, INFRA_ATTEMPTS_LEFT, PINNED_HEAD), {
+    next: "human_action",
+    actionType: "policy_escalation",
+    reason: "execution authority is not supported for runtime cursor_local",
+  });
 });

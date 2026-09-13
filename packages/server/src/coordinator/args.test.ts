@@ -73,3 +73,45 @@ test("buildDeveloperArgs for claude_code makes Bash/Write/Edit available via --t
   assert.ok(args.includes("--restricted"));
   assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
 });
+
+test("claude allowedTools never includes bind_workspace — deny-by-default control plane under execution authority", () => {
+  const args = buildDeveloperArgs("claude_code", "implement");
+  const allowed = args[args.indexOf("--allowedTools") + 1];
+  assert.ok(!allowed.split(",").includes("mcp__agent-deck__bind_workspace"));
+});
+
+test("buildDeveloperArgs for claude_code adds --mcp-config --strict-mcp-config when an authority config path is given, omits it otherwise", () => {
+  const withAuthority = buildDeveloperArgs("claude_code", "implement", undefined, undefined, "/tmp/authz/mcp.json");
+  assert.equal(withAuthority[withAuthority.indexOf("--mcp-config") + 1], "/tmp/authz/mcp.json");
+  assert.ok(withAuthority.includes("--strict-mcp-config"));
+
+  const withoutAuthority = buildDeveloperArgs("claude_code", "implement");
+  assert.ok(!withoutAuthority.includes("--mcp-config"));
+  assert.ok(!withoutAuthority.includes("--strict-mcp-config"));
+});
+
+test("buildReviewerArgs for codex_local keeps MCP config loaded (no --ignore-user-config) once an authority CODEX_HOME is given", () => {
+  const withAuthority = buildReviewerArgs("codex_local", "review", undefined, undefined, "/tmp/authz/codex-home");
+  assert.ok(!withAuthority.includes("--ignore-user-config"));
+
+  const withoutAuthority = buildReviewerArgs("codex_local", "review");
+  assert.ok(withoutAuthority.includes("--ignore-user-config"));
+});
+
+test("buildDeveloperArgs for codex_local never adds --ignore-user-config regardless of authority (write role already loads MCP)", () => {
+  const withAuthority = buildDeveloperArgs("codex_local", "implement", undefined, undefined, "/tmp/authz/codex-home");
+  assert.ok(!withAuthority.includes("--ignore-user-config"));
+  const withoutAuthority = buildDeveloperArgs("codex_local", "implement");
+  assert.ok(!withoutAuthority.includes("--ignore-user-config"));
+});
+
+test("buildDeveloperArgs for cursor_local never adds --approve-mcps — cursor has no isolation mechanism to safely approve (PR #19 review)", () => {
+  // A stray mcpConfigPath must not turn into --approve-mcps even if somehow passed: it
+  // would auto-approve every ambient MCP server cursor-agent's project+global config
+  // loading discovers, not just a scoped one.
+  const withPath = buildDeveloperArgs("cursor_local", "implement", undefined, undefined, "/tmp/wt/.cursor/mcp.json");
+  assert.ok(!withPath.includes("--approve-mcps"));
+
+  const withoutPath = buildDeveloperArgs("cursor_local", "implement");
+  assert.ok(!withoutPath.includes("--approve-mcps"));
+});
