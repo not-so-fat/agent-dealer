@@ -1,7 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { OutboundToolCall, DeckAccessErrorCode } from "@agent-dealer/shared";
 import type { ReflectProposal } from "@agent-dealer/shared";
 import { getAgentDeckConfig, getAgentDeckEnrollmentBearer } from "../repository/intake-settings.js";
@@ -245,11 +243,6 @@ export function isAgentDeckMcpRegistered(): boolean {
   }
 }
 
-export type DeliverOutboundResult = {
-  toolResult: unknown;
-  permalink?: string;
-};
-
 export type CallServiceToolPayload = {
   serviceId: string;
   toolName: string;
@@ -265,7 +258,7 @@ export function toCallServiceToolPayload(toolCall: OutboundToolCall): CallServic
   };
 }
 
-function extractPermalink(toolResult: unknown): string | undefined {
+export function extractPermalink(toolResult: unknown): string | undefined {
   if (!toolResult || typeof toolResult !== "object") return undefined;
   const content = (toolResult as { content?: Array<{ type?: string; text?: string }> }).content;
   if (!Array.isArray(content)) return undefined;
@@ -367,46 +360,6 @@ function formatToolResultText(tr: { content?: Array<{ type?: string; text?: stri
     .trim() || undefined;
 }
 
-export async function deliverOutboundDraft(
-  deckId: string,
-  toolCall: OutboundToolCall,
-  opts?: {
-    workspaceRoot?: string;
-    callTool?: (payload: CallServiceToolPayload) => Promise<unknown>;
-    timeoutMs?: number;
-  }
-): Promise<DeliverOutboundResult> {
-  const payload = toCallServiceToolPayload(toolCall);
-  const workspaceRoot = opts?.workspaceRoot ?? process.cwd();
-  const timeoutMs = opts?.timeoutMs ?? Number(process.env.DELIVER_TIMEOUT_MS ?? 60_000);
-
-  const callTool =
-    opts?.callTool ??
-    (async (p: CallServiceToolPayload) => {
-      const mcpBase = getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "");
-      const transport = new StreamableHTTPClientTransport(new URL(`${mcpBase}/mcp`));
-      const client = new Client({ name: "agent-dealer-deliver", version: "0.0.1" });
-      const connectAndCall = async () => {
-        await client.connect(transport);
-        try {
-          await client.callTool({
-            name: "bind_workspace",
-            arguments: { deckId, workspaceRoot },
-          });
-          return await client.callTool({ name: "call_service_tool", arguments: p });
-        } finally {
-          await client.close();
-        }
-      };
-      return await Promise.race([
-        connectAndCall(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Outbound deliver timed out after ${timeoutMs}ms`)), timeoutMs)
-        ),
-      ]);
-    });
-
-  const toolResult = await callTool(payload);
-  assertCallServiceToolSuccess(toolResult);
-  return { toolResult, permalink: extractPermalink(toolResult) };
-}
+// `deliverOutboundDraft` (the authority-scoped MCP call for approved outbound delivery) has
+// moved to ./outbound-delivery.ts (NOT-95) — kept out of this file to avoid a circular
+// import with agent-deck-bind.ts, whose `parseInteractionRequired` it needs.

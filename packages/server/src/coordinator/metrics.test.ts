@@ -8,6 +8,7 @@ function action(requestedAt: string, resolvedAt: string | null): HumanAction {
   return {
     id: "a",
     issueId: "i",
+    runId: null,
     workflowInstanceId: null,
     actionType: "policy_escalation",
     reason: "r",

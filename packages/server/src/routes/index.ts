@@ -53,7 +53,7 @@ import {
   submitPlanAnswers,
   subscribe,
 } from "../queue/dispatcher.js";
-import { approveRunWithDeliver } from "../queue/approve-deliver.js";
+import { approveRunWithDeliver, resolveOpenDeliveryParkForRun } from "../queue/approve-deliver.js";
 import { recordPlanDelegation } from "../queue/plan-delegation.js";
 import { askResultQuestion } from "../queue/result-qa.js";
 import { rejectPendingOutboundDrafts, deliverInFlight } from "../repository/outbound-drafts.js";
@@ -494,7 +494,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       outboundBody: input.outboundBody,
     });
     if (!result.ok) {
-      return reply.status(result.code).send({ error: result.error });
+      // Surface a typed authority/configuration failure (INTERACTION_REQUIRED, mint denial,
+      // etc.) rather than an opaque message alone (NOT-95).
+      return reply.status(result.code).send({ error: result.error, errorCode: result.errorCode });
     }
     return result.run;
   });
@@ -572,6 +574,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     const retryRun = getRun(retry.id)!;
     addArtifact(id, "feedback", { supersededBy: retry.id, note: "Retry — replaced by new run" }, "system");
+    // The old run is leaving `review` for good — close any open delivery park against it
+    // now, or it can never be resolved (resolveOutboundDeliveryAction's retry_send would
+    // 400 on "Run must be in review" once this transitions).
+    resolveOpenDeliveryParkForRun(id, { resolvedBy: "system", choice: "superseded_by_retry" });
     transitionRun(id, "cancelled");
     syncLinearForRun(retryRun, "retry").catch((e) => console.error("[linear-sync] retry:", e));
     scheduleReflect(run, { trigger: "retry", feedback: input.feedback });
@@ -584,6 +590,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const run = getRun(id);
     if (!run) return reply.status(404).send({ error: "Not found" });
     cancelActiveRun(id);
+    // Same reasoning as retry above — the run is leaving `review` for good.
+    resolveOpenDeliveryParkForRun(id, { resolvedBy: "system", choice: "cancelled" });
     return transitionRun(id, "cancelled");
   });
 

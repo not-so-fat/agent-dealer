@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { getHumanAction, listOpenHumanActions } from "../repository/human-actions.js";
 import { resolveHumanActionAndAdvance } from "../coordinator/commands.js";
 import { triggerIssueReflect, resolveReflectionInteractionAction } from "../coordinator/reflect-trigger.js";
+import { resolveOutboundDeliveryAction } from "../queue/approve-deliver.js";
 
 export async function registerHumanActionRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/human-actions", async () => listOpenHumanActions());
@@ -37,6 +38,15 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
       };
     }
 
+    // Outbound-draft delivery parking (NOT-95) is Run-scoped, not Issue-scoped — same
+    // reasoning as the reflection branch above: no active workflow instance to advance
+    // through resolveHumanActionAndAdvance.
+    if (action.actionType === "outbound_delivery_interaction_required") {
+      const deliveryResult = await resolveOutboundDeliveryAction(id, resolvedBy, choice);
+      if (!deliveryResult.ok) return reply.status(deliveryResult.code).send({ error: deliveryResult.error });
+      return { runStatus: deliveryResult.runStatus, delivered: deliveryResult.delivered };
+    }
+
     const result = resolveHumanActionAndAdvance(id, resolvedBy, choice);
     if (!result.ok) return reply.status(result.code).send({ error: result.error });
 
@@ -46,7 +56,9 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
     // otherwise risk a client timeout on an already-resolved action, whose retry then gets
     // a spurious 409. Fire-and-forget; triggerIssueReflect never throws (it records its own
     // outcome as artifacts), so there is nothing here to await or react to.
-    if (result.triggerReflect) {
+    // triggerReflect is only ever set for final_review:complete, which is always
+    // Issue-scoped (NOT-95's Run-scoped action type never reaches resolveHumanActionAndAdvance).
+    if (result.triggerReflect && action.issueId) {
       void triggerIssueReflect(action.issueId).catch(() => {});
     }
 

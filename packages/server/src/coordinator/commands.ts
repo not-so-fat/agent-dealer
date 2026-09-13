@@ -651,6 +651,11 @@ function questionFor(actionType: HumanActionType, reason: string, resumeAsReview
       // type directly with its own question text (NOT-94). Case exists only so this
       // function stays total over HumanActionType.
       throw new Error("reflection_interaction_required is not raised through applyEffect");
+    case "outbound_delivery_interaction_required":
+      // Never actually raised through applyEffect — approve-deliver.ts creates this
+      // Run-scoped action type directly with its own question text (NOT-95). Case exists
+      // only so this function stays total over HumanActionType.
+      throw new Error("outbound_delivery_interaction_required is not raised through applyEffect");
   }
 }
 
@@ -688,6 +693,9 @@ export function responseOptionsFor(
     case "reflection_interaction_required":
       // Never actually raised through applyEffect — see questionFor's identical case.
       throw new Error("reflection_interaction_required is not raised through applyEffect");
+    case "outbound_delivery_interaction_required":
+      // Never actually raised through applyEffect — see questionFor's identical case.
+      throw new Error("outbound_delivery_interaction_required is not raised through applyEffect");
   }
 }
 
@@ -739,6 +747,9 @@ export function resolveHumanActionAndAdvance(
   if (!resolution) {
     return { ok: false, code: 400, error: `Invalid choice "${choice}" for ${action.actionType}` };
   }
+  // parseHumanResolution already rejects every Run-scoped action type (NOT-95) above, so
+  // every action reaching here is Issue-scoped — this narrows action.issueId for TS.
+  if (!action.issueId) return { ok: false, code: 500, error: "Human action has no issue" };
 
   const issue = getIssue(action.issueId);
   if (!issue) return { ok: false, code: 404, error: "Issue not found" };

@@ -352,6 +352,8 @@ export function resolveReflectionInteractionAction(
   if (action.actionType !== "reflection_interaction_required") {
     return { ok: false, code: 400, error: `Action ${actionId} is not a reflection_interaction_required action` };
   }
+  // Always issue-scoped (reflection runs post-completion on an Issue) — narrows for TS.
+  if (!action.issueId) return { ok: false, code: 500, error: "Human action has no issue" };
   if (action.status !== "open") return { ok: false, code: 409, error: "Human action already resolved" };
   if (choice !== "retry" && choice !== "dismiss") {
     return { ok: false, code: 400, error: `Invalid choice "${choice}" for reflection_interaction_required` };

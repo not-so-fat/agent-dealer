@@ -34,6 +34,10 @@ export const OutboundDraftContent = z.object({
   sentAt: z.string().optional(),
   rejectedAt: z.string().optional(),
   bodyMismatch: z.boolean().optional(),
+  /** Count of real delivery attempts made for this draft (NOT-95) — feeds the execution
+   * authority idempotency key (`${draftArtifactId}:${deliveryAttempts}`) so a retry after
+   * INTERACTION_REQUIRED mints a genuinely distinct authority rather than reusing one. */
+  deliveryAttempts: z.number().int().min(0).default(0),
 });
 export type OutboundDraftContent = z.infer<typeof OutboundDraftContent>;
 

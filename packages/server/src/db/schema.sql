@@ -189,9 +189,13 @@ CREATE INDEX IF NOT EXISTS idx_workflow_events_issue ON workflow_events(issue_id
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_events_idempotency ON workflow_events(idempotency_key)
   WHERE idempotency_key IS NOT NULL;
 
+-- issue_id is nullable — a Run-scoped action (outbound-draft delivery parking, NOT-95) has
+-- no Issue and sets run_id instead. Exactly one of issue_id/run_id is set per row
+-- (app-level invariant, same convention as artifacts' issue_id/run_id split).
 CREATE TABLE IF NOT EXISTS human_actions (
   id TEXT PRIMARY KEY,
-  issue_id TEXT NOT NULL REFERENCES issues(id),
+  issue_id TEXT REFERENCES issues(id),
+  run_id TEXT REFERENCES runs(id),
   workflow_instance_id TEXT REFERENCES workflow_instances(id),
   action_type TEXT NOT NULL,
   reason TEXT NOT NULL,
@@ -209,6 +213,11 @@ CREATE TABLE IF NOT EXISTS human_actions (
 
 CREATE INDEX IF NOT EXISTS idx_human_actions_issue ON human_actions(issue_id);
 CREATE INDEX IF NOT EXISTS idx_human_actions_status ON human_actions(status);
+-- idx_human_actions_run is created in migrate() (db/index.ts) instead of here: run_id is a
+-- brand-new column, and this file's CREATE INDEX statements run unconditionally on every
+-- migrate() even when CREATE TABLE IF NOT EXISTS above no-ops against a pre-existing legacy
+-- table that doesn't have run_id yet — indexing it here would fail on that legacy table
+-- before migrate()'s own ALTER/rebuild logic (below, after this file executes) ever adds it.
 
 CREATE TABLE IF NOT EXISTS findings (
   id TEXT PRIMARY KEY,
