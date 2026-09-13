@@ -44,6 +44,28 @@ export function closeDb(): void {
 
 export function migrate(): void {
   const db = getDb();
+
+  // NOT-91 added `stale_at` (and an index on it) to `authority_attempts`, but that table
+  // itself was introduced earlier (NOT-93). Every other incremental ALTER in this function
+  // runs AFTER the schema.sql exec below because schema.sql's CREATE TABLE/INDEX
+  // statements are themselves idempotent (IF NOT EXISTS) against an already-current table.
+  // This one column can't wait that long: schema.sql's own
+  // `CREATE INDEX idx_authority_attempts_stale ON authority_attempts(status, stale_at)`
+  // throws "no such column: stale_at" against a pre-NOT-91 `authority_attempts` table
+  // before the exec below ever reaches the incremental-ALTER section — aborting migrate()
+  // (and every table's schema updates after it) for any database that ran migrate()
+  // between NOT-93 and NOT-91 landing. Must run first, and only if the table already
+  // exists — a brand-new database gets the column from schema.sql's CREATE TABLE directly.
+  const authorityAttemptsExists = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'authority_attempts'")
+    .get();
+  if (authorityAttemptsExists) {
+    const authorityAttemptCols = db.prepare("PRAGMA table_info(authority_attempts)").all() as Array<{ name: string }>;
+    if (!authorityAttemptCols.some((c) => c.name === "stale_at")) {
+      db.exec("ALTER TABLE authority_attempts ADD COLUMN stale_at TEXT");
+    }
+  }
+
   const schema = readFileSync(path.join(__dirname, "schema.sql"), "utf8");
   db.exec(schema);
 
