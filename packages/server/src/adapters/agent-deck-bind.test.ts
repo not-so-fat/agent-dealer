@@ -16,6 +16,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-de
 const { migrate } = await import("../db/index.js");
 const { acquireWorkerAuthority, releaseWorkerAuthority, parseDeckToolResult } = await import("./agent-deck-bind.js");
 const { mintAuthority } = await import("./execution-authority.js");
+const { getExecutionAuthorityConfigDir } = await import("../paths.js");
 
 migrate();
 
@@ -162,6 +163,40 @@ test("acquireWorkerAuthority revokes and returns infra_failure when the live ver
     }
     assert.match(revokeUrl ?? "", /\/authorities\/authz_1\/revoke$/);
   } finally {
+    fetchMock.mock.restore();
+    delete process.env.AGENT_DECK_ENROLLMENT_ID;
+    delete process.env.AGENT_DECK_ENROLLMENT_SECRET;
+  }
+});
+
+// PR #19 review round 5: a throw from materialization (ENOSPC/EACCES writing the
+// per-attempt config, etc.) happening *after* a successful mint+verify must still revoke
+// — otherwise the caller never learns the authorityId (materializeWorkerMcpConfig never
+// returned) and it would sit live until TTL, unrevoked, for the rest of that budget.
+test("acquireWorkerAuthority revokes and returns infra_failure when config materialization itself throws", async () => {
+  const configDir = getExecutionAuthorityConfigDir();
+  let revokeUrl: string | undefined;
+  const fetchMock = (await import("node:test")).mock.method(globalThis, "fetch", async (url: string) => {
+    revokeUrl = String(url);
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  });
+  process.env.AGENT_DECK_ENROLLMENT_ID = "enr_abc";
+  process.env.AGENT_DECK_ENROLLMENT_SECRET = "enrs_secret";
+  fs.chmodSync(configDir, 0o500); // read+execute only — writeFileSync inside it must EACCES
+  try {
+    const result = await acquireWorkerAuthority({
+      ...BASE_OPTS,
+      mint: async () => MINT_OK,
+      verifyCallTool: async () => textResult({ id: DECK }),
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.kind, "infra_failure");
+      assert.match(result.reason, /authority materialization failed/);
+    }
+    assert.match(revokeUrl ?? "", /\/authorities\/authz_1\/revoke$/);
+  } finally {
+    fs.chmodSync(configDir, 0o700);
     fetchMock.mock.restore();
     delete process.env.AGENT_DECK_ENROLLMENT_ID;
     delete process.env.AGENT_DECK_ENROLLMENT_SECRET;

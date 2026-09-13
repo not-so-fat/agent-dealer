@@ -216,23 +216,31 @@ async function materializeWorkerMcpConfig(opts: {
   if (opts.runtime === "codex_local") {
     const codexHome = path.join(getExecutionAuthorityConfigDir(), `codex-home-${opts.authorityId}-${randomUUID()}`);
     fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
-    const ambientHome = resolveAmbientCodexHome();
     try {
-      const ambientAuthPath = path.join(ambientHome, "auth.json");
-      if (fs.existsSync(ambientAuthPath)) {
-        fs.symlinkSync(ambientAuthPath, path.join(codexHome, "auth.json"));
+      const ambientHome = resolveAmbientCodexHome();
+      try {
+        const ambientAuthPath = path.join(ambientHome, "auth.json");
+        if (fs.existsSync(ambientAuthPath)) {
+          fs.symlinkSync(ambientAuthPath, path.join(codexHome, "auth.json"));
+        }
+      } catch {
+        // best-effort — a host using OS-keychain-backed auth (not file-backed) has no
+        // auth.json to link at all, and codex's keychain lookup isn't home-dir-scoped.
       }
-    } catch {
-      // best-effort — a host using OS-keychain-backed auth (not file-backed) has no
-      // auth.json to link at all, and codex's keychain lookup isn't home-dir-scoped.
+      const toml = stringifyToml({
+        ...readAmbientCodexAuthPolicy(ambientHome),
+        mcp_servers: {
+          "agent-deck": { url: mcpUrl, bearer_token_env_var: CODEX_BEARER_ENV_VAR },
+        },
+      });
+      fs.writeFileSync(path.join(codexHome, "config.toml"), toml, { mode: 0o600 });
+    } catch (err) {
+      // Never leave a half-written per-attempt directory behind for the caller to have
+      // to know the path of (PR #19 review round 5) — the caller only learns of failure
+      // via the thrown error, not this path.
+      fs.rmSync(codexHome, { recursive: true, force: true });
+      throw err;
     }
-    const toml = stringifyToml({
-      ...readAmbientCodexAuthPolicy(ambientHome),
-      mcp_servers: {
-        "agent-deck": { url: mcpUrl, bearer_token_env_var: CODEX_BEARER_ENV_VAR },
-      },
-    });
-    fs.writeFileSync(path.join(codexHome, "config.toml"), toml, { mode: 0o600 });
     return {
       mcpConfigPath: codexHome,
       mcpEnv: {
@@ -244,11 +252,16 @@ async function materializeWorkerMcpConfig(opts: {
 
   const dir = getExecutionAuthorityConfigDir();
   const filePath = path.join(dir, `${opts.authorityId}-${randomUUID()}.json`);
-  fs.writeFileSync(
-    filePath,
-    JSON.stringify(urlHeaderMcpConfig(mcpUrl, opts.authorityId, opts.authoritySecret, opts.worktreePath)),
-    { mode: 0o600 }
-  );
+  try {
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(urlHeaderMcpConfig(mcpUrl, opts.authorityId, opts.authoritySecret, opts.worktreePath)),
+      { mode: 0o600 }
+    );
+  } catch (err) {
+    fs.rmSync(filePath, { force: true });
+    throw err;
+  }
   return { mcpConfigPath: filePath };
 }
 
@@ -369,14 +382,23 @@ export async function acquireWorkerAuthority(opts: {
     return { ok: false, kind: "infra_failure", reason: `authority preflight failed: ${verified.reason}` };
   }
 
-  // AUTHORITY_SUPPORTED_RUNTIMES was already checked above, so this narrowing is sound.
-  const { mcpConfigPath, mcpEnv } = await materializeWorkerMcpConfig({
-    runtime: opts.runtime as "claude_code" | "codex_local",
-    authorityId: authority.authorityId,
-    authoritySecret: authority.authoritySecret,
-    worktreePath: opts.worktreePath,
-  });
-  return { ok: true, authorityId: authority.authorityId, mcpConfigPath, mcpEnv, expiresAt: authority.expiresAt };
+  try {
+    // AUTHORITY_SUPPORTED_RUNTIMES was already checked above, so this narrowing is sound.
+    const { mcpConfigPath, mcpEnv } = await materializeWorkerMcpConfig({
+      runtime: opts.runtime as "claude_code" | "codex_local",
+      authorityId: authority.authorityId,
+      authoritySecret: authority.authoritySecret,
+      worktreePath: opts.worktreePath,
+    });
+    return { ok: true, authorityId: authority.authorityId, mcpConfigPath, mcpEnv, expiresAt: authority.expiresAt };
+  } catch (err) {
+    // Same contract as a verify failure just above: a minted authority the caller never
+    // learns the id of (because this function never returned it) would otherwise sit
+    // live until TTL, unrevoked, for the full developer/reviewer session length (PR #19
+    // review round 5).
+    await revokeAuthority(authority.authorityId);
+    return { ok: false, kind: "infra_failure", reason: `authority materialization failed: ${(err as Error).message}` };
+  }
 }
 
 /**
