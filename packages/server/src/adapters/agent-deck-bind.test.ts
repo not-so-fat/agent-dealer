@@ -194,6 +194,62 @@ test("acquireWorkerAuthority materializes a CODEX_HOME directory, wiring both CO
   }
 });
 
+// PR #19 review round 2: CODEX_HOME also owns codex's file-backed login credentials
+// (auth.json) — a freshly-materialized isolated home lacking it would authenticate as
+// logged out and fail every spawn on a host using file-backed (not keychain) storage.
+test("acquireWorkerAuthority for codex_local copies the ambient auth.json into the isolated CODEX_HOME, never the ambient config.toml", async () => {
+  const ambientCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ambient-codex-"));
+  fs.writeFileSync(path.join(ambientCodexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "real-secret-token" } }));
+  fs.writeFileSync(path.join(ambientCodexHome, "config.toml"), 'model = "should-not-be-copied"\n');
+  const prevCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = ambientCodexHome;
+  try {
+    const result = await acquireWorkerAuthority({
+      ...BASE_OPTS,
+      runtime: "codex_local",
+      mint: async () => MINT_OK,
+      verifyCallTool: async () => textResult({ id: DECK }),
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      const copiedAuth = fs.readFileSync(path.join(result.mcpConfigPath, "auth.json"), "utf8");
+      assert.match(copiedAuth, /real-secret-token/);
+      // Only auth.json is carried over — the ambient config.toml (whatever MCP servers
+      // or settings it defines) must not leak into the isolated, scoped home.
+      const isolatedToml = fs.readFileSync(path.join(result.mcpConfigPath, "config.toml"), "utf8");
+      assert.doesNotMatch(isolatedToml, /should-not-be-copied/);
+      await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
+    }
+  } finally {
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevCodexHome;
+    fs.rmSync(ambientCodexHome, { recursive: true, force: true });
+  }
+});
+
+test("acquireWorkerAuthority for codex_local tolerates no ambient auth.json (e.g. OS-keychain-backed login)", async () => {
+  const ambientCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ambient-codex-nokey-"));
+  const prevCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = ambientCodexHome;
+  try {
+    const result = await acquireWorkerAuthority({
+      ...BASE_OPTS,
+      runtime: "codex_local",
+      mint: async () => MINT_OK,
+      verifyCallTool: async () => textResult({ id: DECK }),
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(fs.existsSync(path.join(result.mcpConfigPath, "auth.json")), false);
+      await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
+    }
+  } finally {
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevCodexHome;
+    fs.rmSync(ambientCodexHome, { recursive: true, force: true });
+  }
+});
+
 test("acquireWorkerAuthority refuses cursor_local — no mechanism isolates its MCP config from ambient/global servers", async () => {
   let mintCalled = false;
   const result = await acquireWorkerAuthority({
@@ -206,7 +262,10 @@ test("acquireWorkerAuthority refuses cursor_local — no mechanism isolates its 
   });
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.equal(result.kind, "infra_failure");
+    // Its own kind, never infra_failure (PR #19 review round 2) — this is a permanent
+    // config mismatch, and the caller must route it non-retryably rather than burn the
+    // bounded infra-retry budget on an attempt that fails identically every time.
+    assert.equal(result.kind, "runtime_unsupported");
     assert.match(result.reason, /not supported for runtime cursor_local/);
   }
   // Rejected before ever minting — no authority is issued (and left unrevoked) for a

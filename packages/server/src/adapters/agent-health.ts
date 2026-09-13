@@ -146,6 +146,18 @@ function agentSpecificIssues(
     });
   }
   // Codex deck binding uses the Agent Deck marketplace plugin (not `agent-deck use --client codex`).
+  // cursor_local execution authority isn't wired at all (agent-deck-bind.ts's
+  // AUTHORITY_SUPPORTED_RUNTIMES, PR #19 review) — cursor-agent has no mechanism to
+  // isolate a per-attempt MCP config from its ambient project/global config, so it never
+  // gets one. Surfacing this here, before a run ever starts, is what actually saves the
+  // wasted infra-retry budget the review flagged: without it, every attempt mints,
+  // spawns, and dies on the same deterministic mismatch until maxInfraAttempts is spent.
+  if (agent.deckId && agent.runtime === "cursor_local") {
+    issues.push({
+      code: "deck_runtime_unsupported",
+      message: "Cursor cannot use Agent Deck yet — no per-attempt MCP config isolation exists for it. Unset the deck or choose a different runtime.",
+    });
+  }
   return issues;
 }
 

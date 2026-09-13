@@ -24,6 +24,7 @@ import type { Runtime } from "@agent-dealer/shared";
 import { getAgentDeckMcpUrl } from "./agent-deck.js";
 import { mintAuthority as defaultMintAuthority, revokeAuthority, type MintAuthorityInput, type MintAuthorityResult } from "./execution-authority.js";
 import { getExecutionAuthorityConfigDir } from "../paths.js";
+import { resolveAmbientCodexHome } from "../cli-env.js";
 
 export { revokeAuthority };
 
@@ -75,6 +76,11 @@ export type WorkerAuthorityOutcome =
   /** Deck returned a typed control-plane requirement — never retried with the same inputs;
    * the caller must release the worker and route to a human action (NOT-87 §6.3). */
   | { ok: false; kind: "interaction_required"; reason: string }
+  /** This profile's (runtime, deckId) combination has no isolation mechanism at all
+   * (currently: cursor_local + any deck) — a permanent configuration mismatch, not a
+   * transient hiccup. Never retried: retrying spawns and fails identically every time
+   * until the infra-attempt budget is burned for nothing (PR #19 review). */
+  | { ok: false; kind: "runtime_unsupported"; reason: string }
   /** Enrollment/config/network failure — the caller's existing bounded infra-retry policy applies. */
   | { ok: false; kind: "infra_failure"; reason: string };
 
@@ -131,7 +137,14 @@ function urlHeaderMcpConfig(mcpUrl: string, authorityId: string, authoritySecret
  *   the secret itself is passed via that env var at spawn time, never written to disk.
  *   Both `CODEX_HOME` and the bearer env var are returned in `mcpEnv` for `spawn.ts` to
  *   set on the child process; without `CODEX_HOME` set, codex would silently fall back
- *   to its default (ambient, unscoped) config root.
+ *   to its default (ambient, unscoped) config root. `CODEX_HOME` also owns codex's own
+ *   file-backed login credentials (`auth.json`, used when `cli_auth_credentials_store`
+ *   is `"file"`, or `"auto"` falling back to it — common on headless/Linux hosts without
+ *   an OS keychain) — `agent-health.ts`'s `codex login status` check runs against the
+ *   *ambient* home, so a freshly-materialized isolated home lacking that file would
+ *   authenticate as logged out and fail every spawn despite health reporting healthy
+ *   (PR #19 review). The effective credential file is copied in (never the ambient
+ *   `config.toml`/`mcp_servers` table — that's the very thing being scoped away).
  *
  * `runtime` is asserted supported by the caller (`acquireWorkerAuthority`) — cursor is
  * never passed here.
@@ -148,6 +161,16 @@ async function materializeWorkerMcpConfig(opts: {
   if (opts.runtime === "codex_local") {
     const codexHome = path.join(getExecutionAuthorityConfigDir(), `codex-home-${opts.authorityId}-${randomUUID()}`);
     fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+    try {
+      const ambientAuthPath = path.join(resolveAmbientCodexHome(), "auth.json");
+      if (fs.existsSync(ambientAuthPath)) {
+        fs.copyFileSync(ambientAuthPath, path.join(codexHome, "auth.json"));
+        fs.chmodSync(path.join(codexHome, "auth.json"), 0o600);
+      }
+    } catch {
+      // best-effort — a host using OS-keychain-backed auth (not file-backed) has no
+      // auth.json to copy at all, and codex's keychain lookup isn't home-dir-scoped.
+    }
     const toml = [
       "[mcp_servers.agent-deck]",
       `url = ${JSON.stringify(mcpUrl)}`,
@@ -244,7 +267,7 @@ export async function acquireWorkerAuthority(opts: {
   if (!AUTHORITY_SUPPORTED_RUNTIMES.has(opts.runtime)) {
     return {
       ok: false,
-      kind: "infra_failure",
+      kind: "runtime_unsupported",
       reason: `execution authority is not supported for runtime ${opts.runtime} — no isolation mechanism for its MCP config exists yet`,
     };
   }

@@ -176,6 +176,9 @@ export async function runDeveloperEffect(
         if (acquired.kind === "interaction_required") {
           return { kind: "interaction_required", reason: acquired.reason };
         }
+        if (acquired.kind === "runtime_unsupported") {
+          return { kind: "deck_runtime_unsupported", reason: acquired.reason };
+        }
         return { kind: "adapter_failure", reason: `deck authority acquisition failed: ${acquired.reason}` };
       }
       workerAuthority = { authorityId: acquired.authorityId, mcpConfigPath: acquired.mcpConfigPath, mcpEnv: acquired.mcpEnv };

@@ -19,7 +19,11 @@ export type DeveloperOutcome =
   /** Agent Deck returned a typed control-plane requirement (INTERACTION_REQUIRED) minting
    * or verifying this attempt's execution authority — never retried with the same inputs
    * (NOT-87). */
-  | { kind: "interaction_required"; reason: string };
+  | { kind: "interaction_required"; reason: string }
+  /** This profile's (runtime, deckId) combination has no execution-authority isolation
+   * mechanism at all (agent-deck-bind.ts's AUTHORITY_SUPPORTED_RUNTIMES) — a permanent
+   * config mismatch, not a transient hiccup; retrying reproduces it identically. */
+  | { kind: "deck_runtime_unsupported"; reason: string };
 
 export type ReviewerOutcome =
   | { kind: "verdict"; result: ReviewerResult }
@@ -28,7 +32,9 @@ export type ReviewerOutcome =
   | { kind: "publish_failed" }
   /** Agent Deck returned a typed control-plane requirement minting or verifying this
    * attempt's execution authority — never retried with the same inputs (NOT-87). */
-  | { kind: "interaction_required"; reason: string };
+  | { kind: "interaction_required"; reason: string }
+  /** See DeveloperOutcome's identical kind. */
+  | { kind: "deck_runtime_unsupported"; reason: string };
 
 export interface RouteLimits {
   currentRound: number;
@@ -66,6 +72,11 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
       // decision, not a transient hiccup); retrying with the same authority request
       // would fail identically (NOT-87 §6.3).
       return { next: "human_action", actionType: "deck_interaction_required", reason: outcome.reason };
+    case "deck_runtime_unsupported":
+      // Never spends any budget, same reasoning as interaction_required — this is a
+      // Dealer-side profile misconfiguration (not a Deck decision), so it's a plain
+      // policy_escalation rather than deck_interaction_required.
+      return { next: "human_action", actionType: "policy_escalation", reason: outcome.reason };
     case "dirty_worktree":
       // Never spends any budget — an unclean handoff is preserved for inspection, not retried blindly.
       return { next: "human_action", actionType: "policy_escalation", reason: "Developer worktree has uncommitted changes after the session ended." };
@@ -139,6 +150,9 @@ export function routeReviewerOutcome(
   switch (outcome.kind) {
     case "interaction_required":
       return { next: "human_action", actionType: "deck_interaction_required", reason: outcome.reason };
+    case "deck_runtime_unsupported":
+      // See DeveloperOutcome's identical case — never spends any budget.
+      return { next: "human_action", actionType: "policy_escalation", reason: outcome.reason };
     case "stale":
       return infraAttemptsRemain(limits)
         ? { next: "retry_reviewer_at_new_head", headSha: outcome.currentHeadSha }

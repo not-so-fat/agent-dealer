@@ -244,6 +244,9 @@ export async function runReviewerEffect(
         if (acquired.kind === "interaction_required") {
           return { kind: "interaction_required", reason: acquired.reason };
         }
+        if (acquired.kind === "runtime_unsupported") {
+          return { kind: "deck_runtime_unsupported", reason: acquired.reason };
+        }
         return { kind: "session_failed" };
       }
       workerAuthority = { authorityId: acquired.authorityId, mcpConfigPath: acquired.mcpConfigPath, mcpEnv: acquired.mcpEnv };
