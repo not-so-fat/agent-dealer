@@ -15,6 +15,7 @@ function action(requestedAt: string, resolvedAt: string | null): HumanAction {
     evidenceJson: null,
     responseOptionsJson: null,
     continuationPreviewJson: null,
+    requestId: null,
     status: resolvedAt ? "resolved" : "open",
     resolutionJson: null,
     resolvedBy: null,

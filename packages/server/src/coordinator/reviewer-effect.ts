@@ -242,7 +242,7 @@ export async function runReviewerEffect(
       if (!acquired.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
         if (acquired.kind === "interaction_required") {
-          return { kind: "interaction_required", reason: acquired.reason };
+          return { kind: "interaction_required", reason: acquired.reason, requestId: acquired.requestId };
         }
         if (acquired.kind === "runtime_unsupported") {
           return { kind: "deck_runtime_unsupported", reason: acquired.reason };

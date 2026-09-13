@@ -112,12 +112,64 @@ test("acquireWorkerAuthority revokes and rejects when get_bound_deck reports a d
 test("acquireWorkerAuthority returns interaction_required without writing a config when Deck denies mint", async () => {
   const result = await acquireWorkerAuthority({
     ...BASE_OPTS,
-    mint: async () => ({ ok: false, code: "INTERACTION_REQUIRED", message: "Control-plane decision required" }),
+    mint: async () => ({
+      ok: false,
+      code: "INTERACTION_REQUIRED",
+      message: "Control-plane decision required",
+      requestId: "req_mint1",
+    }),
   });
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.equal(result.kind, "interaction_required");
     assert.equal(result.reason, "Control-plane decision required");
+    if (result.kind === "interaction_required") assert.equal(result.requestId, "req_mint1");
+  }
+});
+
+// NOT-93: INTERACTION_REQUIRED is a control-plane decision Deck can return for ANY
+// authorized call, not just mint (NOT-85 §11) — the get_bound_deck preflight verify call
+// must recognize Deck's structured contract error for it, not collapse it to an ordinary
+// infra_failure the way every other verify failure does. Misclassifying this would burn
+// the bounded infra-retry budget and eventually mis-route to policy_escalation instead of
+// deck_interaction_required.
+test("acquireWorkerAuthority revokes and returns interaction_required (with Deck's request id) when get_bound_deck itself is denied with INTERACTION_REQUIRED", async () => {
+  let revokeUrl: string | undefined;
+  const fetchMock = (await import("node:test")).mock.method(globalThis, "fetch", async (url: string) => {
+    revokeUrl = String(url);
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  });
+  process.env.AGENT_DECK_ENROLLMENT_ID = "enr_abc";
+  process.env.AGENT_DECK_ENROLLMENT_SECRET = "enrs_secret";
+  try {
+    const result = await acquireWorkerAuthority({
+      ...BASE_OPTS,
+      mint: async () => MINT_OK,
+      verifyCallTool: async () =>
+        errorResult(
+          JSON.stringify({
+            ok: false,
+            error_code: "INTERACTION_REQUIRED",
+            message: "Control-plane decision required; do not hold the worker",
+            correlation: { requestId: "req_verify1" },
+          })
+        ),
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.kind, "interaction_required");
+      if (result.kind === "interaction_required") {
+        assert.equal(result.reason, "Control-plane decision required; do not hold the worker");
+        assert.equal(result.requestId, "req_verify1");
+      }
+    }
+    // The minted authority has no further legitimate use once denied — revoked, not left
+    // to expire by TTL.
+    assert.match(revokeUrl ?? "", /\/authorities\/authz_1\/revoke$/);
+  } finally {
+    fetchMock.mock.restore();
+    delete process.env.AGENT_DECK_ENROLLMENT_ID;
+    delete process.env.AGENT_DECK_ENROLLMENT_SECRET;
   }
 });
 

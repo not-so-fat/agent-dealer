@@ -34,6 +34,7 @@ import {
 import {
   createHumanAction,
   findOpenHumanAction,
+  findOpenHumanActionByRequestId,
   getHumanAction,
   listHumanActionsForIssue,
   resolveHumanAction,
@@ -572,6 +573,17 @@ function applyEffect(
       (actionType === "policy_escalation" || actionType === "deck_interaction_required") &&
       reviewerOutcome !== undefined &&
       reviewerOutcome.kind !== "verdict";
+    // A repeated INTERACTION_REQUIRED for the same Deck request must land on the one
+    // open action it already raised, not pile up a duplicate (NOT-93) — full duplicate-
+    // delivery/race-proofing across concurrent writers is NOT-91's job; this is a plain
+    // read-then-create check inside this transaction.
+    const existingForRequest =
+      actionType === "deck_interaction_required" && effect.requestId
+        ? findOpenHumanActionByRequestId(issue.id, actionType, effect.requestId)
+        : null;
+    if (existingForRequest) {
+      return { ...base, humanActionId: existingForRequest.id };
+    }
     const action = createHumanAction({
       issueId: issue.id,
       workflowInstanceId: instance.id,
@@ -584,6 +596,7 @@ function applyEffect(
       // pre-transition issue param would still carry the stale SHA a "resume" must not reuse.
       continuationPreview: resumeAsReviewer ? { resumeRole: "reviewer", resumeHeadSha: issueNow.headSha } : undefined,
       responseOptions: responseOptionsFor(actionType, resumeAsReviewer),
+      requestId: effect.requestId ?? null,
     });
     if (actionType === "final_review") ev.emit("final_review.requested");
     ev.emit("human_action.requested", { payload: { actionType, actionId: action.id } });

@@ -30,7 +30,15 @@ export interface MintedAuthority {
 
 export type MintAuthorityResult =
   | { ok: true; authority: MintedAuthority }
-  | { ok: false; code: ExecutionAuthorityErrorCode; message: string };
+  | {
+      ok: false;
+      code: ExecutionAuthorityErrorCode;
+      message: string;
+      /** Deck's own correlation id for this INTERACTION_REQUIRED response, when supplied
+       * (NOT-85 §11's `AuditCorrelation.requestId`) — lets Dealer correlate/dedupe the
+       * human action it raises against Deck's own audit trail (NOT-93). */
+      requestId?: string;
+    };
 
 export interface MintAuthorityInput {
   runId: string;
@@ -47,6 +55,9 @@ type DeckContractErrorBody = {
   ok?: boolean;
   error_code?: string;
   message?: string;
+  /** Mirrors Deck's `AuditCorrelation` (agent_deck packages/backend/src/execution-authority/types.ts) —
+   * only `requestId` is read here, everything else is unused by this client. */
+  correlation?: { requestId?: string };
 };
 
 const KNOWN_CODES: ReadonlySet<string> = new Set([
@@ -108,7 +119,12 @@ export async function mintAuthority(input: MintAuthorityInput): Promise<MintAuth
         })
       | null;
     if (!res.ok || !json || json.ok === false || !json.data) {
-      return { ok: false, code: mapErrorCode(json?.error_code), message: json?.message ?? `mint failed: HTTP ${res.status}` };
+      return {
+        ok: false,
+        code: mapErrorCode(json?.error_code),
+        message: json?.message ?? `mint failed: HTTP ${res.status}`,
+        requestId: json?.correlation?.requestId,
+      };
     }
     const { authority, authoritySecret } = json.data;
     return {

@@ -75,8 +75,11 @@ export type WorkerAuthorityOutcome =
       expiresAt: string;
     }
   /** Deck returned a typed control-plane requirement — never retried with the same inputs;
-   * the caller must release the worker and route to a human action (NOT-87 §6.3). */
-  | { ok: false; kind: "interaction_required"; reason: string }
+   * the caller must release the worker and route to a human action (NOT-87 §6.3).
+   * `requestId` is Deck's own correlation id for this response, when supplied — carried
+   * through so the human action it raises can dedupe/correlate against Deck's audit
+   * trail (NOT-93). */
+  | { ok: false; kind: "interaction_required"; reason: string; requestId?: string }
   /** This profile's (runtime, deckId) combination has no isolation mechanism at all
    * (currently: cursor_local + any deck) — a permanent configuration mismatch, not a
    * transient hiccup. Never retried: retrying spawns and fails identically every time
@@ -96,6 +99,30 @@ function resultText(result: unknown): string {
 export function assertToolResultOk(result: unknown, name: string): void {
   if ((result as { isError?: boolean } | null)?.isError) {
     throw new Error(`${name} returned an error: ${resultText(result) || "(no detail)"}`);
+  }
+}
+
+/**
+ * An authorized call under execution authority (any tool, not just mint) can be denied
+ * with Deck's typed `INTERACTION_REQUIRED` contract error (NOT-85 §11) — the same
+ * control-plane signal `mintAuthority` can return, just surfaced through an MCP tool
+ * result's `{ isError: true }` body instead of an HTTP error body. Returns the parsed
+ * `requestId` (if Deck supplied one) when the result IS that specific denial, or `null`
+ * for every other error shape (network failure, a different error_code, unparseable
+ * body) — those stay ordinary infra failures, never misread as a control-plane decision.
+ */
+function parseInteractionRequired(result: unknown): { requestId?: string; message?: string } | null {
+  if (!(result as { isError?: boolean } | null)?.isError) return null;
+  try {
+    const body = parseDeckToolResult(result) as {
+      error_code?: string;
+      message?: string;
+      correlation?: { requestId?: string };
+    };
+    if (body.error_code !== "INTERACTION_REQUIRED") return null;
+    return { requestId: body.correlation?.requestId, message: body.message };
+  } catch {
+    return null;
   }
 }
 
@@ -274,21 +301,35 @@ function assertBoundDeckMatches(result: unknown, expectedDeckId: string): void {
   }
 }
 
+type VerifyAuthorityResult =
+  | { ok: true }
+  | { ok: false; kind: "interaction_required"; reason: string; requestId?: string }
+  | { ok: false; kind: "infra_failure"; reason: string };
+
 async function verifyAuthority(opts: {
   authorityId: string;
   authoritySecret: string;
   deckId: string;
   callTool?: DeckToolCaller;
   timeoutMs: number;
-}): Promise<{ ok: true } | { ok: false; reason: string }> {
+}): Promise<VerifyAuthorityResult> {
   if (opts.callTool) {
+    let result: unknown;
     try {
-      const result = await opts.callTool("get_bound_deck", {});
+      result = await opts.callTool("get_bound_deck", {});
+    } catch (err) {
+      return { ok: false, kind: "infra_failure", reason: (err as Error).message };
+    }
+    const interaction = parseInteractionRequired(result);
+    if (interaction) {
+      return { ok: false, kind: "interaction_required", reason: interactionRequiredReason(interaction), requestId: interaction.requestId };
+    }
+    try {
       assertToolResultOk(result, "get_bound_deck");
       assertBoundDeckMatches(result, opts.deckId);
       return { ok: true };
     } catch (err) {
-      return { ok: false, reason: (err as Error).message };
+      return { ok: false, kind: "infra_failure", reason: (err as Error).message };
     }
   }
   const mcpBase = getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "");
@@ -305,6 +346,10 @@ async function verifyAuthority(opts: {
           setTimeout(() => reject(new Error(`get_bound_deck timed out after ${opts.timeoutMs}ms`)), opts.timeoutMs)
         ),
       ]);
+      const interaction = parseInteractionRequired(result);
+      if (interaction) {
+        return { ok: false, kind: "interaction_required", reason: interactionRequiredReason(interaction), requestId: interaction.requestId };
+      }
       assertToolResultOk(result, "get_bound_deck");
       assertBoundDeckMatches(result, opts.deckId);
       return { ok: true };
@@ -312,11 +357,11 @@ async function verifyAuthority(opts: {
       await client.close();
     }
   } catch (err) {
-    return { ok: false, reason: (err as Error).message };
+    return { ok: false, kind: "infra_failure", reason: (err as Error).message };
   }
 }
 
-function interactionRequiredReason(result: Extract<MintAuthorityResult, { ok: false }>): string {
+function interactionRequiredReason(result: { message?: string }): string {
   return result.message || "Agent Deck requires a control-plane decision before this attempt can continue.";
 }
 
@@ -352,7 +397,7 @@ export async function acquireWorkerAuthority(opts: {
   });
   if (!minted.ok) {
     if (minted.code === "INTERACTION_REQUIRED") {
-      return { ok: false, kind: "interaction_required", reason: interactionRequiredReason(minted) };
+      return { ok: false, kind: "interaction_required", reason: interactionRequiredReason(minted), requestId: minted.requestId };
     }
     return { ok: false, kind: "infra_failure", reason: `${minted.code}: ${minted.message}` };
   }
@@ -378,7 +423,12 @@ export async function acquireWorkerAuthority(opts: {
     timeoutMs,
   });
   if (!verified.ok) {
+    // Revoked either way — a minted authority that failed preflight (whatever the
+    // reason) has no further legitimate use (NOT-85 §6.3).
     await revokeAuthority(authority.authorityId);
+    if (verified.kind === "interaction_required") {
+      return { ok: false, kind: "interaction_required", reason: verified.reason, requestId: verified.requestId };
+    }
     return { ok: false, kind: "infra_failure", reason: `authority preflight failed: ${verified.reason}` };
   }
 
