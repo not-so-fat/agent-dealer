@@ -192,6 +192,16 @@ function fixtureMint(): (input: MintAuthorityInput) => Promise<MintAuthorityResu
   };
 }
 
+/** Without this, `releaseAuthority` falls through to the production `revokeAuthority`
+ * (authority-lifecycle.ts's default) — a no-op with no enrollment env configured, but a
+ * real HTTP call to Deck's revoke endpoint (up to a 5s timeout) with a fixture authority
+ * id on a machine that *does* have `AGENT_DECK_ENROLLMENT_ID`/`_SECRET` set (e.g. a
+ * dogfood box), contradicting this suite's hermetic-fixture claim (PR #24 review). */
+const revokeCalls: string[] = [];
+async function fixtureRevoke(authorityId: string): Promise<void> {
+  revokeCalls.push(authorityId);
+}
+
 /** Stands in for the real `get_bound_deck` MCP round trip agent-deck-bind.ts performs to
  * confirm a freshly minted authority is actually scoped to the intended deck. */
 const fixtureDeckCallTool = async (name: string) => {
@@ -268,10 +278,10 @@ test(
     // an empty store and the reviewer would never find a PR to publish against).
     const github = fakeGithub();
     registerEffectHandler("developer", (ctx) =>
-      runDeveloperEffect(ctx, { spawn: devSpawn, github, mint: fixtureMint(), deckCallTool: fixtureDeckCallTool })
+      runDeveloperEffect(ctx, { spawn: devSpawn, github, mint: fixtureMint(), revoke: fixtureRevoke, deckCallTool: fixtureDeckCallTool })
     );
     registerEffectHandler("reviewer", (ctx) =>
-      runReviewerEffect(ctx, { spawn: reviewerSpawn, github, mint: fixtureMint(), deckCallTool: fixtureDeckCallTool })
+      runReviewerEffect(ctx, { spawn: reviewerSpawn, github, mint: fixtureMint(), revoke: fixtureRevoke, deckCallTool: fixtureDeckCallTool })
     );
 
     const app = Fastify({ logger: false });
@@ -387,6 +397,11 @@ test(
     // attempts through to a normal close (never left `active`/`acquiring`, never leaked).
     assert.equal(mintCalls.length, 2);
     assert.ok(mintCalls.every((c) => c.deckId === DECK_ID));
+    // ...and every minted (fixture) authority was released through the fixture revoke,
+    // never the production one — proves this suite never depends on network reachability
+    // or real Deck enrollment env to stay hermetic.
+    assert.equal(revokeCalls.length, 2);
+    assert.deepEqual(revokeCalls.sort(), mintCalls.map((c) => `authz_${c.idempotencyKey}`).sort());
     const attempts = getDb()
       .prepare(`SELECT owner_kind, status FROM authority_attempts WHERE deck_id = ? ORDER BY owner_kind`)
       .all(DECK_ID) as Array<{ owner_kind: string; status: string }>;
