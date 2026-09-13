@@ -12,6 +12,7 @@ const ACTION_LABELS: Record<HumanActionType, string> = {
   policy_escalation: "Policy escalation",
   product_scope_decision: "Product scope decision",
   deck_interaction_required: "Agent Deck interaction required",
+  reflection_interaction_required: "Reflection interaction required",
 };
 
 const RESOLVED_BY = "web";

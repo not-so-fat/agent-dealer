@@ -646,6 +646,11 @@ function questionFor(actionType: HumanActionType, reason: string, resumeAsReview
       return resumeAsReviewer
         ? `${reason} Resolve it in Agent Deck, then retry the review, or close the issue?`
         : `${reason} Resolve it in Agent Deck, then resume development, or close the issue?`;
+    case "reflection_interaction_required":
+      // Never actually raised through applyEffect — reflect-trigger.ts creates this action
+      // type directly with its own question text (NOT-94). Case exists only so this
+      // function stays total over HumanActionType.
+      throw new Error("reflection_interaction_required is not raised through applyEffect");
   }
 }
 
@@ -680,6 +685,9 @@ export function responseOptionsFor(
         { choice: "resume", label: resumeAsReviewer ? "Retry review" : "Resume with a new attempt" },
         { choice: "close", label: "Close" },
       ];
+    case "reflection_interaction_required":
+      // Never actually raised through applyEffect — see questionFor's identical case.
+      throw new Error("reflection_interaction_required is not raised through applyEffect");
   }
 }
 

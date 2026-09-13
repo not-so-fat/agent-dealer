@@ -111,7 +111,7 @@ export function assertToolResultOk(result: unknown, name: string): void {
  * for every other error shape (network failure, a different error_code, unparseable
  * body) — those stay ordinary infra failures, never misread as a control-plane decision.
  */
-function parseInteractionRequired(result: unknown): { requestId?: string; message?: string } | null {
+export function parseInteractionRequired(result: unknown): { requestId?: string; message?: string } | null {
   if (!(result as { isError?: boolean } | null)?.isError) return null;
   try {
     const body = parseDeckToolResult(result) as {

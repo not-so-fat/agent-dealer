@@ -24,13 +24,20 @@ export interface HumanResolutionResult {
   triggerReflect?: boolean;
 }
 
-/** The only choices resolveHumanActionOutcome accepts per action type — the stored "response options." */
+/**
+ * The only choices resolveHumanActionOutcome accepts per action type — the stored "response
+ * options." `reflection_interaction_required` is listed here only so this map stays total
+ * over `HumanActionType`; it is never routed through `resolveHumanActionOutcome` (NOT-94's
+ * reflect-trigger.ts resolves it directly — reflection runs after the issue is already
+ * `done`, and its choices must never reopen the issue or enqueue developer/reviewer work).
+ */
 const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
   final_review: ["complete", "repair", "close"],
   attempts_exhausted: ["retry", "close"],
   policy_escalation: ["resume", "close"],
   product_scope_decision: ["resume"],
   deck_interaction_required: ["resume", "close"],
+  reflection_interaction_required: ["retry", "dismiss"],
 };
 
 /**
