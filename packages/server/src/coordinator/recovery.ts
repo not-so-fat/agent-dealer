@@ -37,17 +37,20 @@ export interface RecoverResult {
 }
 
 /** Revokes (best-effort, fire-and-forget) whatever `authority_attempts` rows are still open
- * for a reclaimed/dead-lettered work item — `work_items.kind` ('developer' | 'reviewer') is
- * exactly the ledger's owner_kind for this item's own id (NOT-91). An `active` row (known
- * authorityId) revokes immediately; an `acquiring` row with none yet is resolved via its
- * stored idempotencyKey rather than dropped on a guess (NOT-91 review, round 3) — also
- * fire-and-forget, since recovery's own CAS loop must stay synchronous and not block on
- * Deck's availability. */
+ * for a reclaimed/dead-lettered work item. The ledger's owner_id for a developer/reviewer
+ * attempt is `${issueId}:${kind}` — stable across that item's own retry rollover, never the
+ * work-item row's own UUID (NOT-91 review, round 5: keying on the work-item id let a fresh
+ * enqueued retry item see no predecessor and mint beside one that was never actually
+ * resolved). An `active` row (known authorityId) revokes immediately; an `acquiring` row with
+ * none yet is resolved via its stored idempotencyKey rather than dropped on a guess (NOT-91
+ * review, round 3) — also fire-and-forget, since recovery's own CAS loop must stay
+ * synchronous and not block on Deck's availability. */
 function revokeStaleAuthoritiesForItem(item: WorkItem): void {
-  for (const row of revokeOpenActiveAuthorityAttempts(item.kind, item.id)) {
+  const ownerId = `${item.issueId}:${item.kind}`;
+  for (const row of revokeOpenActiveAuthorityAttempts(item.kind, ownerId)) {
     if (row.authorityId) revokeAuthority(row.authorityId).catch(() => {});
   }
-  const acquiring = listOpenAcquiringAuthorityAttempts(item.kind, item.id);
+  const acquiring = listOpenAcquiringAuthorityAttempts(item.kind, ownerId);
   if (acquiring.length > 0) resolveAcquiringAttempts(acquiring).catch(() => {});
 }
 

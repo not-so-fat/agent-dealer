@@ -27,16 +27,17 @@ import {
   activateAuthorityAttempt,
   closeAuthorityAttempt,
   createAuthorityAttempt,
-  getAuthorityAttempt,
   listAllOpenAuthorityAttempts,
   listOpenAcquiringAuthorityAttempts,
+  listStaleAcquiringAuthorityAttempts,
   markAuthorityAttemptFailed,
   markAuthorityAttemptRevoked,
+  markAuthorityAttemptStale,
   revokeOpenActiveAuthorityAttempts,
   type AuthorityAttempt,
   type AuthorityAttemptOwnerKind,
 } from "../repository/authority-attempts.js";
-import { getWorkItem } from "../repository/work-items.js";
+import { listWorkItemsForIssue } from "../repository/work-items.js";
 import {
   mintAuthority as defaultMintAuthority,
   revokeAuthority as defaultRevokeAuthority,
@@ -51,7 +52,9 @@ export type RevokeFn = (authorityId: string) => Promise<void>;
 
 export interface AcquireAuthorityAttemptInput {
   ownerKind: AuthorityAttemptOwnerKind;
-  /** work_item id (developer/reviewer) | issue id (reflect) | run id (outbound_delivery). */
+  /** `${issueId}:${ownerKind}` (developer/reviewer — stable across that role's own work-item
+   * retry rollover, never a work-item row's own UUID) | issue id (reflect) | run id
+   * (outbound_delivery). */
   ownerId: string;
   runId: string;
   attemptId: string;
@@ -225,6 +228,12 @@ async function resolveAcquiringAttempt(
   mint: MintFn,
   revoke: RevokeFn
 ): Promise<"revoked" | "unresolved"> {
+  // Durably flags the row as needing resolution — see schema.sql's `stale_at` comment. If
+  // this replay doesn't manage to resolve it (returns "unresolved" below), the stamp is what
+  // makes it visible to `retryStaleAuthorityAttempts`'s next periodic tick, regardless of
+  // which of the four call sites (startup sweep, cancellation, worker-death reclaim, revoke-
+  // before-new-attempt) got here first (NOT-91 review, round 5).
+  markAuthorityAttemptStale(row.id);
   const resolved = await mint({
     runId: row.runId,
     attemptId: row.attemptId,
@@ -289,11 +298,25 @@ export async function closeOpenAuthorityAttemptsForOwner(
 export interface ReconcileAuthoritiesResult {
   revoked: string[];
   /** `acquiring` rows with no ledger `authorityId` that couldn't be positively resolved this
-   * sweep — left open rather than guessed-terminalized, so a later sweep (this function is
-   * called at startup and periodically thereafter, per index.ts) can still find and close
-   * them once the ambiguity clears. */
+   * sweep — left open (but durably flagged `stale_at`, so `retryStaleAuthorityAttempts`'s
+   * periodic query will keep finding and retrying them) rather than guessed-terminalized. */
   unresolved: string[];
 }
+
+/** A developer/reviewer owner_id is `${issueId}:${ownerKind}` — stable across that role's own
+ * work-item retry rollover (NOT-91 review, round 5), never a work-item row's own UUID. Parses
+ * it back out to look up whether *any* work item currently filling that role for that issue is
+ * `leased` — a live lease means recovery.ts's own reclaim/dead-letter path (which already
+ * revokes on its own trigger) is the one to eventually close this row, not a sweep here. */
+function defaultIsOwnerLeased(ownerKind: AuthorityAttemptOwnerKind, ownerId: string): boolean {
+  if (ownerKind !== "developer" && ownerKind !== "reviewer") return false;
+  const suffix = `:${ownerKind}`;
+  if (!ownerId.endsWith(suffix)) return false;
+  const issueId = ownerId.slice(0, -suffix.length);
+  return listWorkItemsForIssue(issueId).some((item) => item.kind === ownerKind && item.status === "leased");
+}
+
+export type IsOwnerLeasedFn = (ownerKind: AuthorityAttemptOwnerKind, ownerId: string) => boolean;
 
 /**
  * Startup-only (index.ts calls this exactly once, alongside recoverCoordinator(), before
@@ -304,16 +327,14 @@ export interface ReconcileAuthoritiesResult {
  * row is stale" — is true only at a genuine process boundary. Calling this again while the
  * *same* process keeps running would revoke a legitimately in-flight mint or a live
  * reflect/outbound-delivery call out from under it (NOT-91 review, round 4) — that is exactly
- * why the periodic path is a separate function, `retryUnresolvedAuthorityAttempts`, that only
- * ever retries specific rows this sweep (or a previous retry) already flagged unresolved,
- * never re-derives staleness from a fresh scan.
+ * why the periodic path is a separate function, `retryStaleAuthorityAttempts`, that never
+ * rescans every open row and instead only ever retries rows durably flagged `stale_at`.
  *
  * - `acquiring` never legitimately survives a process boundary (it is a sub-second
  *   pre-mint state) — always stale here.
- * - `developer`/`reviewer` rows are stale unless their owning work item is still `leased`;
- *   a live lease means recovery.ts's own reclaim/dead-letter path (which already revokes on
- *   its own trigger) is the one to eventually close it, not this sweep — closing it here too
- *   would race a still-legitimately-running worker.
+ * - `developer`/`reviewer` rows are stale unless their owning role is still `leased` for that
+ *   issue (`defaultIsOwnerLeased`) — closing one here too would race a still-legitimately-
+ *   running worker.
  * - `reflect`/`outbound_delivery` rows are always one-shot, coordinator-process-local calls
  *   with no lease of their own — at a genuine process boundary, if one is still open, the
  *   process that opened it is definitionally gone.
@@ -324,18 +345,18 @@ export interface ReconcileAuthoritiesResult {
 export async function reconcileAuthoritiesAtStartup(deps?: {
   revoke?: RevokeFn;
   mint?: MintFn;
-  isWorkItemLeased?: (workItemId: string) => boolean;
+  isOwnerLeased?: IsOwnerLeasedFn;
 }): Promise<ReconcileAuthoritiesResult> {
   const revoke = deps?.revoke ?? defaultRevokeAuthority;
   const mint = deps?.mint ?? defaultMintAuthority;
-  const isWorkItemLeased = deps?.isWorkItemLeased ?? ((id: string) => getWorkItem(id)?.status === "leased");
+  const isOwnerLeased = deps?.isOwnerLeased ?? defaultIsOwnerLeased;
 
   const revoked: string[] = [];
   const acquiringToResolve: AuthorityAttempt[] = [];
   for (const row of listAllOpenAuthorityAttempts()) {
     const stale =
       row.status === "acquiring" ||
-      (row.ownerKind === "developer" || row.ownerKind === "reviewer" ? !isWorkItemLeased(row.ownerId) : true);
+      (row.ownerKind === "developer" || row.ownerKind === "reviewer" ? !isOwnerLeased(row.ownerKind, row.ownerId) : true);
     if (!stale) continue;
 
     if (row.status === "acquiring" && !row.authorityId) {
@@ -353,30 +374,26 @@ export async function reconcileAuthoritiesAtStartup(deps?: {
 
 /**
  * The periodic counterpart to `reconcileAuthoritiesAtStartup` (index.ts calls this on a
- * bounded interval, seeded with and threading forward the previous call's `unresolved` list).
- * Deliberately takes specific row ids rather than rescanning `listAllOpenAuthorityAttempts()`:
- * unlike the one-time startup sweep, this runs while the process is still live, so re-deriving
- * "every acquiring/process-local row is stale" would revoke a legitimately in-flight mint or a
- * live reflect/outbound-delivery call (NOT-91 review, round 4). Only rows a previous sweep or
- * retry already positively couldn't resolve are retried — and only if still `acquiring` with
- * no `authorityId`, since another path (worker-death reclaim, cancellation, revoke-before-
- * new-attempt) may have already resolved one independently in the meantime.
+ * bounded interval — no state threaded between ticks). Never rescans
+ * `listAllOpenAuthorityAttempts()`: unlike the one-time startup sweep, this runs while the
+ * process is still live, so re-deriving "every acquiring/process-local row is stale" would
+ * revoke a legitimately in-flight mint or a live reflect/outbound-delivery call (NOT-91
+ * review, round 4). Instead queries `listStaleAcquiringAuthorityAttempts()` — rows durably
+ * flagged `stale_at` by `resolveAcquiringAttempt`, from *any* of the four call sites (startup
+ * sweep, cancellation, worker-death reclaim, revoke-before-new-attempt), not just what the
+ * startup sweep itself found (NOT-91 review, round 5: a row that only became stale after
+ * startup, e.g. via a later cancellation, used to have no path back into the periodic retry
+ * at all). A defensive lease check still applies before resolving any of them, in case a row
+ * were ever (incorrectly) flagged stale while still genuinely live.
  */
-export async function retryUnresolvedAuthorityAttempts(
-  rowIds: string[],
-  deps?: { mint?: MintFn; revoke?: RevokeFn; isWorkItemLeased?: (workItemId: string) => boolean }
-): Promise<ResolveAcquiringResult> {
-  const isWorkItemLeased = deps?.isWorkItemLeased ?? ((id: string) => getWorkItem(id)?.status === "leased");
-  const rows: AuthorityAttempt[] = [];
-  for (const id of rowIds) {
-    const row = getAuthorityAttempt(id);
-    if (!row || row.status !== "acquiring" || row.authorityId) continue;
-    // Defense in depth: the tracked id list should never actually contain a live row (it is
-    // seeded only from a genuine process-boundary sweep, before this process's own
-    // coordinator loop starts minting anything), but never resolve one anyway if it somehow
-    // did — a still-leased developer/reviewer owner may have a genuinely in-flight mint.
-    if ((row.ownerKind === "developer" || row.ownerKind === "reviewer") && isWorkItemLeased(row.ownerId)) continue;
-    rows.push(row);
-  }
+export async function retryStaleAuthorityAttempts(deps?: {
+  mint?: MintFn;
+  revoke?: RevokeFn;
+  isOwnerLeased?: IsOwnerLeasedFn;
+}): Promise<ResolveAcquiringResult> {
+  const isOwnerLeased = deps?.isOwnerLeased ?? defaultIsOwnerLeased;
+  const rows = listStaleAcquiringAuthorityAttempts().filter(
+    (row) => !((row.ownerKind === "developer" || row.ownerKind === "reviewer") && isOwnerLeased(row.ownerKind, row.ownerId))
+  );
   return resolveAcquiringAttempts(rows, deps);
 }

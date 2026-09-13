@@ -332,7 +332,7 @@ CREATE TABLE IF NOT EXISTS review_publications (
 CREATE TABLE IF NOT EXISTS authority_attempts (
   id TEXT PRIMARY KEY,
   owner_kind TEXT NOT NULL,        -- 'developer' | 'reviewer' | 'reflect' | 'outbound_delivery'
-  owner_id TEXT NOT NULL,          -- work_item id | issue id | run id, per owner_kind
+  owner_id TEXT NOT NULL,          -- `${issueId}:${kind}` (developer/reviewer) | issue id (reflect) | run id (outbound_delivery) — stable across a work item's own retry rollover, never a work-item row's own UUID
   idempotency_key TEXT NOT NULL,
   authority_id TEXT,               -- Deck's id; null until mint succeeds
   deck_id TEXT NOT NULL,
@@ -341,10 +341,19 @@ CREATE TABLE IF NOT EXISTS authority_attempts (
   ttl_ms INTEGER NOT NULL,
   tool_scope_hint_json TEXT,       -- the original mint's AllowedTool[] hint, when one was given
   status TEXT NOT NULL,            -- 'acquiring' | 'active' | 'closed' | 'revoked' | 'failed'
+  -- Set the moment any path (startup sweep, cancellation, worker-death reclaim, revoke-
+  -- before-new-attempt) determines an `acquiring`/no-authorityId row needs resolving, whether
+  -- or not that same call manages to resolve it immediately. The durable, DB-queryable marker
+  -- the periodic retry sweep scans for (listStaleAcquiringAuthorityAttempts) instead of an
+  -- in-memory list threaded through index.ts — a row flagged stale by any of those four paths
+  -- becomes visible to the next periodic tick regardless of when it was flagged, not just
+  -- what existed at startup (NOT-91 review, round 5).
+  stale_at TEXT,
   expires_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_authority_attempts_owner ON authority_attempts(owner_kind, owner_id);
+CREATE INDEX IF NOT EXISTS idx_authority_attempts_stale ON authority_attempts(status, stale_at) WHERE stale_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_authority_attempts_status ON authority_attempts(status);

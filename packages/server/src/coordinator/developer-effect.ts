@@ -160,6 +160,7 @@ export async function runDeveloperEffect(
     if (snapshot?.deckId) {
       const acquired = await acquireWorkerAuthority({
         ownerKind: "developer",
+        ownerId: `${issue.id}:developer`,
         deckId: snapshot.deckId,
         runId: ctx.instance.id,
         attemptId: workItem.id,

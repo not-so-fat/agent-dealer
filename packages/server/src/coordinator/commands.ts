@@ -1052,10 +1052,14 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
     for (const item of listWorkItemsForIssue(issueId)) {
       if (item.status === "pending" || item.status === "leased") {
         cancelWorkItem(item.id);
-        for (const row of revokeOpenActiveAuthorityAttempts(item.kind, item.id)) {
+        // The ledger's owner_id for a developer/reviewer attempt is `${issueId}:${kind}` —
+        // stable across that item's own retry rollover, never the work-item row's own UUID
+        // (NOT-91 review, round 5).
+        const ownerId = `${issueId}:${item.kind}`;
+        for (const row of revokeOpenActiveAuthorityAttempts(item.kind, ownerId)) {
           if (row.authorityId) authorityIdsToRevoke.push(row.authorityId);
         }
-        acquiringAttemptsToResolve.push(...listOpenAcquiringAuthorityAttempts(item.kind, item.id));
+        acquiringAttemptsToResolve.push(...listOpenAcquiringAuthorityAttempts(item.kind, ownerId));
       }
     }
 

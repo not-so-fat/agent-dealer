@@ -27,10 +27,14 @@ const {
   activateAuthorityAttempt,
   getAuthorityAttempt,
   listOpenAuthorityAttemptsForOwner,
+  markAuthorityAttemptStale,
 } = await import("../repository/authority-attempts.js");
-const { acquireAuthorityForAttempt, reconcileAuthoritiesAtStartup, retryUnresolvedAuthorityAttempts } = await import(
-  "../adapters/authority-lifecycle.js"
-);
+const {
+  acquireAuthorityForAttempt,
+  reconcileAuthoritiesAtStartup,
+  retryStaleAuthorityAttempts,
+  resolveAcquiringAttempts,
+} = await import("../adapters/authority-lifecycle.js");
 const { startWorkflow, abortIssue, resolveHumanActionAndAdvance } = await import("./commands.js");
 const { recoverCoordinator } = await import("./recovery.js");
 const { updateAgent } = await import("../repository/agents.js");
@@ -41,7 +45,13 @@ before(() => {
   migrate();
   updateAgent(BUILTIN_AGENT_CLAUDE_ID, { workspaceRoot: process.env.AGENT_DEALER_HOME! });
 });
-beforeEach(() => getDb().exec("DELETE FROM work_items"));
+beforeEach(() => {
+  getDb().exec("DELETE FROM work_items");
+  // The periodic-retry tests query listStaleAcquiringAuthorityAttempts() globally (unscoped
+  // by owner) — a stale_at row left behind by an earlier test in this shared DB would leak
+  // into that scan and inflate its result.
+  getDb().exec("DELETE FROM authority_attempts");
+});
 
 const DECK = "6e825b59-13de-4ddd-ab7e-55ab5a1c279a";
 
@@ -81,7 +91,7 @@ test("scenario: cancellation revokes an in-flight attempt's execution authority"
 
   const row = createAuthorityAttempt({
     ownerKind: item.kind,
-    ownerId: item.id,
+    ownerId: `${issueId}:${item.kind}`,
     idempotencyKey: `${item.id}:1`,
     deckId: DECK,
     runId: item.id,
@@ -110,7 +120,7 @@ test("scenario: cancelling an item whose authority attempt is still acquiring ne
   // (NOT-91 review, round 3).
   const row = createAuthorityAttempt({
     ownerKind: item.kind,
-    ownerId: item.id,
+    ownerId: `${issueId}:${item.kind}`,
     idempotencyKey: `${item.id}:1`,
     deckId: DECK,
     runId: item.id,
@@ -203,7 +213,7 @@ test("scenario: coordinator restart revokes every attempt a crashed process left
   assert.equal(getWorkItem(liveItem.id)!.status, "leased");
   const liveActive = createAuthorityAttempt({
     ownerKind: liveItem.kind,
-    ownerId: liveItem.id,
+    ownerId: `${liveIssueId}:${liveItem.kind}`,
     idempotencyKey: `${liveItem.id}:1`,
     deckId: DECK,
     runId: liveItem.id,
@@ -220,7 +230,7 @@ test("scenario: coordinator restart revokes every attempt a crashed process left
   assert.equal(getWorkItem(staleItem.id)!.status, "pending");
   const staleActive = createAuthorityAttempt({
     ownerKind: staleItem.kind,
-    ownerId: staleItem.id,
+    ownerId: `${staleIssueId}:${staleItem.kind}`,
     idempotencyKey: `${staleItem.id}:1`,
     deckId: DECK,
     runId: staleItem.id,
@@ -333,7 +343,7 @@ test("scenario: worker death (lease expiry) revokes the attempt's authority and 
 
   const row = createAuthorityAttempt({
     ownerKind: item.kind,
-    ownerId: item.id,
+    ownerId: `${issueId}:${item.kind}`,
     idempotencyKey: `${item.id}:1`,
     deckId: DECK,
     runId: item.id,
@@ -358,7 +368,7 @@ test("scenario: worker death never terminalizes a still-acquiring attempt inside
   // the lease-expiry reclaim path (recovery.ts's revokeStaleAuthoritiesForItem).
   const row = createAuthorityAttempt({
     ownerKind: item.kind,
-    ownerId: item.id,
+    ownerId: `${issueId}:${item.kind}`,
     idempotencyKey: `${item.id}:1`,
     deckId: DECK,
     runId: item.id,
@@ -652,7 +662,7 @@ test("scenario: a fresh attempt fails closed rather than minting beside an unres
   assert.equal(revoked.length, 0, "nothing was revoked for a row that was never positively resolved");
 });
 
-test("scenario: the periodic retry never revokes a live active row, even if it were (incorrectly) passed in by id", async () => {
+test("scenario: the periodic retry only ever finds rows durably flagged stale — a live active row is never even a candidate", async () => {
   const revoked: string[] = [];
 
   const liveRow = createAuthorityAttempt({
@@ -666,11 +676,12 @@ test("scenario: the periodic retry never revokes a live active row, even if it w
   });
   activateAuthorityAttempt(liveRow.id, { authorityId: "authz_live_reflect", expiresAt: "2099-01-01T00:00:00Z" });
 
-  // Unlike reconcileAuthoritiesAtStartup (whose "every reflect/outbound-delivery row is
-  // stale" premise only holds at a genuine process boundary), the periodic retry must never
-  // revoke a row that isn't still `acquiring` with no authorityId — only rows a previous
-  // sweep genuinely couldn't resolve qualify (NOT-91 review, round 4).
-  const result = await retryUnresolvedAuthorityAttempts([liveRow.id], { revoke: async (id) => void revoked.push(id) });
+  // Nothing ever flagged this row `stale_at` (unlike an unresolved row from
+  // reconcileAuthoritiesAtStartup/abort/reclaim/revoke-before-new-attempt, all of which go
+  // through resolveAcquiringAttempt's stamp) — retryStaleAuthorityAttempts's DB query for
+  // `status='acquiring' AND stale_at IS NOT NULL` structurally excludes it, whether or not it
+  // is `active` (NOT-91 review, round 5).
+  const result = await retryStaleAuthorityAttempts({ revoke: async (id) => void revoked.push(id) });
 
   assert.deepEqual(result.revoked, []);
   assert.deepEqual(result.unresolved, []);
@@ -678,29 +689,31 @@ test("scenario: the periodic retry never revokes a live active row, even if it w
   assert.equal(getAuthorityAttempt(liveRow.id)!.status, "active", "a live active row must never be revoked by the periodic retry");
 });
 
-test("scenario: the periodic retry never revokes a live acquiring row under a currently-leased work item", async () => {
+test("scenario: the periodic retry's defensive lease check still applies even if a row were somehow flagged stale while genuinely live", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   const item = listWorkItemsForIssue(issueId)[0];
   claimWorkItem("live-leaseholder", { leaseMs: 600_000 });
   assert.equal(getWorkItem(item.id)!.status, "leased");
 
-  // A genuinely in-flight mint for a still-leased worker — reconcileAuthoritiesAtStartup
-  // would (correctly, at a real process boundary) treat any `acquiring` row as stale; the
-  // periodic retry must not, since this process never restarted and the mint may complete
-  // normally any moment.
+  const ownerId = `${issueId}:${item.kind}`;
   const liveAcquiring = createAuthorityAttempt({
     ownerKind: item.kind,
-    ownerId: item.id,
+    ownerId,
     idempotencyKey: `${item.id}:1`,
     deckId: DECK,
     runId: item.id,
     attemptId: `${item.id}:1`,
     ttlMs: 60_000,
   });
+  // Simulates a row wrongly flagged stale (in reality, nothing flags a developer/reviewer row
+  // stale while its item is still leased — reconcileAuthoritiesAtStartup's own `isOwnerLeased`
+  // check filters it out first) — the retry's own lease check is defense in depth for exactly
+  // this case (NOT-91 review, round 5).
+  markAuthorityAttemptStale(liveAcquiring.id);
 
   let mintCalls = 0;
-  const result = await retryUnresolvedAuthorityAttempts([liveAcquiring.id], {
+  const result = await retryStaleAuthorityAttempts({
     mint: async () => {
       mintCalls += 1;
       return { ok: false, code: "DECK_UNAVAILABLE", message: "should never be called" };
@@ -708,10 +721,45 @@ test("scenario: the periodic retry never revokes a live acquiring row under a cu
     revoke: async () => {},
   });
 
-  // Passed-in ids the tracked list would never actually contain (since startup only tracks
-  // rows it flagged unresolved) — asserting this is a no-op even if it were is the point.
   assert.deepEqual(result.revoked, []);
   assert.deepEqual(result.unresolved, []);
-  assert.equal(mintCalls, 0);
+  assert.equal(mintCalls, 0, "a still-leased owner's row must never be resolved, even once flagged stale");
   assert.equal(getAuthorityAttempt(liveAcquiring.id)!.status, "acquiring");
+});
+
+test("scenario: the periodic retry finds a row that only became unresolved outside the startup sweep, e.g. via a cancellation while Deck was unreachable", async () => {
+  const row = createAuthorityAttempt({
+    ownerKind: "reflect",
+    ownerId: "issue-post-startup-cancel",
+    idempotencyKey: "reflect-post-startup-cancel",
+    deckId: DECK,
+    runId: "issue-post-startup-cancel",
+    attemptId: "reflect-post-startup-cancel",
+    ttlMs: 60_000,
+  });
+
+  // Models what abortIssue's fire-and-forget resolve does when Deck happens to be
+  // unreachable at cancel time: resolveAcquiringAttempts durably flags the row `stale_at`
+  // (via resolveAcquiringAttempt) even though it can't resolve it this call. No startup
+  // sweep ever ran on this row — it only exists because of a cancellation that happened
+  // during normal runtime, well after boot (NOT-91 review, round 5).
+  const firstAttempt = await resolveAcquiringAttempts([row], {
+    mint: async () => ({ ok: false, code: "DECK_UNAVAILABLE", message: "ECONNREFUSED" }),
+    revoke: async () => {},
+  });
+  assert.deepEqual(firstAttempt.unresolved, [row.id]);
+  assert.equal(getAuthorityAttempt(row.id)!.status, "acquiring");
+
+  let mintCalls = 0;
+  const result = await retryStaleAuthorityAttempts({
+    mint: async (input) => {
+      mintCalls += 1;
+      return mintOk()(input);
+    },
+    revoke: async () => {},
+  });
+
+  assert.equal(mintCalls, 1, "the periodic sweep found the row via its durable stale_at flag, with no in-memory list carrying it forward");
+  assert.deepEqual(result.revoked, [row.id]);
+  assert.equal(getAuthorityAttempt(row.id)!.status, "revoked");
 });

@@ -29,6 +29,9 @@ export interface AuthorityAttempt {
   ttlMs: number;
   toolScopeHint: AuthorityAttemptToolScopeHint[] | null;
   status: AuthorityAttemptStatus;
+  /** Set once a row is flagged as needing resolution — see schema.sql's comment. Null while a
+   * row is genuinely still in-flight within its own originating async call. */
+  staleAt: string | null;
   expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -46,6 +49,7 @@ interface AuthorityAttemptRow {
   ttl_ms: number;
   tool_scope_hint_json: string | null;
   status: string;
+  stale_at: string | null;
   expires_at: string | null;
   created_at: string;
   updated_at: string;
@@ -64,6 +68,7 @@ function rowToAttempt(row: AuthorityAttemptRow): AuthorityAttempt {
     ttlMs: row.ttl_ms,
     toolScopeHint: row.tool_scope_hint_json ? JSON.parse(row.tool_scope_hint_json) : null,
     status: row.status as AuthorityAttemptStatus,
+    staleAt: row.stale_at,
     expiresAt: row.expires_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -100,6 +105,7 @@ export function createAuthorityAttempt(input: CreateAuthorityAttemptInput): Auth
     ttl_ms: input.ttlMs,
     tool_scope_hint_json: input.toolScopeHint ? JSON.stringify(input.toolScopeHint) : null,
     status: "acquiring",
+    stale_at: null,
     expires_at: null,
     created_at: now,
     updated_at: now,
@@ -108,10 +114,10 @@ export function createAuthorityAttempt(input: CreateAuthorityAttemptInput): Auth
     .prepare(`
       INSERT INTO authority_attempts (
         id, owner_kind, owner_id, idempotency_key, authority_id, deck_id, run_id, attempt_id,
-        ttl_ms, tool_scope_hint_json, status, expires_at, created_at, updated_at
+        ttl_ms, tool_scope_hint_json, status, stale_at, expires_at, created_at, updated_at
       ) VALUES (
         @id, @owner_kind, @owner_id, @idempotency_key, @authority_id, @deck_id, @run_id, @attempt_id,
-        @ttl_ms, @tool_scope_hint_json, @status, @expires_at, @created_at, @updated_at
+        @ttl_ms, @tool_scope_hint_json, @status, @stale_at, @expires_at, @created_at, @updated_at
       )
     `)
     .run(row);
@@ -174,6 +180,37 @@ export function getAuthorityAttempt(id: string): AuthorityAttempt | null {
     | AuthorityAttemptRow
     | undefined;
   return row ? rowToAttempt(row) : null;
+}
+
+/** Stamps a still-`acquiring` row as needing resolution — see schema.sql's `stale_at`
+ * comment. CAS-fenced on `status = 'acquiring'` (a no-op once the row has moved on) and on
+ * `stale_at IS NULL` (a no-op if already stamped), so calling this from every path that
+ * identifies a row as needing resolution is always safe to repeat. */
+export function markAuthorityAttemptStale(id: string): AuthorityAttempt | null {
+  const now = new Date().toISOString();
+  const row = getDb()
+    .prepare(`
+      UPDATE authority_attempts SET stale_at = @now, updated_at = @now
+      WHERE id = @id AND status = 'acquiring' AND stale_at IS NULL
+      RETURNING *
+    `)
+    .get({ id, now }) as AuthorityAttemptRow | undefined;
+  return row ? rowToAttempt(row) : null;
+}
+
+/** Every row durably flagged as needing resolution and not yet resolved — the periodic
+ * retry sweep's input (authority-lifecycle.ts's `retryStaleAuthorityAttempts`). Unlike the
+ * startup sweep, this never re-derives staleness from a fresh scan of every open row: it
+ * only ever returns rows some other call already positively marked via
+ * `markAuthorityAttemptStale`, so it stays safe to call on a running process without risking
+ * a legitimately in-flight mint. */
+export function listStaleAcquiringAuthorityAttempts(): AuthorityAttempt[] {
+  const rows = getDb()
+    .prepare(
+      "SELECT * FROM authority_attempts WHERE status = 'acquiring' AND stale_at IS NOT NULL ORDER BY stale_at ASC"
+    )
+    .all() as AuthorityAttemptRow[];
+  return rows.map(rowToAttempt);
 }
 
 /** Every row for this owner still `acquiring`/`active` — a fresh attempt (a new

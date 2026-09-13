@@ -46,6 +46,7 @@ function errorResult(msg: string) {
 
 const BASE_OPTS = {
   ownerKind: "developer" as const,
+  ownerId: "issue-1:developer",
   deckId: DECK,
   runId: "run-1",
   attemptId: "wi-1",

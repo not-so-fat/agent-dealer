@@ -370,9 +370,17 @@ function interactionRequiredReason(result: { message?: string }): string {
 }
 
 export async function acquireWorkerAuthority(opts: {
-  /** Which work-item kind this attempt belongs to — the `authority_attempts` ledger's
-   * owner_kind (NOT-91), so restart/worker-death recovery can find it by work item id. */
+  /** Which role this attempt belongs to — the `authority_attempts` ledger's owner_kind
+   * (NOT-91), paired with `ownerId` below for restart/worker-death/cancellation recovery to
+   * find it. */
   ownerKind: "developer" | "reviewer";
+  /** Stable across a work item's own retry rollover — `${issueId}:${ownerKind}` — never the
+   * work-item row's own UUID, which changes every retry (a fresh `enqueueWorkItem` row).
+   * Revoke-before-new-attempt/fail-closed gating in authority-lifecycle.ts is keyed on this,
+   * so it can't be bypassed just because normal infra routing completed the old work item and
+   * enqueued a new one (NOT-91 review, round 5). Distinct from `attemptId`, which is this
+   * specific physical attempt's own identity sent to Deck. */
+  ownerId: string;
   deckId: string;
   runId: string;
   attemptId: string;
@@ -397,7 +405,7 @@ export async function acquireWorkerAuthority(opts: {
 
   const acquired = await acquireAuthorityForAttempt({
     ownerKind: opts.ownerKind,
-    ownerId: opts.attemptId,
+    ownerId: opts.ownerId,
     runId: opts.runId,
     attemptId: opts.attemptId,
     deckId: opts.deckId,

@@ -12,7 +12,7 @@ import { registerIssueRoutes } from "./routes/issues.js";
 import { registerHumanActionRoutes } from "./routes/human-actions.js";
 import { startQueue, recoverOrphanedRuns } from "./queue/dispatcher.js";
 import { recoverCoordinator } from "./coordinator/recovery.js";
-import { reconcileAuthoritiesAtStartup, retryUnresolvedAuthorityAttempts } from "./adapters/authority-lifecycle.js";
+import { reconcileAuthoritiesAtStartup, retryStaleAuthorityAttempts } from "./adapters/authority-lifecycle.js";
 import { startCoordinatorLoop } from "./coordinator/worker-loop.js";
 import { registerEffectHandler } from "./coordinator/effect-registry.js";
 import { runDeveloperEffect } from "./coordinator/developer-effect.js";
@@ -92,28 +92,27 @@ async function main(): Promise<void> {
   if (authorityRecovery.revoked.length) {
     console.warn(`[startup] revoked ${authorityRecovery.revoked.length} orphaned execution authority attempt(s)`);
   }
-  // NOT-91 review round 3/4: a row left unresolved above has no other path to eventually
-  // close once Deck becomes reachable again — a leftover `acquiring` row would otherwise wait
-  // for another full process restart. Retried on a bounded interval, independent of the
-  // coordinator's own (much tighter) work-item poll loop, since this makes a network call to
-  // Deck per unresolved row. Deliberately re-checks only these specific row ids
-  // (retryUnresolvedAuthorityAttempts), never re-running the startup sweep itself — that
-  // sweep's "every acquiring/process-local row is stale" premise is only true at a genuine
-  // process boundary, and would revoke a legitimately in-flight mint or a live reflect/
-  // outbound-delivery call if re-run while this same process keeps running.
-  let unresolvedAuthorityAttemptIds = authorityRecovery.unresolved;
-  if (unresolvedAuthorityAttemptIds.length) {
+  if (authorityRecovery.unresolved.length) {
     console.warn(
-      `[startup] ${unresolvedAuthorityAttemptIds.length} execution authority attempt(s) left unresolved ` +
-        `(Deck unreachable or another ambiguous mint response) — will retry on the periodic reconciliation sweep`
+      `[startup] ${authorityRecovery.unresolved.length} execution authority attempt(s) left unresolved ` +
+        `(Deck unreachable or another ambiguous mint response) — durably flagged for the periodic reconciliation sweep`
     );
   }
+  // NOT-91 review round 3/4/5: a row left unresolved above (or one that only becomes stale
+  // later, e.g. via a cancellation while Deck happens to be unreachable) has no other path to
+  // eventually close once Deck becomes reachable again — a leftover `acquiring` row would
+  // otherwise wait for another full process restart. Retried on a bounded interval,
+  // independent of the coordinator's own (much tighter) work-item poll loop, since this makes
+  // a network call to Deck per stale row. Queries the durable `stale_at` marker fresh every
+  // tick (retryStaleAuthorityAttempts) rather than tracking any in-memory list across ticks —
+  // every one of the four paths that can flag a row stale (startup sweep, cancellation,
+  // worker-death reclaim, revoke-before-new-attempt) becomes visible here automatically,
+  // whenever it happened, and this never re-derives staleness from a fresh scan of every open
+  // row the way the startup-only sweep does.
   const authorityReconcileIntervalMs = Number(process.env.AUTHORITY_RECONCILE_INTERVAL_MS ?? 300_000);
   setInterval(() => {
-    if (unresolvedAuthorityAttemptIds.length === 0) return;
-    retryUnresolvedAuthorityAttempts(unresolvedAuthorityAttemptIds)
+    retryStaleAuthorityAttempts()
       .then((result) => {
-        unresolvedAuthorityAttemptIds = result.unresolved;
         if (result.unresolved.length) {
           console.warn(
             `[coordinator] authority reconciliation retry: ${result.unresolved.length} attempt(s) still unresolved`

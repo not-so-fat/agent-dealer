@@ -229,6 +229,7 @@ export async function runReviewerEffect(
     if (snapshot?.deckId) {
       const acquired = await acquireWorkerAuthority({
         ownerKind: "reviewer",
+        ownerId: `${issue.id}:reviewer`,
         deckId: snapshot.deckId,
         runId: ctx.instance.id,
         attemptId: workItem.id,
