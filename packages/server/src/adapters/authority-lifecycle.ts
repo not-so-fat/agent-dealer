@@ -27,6 +27,7 @@ import {
   activateAuthorityAttempt,
   closeAuthorityAttempt,
   createAuthorityAttempt,
+  getAuthorityAttempt,
   listAllOpenAuthorityAttempts,
   listOpenAcquiringAuthorityAttempts,
   markAuthorityAttemptFailed,
@@ -84,7 +85,22 @@ export async function acquireAuthorityForAttempt(
 
   // Revoke-before-new-attempt: this idempotencyKey is a fresh attempt for this owner, so any
   // authority still open under a *different* key belonged to a superseded one.
-  await closeOpenAuthorityAttemptsForOwner(input.ownerKind, input.ownerId, { mint, revoke });
+  const closed = await closeOpenAuthorityAttemptsForOwner(input.ownerKind, input.ownerId, { mint, revoke });
+  if (closed.unresolved.length > 0) {
+    // A predecessor's live/dead state is genuinely unknown (Deck unreachable, an
+    // enrollment/policy error, ...) — minting a new authority beside it would risk two live
+    // authorities for the same owner if the predecessor turns out to have been live all
+    // along. Fail closed: the caller's own infra-retry policy tries again once the
+    // predecessor is reconciled (by this same check on the next attempt, the startup sweep,
+    // or the periodic retry), instead of proceeding beside an authority of unknown state
+    // (NOT-91 review, round 4).
+    return {
+      ok: false,
+      kind: "infra_failure",
+      reason:
+        "a predecessor execution-authority attempt for this owner could not be resolved (still acquiring, Deck unreachable or an enrollment/policy error) — refusing to mint a new one until it is reconciled",
+    };
+  }
 
   let idempotencyKey = input.idempotencyKey;
   for (let attempt = 1; attempt <= MAX_MINT_ATTEMPTS; attempt++) {
@@ -280,19 +296,27 @@ export interface ReconcileAuthoritiesResult {
 }
 
 /**
- * Called once at startup and periodically thereafter (index.ts, alongside
- * recoverCoordinator()): revokes every `authority_attempts` row a crashed coordinator left
- * open, and retries resolving any row a previous sweep couldn't yet.
+ * Startup-only (index.ts calls this exactly once, alongside recoverCoordinator(), before
+ * anything else can create a new `authority_attempts` row): revokes every row a crashed
+ * coordinator left open.
+ *
+ * This whole sweep's premise — "every `acquiring` row and every `reflect`/`outbound_delivery`
+ * row is stale" — is true only at a genuine process boundary. Calling this again while the
+ * *same* process keeps running would revoke a legitimately in-flight mint or a live
+ * reflect/outbound-delivery call out from under it (NOT-91 review, round 4) — that is exactly
+ * why the periodic path is a separate function, `retryUnresolvedAuthorityAttempts`, that only
+ * ever retries specific rows this sweep (or a previous retry) already flagged unresolved,
+ * never re-derives staleness from a fresh scan.
  *
  * - `acquiring` never legitimately survives a process boundary (it is a sub-second
- *   pre-mint state) — always stale.
+ *   pre-mint state) — always stale here.
  * - `developer`/`reviewer` rows are stale unless their owning work item is still `leased`;
  *   a live lease means recovery.ts's own reclaim/dead-letter path (which already revokes on
  *   its own trigger) is the one to eventually close it, not this sweep — closing it here too
  *   would race a still-legitimately-running worker.
  * - `reflect`/`outbound_delivery` rows are always one-shot, coordinator-process-local calls
- *   with no lease of their own — if one is still open, the process that opened it is
- *   definitionally gone.
+ *   with no lease of their own — at a genuine process boundary, if one is still open, the
+ *   process that opened it is definitionally gone.
  *
  * A stale `acquiring` row with no `authorityId` goes through `resolveAcquiringAttempts`
  * rather than being terminalized directly — see its doc comment for why.
@@ -325,4 +349,34 @@ export async function reconcileAuthoritiesAtStartup(deps?: {
   }
   const resolvedAcquiring = await resolveAcquiringAttempts(acquiringToResolve, { mint, revoke });
   return { revoked: [...revoked, ...resolvedAcquiring.revoked], unresolved: resolvedAcquiring.unresolved };
+}
+
+/**
+ * The periodic counterpart to `reconcileAuthoritiesAtStartup` (index.ts calls this on a
+ * bounded interval, seeded with and threading forward the previous call's `unresolved` list).
+ * Deliberately takes specific row ids rather than rescanning `listAllOpenAuthorityAttempts()`:
+ * unlike the one-time startup sweep, this runs while the process is still live, so re-deriving
+ * "every acquiring/process-local row is stale" would revoke a legitimately in-flight mint or a
+ * live reflect/outbound-delivery call (NOT-91 review, round 4). Only rows a previous sweep or
+ * retry already positively couldn't resolve are retried — and only if still `acquiring` with
+ * no `authorityId`, since another path (worker-death reclaim, cancellation, revoke-before-
+ * new-attempt) may have already resolved one independently in the meantime.
+ */
+export async function retryUnresolvedAuthorityAttempts(
+  rowIds: string[],
+  deps?: { mint?: MintFn; revoke?: RevokeFn; isWorkItemLeased?: (workItemId: string) => boolean }
+): Promise<ResolveAcquiringResult> {
+  const isWorkItemLeased = deps?.isWorkItemLeased ?? ((id: string) => getWorkItem(id)?.status === "leased");
+  const rows: AuthorityAttempt[] = [];
+  for (const id of rowIds) {
+    const row = getAuthorityAttempt(id);
+    if (!row || row.status !== "acquiring" || row.authorityId) continue;
+    // Defense in depth: the tracked id list should never actually contain a live row (it is
+    // seeded only from a genuine process-boundary sweep, before this process's own
+    // coordinator loop starts minting anything), but never resolve one anyway if it somehow
+    // did — a still-leased developer/reviewer owner may have a genuinely in-flight mint.
+    if ((row.ownerKind === "developer" || row.ownerKind === "reviewer") && isWorkItemLeased(row.ownerId)) continue;
+    rows.push(row);
+  }
+  return resolveAcquiringAttempts(rows, deps);
 }

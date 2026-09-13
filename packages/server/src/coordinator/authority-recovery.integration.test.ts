@@ -28,7 +28,9 @@ const {
   getAuthorityAttempt,
   listOpenAuthorityAttemptsForOwner,
 } = await import("../repository/authority-attempts.js");
-const { acquireAuthorityForAttempt, reconcileAuthoritiesAtStartup } = await import("../adapters/authority-lifecycle.js");
+const { acquireAuthorityForAttempt, reconcileAuthoritiesAtStartup, retryUnresolvedAuthorityAttempts } = await import(
+  "../adapters/authority-lifecycle.js"
+);
 const { startWorkflow, abortIssue, resolveHumanActionAndAdvance } = await import("./commands.js");
 const { recoverCoordinator } = await import("./recovery.js");
 const { updateAgent } = await import("../repository/agents.js");
@@ -600,9 +602,10 @@ test("scenario: revoke-before-new-attempt resolves an acquiring (no authorityId 
   assert.equal(getAuthorityAttempt(stalePredecessor.id)!.status, "revoked");
 });
 
-test("scenario: an acquiring predecessor is left unresolved on an enrollment/scope error, never guessed safe to drop", async () => {
+test("scenario: a fresh attempt fails closed rather than minting beside an unresolved predecessor", async () => {
   const ownerId = "wi-supersede-unresolved";
   const revoked: string[] = [];
+  let newKeyMintCalls = 0;
 
   const stalePredecessor = createAuthorityAttempt({
     ownerKind: "developer",
@@ -629,16 +632,86 @@ test("scenario: an acquiring predecessor is left unresolved on an enrollment/sco
       if (input.idempotencyKey === `${ownerId}:1`) {
         return { ok: false, code: "COORDINATOR_NOT_ENROLLED", message: "no bearer" };
       }
+      newKeyMintCalls += 1;
       return mintOk()(input);
     },
     revoke: async (id) => void revoked.push(id),
   });
 
-  assert.equal(second.ok, true, "the new attempt still proceeds even though its predecessor couldn't be resolved");
+  // An unresolved predecessor's live/dead state is unknown — minting a new authority beside
+  // it would risk two live authorities for the same owner if it turns out to have been live
+  // all along. Must fail closed instead of proceeding (NOT-91 review, round 4).
+  assert.equal(second.ok, false, "must not mint a new authority while a predecessor's state is unknown");
+  if (!second.ok) assert.equal(second.kind, "infra_failure");
+  assert.equal(newKeyMintCalls, 0, "no new authority was minted beside the unresolved predecessor");
   assert.equal(
     getAuthorityAttempt(stalePredecessor.id)!.status,
     "acquiring",
     "an enrollment error proves nothing about whether Deck actually committed the original mint — must not be terminalized on a guess"
   );
-  assert.ok(!revoked.some((id) => id.includes(`${ownerId}:1`)), "nothing was revoked for a row that was never positively resolved");
+  assert.equal(revoked.length, 0, "nothing was revoked for a row that was never positively resolved");
+});
+
+test("scenario: the periodic retry never revokes a live active row, even if it were (incorrectly) passed in by id", async () => {
+  const revoked: string[] = [];
+
+  const liveRow = createAuthorityAttempt({
+    ownerKind: "reflect",
+    ownerId: "issue-live-reflect",
+    idempotencyKey: "reflect-live",
+    deckId: DECK,
+    runId: "issue-live-reflect",
+    attemptId: "reflect-live",
+    ttlMs: 60_000,
+  });
+  activateAuthorityAttempt(liveRow.id, { authorityId: "authz_live_reflect", expiresAt: "2099-01-01T00:00:00Z" });
+
+  // Unlike reconcileAuthoritiesAtStartup (whose "every reflect/outbound-delivery row is
+  // stale" premise only holds at a genuine process boundary), the periodic retry must never
+  // revoke a row that isn't still `acquiring` with no authorityId — only rows a previous
+  // sweep genuinely couldn't resolve qualify (NOT-91 review, round 4).
+  const result = await retryUnresolvedAuthorityAttempts([liveRow.id], { revoke: async (id) => void revoked.push(id) });
+
+  assert.deepEqual(result.revoked, []);
+  assert.deepEqual(result.unresolved, []);
+  assert.equal(revoked.length, 0);
+  assert.equal(getAuthorityAttempt(liveRow.id)!.status, "active", "a live active row must never be revoked by the periodic retry");
+});
+
+test("scenario: the periodic retry never revokes a live acquiring row under a currently-leased work item", async () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const item = listWorkItemsForIssue(issueId)[0];
+  claimWorkItem("live-leaseholder", { leaseMs: 600_000 });
+  assert.equal(getWorkItem(item.id)!.status, "leased");
+
+  // A genuinely in-flight mint for a still-leased worker — reconcileAuthoritiesAtStartup
+  // would (correctly, at a real process boundary) treat any `acquiring` row as stale; the
+  // periodic retry must not, since this process never restarted and the mint may complete
+  // normally any moment.
+  const liveAcquiring = createAuthorityAttempt({
+    ownerKind: item.kind,
+    ownerId: item.id,
+    idempotencyKey: `${item.id}:1`,
+    deckId: DECK,
+    runId: item.id,
+    attemptId: `${item.id}:1`,
+    ttlMs: 60_000,
+  });
+
+  let mintCalls = 0;
+  const result = await retryUnresolvedAuthorityAttempts([liveAcquiring.id], {
+    mint: async () => {
+      mintCalls += 1;
+      return { ok: false, code: "DECK_UNAVAILABLE", message: "should never be called" };
+    },
+    revoke: async () => {},
+  });
+
+  // Passed-in ids the tracked list would never actually contain (since startup only tracks
+  // rows it flagged unresolved) — asserting this is a no-op even if it were is the point.
+  assert.deepEqual(result.revoked, []);
+  assert.deepEqual(result.unresolved, []);
+  assert.equal(mintCalls, 0);
+  assert.equal(getAuthorityAttempt(liveAcquiring.id)!.status, "acquiring");
 });
