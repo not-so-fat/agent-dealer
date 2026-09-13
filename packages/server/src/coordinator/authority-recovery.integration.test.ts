@@ -96,6 +96,35 @@ test("scenario: cancellation revokes an in-flight attempt's execution authority"
   assert.equal(getAuthorityAttempt(row.id)!.status, "revoked");
 });
 
+test("scenario: cancelling an item whose authority attempt is still acquiring never terminalizes it inside the transaction on a guess", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const item = listWorkItemsForIssue(issueId)[0];
+
+  // No authorityId yet — models a crash between "asked Deck for authority" and "this row
+  // got activated." abortIssue's own transaction must not assume this is safe to revoke
+  // directly (there is no authorityId to revoke, and no proof nothing was ever minted) — it
+  // has to be resolved via its stored idempotencyKey afterward, not bulk-terminalized here
+  // (NOT-91 review, round 3).
+  const row = createAuthorityAttempt({
+    ownerKind: item.kind,
+    ownerId: item.id,
+    idempotencyKey: `${item.id}:1`,
+    deckId: DECK,
+    runId: item.id,
+    attemptId: `${item.id}:1`,
+    ttlMs: 60_000,
+  });
+
+  const result = abortIssue(issueId, "tester");
+  assert.equal(result.ok, true);
+
+  // Still `acquiring` immediately after abortIssue returns — the transaction only revoked
+  // `active` rows synchronously; this one is left for the async, out-of-transaction resolve
+  // step (fire-and-forget), never flipped to `revoked` on a guess.
+  assert.equal(getAuthorityAttempt(row.id)!.status, "acquiring");
+});
+
 test("scenario: late approval after cancellation is recorded but cannot restart work", () => {
   const issueId = newIssue();
   startWorkflow(issueId);
@@ -269,6 +298,31 @@ test("scenario: coordinator restart leaves an unresolved acquiring attempt open 
   );
 });
 
+test("scenario: coordinator restart leaves an acquiring attempt open on a local enrollment error too, not just DECK_UNAVAILABLE", async () => {
+  // COORDINATOR_NOT_ENROLLED/RESOURCE_OUT_OF_SCOPE can both be produced without the resolve
+  // replay ever proving whether Deck committed the original mint — only AUTHORITY_EXPIRED/
+  // AUTHORITY_REVOKED positively prove nothing is left to revoke (NOT-91 review, round 3).
+  const issueId = newIssue();
+  const row = createAuthorityAttempt({
+    ownerKind: "reflect",
+    ownerId: issueId,
+    idempotencyKey: "reflect-not-enrolled",
+    deckId: DECK,
+    runId: issueId,
+    attemptId: "reflect-not-enrolled",
+    ttlMs: 60_000,
+  });
+
+  const result = await reconcileAuthoritiesAtStartup({
+    revoke: async () => {},
+    mint: async () => ({ ok: false, code: "COORDINATOR_NOT_ENROLLED", message: "no bearer configured" }),
+  });
+
+  assert.ok(result.unresolved.includes(row.id));
+  assert.ok(!result.revoked.includes(row.id));
+  assert.equal(getAuthorityAttempt(row.id)!.status, "acquiring");
+});
+
 test("scenario: worker death (lease expiry) revokes the attempt's authority and returns the item to pending, never permanently occupied", () => {
   const issueId = newIssue();
   startWorkflow(issueId);
@@ -290,6 +344,33 @@ test("scenario: worker death (lease expiry) revokes the attempt's authority and 
   assert.deepEqual(res.reclaimed, [item.id]);
   assert.equal(getWorkItem(item.id)!.status, "pending", "the worker slot is freed, never left occupied by the dead attempt");
   assert.equal(getAuthorityAttempt(row.id)!.status, "revoked");
+});
+
+test("scenario: worker death never terminalizes a still-acquiring attempt inside the reclaim itself, only via async resolve", () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const item = listWorkItemsForIssue(issueId)[0];
+  claimWorkItem("crashed-worker-2", { leaseMs: 1 });
+
+  // No authorityId yet — same ambiguous case as the cancellation regression above, but via
+  // the lease-expiry reclaim path (recovery.ts's revokeStaleAuthoritiesForItem).
+  const row = createAuthorityAttempt({
+    ownerKind: item.kind,
+    ownerId: item.id,
+    idempotencyKey: `${item.id}:1`,
+    deckId: DECK,
+    runId: item.id,
+    attemptId: `${item.id}:1`,
+    ttlMs: 60_000,
+  });
+
+  const res = recoverCoordinator({ now: Date.now() + 3_600_000 });
+  assert.deepEqual(res.reclaimed, [item.id]);
+  assert.equal(
+    getAuthorityAttempt(row.id)!.status,
+    "acquiring",
+    "left for the async, out-of-loop resolve step — recovery's own synchronous CAS never guesses this is safe to revoke"
+  );
 });
 
 test("scenario: Agent Deck outage is a bounded, typed failure — no infinite retry, no ledger row stuck open", async () => {
@@ -471,4 +552,93 @@ test("scenario: revoke-before-new-attempt — a fresh attempt for the same owner
   assert.equal(second.ok, true);
   if (first.ok) assert.ok(revoked.includes(first.authority.authorityId), "the superseded attempt's authority must be revoked, not left live until TTL");
   assert.equal(listOpenAuthorityAttemptsForOwner("developer", ownerId).length, 1, "exactly the new attempt is open — no leaked duplicate authority for one owner");
+});
+
+test("scenario: revoke-before-new-attempt resolves an acquiring (no authorityId yet) predecessor via replay, not a guess", async () => {
+  const ownerId = "wi-supersede-acquiring";
+  const revoked: string[] = [];
+
+  // The predecessor never got past `acquiring` — models a crash between "asked Deck for
+  // authority" and "this row got activated." This used to be bulk-terminalized by a fresh
+  // attempt without ever attempting to resolve it (NOT-91 review, round 3's exact repro).
+  const stalePredecessor = createAuthorityAttempt({
+    ownerKind: "developer",
+    ownerId,
+    idempotencyKey: `${ownerId}:1`,
+    deckId: DECK,
+    runId: "run-supersede-acquiring",
+    attemptId: ownerId,
+    ttlMs: 60_000,
+  });
+
+  let mintCalls = 0;
+  const second = await acquireAuthorityForAttempt({
+    ownerKind: "developer",
+    ownerId,
+    runId: "run-supersede-acquiring",
+    attemptId: ownerId,
+    deckId: DECK,
+    ttlMs: 60_000,
+    idempotencyKey: `${ownerId}:2`,
+    mint: async (input) => {
+      mintCalls += 1;
+      // Replaying the predecessor's own key hands back the live authority Deck actually
+      // committed before the crash (an idempotent remint — no new secret); the real
+      // second-attempt mint, under its own key, succeeds normally.
+      if (input.idempotencyKey === `${ownerId}:1`) return mintOk(null)(input);
+      return mintOk()(input);
+    },
+    revoke: async (id) => void revoked.push(id),
+  });
+
+  assert.equal(second.ok, true);
+  assert.ok(mintCalls >= 2, "the predecessor's key was replayed to resolve it, not skipped");
+  assert.ok(
+    revoked.includes(`authz_${ownerId}:1`),
+    "the live authority discovered behind the acquiring predecessor was revoked, not left until TTL"
+  );
+  assert.equal(getAuthorityAttempt(stalePredecessor.id)!.status, "revoked");
+});
+
+test("scenario: an acquiring predecessor is left unresolved on an enrollment/scope error, never guessed safe to drop", async () => {
+  const ownerId = "wi-supersede-unresolved";
+  const revoked: string[] = [];
+
+  const stalePredecessor = createAuthorityAttempt({
+    ownerKind: "developer",
+    ownerId,
+    idempotencyKey: `${ownerId}:1`,
+    deckId: DECK,
+    runId: "run-supersede-unresolved",
+    attemptId: ownerId,
+    ttlMs: 60_000,
+  });
+
+  const second = await acquireAuthorityForAttempt({
+    ownerKind: "developer",
+    ownerId,
+    runId: "run-supersede-unresolved",
+    attemptId: ownerId,
+    deckId: DECK,
+    ttlMs: 60_000,
+    idempotencyKey: `${ownerId}:2`,
+    mint: async (input) => {
+      // COORDINATOR_NOT_ENROLLED can be produced locally (missing bearer) before any
+      // request reaches Deck — it proves nothing about whether the original mint
+      // committed, unlike AUTHORITY_EXPIRED/AUTHORITY_REVOKED (NOT-91 review, round 3).
+      if (input.idempotencyKey === `${ownerId}:1`) {
+        return { ok: false, code: "COORDINATOR_NOT_ENROLLED", message: "no bearer" };
+      }
+      return mintOk()(input);
+    },
+    revoke: async (id) => void revoked.push(id),
+  });
+
+  assert.equal(second.ok, true, "the new attempt still proceeds even though its predecessor couldn't be resolved");
+  assert.equal(
+    getAuthorityAttempt(stalePredecessor.id)!.status,
+    "acquiring",
+    "an enrollment error proves nothing about whether Deck actually committed the original mint — must not be terminalized on a guess"
+  );
+  assert.ok(!revoked.some((id) => id.includes(`${ownerId}:1`)), "nothing was revoked for a row that was never positively resolved");
 });

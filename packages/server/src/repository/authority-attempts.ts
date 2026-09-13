@@ -163,8 +163,8 @@ export function markAuthorityAttemptFailed(id: string): AuthorityAttempt | null 
   return setTerminalStatus(id, "failed");
 }
 
-/** One row, by id — the startup reconciliation sweep's per-row counterpart to
- * `markOpenAuthorityAttemptsRevoked`'s per-owner bulk flip. */
+/** One row, by id — the per-row counterpart to `revokeOpenActiveAuthorityAttempts`'s
+ * per-owner bulk flip, and what a resolved `acquiring` row is set to. */
 export function markAuthorityAttemptRevoked(id: string): AuthorityAttempt | null {
   return setTerminalStatus(id, "revoked");
 }
@@ -193,13 +193,22 @@ export function listOpenAuthorityAttemptsForOwner(
 }
 
 /**
- * DB-only CAS: flips every `acquiring`/`active` row for this owner to `revoked` and returns
- * them (with their `authorityId`, when minted) so the caller can best-effort revoke each on
- * Deck's side. Synchronous and side-effect-free on Deck, so it is safe to call from inside a
- * `better-sqlite3` transaction (recovery.ts's reclaim/dead-letter, commands.ts's abortIssue)
- * — the actual network revoke happens only after that transaction commits.
+ * DB-only CAS: flips every `active` row for this owner (a known `authorityId`) to `revoked`
+ * and returns them, so the caller can best-effort revoke each on Deck's side. Synchronous and
+ * side-effect-free on Deck, so it is safe to call from inside a `better-sqlite3` transaction
+ * (recovery.ts's reclaim/dead-letter, commands.ts's abortIssue) — the actual network revoke
+ * happens only after that transaction commits.
+ *
+ * Deliberately excludes `acquiring` rows (no `authorityId` yet): a coordinator can crash
+ * after Deck committed a mint but before that row was activated with the resulting id, so an
+ * `acquiring` row alone can't be assumed to have nothing live behind it. Terminalizing it here
+ * on a guess is exactly the leak NOT-91's review caught — it must instead be resolved by
+ * replaying its stored idempotencyKey (authority-lifecycle.ts's `resolveAcquiringAttempts`),
+ * which needs an async mint() call this synchronous DB-only helper can't make. Callers pair
+ * this with `listOpenAcquiringAuthorityAttempts` for that owner and resolve those separately,
+ * outside any surrounding transaction.
  */
-export function markOpenAuthorityAttemptsRevoked(
+export function revokeOpenActiveAuthorityAttempts(
   ownerKind: AuthorityAttemptOwnerKind,
   ownerId: string
 ): AuthorityAttempt[] {
@@ -207,10 +216,26 @@ export function markOpenAuthorityAttemptsRevoked(
   const rows = getDb()
     .prepare(`
       UPDATE authority_attempts SET status = 'revoked', updated_at = @now
-      WHERE owner_kind = @owner_kind AND owner_id = @owner_id AND status IN ('acquiring', 'active')
+      WHERE owner_kind = @owner_kind AND owner_id = @owner_id AND status = 'active'
       RETURNING *
     `)
     .all({ owner_kind: ownerKind, owner_id: ownerId, now }) as AuthorityAttemptRow[];
+  return rows.map(rowToAttempt);
+}
+
+/** Read-only: every `acquiring` row for this owner (no `authorityId` yet) — the counterpart
+ * to `revokeOpenActiveAuthorityAttempts` a caller resolves separately, asynchronously, via
+ * `authority-lifecycle.ts`'s `resolveAcquiringAttempts`. Never mutates status itself, so it is
+ * safe to call from inside a `better-sqlite3` transaction alongside the active-row revoke. */
+export function listOpenAcquiringAuthorityAttempts(
+  ownerKind: AuthorityAttemptOwnerKind,
+  ownerId: string
+): AuthorityAttempt[] {
+  const rows = getDb()
+    .prepare(
+      "SELECT * FROM authority_attempts WHERE owner_kind = ? AND owner_id = ? AND status = 'acquiring' ORDER BY created_at ASC"
+    )
+    .all(ownerKind, ownerId) as AuthorityAttemptRow[];
   return rows.map(rowToAttempt);
 }
 

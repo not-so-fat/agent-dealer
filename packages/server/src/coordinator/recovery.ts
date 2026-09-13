@@ -22,8 +22,9 @@ import {
   requeueWorkItem,
   type WorkItem,
 } from "../repository/work-items.js";
-import { markOpenAuthorityAttemptsRevoked } from "../repository/authority-attempts.js";
+import { listOpenAcquiringAuthorityAttempts, revokeOpenActiveAuthorityAttempts } from "../repository/authority-attempts.js";
 import { revokeAuthority } from "../adapters/execution-authority.js";
+import { resolveAcquiringAttempts } from "../adapters/authority-lifecycle.js";
 import { routeAppliedOutcome } from "./commands.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
@@ -37,11 +38,17 @@ export interface RecoverResult {
 
 /** Revokes (best-effort, fire-and-forget) whatever `authority_attempts` rows are still open
  * for a reclaimed/dead-lettered work item — `work_items.kind` ('developer' | 'reviewer') is
- * exactly the ledger's owner_kind for this item's own id (NOT-91). */
+ * exactly the ledger's owner_kind for this item's own id (NOT-91). An `active` row (known
+ * authorityId) revokes immediately; an `acquiring` row with none yet is resolved via its
+ * stored idempotencyKey rather than dropped on a guess (NOT-91 review, round 3) — also
+ * fire-and-forget, since recovery's own CAS loop must stay synchronous and not block on
+ * Deck's availability. */
 function revokeStaleAuthoritiesForItem(item: WorkItem): void {
-  for (const row of markOpenAuthorityAttemptsRevoked(item.kind, item.id)) {
+  for (const row of revokeOpenActiveAuthorityAttempts(item.kind, item.id)) {
     if (row.authorityId) revokeAuthority(row.authorityId).catch(() => {});
   }
+  const acquiring = listOpenAcquiringAuthorityAttempts(item.kind, item.id);
+  if (acquiring.length > 0) resolveAcquiringAttempts(acquiring).catch(() => {});
 }
 
 /** Fail a worker_session still `running` for an item whose worker is gone. */

@@ -92,6 +92,29 @@ async function main(): Promise<void> {
   if (authorityRecovery.revoked.length) {
     console.warn(`[startup] revoked ${authorityRecovery.revoked.length} orphaned execution authority attempt(s)`);
   }
+  if (authorityRecovery.unresolved.length) {
+    console.warn(
+      `[startup] ${authorityRecovery.unresolved.length} execution authority attempt(s) left unresolved ` +
+        `(Deck unreachable or another ambiguous mint response) — will retry on the periodic reconciliation sweep`
+    );
+  }
+  // NOT-91 review round 3: a row left unresolved above has no other path to eventually close
+  // once Deck becomes reachable again — a leftover `acquiring` row would otherwise wait for
+  // another full process restart. Retries the same sweep on a bounded interval, independent
+  // of the coordinator's own (much tighter) work-item poll loop, since this makes a network
+  // call to Deck per unresolved row and normally has nothing to do.
+  const authorityReconcileIntervalMs = Number(process.env.AUTHORITY_RECONCILE_INTERVAL_MS ?? 300_000);
+  setInterval(() => {
+    reconcileAuthoritiesAtStartup()
+      .then((result) => {
+        if (result.unresolved.length) {
+          console.warn(
+            `[coordinator] authority reconciliation sweep: ${result.unresolved.length} attempt(s) still unresolved`
+          );
+        }
+      })
+      .catch((err) => console.error("[coordinator] authority reconciliation sweep", err));
+  }, authorityReconcileIntervalMs);
   startCoordinatorLoop();
 
   await app.listen({ port, host: "127.0.0.1" });

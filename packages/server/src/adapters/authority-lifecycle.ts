@@ -28,9 +28,11 @@ import {
   closeAuthorityAttempt,
   createAuthorityAttempt,
   listAllOpenAuthorityAttempts,
+  listOpenAcquiringAuthorityAttempts,
   markAuthorityAttemptFailed,
   markAuthorityAttemptRevoked,
-  markOpenAuthorityAttemptsRevoked,
+  revokeOpenActiveAuthorityAttempts,
+  type AuthorityAttempt,
   type AuthorityAttemptOwnerKind,
 } from "../repository/authority-attempts.js";
 import { getWorkItem } from "../repository/work-items.js";
@@ -82,9 +84,7 @@ export async function acquireAuthorityForAttempt(
 
   // Revoke-before-new-attempt: this idempotencyKey is a fresh attempt for this owner, so any
   // authority still open under a *different* key belonged to a superseded one.
-  for (const stale of markOpenAuthorityAttemptsRevoked(input.ownerKind, input.ownerId)) {
-    if (stale.authorityId) await revoke(stale.authorityId);
-  }
+  await closeOpenAuthorityAttemptsForOwner(input.ownerKind, input.ownerId, { mint, revoke });
 
   let idempotencyKey = input.idempotencyKey;
   for (let attempt = 1; attempt <= MAX_MINT_ATTEMPTS; attempt++) {
@@ -178,17 +178,111 @@ export async function failAuthority(
   markAuthorityAttemptFailed(attemptRowId);
 }
 
+export interface ResolveAcquiringResult {
+  revoked: string[];
+  /** Rows Deck couldn't positively resolve one way or the other (DECK_UNAVAILABLE, an
+   * enrollment/policy/scope error, an unexpected INTERACTION_REQUIRED on a resolve replay,
+   * ...) — left `acquiring` rather than guessed-terminalized, so a later sweep can still find
+   * and close them once the ambiguity clears. */
+  unresolved: string[];
+}
+
+/** Mint failure codes that *positively prove* no live authority remains for the replayed key
+ * — safe to terminalize with nothing left to revoke. Every other code (DECK_UNAVAILABLE, an
+ * enrollment/policy/scope error, ...) proves nothing about whether Deck actually committed the
+ * original mint, so it must never be treated as "safe to drop" (NOT-91 review, round 3). */
+const RESOLVED_NO_LIVE_AUTHORITY_CODES = new Set(["AUTHORITY_EXPIRED", "AUTHORITY_REVOKED"]);
+
+/**
+ * Closes one `acquiring` row that has no ledger `authorityId` — the one ambiguous case in this
+ * whole lifecycle: a coordinator can crash after Deck committed a mint but before that row was
+ * activated with the resulting id, so the ledger alone can't tell "nothing was ever minted"
+ * from "a live authority exists that only this row's idempotencyKey can still find." Resolves
+ * it the same way a live caller recovers from a secret-less idempotent remint (NOT-85 §7):
+ * replay the original mint request under its stored idempotencyKey/runId/attemptId/ttlMs/
+ * toolScopeHint. A mint success means a live authority exists (the original, or one this
+ * replay just freshly minted) — revoke it. Only `AUTHORITY_EXPIRED`/`AUTHORITY_REVOKED`
+ * positively prove nothing is left to revoke; every other failure leaves the row open.
+ */
+async function resolveAcquiringAttempt(
+  row: AuthorityAttempt,
+  mint: MintFn,
+  revoke: RevokeFn
+): Promise<"revoked" | "unresolved"> {
+  const resolved = await mint({
+    runId: row.runId,
+    attemptId: row.attemptId,
+    deckId: row.deckId,
+    ttlMs: row.ttlMs,
+    idempotencyKey: row.idempotencyKey,
+    ...(row.toolScopeHint ? { toolScopeHint: row.toolScopeHint } : {}),
+  });
+  if (resolved.ok) {
+    await revoke(resolved.authority.authorityId);
+    markAuthorityAttemptRevoked(row.id);
+    return "revoked";
+  }
+  if (RESOLVED_NO_LIVE_AUTHORITY_CODES.has(resolved.code)) {
+    markAuthorityAttemptRevoked(row.id);
+    return "revoked";
+  }
+  return "unresolved";
+}
+
+/** Resolves a batch of `acquiring`/no-`authorityId` rows (e.g. gathered inside a cancellation
+ * or worker-death-reclaim transaction, before that transaction's synchronous DB work commits)
+ * — the async counterpart callers run afterward, outside any surrounding transaction. */
+export async function resolveAcquiringAttempts(
+  rows: AuthorityAttempt[],
+  deps?: { mint?: MintFn; revoke?: RevokeFn }
+): Promise<ResolveAcquiringResult> {
+  const mint = deps?.mint ?? defaultMintAuthority;
+  const revoke = deps?.revoke ?? defaultRevokeAuthority;
+  const revoked: string[] = [];
+  const unresolved: string[] = [];
+  for (const row of rows) {
+    const outcome = await resolveAcquiringAttempt(row, mint, revoke);
+    (outcome === "revoked" ? revoked : unresolved).push(row.id);
+  }
+  return { revoked, unresolved };
+}
+
+/**
+ * Closes every open `authority_attempts` row for one owner: an `active` row (known
+ * `authorityId`) is revoked immediately; an `acquiring` row with none yet is resolved via
+ * `resolveAcquiringAttempts` instead of being terminalized on a guess. Used by
+ * `acquireAuthorityForAttempt`'s revoke-before-new-attempt step, which isn't itself inside a
+ * surrounding DB transaction, so it can freely await both steps in one call.
+ */
+export async function closeOpenAuthorityAttemptsForOwner(
+  ownerKind: AuthorityAttemptOwnerKind,
+  ownerId: string,
+  deps?: { mint?: MintFn; revoke?: RevokeFn }
+): Promise<ResolveAcquiringResult> {
+  const revoke = deps?.revoke ?? defaultRevokeAuthority;
+  const revoked: string[] = [];
+  for (const row of revokeOpenActiveAuthorityAttempts(ownerKind, ownerId)) {
+    if (row.authorityId) await revoke(row.authorityId);
+    revoked.push(row.id);
+  }
+  const acquiring = listOpenAcquiringAuthorityAttempts(ownerKind, ownerId);
+  const resolvedAcquiring = await resolveAcquiringAttempts(acquiring, deps);
+  return { revoked: [...revoked, ...resolvedAcquiring.revoked], unresolved: resolvedAcquiring.unresolved };
+}
+
 export interface ReconcileAuthoritiesResult {
   revoked: string[];
-  /** `acquiring` rows with no ledger `authorityId` that Deck couldn't resolve right now
-   * (DECK_UNAVAILABLE) — left open rather than guessed-terminalized, so a later sweep can
-   * still find and close them once Deck is reachable again. */
+  /** `acquiring` rows with no ledger `authorityId` that couldn't be positively resolved this
+   * sweep — left open rather than guessed-terminalized, so a later sweep (this function is
+   * called at startup and periodically thereafter, per index.ts) can still find and close
+   * them once the ambiguity clears. */
   unresolved: string[];
 }
 
 /**
- * Startup-only sweep (called once from index.ts, alongside recoverCoordinator()): revokes
- * every `authority_attempts` row a crashed coordinator left open.
+ * Called once at startup and periodically thereafter (index.ts, alongside
+ * recoverCoordinator()): revokes every `authority_attempts` row a crashed coordinator left
+ * open, and retries resolving any row a previous sweep couldn't yet.
  *
  * - `acquiring` never legitimately survives a process boundary (it is a sub-second
  *   pre-mint state) — always stale.
@@ -197,20 +291,11 @@ export interface ReconcileAuthoritiesResult {
  *   its own trigger) is the one to eventually close it, not this sweep — closing it here too
  *   would race a still-legitimately-running worker.
  * - `reflect`/`outbound_delivery` rows are always one-shot, coordinator-process-local calls
- *   with no lease of their own — if one is still open at startup, the process that opened it
- *   is definitionally gone.
+ *   with no lease of their own — if one is still open, the process that opened it is
+ *   definitionally gone.
  *
- * A stale `acquiring` row with no `authorityId` is the one ambiguous case: a coordinator can
- * crash after Deck committed the mint but before this row was activated with the resulting
- * id, so the ledger alone can't tell "nothing was ever minted" from "a live authority exists
- * that only this row's idempotencyKey can still find." Resolve it the same way a live caller
- * recovers from a secret-less idempotent remint (NOT-85 §7): replay the original mint request
- * under its stored idempotencyKey/runId/attemptId/ttlMs/toolScopeHint. A mint success means a
- * live authority exists (whether it's the original or one just freshly minted by this replay)
- * — revoke it. Every typed mint failure other than DECK_UNAVAILABLE means Deck has nothing
- * live to hand back under this key, so the row is safe to terminalize. DECK_UNAVAILABLE alone
- * leaves the row `acquiring` rather than guessing — terminalizing it would be exactly the
- * leak this sweep exists to close.
+ * A stale `acquiring` row with no `authorityId` goes through `resolveAcquiringAttempts`
+ * rather than being terminalized directly — see its doc comment for why.
  */
 export async function reconcileAuthoritiesAtStartup(deps?: {
   revoke?: RevokeFn;
@@ -222,7 +307,7 @@ export async function reconcileAuthoritiesAtStartup(deps?: {
   const isWorkItemLeased = deps?.isWorkItemLeased ?? ((id: string) => getWorkItem(id)?.status === "leased");
 
   const revoked: string[] = [];
-  const unresolved: string[] = [];
+  const acquiringToResolve: AuthorityAttempt[] = [];
   for (const row of listAllOpenAuthorityAttempts()) {
     const stale =
       row.status === "acquiring" ||
@@ -230,24 +315,7 @@ export async function reconcileAuthoritiesAtStartup(deps?: {
     if (!stale) continue;
 
     if (row.status === "acquiring" && !row.authorityId) {
-      const resolved = await mint({
-        runId: row.runId,
-        attemptId: row.attemptId,
-        deckId: row.deckId,
-        ttlMs: row.ttlMs,
-        idempotencyKey: row.idempotencyKey,
-        ...(row.toolScopeHint ? { toolScopeHint: row.toolScopeHint } : {}),
-      });
-      if (resolved.ok) {
-        await revoke(resolved.authority.authorityId);
-        markAuthorityAttemptRevoked(row.id);
-        revoked.push(row.id);
-      } else if (resolved.code === "DECK_UNAVAILABLE") {
-        unresolved.push(row.id);
-      } else {
-        markAuthorityAttemptRevoked(row.id);
-        revoked.push(row.id);
-      }
+      acquiringToResolve.push(row);
       continue;
     }
 
@@ -255,5 +323,6 @@ export async function reconcileAuthoritiesAtStartup(deps?: {
     markAuthorityAttemptRevoked(row.id);
     revoked.push(row.id);
   }
-  return { revoked, unresolved };
+  const resolvedAcquiring = await resolveAcquiringAttempts(acquiringToResolve, { mint, revoke });
+  return { revoked: [...revoked, ...resolvedAcquiring.revoked], unresolved: resolvedAcquiring.unresolved };
 }
