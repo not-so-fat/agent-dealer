@@ -32,7 +32,7 @@ import {
 } from "../repository/outbound-drafts.js";
 import {
   createHumanAction,
-  findOpenHumanActionByRequestIdForRun,
+  findOpenHumanActionForRun,
   getHumanAction,
   resolveHumanAction,
 } from "../repository/human-actions.js";
@@ -53,8 +53,13 @@ function finalizeRunWithoutDelivery(runId: string): Run {
   return updated;
 }
 
-/** Raises (or dedupes, by Deck's own requestId) the one operator action this attempt's
- * INTERACTION_REQUIRED calls for — never a duplicate for the same underlying signal. */
+/** Raises the one operator action this run's delivery blockage calls for — at most one
+ * open `outbound_delivery_interaction_required` action per run at a time (same idempotent
+ * re-raise convention as `product_scope_decision`'s `findOpenHumanAction`), regardless of
+ * whether a retry hits the same or a different underlying Deck signal. This also means a
+ * `retry_send` that hits INTERACTION_REQUIRED again finds its own (still-open, per
+ * `resolveOutboundDeliveryAction` leaving it open on failure) action here and no-ops, rather
+ * than piling up a second queue item for the same run. */
 function parkOnInteractionRequired(
   runId: string,
   draftArtifactId: string,
@@ -62,10 +67,8 @@ function parkOnInteractionRequired(
   reason: string,
   requestId?: string
 ): void {
-  if (requestId) {
-    const existing = findOpenHumanActionByRequestIdForRun(runId, "outbound_delivery_interaction_required", requestId);
-    if (existing) return;
-  }
+  const existing = findOpenHumanActionForRun(runId, "outbound_delivery_interaction_required");
+  if (existing) return;
   createHumanAction({
     runId,
     actionType: "outbound_delivery_interaction_required",
@@ -135,8 +138,17 @@ export async function approveRunWithDeliver(
 
     // Stable per-draft attemptId + a fresh idempotencyKey per real attempt (mirrors
     // developer-effect.ts's `${workItem.id}:${workItem.attemptCount}`) — a retry after
-    // INTERACTION_REQUIRED always mints a genuinely distinct authority.
-    const attemptCount = incrementOutboundDeliveryAttempt(draftArtifactId) ?? 1;
+    // INTERACTION_REQUIRED always mints a genuinely distinct authority. Fail closed (never
+    // default to attempt 1) if the CAS counter can't be advanced — silently reusing `:1`
+    // could collide with a real prior attempt's idempotency key and hit the secret-less
+    // remint path instead of mint a fresh authority.
+    const attemptCount = incrementOutboundDeliveryAttempt(draftArtifactId);
+    if (attemptCount === null) {
+      revertOutboundDraftToPending(draftArtifactId);
+      const reason = "Could not advance the delivery-attempt counter for this draft.";
+      appendEvent(runId, "deliver_failed", { error: reason, errorCode: "INFRA_FAILURE" });
+      return { ok: false, code: 502, error: reason, errorCode: "INFRA_FAILURE" };
+    }
     const idempotencyKey = `${draftArtifactId}:${attemptCount}`;
 
     const minted = await mint({
@@ -218,8 +230,19 @@ export type ResolveOutboundDeliveryResult =
  * Resolves an open `outbound_delivery_interaction_required` action — Run-scoped, so this
  * (like NOT-94's `resolveReflectionInteractionAction`) never goes through
  * `resolveHumanActionAndAdvance`, which assumes an Issue + workflow_instance.
- * `retry_send` re-attempts delivery of the still-pending draft (a fresh authority/attempt);
- * `reject` makes no provider call and finalizes the run without delivering.
+ *
+ * `reject` is always terminal: no provider call, action resolved immediately, run finalized
+ * without delivering.
+ *
+ * `retry_send` re-attempts delivery of the still-pending draft (a fresh authority/attempt —
+ * see `incrementOutboundDeliveryAttempt`). The action is resolved only once that attempt
+ * actually *succeeds* — on any failure (an ordinary infra error, or Deck denying again with
+ * a fresh INTERACTION_REQUIRED) the action is left open rather than resolved out from under
+ * the operator: a resolved-but-failed retry would otherwise vanish from the one shared queue
+ * with no way back to the still-blocked run (there is no per-run detail page to link to on
+ * the legacy Run model). `approveRunWithDeliver`'s own park dedup
+ * (`findOpenHumanActionForRun`) finds this same still-open action on a repeat
+ * INTERACTION_REQUIRED and does not raise a second one.
  */
 export async function resolveOutboundDeliveryAction(
   actionId: string,
@@ -238,9 +261,8 @@ export async function resolveOutboundDeliveryAction(
     return { ok: false, code: 400, error: `Invalid choice "${choice}" for outbound_delivery_interaction_required` };
   }
 
-  resolveHumanAction(actionId, resolvedBy, { choice });
-
   if (choice === "reject") {
+    resolveHumanAction(actionId, resolvedBy, { choice });
     rejectPendingOutboundDrafts(action.runId);
     const updated = finalizeRunWithoutDelivery(action.runId);
     return { ok: true, runStatus: updated.status, delivered: false };
@@ -249,6 +271,11 @@ export async function resolveOutboundDeliveryAction(
   // retry_send — the draft is still pending; an ordinary approve re-attempt mints a fresh
   // authority/attempt (a distinct idempotencyKey — see incrementOutboundDeliveryAttempt).
   const result = await approveRunWithDeliver(action.runId, deps);
-  if (!result.ok) return { ok: false, code: result.code, error: result.error };
+  if (!result.ok) {
+    // Left open on purpose — see the doc comment above. The operator still sees this item
+    // in the queue (and can retry again, or reject) instead of it disappearing on failure.
+    return { ok: false, code: result.code, error: result.error };
+  }
+  resolveHumanAction(actionId, resolvedBy, { choice });
   return { ok: true, runStatus: result.run.status, delivered: result.delivered };
 }

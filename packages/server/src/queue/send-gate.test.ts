@@ -22,8 +22,10 @@ const {
   updateRunFields,
 } = await import("../repository/runs.js");
 const { approveRunWithDeliver, resolveOutboundDeliveryAction } = await import("./approve-deliver.js");
-const { rejectPendingOutboundDrafts, pendingSendCount } = await import("../repository/outbound-drafts.js");
-const { findOpenHumanActionForRun, listHumanActionsForRun } = await import("../repository/human-actions.js");
+const { rejectPendingOutboundDrafts, pendingSendCount, incrementOutboundDeliveryAttempt } = await import(
+  "../repository/outbound-drafts.js"
+);
+const { findOpenHumanActionForRun, listHumanActionsForRun, getHumanAction } = await import("../repository/human-actions.js");
 const { getSnapshot } = await import("./dispatcher.js");
 
 const DECK = "6e825b59-13de-4ddd-ab7e-55ab5a1c279a";
@@ -286,6 +288,36 @@ test("resolveOutboundDeliveryAction:retry_send mints a distinct idempotencyKey t
   assert.equal(res.ok && res.delivered, true);
   assert.notEqual(secondIdempotencyKey, firstIdempotencyKey);
   assert.equal(getRun(run.id)!.status, "done");
+  assert.equal(getHumanAction(actionId)!.status, "resolved");
+});
+
+test("resolveOutboundDeliveryAction:retry_send that fails leaves the action open, not resolved", async () => {
+  const { run, actionId } = await seedParkedRunViaInteractionRequired();
+  const res = await resolveOutboundDeliveryAction(actionId, "yusuke", "retry_send", {
+    mint: mintOk(),
+    revoke: noopRevoke,
+    deliver: async () => ({ ok: false, kind: "infra_failure", reason: "deck down again" }),
+  });
+  assert.equal(res.ok, false);
+  assert.equal(getRun(run.id)!.status, "review");
+  assert.equal(pendingSendCount(run.id), 1);
+  // Left open on purpose — a failed retry must not drop the operator's queue item with no
+  // way back to the still-blocked run (no per-run detail page on the legacy Run model).
+  assert.equal(getHumanAction(actionId)!.status, "open");
+});
+
+test("resolveOutboundDeliveryAction:retry_send that hits INTERACTION_REQUIRED again reuses the same open action, no duplicate", async () => {
+  const { run, actionId } = await seedParkedRunViaInteractionRequired();
+  const res = await resolveOutboundDeliveryAction(actionId, "yusuke", "retry_send", {
+    mint: mintOk(),
+    revoke: noopRevoke,
+    deliver: async () => ({ ok: false, kind: "interaction_required", reason: "still blocked", requestId: "req_different" }),
+  });
+  assert.equal(res.ok, false);
+  assert.equal(getHumanAction(actionId)!.status, "open");
+  const actions = listHumanActionsForRun(run.id).filter((a) => a.actionType === "outbound_delivery_interaction_required");
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].id, actionId);
 });
 
 test("resolveOutboundDeliveryAction:reject makes no mint/deliver call, draft ends rejected, run ends done", async () => {
@@ -339,4 +371,15 @@ test("retry rejects pending draft", () => {
 test("snapshot exposes pendingSendCounts", () => {
   const snap = getSnapshot();
   assert.equal(typeof snap.pendingSendCounts, "object");
+});
+
+test("incrementOutboundDeliveryAttempt counts up from 1 for a real draft", () => {
+  const run = seedReviewRun(true);
+  const draftArt = getLatestArtifact(run.id, "slack_draft")!;
+  assert.equal(incrementOutboundDeliveryAttempt(draftArt.id), 1);
+  assert.equal(incrementOutboundDeliveryAttempt(draftArt.id), 2);
+});
+
+test("incrementOutboundDeliveryAttempt returns null for a nonexistent artifact — approveRunWithDeliver fails closed on this, never defaults to attempt 1", () => {
+  assert.equal(incrementOutboundDeliveryAttempt("00000000-0000-0000-0000-000000000000"), null);
 });

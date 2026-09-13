@@ -171,20 +171,6 @@ export function findOpenHumanActionForRun(runId: string, actionType: HumanAction
   return row ? rowToAction(row) : null;
 }
 
-/** Run-scoped equivalent of `findOpenHumanActionByRequestId` (NOT-95). */
-export function findOpenHumanActionByRequestIdForRun(
-  runId: string,
-  actionType: HumanActionType,
-  requestId: string
-): HumanAction | null {
-  const row = getDb()
-    .prepare(
-      "SELECT * FROM human_actions WHERE run_id = ? AND action_type = ? AND request_id = ? AND status = 'open' ORDER BY requested_at ASC LIMIT 1"
-    )
-    .get(runId, actionType, requestId) as HumanActionRow | undefined;
-  return row ? rowToAction(row) : null;
-}
-
 /** Run-scoped equivalent of `listHumanActionsForIssue` (NOT-95). */
 export function listHumanActionsForRun(runId: string): HumanAction[] {
   const rows = getDb()

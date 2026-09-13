@@ -254,18 +254,31 @@ test("POST resolve outbound_delivery_interaction_required:reject rejects the dra
   await app.close();
 });
 
-test("POST resolve outbound_delivery_interaction_required:retry_send re-attempts delivery (no deck configured, typed infra failure, draft stays pending)", async () => {
+test("POST resolve outbound_delivery_interaction_required:retry_send re-attempts delivery (no deck configured, typed infra failure, draft stays pending, action stays open)", async () => {
   const app = await buildApp();
   const { run, action } = seedRunAwaitingDeliveryDecision();
   const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "retry_send" } });
   // No Agent Deck enrollment configured in this test environment, so the mint call fails —
-  // an ordinary bounded-retry failure, not a crash, and never a second park for the same
-  // already-resolved action.
+  // an ordinary bounded-retry failure, not a crash. The action is left open (not resolved)
+  // so the operator doesn't lose the queue item on a failed retry — there is no per-run
+  // detail page to navigate back to on the legacy Run model.
   assert.equal(res.statusCode, 502);
   assert.equal(getRun(run.id)!.status, "review");
   assert.equal(pendingSendCount(run.id), 1);
   assert.equal(getPendingOutboundDraft(run.id)?.content.status, "pending");
-  assert.equal(getHumanAction(action.id)!.status, "resolved");
+  assert.equal(getHumanAction(action.id)!.status, "open");
+  await app.close();
+});
+
+test("POST resolve outbound_delivery_interaction_required:retry_send can be retried again after a failed attempt (action still open)", async () => {
+  const app = await buildApp();
+  const { action } = seedRunAwaitingDeliveryDecision();
+  const first = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "retry_send" } });
+  assert.equal(first.statusCode, 502);
+  // Same still-open action id — a real second attempt, not a 409/404 on an already-resolved one.
+  const second = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "retry_send" } });
+  assert.equal(second.statusCode, 502);
+  assert.equal(getHumanAction(action.id)!.status, "open");
   await app.close();
 });
 
