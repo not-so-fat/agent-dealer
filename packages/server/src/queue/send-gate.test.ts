@@ -21,7 +21,9 @@ const {
   transitionRun,
   updateRunFields,
 } = await import("../repository/runs.js");
-const { approveRunWithDeliver, resolveOutboundDeliveryAction } = await import("./approve-deliver.js");
+const { approveRunWithDeliver, resolveOutboundDeliveryAction, resolveOpenDeliveryParkForRun } = await import(
+  "./approve-deliver.js"
+);
 const { rejectPendingOutboundDrafts, pendingSendCount, incrementOutboundDeliveryAttempt } = await import(
   "../repository/outbound-drafts.js"
 );
@@ -394,6 +396,21 @@ test("retry rejects pending draft", () => {
 test("snapshot exposes pendingSendCounts", () => {
   const snap = getSnapshot();
   assert.equal(typeof snap.pendingSendCounts, "object");
+});
+
+test("resolveOpenDeliveryParkForRun closes an open park (used by /api/runs/:id/retry and /cancel so a terminalized run's queue item is never left stranded)", async () => {
+  const { run, actionId } = await seedParkedRunViaInteractionRequired();
+  resolveOpenDeliveryParkForRun(run.id, { resolvedBy: "system", choice: "superseded_by_retry" });
+  const resolved = getHumanAction(actionId)!;
+  assert.equal(resolved.status, "resolved");
+  assert.equal(resolved.resolvedBy, "system");
+  assert.deepEqual(JSON.parse(resolved.resolutionJson!), { choice: "superseded_by_retry" });
+});
+
+test("resolveOpenDeliveryParkForRun is a no-op when nothing is parked", () => {
+  const run = seedReviewRun(true);
+  // No open action for this run — must not throw.
+  resolveOpenDeliveryParkForRun(run.id, { resolvedBy: "system", choice: "cancelled" });
 });
 
 test("incrementOutboundDeliveryAttempt counts up from 1 for a real draft", () => {

@@ -53,6 +53,24 @@ const DELIVERY_AUTHORITY_TTL_MS = 5 * 60_000;
 const DEFAULT_ACTION_RESOLUTION = { resolvedBy: "system", choice: "resolved_via_approve" } as const;
 
 /**
+ * Resolves a run's open `outbound_delivery_interaction_required` action, if any — a no-op
+ * otherwise. Any code path that terminalizes a run (finalize-on-success below, but also
+ * `/api/runs/:id/retry` and `/api/runs/:id/cancel` in routes/index.ts, which move the run to
+ * a terminal status without ever calling `approveRunWithDeliver` again) must call this, or a
+ * parked action is left open forever: once the run leaves `review`, `resolveOutboundDeliveryAction`'s
+ * `retry_send` 400s on "Run must be in review" and there is no other way to close the item.
+ */
+export function resolveOpenDeliveryParkForRun(
+  runId: string,
+  actionResolution: { resolvedBy: string; choice: string }
+): void {
+  const openAction = findOpenHumanActionForRun(runId, "outbound_delivery_interaction_required");
+  if (openAction) {
+    resolveHumanAction(openAction.id, actionResolution.resolvedBy, { choice: actionResolution.choice });
+  }
+}
+
+/**
  * Finalizes a run that has no more delivery work to do (no pending draft, or the pending
  * draft was just sent). Also auto-resolves any still-open `outbound_delivery_interaction_required`
  * action for this run: an operator can clear a park either by resolving it directly
@@ -63,10 +81,7 @@ function finalizeRunWithoutDelivery(
   runId: string,
   actionResolution: { resolvedBy: string; choice: string } = DEFAULT_ACTION_RESOLUTION
 ): Run {
-  const openAction = findOpenHumanActionForRun(runId, "outbound_delivery_interaction_required");
-  if (openAction) {
-    resolveHumanAction(openAction.id, actionResolution.resolvedBy, { choice: actionResolution.choice });
-  }
+  resolveOpenDeliveryParkForRun(runId, actionResolution);
   const updated = transitionRun(runId, "done");
   syncLinearForRun(updated, "done").catch((e) => console.error("[linear-sync] done:", e));
   scheduleReflect(updated, { trigger: "approve" });
