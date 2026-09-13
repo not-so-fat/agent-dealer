@@ -194,13 +194,21 @@ test("acquireWorkerAuthority materializes a CODEX_HOME directory, wiring both CO
   }
 });
 
-// PR #19 review round 2: CODEX_HOME also owns codex's file-backed login credentials
-// (auth.json) — a freshly-materialized isolated home lacking it would authenticate as
-// logged out and fail every spawn on a host using file-backed (not keychain) storage.
-test("acquireWorkerAuthority for codex_local copies the ambient auth.json into the isolated CODEX_HOME, never the ambient config.toml", async () => {
+// PR #19 review round 2+3: CODEX_HOME also owns codex's login credentials. A freshly-
+// materialized isolated home lacking auth.json entirely would authenticate as logged out
+// on a host using file-backed (not keychain) storage — but a plain *copy* would (a) drop
+// any refresh codex writes during the session once the isolated dir is deleted, and
+// (b) leave a live second copy of the credential on disk if the coordinator crashes
+// before release runs. auth.json is symlinked, not copied, so there is exactly one real
+// credential file at all times and writes through the link land on it directly.
+test("acquireWorkerAuthority for codex_local symlinks (never copies) the ambient auth.json, preserves cli_auth_credentials_store, and leaves config.toml otherwise untouched", async () => {
   const ambientCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ambient-codex-"));
-  fs.writeFileSync(path.join(ambientCodexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "real-secret-token" } }));
-  fs.writeFileSync(path.join(ambientCodexHome, "config.toml"), 'model = "should-not-be-copied"\n');
+  const ambientAuthPath = path.join(ambientCodexHome, "auth.json");
+  fs.writeFileSync(ambientAuthPath, JSON.stringify({ tokens: { access_token: "real-secret-token" } }));
+  fs.writeFileSync(
+    path.join(ambientCodexHome, "config.toml"),
+    'cli_auth_credentials_store = "file"\nmodel = "should-not-be-copied"\n'
+  );
   const prevCodexHome = process.env.CODEX_HOME;
   process.env.CODEX_HOME = ambientCodexHome;
   try {
@@ -212,13 +220,27 @@ test("acquireWorkerAuthority for codex_local copies the ambient auth.json into t
     });
     assert.equal(result.ok, true);
     if (result.ok) {
-      const copiedAuth = fs.readFileSync(path.join(result.mcpConfigPath, "auth.json"), "utf8");
-      assert.match(copiedAuth, /real-secret-token/);
-      // Only auth.json is carried over — the ambient config.toml (whatever MCP servers
-      // or settings it defines) must not leak into the isolated, scoped home.
+      const isolatedAuthPath = path.join(result.mcpConfigPath, "auth.json");
+      assert.ok(fs.lstatSync(isolatedAuthPath).isSymbolicLink());
+      assert.equal(fs.readlinkSync(isolatedAuthPath), ambientAuthPath);
+      assert.match(fs.readFileSync(isolatedAuthPath, "utf8"), /real-secret-token/);
+
+      // A codex-style in-place refresh (overwrite, not replace) is visible through both
+      // paths — there is exactly one real file.
+      fs.writeFileSync(ambientAuthPath, JSON.stringify({ tokens: { access_token: "refreshed-token" } }));
+      assert.match(fs.readFileSync(isolatedAuthPath, "utf8"), /refreshed-token/);
+
+      // The credential-store *mode* is preserved even though mcp_servers/model are not.
       const isolatedToml = fs.readFileSync(path.join(result.mcpConfigPath, "config.toml"), "utf8");
+      assert.match(isolatedToml, /cli_auth_credentials_store = "file"/);
       assert.doesNotMatch(isolatedToml, /should-not-be-copied/);
+
       await releaseWorkerAuthority({ authorityId: result.authorityId, mcpConfigPath: result.mcpConfigPath });
+      // Releasing (deleting) the isolated dir must remove only the symlink, never the
+      // real ambient credential it points at.
+      assert.equal(fs.existsSync(result.mcpConfigPath), false);
+      assert.ok(fs.existsSync(ambientAuthPath));
+      assert.match(fs.readFileSync(ambientAuthPath, "utf8"), /refreshed-token/);
     }
   } finally {
     if (prevCodexHome === undefined) delete process.env.CODEX_HOME;

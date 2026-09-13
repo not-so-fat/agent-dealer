@@ -17,6 +17,7 @@ import { registerEffectHandler } from "./coordinator/effect-registry.js";
 import { runDeveloperEffect } from "./coordinator/developer-effect.js";
 import { runReviewerEffect } from "./coordinator/reviewer-effect.js";
 import { registerStaticUi } from "./static-ui.js";
+import { cleanupOrphanedWorkerMcpConfig } from "./paths.js";
 
 const { mode, envFile } = loadAgentDealerEnv();
 console.log(formatEnvStartupLine(mode, envFile));
@@ -56,6 +57,7 @@ async function main(): Promise<void> {
   process.on("exit", removeServerPidFile);
 
   migrate();
+  cleanupOrphanedWorkerMcpConfig();
 
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });

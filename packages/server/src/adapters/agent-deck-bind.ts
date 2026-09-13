@@ -110,6 +110,23 @@ interface MaterializedMcpConfig {
   mcpEnv?: Record<string, string>;
 }
 
+/**
+ * Extracts just the top-level `cli_auth_credentials_store` key from the ambient codex
+ * `config.toml`, if present — a single scalar read, not a general TOML parse (pulling in
+ * a parser dependency for one key isn't worth it, and this deliberately never touches
+ * `mcp_servers` or anything else in that file). Returns `null` if the file or key is
+ * absent, or the value isn't a plain quoted string.
+ */
+function readAmbientCredentialsStore(ambientCodexHome: string): string | null {
+  try {
+    const raw = fs.readFileSync(path.join(ambientCodexHome, "config.toml"), "utf8");
+    const match = raw.match(/^\s*cli_auth_credentials_store\s*=\s*"([^"]*)"\s*$/m);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 /** claude's `--mcp-config` file schema. */
 function urlHeaderMcpConfig(mcpUrl: string, authorityId: string, authoritySecret: string, worktreePath: string) {
   return {
@@ -138,13 +155,21 @@ function urlHeaderMcpConfig(mcpUrl: string, authorityId: string, authoritySecret
  *   Both `CODEX_HOME` and the bearer env var are returned in `mcpEnv` for `spawn.ts` to
  *   set on the child process; without `CODEX_HOME` set, codex would silently fall back
  *   to its default (ambient, unscoped) config root. `CODEX_HOME` also owns codex's own
- *   file-backed login credentials (`auth.json`, used when `cli_auth_credentials_store`
- *   is `"file"`, or `"auto"` falling back to it — common on headless/Linux hosts without
- *   an OS keychain) — `agent-health.ts`'s `codex login status` check runs against the
- *   *ambient* home, so a freshly-materialized isolated home lacking that file would
- *   authenticate as logged out and fail every spawn despite health reporting healthy
- *   (PR #19 review). The effective credential file is copied in (never the ambient
- *   `config.toml`/`mcp_servers` table — that's the very thing being scoped away).
+ *   login credentials and their storage-mode selection (PR #19 review round 3):
+ *   - `cli_auth_credentials_store` (ambient `config.toml`) is copied into the isolated
+ *     `config.toml` verbatim if set. Without it, an isolated home defaults to `"auto"`,
+ *     which prefers the OS credential store over `auth.json` whenever one is *available*
+ *     — on a keyring-capable host explicitly configured for `"file"` storage, that would
+ *     make the isolated session ignore the copied `auth.json` and launch logged out even
+ *     though the ambient host is not actually using the keychain.
+ *   - `auth.json` (the credential itself) is *symlinked*, not copied: codex refreshes it
+ *     during normal use, and a plain copy would (a) silently drop those refreshes once
+ *     this per-attempt directory is deleted at release — the opposite of "durable and
+ *     refreshable" — and (b) leave a live second copy of a real, possibly long-lived
+ *     credential on disk if the coordinator crashes before release ever runs (see
+ *     `cleanupOrphanedWorkerMcpConfig` for that crash path — a leftover symlink carries
+ *     no credential bytes of its own, unlike a leftover copy). Writes codex makes through
+ *     the symlink land on the one real ambient file, keeping a single source of truth.
  *
  * `runtime` is asserted supported by the caller (`acquireWorkerAuthority`) — cursor is
  * never passed here.
@@ -161,17 +186,19 @@ async function materializeWorkerMcpConfig(opts: {
   if (opts.runtime === "codex_local") {
     const codexHome = path.join(getExecutionAuthorityConfigDir(), `codex-home-${opts.authorityId}-${randomUUID()}`);
     fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+    const ambientHome = resolveAmbientCodexHome();
     try {
-      const ambientAuthPath = path.join(resolveAmbientCodexHome(), "auth.json");
+      const ambientAuthPath = path.join(ambientHome, "auth.json");
       if (fs.existsSync(ambientAuthPath)) {
-        fs.copyFileSync(ambientAuthPath, path.join(codexHome, "auth.json"));
-        fs.chmodSync(path.join(codexHome, "auth.json"), 0o600);
+        fs.symlinkSync(ambientAuthPath, path.join(codexHome, "auth.json"));
       }
     } catch {
       // best-effort — a host using OS-keychain-backed auth (not file-backed) has no
-      // auth.json to copy at all, and codex's keychain lookup isn't home-dir-scoped.
+      // auth.json to link at all, and codex's keychain lookup isn't home-dir-scoped.
     }
+    const credentialsStore = readAmbientCredentialsStore(ambientHome);
     const toml = [
+      ...(credentialsStore ? [`cli_auth_credentials_store = ${JSON.stringify(credentialsStore)}`, ""] : []),
       "[mcp_servers.agent-deck]",
       `url = ${JSON.stringify(mcpUrl)}`,
       `bearer_token_env_var = ${JSON.stringify(CODEX_BEARER_ENV_VAR)}`,
