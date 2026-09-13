@@ -159,3 +159,58 @@ test("POST resolve final_review:complete finishes the workflow and attempts refl
   assert.ok(!listArtifactsForIssue(issueId).some((a) => a.kind === "playbook_patch"));
   await app.close();
 });
+
+// NOT-94: a reflection_interaction_required action is raised against an issue that is
+// already `done` with no active workflow instance — resolveHumanActionAndAdvance's normal
+// path 409s on "no active workflow for this action" for any type but
+// final_review/attempts_exhausted/product_scope_decision, so the route must dispatch this
+// action type to resolveReflectionInteractionAction instead, never through that machine.
+test("POST resolve on a reflection_interaction_required action bypasses the workflow state machine (issue already done, no active instance)", async () => {
+  const app = await buildApp();
+  const { issueId, actionId } = await seedRealIssueAwaitingFinalReview();
+  const complete = await app.inject({ method: "POST", url: `/api/human-actions/${actionId}/resolve`, payload: { resolvedBy: "yusuke", choice: "complete" } });
+  assert.equal(complete.statusCode, 200);
+  assert.equal(getIssue(issueId)!.status, "done");
+
+  const reflectAction = createHumanAction({
+    issueId,
+    actionType: "reflection_interaction_required",
+    reason: "Approve the coordinator enrollment.",
+    question: "Approve the coordinator enrollment. Retry the reflection, or dismiss?",
+    responseOptions: [
+      { choice: "retry", label: "Retry reflection" },
+      { choice: "dismiss", label: "Dismiss" },
+    ],
+    requestId: "req_route_test",
+  });
+
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${reflectAction.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "dismiss" } });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { issueStatus: string; nextWorkItemId: string | null; instanceCompleted: boolean; restarted: boolean };
+  assert.equal(body.issueStatus, "done");
+  assert.equal(body.nextWorkItemId, null);
+  assert.equal(body.instanceCompleted, false);
+  assert.equal(body.restarted, false);
+  assert.equal(getHumanAction(reflectAction.id)!.status, "resolved");
+  await app.close();
+});
+
+test("POST resolve 400s on a choice not valid for reflection_interaction_required", async () => {
+  const app = await buildApp();
+  const { issueId, actionId } = await seedRealIssueAwaitingFinalReview();
+  await app.inject({ method: "POST", url: `/api/human-actions/${actionId}/resolve`, payload: { resolvedBy: "yusuke", choice: "complete" } });
+
+  const reflectAction = createHumanAction({
+    issueId,
+    actionType: "reflection_interaction_required",
+    reason: "Approve the coordinator enrollment.",
+    question: "Retry the reflection, or dismiss?",
+    responseOptions: [
+      { choice: "retry", label: "Retry reflection" },
+      { choice: "dismiss", label: "Dismiss" },
+    ],
+  });
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${reflectAction.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "close" } });
+  assert.equal(res.statusCode, 400);
+  await app.close();
+});

@@ -9,6 +9,13 @@ export const HumanActionType = z.enum([
    * mint/tool call under execution authority (NOT-87) — the worker was released rather
    * than left holding an in-flight call. */
   "deck_interaction_required",
+  /** Agent Deck returned INTERACTION_REQUIRED while a completed issue's post-review
+   * reflection tried to read/propose against a playbook under execution authority
+   * (NOT-94) — parks that reflection attempt only. Deliberately distinct from
+   * `deck_interaction_required`: reflection runs after the issue is already `done`, and
+   * resolving this action never reopens the issue or enqueues developer/reviewer work,
+   * unlike `deck_interaction_required`'s "resume" choice. */
+  "reflection_interaction_required",
 ]);
 export type HumanActionType = z.infer<typeof HumanActionType>;
 
@@ -27,8 +34,9 @@ export const HumanAction = z.object({
   responseOptionsJson: z.string().nullable(),
   continuationPreviewJson: z.string().nullable(),
   /** Agent Deck's own correlation id for the INTERACTION_REQUIRED response that raised
-   * this action (deck_interaction_required only) — null for every other action type and
-   * for a deck_interaction_required Deck raised without one (NOT-93). */
+   * this action (deck_interaction_required / reflection_interaction_required only) —
+   * null for every other action type and for one Deck raised without a correlation id
+   * (NOT-93). */
   requestId: z.string().nullable(),
   status: HumanActionStatus,
   resolutionJson: z.string().nullable(),

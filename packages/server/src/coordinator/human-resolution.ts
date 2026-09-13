@@ -24,21 +24,34 @@ export interface HumanResolutionResult {
   triggerReflect?: boolean;
 }
 
-/** The only choices resolveHumanActionOutcome accepts per action type — the stored "response options." */
+/**
+ * The only choices resolveHumanActionOutcome accepts per action type — the stored "response
+ * options." `reflection_interaction_required` is listed here only so this map stays total
+ * over `HumanActionType`; it is never routed through `resolveHumanActionOutcome` (NOT-94's
+ * reflect-trigger.ts resolves it directly — reflection runs after the issue is already
+ * `done`, and its choices must never reopen the issue or enqueue developer/reviewer work).
+ */
 const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
   final_review: ["complete", "repair", "close"],
   attempts_exhausted: ["retry", "close"],
   policy_escalation: ["resume", "close"],
   product_scope_decision: ["resume"],
   deck_interaction_required: ["resume", "close"],
+  reflection_interaction_required: ["retry", "dismiss"],
 };
 
 /**
  * Validates a raw (actionType, choice) pair against that action type's allowed response
  * options before it's ever treated as a typed HumanResolution. Returns null for anything
  * not in the allowed set — callers must reject the request rather than guess at intent.
+ *
+ * `reflection_interaction_required` is deliberately rejected here even though
+ * `VALID_CHOICES` lists it (PR #21 review): it has no corresponding `HumanResolution`
+ * variant, so casting it through would be a type lie, and its only legal resolver is
+ * `resolveReflectionInteractionAction` (reflect-trigger.ts), never `resolveHumanActionOutcome`.
  */
 export function parseHumanResolution(actionType: string, choice: string): HumanResolution | null {
+  if (actionType === "reflection_interaction_required") return null;
   if (!(actionType in VALID_CHOICES)) return null;
   if (!VALID_CHOICES[actionType as HumanActionType].includes(choice)) return null;
   return { actionType, choice } as HumanResolution;

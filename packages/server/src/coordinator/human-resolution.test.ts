@@ -16,6 +16,15 @@ test("parseHumanResolution accepts a valid (actionType, choice) pair", () => {
   assert.deepStrictEqual(parseHumanResolution("final_review", "repair"), { actionType: "final_review", choice: "repair" });
 });
 
+// PR #21 review finding #3: reflection_interaction_required has no HumanResolution variant
+// — it must never parse successfully here even though VALID_CHOICES lists its choices (kept
+// there only so that Record<HumanActionType, ...> stays total). Its only legal resolver is
+// resolveReflectionInteractionAction (reflect-trigger.ts).
+test("parseHumanResolution rejects reflection_interaction_required even though VALID_CHOICES lists its choices", () => {
+  assert.equal(parseHumanResolution("reflection_interaction_required", "retry"), null);
+  assert.equal(parseHumanResolution("reflection_interaction_required", "dismiss"), null);
+});
+
 test("resolveHumanActionOutcome throws rather than silently closing on an invalid choice reaching it directly", () => {
   assert.throws(() => resolveHumanActionOutcome({ actionType: "final_review", choice: "bogus" } as never), /Unrecognized final_review choice/);
 });

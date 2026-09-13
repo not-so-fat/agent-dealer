@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { getHumanAction, listOpenHumanActions } from "../repository/human-actions.js";
 import { resolveHumanActionAndAdvance } from "../coordinator/commands.js";
-import { triggerIssueReflect } from "../coordinator/reflect-trigger.js";
+import { triggerIssueReflect, resolveReflectionInteractionAction } from "../coordinator/reflect-trigger.js";
 
 export async function registerHumanActionRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/human-actions", async () => listOpenHumanActions());
@@ -21,6 +21,21 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
     // trigger below and stable regardless of how resolution turns out.
     const action = getHumanAction(id);
     if (!action) return reply.status(404).send({ error: "Human action not found" });
+
+    // A reflection control-plane park never carries an active workflow instance to advance
+    // (the issue is already `done`) — resolve it directly rather than through
+    // resolveHumanActionAndAdvance's workflow state machine, which would 409 on "no active
+    // workflow for this action" (NOT-94).
+    if (action.actionType === "reflection_interaction_required") {
+      const reflectResult = resolveReflectionInteractionAction(id, resolvedBy, choice);
+      if (!reflectResult.ok) return reply.status(reflectResult.code).send({ error: reflectResult.error });
+      return {
+        issueStatus: reflectResult.issueStatus,
+        nextWorkItemId: null,
+        instanceCompleted: false,
+        restarted: false,
+      };
+    }
 
     const result = resolveHumanActionAndAdvance(id, resolvedBy, choice);
     if (!result.ok) return reply.status(result.code).send({ error: result.error });
