@@ -34,9 +34,17 @@ agent-dealer issue create \
 ```
 
 `acceptance-criteria` can be omitted at create time, but `issue start` then opens a
-`product_scope_decision` human action instead of starting — resolve it once acceptance
-criteria are added (via the API/dashboard) rather than retrying `start` blind. The
-response's `id` is the issue id used by every command below.
+`product_scope_decision` human action instead of starting. Once acceptance criteria are
+added (via the API/dashboard — there is no `issue update` CLI command yet), either path
+closes that action and starts the workflow in one step:
+
+```bash
+agent-dealer issue start <issueId>                                        # retry directly
+# or
+agent-dealer action resolve <actionId> --choice resume --by <yourName>    # explicit resolve
+```
+
+The response's `id` from `issue create` is the issue id used by every command below.
 
 ## 3. Confirm it's discoverable
 
