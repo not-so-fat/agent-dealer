@@ -169,8 +169,9 @@ If required product intent cannot be normalized without guessing, create a `prod
    - Store the snapshot as immutable input for every review round.
 
 2. **Prepare developer workspace**
-   - Create or reuse the issue branch and developer worktree.
+   - Create or reuse the issue branch and developer worktree under `<repo>/.agent-dealer-worktrees/` (grant-covered path).
    - Bind the developer profile, runtime, Agent Deck, playbooks, limits, and permissions.
+   - When the profile has a deck, the worker equips it with `bind_workspace` to that worktree cwd before other Deck/Linear use — otherwise the session is not the configured agent.
 
 3. **Develop**
    - Implement against the task snapshot.
@@ -183,8 +184,8 @@ If required product intent cannot be normalized without guessing, create a `prod
    - Emit one visible handoff: `Developer updated PR at <head SHA>`.
 
 5. **Prepare reviewer workspace**
-   - Create a separate read-only reviewer worktree at the recorded head SHA.
-   - Bind the reviewer profile independently from the developer profile.
+   - Create a separate read-only reviewer worktree at the recorded head SHA under the same `.agent-dealer-worktrees/` root.
+   - Bind the reviewer profile independently from the developer profile (same bind-first equip rule when a deck is set).
 
 6. **Review**
    - Review the immutable task snapshot, diff, evidence, repository rules, and prior finding history.

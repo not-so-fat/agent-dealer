@@ -49,23 +49,13 @@ function guidanceSection(guidance: string[] | undefined): string[] {
 }
 
 /**
- * Without an explicit instruction either way, a runtime with its own ambient Agent Deck
- * config (cursor_local loads the operator's global `.cursor/mcp.json` regardless of what
- * this prompt says — see args.ts's `cursor_local` comment) can try `bind_workspace`/Linear
- * on its own initiative, purely out of habit from the operator's personal setup. That
- * always fails for a throwaway worktree that was never bound via `agent-deck use`, and
- * the model then narrates the failure in its own prose ("Linear NOT-96 was not
- * fetchable...") instead of just using the task/acceptance-criteria text already in this
- * prompt — silently degrading review/implementation quality in a way nothing surfaces to
- * the operator.
+ * An agent with a deckId is only that agent once the worker has equipped the deck for
+ * its session cwd. Without an explicit bind-first instruction, models either skip Deck
+ * entirely or (cursor_local) invent a bind against the wrong path from ambient habit.
+ * Worktrees live under the issue repo (`.agent-dealer-worktrees/`) so the operator's
+ * `agent-deck use` grant covers the cwd and bind can succeed.
  *
- * When a deck *is* configured the opposite mistake is just as bad: telling the model to
- * `bind_workspace` (the pre-NOT-87 prompt shape) contradicts execution authority
- * (args.ts / agent-deck-bind.ts — `bind_workspace` is deny-by-default; deck/scope is
- * already pinned at mint) and for cursor_local there is no isolated authority at all, so
- * ambient bind against the generated worktree returns WORKSPACE_SCOPE_MISMATCH. Either
- * way the model burns the session chasing Linear / bind instead of the Task/AC text.
- * Never leave either case ambiguous.
+ * When there is no deckId: forbid bind/Linear — Task/AC are the full brief.
  */
 function agentDeckSection(worktreePath: string | undefined, deckId: string | null | undefined, playbookIds: string[] | undefined): string[] {
   if (!deckId || !worktreePath) {
@@ -74,8 +64,8 @@ function agentDeckSection(worktreePath: string | undefined, deckId: string | nul
     ];
   }
   const parts = [
-    `Agent Deck deckId "${deckId}" is already scoped for this session (workspace ${worktreePath}). Do NOT call bind_workspace — under execution authority it is denied, and ambient bind against a throwaway worktree fails. Use get_bound_deck / get_playbook / list_service_tools as needed.`,
-    `The Task and Acceptance criteria above are the complete, authoritative brief; do not fetch the ticket from Linear to recover them, and do not treat a failed Agent Deck/Linear call as missing acceptance criteria.`,
+    `First equip this agent: bind_workspace({ deckId: "${deckId}", workspaceRoot: "${worktreePath}" }). Do this before any other Agent Deck or Linear call — without that bind you are not running the configured agent.`,
+    `Then get_bound_deck / list_service_tools as needed. The Task and Acceptance criteria above are authoritative; use Linear only to enrich, not to replace a missing brief.`,
   ];
   for (const playbookId of playbookIds ?? []) {
     parts.push(`Then get_playbook("${playbookId}") and follow it.`);

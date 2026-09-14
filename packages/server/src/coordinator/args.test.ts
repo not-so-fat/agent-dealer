@@ -74,10 +74,10 @@ test("buildDeveloperArgs for claude_code makes Bash/Write/Edit available via --t
   assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
 });
 
-test("claude allowedTools never includes bind_workspace — deny-by-default control plane under execution authority", () => {
+test("claude allowedTools includes bind_workspace so a deck-equipped agent can bind its cwd", () => {
   const args = buildDeveloperArgs("claude_code", "implement");
   const allowed = args[args.indexOf("--allowedTools") + 1];
-  assert.ok(!allowed.split(",").includes("mcp__agent-deck__bind_workspace"));
+  assert.ok(allowed.split(",").includes("mcp__agent-deck__bind_workspace"));
 });
 
 test("buildDeveloperArgs for claude_code adds --mcp-config --strict-mcp-config when an authority config path is given, omits it otherwise", () => {

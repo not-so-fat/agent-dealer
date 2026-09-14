@@ -13,8 +13,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { WorkerSessionRole } from "@agent-dealer/shared";
-import { getDataDir } from "../db/index.js";
 import { withRepoLock } from "../runners/process-registry.js";
+
+/** Directory name under the issue repo for coordinator-managed role worktrees.
+ * Kept inside the repo (not `$AGENT_DEALER_HOME`) so `agent-deck use` grants cover the
+ * worker cwd and `bind_workspace` to that path can succeed. */
+export const WORKTREES_DIR_NAME = ".agent-dealer-worktrees";
 
 const run = promisify(execFile);
 
@@ -85,13 +89,19 @@ export async function branchExists(repo: string, branch: string): Promise<boolea
 
 export { withRepoLock };
 
-/** Where role worktrees are checked out — a sibling of the sqlite db, off the repo tree. */
-export function worktreesRoot(): string {
-  return path.join(getDataDir(), "worktrees");
+/** Where role worktrees are checked out for this issue repo — under the repo tree so the
+ * agent's deck grant (typically rooted at the same checkout or an ancestor) covers the
+ * worker cwd and bind-first equip can succeed. */
+export function worktreesRoot(repo: string): string {
+  return path.join(repo, WORKTREES_DIR_NAME);
 }
 
-export function roleWorktreePath(sessionId: string, role: WorkerSessionRole): string {
-  return path.join(worktreesRoot(), `${sessionId}-${role}`);
+export function roleWorktreePath(repo: string, sessionId: string, role: WorkerSessionRole): string {
+  return path.join(worktreesRoot(repo), `${sessionId}-${role}`);
+}
+
+function ensureWorktreesRoot(repo: string): void {
+  fs.mkdirSync(worktreesRoot(repo), { recursive: true });
 }
 
 export interface RoleWorktree {
@@ -140,9 +150,10 @@ export async function createRoleWorktree(opts: {
   newBranch?: string;
 }): Promise<RoleWorktree> {
   const detached = opts.role === "reviewer";
-  const worktreePath = roleWorktreePath(opts.sessionId, opts.role);
+  const worktreePath = roleWorktreePath(opts.repo, opts.sessionId, opts.role);
   await withRepoLock(opts.repo, async () => {
     await pruneWorktrees(opts.repo);
+    ensureWorktreesRoot(opts.repo);
     await addWorktree({
       repo: opts.repo,
       path: worktreePath,
@@ -152,7 +163,7 @@ export async function createRoleWorktree(opts: {
     });
     if (detached) await blockPush(opts.repo, worktreePath);
   });
-  return { path: worktreePath, role: opts.role, ref: opts.newBranch ?? opts.ref, detached };
+  return { path: tryRealpath(worktreePath), role: opts.role, ref: opts.newBranch ?? opts.ref, detached };
 }
 
 export type PushResult = { ok: true } | { ok: false; reason: string; rejected: boolean };
@@ -303,7 +314,8 @@ export async function resolveDeveloperWorktree(opts: {
     await pruneWorktrees(opts.repo);
     const existing = await findWorktreeForBranch(opts.repo, opts.branchName);
     if (existing) {
-      const underRoot = tryRealpath(existing).startsWith(tryRealpath(worktreesRoot()) + path.sep);
+      const root = tryRealpath(worktreesRoot(opts.repo));
+      const underRoot = tryRealpath(existing).startsWith(root + path.sep);
       if (!underRoot) {
         return {
           kind: "conflict",
@@ -314,7 +326,7 @@ export async function resolveDeveloperWorktree(opts: {
       }
       const state = await inspectLeftoverWorktree(existing);
       if (state === "clean") {
-        return { kind: "reused", path: existing };
+        return { kind: "reused", path: tryRealpath(existing) };
       }
       if (state === "dirty_or_unpushed") {
         return {
@@ -349,7 +361,8 @@ export async function resolveDeveloperWorktree(opts: {
       }
       await pruneWorktrees(opts.repo);
     }
-    const worktreePath = roleWorktreePath(opts.sessionId, "developer");
+    ensureWorktreesRoot(opts.repo);
+    const worktreePath = roleWorktreePath(opts.repo, opts.sessionId, "developer");
     await addWorktree({
       repo: opts.repo,
       path: worktreePath,
@@ -357,6 +370,6 @@ export async function resolveDeveloperWorktree(opts: {
       detach: false,
       newBranch: opts.reuseBranch ? undefined : opts.branchName,
     });
-    return { kind: "created", path: worktreePath };
+    return { kind: "created", path: tryRealpath(worktreePath) };
   });
 }

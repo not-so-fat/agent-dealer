@@ -6,9 +6,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// realpathSync: macOS's /tmp is a symlink to /private/tmp, and `git worktree list` reports
-// the resolved path — without this, a path built from AGENT_DEALER_HOME would never
-// string-equal what findWorktreeForBranch/resolveDeveloperWorktree read back from git.
+// Worktrees live under `<repo>/.agent-dealer-worktrees/` so deck grants on the issue
+// repo cover the worker cwd. realpathSync: macOS's /tmp is a symlink to /private/tmp,
+// and `git worktree list` reports the resolved path — without this, path comparisons
+// against findWorktreeForBranch/resolveDeveloperWorktree would fail.
 const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-home-")));
 process.env.AGENT_DEALER_HOME = home;
 
@@ -22,6 +23,8 @@ const {
   commitsAhead,
   findWorktreeForBranch,
   resolveDeveloperWorktree,
+  worktreesRoot,
+  WORKTREES_DIR_NAME,
 } = await import("./git-worktree.js");
 
 let repo: string;
@@ -57,6 +60,8 @@ after(() => {
 
 test("createRoleWorktree gives the developer a branch checkout and the reviewer a detached one", async () => {
   const dev = await createRoleWorktree({ repo, role: "developer", sessionId: "s-dev", ref: "issue-1" });
+  assert.ok(dev.path.startsWith(fs.realpathSync(worktreesRoot(repo)) + path.sep));
+  assert.ok(dev.path.includes(WORKTREES_DIR_NAME));
   const head = git(repo, "rev-parse", "HEAD");
   const rev = await createRoleWorktree({ repo, role: "reviewer", sessionId: "s-rev", ref: head });
 

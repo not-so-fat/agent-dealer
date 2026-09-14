@@ -504,7 +504,7 @@ test("NOT-88: a leftover clean worktree from a resolved unpushed_commit escalati
   const issueAfterEscalation = getIssue(issueId)!;
   assert.equal(issueAfterEscalation.status, "needs_human");
   const round1Session = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
-  const leftoverPath = roleWorktreePath(round1Session.id, "developer");
+  const leftoverPath = roleWorktreePath(repo, round1Session.id, "developer");
   assert.ok(fs.existsSync(leftoverPath), "the clean worktree behind the rejected push must be preserved, not removed");
 
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation" && a.status === "open")!;
@@ -527,7 +527,7 @@ test("NOT-88: a leftover clean worktree from a resolved unpushed_commit escalati
   assert.equal(devSessions[1].status, "done");
   // Round 2 never created its OWN sessionId-keyed worktree — it reused round 1's leftover
   // path in place, which the clean_handoff path then removes as part of a normal wrap-up.
-  assert.ok(!fs.existsSync(roleWorktreePath(devSessions[1].id, "developer")));
+  assert.ok(!fs.existsSync(roleWorktreePath(repo, devSessions[1].id, "developer")));
   assert.ok(!fs.existsSync(leftoverPath), "the reused worktree is cleaned up after a successful handoff");
 });
 
@@ -546,7 +546,7 @@ test("NOT-88: a leftover dirty worktree escalates as an actionable worktree_conf
   await pump(1);
 
   const round1Session = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
-  const leftoverPath = roleWorktreePath(round1Session.id, "developer");
+  const leftoverPath = roleWorktreePath(repo, round1Session.id, "developer");
   assert.ok(fs.existsSync(path.join(leftoverPath, "half-done.txt")), "the dirty leftover must be preserved");
 
   const firstAction = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation" && a.status === "open")!;
@@ -726,4 +726,72 @@ test("NOT-83 review: an item cancelled during worktree/deck-bind setup (before s
 
   assert.equal(spawnCalled, false, "a cancelled item must never reach the real spawn");
   assert.deepEqual(outcome, { kind: "session_failed" });
+});
+
+test("cursor_local + deckId: skips acquireWorkerAuthority mint (ambient MCP path)", async () => {
+  const { randomUUID } = await import("node:crypto");
+  const { buildProfileSnapshot } = await import("./profile-snapshot.js");
+
+  const deckId = randomUUID();
+  const dev = createAgent({
+    name: `cursor-dev-${Math.random()}`,
+    runtime: "cursor_local",
+    workspaceRoot: repo,
+    deckId,
+  });
+  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
+  const issueId = createIssue({
+    title: "Cursor ambient deck",
+    description: "Use ambient MCP.",
+    acceptanceCriteria: "Mint skipped.",
+    repo,
+    baseBranch: "main",
+    developerAgentId: dev.id,
+    reviewerAgentId: rev.id,
+    maxReviewRounds: 3,
+    maxInfraAttempts: 3,
+    source: "manual",
+  }).id;
+
+  startWorkflow(issueId);
+  const claimed = claimWorkItem(`test-cursor-deck-${issueId}`, { leaseMs: 60_000 })!;
+  const snapshot = buildProfileSnapshot(dev, "developer");
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: claimed.round,
+    agentId: dev.id,
+    runtime: "cursor_local",
+    profileSnapshotJson: JSON.stringify(snapshot),
+  });
+  assert.ok(bindWorkItemSession(claimed.id, session.id, claimed.leaseToken!));
+  startSession(session.id);
+
+  let mintCalls = 0;
+  let spawnSawMcpConfig: string | undefined;
+  const spySpawn: SpawnFn = async (input) => {
+    spawnSawMcpConfig = input.mcpConfigPath;
+    return commitingSpawn(input);
+  };
+
+  const outcome = await runDeveloperEffect(
+    {
+      workItem: { ...claimed, workerSessionId: session.id },
+      issue: getIssue(issueId)!,
+      instance: getActiveWorkflowInstance(issueId)!,
+      signal: new AbortController().signal,
+    },
+    {
+      spawn: spySpawn,
+      github: fakeGithub(),
+      mint: async () => {
+        mintCalls += 1;
+        throw new Error("mint must not be called for cursor_local + deck");
+      },
+    }
+  );
+
+  assert.equal(mintCalls, 0, "cursor_local must not mint execution authority");
+  assert.equal(spawnSawMcpConfig, undefined, "no scoped mcpConfigPath for ambient Cursor path");
+  assert.equal(outcome.kind, "clean_handoff");
 });

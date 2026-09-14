@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 .temporal/
+.agent-dealer-worktrees/
 .cursor/*
 !.cursor/rules/
 !.cursor/rules/**

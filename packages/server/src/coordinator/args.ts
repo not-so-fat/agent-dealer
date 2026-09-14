@@ -7,12 +7,11 @@
 import type { PermissionPolicy, Runtime, WorkerSessionRole } from "@agent-dealer/shared";
 import { roleCeiling } from "@agent-dealer/shared";
 
-// `bind_workspace` is deliberately absent (NOT-87/92): under execution authority Deck
-// returns INTERACTION_REQUIRED for it unconditionally — the deck/scope is already pinned
-// by the authority at mint time — so offering it to the model is dead weight, not a
-// capability.
+// `bind_workspace` is required when a profile carries a deckId — equipping the deck for
+// the worker cwd is what makes the session the agent the operator defined. Worktrees live
+// under the issue repo so the grant covers that path (git-worktree.ts).
 const DECK_READ_TOOLS =
-  "mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__list_service_tools";
+  "mcp__agent-deck__bind_workspace,mcp__agent-deck__get_playbook,mcp__agent-deck__get_bound_deck,mcp__agent-deck__list_service_tools";
 const DENY_SEND_TOOL = "mcp__agent-deck__call_service_tool";
 
 // Built-in tool names (no MCP tools — --tools only governs the built-in set) passed to

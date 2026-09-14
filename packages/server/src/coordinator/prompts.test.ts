@@ -41,7 +41,7 @@ test("an infra retry on a repair round still surfaces the failure reason, not th
   assert.doesNotMatch(prompt, /^This is repair round 2\./m);
 });
 
-test("deck section lists every playbook id, not just the first, and never asks for bind_workspace", () => {
+test("deck section requires bind_workspace first, then lists every playbook id", () => {
   const prompt = buildDeveloperPrompt({
     taskSnapshot,
     round: 1,
@@ -49,13 +49,8 @@ test("deck section lists every playbook id, not just the first, and never asks f
     deckId: "deck-1",
     playbookIds: ["pb-a", "pb-b"],
   });
-  // Must not invite a bind call (pre-NOT-87 shape). The prohibition text itself may
-  // still contain the token "bind_workspace" — assert against the call-shaped form.
-  assert.doesNotMatch(prompt, /bind_workspace\s*\(/);
-  assert.doesNotMatch(prompt, /Use Agent Deck:\s*bind_workspace/);
-  assert.match(prompt, /deckId "deck-1" is already scoped/);
-  assert.match(prompt, /Do NOT call bind_workspace/);
-  assert.match(prompt, /complete, authoritative brief/);
+  assert.match(prompt, /bind_workspace\(\{ deckId: "deck-1", workspaceRoot: "\/wt" \}\)/);
+  assert.match(prompt, /First equip this agent/);
   assert.match(prompt, /get_playbook\("pb-a"\)/);
   assert.match(prompt, /get_playbook\("pb-b"\)/);
 });
@@ -134,12 +129,10 @@ test("reviewer prompt omits optional sections when absent", () => {
   assert.doesNotMatch(prompt, /bind_workspace/);
 });
 
-test("reviewer prompt deck section lists every playbook id, matching the developer prompt's pattern", () => {
+test("reviewer prompt deck section requires bind_workspace first, matching the developer prompt", () => {
   const prompt = buildReviewerPrompt({ ...reviewerBase, worktreePath: "/wt", deckId: "deck-1", playbookIds: ["pb-a", "pb-b"] });
-  assert.doesNotMatch(prompt, /bind_workspace\s*\(/);
-  assert.doesNotMatch(prompt, /Use Agent Deck:\s*bind_workspace/);
-  assert.match(prompt, /deckId "deck-1" is already scoped/);
-  assert.match(prompt, /Do NOT call bind_workspace/);
+  assert.match(prompt, /bind_workspace\(\{ deckId: "deck-1", workspaceRoot: "\/wt" \}\)/);
+  assert.match(prompt, /First equip this agent/);
   assert.match(prompt, /get_playbook\("pb-a"\)/);
   assert.match(prompt, /get_playbook\("pb-b"\)/);
 });

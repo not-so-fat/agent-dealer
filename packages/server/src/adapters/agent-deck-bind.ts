@@ -8,13 +8,11 @@
 // `materializeWorkerMcpConfig`), and hands the result back for `spawn.ts` to wire into the
 // runtime's own CLI invocation.
 //
-// This replaces the NOT-60 `bindAndVerify`/`bind_workspace` preflight: under execution
-// authority, `bind_workspace` is deny-by-default control-plane (Deck returns
-// INTERACTION_REQUIRED for it unconditionally — the deck/scope is already pinned by the
-// authority at mint time, per NOT-86's as-built `EXECUTION_AUTHORITY_ALLOWED_TOOLS`
-// allowlist). A live `get_bound_deck` round-trip using the freshly minted authority
-// stands in for the old bind+verify round-trip, catching a bad mint (wrong deck,
-// audience mismatch) before the paid worker session ever spawns.
+// Worker prompts still instruct `bind_workspace` to the session cwd first (equip the
+// configured deck). Worktrees live under the issue repo so ambient/grant scope covers that
+// path. For claude/codex, this mint + `x-agent-deck-workspace` header remains the isolated
+// MCP transport; `get_bound_deck` verifies the mint before spawn. `cursor_local` skips mint
+// (no isolation flag) and relies on ambient MCP + bind-first.
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";

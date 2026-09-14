@@ -32,13 +32,15 @@ Deleting `~/.agent-dealer/.temporal/` is safe — treasure remains in the databa
     logs/            ← runner NDJSON logs
 ```
 
+Issue-coordinator role worktrees are **not** under this home directory. They are checked out at `<issue.repo>/.agent-dealer-worktrees/<sessionId>-{developer|reviewer}` so an Agent Deck workspace grant on that repo covers the worker cwd and `bind_workspace` can equip the configured deck.
+
 ## Agent fields
 
 | Field | Required | Role |
 |-------|----------|------|
 | `workspaceRoot` | Yes (before kick) | CLI working directory — git repo for dev, vault folder for notes |
 | `runtime` | Yes | `claude_code`, `cursor_local`, or `codex_local` |
-| `deckId` / `playbookId` | No | Agent Deck binding |
+| `deckId` / `playbookId` | No | Agent Deck binding — when set, issue workers must `bind_workspace` to their session cwd before other Deck use |
 | `name` | Yes | Display label |
 
 Built-in Claude, Cursor, and Codex agents ship with **no default workspace**. Configure workspace on the Agents page before kicking tasks.
