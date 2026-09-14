@@ -1,93 +1,39 @@
 // packages/server/src/adapters/agent-deck-bind.ts
 //
-// Server-side Agent Deck preflight for a worker session (NOT-87/92). A generated worktree
-// must never inherit a persistent, path-scoped credential, so before a developer/reviewer
-// session spawns the coordinator mints a short-lived execution authority for this specific
-// attempt (NOT-85 §5.2), materializes a per-attempt, runtime-specific MCP config carrying
-// that authority as the spawned worker's *only* way to reach Agent Deck (see
-// `materializeWorkerMcpConfig`), and hands the result back for `spawn.ts` to wire into the
-// runtime's own CLI invocation.
+// Server-side Agent Deck preflight for a worker session (NOT-106). Before a
+// developer/reviewer session spawns, the coordinator materializes a per-attempt,
+// runtime-specific MCP config that sends `x-agent-deck-deck-id` (+ workspace) with
+// **no** Authorization — Agent Deck's launch-fixed deck session (NOT-105). Then it
+// verifies with a live `get_bound_deck` before spawn.
 //
-// Worker prompts still instruct `bind_workspace` to the session cwd first (equip the
-// configured deck). Worktrees live under the issue repo so ambient/grant scope covers that
-// path. For claude/codex, this mint + `x-agent-deck-workspace` header remains the isolated
-// MCP transport; `get_bound_deck` verifies the mint before spawn. `cursor_local` skips mint
-// (no isolation flag) and relies on ambient MCP + bind-first.
+// Worker prompts still instruct `bind_workspace` first; under a launch-fixed deck that
+// bind confirms the equipped deck (and rejects a different one with DECK_FIXED).
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Runtime } from "@agent-dealer/shared";
 import { getAgentDeckMcpUrl } from "./agent-deck.js";
-import { revokeAuthority } from "./execution-authority.js";
-import { acquireAuthorityForAttempt, failAuthority, releaseAuthority, type MintFn, type RevokeFn } from "./authority-lifecycle.js";
 import { getExecutionAuthorityConfigDir } from "../paths.js";
 import { resolveAmbientCodexHome } from "../cli-env.js";
 
-export { revokeAuthority };
-
-// Fallback only — every real caller (developer-effect.ts, reviewer-effect.ts) passes an
-// explicit ttlMs derived from that role's own session timeout. A fixed default here would
-// otherwise be silently shorter than a configurable session timeout and expire the
-// authority mid-session (PR #19 review).
-const DEFAULT_TTL_MS = 30 * 60_000;
-
-/**
- * Added on top of a role's own (configurable) session timeout to get the authority's
- * ttlMs — covers the mint + live `get_bound_deck` verify round-trip that happens
- * *before* the spawned session's own timeout clock starts, so the authority can't
- * expire mid-session even at that timeout's exact edge.
- */
-export const AUTHORITY_TTL_HEADROOM_MS = 5 * 60_000;
-
-const CODEX_BEARER_ENV_VAR = "AGENT_DECK_AUTHORITY_BEARER";
 const CODEX_HOME_ENV_VAR = "CODEX_HOME";
-
-/**
- * Runtimes execution authority can materialize an isolated, single-server MCP config
- * for. `cursor_local` is deliberately excluded (PR #19 review): cursor-agent loads
- * project *and* global `.cursor/mcp.json` and has no flag to isolate one from the
- * other, so `--approve-mcps` would auto-approve every ambient MCP server on the
- * machine, not just a freshly-scoped one — a worse hole than the ambient access cursor
- * already had before this ticket. Until cursor ships a real isolation mechanism,
- * `acquireWorkerAuthority` refuses to mint for it rather than claim a scoping
- * guarantee it cannot enforce.
- */
-const AUTHORITY_SUPPORTED_RUNTIMES: ReadonlySet<Runtime> = new Set(["claude_code", "codex_local"]);
 
 /** One tool call within a single connected MCP session. */
 export type DeckToolCaller = (name: string, args: Record<string, unknown>) => Promise<unknown>;
 
-export type WorkerAuthorityOutcome =
+export type WorkerDeckConnectionOutcome =
   | {
       ok: true;
-      authorityId: string;
-      /** The `authority_attempts` ledger row backing this authority (NOT-91) — pass to
-       * `releaseWorkerAuthority` so it closes the row, not just Deck's own record. */
-      attemptRowId: string;
-      /** Runtime-specific: a claude `--mcp-config` file, or a codex `CODEX_HOME`
-       * directory — see `materializeWorkerMcpConfig`. */
+      /** Runtime-specific: a claude `--mcp-config` file, a codex `CODEX_HOME` directory,
+       * or the cursor worktree `.cursor/mcp.json` path. */
       mcpConfigPath: string;
-      /** Extra env the spawned CLI needs to resolve mcpConfigPath — codex needs both
-       * `CODEX_HOME` (pointed at the scoped directory) and its bearer-token env var
-       * (read from the environment, never written to config.toml). */
+      /** Extra env the spawned CLI needs — codex needs `CODEX_HOME` pointed at the scoped directory. */
       mcpEnv?: Record<string, string>;
-      expiresAt: string;
     }
-  /** Deck returned a typed control-plane requirement — never retried with the same inputs;
-   * the caller must release the worker and route to a human action (NOT-87 §6.3).
-   * `requestId` is Deck's own correlation id for this response, when supplied — carried
-   * through so the human action it raises can dedupe/correlate against Deck's audit
-   * trail (NOT-93). */
-  | { ok: false; kind: "interaction_required"; reason: string; requestId?: string }
-  /** This profile's (runtime, deckId) combination has no isolation mechanism at all
-   * (currently: cursor_local + any deck) — a permanent configuration mismatch, not a
-   * transient hiccup. Never retried: retrying spawns and fails identically every time
-   * until the infra-attempt budget is burned for nothing (PR #19 review). */
-  | { ok: false; kind: "runtime_unsupported"; reason: string }
-  /** Enrollment/config/network failure — the caller's existing bounded infra-retry policy applies. */
   | { ok: false; kind: "infra_failure"; reason: string };
 
 function resultText(result: unknown): string {
@@ -105,13 +51,9 @@ export function assertToolResultOk(result: unknown, name: string): void {
 }
 
 /**
- * An authorized call under execution authority (any tool, not just mint) can be denied
- * with Deck's typed `INTERACTION_REQUIRED` contract error (NOT-85 §11) — the same
- * control-plane signal `mintAuthority` can return, just surfaced through an MCP tool
- * result's `{ isError: true }` body instead of an HTTP error body. Returns the parsed
- * `requestId` (if Deck supplied one) when the result IS that specific denial, or `null`
- * for every other error shape (network failure, a different error_code, unparseable
- * body) — those stay ordinary infra failures, never misread as a control-plane decision.
+ * Parse Deck's typed `INTERACTION_REQUIRED` contract error from an MCP tool result.
+ * Kept for callers that still inspect tool results (e.g. legacy paths); launch-fixed
+ * deck sessions no longer park on this for worker/coordinator Deck connects.
  */
 export function parseInteractionRequired(result: unknown): { requestId?: string; message?: string } | null {
   if (!(result as { isError?: boolean } | null)?.isError) return null;
@@ -140,16 +82,6 @@ interface MaterializedMcpConfig {
   mcpEnv?: Record<string, string>;
 }
 
-/**
- * Codex's top-level authentication-policy keys (docs: "Enforce a login method or
- * workspace") — carried verbatim from the ambient `config.toml` into the isolated one so
- * a worker authenticates under the *same* policy `agent-health.ts`'s `codex login status`
- * already verified against the ambient host, never a looser one. `forced_login_method`/
- * `forced_chatgpt_workspace_id` make codex exit rather than silently proceed when cached
- * credentials don't match, so dropping them wouldn't just risk a wrong-context login —
- * it would let a per-attempt isolated session skip an enforcement the ambient host relies
- * on entirely.
- */
 const CODEX_AUTH_POLICY_KEYS = [
   "cli_auth_credentials_store",
   "chatgpt_base_url",
@@ -157,13 +89,6 @@ const CODEX_AUTH_POLICY_KEYS = [
   "forced_chatgpt_workspace_id",
 ] as const;
 
-/**
- * Real TOML parse (PR #19 review round 4 — a regex over `config.toml` text missed valid
- * single-quoted strings, trailing comments, and had no table-scoping), reading only
- * `CODEX_AUTH_POLICY_KEYS` off the *root* table. Deliberately ignores everything else in
- * the file, `mcp_servers` most of all — that table is what execution authority exists to
- * replace, never to inherit.
- */
 function readAmbientCodexAuthPolicy(ambientCodexHome: string): Record<string, unknown> {
   try {
     const raw = fs.readFileSync(path.join(ambientCodexHome, "config.toml"), "utf8");
@@ -180,70 +105,84 @@ function readAmbientCodexAuthPolicy(ambientCodexHome: string): Record<string, un
   }
 }
 
-/** claude's `--mcp-config` file schema. */
-function urlHeaderMcpConfig(mcpUrl: string, authorityId: string, authoritySecret: string, worktreePath: string) {
+function deckLaunchHeaders(deckId: string, worktreePath: string): Record<string, string> {
+  return {
+    "x-agent-deck-deck-id": deckId,
+    "x-agent-deck-workspace": worktreePath,
+  };
+}
+
+/** claude's `--mcp-config` file schema — deck headers only, no Authorization. */
+function urlHeaderMcpConfig(mcpUrl: string, deckId: string, worktreePath: string) {
   return {
     mcpServers: {
       "agent-deck": {
         type: "http",
         url: mcpUrl,
-        headers: {
-          Authorization: `Bearer ${authorityId}:${authoritySecret}`,
-          "x-agent-deck-workspace": worktreePath,
-        },
+        headers: deckLaunchHeaders(deckId, worktreePath),
       },
     },
   };
 }
 
+function gitCaptured(worktreePath: string, args: string[]): { ok: boolean; stdout: string; stderr: string } {
+  try {
+    const stdout = execFileSync("git", ["-C", worktreePath, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { ok: true, stdout: stdout ?? "", stderr: "" };
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; status?: number };
+    return { ok: false, stdout: e.stdout ?? "", stderr: e.stderr ?? String(err) };
+  }
+}
+
+function isCursorMcpTracked(worktreePath: string): boolean {
+  const result = gitCaptured(worktreePath, ["ls-files", "--error-unmatch", ".cursor/mcp.json"]);
+  return result.ok;
+}
+
+/** Append `/.cursor/mcp.json` idempotently to the worktree's info/exclude. */
+function ensureCursorMcpExcluded(worktreePath: string): void {
+  const excludePathResult = gitCaptured(worktreePath, ["rev-parse", "--git-path", "info/exclude"]);
+  if (!excludePathResult.ok) {
+    throw new Error(`could not resolve git info/exclude: ${excludePathResult.stderr || "unknown error"}`);
+  }
+  const excludePath = path.resolve(worktreePath, excludePathResult.stdout.trim());
+  fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+  const line = "/.cursor/mcp.json";
+  let existing = "";
+  try {
+    existing = fs.readFileSync(excludePath, "utf8");
+  } catch {
+    existing = "";
+  }
+  const lines = existing.split(/\r?\n/);
+  if (lines.some((l) => l.trim() === line)) return;
+  const next = existing.length === 0 || existing.endsWith("\n") ? `${existing}${line}\n` : `${existing}\n${line}\n`;
+  fs.writeFileSync(excludePath, next, { mode: 0o644 });
+}
+
 /**
- * Writes this attempt's execution authority as the spawned worker's *only* route to
- * Agent Deck (NOT-87/92) — never merged with, or falling back to, any ambient/user MCP
- * config. Where the config can live is runtime-specific:
+ * Writes this attempt's deck-launch MCP config as the spawned worker's route to Agent Deck
+ * (NOT-106) — no mint, no Authorization.
  *
- * - claude: a JSON file outside the worktree (`--mcp-config --strict-mcp-config`).
- * - codex: a per-attempt `CODEX_HOME` directory outside the worktree, whose
- *   `config.toml` names the server and an env-var to read the bearer token from —
- *   the secret itself is passed via that env var at spawn time, never written to disk.
- *   Both `CODEX_HOME` and the bearer env var are returned in `mcpEnv` for `spawn.ts` to
- *   set on the child process; without `CODEX_HOME` set, codex would silently fall back
- *   to its default (ambient, unscoped) config root. `CODEX_HOME` also owns codex's own
- *   login credentials and authentication policy (PR #19 review rounds 3-4):
- *   - `CODEX_AUTH_POLICY_KEYS` (`cli_auth_credentials_store`, `chatgpt_base_url`,
- *     `forced_login_method`, `forced_chatgpt_workspace_id`) are read out of the ambient
- *     `config.toml` with a real TOML parser (`readAmbientCodexAuthPolicy` — a regex
- *     misses valid single-quoted strings/trailing comments and has no table-scoping) and
- *     `smol-toml`-stringified into the isolated one, so the worker authenticates under
- *     the *same* enforced policy `agent-health.ts`'s `codex login status` already
- *     verified — nothing else from the ambient file (`mcp_servers` most of all) crosses
- *     over. Without `cli_auth_credentials_store` specifically, an isolated home defaults
- *     to `"auto"`, which prefers the OS credential store over `auth.json` whenever one is
- *     *available* — on a keyring-capable host explicitly configured for `"file"`
- *     storage, that would make the isolated session ignore the symlinked `auth.json` and
- *     launch logged out even though the ambient host isn't actually using the keychain.
- *   - `auth.json` (the credential itself) is *symlinked*, not copied: codex refreshes it
- *     during normal use, and a plain copy would (a) silently drop those refreshes once
- *     this per-attempt directory is deleted at release — the opposite of "durable and
- *     refreshable" — and (b) leave a live second copy of a real, possibly long-lived
- *     credential on disk if the coordinator crashes before release ever runs (see
- *     `cleanupOrphanedWorkerMcpConfig` for that crash path — a leftover symlink carries
- *     no credential bytes of its own, unlike a leftover copy). Writes codex makes through
- *     the symlink land on the one real ambient file, keeping a single source of truth.
- *
- * `runtime` is asserted supported by the caller (`acquireWorkerAuthority`) — cursor is
- * never passed here.
+ * - claude: JSON file outside the worktree (`--mcp-config --strict-mcp-config`).
+ * - codex: per-attempt `CODEX_HOME` outside the worktree with `http_headers` in config.toml.
+ * - cursor: `<worktree>/.cursor/mcp.json` + info/exclude so the worktree stays porcelain-clean.
  */
 async function materializeWorkerMcpConfig(opts: {
-  runtime: "claude_code" | "codex_local";
-  authorityId: string;
-  authoritySecret: string;
+  runtime: Runtime;
+  deckId: string;
   worktreePath: string;
 }): Promise<MaterializedMcpConfig> {
   const mcpBase = getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "");
   const mcpUrl = `${mcpBase}/mcp`;
+  const headers = deckLaunchHeaders(opts.deckId, opts.worktreePath);
 
   if (opts.runtime === "codex_local") {
-    const codexHome = path.join(getExecutionAuthorityConfigDir(), `codex-home-${opts.authorityId}-${randomUUID()}`);
+    const codexHome = path.join(getExecutionAuthorityConfigDir(), `codex-home-${opts.deckId.slice(0, 8)}-${randomUUID()}`);
     fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
     try {
       const ambientHome = resolveAmbientCodexHome();
@@ -253,40 +192,48 @@ async function materializeWorkerMcpConfig(opts: {
           fs.symlinkSync(ambientAuthPath, path.join(codexHome, "auth.json"));
         }
       } catch {
-        // best-effort — a host using OS-keychain-backed auth (not file-backed) has no
-        // auth.json to link at all, and codex's keychain lookup isn't home-dir-scoped.
+        // best-effort — OS-keychain-backed hosts have no auth.json
       }
       const toml = stringifyToml({
         ...readAmbientCodexAuthPolicy(ambientHome),
         mcp_servers: {
-          "agent-deck": { url: mcpUrl, bearer_token_env_var: CODEX_BEARER_ENV_VAR },
+          "agent-deck": { url: mcpUrl, http_headers: headers },
         },
       });
       fs.writeFileSync(path.join(codexHome, "config.toml"), toml, { mode: 0o600 });
     } catch (err) {
-      // Never leave a half-written per-attempt directory behind for the caller to have
-      // to know the path of (PR #19 review round 5) — the caller only learns of failure
-      // via the thrown error, not this path.
       fs.rmSync(codexHome, { recursive: true, force: true });
       throw err;
     }
     return {
       mcpConfigPath: codexHome,
-      mcpEnv: {
-        [CODEX_HOME_ENV_VAR]: codexHome,
-        [CODEX_BEARER_ENV_VAR]: `${opts.authorityId}:${opts.authoritySecret}`,
-      },
+      mcpEnv: { [CODEX_HOME_ENV_VAR]: codexHome },
     };
   }
 
-  const dir = getExecutionAuthorityConfigDir();
-  const filePath = path.join(dir, `${opts.authorityId}-${randomUUID()}.json`);
-  try {
+  if (opts.runtime === "cursor_local") {
+    if (isCursorMcpTracked(opts.worktreePath)) {
+      throw new Error(
+        ".cursor/mcp.json is tracked in this repository — refusing to overwrite a tracked file for the worker MCP config"
+      );
+    }
+    ensureCursorMcpExcluded(opts.worktreePath);
+    const cursorDir = path.join(opts.worktreePath, ".cursor");
+    fs.mkdirSync(cursorDir, { recursive: true });
+    const filePath = path.join(cursorDir, "mcp.json");
     fs.writeFileSync(
       filePath,
-      JSON.stringify(urlHeaderMcpConfig(mcpUrl, opts.authorityId, opts.authoritySecret, opts.worktreePath)),
+      JSON.stringify({ mcpServers: { "agent-deck": { url: mcpUrl, headers } } }, null, 2) + "\n",
       { mode: 0o600 }
     );
+    return { mcpConfigPath: filePath };
+  }
+
+  // claude_code
+  const dir = getExecutionAuthorityConfigDir();
+  const filePath = path.join(dir, `claude-mcp-${opts.deckId.slice(0, 8)}-${randomUUID()}.json`);
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(urlHeaderMcpConfig(mcpUrl, opts.deckId, opts.worktreePath)), { mode: 0o600 });
   } catch (err) {
     fs.rmSync(filePath, { force: true });
     throw err;
@@ -294,7 +241,7 @@ async function materializeWorkerMcpConfig(opts: {
   return { mcpConfigPath: filePath };
 }
 
-/** `get_bound_deck`'s own deck-identity field (confirmed against the live tool result: `{"id": "<deckId>", "name": ..., ...}`). */
+/** `get_bound_deck`'s deck-identity field. */
 function assertBoundDeckMatches(result: unknown, expectedDeckId: string): void {
   const payload = parseDeckToolResult(result);
   const boundDeckId = typeof payload.id === "string" ? payload.id : undefined;
@@ -303,28 +250,20 @@ function assertBoundDeckMatches(result: unknown, expectedDeckId: string): void {
   }
 }
 
-type VerifyAuthorityResult =
-  | { ok: true }
-  | { ok: false; kind: "interaction_required"; reason: string; requestId?: string }
-  | { ok: false; kind: "infra_failure"; reason: string };
+type VerifyDeckResult = { ok: true } | { ok: false; kind: "infra_failure"; reason: string };
 
-async function verifyAuthority(opts: {
-  authorityId: string;
-  authoritySecret: string;
+async function verifyDeckConnection(opts: {
   deckId: string;
+  worktreePath: string;
   callTool?: DeckToolCaller;
   timeoutMs: number;
-}): Promise<VerifyAuthorityResult> {
+}): Promise<VerifyDeckResult> {
   if (opts.callTool) {
     let result: unknown;
     try {
       result = await opts.callTool("get_bound_deck", {});
     } catch (err) {
       return { ok: false, kind: "infra_failure", reason: (err as Error).message };
-    }
-    const interaction = parseInteractionRequired(result);
-    if (interaction) {
-      return { ok: false, kind: "interaction_required", reason: interactionRequiredReason(interaction), requestId: interaction.requestId };
     }
     try {
       assertToolResultOk(result, "get_bound_deck");
@@ -336,9 +275,9 @@ async function verifyAuthority(opts: {
   }
   const mcpBase = getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "");
   const transport = new StreamableHTTPClientTransport(new URL(`${mcpBase}/mcp`), {
-    requestInit: { headers: { Authorization: `Bearer ${opts.authorityId}:${opts.authoritySecret}` } },
+    requestInit: { headers: deckLaunchHeaders(opts.deckId, opts.worktreePath) },
   });
-  const client = new Client({ name: "agent-dealer-authority-preflight", version: "0.0.1" });
+  const client = new Client({ name: "agent-dealer-deck-preflight", version: "0.0.1" });
   try {
     await client.connect(transport);
     try {
@@ -348,10 +287,6 @@ async function verifyAuthority(opts: {
           setTimeout(() => reject(new Error(`get_bound_deck timed out after ${opts.timeoutMs}ms`)), opts.timeoutMs)
         ),
       ]);
-      const interaction = parseInteractionRequired(result);
-      if (interaction) {
-        return { ok: false, kind: "interaction_required", reason: interactionRequiredReason(interaction), requestId: interaction.requestId };
-      }
       assertToolResultOk(result, "get_bound_deck");
       assertBoundDeckMatches(result, opts.deckId);
       return { ok: true };
@@ -363,120 +298,53 @@ async function verifyAuthority(opts: {
   }
 }
 
-function interactionRequiredReason(result: { message?: string }): string {
-  return result.message || "Agent Deck requires a control-plane decision before this attempt can continue.";
-}
-
-export async function acquireWorkerAuthority(opts: {
-  /** Which role this attempt belongs to — the `authority_attempts` ledger's owner_kind
-   * (NOT-91), paired with `ownerId` below for restart/worker-death/cancellation recovery to
-   * find it. */
-  ownerKind: "developer" | "reviewer";
-  /** Stable across a work item's own retry rollover — `${issueId}:${ownerKind}` — never the
-   * work-item row's own UUID, which changes every retry (a fresh `enqueueWorkItem` row).
-   * Revoke-before-new-attempt/fail-closed gating in authority-lifecycle.ts is keyed on this,
-   * so it can't be bypassed just because normal infra routing completed the old work item and
-   * enqueued a new one (NOT-91 review, round 5). Distinct from `attemptId`, which is this
-   * specific physical attempt's own identity sent to Deck. */
-  ownerId: string;
+/**
+ * Materialize a per-attempt MCP config for the profile's deck and verify with
+ * `get_bound_deck` before spawn. No mint, no ledger, no Authorization.
+ */
+export async function prepareWorkerDeckConnection(opts: {
   deckId: string;
-  runId: string;
-  attemptId: string;
-  idempotencyKey: string;
   worktreePath: string;
   runtime: Runtime;
-  ttlMs?: number;
-  mint?: MintFn;
-  revoke?: RevokeFn;
   verifyCallTool?: DeckToolCaller;
   timeoutMs?: number;
-}): Promise<WorkerAuthorityOutcome> {
-  if (!AUTHORITY_SUPPORTED_RUNTIMES.has(opts.runtime)) {
-    return {
-      ok: false,
-      kind: "runtime_unsupported",
-      reason: `execution authority is not supported for runtime ${opts.runtime} — no isolation mechanism for its MCP config exists yet`,
-    };
-  }
-
+}): Promise<WorkerDeckConnectionOutcome> {
   const timeoutMs = opts.timeoutMs ?? Number(process.env.DECK_BIND_TIMEOUT_MS ?? 30_000);
 
-  const acquired = await acquireAuthorityForAttempt({
-    ownerKind: opts.ownerKind,
-    ownerId: opts.ownerId,
-    runId: opts.runId,
-    attemptId: opts.attemptId,
-    deckId: opts.deckId,
-    ttlMs: opts.ttlMs ?? DEFAULT_TTL_MS,
-    idempotencyKey: opts.idempotencyKey,
-    mint: opts.mint,
-    revoke: opts.revoke,
-  });
-  if (!acquired.ok) {
-    if (acquired.kind === "interaction_required") {
-      return { ok: false, kind: "interaction_required", reason: acquired.reason, requestId: acquired.requestId };
-    }
-    return { ok: false, kind: "infra_failure", reason: acquired.reason };
+  let materialized: MaterializedMcpConfig;
+  try {
+    materialized = await materializeWorkerMcpConfig({
+      runtime: opts.runtime,
+      deckId: opts.deckId,
+      worktreePath: opts.worktreePath,
+    });
+  } catch (err) {
+    return { ok: false, kind: "infra_failure", reason: `deck MCP materialization failed: ${(err as Error).message}` };
   }
-  const { authority, attemptRowId } = acquired;
-  // acquireAuthorityForAttempt never returns ok:true without a secret — it resolves a
-  // secret-less idempotent remint internally (NOT-91) — so authority.authoritySecret is
-  // always present here.
-  const authoritySecret = authority.authoritySecret!;
 
-  const verified = await verifyAuthority({
-    authorityId: authority.authorityId,
-    authoritySecret,
+  const verified = await verifyDeckConnection({
     deckId: opts.deckId,
+    worktreePath: opts.worktreePath,
     callTool: opts.verifyCallTool,
     timeoutMs,
   });
   if (!verified.ok) {
-    // Failed either way — a minted authority that failed preflight (whatever the reason)
-    // has no further legitimate use (NOT-85 §6.3).
-    await failAuthority(attemptRowId, authority.authorityId, opts.revoke);
-    if (verified.kind === "interaction_required") {
-      return { ok: false, kind: "interaction_required", reason: verified.reason, requestId: verified.requestId };
+    try {
+      fs.rmSync(materialized.mcpConfigPath, { recursive: true, force: true });
+    } catch {
+      // best-effort
     }
-    return { ok: false, kind: "infra_failure", reason: `authority preflight failed: ${verified.reason}` };
+    return { ok: false, kind: "infra_failure", reason: `deck preflight failed: ${verified.reason}` };
   }
 
-  try {
-    // AUTHORITY_SUPPORTED_RUNTIMES was already checked above, so this narrowing is sound.
-    const { mcpConfigPath, mcpEnv } = await materializeWorkerMcpConfig({
-      runtime: opts.runtime as "claude_code" | "codex_local",
-      authorityId: authority.authorityId,
-      authoritySecret,
-      worktreePath: opts.worktreePath,
-    });
-    return { ok: true, authorityId: authority.authorityId, attemptRowId, mcpConfigPath, mcpEnv, expiresAt: authority.expiresAt };
-  } catch (err) {
-    // Same contract as a verify failure just above: a minted authority the caller never
-    // learns the id of (because this function never returned it) would otherwise sit
-    // live until TTL, unrevoked, for the full developer/reviewer session length (PR #19
-    // review round 5).
-    await failAuthority(attemptRowId, authority.authorityId, opts.revoke);
-    return { ok: false, kind: "infra_failure", reason: `authority materialization failed: ${(err as Error).message}` };
-  }
+  return { ok: true, mcpConfigPath: materialized.mcpConfigPath, mcpEnv: materialized.mcpEnv };
 }
 
-/**
- * Best-effort — never leaves a live authority or its on-disk config around after a spawn
- * ends. `recursive: true` covers codex's directory-shaped `CODEX_HOME` as well as
- * claude's single file. Closes the `authority_attempts` ledger row (NOT-91) as well as
- * Deck's own record, so a normal release never looks like something restart recovery needs
- * to clean up.
- */
-export async function releaseWorkerAuthority(opts: {
-  authorityId: string;
-  attemptRowId: string;
-  mcpConfigPath: string;
-  revoke?: RevokeFn;
-}): Promise<void> {
+/** Best-effort cleanup of the on-disk MCP config after a spawn ends. */
+export async function releaseWorkerDeckConnection(opts: { mcpConfigPath: string }): Promise<void> {
   try {
     fs.rmSync(opts.mcpConfigPath, { recursive: true, force: true });
   } catch {
     // best-effort
   }
-  await releaseAuthority(opts.attemptRowId, opts.authorityId, opts.revoke);
 }

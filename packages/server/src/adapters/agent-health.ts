@@ -10,7 +10,7 @@ import {
   resolveCodexBin,
   codexBinExists,
 } from "../cli-env.js";
-import { checkAgentDeckHealth, fetchAuthorizedDecks, isAgentDeckMcpRegistered, type DeckAccessResult } from "./agent-deck.js";
+import { checkAgentDeckHealth, fetchDecks, isAgentDeckMcpRegistered, type DeckAccessResult } from "./agent-deck.js";
 
 const RUNTIME_CACHE_MS = 60_000;
 const runtimeIssueCache = new Map<Runtime, { at: number; issues: AgentHealthIssue[] }>();
@@ -127,15 +127,15 @@ function agentSpecificIssues(
   }
   // resolveDeckName silently returns null on this same failure elsewhere (route/index.ts) —
   // surface it here so a bound deck that can no longer be read isn't just a quiet no-op. A
-  // *successful* metadata call that simply doesn't include this deck (deleted, or out of
-  // scope after re-enrollment) is the same user-visible failure as the call itself failing.
+  // *successful* metadata call that simply doesn't include this deck (deleted) is the same
+  // user-visible failure as the call itself failing.
   if (agent.deckId && agentDeckOnline && deckAccessResult) {
     if (!deckAccessResult.ok) {
       issues.push({ code: "deck_unauthorized", message: deckAccessResult.message });
     } else if (!deckAccessResult.decks.some((d) => d.id === agent.deckId)) {
       issues.push({
         code: "deck_unauthorized",
-        message: `Deck ${agent.deckName ?? agent.deckId} is not in this coordinator's authorized deck set (deleted, or out of scope after re-enrollment)`,
+        message: `Deck ${agent.deckName ?? agent.deckId} is not available from Agent Deck (deleted or unreachable)`,
       });
     }
   }
@@ -143,19 +143,6 @@ function agentSpecificIssues(
     issues.push({
       code: "mcp_not_registered",
       message: "Run agent-deck setup --client claude --start (Claude MCP not registered)",
-    });
-  }
-  // Codex deck binding uses the Agent Deck marketplace plugin (not `agent-deck use --client codex`).
-  // cursor_local execution authority isn't wired at all (agent-deck-bind.ts's
-  // AUTHORITY_SUPPORTED_RUNTIMES, PR #19 review) — cursor-agent has no mechanism to
-  // isolate a per-attempt MCP config from its ambient project/global config, so it never
-  // gets one. Surfacing this here, before a run ever starts, is what actually saves the
-  // wasted infra-retry budget the review flagged: without it, every attempt mints,
-  // spawns, and dies on the same deterministic mismatch until maxInfraAttempts is spent.
-  if (agent.deckId && agent.runtime === "cursor_local") {
-    issues.push({
-      code: "deck_runtime_unsupported",
-      message: "Cursor cannot use Agent Deck yet — no per-attempt MCP config isolation exists for it. Unset the deck or choose a different runtime.",
     });
   }
   return issues;
@@ -188,7 +175,7 @@ export async function listAgentsWithHealth(agents: AgentProfile[]): Promise<Agen
   const agentDeckOnline = await checkAgentDeckHealth();
   const mcpRegistered = isAgentDeckMcpRegistered();
   const needsDeckAccess = agents.some((a) => a.deckId);
-  const deckAccessResult = agentDeckOnline && needsDeckAccess ? await fetchAuthorizedDecks() : null;
+  const deckAccessResult = agentDeckOnline && needsDeckAccess ? await fetchDecks() : null;
   const runtimes = [...new Set(agents.map((a) => a.runtime))];
   const runtimeIssuesByRuntime = new Map<Runtime, AgentHealthIssue[]>();
   await Promise.all(

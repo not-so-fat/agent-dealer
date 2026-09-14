@@ -4,8 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { OutboundToolCall } from "@agent-dealer/shared";
-import type { MintAuthorityInput, MintAuthorityResult } from "../adapters/execution-authority.js";
-import type { DeliverOutboundResult, DeliveryAuthority } from "../adapters/outbound-delivery.js";
+import type { DeliverOutboundResult } from "../adapters/outbound-delivery.js";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-send-gate-"));
 process.env.MAX_CONCURRENT_RUNS = "0";
@@ -69,25 +68,6 @@ function seedReviewRun(withDraft = true) {
   return getRun(run.id)!;
 }
 
-const AUTHORITY: DeliveryAuthority = { authorityId: "authz_1", authoritySecret: "authzs_secret_1" };
-
-function mintOk(authority: DeliveryAuthority = AUTHORITY) {
-  return async (input: MintAuthorityInput): Promise<MintAuthorityResult> => ({
-    ok: true,
-    authority: {
-      authorityId: authority.authorityId,
-      authoritySecret: authority.authoritySecret,
-      deckId: input.deckId,
-      audience: "dealer-worker",
-      allowedServices: (input.toolScopeHint ?? []).map((t) => t.serviceId),
-      allowedTools: input.toolScopeHint ?? [],
-      expiresAt: "2026-01-01T00:30:00Z",
-    },
-  });
-}
-
-async function noopRevoke(): Promise<void> {}
-
 test("pendingSendCount is 1 when draft pending", () => {
   const run = seedReviewRun(true);
   assert.equal(pendingSendCount(run.id), 1);
@@ -101,28 +81,21 @@ test("approve without draft transitions to done", async () => {
   assert.equal(getRun(run.id)!.status, "done");
 });
 
-test("approve mints authority scoped to the draft's exact serviceId/toolName, delivers, and revokes", async () => {
+test("approve delivers under the run deckId and records a receipt", async () => {
   const run = seedReviewRun(true);
+  let capturedDeck: string | null = null;
   let captured: OutboundToolCall | null = null;
-  let revoked: string | null = null;
   const res = await approveRunWithDeliver(run.id, {
-    mint: async (input) => {
-      assert.deepEqual(input.toolScopeHint, [{ serviceId: TOOL_CALL.serviceName, toolName: TOOL_CALL.toolName }]);
-      return mintOk()(input);
-    },
-    revoke: async (authorityId) => {
-      revoked = authorityId;
-    },
-    deliver: async (authority, toolCall): Promise<DeliverOutboundResult> => {
-      assert.deepEqual(authority, AUTHORITY);
+    deliver: async (deckId, toolCall): Promise<DeliverOutboundResult> => {
+      capturedDeck = deckId;
       captured = toolCall;
       return { ok: true, toolResult: { ok: true }, permalink: "https://slack.example/msg/1" };
     },
   });
   assert.equal(res.ok, true);
   assert.equal(res.ok && res.delivered, true);
+  assert.equal(capturedDeck, DECK);
   assert.deepEqual(captured, TOOL_CALL);
-  assert.equal(revoked, AUTHORITY.authorityId);
   assert.equal(getRun(run.id)!.status, "done");
   assert.ok(getLatestArtifact(run.id, "send_receipt"));
   const draftArt = getLatestArtifact(run.id, "slack_draft");
@@ -134,9 +107,7 @@ test("approve with human-edited body sends updated payload", async () => {
   let captured: OutboundToolCall | null = null;
   const res = await approveRunWithDeliver(run.id, {
     outboundBody: "Human tweak before send",
-    mint: mintOk(),
-    revoke: noopRevoke,
-    deliver: async (_authority, toolCall) => {
+    deliver: async (_deckId, toolCall) => {
       captured = toolCall;
       return { ok: true, toolResult: { ok: true } };
     },
@@ -150,14 +121,9 @@ test("approve with human-edited body sends updated payload", async () => {
   assert.match(draftArt!.contentJson!, /Human tweak before send/);
 });
 
-test("deliver infra failure keeps run in review with pending draft, revokes authority, no park", async () => {
+test("deliver infra failure keeps run in review with pending draft, no park", async () => {
   const run = seedReviewRun(true);
-  let revoked: string | null = null;
   const res = await approveRunWithDeliver(run.id, {
-    mint: mintOk(),
-    revoke: async (authorityId) => {
-      revoked = authorityId;
-    },
     deliver: async (): Promise<DeliverOutboundResult> => ({ ok: false, kind: "infra_failure", reason: "deck down" }),
   });
   assert.equal(res.ok, false);
@@ -165,7 +131,6 @@ test("deliver infra failure keeps run in review with pending draft, revokes auth
   assert.equal(!res.ok && res.errorCode, "DELIVERY_FAILED");
   assert.equal(getRun(run.id)!.status, "review");
   assert.equal(pendingSendCount(run.id), 1);
-  assert.equal(revoked, AUTHORITY.authorityId);
   assert.equal(findOpenHumanActionForRun(run.id, "outbound_delivery_interaction_required"), null);
   const draftArt = getLatestArtifact(run.id, "slack_draft");
   assert.match(draftArt!.contentJson!, /"status":"pending"/);
@@ -174,8 +139,6 @@ test("deliver infra failure keeps run in review with pending draft, revokes auth
 test("off-scope/provider denial surfaces as an ordinary delivery failure, not parked", async () => {
   const run = seedReviewRun(true);
   const res = await approveRunWithDeliver(run.id, {
-    mint: mintOk(),
-    revoke: noopRevoke,
     deliver: async (): Promise<DeliverOutboundResult> => ({
       ok: false,
       kind: "infra_failure",
@@ -188,64 +151,35 @@ test("off-scope/provider denial surfaces as an ordinary delivery failure, not pa
   assert.ok(!getLatestArtifact(run.id, "send_receipt"));
 });
 
-test("mint returning INTERACTION_REQUIRED parks the run: draft pending, run in review, one open action", async () => {
+test("deliver returning ambiguous parks the run: draft pending, run in review, one open action", async () => {
   const run = seedReviewRun(true);
   const res = await approveRunWithDeliver(run.id, {
-    mint: async (): Promise<MintAuthorityResult> => ({
+    deliver: async (): Promise<DeliverOutboundResult> => ({
       ok: false,
-      code: "INTERACTION_REQUIRED",
-      message: "Deck requires re-authorization for this deck.",
-      requestId: "req_mint_1",
+      kind: "ambiguous",
+      reason: "Outbound deliver timed out after 60000ms — whether the message was actually sent is unknown",
     }),
-    revoke: noopRevoke,
-    deliver: async () => {
-      throw new Error("must not be called — mint already failed");
-    },
   });
   assert.equal(res.ok, false);
-  assert.equal(!res.ok && res.errorCode, "INTERACTION_REQUIRED");
+  assert.equal(!res.ok && res.errorCode, "AMBIGUOUS_RESULT");
   assert.equal(getRun(run.id)!.status, "review");
   assert.equal(pendingSendCount(run.id), 1);
   const action = findOpenHumanActionForRun(run.id, "outbound_delivery_interaction_required");
   assert.ok(action);
   assert.equal(action!.runId, run.id);
-  assert.equal(action!.requestId, "req_mint_1");
   assert.deepEqual(JSON.parse(action!.responseOptionsJson!), [
     { choice: "retry_send", label: "Retry send" },
     { choice: "reject", label: "Reject draft" },
   ]);
 });
 
-test("deliver returning INTERACTION_REQUIRED (mint succeeded) also parks the run", async () => {
-  const run = seedReviewRun(true);
-  const res = await approveRunWithDeliver(run.id, {
-    mint: mintOk(),
-    revoke: noopRevoke,
-    deliver: async (): Promise<DeliverOutboundResult> => ({
-      ok: false,
-      kind: "interaction_required",
-      reason: "Deck requires re-authorization mid-call.",
-      requestId: "req_deliver_1",
-    }),
-  });
-  assert.equal(res.ok, false);
-  assert.equal(!res.ok && res.errorCode, "INTERACTION_REQUIRED");
-  assert.equal(getRun(run.id)!.status, "review");
-  const action = findOpenHumanActionForRun(run.id, "outbound_delivery_interaction_required");
-  assert.ok(action);
-  assert.equal(action!.requestId, "req_deliver_1");
-});
-
-test("a repeated INTERACTION_REQUIRED signal for the same requestId dedupes to one action", async () => {
+test("a repeated ambiguous signal dedupes to one action", async () => {
   const run = seedReviewRun(true);
   const deps = {
-    mint: mintOk(),
-    revoke: noopRevoke,
     deliver: async (): Promise<DeliverOutboundResult> => ({
       ok: false,
-      kind: "interaction_required" as const,
-      reason: "Deck requires re-authorization.",
-      requestId: "req_dup_1",
+      kind: "ambiguous" as const,
+      reason: "timeout — whether the message was actually sent is unknown",
     }),
   };
   await approveRunWithDeliver(run.id, deps);
@@ -254,57 +188,37 @@ test("a repeated INTERACTION_REQUIRED signal for the same requestId dedupes to o
   assert.equal(actions.length, 1);
 });
 
-/** Drives a real INTERACTION_REQUIRED park (through approveRunWithDeliver, not a
- * hand-crafted human action) so the retry test below can compare the retry's
- * idempotencyKey against the original attempt's. */
-async function seedParkedRunViaInteractionRequired(): Promise<{ run: Awaited<ReturnType<typeof seedReviewRun>>; actionId: string; firstIdempotencyKey: string }> {
+async function seedParkedRunViaAmbiguous(): Promise<{ run: Awaited<ReturnType<typeof seedReviewRun>>; actionId: string }> {
   const run = seedReviewRun(true);
-  let firstIdempotencyKey = "";
   await approveRunWithDeliver(run.id, {
-    mint: async (input) => {
-      firstIdempotencyKey = input.idempotencyKey;
-      return { ok: false, code: "INTERACTION_REQUIRED", message: "Deck requires re-authorization.", requestId: "req_seed_park" };
-    },
-    revoke: noopRevoke,
-    deliver: async () => {
-      throw new Error("must not be called — mint already failed");
-    },
+    deliver: async () => ({
+      ok: false,
+      kind: "ambiguous",
+      reason: "timeout — whether the message was actually sent is unknown",
+    }),
   });
   const action = findOpenHumanActionForRun(run.id, "outbound_delivery_interaction_required");
   assert.ok(action, "expected the original attempt to have parked the run");
-  return { run, actionId: action!.id, firstIdempotencyKey };
+  return { run, actionId: action!.id };
 }
 
-test("resolveOutboundDeliveryAction:retry_send mints a distinct idempotencyKey than the original parked attempt", async () => {
-  const { run, actionId, firstIdempotencyKey } = await seedParkedRunViaInteractionRequired();
-  let secondIdempotencyKey = "";
+test("resolveOutboundDeliveryAction:retry_send re-delivers and closes the park on success", async () => {
+  const { run, actionId } = await seedParkedRunViaAmbiguous();
   const res = await resolveOutboundDeliveryAction(actionId, "yusuke", "retry_send", {
-    mint: async (input) => {
-      secondIdempotencyKey = input.idempotencyKey;
-      return mintOk()(input);
-    },
-    revoke: noopRevoke,
     deliver: async () => ({ ok: true, toolResult: { ok: true } }),
   });
   assert.equal(res.ok, true);
   assert.equal(res.ok && res.delivered, true);
-  assert.notEqual(secondIdempotencyKey, firstIdempotencyKey);
   assert.equal(getRun(run.id)!.status, "done");
   const resolved = getHumanAction(actionId)!;
   assert.equal(resolved.status, "resolved");
-  // Resolved with the real operator identity/choice (threaded through as actionResolution),
-  // not the generic "system"/"resolved_via_approve" marker a plain Ops re-approve gets.
   assert.equal(resolved.resolvedBy, "yusuke");
   assert.deepEqual(JSON.parse(resolved.resolutionJson!), { choice: "retry_send" });
 });
 
 test("a plain re-approve (not via retry_send) closes an open delivery park too, with a generic system resolution", async () => {
-  const { run, actionId } = await seedParkedRunViaInteractionRequired();
-  // Simulates an operator fixing the Deck-side control-plane issue out of band and just
-  // re-approving from Ops, never touching the Human Actions queue item directly.
+  const { run, actionId } = await seedParkedRunViaAmbiguous();
   const res = await approveRunWithDeliver(run.id, {
-    mint: mintOk(),
-    revoke: noopRevoke,
     deliver: async () => ({ ok: true, toolResult: { ok: true } }),
   });
   assert.equal(res.ok, true);
@@ -317,26 +231,20 @@ test("a plain re-approve (not via retry_send) closes an open delivery park too, 
 });
 
 test("resolveOutboundDeliveryAction:retry_send that fails leaves the action open, not resolved", async () => {
-  const { run, actionId } = await seedParkedRunViaInteractionRequired();
+  const { run, actionId } = await seedParkedRunViaAmbiguous();
   const res = await resolveOutboundDeliveryAction(actionId, "yusuke", "retry_send", {
-    mint: mintOk(),
-    revoke: noopRevoke,
     deliver: async () => ({ ok: false, kind: "infra_failure", reason: "deck down again" }),
   });
   assert.equal(res.ok, false);
   assert.equal(getRun(run.id)!.status, "review");
   assert.equal(pendingSendCount(run.id), 1);
-  // Left open on purpose — a failed retry must not drop the operator's queue item with no
-  // way back to the still-blocked run (no per-run detail page on the legacy Run model).
   assert.equal(getHumanAction(actionId)!.status, "open");
 });
 
-test("resolveOutboundDeliveryAction:retry_send that hits INTERACTION_REQUIRED again reuses the same open action, no duplicate", async () => {
-  const { run, actionId } = await seedParkedRunViaInteractionRequired();
+test("resolveOutboundDeliveryAction:retry_send that hits ambiguous again reuses the same open action, no duplicate", async () => {
+  const { run, actionId } = await seedParkedRunViaAmbiguous();
   const res = await resolveOutboundDeliveryAction(actionId, "yusuke", "retry_send", {
-    mint: mintOk(),
-    revoke: noopRevoke,
-    deliver: async () => ({ ok: false, kind: "interaction_required", reason: "still blocked", requestId: "req_different" }),
+    deliver: async () => ({ ok: false, kind: "ambiguous", reason: "still ambiguous" }),
   });
   assert.equal(res.ok, false);
   assert.equal(getHumanAction(actionId)!.status, "open");
@@ -345,15 +253,10 @@ test("resolveOutboundDeliveryAction:retry_send that hits INTERACTION_REQUIRED ag
   assert.equal(actions[0].id, actionId);
 });
 
-test("resolveOutboundDeliveryAction:reject makes no mint/deliver call, draft ends rejected, run ends done", async () => {
-  const { run, actionId } = await seedParkedRunViaInteractionRequired();
+test("resolveOutboundDeliveryAction:reject makes no deliver call, draft ends rejected, run ends done", async () => {
+  const { run, actionId } = await seedParkedRunViaAmbiguous();
   let called = false;
   const res = await resolveOutboundDeliveryAction(actionId, "yusuke", "reject", {
-    mint: async () => {
-      called = true;
-      throw new Error("must not be called");
-    },
-    revoke: noopRevoke,
     deliver: async () => {
       called = true;
       throw new Error("must not be called");
@@ -372,8 +275,6 @@ test("mark sent before deliver prevents double-send race", async () => {
   const run = seedReviewRun(true);
   let deliverCalls = 0;
   const res = await approveRunWithDeliver(run.id, {
-    mint: mintOk(),
-    revoke: noopRevoke,
     deliver: async () => {
       deliverCalls++;
       return { ok: true, toolResult: { ok: true } };
@@ -398,8 +299,8 @@ test("snapshot exposes pendingSendCounts", () => {
   assert.equal(typeof snap.pendingSendCounts, "object");
 });
 
-test("resolveOpenDeliveryParkForRun closes an open park (used by /api/runs/:id/retry and /cancel so a terminalized run's queue item is never left stranded)", async () => {
-  const { run, actionId } = await seedParkedRunViaInteractionRequired();
+test("resolveOpenDeliveryParkForRun closes an open park", async () => {
+  const { run, actionId } = await seedParkedRunViaAmbiguous();
   resolveOpenDeliveryParkForRun(run.id, { resolvedBy: "system", choice: "superseded_by_retry" });
   const resolved = getHumanAction(actionId)!;
   assert.equal(resolved.status, "resolved");
@@ -409,7 +310,6 @@ test("resolveOpenDeliveryParkForRun closes an open park (used by /api/runs/:id/r
 
 test("resolveOpenDeliveryParkForRun is a no-op when nothing is parked", () => {
   const run = seedReviewRun(true);
-  // No open action for this run — must not throw.
   resolveOpenDeliveryParkForRun(run.id, { resolvedBy: "system", choice: "cancelled" });
 });
 
@@ -420,6 +320,6 @@ test("incrementOutboundDeliveryAttempt counts up from 1 for a real draft", () =>
   assert.equal(incrementOutboundDeliveryAttempt(draftArt.id), 2);
 });
 
-test("incrementOutboundDeliveryAttempt returns null for a nonexistent artifact — approveRunWithDeliver fails closed on this, never defaults to attempt 1", () => {
+test("incrementOutboundDeliveryAttempt returns null for a nonexistent artifact", () => {
   assert.equal(incrementOutboundDeliveryAttempt("00000000-0000-0000-0000-000000000000"), null);
 });

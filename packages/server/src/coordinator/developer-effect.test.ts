@@ -728,7 +728,7 @@ test("NOT-83 review: an item cancelled during worktree/deck-bind setup (before s
   assert.deepEqual(outcome, { kind: "session_failed" });
 });
 
-test("cursor_local + deckId: skips acquireWorkerAuthority mint (ambient MCP path)", async () => {
+test("cursor_local + deckId: prepares worker deck connection and passes mcpConfigPath to spawn", async () => {
   const { randomUUID } = await import("node:crypto");
   const { buildProfileSnapshot } = await import("./profile-snapshot.js");
 
@@ -741,9 +741,9 @@ test("cursor_local + deckId: skips acquireWorkerAuthority mint (ambient MCP path
   });
   const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
   const issueId = createIssue({
-    title: "Cursor ambient deck",
-    description: "Use ambient MCP.",
-    acceptanceCriteria: "Mint skipped.",
+    title: "Cursor deck launch",
+    description: "Use launch-fixed deck MCP.",
+    acceptanceCriteria: "mcpConfigPath set.",
     repo,
     baseBranch: "main",
     developerAgentId: dev.id,
@@ -767,7 +767,6 @@ test("cursor_local + deckId: skips acquireWorkerAuthority mint (ambient MCP path
   assert.ok(bindWorkItemSession(claimed.id, session.id, claimed.leaseToken!));
   startSession(session.id);
 
-  let mintCalls = 0;
   let spawnSawMcpConfig: string | undefined;
   const spySpawn: SpawnFn = async (input) => {
     spawnSawMcpConfig = input.mcpConfigPath;
@@ -784,14 +783,11 @@ test("cursor_local + deckId: skips acquireWorkerAuthority mint (ambient MCP path
     {
       spawn: spySpawn,
       github: fakeGithub(),
-      mint: async () => {
-        mintCalls += 1;
-        throw new Error("mint must not be called for cursor_local + deck");
-      },
+      deckCallTool: async () => ({ content: [{ type: "text", text: JSON.stringify({ id: deckId, name: "dev" }) }] }),
     }
   );
 
-  assert.equal(mintCalls, 0, "cursor_local must not mint execution authority");
-  assert.equal(spawnSawMcpConfig, undefined, "no scoped mcpConfigPath for ambient Cursor path");
+  assert.ok(spawnSawMcpConfig, "cursor_local + deckId must materialize a worktree mcp.json");
+  assert.match(spawnSawMcpConfig!, /\.cursor\/mcp\.json$/);
   assert.equal(outcome.kind, "clean_handoff");
 });

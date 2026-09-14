@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { MintAuthorityInput, MintAuthorityResult } from "../adapters/execution-authority.js";
-import type { DeliverOutboundResult, DeliveryAuthority } from "../adapters/outbound-delivery.js";
+import type { DeliverOutboundResult } from "../adapters/outbound-delivery.js";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-authrecovery-"));
 process.env.COORDINATOR_FAIL_BACKOFF_MS = "0";
@@ -451,8 +451,7 @@ test("scenario: authority expiry mid-attempt auto-recovers under a fresh key, di
 
 test("scenario: an ambiguous downstream result (timeout) is parked for a human decision, never silently auto-retried", async () => {
   const { deliverOutboundDraft } = await import("../adapters/outbound-delivery.js");
-  const authority: DeliveryAuthority = { authorityId: "authz_ambiguous", authoritySecret: "authzs_secret" };
-  const result = await deliverOutboundDraft(authority, { serviceName: "slack", toolName: "chat_postMessage", arguments: {} }, {
+  const result = await deliverOutboundDraft(DECK, { serviceName: "slack", toolName: "chat_postMessage", arguments: {} }, {
     callTool: async () => {
       throw new Error("Outbound deliver timed out after 60000ms");
     },
@@ -476,8 +475,6 @@ test("scenario: an ambiguous downstream result (timeout) is parked for a human d
   );
 
   const approveRes = await approveRunWithDeliver(run.id, {
-    mint: mintOk(),
-    revoke: async () => {},
     deliver: async (): Promise<DeliverOutboundResult> => ({ ok: false, kind: "ambiguous", reason: "timed out — unknown" }),
   });
   assert.equal(approveRes.ok, false);
@@ -485,7 +482,7 @@ test("scenario: an ambiguous downstream result (timeout) is parked for a human d
 
   const { listHumanActionsForRun } = await import("../repository/human-actions.js");
   const parked = listHumanActionsForRun(run.id).find((a) => a.actionType === "outbound_delivery_interaction_required" && a.status === "open");
-  assert.ok(parked, "an ambiguous result must raise the same explicit retry/reject decision as a Deck-side INTERACTION_REQUIRED, not disappear as an ordinary failure");
+  assert.ok(parked, "an ambiguous result must raise an explicit retry/reject decision, not disappear as an ordinary failure");
   assert.equal(getRun(run.id)!.status, "review", "still blocked on the human decision, never silently advanced");
 });
 

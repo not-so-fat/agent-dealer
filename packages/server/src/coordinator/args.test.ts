@@ -105,12 +105,9 @@ test("buildDeveloperArgs for codex_local never adds --ignore-user-config regardl
   assert.ok(!withoutAuthority.includes("--ignore-user-config"));
 });
 
-test("buildDeveloperArgs for cursor_local never adds --approve-mcps — cursor has no isolation mechanism to safely approve (PR #19 review)", () => {
-  // A stray mcpConfigPath must not turn into --approve-mcps even if somehow passed: it
-  // would auto-approve every ambient MCP server cursor-agent's project+global config
-  // loading discovers, not just a scoped one.
+test("buildDeveloperArgs for cursor_local adds --approve-mcps when mcpConfigPath is set", () => {
   const withPath = buildDeveloperArgs("cursor_local", "implement", undefined, undefined, "/tmp/wt/.cursor/mcp.json");
-  assert.ok(!withPath.includes("--approve-mcps"));
+  assert.ok(withPath.includes("--approve-mcps"));
 
   const withoutPath = buildDeveloperArgs("cursor_local", "implement");
   assert.ok(!withoutPath.includes("--approve-mcps"));

@@ -38,8 +38,7 @@ import {
   fetchRef,
   diffShas,
 } from "../adapters/git-worktree.js";
-import { acquireWorkerAuthority, releaseWorkerAuthority, AUTHORITY_TTL_HEADROOM_MS, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
-import type { MintFn, RevokeFn } from "../adapters/authority-lifecycle.js";
+import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adapters/github.js";
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { getWorkItem } from "../repository/work-items.js";
@@ -108,11 +107,9 @@ async function acquireOrAwaitPublication(workItemId: string, leaseToken: string)
 export interface ReviewerEffectDeps {
   spawn: ReviewerSpawn;
   github: GithubAdapter;
+  /** Test-only seam: fake `get_bound_deck` so a deckId-bearing profile can exercise the
+   * real deck-connection path without a reachable Agent Deck. */
   deckCallTool?: DeckToolCaller;
-  /** Test-only seam (NOT-79): a fixture mint/revoke so a deckId-bearing profile can
-   * exercise the real authority-acquisition path without a reachable Agent Deck. */
-  mint?: MintFn;
-  revoke?: RevokeFn;
 }
 
 const defaultDeps: ReviewerEffectDeps = { spawn: realReviewerSpawn, github: realGithubAdapter };
@@ -220,7 +217,7 @@ export async function runReviewerEffect(
 
   let worktreePath: string;
   let result: ReviewerResult;
-  let workerAuthority: { authorityId: string; attemptRowId: string; mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
+  let workerAuthority: { mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   try {
    try {
     const worktree = await createRoleWorktree({
@@ -232,37 +229,19 @@ export async function runReviewerEffect(
     worktreePath = worktree.path;
 
     if (snapshot?.deckId) {
-      const acquired = await acquireWorkerAuthority({
-        ownerKind: "reviewer",
-        ownerId: `${issue.id}:reviewer`,
+      const prepared = await prepareWorkerDeckConnection({
         deckId: snapshot.deckId,
-        runId: ctx.instance.id,
-        attemptId: workItem.id,
-        idempotencyKey: `${workItem.id}:${workItem.attemptCount}`,
         worktreePath,
         runtime,
-        // See developer-effect.ts's identical comment: must outlive the reviewer
-        // session's own (configurable) timeout.
-        ttlMs: reviewerEffectConfig.sessionTimeoutMs + AUTHORITY_TTL_HEADROOM_MS,
         verifyCallTool: deps.deckCallTool,
-        mint: deps.mint,
-        revoke: deps.revoke,
       });
-      if (!acquired.ok) {
+      if (!prepared.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
-        if (acquired.kind === "interaction_required") {
-          return { kind: "interaction_required", reason: acquired.reason, requestId: acquired.requestId };
-        }
-        if (acquired.kind === "runtime_unsupported") {
-          return { kind: "deck_runtime_unsupported", reason: acquired.reason };
-        }
         return { kind: "session_failed" };
       }
       workerAuthority = {
-        authorityId: acquired.authorityId,
-        attemptRowId: acquired.attemptRowId,
-        mcpConfigPath: acquired.mcpConfigPath,
-        mcpEnv: acquired.mcpEnv,
+        mcpConfigPath: prepared.mcpConfigPath,
+        mcpEnv: prepared.mcpEnv,
       };
     }
 
@@ -328,11 +307,11 @@ export async function runReviewerEffect(
     });
 
     // See developer-effect.ts's identical release: the worker's own subprocess has
-    // exited, so its authority has no further legitimate use, and (cursor) its
+    // exited, so its deck MCP config has no further legitimate use, and (cursor) its
     // worktree-local MCP config must be gone well before this worktree could ever be
     // reused — don't wait for this function's own return to clean it up.
     if (workerAuthority) {
-      await releaseWorkerAuthority({ ...workerAuthority, revoke: deps.revoke });
+      await releaseWorkerDeckConnection(workerAuthority);
       workerAuthority = null;
     }
 
@@ -468,8 +447,8 @@ export async function runReviewerEffect(
   }
   } finally {
     // See developer-effect.ts's identical finally: the worker's subprocess is done (or
-    // never started) by every path through this function, so its authority is revoked
-    // here rather than left to expire by TTL (NOT-85 section 6.3).
-    if (workerAuthority) await releaseWorkerAuthority({ ...workerAuthority, revoke: deps.revoke });
+    // never started) by every path through this function, so its per-attempt MCP config
+    // is cleaned up here.
+    if (workerAuthority) await releaseWorkerDeckConnection(workerAuthority);
   }
 }

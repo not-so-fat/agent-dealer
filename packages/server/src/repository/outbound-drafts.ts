@@ -6,7 +6,7 @@ import {
 } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 import { listArtifacts } from "./runs.js";
-import type { DeliveryAuthority, DeliverOutboundResult } from "../adapters/outbound-delivery.js";
+import type { DeliverOutboundResult } from "../adapters/outbound-delivery.js";
 
 export type PendingOutboundDraft = {
   artifact: Artifact;
@@ -148,6 +148,6 @@ export function markOutboundDraftSent(artifactId: string): boolean {
 export const deliverInFlight = new Set<string>();
 
 export type DeliverFn = (
-  authority: DeliveryAuthority,
+  deckId: string,
   toolCall: OutboundToolCall
 ) => Promise<DeliverOutboundResult>;
