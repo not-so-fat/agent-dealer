@@ -86,15 +86,30 @@ export async function spawnCli(
         // invocation that produced stderr output; every fixture-based test's fake spawn
         // never wrote stderr, so this path went unexercised until a real session hit it).
         const stderr = stderrChunks.join("");
+        // write()/end() only queue the I/O — resolving immediately (PR #27 review) races
+        // the actual flush, so a caller reading opts.logPath right after this promise
+        // settles can see a file missing the stderr trailer (or, on a slow disk, even
+        // the tail of stdout). Wait for the stream to actually finish (or, if the
+        // underlying write itself errors, the 'error' handler above already logged it —
+        // finalize anyway rather than hang forever on a transcript that's already fully
+        // buffered in memory regardless of the file write's outcome).
+        let finalized = false;
+        const finalize = () => {
+          if (finalized) return;
+          finalized = true;
+          resolve({
+            exitCode,
+            transcript: stdoutChunks.join(""),
+            timedOut,
+          });
+        };
+        logStream.once("finish", finalize);
+        logStream.once("error", finalize);
         if (stderr.trim()) {
-          logStream.write(`\n--- stderr ---\n${stderr}`);
+          logStream.end(`\n--- stderr ---\n${stderr}`);
+        } else {
+          logStream.end();
         }
-        logStream.end();
-        resolve({
-          exitCode,
-          transcript: stdoutChunks.join(""),
-          timedOut,
-        });
       };
 
       const timer = setTimeout(() => {
