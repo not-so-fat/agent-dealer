@@ -50,26 +50,6 @@ export function assertToolResultOk(result: unknown, name: string): void {
   }
 }
 
-/**
- * Parse Deck's typed `INTERACTION_REQUIRED` contract error from an MCP tool result.
- * Kept for callers that still inspect tool results (e.g. legacy paths); launch-fixed
- * deck sessions no longer park on this for worker/coordinator Deck connects.
- */
-export function parseInteractionRequired(result: unknown): { requestId?: string; message?: string } | null {
-  if (!(result as { isError?: boolean } | null)?.isError) return null;
-  try {
-    const body = parseDeckToolResult(result) as {
-      error_code?: string;
-      message?: string;
-      correlation?: { requestId?: string };
-    };
-    if (body.error_code !== "INTERACTION_REQUIRED") return null;
-    return { requestId: body.correlation?.requestId, message: body.message };
-  } catch {
-    return null;
-  }
-}
-
 /** Pull the text payload out of a (non-error) MCP tool result and JSON-parse it. */
 export function parseDeckToolResult(result: unknown): Record<string, unknown> {
   const text = resultText(result);
