@@ -9,10 +9,10 @@
 // agent would invoke it, talking over real HTTP to an ephemeral port recorded in
 // run.json. Only the two things that would otherwise cost money or need a live external
 // service are faked: the agent CLI session (`spawn`) and GitHub (`github`) — the
-// confirmed NOT-61/62 scope — plus Agent Deck's execution-authority mint/verify, faked
-// here for the same reason (NOT-87 introduced a real network dependency on a running
-// Agent Deck backend that a hermetic test must not require). Everything else — routing,
-// git, worktrees, the authority ledger, PR/SHA verification, findings, human actions — is
+// confirmed NOT-61/62 scope — plus Agent Deck launch-deck MCP preflight, faked
+// here for the same reason (NOT-106 replaced mint/verify with header-based deck
+// connect that a hermetic test must not require a live Agent Deck for). Everything else — routing,
+// git, worktrees, PR/SHA verification, findings, human actions — is
 // exercised for real.
 //
 // A real local dogfood run (real coding agents, a real Agent Deck backend, a real PR

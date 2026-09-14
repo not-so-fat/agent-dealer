@@ -376,9 +376,6 @@ export type AgentDeckConfigPatch = z.infer<typeof AgentDeckConfigPatch>;
 
 /** Typed outcomes for deck-metadata discovery — never collapse to an empty list. */
 export const DeckAccessErrorCode = z.enum([
-  "NOT_ENROLLED",
-  "COORDINATOR_NOT_ENROLLED",
-  "ENROLLMENT_REVOKED",
   "UNAUTHORIZED",
   "DECK_UNAVAILABLE",
 ]);
@@ -395,26 +392,6 @@ export const AgentDeckStatus = z.object({
   deckAccessErrorMessage: z.string().optional(),
 });
 export type AgentDeckStatus = z.infer<typeof AgentDeckStatus>;
-
-/**
- * Typed outcomes for minting/using short-lived Agent Deck execution authority
- * (NOT-85 §7, NOT-87). `INTERACTION_REQUIRED` is the non-error, expected-in-normal-
- * operation outcome that must park the attempt rather than retry — every other code is
- * an auth/config/infra failure. Mirrors Deck's `ContractErrorCode` (agent_deck
- * packages/backend/src/execution-authority/types.ts) but scoped to what the coordinator
- * actually branches on for mint + one authorized call.
- */
-export const ExecutionAuthorityErrorCode = z.enum([
-  "COORDINATOR_NOT_ENROLLED",
-  "ENROLLMENT_REVOKED",
-  "RESOURCE_OUT_OF_SCOPE",
-  "INTERACTION_REQUIRED",
-  "AUTHORITY_EXPIRED",
-  "AUTHORITY_REVOKED",
-  "INVALID_MINT_REQUEST",
-  "DECK_UNAVAILABLE",
-]);
-export type ExecutionAuthorityErrorCode = z.infer<typeof ExecutionAuthorityErrorCode>;
 
 export const PromoteLinearInput = z
   .object({

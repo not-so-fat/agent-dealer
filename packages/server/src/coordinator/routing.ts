@@ -15,26 +15,13 @@ export type DeveloperOutcome =
   | { kind: "timed_out" }
   /** git/gh tooling itself errored during verification — not the agent's fault. */
   | { kind: "adapter_failure"; reason: string }
-  | { kind: "session_failed" }
-  /** Agent Deck returned a typed control-plane requirement (INTERACTION_REQUIRED). Kept
-   * for PR 2 / residual authority-lifecycle paths; developer/reviewer effects no longer
-   * produce this under launch-fixed decks (NOT-106). */
-  | { kind: "interaction_required"; reason: string; requestId?: string }
-  /** Formerly raised when a runtime had no MCP isolation (AUTHORITY_SUPPORTED_RUNTIMES).
-   * Cursor is supported as of NOT-106; kind kept until PR 2 deletes residual producers. */
-  | { kind: "deck_runtime_unsupported"; reason: string };
+  | { kind: "session_failed" };
 
 export type ReviewerOutcome =
   | { kind: "verdict"; result: ReviewerResult }
   | { kind: "stale"; currentHeadSha: string }
   | { kind: "session_failed" }
-  | { kind: "publish_failed" }
-  /** Agent Deck returned a typed control-plane requirement minting or verifying this
-   * attempt's execution authority — never retried with the same inputs (NOT-87). See
-   * DeveloperOutcome's identical kind for `requestId`. */
-  | { kind: "interaction_required"; reason: string; requestId?: string }
-  /** See DeveloperOutcome's identical kind. */
-  | { kind: "deck_runtime_unsupported"; reason: string };
+  | { kind: "publish_failed" };
 
 export interface RouteLimits {
   currentRound: number;
@@ -72,16 +59,6 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
   switch (outcome.kind) {
     case "clean_handoff":
       return { next: "spawn_reviewer", headSha: outcome.headSha };
-    case "interaction_required":
-      // Never spends any budget — Deck denied this deterministically (a control-plane
-      // decision, not a transient hiccup); retrying with the same authority request
-      // would fail identically (NOT-87 §6.3).
-      return { next: "human_action", actionType: "deck_interaction_required", reason: outcome.reason, requestId: outcome.requestId };
-    case "deck_runtime_unsupported":
-      // Never spends any budget, same reasoning as interaction_required — this is a
-      // Dealer-side profile misconfiguration (not a Deck decision), so it's a plain
-      // policy_escalation rather than deck_interaction_required.
-      return { next: "human_action", actionType: "policy_escalation", reason: outcome.reason };
     case "dirty_worktree":
       // Never spends any budget — an unclean handoff is preserved for inspection, not retried blindly.
       return { next: "human_action", actionType: "policy_escalation", reason: "Developer worktree has uncommitted changes after the session ended." };
@@ -154,11 +131,6 @@ export function routeReviewerOutcome(
   pinnedHeadSha: string
 ): ReviewerRouteResult {
   switch (outcome.kind) {
-    case "interaction_required":
-      return { next: "human_action", actionType: "deck_interaction_required", reason: outcome.reason, requestId: outcome.requestId };
-    case "deck_runtime_unsupported":
-      // See DeveloperOutcome's identical case — never spends any budget.
-      return { next: "human_action", actionType: "policy_escalation", reason: outcome.reason };
     case "stale":
       return infraAttemptsRemain(limits)
         ? { next: "retry_reviewer_at_new_head", headSha: outcome.currentHeadSha }
