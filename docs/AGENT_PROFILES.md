@@ -40,7 +40,7 @@ Issue-coordinator role worktrees are **not** under this home directory. They are
 |-------|----------|------|
 | `workspaceRoot` | Yes (before kick) | CLI working directory — git repo for dev, vault folder for notes |
 | `runtime` | Yes | `claude_code`, `cursor_local`, or `codex_local` |
-| `deckId` / `playbookId` | No | Agent Deck binding — when set, issue workers must `bind_workspace` to their session cwd before other Deck use |
+| `deckId` / `playbookId` | No | Optional Agent Deck id on the profile — when set, issue workers must `bind_workspace` to their session cwd to equip that deck before other Deck use |
 | `name` | Yes | Display label |
 
 Built-in Claude, Cursor, and Codex agents ship with **no default workspace**. Configure workspace on the Agents page before kicking tasks.
