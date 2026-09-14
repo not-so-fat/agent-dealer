@@ -54,32 +54,29 @@ function buildArgs(
   if (runtime === "codex_local") {
     const args = ["exec", "--json", "-s", policy.worktreeWrite ? "workspace-write" : "read-only"];
     // codex's read-only sandbox constrains shell/files but NOT configured MCP/plugin
-    // calls, so a read-only session with no execution authority (no deck configured)
-    // must have `--ignore-user-config` to skip `$CODEX_HOME/config.toml` entirely —
+    // calls, so a read-only session with no deck MCP config must have
+    // `--ignore-user-config` to skip `$CODEX_HOME/config.toml` entirely —
     // otherwise the ambient `~/.codex/config.toml` MCP table (if any) stays reachable
     // regardless of role; confirmed directly against the installed CLI (`codex mcp list`
     // shows configured servers enabled with or without a `-c mcp_servers={}` override,
     // since codex merges CLI overrides into the loaded config rather than replacing it).
-    // When execution authority *is* wired (mcpConfigPath set), `CODEX_HOME` is pointed at
-    // a per-attempt directory whose `config.toml` defines exactly one, authority-scoped
-    // MCP server (agent-deck-bind.ts) — `--ignore-user-config` would skip loading that
-    // scoped file too, so it is never passed once an authority exists, for either role;
-    // the deck's own allowedTools scope (not this CLI flag) is what still keeps a
-    // reviewer's authority read-only server-side.
+    // When a deck MCP config *is* wired (mcpConfigPath set), `CODEX_HOME` is pointed at
+    // a per-attempt directory whose `config.toml` defines exactly one deck-header MCP
+    // server (agent-deck-bind.ts) — `--ignore-user-config` would skip loading that
+    // scoped file too, so it is never passed once a deck config exists, for either role.
     if (!policy.worktreeWrite && !mcpConfigPath) args.push("--ignore-user-config");
     if (model) args.push("-m", model);
     args.push(prompt);
     return args;
   }
   if (runtime === "cursor_local") {
-    // No execution-authority MCP wiring for cursor (agent-deck-bind.ts's
-    // AUTHORITY_SUPPORTED_RUNTIMES, PR #19 review): cursor-agent loads project *and*
-    // global `.cursor/mcp.json` with no flag to isolate one from the other, so
-    // `--approve-mcps` would auto-approve every ambient MCP server on the machine, not
-    // just a freshly-scoped one. `mcpConfigPath` is intentionally never consulted here.
+    // Project `.cursor/mcp.json` is written with deck-launch headers (NOT-106). Headless
+    // `-p` needs `--approve-mcps` to load it; approving ambient servers under the same
+    // name is acceptable — the goal is the assigned deck, not MCP isolation.
     return [
       "-p",
       "--trust",
+      ...(mcpConfigPath ? ["--approve-mcps"] : []),
       "--output-format",
       "stream-json",
       "--stream-partial-output",

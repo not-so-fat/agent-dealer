@@ -58,7 +58,7 @@ import { recordPlanDelegation } from "../queue/plan-delegation.js";
 import { askResultQuestion } from "../queue/result-qa.js";
 import { rejectPendingOutboundDrafts, deliverInFlight } from "../repository/outbound-drafts.js";
 import { getActiveLogPath } from "../runners/claude.js";
-import { fetchAuthorizedDecks } from "../adapters/agent-deck.js";
+import { fetchDecks } from "../adapters/agent-deck.js";
 import { testAgentDeckConnection } from "../adapters/agent-deck.js";
 import {
   getLinearIssue,
@@ -80,7 +80,7 @@ import { listRuntimeModels } from "../runners/models.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
   if (!deckId) return null;
-  const result = await fetchAuthorizedDecks();
+  const result = await fetchDecks();
   if (!result.ok) return null;
   return result.decks.find((d) => d.id === deckId)?.name ?? null;
 }
@@ -645,9 +645,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/api/agent-deck/decks", async (_req, reply) => {
-    const result = await fetchAuthorizedDecks();
+    const result = await fetchDecks();
     if (!result.ok) {
-      const status = result.code === "NOT_ENROLLED" ? 409 : result.code === "DECK_UNAVAILABLE" ? 502 : 403;
+      const status = result.code === "DECK_UNAVAILABLE" ? 502 : 403;
       return reply.status(status).send({ error: result.message, code: result.code, data: [] });
     }
     return { data: result.decks };
@@ -658,11 +658,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const { getAgentDeckApiUrl } = await import("../adapters/agent-deck.js");
     const base = getAgentDeckApiUrl();
     try {
-      const res = await fetch(`${base}/api/decks/${deckId}/playbooks`, {
+      const res = await fetch(`${base}/api/launch/decks/${encodeURIComponent(deckId)}/playbooks`, {
         signal: AbortSignal.timeout(5000),
       });
       if (!res.ok) throw new Error(`Agent Deck API error: ${res.status}`);
-      return res.json();
+      const json = (await res.json()) as {
+        success?: boolean;
+        data?: Array<{ id: string; title: string }> | { playbooks?: Array<{ id: string; title: string }> };
+        message?: string;
+      };
+      if (json.success === false) throw new Error(json.message ?? "Agent Deck playbooks request failed");
+      const playbooks = Array.isArray(json.data) ? json.data : (json.data?.playbooks ?? []);
+      return { data: playbooks };
     } catch (e) {
       return reply.status(502).send({ error: String(e), data: [] });
     }

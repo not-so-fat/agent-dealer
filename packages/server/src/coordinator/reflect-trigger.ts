@@ -13,25 +13,15 @@
 // the review verdicts/findings accumulated across rounds — the "final implementation
 // conclusion + review history as input" the design doc calls for, minus the extra spawn.
 //
-// NOT-94: every Deck call this makes (get_playbook, propose_playbook_patch) runs under a
-// freshly minted, short-lived execution authority scoped to the frozen deck/playbook
-// snapshot — never `x-agent-deck-client`, dashboard headers, copied workspace grants, or
-// agent-admin (NOT-85's contract). Each call goes through the coordinator's own
-// authority-authenticated MCP connection (adapters/reflect-authority.ts), the same
-// principal shape a worker's isolated MCP config carries. A Deck-side `INTERACTION_REQUIRED`
-// for the mint or any tool call durably parks that one reflection attempt behind a
-// `reflection_interaction_required` human action — deliberately never routed through
-// `resolveHumanActionAndAdvance`'s workflow state machine: the issue is already `done`, and
-// resolving this action must never reopen it or enqueue developer/reviewer work. Retrying
-// starts a brand new correlated attempt with a fresh authority; dismissing makes no further
-// Deck call.
+// NOT-106: every Deck call this makes (get_playbook, propose_playbook_patch) runs under
+// the launch-fixed deck header (`x-agent-deck-deck-id`) via adapters/reflect-authority.ts —
+// no mint, no Authorization. Resolving a legacy `reflection_interaction_required` action
+// still bypasses `resolveHumanActionAndAdvance` (issue is already `done`).
 import type { Issue } from "@agent-dealer/shared";
 import { parseProfileSnapshot } from "@agent-dealer/shared";
 import { randomUUID } from "node:crypto";
 import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
-import { mintAuthority, revokeAuthority } from "../adapters/execution-authority.js";
-import { acquireAuthorityForAttempt, releaseAuthority } from "../adapters/authority-lifecycle.js";
-import { callAuthorizedDeckTool, type AuthorizedDeckCallResult } from "../adapters/reflect-authority.js";
+import { callDeckTool } from "../adapters/reflect-authority.js";
 import { getIssue } from "../repository/issues.js";
 import { getAgent } from "../repository/agents.js";
 import { listFindingsForIssue } from "../repository/findings.js";
@@ -40,16 +30,11 @@ import { listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import { listArtifactsForIssueByKind } from "../repository/artifacts-for-issue.js";
 import {
-  createHumanAction,
-  findOpenHumanActionByRequestId,
   getHumanAction,
   resolveHumanAction,
 } from "../repository/human-actions.js";
 import { buildProfileSnapshot } from "./profile-snapshot.js";
 
-/** One attempt's worth of work — long enough to fetch/propose every playbook in the
- * snapshot sequentially, never a session-long grant (NOT-85 §5.2). */
-const REFLECT_AUTHORITY_TTL_MS = 5 * 60_000;
 const REFLECT_TOOL_TIMEOUT_MS = 15_000;
 
 /**
@@ -77,16 +62,12 @@ function resolveReflectTargets(issue: Issue): { deckId: string | null; playbookI
 
 export interface ReflectDeps {
   checkHealth: typeof checkAgentDeckHealth;
-  mintAuthority: typeof mintAuthority;
-  revokeAuthority: typeof revokeAuthority;
-  callTool: typeof callAuthorizedDeckTool;
+  callTool: typeof callDeckTool;
 }
 
 const defaultDeps: ReflectDeps = {
   checkHealth: checkAgentDeckHealth,
-  mintAuthority,
-  revokeAuthority,
-  callTool: callAuthorizedDeckTool,
+  callTool: callDeckTool,
 };
 
 function readConclusionExcerpt(issueId: string): string | null {
@@ -156,46 +137,21 @@ function alreadyProposedPlaybookIds(issueId: string): Set<string> {
   return ids;
 }
 
-/**
- * Raises (or dedupes onto) the one open `reflection_interaction_required` action for this
- * issue/requestId (NOT-93's requestId-dedupe pattern, mirrored here for reflection instead
- * of a worker attempt). Deliberately never touches issue status or workflow instances —
- * the issue is already `done`.
- */
-function parkReflectAttempt(issueId: string, reason: string, requestId?: string): void {
-  if (requestId) {
-    const existing = findOpenHumanActionByRequestId(issueId, "reflection_interaction_required", requestId);
-    if (existing) return;
-  }
-  createHumanAction({
-    issueId,
-    actionType: "reflection_interaction_required",
-    reason,
-    question: `${reason} Retry the reflection, or dismiss?`,
-    responseOptions: [
-      { choice: "retry", label: "Retry reflection" },
-      { choice: "dismiss", label: "Dismiss" },
-    ],
-    requestId: requestId ?? null,
-  });
-}
-
 function recordStatus(issueId: string, content: Record<string, unknown>): void {
   createIssueArtifact({ issueId, kind: "reflect_status", author: "system", content });
 }
 
 /**
  * Fires once per completed workflow instance, only on final_review:complete. Never throws —
- * every failure mode (no deck/playbooks configured, Agent Deck offline, a denied mint, a
- * failed or parked patch proposal) is recorded as a `reflect_status`/`playbook_patch`
- * artifact (and, for a control-plane requirement, a `reflection_interaction_required`
- * human action) and reported back as a result the caller can log, not an exception that
- * would undo the already-committed human-action resolution.
+ * every failure mode (no deck/playbooks configured, Agent Deck offline, a failed patch
+ * proposal) is recorded as a `reflect_status`/`playbook_patch` artifact and reported back
+ * as a result the caller can log, not an exception that would undo the already-committed
+ * human-action resolution.
  */
 export async function triggerIssueReflect(
   issueId: string,
   deps: ReflectDeps = defaultDeps
-): Promise<"triggered" | "skipped" | "failed" | "parked"> {
+): Promise<"triggered" | "skipped" | "failed"> {
   const issue = getIssue(issueId);
   if (!issue) return "skipped";
 
@@ -208,123 +164,62 @@ export async function triggerIssueReflect(
     return "skipped";
   }
 
-  // A fresh, correlated attempt id every call — never reused across retries (NOT-85 §6.2,
-  // §8): it doubles as the mint idempotency key and as the correlation Deck's own audit
-  // trail and this attempt's artifacts share.
   const attemptId = randomUUID();
-  // ownerId = issueId (stable across attempts): a crashed prior attempt's still-open
-  // authority_attempts row (NOT-91) is revoked before this one starts, and — since
-  // acquireAuthorityForAttempt handles a secret-less idempotent remint / AUTHORITY_EXPIRED
-  // internally — this call never needs to branch on either.
-  const acquired = await acquireAuthorityForAttempt({
-    ownerKind: "reflect",
-    ownerId: issueId,
-    runId: issueId,
-    attemptId,
-    deckId,
-    ttlMs: REFLECT_AUTHORITY_TTL_MS,
-    idempotencyKey: attemptId,
-    mint: deps.mintAuthority,
-    revoke: deps.revokeAuthority,
-  });
-  if (!acquired.ok) {
-    if (acquired.kind === "interaction_required") {
-      parkReflectAttempt(issueId, acquired.reason, acquired.requestId);
-      recordStatus(issueId, { status: "parked", attemptId, reason: acquired.reason });
-      return "parked";
-    }
-    recordStatus(issueId, { status: "failed", attemptId, error: acquired.reason });
-    return "failed";
-  }
-  const { authority, attemptRowId } = acquired;
-  // acquireAuthorityForAttempt never returns ok:true without a secret — it resolves a
-  // secret-less idempotent remint internally (NOT-91).
-  const authoritySecret = authority.authoritySecret!;
-
   const rationale = buildRationale(issueId);
   const alreadyProposed = alreadyProposedPlaybookIds(issueId);
   let anySucceeded = false;
   let anyFailed = false;
-  let parked = false;
 
-  /** Records a plain infra failure and returns false, or parks the attempt (recording a
-   * `reflection_interaction_required` action) and returns true. */
-  const handleToolFailure = (result: Extract<AuthorizedDeckCallResult<unknown>, { ok: false }>): boolean => {
-    if (result.kind === "interaction_required") {
-      parkReflectAttempt(issueId, result.reason, result.requestId);
-      return true;
-    }
-    recordStatus(issueId, { status: "failed", attemptId, error: result.reason });
-    return false;
-  };
-
-  try {
-    for (const playbookId of playbookIds) {
-      if (alreadyProposed.has(playbookId)) {
-        // A prior attempt for this issue already proposed this playbook's patch — a retry
-        // must not duplicate it (PR #21 review finding #1).
-        anySucceeded = true;
-        continue;
-      }
-
-      const playbook = await deps.callTool<{ id: string; title: string; body: string }>({
-        authorityId: authority.authorityId,
-        authoritySecret,
-        toolName: "get_playbook",
-        arguments: { playbook_id: playbookId },
-        timeoutMs: REFLECT_TOOL_TIMEOUT_MS,
-      });
-      if (!playbook.ok) {
-        if (handleToolFailure(playbook)) {
-          parked = true;
-          break;
-        }
-        anyFailed = true;
-        continue;
-      }
-
-      const proposed = await deps.callTool<{ id: string; playbookId: string | null }>({
-        authorityId: authority.authorityId,
-        authoritySecret,
-        toolName: "propose_playbook_patch",
-        arguments: {
-          kind: "update",
-          playbook_id: playbookId,
-          ops: [{ op: "add_item", section: "Notes", text: rationale }],
-          rationale,
-        },
-        timeoutMs: REFLECT_TOOL_TIMEOUT_MS,
-      });
-      if (!proposed.ok) {
-        if (handleToolFailure(proposed)) {
-          parked = true;
-          break;
-        }
-        anyFailed = true;
-        continue;
-      }
-
-      createIssueArtifact({
-        issueId,
-        kind: "playbook_patch",
-        author: "system",
-        content: {
-          patchId: proposed.data.id,
-          playbookId,
-          playbookTitle: playbook.data.title,
-          rationale,
-          status: "proposed",
-        },
-      });
+  for (const playbookId of playbookIds) {
+    if (alreadyProposed.has(playbookId)) {
+      // A prior attempt for this issue already proposed this playbook's patch — a retry
+      // must not duplicate it (PR #21 review finding #1).
       anySucceeded = true;
+      continue;
     }
-  } finally {
-    await releaseAuthority(attemptRowId, authority.authorityId, deps.revokeAuthority);
-  }
 
-  if (parked) {
-    recordStatus(issueId, { status: "parked", attemptId, playbookCount: playbookIds.length });
-    return "parked";
+    const playbook = await deps.callTool<{ id: string; title: string; body: string }>({
+      deckId,
+      toolName: "get_playbook",
+      arguments: { playbook_id: playbookId },
+      timeoutMs: REFLECT_TOOL_TIMEOUT_MS,
+    });
+    if (!playbook.ok) {
+      recordStatus(issueId, { status: "failed", attemptId, error: playbook.reason });
+      anyFailed = true;
+      continue;
+    }
+
+    const proposed = await deps.callTool<{ id: string; playbookId: string | null }>({
+      deckId,
+      toolName: "propose_playbook_patch",
+      arguments: {
+        kind: "update",
+        playbook_id: playbookId,
+        ops: [{ op: "add_item", section: "Notes", text: rationale }],
+        rationale,
+      },
+      timeoutMs: REFLECT_TOOL_TIMEOUT_MS,
+    });
+    if (!proposed.ok) {
+      recordStatus(issueId, { status: "failed", attemptId, error: proposed.reason });
+      anyFailed = true;
+      continue;
+    }
+
+    createIssueArtifact({
+      issueId,
+      kind: "playbook_patch",
+      author: "system",
+      content: {
+        patchId: proposed.data.id,
+        playbookId,
+        playbookTitle: playbook.data.title,
+        rationale,
+        status: "proposed",
+      },
+    });
+    anySucceeded = true;
   }
 
   recordStatus(issueId, {

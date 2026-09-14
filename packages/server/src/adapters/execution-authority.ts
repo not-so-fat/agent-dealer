@@ -10,8 +10,15 @@
 // coordinator-side call, then revoke) — callers never reuse an authority across attempts;
 // a new attempt always mints again with a new idempotency key (NOT-85 §6.2, §8).
 import { getAgentDeckApiUrl } from "./agent-deck.js";
-import { getAgentDeckEnrollmentBearer } from "../repository/intake-settings.js";
 import type { ExecutionAuthorityErrorCode } from "@agent-dealer/shared";
+
+/** Enrollment bearer for legacy mint/revoke (kept for PR2 / authority-lifecycle). */
+function getAgentDeckEnrollmentBearer(): string | null {
+  const enrollmentId = process.env.AGENT_DECK_ENROLLMENT_ID;
+  const secret = process.env.AGENT_DECK_ENROLLMENT_SECRET;
+  if (!enrollmentId || !secret) return null;
+  return `${enrollmentId}:${secret}`;
+}
 
 export interface AllowedTool {
   serviceId: string;

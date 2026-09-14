@@ -49,11 +49,12 @@ function guidanceSection(guidance: string[] | undefined): string[] {
 }
 
 /**
- * An agent with a deckId is only that agent once the worker has equipped the deck for
- * its session cwd. Without an explicit bind-first instruction, models either skip Deck
- * entirely or (cursor_local) invent a bind against the wrong path from ambient habit.
- * Worktrees live under the issue repo (`.agent-dealer-worktrees/`) so the operator's
- * `agent-deck use` grant covers the cwd and bind can succeed.
+ * An agent with a deckId is launched with that deck already equipped in its MCP session
+ * (NOT-106). `bind_workspace` confirms the equipped deck for this session cwd — it does
+ * not pick a different deck. Without an explicit bind-first instruction, models either
+ * skip Deck entirely or (cursor_local) invent a bind against the wrong path from ambient
+ * habit. Worktrees live under the issue repo (`.agent-dealer-worktrees/`) so the
+ * operator's `agent-deck use` grant covers the cwd and bind can succeed.
  *
  * When there is no deckId: forbid bind/Linear — Task/AC are the full brief.
  */

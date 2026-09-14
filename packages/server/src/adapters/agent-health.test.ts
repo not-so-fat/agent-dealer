@@ -1,10 +1,9 @@
 // packages/server/src/adapters/agent-health.test.ts
 //
-// NOT-77: an agent bound to a deck that Agent Deck is reachable for (agentDeckOnline) but
-// whose authenticated metadata call fails (missing/revoked enrollment, auth error) — or
-// succeeds but simply no longer includes this deck (deleted, or out of scope after
-// re-enrollment) — must surface a distinct issue. resolveDeckName silently swallows both
-// of the same failures to null elsewhere, so this is the one place an operator can see why
+// An agent bound to a deck that Agent Deck is reachable for (agentDeckOnline) but whose
+// launch deck-metadata call fails — or succeeds but simply no longer includes this deck
+// (deleted) — must surface a distinct issue. resolveDeckName silently swallows both of
+// the same failures to null elsewhere, so this is the one place an operator can see why
 // deck resolution is broken.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -22,7 +21,7 @@ const { healthForAgent } = await import("./agent-health.js");
 
 migrate();
 
-const FAILURE: DeckAccessResult = { ok: false, code: "ENROLLMENT_REVOKED", message: "enrollment is revoked" };
+const FAILURE: DeckAccessResult = { ok: false, code: "DECK_UNAVAILABLE", message: "Agent Deck API error: 502" };
 
 test("agentDeckOnline but no deckId configured: no deck-related issue", async () => {
   const agent = createAgent({ name: "no-deck", runtime: "claude_code", workspaceRoot: "/tmp" });
@@ -47,9 +46,9 @@ test("agent deck offline: reports deck_offline, not deck_unauthorized", async ()
   );
 });
 
-test("agent deck online but enrollment revoked: reports deck_unauthorized with the Deck message", async () => {
+test("agent deck online but metadata unavailable: reports deck_unauthorized with the Deck message", async () => {
   const agent = createAgent({
-    name: "revoked",
+    name: "unavailable",
     runtime: "claude_code",
     workspaceRoot: "/tmp",
     deckId: randomUUID(),
@@ -57,7 +56,7 @@ test("agent deck online but enrollment revoked: reports deck_unauthorized with t
   const result = await healthForAgent(agent, true, new Map(), true, FAILURE);
   const issue = result.issues.find((i) => i.code === "deck_unauthorized");
   assert.ok(issue, "expected a deck_unauthorized issue");
-  assert.equal(issue?.message, "enrollment is revoked");
+  assert.equal(issue?.message, "Agent Deck API error: 502");
 });
 
 test("agent deck online, metadata call succeeds, but this deck isn't in the returned set: reports deck_unauthorized", async () => {
@@ -66,7 +65,7 @@ test("agent deck online, metadata call succeeds, but this deck isn't in the retu
   const deckAccessResult: DeckAccessResult = { ok: true, decks: [{ id: randomUUID(), name: "some-other-deck" }] };
   const result = await healthForAgent(agent, true, new Map(), true, deckAccessResult);
   const issue = result.issues.find((i) => i.code === "deck_unauthorized");
-  assert.ok(issue, "expected a deck_unauthorized issue for a deck missing from the authorized set");
+  assert.ok(issue, "expected a deck_unauthorized issue for a deck missing from the launch set");
 });
 
 test("agent deck online and this deck is in the returned set: healthy on the deck axis", async () => {
@@ -94,35 +93,10 @@ test("agent deck online with no deck-access result computed (e.g. no agent neede
   );
 });
 
-// PR #19 review round 2: cursor_local + a bound deck has no execution-authority
-// isolation mechanism at all — surfacing it here (before a run ever starts) is what
-// actually avoids burning the infra-retry budget on an attempt that fails identically
-// every time.
-test("cursor_local with a bound deck: reports deck_runtime_unsupported", async () => {
+test("cursor_local with a bound deck: no deck_runtime_unsupported issue (launch MCP is supported)", async () => {
   const agent = createAgent({
     name: "cursor-with-deck",
     runtime: "cursor_local",
-    workspaceRoot: "/tmp",
-    deckId: randomUUID(),
-  });
-  const result = await healthForAgent(agent, true, new Map(), true, null);
-  assert.ok(result.issues.some((i) => i.code === "deck_runtime_unsupported"));
-  assert.equal(result.healthy, false);
-});
-
-test("cursor_local with no deck: no deck_runtime_unsupported issue", async () => {
-  const agent = createAgent({ name: "cursor-no-deck", runtime: "cursor_local", workspaceRoot: "/tmp" });
-  const result = await healthForAgent(agent, true, new Map(), true, null);
-  assert.equal(
-    result.issues.some((i) => i.code === "deck_runtime_unsupported"),
-    false
-  );
-});
-
-test("claude_code with a bound deck: no deck_runtime_unsupported issue (only cursor_local is affected)", async () => {
-  const agent = createAgent({
-    name: "claude-with-deck",
-    runtime: "claude_code",
     workspaceRoot: "/tmp",
     deckId: randomUUID(),
   });
