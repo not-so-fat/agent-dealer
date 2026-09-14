@@ -57,8 +57,15 @@ function guidanceSection(guidance: string[] | undefined): string[] {
  * the model then narrates the failure in its own prose ("Linear NOT-96 was not
  * fetchable...") instead of just using the task/acceptance-criteria text already in this
  * prompt — silently degrading review/implementation quality in a way nothing surfaces to
- * the operator. Explicitly say not to try, both when there is no deckId to bind and (for
- * clarity to the model) when there is one — never leave this ambiguous.
+ * the operator.
+ *
+ * When a deck *is* configured the opposite mistake is just as bad: telling the model to
+ * `bind_workspace` (the pre-NOT-87 prompt shape) contradicts execution authority
+ * (args.ts / agent-deck-bind.ts — `bind_workspace` is deny-by-default; deck/scope is
+ * already pinned at mint) and for cursor_local there is no isolated authority at all, so
+ * ambient bind against the generated worktree returns WORKSPACE_SCOPE_MISMATCH. Either
+ * way the model burns the session chasing Linear / bind instead of the Task/AC text.
+ * Never leave either case ambiguous.
  */
 function agentDeckSection(worktreePath: string | undefined, deckId: string | null | undefined, playbookIds: string[] | undefined): string[] {
   if (!deckId || !worktreePath) {
@@ -66,7 +73,10 @@ function agentDeckSection(worktreePath: string | undefined, deckId: string | nul
       `This session has no Agent Deck/Linear binding. Do not attempt to bind a workspace, fetch the ticket from Linear, or call any Agent Deck tool — all of that will fail here. The Task and Acceptance criteria above are the complete, authoritative brief; treat them as such.`,
     ];
   }
-  const parts = [`Use Agent Deck: bind_workspace({ deckId: "${deckId}", workspaceRoot: "${worktreePath}" })`];
+  const parts = [
+    `Agent Deck deckId "${deckId}" is already scoped for this session (workspace ${worktreePath}). Do NOT call bind_workspace — under execution authority it is denied, and ambient bind against a throwaway worktree fails. Use get_bound_deck / get_playbook / list_service_tools as needed.`,
+    `The Task and Acceptance criteria above are the complete, authoritative brief; do not fetch the ticket from Linear to recover them, and do not treat a failed Agent Deck/Linear call as missing acceptance criteria.`,
+  ];
   for (const playbookId of playbookIds ?? []) {
     parts.push(`Then get_playbook("${playbookId}") and follow it.`);
   }

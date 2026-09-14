@@ -41,7 +41,7 @@ test("an infra retry on a repair round still surfaces the failure reason, not th
   assert.doesNotMatch(prompt, /^This is repair round 2\./m);
 });
 
-test("deck section lists every playbook id, not just the first", () => {
+test("deck section lists every playbook id, not just the first, and never asks for bind_workspace", () => {
   const prompt = buildDeveloperPrompt({
     taskSnapshot,
     round: 1,
@@ -49,7 +49,13 @@ test("deck section lists every playbook id, not just the first", () => {
     deckId: "deck-1",
     playbookIds: ["pb-a", "pb-b"],
   });
-  assert.match(prompt, /bind_workspace\(\{ deckId: "deck-1", workspaceRoot: "\/wt" \}\)/);
+  // Must not invite a bind call (pre-NOT-87 shape). The prohibition text itself may
+  // still contain the token "bind_workspace" — assert against the call-shaped form.
+  assert.doesNotMatch(prompt, /bind_workspace\s*\(/);
+  assert.doesNotMatch(prompt, /Use Agent Deck:\s*bind_workspace/);
+  assert.match(prompt, /deckId "deck-1" is already scoped/);
+  assert.match(prompt, /Do NOT call bind_workspace/);
+  assert.match(prompt, /complete, authoritative brief/);
   assert.match(prompt, /get_playbook\("pb-a"\)/);
   assert.match(prompt, /get_playbook\("pb-b"\)/);
 });
@@ -130,7 +136,10 @@ test("reviewer prompt omits optional sections when absent", () => {
 
 test("reviewer prompt deck section lists every playbook id, matching the developer prompt's pattern", () => {
   const prompt = buildReviewerPrompt({ ...reviewerBase, worktreePath: "/wt", deckId: "deck-1", playbookIds: ["pb-a", "pb-b"] });
-  assert.match(prompt, /bind_workspace\(\{ deckId: "deck-1", workspaceRoot: "\/wt" \}\)/);
+  assert.doesNotMatch(prompt, /bind_workspace\s*\(/);
+  assert.doesNotMatch(prompt, /Use Agent Deck:\s*bind_workspace/);
+  assert.match(prompt, /deckId "deck-1" is already scoped/);
+  assert.match(prompt, /Do NOT call bind_workspace/);
   assert.match(prompt, /get_playbook\("pb-a"\)/);
   assert.match(prompt, /get_playbook\("pb-b"\)/);
 });
