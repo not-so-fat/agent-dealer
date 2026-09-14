@@ -50,9 +50,8 @@ export type DeveloperRouteResult =
   | { next: "retry_developer"; reason: string }
   | {
       next: "human_action";
-      actionType: "attempts_exhausted" | "policy_escalation" | "deck_interaction_required";
+      actionType: "attempts_exhausted" | "policy_escalation";
       reason: string;
-      requestId?: string;
     };
 
 export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLimits): DeveloperRouteResult {
@@ -120,9 +119,8 @@ export type ReviewerRouteResult =
   | { next: "retry_reviewer"; headSha: string }
   | {
       next: "human_action";
-      actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision" | "deck_interaction_required";
+      actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision";
       reason: string;
-      requestId?: string;
     };
 
 export function routeReviewerOutcome(
