@@ -16,15 +16,12 @@ export type DeveloperOutcome =
   /** git/gh tooling itself errored during verification — not the agent's fault. */
   | { kind: "adapter_failure"; reason: string }
   | { kind: "session_failed" }
-  /** Agent Deck returned a typed control-plane requirement (INTERACTION_REQUIRED) minting
-   * or verifying this attempt's execution authority — never retried with the same inputs
-   * (NOT-87). `requestId` is Deck's own correlation id for the response, when supplied
-   * (NOT-93) — carried through to the human_action this raises for audit correlation
-   * and dedupe. */
+  /** Agent Deck returned a typed control-plane requirement (INTERACTION_REQUIRED). Kept
+   * for PR 2 / residual authority-lifecycle paths; developer/reviewer effects no longer
+   * produce this under launch-fixed decks (NOT-106). */
   | { kind: "interaction_required"; reason: string; requestId?: string }
-  /** This profile's (runtime, deckId) combination has no execution-authority isolation
-   * mechanism at all (agent-deck-bind.ts's AUTHORITY_SUPPORTED_RUNTIMES) — a permanent
-   * config mismatch, not a transient hiccup; retrying reproduces it identically. */
+  /** Formerly raised when a runtime had no MCP isolation (AUTHORITY_SUPPORTED_RUNTIMES).
+   * Cursor is supported as of NOT-106; kind kept until PR 2 deletes residual producers. */
   | { kind: "deck_runtime_unsupported"; reason: string };
 
 export type ReviewerOutcome =

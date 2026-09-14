@@ -143,7 +143,12 @@ function isCursorMcpTracked(worktreePath: string): boolean {
   return result.ok;
 }
 
-/** Append `/.cursor/mcp.json` idempotently to the worktree's info/exclude. */
+/** Append `/.cursor/mcp.json` idempotently to git's info/exclude.
+ *
+ * Note: for a linked worktree, `git rev-parse --git-path info/exclude` resolves to the
+ * *main* repository's `.git/info/exclude` (shared across all worktrees of that repo), not
+ * a per-worktree file. The `/.cursor/mcp.json` pattern is still correct per worktree root;
+ * we rewrite with a single occurrence so concurrent preparations can't leave duplicate lines. */
 function ensureCursorMcpExcluded(worktreePath: string): void {
   const excludePathResult = gitCaptured(worktreePath, ["rev-parse", "--git-path", "info/exclude"]);
   if (!excludePathResult.ok) {
@@ -158,10 +163,11 @@ function ensureCursorMcpExcluded(worktreePath: string): void {
   } catch {
     existing = "";
   }
-  const lines = existing.split(/\r?\n/);
-  if (lines.some((l) => l.trim() === line)) return;
-  const next = existing.length === 0 || existing.endsWith("\n") ? `${existing}${line}\n` : `${existing}\n${line}\n`;
-  fs.writeFileSync(excludePath, next, { mode: 0o644 });
+  const kept = existing
+    .split(/\r?\n/)
+    .filter((l) => l.trim() !== "" && l.trim() !== line);
+  kept.push(line);
+  fs.writeFileSync(excludePath, `${kept.join("\n")}\n`, { mode: 0o644 });
 }
 
 /**
