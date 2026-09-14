@@ -38,7 +38,7 @@ import { listFindingsForIssue } from "../repository/findings.js";
 import { listWorkflowEventsForIssue } from "../repository/workflow-events.js";
 import { listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
-import { listArtifactsForIssue } from "../repository/artifacts-for-issue.js";
+import { listArtifactsForIssueByKind } from "../repository/artifacts-for-issue.js";
 import {
   createHumanAction,
   findOpenHumanActionByRequestId,
@@ -138,11 +138,14 @@ function buildRationale(issueId: string): string {
  * (PR #21 review finding #1). Reflect fires at most once per issue outside of retries, so
  * every artifact this finds genuinely belongs to this same reflection, never a later
  * unrelated one.
+ *
+ * NOT-96: queries `playbook_patch` rows by kind directly rather than scanning the
+ * newest-first, all-kinds `listArtifactsForIssue` window — on an artifact-heavy issue an
+ * older `playbook_patch` could otherwise fall outside that window and get re-proposed.
  */
 function alreadyProposedPlaybookIds(issueId: string): Set<string> {
   const ids = new Set<string>();
-  for (const artifact of listArtifactsForIssue(issueId, { limit: 200 })) {
-    if (artifact.kind !== "playbook_patch") continue;
+  for (const artifact of listArtifactsForIssueByKind(issueId, "playbook_patch")) {
     try {
       const playbookId = (JSON.parse(artifact.contentJson ?? "{}") as { playbookId?: string }).playbookId;
       if (playbookId) ids.add(playbookId);

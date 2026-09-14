@@ -48,3 +48,14 @@ export function listArtifactsForIssue(
         .all(issueId, limit) as ArtifactRow[]);
   return rows.map(rowToArtifact);
 }
+
+/** Every artifact of `kind` for the issue, unbounded — unlike `listArtifactsForIssue`'s
+ * newest-first `limit` window, filtering by kind in SQL means a caller that needs "all
+ * artifacts of this kind ever recorded" (e.g. reflect-trigger's already-proposed-playbook
+ * scan) can't have an old row fall outside the window on an artifact-heavy issue. */
+export function listArtifactsForIssueByKind(issueId: string, kind: string): IssueArtifact[] {
+  const rows = getDb()
+    .prepare("SELECT * FROM artifacts WHERE issue_id = ? AND kind = ? ORDER BY created_at DESC")
+    .all(issueId, kind) as ArtifactRow[];
+  return rows.map(rowToArtifact);
+}
