@@ -94,21 +94,38 @@ export async function spawnCli(
         // finalize anyway rather than hang forever on a transcript that's already fully
         // buffered in memory regardless of the file write's outcome).
         let finalized = false;
+        let finalizeTimer: ReturnType<typeof setTimeout> | undefined;
         const finalize = () => {
           if (finalized) return;
           finalized = true;
+          if (finalizeTimer) clearTimeout(finalizeTimer);
           resolve({
             exitCode,
             transcript: stdoutChunks.join(""),
             timedOut,
           });
         };
-        logStream.once("finish", finalize);
-        logStream.once("error", finalize);
-        if (stderr.trim()) {
-          logStream.end(`\n--- stderr ---\n${stderr}`);
+        if (logStream.destroyed || logStream.errored) {
+          // The stream already failed (e.g. ENOENT on open, or a write error during
+          // stdout streaming — before this function ever attached the listeners below)
+          // — end() on an already-destroyed stream emits neither 'finish' nor a fresh
+          // 'error', so waiting for either would hang this promise forever and leak the
+          // spawn slot (PR #27 review, round 2). The transcript is already fully
+          // buffered in memory regardless of the file write's outcome.
+          finalize();
         } else {
-          logStream.end();
+          logStream.once("finish", finalize);
+          logStream.once("error", finalize);
+          // Belt-and-suspenders: 'finish'/'error' are expected to fire quickly once
+          // end() is called, but a stream wedged on some other, unanticipated failure
+          // mode must still never pin this work item's spawn slot indefinitely.
+          finalizeTimer = setTimeout(finalize, 2000);
+          finalizeTimer.unref?.();
+          if (stderr.trim()) {
+            logStream.end(`\n--- stderr ---\n${stderr}`);
+          } else {
+            logStream.end();
+          }
         }
       };
 

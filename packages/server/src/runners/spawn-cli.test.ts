@@ -47,3 +47,27 @@ test("spawnCli does not crash when the child writes only stdout (no stderr)", as
   const logged = fs.readFileSync(logPath, "utf8");
   assert.doesNotMatch(logged, /--- stderr ---/);
 });
+
+// PR #27 review, round 2: waiting for finish()/error on the write stream only helps if
+// those listeners are attached before the stream already failed. A stream that errors
+// (and self-destroys) BEFORE the child closes -- e.g. ENOENT opening the log file --
+// never emits either event again once end() is called, so a naive wait-then-resolve
+// would hang forever, leaking the spawn slot. Set a short per-test timeout so a
+// regression fails fast instead of hanging the whole suite.
+test(
+  "spawnCli still resolves (does not hang) when the log stream already errored before the child closed",
+  { timeout: 5000 },
+  async () => {
+    // A path whose parent directory doesn't exist -- fs.createWriteStream fails with
+    // ENOENT almost immediately, well before this "sleep" child exits.
+    const logPath = path.join(os.tmpdir(), `dealer-spawn-cli-missing-${Date.now()}`, "nested", "out.ndjson");
+
+    const result = await spawnCli("test-run-stream-error", "sh", ["-c", "sleep 0.2; echo done"], process.cwd(), {
+      logPath,
+      timeoutMs: 5000,
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.match(result.transcript, /done/, "the in-memory transcript is unaffected by the log file write failing");
+  }
+);
