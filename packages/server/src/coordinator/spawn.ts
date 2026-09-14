@@ -18,6 +18,7 @@ import { resolveClaudeBin, resolveCodexBin, resolveCursorBin } from "../cli-env.
 import { spawnCli } from "../runners/spawn-cli.js";
 import { buildDeveloperArgs, buildReviewerArgs } from "./args.js";
 import { assertReviewerReadOnly } from "./permissions.js";
+import { extractResultTranscript } from "./usage.js";
 
 export interface DeveloperSpawnResult {
   exitCode: number;
@@ -78,7 +79,7 @@ export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
     input.cwd,
     { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv }
   );
-  return { exitCode, transcript, logPath, timedOut };
+  return { exitCode, transcript: extractResultTranscript(logPath, input.runtime, transcript), logPath, timedOut };
 };
 
 /**
@@ -97,5 +98,5 @@ export const realReviewerSpawn: ReviewerSpawn = async (input) => {
     input.cwd,
     { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv }
   );
-  return { exitCode, transcript, logPath, timedOut };
+  return { exitCode, transcript: extractResultTranscript(logPath, input.runtime, transcript), logPath, timedOut };
 };
