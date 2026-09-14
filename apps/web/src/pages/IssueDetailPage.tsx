@@ -162,6 +162,19 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
     }
   };
 
+  const resolveActionChoice = async (actionId: string, choice: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await resolveHumanAction(actionId, RESOLVED_BY, choice);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const loadEvidence = () => {
     if (!evidence) fetchIssueEvidence(issueId).then(setEvidence).catch((e) => setError(String(e)));
   };
@@ -224,16 +237,49 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
         {openActions.length > 0 && (
           <div className="mb-4 p-3 rounded border border-red-400/30 bg-red-500/10 space-y-2">
             <p className="text-xs text-red-300 font-medium">Human action needed</p>
-            {openActions.map((a) => (
-              <div key={a.id}>
-                <p className="text-sm text-white/80">{a.question}</p>
-                {a.actionType === "product_scope_decision" && readiness.ok && (
-                  <button type="button" className="btn-gold px-3 py-1 mt-1 text-xs" disabled={busy} onClick={() => resolveScopeDecision(a.id)}>
-                    Resume
-                  </button>
-                )}
-              </div>
-            ))}
+            {openActions.map((a) => {
+              // product_scope_decision keeps its own gated button above: resolving it
+              // before acceptance criteria actually exist would just bounce off the
+              // server, so it's only offered once `readiness.ok`. Every other action
+              // type (policy_escalation, attempts_exhausted, final_review,
+              // deck_interaction_required, …) has no such precondition — render its
+              // real choices generically instead of leaving the panel with no way to
+              // resolve it at all (this used to be a dashboard dead end; those action
+              // types were only resolvable via the CLI/API).
+              let choices: Array<{ choice: string; label: string }> = [];
+              if (a.actionType !== "product_scope_decision" && a.responseOptionsJson) {
+                try {
+                  choices = JSON.parse(a.responseOptionsJson);
+                } catch {
+                  choices = [];
+                }
+              }
+              return (
+                <div key={a.id}>
+                  <p className="text-sm text-white/80">{a.question}</p>
+                  {a.actionType === "product_scope_decision" && readiness.ok && (
+                    <button type="button" className="btn-gold px-3 py-1 mt-1 text-xs" disabled={busy} onClick={() => resolveScopeDecision(a.id)}>
+                      Resume
+                    </button>
+                  )}
+                  {choices.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mt-1">
+                      {choices.map((opt) => (
+                        <button
+                          key={opt.choice}
+                          type="button"
+                          className={opt.choice === "close" ? "btn-ghost-danger px-3 py-1 text-xs" : "btn-gold px-3 py-1 text-xs"}
+                          disabled={busy}
+                          onClick={() => resolveActionChoice(a.id, opt.choice)}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 
