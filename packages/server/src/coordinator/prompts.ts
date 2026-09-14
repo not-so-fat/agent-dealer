@@ -48,8 +48,24 @@ function guidanceSection(guidance: string[] | undefined): string[] {
   ];
 }
 
+/**
+ * Without an explicit instruction either way, a runtime with its own ambient Agent Deck
+ * config (cursor_local loads the operator's global `.cursor/mcp.json` regardless of what
+ * this prompt says — see args.ts's `cursor_local` comment) can try `bind_workspace`/Linear
+ * on its own initiative, purely out of habit from the operator's personal setup. That
+ * always fails for a throwaway worktree that was never bound via `agent-deck use`, and
+ * the model then narrates the failure in its own prose ("Linear NOT-96 was not
+ * fetchable...") instead of just using the task/acceptance-criteria text already in this
+ * prompt — silently degrading review/implementation quality in a way nothing surfaces to
+ * the operator. Explicitly say not to try, both when there is no deckId to bind and (for
+ * clarity to the model) when there is one — never leave this ambiguous.
+ */
 function agentDeckSection(worktreePath: string | undefined, deckId: string | null | undefined, playbookIds: string[] | undefined): string[] {
-  if (!deckId || !worktreePath) return [];
+  if (!deckId || !worktreePath) {
+    return [
+      `This session has no Agent Deck/Linear binding. Do not attempt to bind a workspace, fetch the ticket from Linear, or call any Agent Deck tool — all of that will fail here. The Task and Acceptance criteria above are the complete, authoritative brief; treat them as such.`,
+    ];
+  }
   const parts = [`Use Agent Deck: bind_workspace({ deckId: "${deckId}", workspaceRoot: "${worktreePath}" })`];
   for (const playbookId of playbookIds ?? []) {
     parts.push(`Then get_playbook("${playbookId}") and follow it.`);

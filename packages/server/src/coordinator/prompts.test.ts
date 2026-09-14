@@ -54,9 +54,16 @@ test("deck section lists every playbook id, not just the first", () => {
   assert.match(prompt, /get_playbook\("pb-b"\)/);
 });
 
-test("no deck section when the profile has no deckId", () => {
+test("no deckId: explicitly told not to touch Agent Deck/Linear, not just left silent", () => {
+  // A silent [] here (the prior behavior) left the model free to try its own ambient
+  // Agent Deck config anyway — cursor_local loads the operator's global .cursor/mcp.json
+  // regardless of this prompt (args.ts) — which always fails against an unbound worktree
+  // and got narrated into review/implementation output as if the ticket were unavailable,
+  // even though the Task/Acceptance criteria sections above already have everything.
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, worktreePath: "/wt", deckId: null });
   assert.doesNotMatch(prompt, /bind_workspace/);
+  assert.match(prompt, /no Agent Deck\/Linear binding/i);
+  assert.match(prompt, /Do not attempt to bind a workspace, fetch the ticket from Linear, or call any Agent Deck tool/);
 });
 
 test("guidance since the last session is surfaced in the developer prompt", () => {
