@@ -56,6 +56,15 @@ export async function spawnCli(
       let settled = false;
 
       const logStream = fs.createWriteStream(opts.logPath, { flags: "w" });
+      // A WriteStream's 'error' event has no default handler — left unguarded, any
+      // stream error (a write after end, ENOSPC, a permissions problem) is an uncaught
+      // exception that crashes this entire process, taking down every other in-flight
+      // issue's coordinator work along with it. Best-effort: the transcript this
+      // function resolves with is already buffered in memory regardless of whether the
+      // log file write succeeds.
+      logStream.on("error", (err) => {
+        console.error(`[spawn-cli] log stream error for ${opts.logPath}`, err);
+      });
 
       const child = spawn(cmd, args, {
         cwd,
@@ -72,16 +81,52 @@ export async function spawnCli(
         settled = true;
         clearTimeout(timer);
         unregisterChild(runId);
-        logStream.end();
+        // Write any stderr BEFORE ending the stream — writing after end() throws
+        // ERR_STREAM_WRITE_AFTER_END (this crashed the whole process on any real CLI
+        // invocation that produced stderr output; every fixture-based test's fake spawn
+        // never wrote stderr, so this path went unexercised until a real session hit it).
         const stderr = stderrChunks.join("");
-        if (stderr.trim()) {
-          logStream.write(`\n--- stderr ---\n${stderr}`);
+        // write()/end() only queue the I/O — resolving immediately (PR #27 review) races
+        // the actual flush, so a caller reading opts.logPath right after this promise
+        // settles can see a file missing the stderr trailer (or, on a slow disk, even
+        // the tail of stdout). Wait for the stream to actually finish (or, if the
+        // underlying write itself errors, the 'error' handler above already logged it —
+        // finalize anyway rather than hang forever on a transcript that's already fully
+        // buffered in memory regardless of the file write's outcome).
+        let finalized = false;
+        let finalizeTimer: ReturnType<typeof setTimeout> | undefined;
+        const finalize = () => {
+          if (finalized) return;
+          finalized = true;
+          if (finalizeTimer) clearTimeout(finalizeTimer);
+          resolve({
+            exitCode,
+            transcript: stdoutChunks.join(""),
+            timedOut,
+          });
+        };
+        if (logStream.destroyed || logStream.errored) {
+          // The stream already failed (e.g. ENOENT on open, or a write error during
+          // stdout streaming — before this function ever attached the listeners below)
+          // — end() on an already-destroyed stream emits neither 'finish' nor a fresh
+          // 'error', so waiting for either would hang this promise forever and leak the
+          // spawn slot (PR #27 review, round 2). The transcript is already fully
+          // buffered in memory regardless of the file write's outcome.
+          finalize();
+        } else {
+          logStream.once("finish", finalize);
+          logStream.once("error", finalize);
+          // Belt-and-suspenders: 'finish'/'error' are expected to fire quickly once
+          // end() is called, but a stream wedged on some other, unanticipated failure
+          // mode must still never pin this work item's spawn slot indefinitely.
+          finalizeTimer = setTimeout(finalize, 2000);
+          finalizeTimer.unref?.();
+          if (stderr.trim()) {
+            logStream.end(`\n--- stderr ---\n${stderr}`);
+          } else {
+            logStream.end();
+          }
         }
-        resolve({
-          exitCode,
-          transcript: stdoutChunks.join(""),
-          timedOut,
-        });
       };
 
       const timer = setTimeout(() => {
