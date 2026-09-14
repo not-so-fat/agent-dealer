@@ -93,7 +93,7 @@ test("agent deck online with no deck-access result computed (e.g. no agent neede
   );
 });
 
-test("cursor_local with a bound deck: no deck_runtime_unsupported issue (launch MCP is supported)", async () => {
+test("cursor_local with a bound deck: no deck access issue (launch MCP is supported)", async () => {
   const agent = createAgent({
     name: "cursor-with-deck",
     runtime: "cursor_local",
@@ -102,7 +102,7 @@ test("cursor_local with a bound deck: no deck_runtime_unsupported issue (launch 
   });
   const result = await healthForAgent(agent, true, new Map(), true, null);
   assert.equal(
-    result.issues.some((i) => i.code === "deck_runtime_unsupported"),
+    result.issues.some((i) => i.code === "deck_unauthorized" || i.code === "deck_offline"),
     false
   );
 });

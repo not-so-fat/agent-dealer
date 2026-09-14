@@ -34,7 +34,6 @@ import {
 import {
   createHumanAction,
   findOpenHumanAction,
-  findOpenHumanActionByRequestId,
   getHumanAction,
   listHumanActionsForIssue,
   resolveHumanAction,
@@ -52,13 +51,6 @@ import {
   type WorkItemKind,
 } from "../repository/work-items.js";
 import { completeSession, listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
-import {
-  listOpenAcquiringAuthorityAttempts,
-  revokeOpenActiveAuthorityAttempts,
-  type AuthorityAttempt,
-} from "../repository/authority-attempts.js";
-import { revokeAuthority } from "../adapters/execution-authority.js";
-import { resolveAcquiringAttempts } from "../adapters/authority-lifecycle.js";
 import { killRunProcess } from "../runners/spawn-cli.js";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import {
@@ -67,7 +59,7 @@ import {
   type DeveloperOutcome,
   type ReviewerOutcome,
 } from "./routing.js";
-import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection, type NextEffect } from "./projection.js";
+import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } from "./projection.js";
 import { parseHumanResolution, resolveHumanActionOutcome, type HumanResolution } from "./human-resolution.js";
 
 export const WORKFLOW_VERSION = "dev_reviewer_v1";
@@ -400,23 +392,6 @@ function applyProjectionTransition(issue: Issue, projection: IssueProjection, pa
   });
 }
 
-/**
- * A repeated Deck INTERACTION_REQUIRED for the same request id must land on the one open
- * action it already raised (NOT-93) — checked and short-circuited BEFORE any event is
- * emitted or the issue is re-transitioned, not after. The first signal already parked the
- * issue at `needs_human`, and `ISSUE_STATUS_TRANSITIONS` has no `needs_human -> needs_human`
- * self-loop, so projecting a second `deck_interaction_required` for the same request id
- * would throw "Invalid transition" from `applyProjectionTransition` before a later
- * dedupe check ever got a chance to run. A plain read-then-return check; full
- * duplicate-delivery/race-proofing across concurrent writers is NOT-91's job.
- */
-function findDuplicateInteractionRequired(issueId: string, effect: NextEffect): HumanAction | null {
-  if (effect.kind !== "human_action" || effect.actionType !== "deck_interaction_required" || !effect.requestId) {
-    return null;
-  }
-  return findOpenHumanActionByRequestId(issueId, "deck_interaction_required", effect.requestId);
-}
-
 function applyDeveloper(
   issue: Issue,
   instance: WorkflowInstance,
@@ -430,11 +405,6 @@ function applyDeveloper(
     maxInfraAttempts: issue.maxInfraAttempts,
   });
   const { projection, effect, advance } = projectDeveloperRoute(route, issue.status, issue.currentRound);
-
-  const duplicateAction = findDuplicateInteractionRequired(issue.id, effect);
-  if (duplicateAction) {
-    return { applied: true, issueStatus: issue.status, nextWorkItemId: null, humanActionId: duplicateAction.id, instanceCompleted: false };
-  }
 
   const ev = eventEmitter(issue, instance, item.workerSessionId, projection.issueStatus, issue.currentRound);
 
@@ -488,11 +458,6 @@ function applyReviewer(
   );
   const hasVerdict = outcome.kind === "verdict";
   const { projection, effect, advance } = projectReviewerRoute(route, issue.currentRound, hasVerdict);
-
-  const duplicateAction = findDuplicateInteractionRequired(issue.id, effect);
-  if (duplicateAction) {
-    return { applied: true, issueStatus: issue.status, nextWorkItemId: null, humanActionId: duplicateAction.id, instanceCompleted: false };
-  }
 
   const ev = eventEmitter(issue, instance, item.workerSessionId, projection.issueStatus, issue.currentRound);
 
@@ -600,21 +565,15 @@ function applyEffect(
 
   if (effect.kind === "human_action") {
     const actionType = effect.actionType as HumanActionType;
-    // A reviewer-side infra exhaustion (session_failed/publish_failed/interaction_required —
-    // not a verdict) is the flavor where nothing is wrong with the code/PR itself; the
-    // reviewer's own attempt just couldn't proceed. Tag the continuation so resolving
-    // "resume" can re-queue a fresh REVIEWER at the still-valid pinned head instead of
-    // defaulting to a developer round (which would be a wasted, unrelated re-implementation).
+    // A reviewer-side infra exhaustion (session_failed/publish_failed — not a verdict) is
+    // the flavor where nothing is wrong with the code/PR itself; the reviewer's own attempt
+    // just couldn't proceed. Tag the continuation so resolving "resume" can re-queue a
+    // fresh REVIEWER at the still-valid pinned head instead of defaulting to a developer
+    // round (which would be a wasted, unrelated re-implementation).
     const resumeAsReviewer =
-      (actionType === "policy_escalation" || actionType === "deck_interaction_required") &&
+      actionType === "policy_escalation" &&
       reviewerOutcome !== undefined &&
       reviewerOutcome.kind !== "verdict";
-    // The requestId-dedupe check itself already ran in applyDeveloper/applyReviewer
-    // (findDuplicateInteractionRequired), before this effect was ever projected onto the
-    // issue — by the time execution reaches here, this is known to be either a first
-    // signal for this request id or one with no request id at all. requestId is still
-    // persisted below so a *later* repeat of the same id (once this action resolves,
-    // NOT-93's dedupe window) has something to have matched against.
     const action = createHumanAction({
       issueId: issue.id,
       workflowInstanceId: instance.id,
@@ -627,7 +586,6 @@ function applyEffect(
       // pre-transition issue param would still carry the stale SHA a "resume" must not reuse.
       continuationPreview: resumeAsReviewer ? { resumeRole: "reviewer", resumeHeadSha: issueNow.headSha } : undefined,
       responseOptions: responseOptionsFor(actionType, resumeAsReviewer),
-      requestId: effect.requestId ?? null,
     });
     if (actionType === "final_review") ev.emit("final_review.requested");
     ev.emit("human_action.requested", { payload: { actionType, actionId: action.id } });
@@ -650,9 +608,10 @@ function questionFor(actionType: HumanActionType, reason: string, resumeAsReview
     case "product_scope_decision":
       return `${reason} Provide the missing decision to resume.`;
     case "deck_interaction_required":
-      return resumeAsReviewer
-        ? `${reason} Resolve it in Agent Deck, then retry the review, or close the issue?`
-        : `${reason} Resolve it in Agent Deck, then resume development, or close the issue?`;
+      // Never raised through applyEffect after NOT-106 Step 2 (launch-fixed decks). Kept
+      // for HumanActionType totality; ops still resolve legacy open actions via
+      // resolveHumanActionAndAdvance / human-resolution.
+      throw new Error("deck_interaction_required is not raised through applyEffect");
     case "reflection_interaction_required":
       // Never actually raised through applyEffect — reflect-trigger.ts creates this action
       // type directly with its own question text (NOT-94). Case exists only so this
@@ -693,10 +652,8 @@ export function responseOptionsFor(
     case "product_scope_decision":
       return [{ choice: "resume", label: "Resume development" }];
     case "deck_interaction_required":
-      return [
-        { choice: "resume", label: resumeAsReviewer ? "Retry review" : "Resume with a new attempt" },
-        { choice: "close", label: "Close" },
-      ];
+      // Never raised through applyEffect after NOT-106 Step 2 — see questionFor.
+      throw new Error("deck_interaction_required is not raised through applyEffect");
     case "reflection_interaction_required":
       // Never actually raised through applyEffect — see questionFor's identical case.
       throw new Error("reflection_interaction_required is not raised through applyEffect");
@@ -1031,16 +988,6 @@ interface AbortTxResult {
 export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssueDeps = defaultAbortDeps): AbortResult {
   if (!getIssue(issueId)) return { ok: false, code: 404, error: "Issue not found" };
 
-  // Populated inside the transaction below, revoked/resolved (best-effort, network) only
-  // after it commits — same "DB write now, effect outside" split as `killProcess` below
-  // (NOT-91: a cancelled work item's execution authority has no further legitimate use, and
-  // must not be left live until TTL for what is now a "late approval after cancellation"
-  // no-op). An `acquiring` row with no authorityId yet can't be revoked directly — it's
-  // gathered separately and resolved via its idempotencyKey after commit, never terminalized
-  // on a guess inside the transaction (NOT-91 review, round 3).
-  const authorityIdsToRevoke: string[] = [];
-  const acquiringAttemptsToResolve: AuthorityAttempt[] = [];
-
   const tx = getDb().transaction((): AbortTxResult => {
     const issue = getIssue(issueId)!;
     if (issue.status === "done" || issue.status === "closed") {
@@ -1052,14 +999,6 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
     for (const item of listWorkItemsForIssue(issueId)) {
       if (item.status === "pending" || item.status === "leased") {
         cancelWorkItem(item.id);
-        // The ledger's owner_id for a developer/reviewer attempt is `${issueId}:${kind}` —
-        // stable across that item's own retry rollover, never the work-item row's own UUID
-        // (NOT-91 review, round 5).
-        const ownerId = `${issueId}:${item.kind}`;
-        for (const row of revokeOpenActiveAuthorityAttempts(item.kind, ownerId)) {
-          if (row.authorityId) authorityIdsToRevoke.push(row.authorityId);
-        }
-        acquiringAttemptsToResolve.push(...listOpenAcquiringAuthorityAttempts(item.kind, ownerId));
       }
     }
 
@@ -1098,8 +1037,6 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
   // Outside the transaction, per the ticket contract: terminating a child process is not
   // a DB write, and must happen only once the abort itself is durably committed.
   for (const sessionId of tx.runningSessionIds) deps.killProcess(sessionId);
-  for (const authorityId of authorityIdsToRevoke) revokeAuthority(authorityId).catch(() => {});
-  if (acquiringAttemptsToResolve.length > 0) resolveAcquiringAttempts(acquiringAttemptsToResolve).catch(() => {});
 
   return { ok: true, issueStatus: tx.issueStatus, alreadyClosed: tx.alreadyClosed };
 }

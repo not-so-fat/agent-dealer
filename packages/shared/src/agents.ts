@@ -22,7 +22,6 @@ export const AgentHealthIssue = z.object({
     "deck_unauthorized",
     "workspace_missing",
     "mcp_not_registered",
-    "deck_runtime_unsupported",
   ]),
   message: z.string(),
 });

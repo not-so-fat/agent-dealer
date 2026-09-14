@@ -17,7 +17,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Runtime } from "@agent-dealer/shared";
 import { getAgentDeckMcpUrl } from "./agent-deck.js";
-import { getExecutionAuthorityConfigDir } from "../paths.js";
+import { getWorkerMcpConfigDir } from "../paths.js";
 import { resolveAmbientCodexHome } from "../cli-env.js";
 
 const CODEX_HOME_ENV_VAR = "CODEX_HOME";
@@ -47,26 +47,6 @@ function resultText(result: unknown): string {
 export function assertToolResultOk(result: unknown, name: string): void {
   if ((result as { isError?: boolean } | null)?.isError) {
     throw new Error(`${name} returned an error: ${resultText(result) || "(no detail)"}`);
-  }
-}
-
-/**
- * Parse Deck's typed `INTERACTION_REQUIRED` contract error from an MCP tool result.
- * Kept for callers that still inspect tool results (e.g. legacy paths); launch-fixed
- * deck sessions no longer park on this for worker/coordinator Deck connects.
- */
-export function parseInteractionRequired(result: unknown): { requestId?: string; message?: string } | null {
-  if (!(result as { isError?: boolean } | null)?.isError) return null;
-  try {
-    const body = parseDeckToolResult(result) as {
-      error_code?: string;
-      message?: string;
-      correlation?: { requestId?: string };
-    };
-    if (body.error_code !== "INTERACTION_REQUIRED") return null;
-    return { requestId: body.correlation?.requestId, message: body.message };
-  } catch {
-    return null;
   }
 }
 
@@ -188,7 +168,7 @@ async function materializeWorkerMcpConfig(opts: {
   const headers = deckLaunchHeaders(opts.deckId, opts.worktreePath);
 
   if (opts.runtime === "codex_local") {
-    const codexHome = path.join(getExecutionAuthorityConfigDir(), `codex-home-${opts.deckId.slice(0, 8)}-${randomUUID()}`);
+    const codexHome = path.join(getWorkerMcpConfigDir(), `codex-home-${opts.deckId.slice(0, 8)}-${randomUUID()}`);
     fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
     try {
       const ambientHome = resolveAmbientCodexHome();
@@ -236,7 +216,7 @@ async function materializeWorkerMcpConfig(opts: {
   }
 
   // claude_code
-  const dir = getExecutionAuthorityConfigDir();
+  const dir = getWorkerMcpConfigDir();
   const filePath = path.join(dir, `claude-mcp-${opts.deckId.slice(0, 8)}-${randomUUID()}.json`);
   try {
     fs.writeFileSync(filePath, JSON.stringify(urlHeaderMcpConfig(mcpUrl, opts.deckId, opts.worktreePath)), { mode: 0o600 });
