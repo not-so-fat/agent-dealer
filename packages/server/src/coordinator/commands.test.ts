@@ -62,9 +62,9 @@ function claim(issueId: string) {
 }
 
 /** Claim + apply the issue's current work item's outcome. */
-function complete(issueId: string, outcome: Parameters<typeof applyCompletion>[2]) {
+async function complete(issueId: string, outcome: Parameters<typeof applyCompletion>[2]) {
   const item = claim(issueId);
-  return { item, result: applyCompletion(item.id, item.leaseToken!, outcome) };
+  return { item, result: await applyCompletion(item.id, item.leaseToken!, outcome) };
 }
 
 const okReview = (verdict: "approved" | "changes_requested" | "escalated") =>
@@ -173,10 +173,10 @@ test("a second startWorkflow while active is rejected with 409", () => {
   if (again.ok === false) assert.equal(again.code, 409);
 });
 
-test("NOT-88: startWorkflow's 409 while an open human action is blocking names it, instead of an opaque dead end", () => {
+test("NOT-88: startWorkflow's 409 while an open human action is blocking names it, instead of an opaque dead end", async () => {
   const issueId = newIssue({ maxInfraAttempts: 0 });
   startWorkflow(issueId);
-  complete(issueId, { kind: "session_failed" }); // infra-exhausted on the first attempt -> policy_escalation
+  await complete(issueId, { kind: "session_failed" }); // infra-exhausted on the first attempt -> policy_escalation
 
   const action = listHumanActionsForIssue(issueId).find((a) => a.status === "open")!;
   assert.equal(action.actionType, "policy_escalation");
@@ -191,10 +191,10 @@ test("NOT-88: startWorkflow's 409 while an open human action is blocking names i
   }
 });
 
-test("developer clean handoff → reviewing + a reviewer work item + PR recorded on the issue", () => {
+test("developer clean handoff → reviewing + a reviewer work item + PR recorded on the issue", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
-  const { result } = complete(issueId, cleanHandoff);
+  const { result } = await complete(issueId, cleanHandoff);
   assert.equal(result.applied, true);
 
   const issue = getIssue(issueId)!;
@@ -210,17 +210,17 @@ test("developer clean handoff → reviewing + a reviewer work item + PR recorded
   assert.ok(types.includes("worker.completed") && types.includes("pull_request.opened"));
 });
 
-test("applyCompletion is idempotent — a duplicate completion (same or stale token) advances the issue once", () => {
+test("applyCompletion is idempotent — a duplicate completion (same or stale token) advances the issue once", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   const item = claim(issueId);
 
-  const first = applyCompletion(item.id, item.leaseToken!, cleanHandoff);
+  const first = await applyCompletion(item.id, item.leaseToken!, cleanHandoff);
   assert.equal(first.applied, true);
-  const second = applyCompletion(item.id, item.leaseToken!, cleanHandoff);
+  const second = await applyCompletion(item.id, item.leaseToken!, cleanHandoff);
   assert.equal(second.applied, false);
   if (second.applied === false) assert.equal(second.reason, "already_terminal");
-  const third = applyCompletion(item.id, "some-other-token", cleanHandoff);
+  const third = await applyCompletion(item.id, "some-other-token", cleanHandoff);
   assert.equal(third.applied, false);
 
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 1);
@@ -230,11 +230,11 @@ test("applyCompletion is idempotent — a duplicate completion (same or stale to
   );
 });
 
-test("reviewer approved → final_review human action; resolving complete finishes the workflow", () => {
+test("reviewer approved → final_review human action; resolving complete finishes the workflow", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
-  complete(issueId, { kind: "verdict", result: okReview("approved") });
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
 
   assert.equal(getIssue(issueId)!.status, "final_review");
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review")!;
@@ -249,11 +249,11 @@ test("reviewer approved → final_review human action; resolving complete finish
   assert.ok(types.includes("human_action.resolved") && types.includes("issue.completed"));
 });
 
-test("resolving final_review as repair never sets triggerReflect", () => {
+test("resolving final_review as repair never sets triggerReflect", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
-  complete(issueId, { kind: "verdict", result: okReview("approved") });
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review")!;
 
   const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "repair");
@@ -261,11 +261,11 @@ test("resolving final_review as repair never sets triggerReflect", () => {
   assert.equal((resolved as { triggerReflect: boolean }).triggerReflect, false);
 });
 
-test("reviewer changes_requested with rounds left → repair round with a fresh developer work item", () => {
+test("reviewer changes_requested with rounds left → repair round with a fresh developer work item", async () => {
   const issueId = newIssue({ maxReviewRounds: 3 });
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
-  complete(issueId, {
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, {
     kind: "verdict",
     result: {
       ...okReview("changes_requested"),
@@ -282,11 +282,11 @@ test("reviewer changes_requested with rounds left → repair round with a fresh 
   assert.ok(listWorkflowEventsForIssue(issueId).map((e) => e.type).includes("repair.started"));
 });
 
-test("reviewer changes_requested at the round limit → attempts_exhausted", () => {
+test("reviewer changes_requested at the round limit → attempts_exhausted", async () => {
   const issueId = newIssue({ maxReviewRounds: 1 });
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
-  complete(issueId, { kind: "verdict", result: okReview("changes_requested") });
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("changes_requested") });
 
   assert.equal(getIssue(issueId)!.status, "needs_human");
   assert.equal(
@@ -296,10 +296,10 @@ test("reviewer changes_requested at the round limit → attempts_exhausted", () 
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0);
 });
 
-test("developer infra failure retries on the infra budget, not the review-round budget; the reviewer is never involved", () => {
+test("developer infra failure retries on the infra budget, not the review-round budget; the reviewer is never involved", async () => {
   const issueId = newIssue({ maxReviewRounds: 3 });
   startWorkflow(issueId);
-  complete(issueId, { kind: "session_failed" });
+  await complete(issueId, { kind: "session_failed" });
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "developing");
@@ -309,10 +309,10 @@ test("developer infra failure retries on the infra budget, not the review-round 
   assert.deepEqual(pending.map((i) => [i.kind, i.round]), [["developer", 1]]);
 });
 
-test("developer infra failures escalate as policy_escalation (not attempts_exhausted) once the infra-attempt limit is reached", () => {
+test("developer infra failures escalate as policy_escalation (not attempts_exhausted) once the infra-attempt limit is reached", async () => {
   const issueId = newIssue({ maxInfraAttempts: 0 });
   startWorkflow(issueId);
-  complete(issueId, { kind: "session_failed" });
+  await complete(issueId, { kind: "session_failed" });
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "needs_human");
@@ -323,11 +323,11 @@ test("developer infra failures escalate as policy_escalation (not attempts_exhau
   );
 });
 
-test("resolving attempts_exhausted:retry grants one more round instead of instantly re-exhausting", () => {
+test("resolving attempts_exhausted:retry grants one more round instead of instantly re-exhausting", async () => {
   const issueId = newIssue({ maxReviewRounds: 1 });
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
-  complete(issueId, { kind: "verdict", result: okReview("changes_requested") });
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("changes_requested") });
   assert.equal(getIssue(issueId)!.status, "needs_human");
   assert.deepEqual([getIssue(issueId)!.currentRound, getIssue(issueId)!.maxReviewRounds], [1, 1]);
 
@@ -346,11 +346,11 @@ test("resolving attempts_exhausted:retry grants one more round instead of instan
   assert.equal(issue.currentIntent, "Developer implementing round 2");
 });
 
-test("resolving policy_escalation:resume resets the infra-attempt budget without spending a review round", () => {
+test("resolving policy_escalation:resume resets the infra-attempt budget without spending a review round", async () => {
   const issueId = newIssue({ maxInfraAttempts: 1 });
   startWorkflow(issueId);
-  complete(issueId, { kind: "session_failed" }); // attempt 1: retries (0 < 1)
-  complete(issueId, { kind: "session_failed" }); // attempt 2: exhausts (1 < 1 is false)
+  await complete(issueId, { kind: "session_failed" }); // attempt 1: retries (0 < 1)
+  await complete(issueId, { kind: "session_failed" }); // attempt 2: exhausts (1 < 1 is false)
   const before = getIssue(issueId)!;
   assert.equal(before.status, "needs_human");
   assert.equal(before.infraAttempts, 1);
@@ -369,11 +369,11 @@ test("resolving policy_escalation:resume resets the infra-attempt budget without
   assert.equal(issue.currentIntent, `Developer implementing round ${before.currentRound}`);
 });
 
-test("resolving policy_escalation:resume after a reviewer-side infra exhaustion re-queues a REVIEWER at the pinned head, not a developer", () => {
+test("resolving policy_escalation:resume after a reviewer-side infra exhaustion re-queues a REVIEWER at the pinned head, not a developer", async () => {
   const issueId = newIssue({ maxInfraAttempts: 0 });
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff); // -> reviewing, headSha pinned to cleanHandoff.headSha
-  complete(issueId, { kind: "session_failed" }); // 0 infra attempts allowed -> exhausts immediately
+  await complete(issueId, cleanHandoff); // -> reviewing, headSha pinned to cleanHandoff.headSha
+  await complete(issueId, { kind: "session_failed" }); // 0 infra attempts allowed -> exhausts immediately
 
   const before = getIssue(issueId)!;
   assert.equal(before.status, "needs_human");
@@ -401,11 +401,11 @@ test("resolving policy_escalation:resume after a reviewer-side infra exhaustion 
   ]);
 });
 
-test("resolving a reviewer-origin escalation records human_action.resolved under 'reviewing' and never emits repair.started", () => {
+test("resolving a reviewer-origin escalation records human_action.resolved under 'reviewing' and never emits repair.started", async () => {
   const issueId = newIssue({ maxInfraAttempts: 0 });
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
-  complete(issueId, { kind: "session_failed" });
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "session_failed" });
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
   resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
 
@@ -415,17 +415,17 @@ test("resolving a reviewer-origin escalation records human_action.resolved under
   assert.ok(!events.some((e) => e.type === "repair.started"), "a reviewer resume is a review retry, not a repair round");
 });
 
-test("a reviewer head that cycles A→B→A does not collide with the original A enqueue's idempotency key", () => {
+test("a reviewer head that cycles A→B→A does not collide with the original A enqueue's idempotency key", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff); // reviewer queued pinned to cleanHandoff.headSha ("A")
-  complete(issueId, { kind: "stale", currentHeadSha: "head-B" }); // -> reviewing at B, infraAttempts 1
+  await complete(issueId, cleanHandoff); // reviewer queued pinned to cleanHandoff.headSha ("A")
+  await complete(issueId, { kind: "stale", currentHeadSha: "head-B" }); // -> reviewing at B, infraAttempts 1
 
   const afterB = getIssue(issueId)!;
   assert.equal(afterB.headSha, "head-B");
   assert.equal(afterB.infraAttempts, 1);
 
-  complete(issueId, { kind: "stale", currentHeadSha: cleanHandoff.headSha }); // cycles back to A
+  await complete(issueId, { kind: "stale", currentHeadSha: cleanHandoff.headSha }); // cycles back to A
   const afterA = getIssue(issueId)!;
   assert.equal(afterA.headSha, cleanHandoff.headSha);
   assert.equal(afterA.infraAttempts, 2);
@@ -439,11 +439,11 @@ test("a reviewer head that cycles A→B→A does not collide with the original A
   assert.equal(JSON.parse(pending[0].payloadJson!).inputSha, cleanHandoff.headSha);
 });
 
-test("a stale review that exhausts the infra budget still records the newly observed head; resuming queues the reviewer there, not at the old pinned SHA", () => {
+test("a stale review that exhausts the infra budget still records the newly observed head; resuming queues the reviewer there, not at the old pinned SHA", async () => {
   const issueId = newIssue({ maxInfraAttempts: 0 });
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff); // reviewing at cleanHandoff.headSha ("A")
-  complete(issueId, { kind: "stale", currentHeadSha: "head-B" }); // 0 infra attempts allowed -> exhausts on this very stale event
+  await complete(issueId, cleanHandoff); // reviewing at cleanHandoff.headSha ("A")
+  await complete(issueId, { kind: "stale", currentHeadSha: "head-B" }); // 0 infra attempts allowed -> exhausts on this very stale event
 
   const before = getIssue(issueId)!;
   assert.equal(before.status, "needs_human");
@@ -463,7 +463,7 @@ test("a stale review that exhausts the infra budget still records the newly obse
   );
 });
 
-test("fail → retry → exhaust → resume → fail again does not collide with the pre-escalation retry's idempotency key", () => {
+test("fail → retry → exhaust → resume → fail again does not collide with the pre-escalation retry's idempotency key", async () => {
   // Reproduces the reviewer's report: policy_escalation:resume resets infraAttempts to 0,
   // so an automatic retry after resuming can re-derive the exact (round, infraAttempts)
   // pair an earlier, now-terminal, PRE-escalation retry already used — an
@@ -471,18 +471,18 @@ test("fail → retry → exhaust → resume → fail again does not collide with
   const issueId = newIssue({ maxInfraAttempts: 1 });
   startWorkflow(issueId);
 
-  complete(issueId, { kind: "session_failed" }); // attempt 1: retries (infraAttempts 0 -> 1)
+  await complete(issueId, { kind: "session_failed" }); // attempt 1: retries (infraAttempts 0 -> 1)
   const firstRetryItem = listWorkItemsForIssue(issueId).find((i) => i.status === "pending")!;
   assert.equal(getIssue(issueId)!.infraAttempts, 1);
 
-  complete(issueId, { kind: "session_failed" }); // attempt 2: exhausts (1 < 1 is false) -> policy_escalation
+  await complete(issueId, { kind: "session_failed" }); // attempt 2: exhausts (1 < 1 is false) -> policy_escalation
   assert.equal(getIssue(issueId)!.status, "needs_human");
 
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
   resolveHumanActionAndAdvance(action.id, "yusuke", "resume"); // resets infraAttempts to 0
   assert.equal(getIssue(issueId)!.infraAttempts, 0);
 
-  complete(issueId, { kind: "session_failed" }); // attempt after resume: retries again (0 -> 1) — SAME (round, infraAttempts) pair as the very first retry above
+  await complete(issueId, { kind: "session_failed" }); // attempt after resume: retries again (0 -> 1) — SAME (round, infraAttempts) pair as the very first retry above
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "developing", "must still have live work, not silently stranded");
@@ -492,11 +492,11 @@ test("fail → retry → exhaust → resume → fail again does not collide with
   assert.notEqual(pending[0].id, firstRetryItem.id, "must be a NEW work item, not the pre-escalation retry's now-terminal row");
 });
 
-test("resolving policy_escalation:resume after a reviewer's escalated verdict (a real code-level question) still resumes as the developer", () => {
+test("resolving policy_escalation:resume after a reviewer's escalated verdict (a real code-level question) still resumes as the developer", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
-  complete(issueId, { kind: "verdict", result: okReview("escalated") });
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("escalated") });
 
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
   assert.equal(action.continuationPreviewJson, null, "an escalated-verdict policy_escalation carries no reviewer-resume continuation");
@@ -509,12 +509,12 @@ test("resolving policy_escalation:resume after a reviewer's escalated verdict (a
   assert.deepEqual(pending.map((i) => i.kind), ["developer"]);
 });
 
-test("a stale review re-queues a reviewer at the new head without consuming a round", () => {
+test("a stale review re-queues a reviewer at the new head without consuming a round", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
+  await complete(issueId, cleanHandoff);
   const before = getIssue(issueId)!.currentRound;
-  complete(issueId, { kind: "stale", currentHeadSha: "newhead9" });
+  await complete(issueId, { kind: "stale", currentHeadSha: "newhead9" });
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "reviewing");
@@ -526,8 +526,8 @@ test("a stale review re-queues a reviewer at the new head without consuming a ro
   );
 });
 
-test("applyCompletion on an unknown / never-leased work item is a no-op", () => {
-  assert.deepEqual(applyCompletion("missing", "tok", { kind: "no_pr" }), {
+test("applyCompletion on an unknown / never-leased work item is a no-op", async () => {
+  assert.deepEqual(await applyCompletion("missing", "tok", { kind: "no_pr" }), {
     applied: false,
     reason: "not_found",
   });
@@ -535,7 +535,7 @@ test("applyCompletion on an unknown / never-leased work item is a no-op", () => 
   const issueId = newIssue();
   startWorkflow(issueId);
   const pendingId = listWorkItemsForIssue(issueId)[0].id; // never leased
-  const res = applyCompletion(pendingId, "tok", { kind: "no_pr" });
+  const res = await applyCompletion(pendingId, "tok", { kind: "no_pr" });
   assert.equal(res.applied, false);
   if (res.applied === false) assert.equal(res.reason, "lease_lost");
   assert.equal(getWorkItem(pendingId)!.status, "pending");
@@ -609,11 +609,11 @@ test("abortIssue is idempotent once the issue is already closed", () => {
   assert.equal(events(issueId).length, before, "a repeated abort must not append another event");
 });
 
-test("abortIssue on an already-done issue is a no-op", () => {
+test("abortIssue on an already-done issue is a no-op", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
-  complete(issueId, { kind: "verdict", result: okReview("approved") });
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
   const finalReviewAction = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review" && a.status === "open")!;
   const resolved = resolveHumanActionAndAdvance(finalReviewAction.id, "yusuke", "complete");
   assert.equal(resolved.ok, true);
@@ -645,7 +645,7 @@ test("abortIssue cancels a running worker session and terminates its registered 
   assert.equal(getWorkItem(item.id)!.status, "cancelled");
 });
 
-test("a late completion after abort is fenced — applyCompletion is a no-op", () => {
+test("a late completion after abort is fenced — applyCompletion is a no-op", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   const item = claim(issueId); // simulates the effect worker already holding the lease
@@ -654,7 +654,7 @@ test("a late completion after abort is fenced — applyCompletion is a no-op", (
   assert.equal(getIssue(issueId)!.status, "closed");
 
   // The zombie attempt's own completion arrives after the abort already committed.
-  const res = applyCompletion(item.id, item.leaseToken!, cleanHandoff);
+  const res = await applyCompletion(item.id, item.leaseToken!, cleanHandoff);
   assert.equal(res.applied, false);
   assert.equal(getIssue(issueId)!.status, "closed", "a late completion must never reopen or mutate a closed issue");
 });

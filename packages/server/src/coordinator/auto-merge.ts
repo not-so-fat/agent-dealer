@@ -8,7 +8,12 @@
 // no human action. recoverStrandedAutoMerges() (startup + coordinator tick) retries
 // finalize so a process death cannot leave the issue silently half-done. If `gh` already
 // merged before the DB write, a re-run treats "already merged" as success.
-import { spawnSync } from "node:child_process";
+//
+// Network calls are async (promisify(execFile) + timeout) — never spawnSync on the
+// coordinator event loop. A hung `gh` (auth prompt, outage, rate limit) must fail bounded
+// and escalate, not freeze every other issue's work.
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { Issue } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 import { getIssue, listIssues, transitionIssue } from "../repository/issues.js";
@@ -19,34 +24,65 @@ import {
 } from "../repository/workflow-events.js";
 import { createHumanAction } from "../repository/human-actions.js";
 
+const run = promisify(execFile);
+
+/** Bound each `gh` shell-out so a hang cannot freeze the coordinator process. */
+export const GH_MERGE_TIMEOUT_MS = 20_000;
+
 export type MergePrResult = { ok: true } | { ok: false; reason: string };
 
-export type SyncMergePr = (opts: { cwd: string; number: number }) => MergePrResult;
+export type MergePr = (opts: { cwd: string; number: number }) => Promise<MergePrResult>;
 
 /** Must match projection.ts's auto_merge currentIntent — recovery keys off this string. */
 export const AUTO_MERGE_INTENT = "Auto-merging approved PR";
 
 const ALREADY_MERGED = /already (been )?merged|pull request is not mergeable:.*merged/i;
 
-/** Production: mark draft ready (ignore if already), then squash-merge. */
-export const realSyncMergePr: SyncMergePr = ({ cwd, number }) => {
-  spawnSync("gh", ["pr", "ready", String(number)], { cwd, encoding: "utf8" });
-  const merged = spawnSync("gh", ["pr", "merge", String(number), "--squash"], {
-    cwd,
-    encoding: "utf8",
-  });
-  if (merged.status === 0) return { ok: true };
-  const reason = (merged.stderr || merged.stdout || `gh pr merge exited ${merged.status}`).trim();
-  // Crash between a successful merge and the done-transition: retry must not escalate.
-  if (ALREADY_MERGED.test(reason)) return { ok: true };
-  return { ok: false, reason: reason || "gh pr merge failed" };
+function ghErrorReason(err: unknown, fallback: string): string {
+  const e = err as {
+    stderr?: string;
+    stdout?: string;
+    message?: string;
+    killed?: boolean;
+    signal?: string | null;
+  };
+  if (e.killed || e.signal === "SIGTERM") {
+    return `gh timed out after ${GH_MERGE_TIMEOUT_MS}ms`;
+  }
+  return (e.stderr || e.stdout || e.message || fallback).trim() || fallback;
+}
+
+/** Production: mark draft ready (ignore if already), then squash-merge — async + timed. */
+export const realMergePr: MergePr = async ({ cwd, number }) => {
+  try {
+    await run("gh", ["pr", "ready", String(number)], {
+      cwd,
+      encoding: "utf8",
+      timeout: GH_MERGE_TIMEOUT_MS,
+    });
+  } catch {
+    // Already ready / not a draft — ignore; merge is the authority.
+  }
+  try {
+    await run("gh", ["pr", "merge", String(number), "--squash"], {
+      cwd,
+      encoding: "utf8",
+      timeout: GH_MERGE_TIMEOUT_MS,
+    });
+    return { ok: true };
+  } catch (err) {
+    const reason = ghErrorReason(err, "gh pr merge failed");
+    // Crash between a successful merge and the done-transition: retry must not escalate.
+    if (ALREADY_MERGED.test(reason)) return { ok: true };
+    return { ok: false, reason };
+  }
 };
 
-let mergePrImpl: SyncMergePr = realSyncMergePr;
+let mergePrImpl: MergePr = realMergePr;
 
 /** Test hook — inject a fake so unit tests never shell out to `gh`. */
-export function setSyncMergePrForTests(fn: SyncMergePr | null): void {
-  mergePrImpl = fn ?? realSyncMergePr;
+export function setMergePrForTests(fn: MergePr | null): void {
+  mergePrImpl = fn ?? realMergePr;
 }
 
 export type AutoMergeFinalizeResult = {
@@ -61,8 +97,9 @@ export type AutoMergeFinalizeResult = {
 /**
  * Completes an auto-merge parked in `final_review` / system ownership after reviewer
  * approve. Success → done + reflect; failure → needs_human + policy_escalation.
+ * The `gh` merge runs outside any DB transaction (async); only the follow-up write is txn'd.
  */
-export function finalizeAutoMerge(issueId: string): AutoMergeFinalizeResult {
+export async function finalizeAutoMerge(issueId: string): Promise<AutoMergeFinalizeResult> {
   const issue = getIssue(issueId);
   if (!issue) {
     throw new Error(`finalizeAutoMerge: issue vanished ${issueId}`);
@@ -75,7 +112,7 @@ export function finalizeAutoMerge(issueId: string): AutoMergeFinalizeResult {
     return escalateMergeFailure(issue, instance.id, "Reviewer approved but the issue has no PR number to merge.");
   }
 
-  const merge = mergePrImpl({ cwd: issue.repo, number: issue.prNumber });
+  const merge = await mergePrImpl({ cwd: issue.repo, number: issue.prNumber });
   if (!merge.ok) {
     return escalateMergeFailure(issue, instance.id, `Auto-merge failed: ${merge.reason}`);
   }
@@ -195,12 +232,12 @@ export function listStrandedAutoMerges(): Issue[] {
  * Retries finalizeAutoMerge for every stranded park. Called from startup recovery and the
  * coordinator poll so a crash after approve cannot leave the issue silently half-done.
  */
-export function recoverStrandedAutoMerges(): { finalized: string[]; errors: string[] } {
+export async function recoverStrandedAutoMerges(): Promise<{ finalized: string[]; errors: string[] }> {
   const finalized: string[] = [];
   const errors: string[] = [];
   for (const issue of listStrandedAutoMerges()) {
     try {
-      const result = finalizeAutoMerge(issue.id);
+      const result = await finalizeAutoMerge(issue.id);
       finalized.push(issue.id);
       if (result.triggerReflect) {
         void import("./reflect-trigger.js").then(({ triggerIssueReflect }) =>

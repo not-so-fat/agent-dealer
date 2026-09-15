@@ -314,11 +314,11 @@ export type ApplyResult =
  * *after* the transaction (so `gh` never holds the write lock): merge the PR, then mark
  * done or escalate on failure (NOT-102).
  */
-export function applyCompletion(
+export async function applyCompletion(
   workItemId: string,
   leaseToken: string,
   outcome: DeveloperOutcome | ReviewerOutcome
-): ApplyResult {
+): Promise<ApplyResult> {
   const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
     if (!before) return { applied: false, reason: "not_found" };
@@ -340,6 +340,7 @@ export function applyCompletion(
   })();
 
   if (routed.applied && routed.pendingAutoMerge) {
+    // Await async `gh` merge outside the routing txn — never block the event loop with spawnSync.
     return finalizeAutoMerge(getWorkItem(workItemId)!.issueId);
   }
   return routed;

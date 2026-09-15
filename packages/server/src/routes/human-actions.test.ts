@@ -47,13 +47,13 @@ function seedIssueAwaitingFinalReview() {
  * approval, so the resulting final_review human action carries a real workflow instance
  * (unlike seedIssueAwaitingFinalReview's hand-crafted transitions) — needed to exercise
  * resolveHumanActionAndAdvance's actual transactional path through the route. */
-function seedRealIssueAwaitingFinalReview(): { issueId: string; actionId: string } {
+async function seedRealIssueAwaitingFinalReview(): Promise<{ issueId: string; actionId: string }> {
   const issue = createIssue({ title: "Real workflow", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
   const start = startWorkflow(issue.id);
   assert.equal(start.ok, true);
 
   const devItem = claimWorkItem(`route-test-${issue.id}-dev`, { leaseMs: 60_000 })!;
-  applyCompletion(devItem.id, devItem.leaseToken!, {
+  await applyCompletion(devItem.id, devItem.leaseToken!, {
     kind: "clean_handoff",
     branch: `issue-${issue.id}`,
     headSha: "a".repeat(40),
@@ -63,7 +63,7 @@ function seedRealIssueAwaitingFinalReview(): { issueId: string; actionId: string
   });
 
   const reviewItem = claimWorkItem(`route-test-${issue.id}-rev`, { leaseMs: 60_000 })!;
-  applyCompletion(reviewItem.id, reviewItem.leaseToken!, {
+  await applyCompletion(reviewItem.id, reviewItem.leaseToken!, {
     kind: "verdict",
     result: ReviewerResult.parse({
       verdict: "approved",

@@ -17,7 +17,7 @@ const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import(
 const { claimWorkItem, listWorkItemsForIssue } = await import("../repository/work-items.js");
 const { startWorkflow, applyCompletion } = await import("./commands.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
-const { setSyncMergePrForTests } = await import("./auto-merge.js");
+const { setMergePrForTests } = await import("./auto-merge.js");
 
 before(() => migrate());
 beforeEach(() => {
@@ -33,9 +33,9 @@ beforeEach(() => {
     DELETE FROM workflow_instances;
     DELETE FROM issues;
   `);
-  setSyncMergePrForTests(() => ({ ok: true }));
+  setMergePrForTests(async () => ({ ok: true }));
 });
-afterEach(() => setSyncMergePrForTests(null));
+afterEach(() => setMergePrForTests(null));
 
 function newIssue(opts: { autoMerge?: boolean; repo?: string } = {}): string {
   return createIssue({
@@ -59,7 +59,7 @@ function claim(issueId: string) {
   return item!;
 }
 
-function complete(issueId: string, outcome: Parameters<typeof applyCompletion>[2]) {
+async function complete(issueId: string, outcome: Parameters<typeof applyCompletion>[2]) {
   const item = claim(issueId);
   return applyCompletion(item.id, item.leaseToken!, outcome);
 }
@@ -84,17 +84,17 @@ const cleanHandoff = {
   prUrl: "https://gh/pr/42",
 } as const;
 
-test("autoMerge off: reviewer approve opens final_review and does not merge", () => {
+test("autoMerge off: reviewer approve opens final_review and does not merge", async () => {
   const calls: Array<{ cwd: string; number: number }> = [];
-  setSyncMergePrForTests((opts) => {
+  setMergePrForTests(async (opts) => {
     calls.push(opts);
     return { ok: true };
   });
 
   const issueId = newIssue({ autoMerge: false });
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
-  complete(issueId, { kind: "verdict", result: okReview("approved") });
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
 
   assert.equal(getIssue(issueId)!.status, "final_review");
   assert.equal(getIssue(issueId)!.currentOwner, "human");
@@ -102,17 +102,17 @@ test("autoMerge off: reviewer approve opens final_review and does not merge", ()
   assert.equal(calls.length, 0);
 });
 
-test("autoMerge on: reviewer approve merges PR, marks done, skips final_review human action", () => {
+test("autoMerge on: reviewer approve merges PR, marks done, skips final_review human action", async () => {
   const calls: Array<{ cwd: string; number: number }> = [];
-  setSyncMergePrForTests((opts) => {
+  setMergePrForTests(async (opts) => {
     calls.push(opts);
     return { ok: true };
   });
 
   const issueId = newIssue({ autoMerge: true });
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
-  const result = complete(issueId, { kind: "verdict", result: okReview("approved") });
+  await complete(issueId, cleanHandoff);
+  const result = await complete(issueId, { kind: "verdict", result: okReview("approved") });
 
   assert.equal(result.applied, true);
   if (result.applied) {
@@ -130,13 +130,13 @@ test("autoMerge on: reviewer approve merges PR, marks done, skips final_review h
   assert.ok(listWorkflowEventsForIssue(issueId).some((e) => e.type === "issue.completed"));
 });
 
-test("autoMerge on: merge failure escalates to policy_escalation; issue not left half-done as final_review", () => {
-  setSyncMergePrForTests(() => ({ ok: false, reason: "required status checks failed" }));
+test("autoMerge on: merge failure escalates to policy_escalation; issue not left half-done as final_review", async () => {
+  setMergePrForTests(async () => ({ ok: false, reason: "required status checks failed" }));
 
   const issueId = newIssue({ autoMerge: true });
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
-  complete(issueId, { kind: "verdict", result: okReview("approved") });
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "needs_human");
@@ -176,10 +176,10 @@ test("recoverStrandedAutoMerges finalizes a parked auto-merge after a simulated 
   const { recoverStrandedAutoMerges, AUTO_MERGE_INTENT } = await import("./auto-merge.js");
   const { transitionIssue } = await import("../repository/issues.js");
 
-  setSyncMergePrForTests(() => ({ ok: true }));
+  setMergePrForTests(async () => ({ ok: true }));
   const issueId = newIssue({ autoMerge: true });
   startWorkflow(issueId);
-  complete(issueId, cleanHandoff);
+  await complete(issueId, cleanHandoff);
   // Simulate crash after approve routing parked for auto-merge but before finalize.
   // reviewing → final_review is legal; park with the recovery intent key.
   transitionIssue(issueId, "reviewing", { currentOwner: "reviewer", currentIntent: "reviewing" });
@@ -197,7 +197,7 @@ test("recoverStrandedAutoMerges finalizes a parked auto-merge after a simulated 
   assert.equal(getIssue(issueId)!.currentIntent, AUTO_MERGE_INTENT);
   assert.ok(getActiveWorkflowInstance(issueId));
 
-  const recovered = recoverStrandedAutoMerges();
+  const recovered = await recoverStrandedAutoMerges();
   assert.ok(recovered.finalized.includes(issueId));
   assert.equal(getIssue(issueId)!.status, "done");
 });

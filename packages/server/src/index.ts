@@ -78,7 +78,7 @@ async function main(): Promise<void> {
   registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx));
   registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx));
 
-  const coordinatorRecovery = recoverCoordinator();
+  const coordinatorRecovery = await recoverCoordinator();
   if (
     coordinatorRecovery.reclaimed.length ||
     coordinatorRecovery.deadLettered.length ||

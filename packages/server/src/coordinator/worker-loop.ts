@@ -230,7 +230,7 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
 
   // The completion CAS is fenced on leaseToken and is the only path to a terminal state —
   // a duplicate or a reclaimed-then-late completion applies nothing.
-  const result = applyCompletion(claimed.id, leaseToken, outcome);
+  const result = await applyCompletion(claimed.id, leaseToken, outcome);
   if (!result.applied) {
     safeCompleteSession(session.id, "cancelled", { reason: result.reason });
     return;
@@ -250,7 +250,7 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
  */
 export async function runCoordinatorTick(opts?: { leaseOwner?: string }): Promise<number> {
   // NOT-102: finish auto-merges parked before a crash (no in-memory pendingAutoMerge left).
-  recoverStrandedAutoMerges();
+  await recoverStrandedAutoMerges();
   const leaseOwner = opts?.leaseOwner ?? `loop-${process.pid}-${uuid().slice(0, 8)}`;
   let started = 0;
   while (active.size < coordinatorConfig.maxConcurrency) {

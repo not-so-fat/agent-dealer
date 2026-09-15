@@ -54,7 +54,7 @@ function failOrphanSession(workerSessionId: string | null): void {
  *                  whose `lease_expires_at` is before this — the recovery latency for an
  *                  orphaned item is bounded by `COORDINATOR_LEASE_MS`.
  */
-export function recoverCoordinator(opts?: { now?: number }): RecoverResult {
+export async function recoverCoordinator(opts?: { now?: number }): Promise<RecoverResult> {
   const now = opts?.now ?? Date.now();
   const nowIso = new Date(now).toISOString();
   const backoffMs = num("COORDINATOR_FAIL_BACKOFF_MS", 10_000);
@@ -104,9 +104,10 @@ export function recoverCoordinator(opts?: { now?: number }): RecoverResult {
     }
   }
 
+  const stranded = await recoverStrandedAutoMerges();
   return {
     reclaimed,
     deadLettered,
-    autoMergesFinalized: recoverStrandedAutoMerges().finalized,
+    autoMergesFinalized: stranded.finalized,
   };
 }
