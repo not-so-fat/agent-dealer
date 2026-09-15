@@ -156,8 +156,19 @@ export async function githubIssuesUncached(): Promise<AgentHealthIssue[]> {
   return [];
 }
 
+/**
+ * Unit/CI tests must not call the real `gh auth status` — runners usually have no
+ * usable token, and the startWorkflow preflight would refuse every kick. Set
+ * `AGENT_DEALER_SKIP_GITHUB_HEALTH=1` in `test:unit` / `test:ci`. Production and
+ * local `npm run dev` leave it unset so Start still refuses bad auth.
+ */
+function githubHealthSkippedForTests(): boolean {
+  return process.env.AGENT_DEALER_SKIP_GITHUB_HEALTH === "1";
+}
+
 /** Synchronous for startWorkflow — issue kick must refuse before spending a developer round. */
 export function githubIssuesSync(): AgentHealthIssue[] {
+  if (githubHealthSkippedForTests()) return [];
   if (githubIssueCache && Date.now() - githubIssueCache.at < RUNTIME_CACHE_MS) {
     return githubIssueCache.issues;
   }
