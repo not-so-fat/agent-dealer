@@ -155,6 +155,66 @@ test("pending item on capped runtime is not spawned before until (pre-spawn defe
   assert.ok(listWorkflowEventsForIssue(issueId).some((e) => e.type === "worker.deferred"));
 });
 
+test("deferral past the ceiling escalates to policy_escalation instead of deferring forever", async () => {
+  const prevCeiling = process.env.USAGE_CAP_DEFERRAL_CEILING_MS;
+  process.env.USAGE_CAP_DEFERRAL_CEILING_MS = "50";
+  try {
+    const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cap-ceiling-"));
+    const dev = createAgent({ name: "dev-ceiling", runtime: "claude_code", workspaceRoot: repo });
+    const rev = createAgent({ name: "rev-ceiling", runtime: "claude_code", workspaceRoot: repo });
+    const issueId = createIssue({
+      title: "Ceiling test",
+      description: "d",
+      acceptanceCriteria: "ac",
+      repo,
+      baseBranch: "main",
+      developerAgentId: dev.id,
+      reviewerAgentId: rev.id,
+      maxReviewRounds: 2,
+      maxInfraAttempts: 3,
+      source: "manual",
+    }).id;
+
+    // Every attempt reports the same hard cap — availableAt is a few ms out so the next
+    // pump tick re-attempts quickly, letting the 50ms ceiling elapse across two deferrals.
+    registerEffectHandler("developer", async () => {
+      const until = new Date(Date.now() + 5).toISOString();
+      return {
+        kind: "usage_capped",
+        until,
+        reason: "claude_code usage capped — plan limit rejected",
+      } satisfies DeveloperOutcome;
+    });
+
+    const started = startWorkflow(issueId);
+    assert.equal(started.ok, true);
+
+    await pump(1); // first cap observation — defers, starts the ceiling clock
+    assert.equal(getIssue(issueId)!.status, "developing");
+
+    await new Promise((r) => setTimeout(r, 60)); // elapse the 50ms deferral ceiling
+
+    await pump(); // second cap observation — ceiling exceeded, escalates
+
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.status, "needs_human");
+    const escalation = listHumanActionsForIssue(issueId).find((a) => a.status === "open");
+    assert.equal(escalation?.actionType, "policy_escalation");
+
+    const items = listWorkItemsForIssue(issueId);
+    assert.equal(items.length, 1);
+    assert.equal(items[0]!.status, "done", "escalation finishes the work item rather than deferring it again");
+
+    const events = listWorkflowEventsForIssue(issueId);
+    assert.equal(events.filter((e) => e.type === "worker.deferred").length, 1, "exactly one deferral before escalation");
+    assert.ok(events.some((e) => e.type === "worker.failed"));
+  } finally {
+    if (prevCeiling === undefined) delete process.env.USAGE_CAP_DEFERRAL_CEILING_MS;
+    else process.env.USAGE_CAP_DEFERRAL_CEILING_MS = prevCeiling;
+  }
+});
+
 test("fixture log records runtime_availability with resetsAt", () => {
   const cap = recordUsageCapFromLog(fixturePath, "claude_code", Date.parse("2026-01-01T00:00:00.000Z"));
   assert.ok(cap);

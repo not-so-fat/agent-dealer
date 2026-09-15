@@ -17,7 +17,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ag
 
 const { migrate } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
-const { healthForAgent } = await import("./agent-health.js");
+const { healthForAgent, runtimeIssuesUncached } = await import("./agent-health.js");
 
 migrate();
 
@@ -91,6 +91,21 @@ test("agent deck online with no deck-access result computed (e.g. no agent neede
     result.issues.some((i) => i.code === "deck_unauthorized" || i.code === "deck_offline"),
     false
   );
+});
+
+test("codex_local with a missing CLI reports cli_missing exactly once, not twice", async () => {
+  const prevCodexCli = process.env.CODEX_CLI;
+  process.env.CODEX_CLI = "/nonexistent/path/codex-does-not-exist";
+  try {
+    const issues = await runtimeIssuesUncached("codex_local");
+    assert.deepEqual(
+      issues.map((i) => i.code),
+      ["cli_missing"]
+    );
+  } finally {
+    if (prevCodexCli === undefined) delete process.env.CODEX_CLI;
+    else process.env.CODEX_CLI = prevCodexCli;
+  }
 });
 
 test("cursor_local with a bound deck: no deck access issue (launch MCP is supported)", async () => {

@@ -82,10 +82,11 @@ async function main(): Promise<void> {
   if (
     coordinatorRecovery.reclaimed.length ||
     coordinatorRecovery.deadLettered.length ||
+    coordinatorRecovery.deferredForCap.length ||
     coordinatorRecovery.autoMergesFinalized.length
   ) {
     console.warn(
-      `[startup] coordinator recovery: reclaimed ${coordinatorRecovery.reclaimed.length}, dead-lettered ${coordinatorRecovery.deadLettered.length}, auto-merges finalized ${coordinatorRecovery.autoMergesFinalized.length}`
+      `[startup] coordinator recovery: reclaimed ${coordinatorRecovery.reclaimed.length}, dead-lettered ${coordinatorRecovery.deadLettered.length}, deferred for cap ${coordinatorRecovery.deferredForCap.length}, auto-merges finalized ${coordinatorRecovery.autoMergesFinalized.length}`
     );
   }
   startCoordinatorLoop();

@@ -312,11 +312,14 @@ export interface DeferWorkItemOpts {
   /** Undo the claim-time attempt_count bump — usage-cap deferral must not spend attempts. */
   revertAttemptCount?: boolean;
   payloadJson?: string;
+  /** Recovery guard — see FinishInput.onlyIfExpiredBefore. */
+  onlyIfExpiredBefore?: string;
 }
 
 /**
  * Returns a leased item to `pending` behind a usage-cap gate, optionally undoing the claim
- * attempt_count bump. Fenced on the lease token like requeueWorkItem.
+ * attempt_count bump. Fenced on the lease token like requeueWorkItem, and optionally on
+ * `lease_expires_at` for recovery's stale-lease reclaim.
  */
 export function deferWorkItem(
   id: string,
@@ -337,6 +340,7 @@ export function deferWorkItem(
         lease_expires_at = NULL,
         updated_at = @now
       WHERE id = @id AND status = 'leased' AND lease_token = @token
+        AND (@expired_before IS NULL OR lease_expires_at < @expired_before)
       RETURNING *
     `)
     .get({
@@ -346,6 +350,7 @@ export function deferWorkItem(
       available_at: opts.availableAt,
       revert: opts.revertAttemptCount ? 1 : 0,
       payload_json: opts.payloadJson ?? null,
+      expired_before: opts.onlyIfExpiredBefore ?? null,
       now,
     }) as WorkItemRow | undefined;
   return row ? rowToWorkItem(row) : null;

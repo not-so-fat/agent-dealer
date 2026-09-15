@@ -75,7 +75,7 @@ test("recovery ignores a lease that has not expired", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   claimWorkItem("healthy", { leaseMs: 600_000 });
-  assert.deepEqual(await recoverCoordinator({ now: Date.now() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: Date.now() }), { reclaimed: [], deadLettered: [], deferredForCap: [], autoMergesFinalized: [] });
 });
 
 test("recovery leaves a lease alone when a heartbeat renewed it after the snapshot", async () => {
@@ -90,7 +90,7 @@ test("recovery leaves a lease alone when a heartbeat renewed it after the snapsh
   refreshHeartbeat(devItem.id, claimed.leaseToken!, { leaseMs: 600_000 });
 
   const res = await recoverCoordinator({ now: Date.now() + 1_000 });
-  assert.deepEqual(res, { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
+  assert.deepEqual(res, { reclaimed: [], deadLettered: [], deferredForCap: [], autoMergesFinalized: [] });
   assert.equal(getWorkItem(devItem.id)!.status, "leased");
 });
 
@@ -116,7 +116,7 @@ test("an expired lease past the attempt cap is dead-lettered AND routed in one s
   );
 
   // A second recovery pass is a no-op — the item is already dead, nothing to reclaim.
-  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], deferredForCap: [], autoMergesFinalized: [] });
   assert.equal(
     listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
     1,
@@ -133,10 +133,61 @@ test("recovery loses its CAS to a worker that completed concurrently", async () 
   // Worker finishes just before recovery's transaction runs.
   finishWorkItem(devItem.id, claimed.leaseToken!, { status: "done", result: { kind: "no_pr" } });
 
-  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], deferredForCap: [], autoMergesFinalized: [] });
   assert.equal(getWorkItem(devItem.id)!.status, "done");
 });
 
+test("an expired lease on a usage-capped runtime is deferred, not dead-lettered (NOT-111 recovery gap)", async () => {
+  const { recordRuntimeAvailability, clearAllRuntimeAvailability } = await import(
+    "../repository/runtime-availability.js"
+  );
+  clearAllRuntimeAvailability();
+  try {
+    // maxInfraAttempts 0 means a normal expired lease would dead-letter on its first
+    // reclaim — proving the cap check pre-empts that, not just skips a retry.
+    const issueId = newIssue(3, 0);
+    startWorkflow(issueId);
+    const devItem = listWorkItemsForIssue(issueId)[0];
+
+    const claimed = claimWorkItem("crashed", { leaseMs: 1 })!;
+    const session = createWorkerSession({
+      issueId,
+      role: "developer",
+      round: 1,
+      agentId: BUILTIN_AGENT_CLAUDE_ID,
+      runtime: "claude_code",
+    });
+    startSession(session.id);
+    assert.equal(bindWorkItemSession(devItem.id, session.id, claimed.leaseToken!), true);
+
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    recordRuntimeAvailability({
+      runtime: "claude_code",
+      unavailableUntil: until,
+      reason: "claude_code usage capped — plan limit rejected",
+    });
+
+    const res = await recoverCoordinator({ now: FUTURE() });
+    assert.deepEqual(res, {
+      reclaimed: [],
+      deadLettered: [],
+      deferredForCap: [devItem.id],
+      autoMergesFinalized: [],
+    });
+    assert.equal(getWorkItem(devItem.id)!.status, "pending");
+    assert.equal(getWorkItem(devItem.id)!.attemptCount, 0, "claim's attempt bump is reverted, like a live cap deferral");
+    assert.equal(getWorkItem(devItem.id)!.availableAt, until);
+    assert.equal(listWorkerSessionsForIssue(issueId)[0].status, "failed");
+    assert.equal(
+      listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+      0,
+      "deferred, not routed to a human action"
+    );
+  } finally {
+    clearAllRuntimeAvailability();
+  }
+});
+
 test("recoverCoordinator is a no-op on a clean queue", async () => {
-  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], deferredForCap: [], autoMergesFinalized: [] });
 });

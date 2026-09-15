@@ -67,7 +67,8 @@ function runCommand(
   });
 }
 
-async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHealthIssue[]> {
+/** Exported for direct testing — bypasses the 60s cache in runtimeIssues(). */
+export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHealthIssue[]> {
   const issues: AgentHealthIssue[] = [];
 
   if (runtime === "claude_code") {
@@ -84,12 +85,8 @@ async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHealthIssue
       const ver = await runCommand(resolveCodexBin(), ["--version"]);
       if (!ver.ok) {
         issues.push({ code: "cli_missing", message: "Codex CLI not found — install Codex (`codex`)" });
+        return issues;
       }
-    }
-    const ver = await runCommand(resolveCodexBin(), ["--version"]);
-    if (!ver.ok) {
-      issues.push({ code: "cli_missing", message: "Codex CLI not found — install Codex (`codex`)" });
-      return issues;
     }
     // `codex --version` succeeds without auth — use login status for auth health.
     const login = await runCommand(resolveCodexBin(), ["login", "status"]);
