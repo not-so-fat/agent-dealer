@@ -23,6 +23,7 @@ const {
   startWorkflow,
   applyCompletion,
   resolveHumanActionAndAdvance,
+  resolveHumanActionAndAdvanceAsync,
   getTaskSnapshot,
   TASK_SNAPSHOT_ARTIFACT_KIND,
   checkIssueReadiness,
@@ -30,9 +31,14 @@ const {
 } = await import("./commands.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
+const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./auto-merge.js");
 
 before(() => migrate());
-beforeEach(() => getDb().exec("DELETE FROM work_items"));
+beforeEach(() => {
+  getDb().exec("DELETE FROM work_items");
+  clearFinalizeInflightForTests();
+  setMergePrForTests(async () => ({ ok: true }));
+});
 
 interface Opts {
   acceptanceCriteria?: string | null;
@@ -230,7 +236,7 @@ test("applyCompletion is idempotent — a duplicate completion (same or stale to
   );
 });
 
-test("reviewer approved → final_review human action; resolving complete finishes the workflow", async () => {
+test("reviewer approved → final_review human action; resolving complete merges and finishes the workflow", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   await complete(issueId, cleanHandoff);
@@ -240,7 +246,7 @@ test("reviewer approved → final_review human action; resolving complete finish
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review")!;
   assert.ok(action);
 
-  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "complete");
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "yusuke", "complete");
   assert.equal(resolved.ok, true);
   assert.equal(getIssue(issueId)!.status, "done");
   assert.equal(getActiveWorkflowInstance(issueId), null);
@@ -615,7 +621,7 @@ test("abortIssue on an already-done issue is a no-op", async () => {
   await complete(issueId, cleanHandoff);
   await complete(issueId, { kind: "verdict", result: okReview("approved") });
   const finalReviewAction = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review" && a.status === "open")!;
-  const resolved = resolveHumanActionAndAdvance(finalReviewAction.id, "yusuke", "complete");
+  const resolved = await resolveHumanActionAndAdvanceAsync(finalReviewAction.id, "yusuke", "complete");
   assert.equal(resolved.ok, true);
   assert.equal(getIssue(issueId)!.status, "done");
 

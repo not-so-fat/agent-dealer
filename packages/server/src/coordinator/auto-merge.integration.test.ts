@@ -88,7 +88,7 @@ const cleanHandoff = {
   prUrl: "https://gh/pr/42",
 } as const;
 
-test("autoMerge off: reviewer approve opens final_review and does not merge", async () => {
+test("autoMerge off: reviewer approve opens final_review and does not merge yet", async () => {
   const calls: Array<{ cwd: string; number: number }> = [];
   setMergePrForTests(async (opts) => {
     calls.push(opts);
@@ -104,6 +104,55 @@ test("autoMerge off: reviewer approve opens final_review and does not merge", as
   assert.equal(getIssue(issueId)!.currentOwner, "human");
   assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review"));
   assert.equal(calls.length, 0);
+});
+
+test("autoMerge off: final_review complete undrafts+merges then marks done", async () => {
+  const { resolveHumanActionAndAdvanceAsync } = await import("./commands.js");
+  const calls: Array<{ cwd: string; number: number }> = [];
+  setMergePrForTests(async (opts) => {
+    calls.push(opts);
+    return { ok: true };
+  });
+
+  const issueId = newIssue({ autoMerge: false });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review")!;
+
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "yusuke", "complete");
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) {
+    assert.equal(resolved.issueStatus, "done");
+    assert.equal(resolved.instanceCompleted, true);
+    assert.equal(resolved.triggerReflect, true);
+  }
+  assert.deepEqual(calls, [{ cwd: "/repo/a", number: 42 }]);
+  assert.equal(getIssue(issueId)!.status, "done");
+  assert.equal(getActiveWorkflowInstance(issueId), null);
+  assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
+});
+
+test("autoMerge off: final_review complete with merge failure escalates (never done with draft)", async () => {
+  const { resolveHumanActionAndAdvanceAsync } = await import("./commands.js");
+  setMergePrForTests(async () => ({ ok: false, reason: "protected branch" }));
+
+  const issueId = newIssue({ autoMerge: false });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review")!;
+
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "yusuke", "complete");
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) {
+    assert.equal(resolved.issueStatus, "needs_human");
+    assert.equal(resolved.instanceCompleted, false);
+  }
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.match(issue.currentIntent ?? "", /protected branch/);
+  assert.ok(listHumanActionsForIssue(issueId).some((a) => a.actionType === "policy_escalation" && a.status === "open"));
 });
 
 test("autoMerge on: reviewer approve merges PR, marks done, skips final_review human action", async () => {
@@ -221,6 +270,28 @@ test("recoverStrandedAutoMerges finalizes a parked auto-merge after a simulated 
   assert.equal(getIssue(issueId)!.status, "final_review");
   assert.equal(getIssue(issueId)!.currentIntent, AUTO_MERGE_INTENT);
   assert.ok(getActiveWorkflowInstance(issueId));
+
+  const recovered = await recoverStrandedAutoMerges();
+  assert.ok(recovered.finalized.includes(issueId));
+  assert.equal(getIssue(issueId)!.status, "done");
+});
+
+test("recoverStrandedAutoMerges recovers human-complete park even when autoMerge is off", async () => {
+  const { recoverStrandedAutoMerges, AUTO_MERGE_INTENT } = await import("./auto-merge.js");
+  const { transitionIssue } = await import("../repository/issues.js");
+
+  setMergePrForTests(async () => ({ ok: true }));
+  const issueId = newIssue({ autoMerge: false });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  transitionIssue(issueId, "reviewing", { currentOwner: "reviewer", currentIntent: "reviewing" });
+  getDb().exec("DELETE FROM work_items");
+  transitionIssue(issueId, "final_review", {
+    currentOwner: "system",
+    currentIntent: AUTO_MERGE_INTENT,
+    prNumber: 42,
+    prUrl: "https://gh/pr/42",
+  });
 
   const recovered = await recoverStrandedAutoMerges();
   assert.ok(recovered.finalized.includes(issueId));

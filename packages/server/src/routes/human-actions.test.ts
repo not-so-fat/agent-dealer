@@ -19,6 +19,7 @@ const { listArtifactsForIssue } = await import("../repository/artifacts-for-issu
 const { createRun, getRun, transitionRun, addArtifact, updateRunFields } = await import("../repository/runs.js");
 const { pendingSendCount, getPendingOutboundDraft } = await import("../repository/outbound-drafts.js");
 const { updateAgent } = await import("../repository/agents.js");
+const { setMergePrForTests, clearFinalizeInflightForTests } = await import("../coordinator/auto-merge.js");
 
 before(() => {
   migrate();
@@ -26,7 +27,12 @@ before(() => {
 });
 // claimWorkItem is global FIFO, not issue-scoped — a leftover queued item from an earlier
 // test would otherwise be claimed instead of the issue this test just started.
-beforeEach(() => getDb().exec("DELETE FROM work_items"));
+beforeEach(() => {
+  getDb().exec("DELETE FROM work_items");
+  clearFinalizeInflightForTests();
+  // final_review:complete now undrafts+merges — never hit real `gh` from route tests.
+  setMergePrForTests(async () => ({ ok: true }));
+});
 
 async function buildApp() {
   const app = Fastify();

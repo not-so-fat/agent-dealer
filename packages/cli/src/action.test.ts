@@ -13,7 +13,7 @@ test("action list calls GET /api/human-actions and surfaces parsed choices", asy
       reason: "done",
       question: "Accept?",
       evidenceJson: null,
-      responseOptionsJson: JSON.stringify([{ choice: "complete", label: "Accept — mark done" }]),
+      responseOptionsJson: JSON.stringify([{ choice: "complete", label: "Accept — merge & mark done" }]),
       continuationPreviewJson: null,
       status: "open",
       resolutionJson: null,
@@ -32,7 +32,7 @@ test("action list calls GET /api/human-actions and surfaces parsed choices", asy
     assert.equal(code, 0);
     stub.assertCalled();
     const [action] = JSON.parse(printed);
-    assert.deepEqual(action.choices, [{ choice: "complete", label: "Accept — mark done" }]);
+    assert.deepEqual(action.choices, [{ choice: "complete", label: "Accept — merge & mark done" }]);
   } finally {
     console.log = originalLog;
     stub.restore();

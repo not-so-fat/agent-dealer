@@ -197,7 +197,7 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
     }
     transitionIssue(issueId, "done", {
       currentOwner: "system",
-      currentIntent: "Auto-merged after reviewer approval",
+      currentIntent: "Merged approved PR",
     });
     completeWorkflowInstance(active.id, "done");
     appendWorkflowEvent({
@@ -298,11 +298,12 @@ function escalateMergeFailure(
   })();
 }
 
-/** Issues parked for auto-merge that are not already being finalized in this process. */
+/** Issues parked for undraft+merge (autoMerge approve *or* human final_review:complete)
+ * that are not already being finalized in this process. Keyed by AUTO_MERGE_INTENT —
+ * not `autoMerge` — so autoMerge-off human accepts still recover after a crash. */
 export function listStrandedAutoMerges(): Issue[] {
   return listIssues("final_review").filter(
     (i) =>
-      i.autoMerge &&
       i.currentOwner === "system" &&
       i.currentIntent === AUTO_MERGE_INTENT &&
       !finalizeInflight.has(i.id)

@@ -109,7 +109,8 @@ export const ISSUE_STATUS_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   // exhausted) resume with a fresh reviewer session at the still-valid pinned head,
   // instead of always routing back through the developer.
   needs_human: ["developing", "reviewing", "repairing", "final_review", "done", "closed"],
-  final_review: ["done", "repairing", "needs_human", "closed"],
+  // Self-loop: human complete parks owner/intent for undraft+merge without leaving the stage.
+  final_review: ["final_review", "done", "repairing", "needs_human", "closed"],
   done: [],
   closed: [],
 };

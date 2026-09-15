@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { getHumanAction, listOpenHumanActions } from "../repository/human-actions.js";
-import { resolveHumanActionAndAdvance } from "../coordinator/commands.js";
+import { resolveHumanActionAndAdvanceAsync } from "../coordinator/commands.js";
 import { triggerIssueReflect, resolveReflectionInteractionAction } from "../coordinator/reflect-trigger.js";
 import { resolveOutboundDeliveryAction } from "../queue/approve-deliver.js";
 
@@ -47,7 +47,9 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
       return { runStatus: deliveryResult.runStatus, delivered: deliveryResult.delivered };
     }
 
-    const result = resolveHumanActionAndAdvance(id, resolvedBy, choice);
+    // Awaits undraft+merge when final_review:complete (NOT-102) — sync resolve alone would
+    // only park at AUTO_MERGE_INTENT and leave the PR draft.
+    const result = await resolveHumanActionAndAdvanceAsync(id, resolvedBy, choice);
     if (!result.ok) return reply.status(result.code).send({ error: result.error });
 
     // Reflect is a best-effort network call to Agent Deck (health check + a sequential
@@ -56,8 +58,7 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
     // otherwise risk a client timeout on an already-resolved action, whose retry then gets
     // a spurious 409. Fire-and-forget; triggerIssueReflect never throws (it records its own
     // outcome as artifacts), so there is nothing here to await or react to.
-    // triggerReflect is only ever set for final_review:complete, which is always
-    // Issue-scoped (NOT-95's Run-scoped action type never reaches resolveHumanActionAndAdvance).
+    // triggerReflect is set after a successful merge-to-done (auto-merge or human complete).
     if (result.triggerReflect && action.issueId) {
       void triggerIssueReflect(action.issueId).catch(() => {});
     }

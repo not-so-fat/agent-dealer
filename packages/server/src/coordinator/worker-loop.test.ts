@@ -23,17 +23,22 @@ const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import(
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
 const { listWorkItemsForIssue, claimWorkItem, getWorkItem } = await import("../repository/work-items.js");
-const { startWorkflow, applyCompletion, resolveHumanActionAndAdvance } = await import("./commands.js");
+const { startWorkflow, applyCompletion, resolveHumanActionAndAdvanceAsync } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
 const { runCoordinatorTick, drainCoordinator, activeAttemptCount, startCoordinatorLoop, stopCoordinatorLoop } =
   await import("./worker-loop.js");
 const { recoverCoordinator } = await import("./recovery.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
+const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./auto-merge.js");
 
 before(() => migrate());
 // claimWorkItem / recovery scan the whole table (one loop in production); start each
 // case from an empty queue so a prior test's un-processed item is never claimed here.
-beforeEach(() => getDb().exec("DELETE FROM work_items"));
+beforeEach(() => {
+  getDb().exec("DELETE FROM work_items");
+  clearFinalizeInflightForTests();
+  setMergePrForTests(async () => ({ ok: true }));
+});
 afterEach(() => resetEffectHandlers());
 
 function newIssue(maxReviewRounds = 3): string {
@@ -89,7 +94,7 @@ test("happy path: developer → reviewer(approved) → final_review, resolved co
 
   assert.equal(getIssue(issueId)!.status, "final_review");
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review")!;
-  resolveHumanActionAndAdvance(action.id, "yusuke", "complete");
+  await resolveHumanActionAndAdvanceAsync(action.id, "yusuke", "complete");
   assert.equal(getIssue(issueId)!.status, "done");
   assert.equal(getActiveWorkflowInstance(issueId), null);
 
