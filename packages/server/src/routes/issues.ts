@@ -16,6 +16,7 @@ import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/hu
 import { listFindingsForIssue } from "../repository/findings.js";
 import { abortIssue, checkIssueReadiness, startWorkflow } from "../coordinator/commands.js";
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
+import { getQueuedEntryForIssue } from "../repository/queue-entries.js";
 
 const TRACE_DEFAULT_MAX_CHARS = 50_000;
 const TRACE_HARD_MAX_CHARS = 200_000;
@@ -90,6 +91,8 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       latestWorkflowInstance: instances.length ? instances[instances.length - 1] : null,
       // NOT-109: live session strip while developing/reviewing.
       activeWorkerSession,
+      // NOT-103: whether this issue is in the admission queue.
+      queued: getQueuedEntryForIssue(id) != null,
     };
   });
 

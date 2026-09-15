@@ -19,6 +19,7 @@ export * from "./human-actions.js";
 export * from "./findings.js";
 export * from "./usage-events.js";
 export * from "./runtime-availability.js";
+export * from "./queue-entries.js";
 
 export const RunStatus = z.enum([
   "queued",

@@ -71,6 +71,7 @@ import {
   usageCapDeferralStartedAt,
   type UsageCappedOutcome,
 } from "./usage-cap-defer.js";
+import { markQueueEntryAdmitted } from "../repository/queue-entries.js";
 
 export const WORKFLOW_VERSION = "dev_reviewer_v1";
 
@@ -154,7 +155,7 @@ const REQUIRED_FIELDS: Array<[keyof Issue, string]> = [
   ["reviewerAgentId", "reviewer profile"],
 ];
 
-class StartPreconditionError extends Error {
+export class StartPreconditionError extends Error {
   constructor(
     readonly code: number,
     message: string
@@ -189,12 +190,36 @@ export function checkIssueReadiness(issue: Issue): IssueReadiness {
 }
 
 /**
+ * Close a stale pre-start `product_scope_decision` that was opened when acceptance criteria
+ * were missing, then later filled in (PATCH / resolve-by-start). Shared by Manual Start,
+ * admission, and any other startWorkflowCore caller so a gate never stays open beside a
+ * running workflow (resolving it later would enqueue a second developer work item).
+ */
+function clearStaleProductScopeDecision(issue: Issue): void {
+  const openScopeDecision = findOpenHumanAction(issue.id, "product_scope_decision");
+  if (!openScopeDecision) return;
+  resolveHumanAction(openScopeDecision.id, "system", { choice: "resume" });
+  appendWorkflowEvent({
+    issueId: issue.id,
+    type: "human_action.resolved",
+    actorType: "system",
+    stage: issue.status,
+    payload: { actionType: "product_scope_decision", choice: "resume" },
+  });
+}
+
+/**
  * The instance + `workflow.started` event + issue transition + round-1 developer work item,
  * all as unconditional writes. Throws on any precondition failure so a caller that runs this
- * inside its own transaction (see resolveHumanActionAndAdvance) rolls the whole step back.
- * Must be called within a transaction.
+ * inside its own transaction (see resolveHumanActionAndAdvance / admitNext) rolls the whole
+ * step back. Must be called within a transaction.
+ *
+ * Exported for NOT-103 admission — callers must already have verified readiness so they
+ * never open a `product_scope_decision` (that path lives only on startWorkflow). Opening
+ * the gate stays on startWorkflow; clearing a stale gate after AC lands lives here so
+ * admitNext cannot leave it dangling.
  */
-function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workItem: WorkItem } {
+export function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workItem: WorkItem } {
   const issue = getIssue(issueId);
   if (!issue) throw new StartPreconditionError(404, "Issue not found");
   if (issue.status !== "ready" && issue.status !== "needs_human") {
@@ -218,6 +243,9 @@ function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workI
     throw new StartPreconditionError(400, `Missing required field(s): ${readiness.missing.join(", ")}`);
   }
 
+  // Criteria were added since a pre-start gate opened — close it in the same txn as start.
+  clearStaleProductScopeDecision(issue);
+
   const instance = startWorkflowInstance(issueId, WORKFLOW_VERSION);
   freezeTaskSnapshot(issue);
   appendWorkflowEvent({
@@ -240,6 +268,9 @@ function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workI
     payload: { profileSnapshot: queuedProfileSnapshot(issue, "developer") },
     idempotencyKey: `${instance.id}:developer:1`,
   });
+  // NOT-103: every successful start is a force-admit — keep queue state in sync whether
+  // the caller was startWorkflow, admitNext, or product_scope_decision resolve.
+  markQueueEntryAdmitted(issueId);
   return { instance, workItem };
 }
 
@@ -254,11 +285,8 @@ export function startWorkflow(issueId: string): StartResult {
   if (!issue) return { ok: false, code: 404, error: "Issue not found" };
 
   const preStart = (issue.status === "ready" || issue.status === "needs_human") && !getActiveWorkflowInstance(issueId);
-  // Looked up whenever a fresh start is even possible (not just when criteria are still
-  // missing): a PATCH can add acceptance criteria after this action was opened, and a
-  // caller may retry /start directly instead of going through the resolve endpoint —
-  // that path must still close out the stale action rather than leave it open forever
-  // alongside a running workflow.
+  // Idempotent lookup when AC is still missing — return the existing gate rather than
+  // creating a duplicate. Stale-gate cleanup after AC lands lives in startWorkflowCore.
   const openScopeDecision = preStart ? findOpenHumanAction(issueId, "product_scope_decision") : null;
 
   // Refuse before enqueueing a developer round when `gh` cannot open the draft PR —
@@ -286,22 +314,8 @@ export function startWorkflow(issueId: string): StartResult {
   }
 
   try {
-    const result = getDb().transaction((): { instance: WorkflowInstance; workItem: WorkItem } => {
-      // Criteria were added (e.g. via PATCH) since this action was opened, and the
-      // caller is starting directly rather than resolving it — close it out in the same
-      // transaction as the start it's unblocking, so it never dangles open indefinitely.
-      if (openScopeDecision) {
-        resolveHumanAction(openScopeDecision.id, "system", { choice: "resume" });
-        appendWorkflowEvent({
-          issueId,
-          type: "human_action.resolved",
-          actorType: "system",
-          stage: issue.status,
-          payload: { actionType: "product_scope_decision", choice: "resume" },
-        });
-      }
-      return startWorkflowCore(issueId);
-    })();
+    // Stale product_scope_decision cleanup lives in startWorkflowCore so admitNext shares it.
+    const result = getDb().transaction(() => startWorkflowCore(issueId))();
     return { ok: true, ...result };
   } catch (err) {
     if (err instanceof StartPreconditionError) return { ok: false, code: err.code, error: err.message };

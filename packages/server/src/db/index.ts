@@ -354,6 +354,28 @@ export function migrate(): void {
     `);
   }
 
+  // NOT-103: sequential issue admission queue.
+  const queueEntries = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'queue_entries'")
+    .get() as { name: string } | undefined;
+  if (!queueEntries) {
+    db.exec(`
+      CREATE TABLE queue_entries (
+        id TEXT PRIMARY KEY,
+        issue_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        enqueued_at TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('queued', 'admitted', 'removed')),
+        wait_reason TEXT,
+        wait_reason_at TEXT
+      );
+      CREATE UNIQUE INDEX idx_queue_entries_queued_issue
+        ON queue_entries(issue_id) WHERE state = 'queued';
+      CREATE INDEX idx_queue_entries_queued_position
+        ON queue_entries(position) WHERE state = 'queued';
+    `);
+  }
+
   seedBuiltinAgents(db);
   seedIntakeSettings(db);
   migrateLegacyAgentDeckPort(db);

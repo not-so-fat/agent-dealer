@@ -40,6 +40,7 @@ import { parseProfileSnapshot } from "@agent-dealer/shared";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
+import { admitNext } from "./admission.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
 import { deferLeasedWorkItemForUsageCap, type UsageCappedOutcome } from "./usage-cap-defer.js";
@@ -290,6 +291,13 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
 export async function runCoordinatorTick(opts?: { leaseOwner?: string }): Promise<number> {
   // NOT-102: finish auto-merges parked before a crash (no in-memory pendingAutoMerge left).
   await recoverStrandedAutoMerges();
+  // NOT-103: level-triggered admission — free slot + eligible queued entry → startWorkflowCore.
+  // Not hooked into terminal transitions; polling recovers correctly after restart.
+  try {
+    await admitNext();
+  } catch (err) {
+    console.error("[coordinator] admitNext", err);
+  }
   const leaseOwner = opts?.leaseOwner ?? `loop-${process.pid}-${uuid().slice(0, 8)}`;
   let started = 0;
   while (active.size < coordinatorConfig.maxConcurrency) {

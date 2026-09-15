@@ -24,6 +24,9 @@ function printUsage(): void {
   agent-dealer issue show <id> [--include evidence]
   agent-dealer issue start <id>
   agent-dealer issue guide <id> --message M
+  agent-dealer queue add <issueId>
+  agent-dealer queue remove <issueId>
+  agent-dealer queue list
   agent-dealer action list
   agent-dealer action resolve <id> --choice C --by NAME
   agent-dealer --version
@@ -140,6 +143,11 @@ export async function runCli(argv: string[]): Promise<number> {
   if (cmd === "issue") {
     const { runIssueCommand } = await import("./issue.js");
     return runIssueCommand(args.slice(1));
+  }
+
+  if (cmd === "queue") {
+    const { runQueueCommand } = await import("./queue.js");
+    return runQueueCommand(args.slice(1));
   }
 
   if (cmd === "action") {

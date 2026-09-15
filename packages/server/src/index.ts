@@ -9,6 +9,7 @@ import { migrate } from "./db/index.js";
 import { writeServerPidFile, removeServerPidFile } from "./server-liveness.js";
 import { registerRoutes } from "./routes/index.js";
 import { registerIssueRoutes } from "./routes/issues.js";
+import { registerQueueRoutes } from "./routes/queue.js";
 import { registerHumanActionRoutes } from "./routes/human-actions.js";
 import { startQueue, recoverOrphanedRuns } from "./queue/dispatcher.js";
 import { recoverCoordinator } from "./coordinator/recovery.js";
@@ -63,6 +64,7 @@ async function main(): Promise<void> {
   await app.register(cors, { origin: true });
   await registerRoutes(app);
   await registerIssueRoutes(app);
+  await registerQueueRoutes(app);
   await registerHumanActionRoutes(app);
 
   const uiDist = await registerStaticUi(app);
