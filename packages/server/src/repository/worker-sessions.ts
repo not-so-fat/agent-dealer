@@ -180,6 +180,25 @@ export function getActiveWorkerSessionForIssue(issueId: string): WorkerSession |
   return row ? rowToSession(row) : null;
 }
 
+/**
+ * Latest terminal session that recorded a failure reason (NOT-113 detail strip).
+ * Prefers failed/timed_out; also includes done/cancelled rows that still carry errorJson
+ * (e.g. dirty_worktree completions that preserve the worktree but surface auth death).
+ */
+export function getLatestFailedWorkerSessionForIssue(issueId: string): WorkerSession | null {
+  const row = getDb()
+    .prepare(
+      `SELECT * FROM worker_sessions
+       WHERE issue_id = ?
+         AND error_json IS NOT NULL
+         AND status IN ('failed', 'timed_out', 'done', 'cancelled')
+       ORDER BY COALESCE(completed_at, updated_at) DESC, created_at DESC
+       LIMIT 1`
+    )
+    .get(issueId) as WorkerSessionRow | undefined;
+  return row ? rowToSession(row) : null;
+}
+
 export interface CompleteSessionPatch {
   status: Extract<WorkerSessionStatus, "done" | "failed" | "timed_out" | "cancelled">;
   exitCode?: number | null;

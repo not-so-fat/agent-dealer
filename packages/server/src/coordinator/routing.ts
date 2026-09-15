@@ -4,7 +4,8 @@ import type { ReviewerResult } from "./reviewer-result.js";
 export type DeveloperOutcome =
   | { kind: "clean_handoff"; branch: string; headSha: string; baseSha: string; prNumber: number; prUrl: string }
   | { kind: "no_pr" }
-  | { kind: "dirty_worktree" }
+  /** Optional `reason` surfaces auth/runtime classifiers (NOT-113) while keeping preservation. */
+  | { kind: "dirty_worktree"; reason?: string }
   /** Local commits exist but the coordinator's own push was rejected (e.g. non-fast-forward). */
   | { kind: "unpushed_commit"; reason: string }
   /** A prior round's worktree still holds the issue branch and can't be safely reused/removed
@@ -12,20 +13,20 @@ export type DeveloperOutcome =
   | { kind: "worktree_conflict"; path: string; reason: string; recoveryCommands: string[] }
   | { kind: "checks_failed"; details?: string }
   /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll. */
-  | { kind: "timed_out" }
+  | { kind: "timed_out"; reason?: string }
   /** git/gh tooling itself errored during verification — not the agent's fault.
    * When `afterPush` is set, the branch is already on the remote: infra retry should
    * re-run coordinator publish only (no new agent session). */
   | { kind: "adapter_failure"; reason: string; afterPush?: { branch: string } }
-  | { kind: "session_failed" }
+  | { kind: "session_failed"; reason?: string }
   /** Runtime account usage cap — defer until unavailable_until, not an infra failure (NOT-111). */
   | { kind: "usage_capped"; until: string; reason: string; evidence?: unknown };
 
 export type ReviewerOutcome =
   | { kind: "verdict"; result: ReviewerResult }
   | { kind: "stale"; currentHeadSha: string }
-  | { kind: "session_failed" }
-  | { kind: "publish_failed" }
+  | { kind: "session_failed"; reason?: string }
+  | { kind: "publish_failed"; reason?: string }
   | { kind: "usage_capped"; until: string; reason: string; evidence?: unknown };
 
 export interface RouteLimits {
@@ -68,7 +69,14 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
       return { next: "spawn_reviewer", headSha: outcome.headSha };
     case "dirty_worktree":
       // Never spends any budget — an unclean handoff is preserved for inspection, not retried blindly.
-      return { next: "human_action", actionType: "policy_escalation", reason: "Developer worktree has uncommitted changes after the session ended." };
+      // Prefer classified reason (e.g. Cursor keychain died mid-run) when the effect attached one.
+      return {
+        next: "human_action",
+        actionType: "policy_escalation",
+        reason:
+          outcome.reason ??
+          "Developer worktree has uncommitted changes after the session ended.",
+      };
     case "unpushed_commit":
       // Same bucket as dirty_worktree: local work exists that must not be silently discarded
       // or force-retried — a human decides how to resolve the rejected push.
@@ -115,9 +123,9 @@ function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "sessi
     case "no_pr":
       return "Developer session produced no PR.";
     case "session_failed":
-      return "Developer session failed or crashed.";
+      return outcome.reason ?? "Developer session failed or crashed.";
     case "timed_out":
-      return "Developer session timed out.";
+      return outcome.reason ?? "Developer session timed out.";
     case "checks_failed":
       return "Developer's PR checks failed.";
     case "adapter_failure":
@@ -136,7 +144,7 @@ export type ReviewerRouteResult =
    * let the coordinator spawn reviewer sessions indefinitely. */
   | { next: "retry_reviewer_at_new_head"; headSha: string }
   /** Bounded infra retry — a fresh reviewer session at the SAME already-verified head. */
-  | { next: "retry_reviewer"; headSha: string }
+  | { next: "retry_reviewer"; headSha: string; reason: string }
   | {
       next: "human_action";
       actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision";
@@ -162,10 +170,11 @@ export function routeReviewerOutcome(
     case "publish_failed": {
       const reason =
         outcome.kind === "session_failed"
-          ? "Reviewer session failed, timed out, its worktree checkout failed, or its output was unparseable."
-          : "Review publication to GitHub failed.";
+          ? (outcome.reason ??
+            "Reviewer session failed, timed out, its worktree checkout failed, or its output was unparseable.")
+          : (outcome.reason ?? "Review publication to GitHub failed.");
       return infraAttemptsRemain(limits)
-        ? { next: "retry_reviewer", headSha: pinnedHeadSha }
+        ? { next: "retry_reviewer", headSha: pinnedHeadSha, reason }
         : { next: "human_action", actionType: "policy_escalation", reason: `${reason} (infra-attempt limit reached).` };
     }
     case "usage_capped":

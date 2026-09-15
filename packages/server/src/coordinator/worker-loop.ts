@@ -44,6 +44,7 @@ import { admitNext } from "./admission.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
 import { deferLeasedWorkItemForUsageCap, type UsageCappedOutcome } from "./usage-cap-defer.js";
+import { outcomeShouldRecordError, reasonForWorkerFailedEvent } from "./failure-reason.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -52,6 +53,8 @@ export const coordinatorConfig = {
     return num("MAX_COORDINATOR_CONCURRENCY", 2);
   },
   get leaseMs(): number {
+    // Default 60s — coordinator Node-worker liveness, not Cursor think time. See
+    // docs/TROUBLESHOOTING.md#coordinator-lease--heartbeat-not-113 (NOT-113 decision).
     return num("COORDINATOR_LEASE_MS", 60_000);
   },
   get heartbeatMs(): number {
@@ -126,7 +129,13 @@ function handleEffectFailure(itemId: string, leaseToken: string, error: unknown)
     const issue = getIssue(dead.issueId);
     const instance = getActiveWorkflowInstance(dead.issueId);
     if (issue && instance && instance.id === dead.workflowInstanceId) {
-      routeAppliedOutcome(issue, instance, dead, { kind: "session_failed" });
+      const reason =
+        error && typeof error === "object" && "reason" in error && typeof (error as { reason: unknown }).reason === "string"
+          ? (error as { reason: string }).reason
+          : error && typeof error === "object" && "error" in error && typeof (error as { error: unknown }).error === "string"
+            ? (error as { error: string }).error
+            : String(error);
+      routeAppliedOutcome(issue, instance, dead, { kind: "session_failed", reason });
     }
   })();
 }
@@ -280,7 +289,17 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
         : isFailureOutcome(outcome)
           ? "failed"
           : "done";
-  safeCompleteSession(session.id, sessionStatus);
+  // NOT-113: persist a prose reason on failure-ish completions (including dirty_worktree,
+  // which stays status=done for preservation but still needs errorJson for the detail strip).
+  const errorPayload = outcomeShouldRecordError(outcome)
+    ? {
+        reason: reasonForWorkerFailedEvent({
+          outcome,
+          logPath: session.logPath,
+        }),
+      }
+    : undefined;
+  safeCompleteSession(session.id, sessionStatus, errorPayload);
 }
 
 /**

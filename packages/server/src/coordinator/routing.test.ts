@@ -233,7 +233,11 @@ test("a head that keeps moving faster than the reviewer can catch up eventually 
 
 test("reviewer session_failed is bounded-retried at the SAME pinned head, not the developer", () => {
   const outcome: ReviewerOutcome = { kind: "session_failed" };
-  assert.deepStrictEqual(routeReviewerOutcome(outcome, INFRA_ATTEMPTS_LEFT, PINNED_HEAD), { next: "retry_reviewer", headSha: PINNED_HEAD });
+  assert.deepStrictEqual(routeReviewerOutcome(outcome, INFRA_ATTEMPTS_LEFT, PINNED_HEAD), {
+    next: "retry_reviewer",
+    headSha: PINNED_HEAD,
+    reason: "Reviewer session failed, timed out, its worktree checkout failed, or its output was unparseable.",
+  });
 });
 
 test("reviewer session_failed escalates once the infra-attempt limit is reached", () => {
@@ -245,7 +249,11 @@ test("reviewer session_failed escalates once the infra-attempt limit is reached"
 
 test("review publish_failed is bounded-retried rather than immediately confused with a code finding", () => {
   const outcome: ReviewerOutcome = { kind: "publish_failed" };
-  assert.deepStrictEqual(routeReviewerOutcome(outcome, INFRA_ATTEMPTS_LEFT, PINNED_HEAD), { next: "retry_reviewer", headSha: PINNED_HEAD });
+  assert.deepStrictEqual(routeReviewerOutcome(outcome, INFRA_ATTEMPTS_LEFT, PINNED_HEAD), {
+    next: "retry_reviewer",
+    headSha: PINNED_HEAD,
+    reason: "Review publication to GitHub failed.",
+  });
 });
 
 test("review publish_failed escalates once the infra-attempt limit is reached", () => {
@@ -257,5 +265,9 @@ test("review publish_failed escalates once the infra-attempt limit is reached", 
 
 test("a reviewer infra-class failure never spends the review-round budget, even at the review-round limit", () => {
   const outcome: ReviewerOutcome = { kind: "session_failed" };
-  assert.deepStrictEqual(routeReviewerOutcome(outcome, REVIEW_AT_LIMIT, PINNED_HEAD), { next: "retry_reviewer", headSha: PINNED_HEAD });
+  assert.deepStrictEqual(routeReviewerOutcome(outcome, REVIEW_AT_LIMIT, PINNED_HEAD), {
+    next: "retry_reviewer",
+    headSha: PINNED_HEAD,
+    reason: "Reviewer session failed, timed out, its worktree checkout failed, or its output was unparseable.",
+  });
 });

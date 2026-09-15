@@ -44,6 +44,7 @@ import { createIssueArtifact, latestIssueArtifact } from "../repository/artifact
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
 import { recordUsageCapFromLog } from "../runners/usage-cap.js";
+import { reasonForDirtyWorktree, reasonForSessionCrash } from "./failure-reason.js";
 import {
   emitSessionMilestone,
   setLiveIntent,
@@ -549,7 +550,7 @@ export async function runDeveloperEffect(
     const usageCap = recordUsageCapFromLog(spawned.logPath, runtime);
     if (usageCap) {
       const clean = await isWorktreeClean(worktreePath).catch(() => false);
-      if (!clean) return { kind: "dirty_worktree" };
+      if (!clean) return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath) };
       await bestEffortRemove(issue.repo, worktreePath);
       return {
         kind: "usage_capped",
@@ -567,10 +568,14 @@ export async function runDeveloperEffect(
       // failed as a confusing adapter_failure two rounds later. dirty_worktree (which
       // preserves the checkout and escalates without consuming a round) must win here,
       // exactly as it does when the agent exits 0 but leaves the worktree dirty below.
+      // NOT-113: when Cursor stderr shows keychain/auth death, keep dirty_worktree but
+      // attach an actionable reason so the UI isn't just "dirty tree".
       const clean = await isWorktreeClean(worktreePath).catch(() => false);
-      if (!clean) return { kind: "dirty_worktree" };
+      if (!clean) return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath) };
       await bestEffortRemove(issue.repo, worktreePath);
-      return spawned.timedOut ? { kind: "timed_out" } : { kind: "session_failed" };
+      return spawned.timedOut
+        ? { kind: "timed_out", reason: reasonForSessionCrash({ timedOut: true, logPath: spawned.logPath }) }
+        : { kind: "session_failed", reason: reasonForSessionCrash({ timedOut: false, logPath: spawned.logPath }) };
     }
 
     // Persisted as soon as the session itself completes — a review round found these
@@ -593,7 +598,7 @@ export async function runDeveloperEffect(
     });
 
     if (!(await isWorktreeClean(worktreePath))) {
-      return { kind: "dirty_worktree" };
+      return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath) };
     }
 
     const ahead = await commitsAhead({ worktreePath, baseRef: `origin/${issue.baseBranch}` });

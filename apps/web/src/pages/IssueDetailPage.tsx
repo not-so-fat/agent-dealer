@@ -100,7 +100,7 @@ export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
   if (error) return <div className="p-6 text-red-300 text-sm">{error}</div>;
   if (!detail) return <div className="p-6 text-white/50 text-sm">Loading…</div>;
 
-  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, queued } = detail;
+  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, latestSessionFailure, queued } = detail;
   const developerAgent = agents.find((a) => a.id === issue.developerAgentId);
   const developerBlocked = developerAgent && !developerAgent.healthy;
   const developerBlockReason = developerAgent?.issues[0]?.message ?? "Developer agent is unhealthy";
@@ -114,6 +114,8 @@ export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
     activeWorkerSession &&
     activeWorkerSession.status === "running" &&
     (issue.status === "developing" || issue.status === "reviewing" || issue.status === "repairing");
+  // Hide the failure strip while a live session is running — the live strip owns that slot.
+  const showLatestFailure = Boolean(latestSessionFailure) && !sessionLive;
 
   const submitGuidance = async () => {
     if (!guidance.trim()) return;
@@ -303,6 +305,24 @@ export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
             {activeWorkerSession.logPath && (
               <p className="text-xs text-white/40 font-mono break-all" title={activeWorkerSession.logPath}>
                 Log: {shortPath(activeWorkerSession.logPath) ?? activeWorkerSession.logPath}
+              </p>
+            )}
+          </div>
+        )}
+
+        {showLatestFailure && latestSessionFailure && (
+          <div className="mb-4 p-3 rounded border border-red-400/30 bg-red-500/10 space-y-1.5">
+            <p className="text-xs text-red-300 font-medium uppercase tracking-wide">Latest session failure</p>
+            <p className="text-sm text-white/90 whitespace-pre-wrap break-words">{latestSessionFailure.reason}</p>
+            <p className="text-xs text-white/45">
+              {latestSessionFailure.role ? <span className="capitalize">{latestSessionFailure.role}</span> : "Worker"}
+              {latestSessionFailure.outcome ? ` · ${latestSessionFailure.outcome}` : ""}
+              {` · ${new Date(latestSessionFailure.when).toLocaleString()}`}
+              {` · infra ${latestSessionFailure.infraAttempts}/${latestSessionFailure.maxInfraAttempts}`}
+            </p>
+            {latestSessionFailure.logPath && (
+              <p className="text-xs text-white/40 font-mono break-all" title={latestSessionFailure.logPath}>
+                Log: {shortPath(latestSessionFailure.logPath) ?? latestSessionFailure.logPath}
               </p>
             )}
           </div>
