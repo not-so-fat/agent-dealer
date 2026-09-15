@@ -10,6 +10,7 @@ import { getDb } from "../db/index.js";
 import { getAgent } from "../repository/agents.js";
 import { getIssue, listIssues } from "../repository/issues.js";
 import {
+  getQueuedEntryForIssue,
   listQueuedEntries,
   markQueueEntryAdmitted,
   markQueueEntryRemoved,
@@ -94,10 +95,13 @@ async function checkAgentsHealthy(issue: Issue): Promise<EligibilityResult> {
   return { ok: true };
 }
 
-/** Status must be ready and checkIssueReadiness must pass — never open product_scope_decision. */
+/**
+ * Status must be startable (`ready`, or `needs_human` with no active workflow) and
+ * checkIssueReadiness must pass — never open product_scope_decision.
+ */
 function issueReadinessRule(issue: Issue): EligibilityResult {
-  if (issue.status !== "ready") {
-    return { ok: false, reason: `issue status is ${issue.status} — need ready` };
+  if (issue.status !== "ready" && issue.status !== "needs_human") {
+    return { ok: false, reason: `issue status is ${issue.status} — not startable` };
   }
   if (getActiveWorkflowInstance(issue.id)) {
     return { ok: false, reason: "issue already has an active workflow" };
@@ -196,6 +200,14 @@ export async function admitNext(): Promise<{ issueId: string } | null> {
 
     try {
       getDb().transaction(() => {
+        // Dequeue race: operator may have removed the entry during async eligibility checks.
+        if (!getQueuedEntryForIssue(entry.issueId)) {
+          throw new StartPreconditionError(409, "queue entry no longer queued");
+        }
+        // Re-check capacity inside the txn so a concurrent Manual Start cannot double-admit.
+        if (capacityPolicy(listOccupyingIssues()) <= 0) {
+          throw new StartPreconditionError(409, "no free admission slots");
+        }
         // Force-admit lives inside startWorkflowCore — single owner for start-path-queue-sync.
         startWorkflowCore(entry.issueId);
       })();
@@ -207,6 +219,10 @@ export async function admitNext(): Promise<{ issueId: string } | null> {
           : err instanceof Error
             ? err.message
             : String(err);
+      // Entry was dequeued — nothing to record; try the next entry.
+      if (message.includes("no longer queued")) continue;
+      // Capacity exhausted mid-walk (concurrent Manual Start) — stop; do not write wait reasons.
+      if (message.includes("no free admission slots")) return null;
       setQueueWaitReason(entry.id, message);
     }
   }
