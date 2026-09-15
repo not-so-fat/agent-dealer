@@ -20,6 +20,8 @@ agent-dealer separates **development** (repo work) and **production** (local alw
 mkdir -p ~/.agent-dealer-dev
 cp scripts/templates/dev.env.example ~/.agent-dealer-dev/.env
 # Edit ~/.agent-dealer-dev/.env — add LINEAR_API_KEY, etc.
+npm install
+npm run build -w @agent-dealer/shared   # server resolves @agent-dealer/shared/dist
 npm run db:migrate
 npm run dev
 ```
@@ -32,6 +34,8 @@ Dashboard: **http://localhost:3222** · API: **http://127.0.0.1:3221**
 mkdir -p ~/.agent-dealer
 cp scripts/templates/prod.env.example ~/.agent-dealer/.env
 # Edit ~/.agent-dealer/.env — add LINEAR_API_KEY, etc.
+npm install
+npm run build                           # start runs dist/ — build before starting
 npm run db:migrate:prod
 npm run start
 ```
