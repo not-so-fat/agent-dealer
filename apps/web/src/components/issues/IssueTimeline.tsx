@@ -12,6 +12,7 @@ const LABELS: Record<string, (e: WorkflowEvent) => string> = {
   "worker.started": (e) => `${roleNoun(e.actorType)} started${e.round ? ` (round ${e.round})` : ""}`,
   "worker.completed": (e) => `${roleNoun(e.actorType)} finished${e.round ? ` (round ${e.round})` : ""}`,
   "worker.failed": (e) => `${roleNoun(e.actorType)} failed${e.round ? ` (round ${e.round})` : ""}`,
+  "worker.deferred": (e) => `${roleNoun(e.actorType)} deferred${e.round ? ` (round ${e.round})` : ""}`,
   "worktree.ready": () => "Worktree ready",
   "deck.connected": () => "Deck connected",
   "brief.resolved": () => "Brief resolved",
@@ -77,6 +78,7 @@ function EventBody({ e }: { e: WorkflowEvent }) {
     e.type === "worker.started" ||
     e.type === "worker.completed" ||
     e.type === "worker.failed" ||
+    e.type === "worker.deferred" ||
     e.type === "worktree.ready" ||
     e.type === "deck.connected" ||
     e.type === "brief.resolved" ||
@@ -93,6 +95,8 @@ function EventBody({ e }: { e: WorkflowEvent }) {
       snapshot?: string;
       commitsAhead?: number;
       branch?: string;
+      reason?: string;
+      until?: string;
     }>(e.payloadJson);
     if (!payload) return null;
     const bits: string[] = [];
@@ -104,6 +108,12 @@ function EventBody({ e }: { e: WorkflowEvent }) {
     if (payload.branch) bits.push(payload.branch);
     if (payload.commitsAhead != null) bits.push(`${payload.commitsAhead} ahead`);
     if (payload.snapshot) bits.push(payload.snapshot);
+    if (e.type === "worker.deferred") {
+      if (payload.reason) bits.push(payload.reason);
+      if (payload.until) {
+        bits.push(`until ${new Date(payload.until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+      }
+    }
     if (bits.length === 0) return null;
     return <span className="text-xs text-white/40">· {bits.join(" · ")}</span>;
   }

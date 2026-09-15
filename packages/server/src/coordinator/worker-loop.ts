@@ -34,13 +34,15 @@ import {
   type WorkItem,
   type WorkItemKind,
 } from "../repository/work-items.js";
-import { applyCompletion, routeAppliedOutcome } from "./commands.js";
+import { applyCompletion, routeAppliedOutcome, routeCapEscalation } from "./commands.js";
 import { getEffectHandler } from "./effect-registry.js";
 import { parseProfileSnapshot } from "@agent-dealer/shared";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
 import { workerSessionPayload } from "./session-progress.js";
+import { runtimeAvailability } from "../repository/runtime-availability.js";
+import { deferLeasedWorkItemForUsageCap, type UsageCappedOutcome } from "./usage-cap-defer.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -160,7 +162,28 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     snapshot = agent ? buildProfileSnapshot(agent, role) : null;
   }
 
-  // Create + bind + start the session and emit worker.started atomically, so a crash never
+  const runtime = snapshot?.runtime ?? null;
+  if (runtime) {
+    const avail = runtimeAvailability(runtime);
+    if (!avail.available) {
+      const cap: UsageCappedOutcome = {
+        kind: "usage_capped",
+        until: avail.until,
+        reason: avail.reason,
+      };
+      const deferResult = deferLeasedWorkItemForUsageCap(claimed, leaseToken, cap, issue, instance);
+      if (deferResult.deferred) return;
+      if (deferResult.escalated) {
+        getDb().transaction(() => {
+          const finished = finishWorkItem(claimed.id, leaseToken, { status: "done", result: cap });
+          if (finished) routeCapEscalation(issue, instance, finished, cap);
+        })();
+      }
+      return;
+    }
+  }
+
+  // Create + bind + start the session
   // leaves a running session that recovery (which keys off work_items) cannot locate. The
   // bind is fenced on the lease token: if this attempt lost its lease between claim and
   // here, the transaction rolls back (session creation undone) and the attempt is dropped.
@@ -248,7 +271,14 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     const { triggerIssueReflect } = await import("./reflect-trigger.js");
     void triggerIssueReflect(claimed.issueId).catch(() => {});
   }
-  const sessionStatus = isTimedOutOutcome(outcome) ? "timed_out" : isFailureOutcome(outcome) ? "failed" : "done";
+  const sessionStatus =
+    outcome.kind === "usage_capped"
+      ? "done"
+      : isTimedOutOutcome(outcome)
+        ? "timed_out"
+        : isFailureOutcome(outcome)
+          ? "failed"
+          : "done";
   safeCompleteSession(session.id, sessionStatus);
 }
 

@@ -63,8 +63,18 @@ import {
 import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } from "./projection.js";
 import { parseHumanResolution, resolveHumanActionOutcome, type HumanResolution } from "./human-resolution.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
+import {
+  capEscalationEvents,
+  deferLeasedWorkItemForUsageCap,
+  formatCapEscalationReason,
+  usageCapDeferralStartedAt,
+  type UsageCappedOutcome,
+} from "./usage-cap-defer.js";
 
 export const WORKFLOW_VERSION = "dev_reviewer_v1";
+
+/** NOT-103 queue admission reads the same cap state as the coordinator deferral path. */
+export { runtimeAvailability } from "../repository/runtime-availability.js";
 
 /**
  * The frozen issue-level snapshot design §"Prepare task snapshot" requires: written once,
@@ -320,6 +330,10 @@ export async function applyCompletion(
   leaseToken: string,
   outcome: DeveloperOutcome | ReviewerOutcome
 ): Promise<ApplyResult> {
+  if (outcome.kind === "usage_capped") {
+    return applyUsageCapCompletion(workItemId, leaseToken, outcome);
+  }
+
   const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
     if (!before) return { applied: false, reason: "not_found" };
@@ -347,12 +361,121 @@ export async function applyCompletion(
   return routed;
 }
 
+function parseWorkItemPayload(json: string | null): Record<string, unknown> {
+  if (!json) return {};
+  try {
+    return JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+/** NOT-111: defer without finishing the work item or spending infra/attempt budgets. */
+function applyUsageCapCompletion(
+  workItemId: string,
+  leaseToken: string,
+  cap: UsageCappedOutcome
+): ApplyResult {
+  return getDb().transaction((): ApplyResult => {
+    const before = getWorkItem(workItemId);
+    if (!before) return { applied: false, reason: "not_found" };
+    if (before.status === "done" || before.status === "dead" || before.status === "cancelled") {
+      return { applied: false, reason: "already_terminal" };
+    }
+
+    const issue = getIssue(before.issueId);
+    if (!issue) return { applied: false, reason: "not_found" };
+    const instance = getActiveWorkflowInstance(before.issueId);
+    if (!instance || instance.id !== before.workflowInstanceId) {
+      return { applied: false, reason: "no_active_instance" };
+    }
+
+    const deferResult = deferLeasedWorkItemForUsageCap(before, leaseToken, cap, issue, instance);
+    if (deferResult.deferred) {
+      const issueNow = getIssue(issue.id)!;
+      return {
+        applied: true,
+        issueStatus: issueNow.status,
+        nextWorkItemId: before.id,
+        humanActionId: null,
+        instanceCompleted: false,
+      };
+    }
+    if (deferResult.escalated) {
+      const item = finishWorkItem(workItemId, leaseToken, { status: "done", result: cap });
+      if (!item) return { applied: false, reason: "lease_lost" };
+      return routeCapEscalation(issue, instance, item, cap);
+    }
+    return { applied: false, reason: "lease_lost" };
+  })();
+}
+
 /**
- * Projects an already-terminal work item's outcome onto the workflow: transition, events,
- * findings, and the single next effect. The caller has already CAS-marked the item
- * terminal and is inside a transaction — used by applyCompletion (success) and by the
- * recovery / handler-failure paths (a dead-lettered item routed as `session_failed`).
+ * Deferral ceiling exceeded — escalate with cap evidence without spending infra attempts.
+ * Used when applyCompletion or the worker loop cannot defer any longer.
  */
+export function routeCapEscalation(
+  issue: Issue,
+  instance: WorkflowInstance,
+  item: WorkItem,
+  cap: UsageCappedOutcome
+): ApplyResult {
+  const payload = parseWorkItemPayload(item.payloadJson);
+  const firstDeferredAt = usageCapDeferralStartedAt(payload) ?? new Date().toISOString();
+  const reason = formatCapEscalationReason(cap, firstDeferredAt);
+  const role = item.kind === "developer" ? "developer" : "reviewer";
+
+  const ev = eventEmitter(issue, instance, item.workerSessionId, "needs_human", issue.currentRound);
+  for (const type of capEscalationEvents()) {
+    const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
+    ev.emit(type, {
+      actorType: role,
+      payload: {
+        ...workerSessionPayload({
+          runtime: session?.runtime,
+          model: session?.model,
+          sessionId: item.workerSessionId ?? "",
+          worktreePath: session?.worktreePath,
+        }),
+        outcome: "usage_capped",
+        until: cap.until,
+        reason: cap.reason,
+        evidence: cap.evidence,
+      },
+    });
+  }
+
+  applyProjectionTransition(
+    issue,
+    {
+      issueStatus: "needs_human",
+      currentOwner: "human",
+      currentIntent: reason,
+      events: capEscalationEvents(),
+    },
+    {}
+  );
+
+  const action = createHumanAction({
+    issueId: issue.id,
+    workflowInstanceId: instance.id,
+    actionType: "policy_escalation",
+    reason,
+    question: questionFor("policy_escalation", reason),
+    evidence: { usageCap: cap, firstDeferredAt },
+    responseOptions: responseOptionsFor("policy_escalation"),
+  });
+  ev.emit("human_action.requested", { payload: { actionType: "policy_escalation", actionId: action.id } });
+
+  return {
+    applied: true,
+    issueStatus: "needs_human",
+    nextWorkItemId: null,
+    humanActionId: action.id,
+    instanceCompleted: false,
+  };
+}
+
 export function routeAppliedOutcome(
   issue: Issue,
   instance: WorkflowInstance,

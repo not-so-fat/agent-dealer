@@ -88,6 +88,8 @@ export function projectDeveloperRoute(
         effect: { kind: "human_action", actionType: route.actionType, reason: route.reason },
         advance: "none",
       };
+    case "defer_work":
+      throw new Error("defer_work is applied by applyUsageCapCompletion, not projection");
   }
 }
 
@@ -185,5 +187,7 @@ export function projectReviewerRoute(
         advance: "none",
         hasVerdict,
       };
+    case "defer_work":
+      throw new Error("defer_work is applied by applyUsageCapCompletion, not projection");
   }
 }

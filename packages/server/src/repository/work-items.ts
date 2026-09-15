@@ -306,6 +306,51 @@ export interface RequeueOpts {
   onlyIfExpiredBefore?: string;
 }
 
+export interface DeferWorkItemOpts {
+  availableAt: string;
+  error: unknown;
+  /** Undo the claim-time attempt_count bump — usage-cap deferral must not spend attempts. */
+  revertAttemptCount?: boolean;
+  payloadJson?: string;
+}
+
+/**
+ * Returns a leased item to `pending` behind a usage-cap gate, optionally undoing the claim
+ * attempt_count bump. Fenced on the lease token like requeueWorkItem.
+ */
+export function deferWorkItem(
+  id: string,
+  leaseToken: string,
+  opts: DeferWorkItemOpts
+): WorkItem | null {
+  const now = new Date().toISOString();
+  const row = getDb()
+    .prepare(`
+      UPDATE work_items SET
+        status = 'pending',
+        error_json = @error,
+        available_at = @available_at,
+        attempt_count = CASE WHEN @revert = 1 THEN MAX(0, attempt_count - 1) ELSE attempt_count END,
+        payload_json = COALESCE(@payload_json, payload_json),
+        lease_owner = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        updated_at = @now
+      WHERE id = @id AND status = 'leased' AND lease_token = @token
+      RETURNING *
+    `)
+    .get({
+      id,
+      token: leaseToken,
+      error: JSON.stringify(opts.error),
+      available_at: opts.availableAt,
+      revert: opts.revertAttemptCount ? 1 : 0,
+      payload_json: opts.payloadJson ?? null,
+      now,
+    }) as WorkItemRow | undefined;
+  return row ? rowToWorkItem(row) : null;
+}
+
 /**
  * Returns a leased item to `pending` behind a backoff gate for another attempt, fenced on
  * the lease token. Returns false when the token no longer holds the lease (a concurrent

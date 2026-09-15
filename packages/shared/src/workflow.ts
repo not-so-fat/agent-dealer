@@ -19,6 +19,7 @@ export const WorkflowEventType = z.enum([
   "worker.started",
   "worker.completed",
   "worker.failed",
+  "worker.deferred",
   /** Mid-session milestones (NOT-109) — low volume, not per-tool-call. */
   "worktree.ready",
   "deck.connected",

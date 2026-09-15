@@ -11,6 +11,25 @@ import {
   codexBinExists,
 } from "../cli-env.js";
 import { checkAgentDeckHealth, fetchDecks, isAgentDeckMcpRegistered, type DeckAccessResult } from "./agent-deck.js";
+import { runtimeAvailability } from "../repository/runtime-availability.js";
+
+const RUNTIME_LABEL: Record<Runtime, string> = {
+  claude_code: "Claude",
+  cursor_local: "Cursor",
+  codex_local: "Codex",
+};
+
+function capHealthIssues(runtime: Runtime): AgentHealthIssue[] {
+  const avail = runtimeAvailability(runtime);
+  if (avail.available) return [];
+  const until = new Date(avail.until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return [
+    {
+      code: "usage_capped",
+      message: `${RUNTIME_LABEL[runtime]} capped until ${until}`,
+    },
+  ];
+}
 
 const RUNTIME_CACHE_MS = 60_000;
 const runtimeIssueCache = new Map<Runtime, { at: number; issues: AgentHealthIssue[] }>();
@@ -49,25 +68,28 @@ function runCommand(
 }
 
 async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHealthIssue[]> {
+  const issues: AgentHealthIssue[] = [];
+
   if (runtime === "claude_code") {
-    if (claudeBinExists()) return [];
+    if (claudeBinExists()) return issues;
     const ver = await runCommand(resolveClaudeBin(), ["--version"]);
     if (!ver.ok) {
-      return [{ code: "cli_missing", message: "Claude CLI not found — install Claude Code" }];
+      issues.push({ code: "cli_missing", message: "Claude CLI not found — install Claude Code" });
     }
-    return [];
+    return issues;
   }
 
   if (runtime === "codex_local") {
     if (!codexBinExists()) {
       const ver = await runCommand(resolveCodexBin(), ["--version"]);
       if (!ver.ok) {
-        return [{ code: "cli_missing", message: "Codex CLI not found — install Codex (`codex`)" }];
+        issues.push({ code: "cli_missing", message: "Codex CLI not found — install Codex (`codex`)" });
       }
     }
     const ver = await runCommand(resolveCodexBin(), ["--version"]);
     if (!ver.ok) {
-      return [{ code: "cli_missing", message: "Codex CLI not found — install Codex (`codex`)" }];
+      issues.push({ code: "cli_missing", message: "Codex CLI not found — install Codex (`codex`)" });
+      return issues;
     }
     // `codex --version` succeeds without auth — use login status for auth health.
     const login = await runCommand(resolveCodexBin(), ["login", "status"]);
@@ -76,35 +98,36 @@ async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHealthIssue
       login.ok &&
       (out.includes("logged in") || out.includes("authenticated") || out.includes("api key"));
     if (!loggedIn) {
-      return [
-        {
-          code: "runtime_auth",
-          message: "Run `codex login` (or set OPENAI_API_KEY for automation)",
-        },
-      ];
+      issues.push({
+        code: "runtime_auth",
+        message: "Run `codex login` (or set OPENAI_API_KEY for automation)",
+      });
     }
-    return [];
+    return issues;
   }
 
   const status = await runCommand(resolveCursorBin(), cursorInvokeArgs(["status"]));
   if (!status.ok && !status.output.trim() && !cursorBinExists()) {
-    return [{ code: "cli_missing", message: "cursor-agent not found — run: curl https://cursor.com/install -fsS | bash" }];
+    issues.push({ code: "cli_missing", message: "cursor-agent not found — run: curl https://cursor.com/install -fsS | bash" });
+    return issues;
   }
   const out = status.output.toLowerCase();
   if (out.includes("not logged in") || out.includes("login required") || out.includes("not authenticated")) {
-    return [{ code: "runtime_auth", message: "Run cursor-agent login" }];
+    issues.push({ code: "runtime_auth", message: "Run cursor-agent login" });
   }
-  return [];
+  return issues;
 }
 
 async function runtimeIssues(runtime: Runtime): Promise<AgentHealthIssue[]> {
+  const capIssues = capHealthIssues(runtime);
   const cached = runtimeIssueCache.get(runtime);
   if (cached && Date.now() - cached.at < RUNTIME_CACHE_MS) {
-    return cached.issues;
+    return [...capIssues, ...cached.issues];
   }
   const issues = await runtimeIssuesUncached(runtime);
-  runtimeIssueCache.set(runtime, { at: Date.now(), issues });
-  return issues;
+  const nonCap = issues.filter((i) => i.code !== "usage_capped");
+  runtimeIssueCache.set(runtime, { at: Date.now(), issues: nonCap });
+  return [...capIssues, ...nonCap];
 }
 
 function agentSpecificIssues(
