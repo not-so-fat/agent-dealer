@@ -551,13 +551,33 @@ export async function runDeveloperEffect(
     if (usageCap) {
       const clean = await isWorktreeClean(worktreePath).catch(() => false);
       if (!clean) return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath) };
-      await bestEffortRemove(issue.repo, worktreePath);
-      return {
-        kind: "usage_capped",
-        until: usageCap.unavailableUntil,
-        reason: usageCap.reason,
-        evidence: usageCap.evidence,
-      };
+
+      const sessionOk = !spawned.timedOut && spawned.exitCode === 0;
+      const ahead = await commitsAhead({
+        worktreePath,
+        baseRef: `origin/${issue.baseBranch}`,
+      }).catch(() => 0);
+
+      // NOT-117: a successful clean tip must continue to push/PR. Cap is already recorded
+      // for future agent spawns; deferring here discarded the tip and the resume prompt
+      // looked like a blank round-1 rebuild.
+      if (!(sessionOk && ahead > 0)) {
+        await bestEffortRemove(issue.repo, worktreePath);
+        return {
+          kind: "usage_capped",
+          until: usageCap.unavailableUntil,
+          reason: usageCap.reason,
+          evidence: usageCap.evidence,
+          ...(ahead > 0
+            ? {
+                resume: {
+                  retryReason:
+                    "Prior developer session was deferred for a usage cap after local commits existed. Continue from the existing branch — do not re-implement from scratch.",
+                },
+              }
+            : {}),
+        };
+      }
     }
 
     if (spawned.timedOut || spawned.exitCode !== 0) {

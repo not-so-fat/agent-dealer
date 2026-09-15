@@ -1,0 +1,4 @@
+{"type":"assistant","message":{"content":[{"type":"text","text":"Looking at routing.ts — the message says infra-attempt limit reached when max_infra_attempts is spent."}]}}
+{"type":"tool_call","subtype":"started","call_id":"c1","tool_call":{"readToolCall":{"args":{"path":"packages/server/src/coordinator/routing.ts"}}}}
+{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"readToolCall":{"result":{"success":{"content":"      return { next: \"human_action\", actionType: \"policy_escalation\", reason: `${reason} (infra-attempt limit reached).` };\n"}}}}}
+{"type":"result","subtype":"success","is_error":false,"result":"Implemented worker failure UI.","duration_ms":1200,"session_id":"fixture-success-with-source-limit-text"}

@@ -1,12 +1,15 @@
 // packages/server/src/runners/usage-cap.ts
 //
 // NOT-111: detect hard usage-cap signals from CLI NDJSON logs and persist runtime_availability.
+// NOT-117: Cursor/Codex text fallback must not scan assistant/tool file contents (false
+// positives like "infra-attempt limit reached" in source); successful sessions never open a
+// deferral from body text alone.
 
 import fs from "node:fs";
 import type { Runtime } from "@agent-dealer/shared";
 import { usageCapFallbackCooldownMs } from "../coordinator/usage-cap-config.js";
 import { recordRuntimeAvailability } from "../repository/runtime-availability.js";
-import { parseCodexJsonl, stripStderrTrailer } from "./codex-jsonl.js";
+import { parseCodexJsonl } from "./codex-jsonl.js";
 import { parseNdjson } from "./stream-json.js";
 
 type StreamEvent = Record<string, unknown>;
@@ -17,8 +20,16 @@ export interface UsageCapDetection {
   evidence: Record<string, unknown>;
 }
 
+/** Structured / result-error prose — no bare "limit reached" (NOT-117). */
 const CAP_ERROR_RE =
-  /\b(rate limit(?:ed)?|usage limit|quota exceeded|limit reached|billing_error|subscription limit)\b/i;
+  /\b(rate\s*limit(?:ed)?|usage\s*limit|quota\s*exceeded|billing_error|subscription\s*limit)\b/i;
+
+/**
+ * Text-only fallback (stderr / error result). Requires rate|usage|quota|subscription
+ * near "limit", or an explicit billing/quota phrase — never bare "limit reached".
+ */
+const CAP_FALLBACK_RE =
+  /\b((?:rate|usage|quota|subscription)\s+limits?(?:\s+\w+){0,4}\s+reached|(?:rate|usage)\s*limit(?:ed)?|quota\s+exceeded|billing_error|subscription\s+limit)\b/i;
 
 function parseResetsAt(raw: unknown): Date | null {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return null;
@@ -145,13 +156,55 @@ function parseEventsForRuntime(raw: string, runtime: Runtime): StreamEvent[] {
   return parseNdjson(raw);
 }
 
-export function detectUsageCapFromLog(
-  logPath: string,
-  runtime: Runtime,
-  nowMs = Date.now()
-): UsageCapDetection | null {
-  if (!fs.existsSync(logPath)) return null;
-  const raw = fs.readFileSync(logPath, "utf8");
+/**
+ * True when the stream ended successfully — used to skip Codex/Cursor text fallback
+ * (NOT-117). Cursor/Claude use a non-error `result`; Codex native JSONL uses
+ * `turn.completed` (never emits `type: "result"` until normalizeCodexEvents).
+ */
+function sessionEndedSuccessfully(events: StreamEvent[], runtime: Runtime): boolean {
+  if (runtime === "codex_local") {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]!;
+      if (e.type === "turn.failed") return false;
+      if (e.type === "error") return false;
+      if (e.type === "turn.completed") return true;
+    }
+    return false;
+  }
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i]!;
+    if (e.type === "result") return !e.is_error;
+  }
+  return false;
+}
+
+/**
+ * Text fallback haystack: stderr trailer + error-result strings only — never assistant /
+ * tool / file-read bodies (NOT-117 false-positive source).
+ */
+function textFallbackHaystack(raw: string, events: StreamEvent[]): string {
+  const stderr = raw.includes("\n--- stderr ---\n") ? raw.split("\n--- stderr ---\n")[1] ?? "" : "";
+  const resultBits: string[] = [];
+  for (const e of events) {
+    if (e.type === "result" && e.is_error && typeof e.result === "string") {
+      resultBits.push(e.result);
+    }
+  }
+  return `${resultBits.join("\n")}\n${stderr}`;
+}
+
+/** Detect from an in-memory NDJSON string (unit tests). */
+export function detectUsageCapFromNdjson(raw: string, runtime: Runtime, nowMs = Date.now()): UsageCapDetection | null {
+  const events = parseEventsForRuntime(raw, runtime);
+  if (runtime === "codex_local") return codexCapFromEvents(events, runtime, nowMs);
+  return extractUsageCapFromEvents(events, runtime, nowMs);
+}
+
+/**
+ * Full-log detection including Cursor/Codex text fallback (unit tests that need the
+ * NOT-117 path without writing a temp file).
+ */
+export function detectUsageCapFromRawLog(raw: string, runtime: Runtime, nowMs = Date.now()): UsageCapDetection | null {
   const events = parseEventsForRuntime(raw, runtime);
   const fromEvents =
     runtime === "codex_local"
@@ -160,9 +213,10 @@ export function detectUsageCapFromLog(
   if (fromEvents) return fromEvents;
 
   if (runtime === "codex_local" || runtime === "cursor_local") {
-    const stderr = raw.includes("\n--- stderr ---\n") ? raw.split("\n--- stderr ---\n")[1] ?? "" : "";
-    const haystack = `${stripStderrTrailer(raw)}\n${stderr}`;
-    if (CAP_ERROR_RE.test(haystack)) {
+    // Successful sessions must not open a usage-cap deferral from log body text (NOT-117).
+    if (sessionEndedSuccessfully(events, runtime)) return null;
+    const haystack = textFallbackHaystack(raw, events);
+    if (CAP_FALLBACK_RE.test(haystack)) {
       return {
         unavailableUntil: fallbackUntil(nowMs),
         reason: capReason(runtime, "stderr/log matched usage-cap pattern"),
@@ -173,11 +227,13 @@ export function detectUsageCapFromLog(
   return null;
 }
 
-/** Detect from an in-memory NDJSON string (unit tests). */
-export function detectUsageCapFromNdjson(raw: string, runtime: Runtime, nowMs = Date.now()): UsageCapDetection | null {
-  const events = parseEventsForRuntime(raw, runtime);
-  if (runtime === "codex_local") return codexCapFromEvents(events, runtime, nowMs);
-  return extractUsageCapFromEvents(events, runtime, nowMs);
+export function detectUsageCapFromLog(
+  logPath: string,
+  runtime: Runtime,
+  nowMs = Date.now()
+): UsageCapDetection | null {
+  if (!fs.existsSync(logPath)) return null;
+  return detectUsageCapFromRawLog(fs.readFileSync(logPath, "utf8"), runtime, nowMs);
 }
 
 /** Persist a cap row when detected; returns the detection or null. */
