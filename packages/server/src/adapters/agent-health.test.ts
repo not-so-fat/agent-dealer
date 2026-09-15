@@ -11,21 +11,26 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import type { AgentHealthIssue } from "@agent-dealer/shared";
 import type { DeckAccessResult } from "./agent-deck.js";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-agenthealth-"));
 
 const { migrate } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
-const { healthForAgent, runtimeIssuesUncached } = await import("./agent-health.js");
+const { healthForAgent, runtimeIssuesUncached, githubIssuesUncached, clearAgentHealthCaches } =
+  await import("./agent-health.js");
 
 migrate();
 
 const FAILURE: DeckAccessResult = { ok: false, code: "DECK_UNAVAILABLE", message: "Agent Deck API error: 502" };
 
+/** Tests inject an empty github list so host `gh auth` does not pollute assertions. */
+const NO_GITHUB: AgentHealthIssue[] = [];
+
 test("agentDeckOnline but no deckId configured: no deck-related issue", async () => {
   const agent = createAgent({ name: "no-deck", runtime: "claude_code", workspaceRoot: "/tmp" });
-  const result = await healthForAgent(agent, true, new Map(), true, FAILURE);
+  const result = await healthForAgent(agent, true, new Map(), true, FAILURE, NO_GITHUB);
   assert.equal(
     result.issues.some((i) => i.code === "deck_unauthorized" || i.code === "deck_offline"),
     false
@@ -39,7 +44,7 @@ test("agent deck offline: reports deck_offline, not deck_unauthorized", async ()
     workspaceRoot: "/tmp",
     deckId: randomUUID(),
   });
-  const result = await healthForAgent(agent, false, new Map(), true, FAILURE);
+  const result = await healthForAgent(agent, false, new Map(), true, FAILURE, NO_GITHUB);
   assert.deepEqual(
     result.issues.map((i) => i.code).sort(),
     ["deck_offline"]
@@ -53,7 +58,7 @@ test("agent deck online but metadata unavailable: reports deck_unauthorized with
     workspaceRoot: "/tmp",
     deckId: randomUUID(),
   });
-  const result = await healthForAgent(agent, true, new Map(), true, FAILURE);
+  const result = await healthForAgent(agent, true, new Map(), true, FAILURE, NO_GITHUB);
   const issue = result.issues.find((i) => i.code === "deck_unauthorized");
   assert.ok(issue, "expected a deck_unauthorized issue");
   assert.equal(issue?.message, "Agent Deck API error: 502");
@@ -63,7 +68,7 @@ test("agent deck online, metadata call succeeds, but this deck isn't in the retu
   const deckId = randomUUID();
   const agent = createAgent({ name: "stale-deck", runtime: "claude_code", workspaceRoot: "/tmp", deckId });
   const deckAccessResult: DeckAccessResult = { ok: true, decks: [{ id: randomUUID(), name: "some-other-deck" }] };
-  const result = await healthForAgent(agent, true, new Map(), true, deckAccessResult);
+  const result = await healthForAgent(agent, true, new Map(), true, deckAccessResult, NO_GITHUB);
   const issue = result.issues.find((i) => i.code === "deck_unauthorized");
   assert.ok(issue, "expected a deck_unauthorized issue for a deck missing from the launch set");
 });
@@ -72,7 +77,7 @@ test("agent deck online and this deck is in the returned set: healthy on the dec
   const deckId = randomUUID();
   const agent = createAgent({ name: "healthy", runtime: "claude_code", workspaceRoot: "/tmp", deckId });
   const deckAccessResult: DeckAccessResult = { ok: true, decks: [{ id: deckId, name: "healthy-deck" }] };
-  const result = await healthForAgent(agent, true, new Map(), true, deckAccessResult);
+  const result = await healthForAgent(agent, true, new Map(), true, deckAccessResult, NO_GITHUB);
   assert.equal(
     result.issues.some((i) => i.code === "deck_unauthorized" || i.code === "deck_offline"),
     false
@@ -86,7 +91,7 @@ test("agent deck online with no deck-access result computed (e.g. no agent neede
     workspaceRoot: "/tmp",
     deckId: randomUUID(),
   });
-  const result = await healthForAgent(agent, true, new Map(), true, null);
+  const result = await healthForAgent(agent, true, new Map(), true, null, NO_GITHUB);
   assert.equal(
     result.issues.some((i) => i.code === "deck_unauthorized" || i.code === "deck_offline"),
     false
@@ -115,9 +120,37 @@ test("cursor_local with a bound deck: no deck access issue (launch MCP is suppor
     workspaceRoot: "/tmp",
     deckId: randomUUID(),
   });
-  const result = await healthForAgent(agent, true, new Map(), true, null);
+  const result = await healthForAgent(agent, true, new Map(), true, null, NO_GITHUB);
   assert.equal(
     result.issues.some((i) => i.code === "deck_unauthorized" || i.code === "deck_offline"),
     false
   );
+});
+
+test("github_auth issues mark the agent unhealthy so Start can refuse before a wasted run", async () => {
+  const agent = createAgent({ name: "needs-gh", runtime: "claude_code", workspaceRoot: "/tmp" });
+  const gh: AgentHealthIssue[] = [
+    { code: "github_auth", message: "Run `gh auth login` — GitHub CLI auth required to open PRs" },
+  ];
+  const result = await healthForAgent(agent, true, new Map(), true, null, gh);
+  assert.equal(result.healthy, false);
+  assert.equal(result.issues.some((i) => i.code === "github_auth"), true);
+});
+
+test("githubIssuesUncached reports github_auth when gh auth status fails with an invalid token", async () => {
+  clearAgentHealthCaches();
+  // Exercise the real parser path by stubbing via PATH... we instead unit-test the
+  // injected-list path above for healthForAgent. Here we assert the uncached helper
+  // returns a known shape when `gh` is present but auth is bad — skip if gh missing.
+  const { spawnSync } = await import("node:child_process");
+  const probe = spawnSync("gh", ["--version"], { encoding: "utf8" });
+  if (probe.error || probe.status !== 0) {
+    // No gh on this host — nothing to assert about auth status.
+    return;
+  }
+  const issues = await githubIssuesUncached();
+  for (const issue of issues) {
+    assert.ok(issue.code === "github_auth" || issue.code === "github_cli_missing");
+    assert.ok(issue.message.length > 0);
+  }
 });

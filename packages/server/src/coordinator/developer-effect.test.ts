@@ -131,13 +131,18 @@ const timedOutSpawn: SpawnFn = async () => ({ exitCode: 1, transcript: "", logPa
  * that fallback (`gh`'s bare current-branch/upstream inference), and a fake that still
  * tolerated it would let a regression back in silently.
  */
-function fakeGithub(opts: { checks?: "success" | "failure" | "pending"; createFails?: boolean } = {}): GithubFn {
+function fakeGithub(opts: {
+  checks?: "success" | "failure" | "pending";
+  createFails?: boolean | (() => boolean);
+} = {}): GithubFn {
   const prs = new Map<string, { number: number; url: string; base: string }>();
   let nextNumber = 100;
   // GitHub's view of a PR's head is the REMOTE branch tip, not the local worktree's
   // checkout — reading it from `remote` (rather than `cwd`) lets a test simulate a
   // concurrent push changing the head independently of this worktree.
   const remoteHead = (branch: string) => git(remote, "rev-parse", branch);
+  const shouldFailCreate = () =>
+    typeof opts.createFails === "function" ? opts.createFails() : Boolean(opts.createFails);
   const adapter: GithubFn = {
     async viewPr({ branch, number }) {
       if (!branch) throw new Error("fakeGithub.viewPr requires an explicit branch — bare current-branch lookup is the NOT-82 bug");
@@ -147,7 +152,7 @@ function fakeGithub(opts: { checks?: "success" | "failure" | "pending"; createFa
       return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: branch, headRefOid: remoteHead(branch), isDraft: true };
     },
     async createDraftPr({ base, head }) {
-      if (opts.createFails) return { ok: false, reason: "gh: simulated failure", noCommits: false };
+      if (shouldFailCreate()) return { ok: false, reason: "gh: simulated failure", noCommits: false };
       if (!head) throw new Error("fakeGithub.createDraftPr requires an explicit --head — bare create is the NOT-82 bug");
       const number = nextNumber++;
       const url = `https://github.com/o/r/pull/${number}`;
@@ -265,8 +270,9 @@ test("the branch created on a retried round is reused, not re-created — no 'br
   // The retried session's prompt must carry WHY the prior attempt failed and must NOT
   // claim a fresh branch — it's still round 1 (no_pr is an infra retry, not a new round),
   // and the branch already carries whatever the first attempt left behind.
-  assert.doesNotMatch(prompts[0], /previous attempt failed/);
-  assert.match(prompts[1], /retry of round 1 after the previous attempt failed: Developer session produced no PR\./);
+  assert.doesNotMatch(prompts[0], /Previous attempt|previous attempt failed/);
+  assert.match(prompts[1], /retry of round 1 \(same review round/);
+  assert.match(prompts[1], /\*\*Last failure:\*\* Developer session produced no PR\./);
   assert.doesNotMatch(prompts[1], /fresh branch/);
 });
 
@@ -487,6 +493,27 @@ test("adapter_failure: gh pr create itself fails — never silently treated as a
   assert.equal(issue.status, "needs_human");
   assert.equal(issue.currentRound, 1, "adapter failure never consumes a review round");
   assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
+});
+
+test("publish-only retry: post-push gh create failure reopens the PR without respawning the agent", async () => {
+  const issueId = await makeIssue();
+  let createAttempt = 0;
+  let spawnCalls = 0;
+  const github = fakeGithub({ createFails: () => ++createAttempt === 1 });
+  const countingSpawn: SpawnFn = async (input) => {
+    spawnCalls++;
+    return commitingSpawn(input);
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: countingSpawn, github }));
+  startWorkflow(issueId);
+  await pump(4);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(spawnCalls, 1, "publish-only retry must not spawn another agent session");
+  assert.equal(createAttempt, 2, "gh create is retried once after the first failure");
+  assert.equal(issue.status, "reviewing");
+  assert.ok(issue.prNumber, "draft PR must exist after the publish-only retry");
+  assert.equal(issue.currentRound, 1, "publish-only infra retry does not spend a review round");
 });
 
 test("unpushed_commit: the coordinator's own push is rejected by a diverged remote branch — escalates, work preserved", async () => {

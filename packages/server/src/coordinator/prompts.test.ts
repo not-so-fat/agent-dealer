@@ -31,14 +31,28 @@ test("repair round includes findings and references the round number", () => {
 test("a round-1 infra retry never claims a fresh branch — it says the branch may already carry partial work", () => {
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, retryReason: "Developer session failed or crashed." });
   assert.doesNotMatch(prompt, /fresh branch/);
-  assert.match(prompt, /retry of round 1 after the previous attempt failed: Developer session failed or crashed\./);
-  assert.match(prompt, /may already carry partial work/);
+  assert.match(prompt, /## Previous attempt/);
+  assert.match(prompt, /Last failure:\*\* Developer session failed or crashed\./);
+  assert.match(prompt, /do not re-implement from scratch/i);
 });
 
 test("an infra retry on a repair round still surfaces the failure reason, not the generic repair framing", () => {
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 2, retryReason: "Developer's PR checks failed." });
-  assert.match(prompt, /retry of round 2 after the previous attempt failed: Developer's PR checks failed\./);
+  assert.match(prompt, /## Previous attempt/);
+  assert.match(prompt, /Last failure:\*\* Developer's PR checks failed\./);
   assert.doesNotMatch(prompt, /^This is repair round 2\./m);
+});
+
+test("infra retry includes prior implementation conclusion when provided", () => {
+  const prompt = buildDeveloperPrompt({
+    taskSnapshot,
+    round: 1,
+    retryReason: "Branch already pushed; only draft PR create failed: gh auth",
+    priorConclusion: "Added queue_entries and admission.ts.",
+  });
+  assert.match(prompt, /### Prior implementation conclusion/);
+  assert.match(prompt, /Added queue_entries and admission\.ts\./);
+  assert.match(prompt, /only coordinator GitHub verification/i);
 });
 
 test("deck section requires bind_workspace first, then lists every playbook id", () => {

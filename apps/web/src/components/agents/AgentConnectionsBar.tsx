@@ -20,6 +20,15 @@ function runtimeCliStatus(
   return { ok: true, detail: "CLI ready" };
 }
 
+function githubCliStatus(agents: AgentWithHealth[]): { ok: boolean; detail: string } {
+  const blocker = agents
+    .flatMap((a) => a.issues)
+    .find((i) => i.code === "github_cli_missing" || i.code === "github_auth");
+  if (blocker) return { ok: false, detail: blocker.message };
+  if (agents.length === 0) return { ok: false, detail: "no agent" };
+  return { ok: true, detail: "gh ready" };
+}
+
 function StatusDot({ ok }: { ok: boolean }) {
   return (
     <span
@@ -42,6 +51,7 @@ export default function AgentConnectionsBar({ agents, agentDeckOnline }: Props) 
   const claude = runtimeCliStatus(agents, "claude_code");
   const cursor = runtimeCliStatus(agents, "cursor_local");
   const codex = runtimeCliStatus(agents, "codex_local");
+  const github = githubCliStatus(agents);
   const mcpIssue = agents
     .flatMap((a) => a.issues)
     .find((i) => i.code === "mcp_not_registered");
@@ -60,6 +70,10 @@ export default function AgentConnectionsBar({ agents, agentDeckOnline }: Props) 
       <span className="inline-flex items-center gap-1.5" title={codex.detail}>
         <StatusDot ok={codex.ok} />
         <span className={codex.ok ? "text-white/55" : "text-amber-200/90"}>Codex</span>
+      </span>
+      <span className="inline-flex items-center gap-1.5" title={github.detail}>
+        <StatusDot ok={github.ok} />
+        <span className={github.ok ? "text-white/55" : "text-amber-200/90"}>GitHub</span>
       </span>
       <span
         className="inline-flex items-center gap-1.5"

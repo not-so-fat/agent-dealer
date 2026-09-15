@@ -21,7 +21,15 @@ export interface IssueProjection {
 
 /** The kind of the single next work item this decision enqueues, if any. */
 export type NextEffect =
-  | { kind: "enqueue"; workItem: WorkItemKind; atHeadSha?: string; retryReason?: string }
+  | {
+      kind: "enqueue";
+      workItem: WorkItemKind;
+      atHeadSha?: string;
+      retryReason?: string;
+      /** Coordinator-only gh/PR/checks retry — no agent spawn (post-push adapter_failure). */
+      publishOnly?: boolean;
+      branch?: string;
+    }
   | {
       kind: "human_action";
       actionType:
@@ -75,6 +83,23 @@ export function projectDeveloperRoute(
           events: ["worker.failed"],
         },
         effect: { kind: "enqueue", workItem: "developer", retryReason: route.reason },
+        advance: "infra",
+      };
+    case "retry_publish":
+      return {
+        projection: {
+          issueStatus: currentStatus === "repairing" ? "repairing" : "developing",
+          currentOwner: "developer",
+          currentIntent: `Retrying GitHub publish (no agent) — ${route.reason}`,
+          events: ["worker.failed"],
+        },
+        effect: {
+          kind: "enqueue",
+          workItem: "developer",
+          retryReason: route.reason,
+          publishOnly: true,
+          branch: route.branch,
+        },
         advance: "infra",
       };
     case "human_action":

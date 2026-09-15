@@ -73,6 +73,12 @@ export async function revParseHead(worktreePath: string): Promise<string> {
   return stdout.trim();
 }
 
+/** Resolve any ref (e.g. `origin/issue-…`) — used by publish-only retries that have no worktree. */
+export async function revParseRef(repo: string, ref: string): Promise<string> {
+  const { stdout } = await git(repo, ["rev-parse", ref]);
+  return stdout.trim();
+}
+
 export async function pruneWorktrees(repo: string): Promise<void> {
   await git(repo, ["worktree", "prune"]);
 }

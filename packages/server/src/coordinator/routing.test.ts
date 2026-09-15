@@ -82,6 +82,30 @@ test("adapter failure is bounded-retried on the infra budget (unified failure po
   });
 });
 
+test("adapter failure after push retries publish only (no full developer session)", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "adapter_failure",
+    reason: "Branch already pushed (issue-1); only draft PR create failed: boom",
+    afterPush: { branch: "issue-1" },
+  };
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    next: "retry_publish",
+    reason: "Git/GitHub verification failed: Branch already pushed (issue-1); only draft PR create failed: boom",
+    branch: "issue-1",
+  });
+});
+
+test("adapter failure after push still escalates once infra attempts are exhausted", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "adapter_failure",
+    reason: "Branch already pushed (issue-1); only draft PR create failed: boom",
+    afterPush: { branch: "issue-1" },
+  };
+  const result = routeDeveloperOutcome(outcome, INFRA_AT_LIMIT);
+  assert.equal(result.next, "human_action");
+  assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+});
+
 test("adapter failure escalates once the infra-attempt limit is reached", () => {
   const outcome: DeveloperOutcome = { kind: "adapter_failure", reason: "gh: command not found" };
   const result = routeDeveloperOutcome(outcome, INFRA_AT_LIMIT);

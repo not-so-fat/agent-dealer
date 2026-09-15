@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { AgentWithHealth } from "@agent-dealer/shared";
 import {
   abortIssue,
   dequeueIssue,
@@ -18,6 +19,7 @@ import IssueTimeline from "../components/issues/IssueTimeline";
 
 type Props = {
   issueId: string;
+  agents: AgentWithHealth[];
   onBack: () => void;
 };
 
@@ -75,7 +77,7 @@ function nextActionLabel(detail: IssueDetail): string {
   }
 }
 
-export default function IssueDetailPage({ issueId, onBack }: Props) {
+export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [evidence, setEvidence] = useState<IssueEvidence | null>(null);
   const [traces, setTraces] = useState<Record<string, { content: string; loading: boolean; error?: string }>>({});
@@ -99,6 +101,9 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
   if (!detail) return <div className="p-6 text-white/50 text-sm">Loading…</div>;
 
   const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, queued } = detail;
+  const developerAgent = agents.find((a) => a.id === issue.developerAgentId);
+  const developerBlocked = developerAgent && !developerAgent.healthy;
+  const developerBlockReason = developerAgent?.issues[0]?.message ?? "Developer agent is unhealthy";
   const durationMs = latestWorkflowInstance
     ? new Date(latestWorkflowInstance.completedAt ?? Date.now()).getTime() - new Date(latestWorkflowInstance.startedAt).getTime()
     : 0;
@@ -383,29 +388,42 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
             (startWorkflow's preStart check) already accepts needs_human the same as
             ready; this just stops the resolution from being a dead end in the UI. */}
         {(issue.status === "ready" || (issue.status === "needs_human" && openActions.length === 0)) && (
-          <div className="flex flex-wrap gap-2 mb-4">
-            <button type="button" className="btn-gold px-4 py-2 disabled:opacity-50" disabled={!readiness.ok || busy} onClick={doStart}>
-              Start
-            </button>
-            {!queued ? (
-              <button
-                type="button"
-                className="px-4 py-2 text-sm border border-white/15 rounded text-white/80 hover:border-cyber-teal/50 hover:text-cyber-teal disabled:opacity-50"
-                disabled={busy || hasActiveWorkflow}
-                onClick={doEnqueue}
-              >
-                Add to queue
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="px-4 py-2 text-sm border border-white/15 rounded text-white/60 hover:text-white disabled:opacity-50"
-                disabled={busy}
-                onClick={doDequeue}
-              >
-                Remove from queue
-              </button>
+          <div className="mb-4 space-y-2">
+            {developerBlocked && (
+              <p className="text-sm text-amber-200/90">
+                Fix before Start: {developerBlockReason}
+              </p>
             )}
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="btn-gold px-4 py-2 disabled:opacity-50"
+                disabled={!readiness.ok || busy || !!developerBlocked}
+                title={developerBlocked ? developerBlockReason : undefined}
+                onClick={doStart}
+              >
+                Start
+              </button>
+              {!queued ? (
+                <button
+                  type="button"
+                  className="px-4 py-2 text-sm border border-white/15 rounded text-white/80 hover:border-cyber-teal/50 hover:text-cyber-teal disabled:opacity-50"
+                  disabled={busy || hasActiveWorkflow}
+                  onClick={doEnqueue}
+                >
+                  Add to queue
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="px-4 py-2 text-sm border border-white/15 rounded text-white/60 hover:text-white disabled:opacity-50"
+                  disabled={busy}
+                  onClick={doDequeue}
+                >
+                  Remove from queue
+                </button>
+              )}
+            </div>
           </div>
         )}
 
