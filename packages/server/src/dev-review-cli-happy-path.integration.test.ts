@@ -8,7 +8,8 @@
 // genuine separate `tsx` process per command, exactly as an operator or another coding
 // agent would invoke it, talking over real HTTP to an ephemeral port recorded in
 // run.json. Only the two things that would otherwise cost money or need a live external
-// service are faked: the agent CLI session (`spawn`) and GitHub (`github`) — the
+// service are faked: the agent CLI session (`spawn`), GitHub (`github`), and PR merge
+// (`setMergePrForTests` — NOT-102 undraft+merge on final_review:complete) — the
 // confirmed NOT-61/62 scope — plus Agent Deck launch-deck MCP preflight, faked
 // here for the same reason (NOT-106 replaced mint/verify with header-based deck
 // connect that a hermetic test must not require a live Agent Deck for). Everything else — routing,
@@ -59,6 +60,7 @@ const { registerEffectHandler, resetEffectHandlers } = await import("./coordinat
 const { runDeveloperEffect } = await import("./coordinator/developer-effect.js");
 const { runReviewerEffect } = await import("./coordinator/reviewer-effect.js");
 const { startCoordinatorLoop, stopCoordinatorLoop } = await import("./coordinator/worker-loop.js");
+const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./coordinator/auto-merge.js");
 type DeveloperDeps = Parameters<typeof runDeveloperEffect>[1];
 type ReviewerDeps = Parameters<typeof runReviewerEffect>[1];
 type SpawnFn = NonNullable<DeveloperDeps>["spawn"];
@@ -67,10 +69,15 @@ type GithubFn = GithubAdapter;
 
 const DECK_ID = "6e825b59-13de-4ddd-ab7e-55ab5a1c279c";
 
-before(() => migrate());
+before(() => {
+  migrate();
+  // final_review:complete undrafts+merges (NOT-102); hermetic suite must not shell out to `gh`.
+  setMergePrForTests(async () => ({ ok: true }));
+});
 after(() => {
   stopCoordinatorLoop();
   resetEffectHandlers();
+  clearFinalizeInflightForTests();
 });
 
 function git(cwd: string, ...args: string[]): string {
