@@ -156,8 +156,21 @@ function parseEventsForRuntime(raw: string, runtime: Runtime): StreamEvent[] {
   return parseNdjson(raw);
 }
 
-/** True when the stream ended with a non-error `result` (successful Cursor/Claude session). */
-function sessionEndedSuccessfully(events: StreamEvent[]): boolean {
+/**
+ * True when the stream ended successfully — used to skip Codex/Cursor text fallback
+ * (NOT-117). Cursor/Claude use a non-error `result`; Codex native JSONL uses
+ * `turn.completed` (never emits `type: "result"` until normalizeCodexEvents).
+ */
+function sessionEndedSuccessfully(events: StreamEvent[], runtime: Runtime): boolean {
+  if (runtime === "codex_local") {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]!;
+      if (e.type === "turn.failed") return false;
+      if (e.type === "error") return false;
+      if (e.type === "turn.completed") return true;
+    }
+    return false;
+  }
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]!;
     if (e.type === "result") return !e.is_error;
@@ -180,35 +193,6 @@ function textFallbackHaystack(raw: string, events: StreamEvent[]): string {
   return `${resultBits.join("\n")}\n${stderr}`;
 }
 
-export function detectUsageCapFromLog(
-  logPath: string,
-  runtime: Runtime,
-  nowMs = Date.now()
-): UsageCapDetection | null {
-  if (!fs.existsSync(logPath)) return null;
-  const raw = fs.readFileSync(logPath, "utf8");
-  const events = parseEventsForRuntime(raw, runtime);
-  const fromEvents =
-    runtime === "codex_local"
-      ? codexCapFromEvents(events, runtime, nowMs)
-      : extractUsageCapFromEvents(events, runtime, nowMs);
-  if (fromEvents) return fromEvents;
-
-  if (runtime === "codex_local" || runtime === "cursor_local") {
-    // Successful sessions must not open a usage-cap deferral from log body text (NOT-117).
-    if (sessionEndedSuccessfully(events)) return null;
-    const haystack = textFallbackHaystack(raw, events);
-    if (CAP_FALLBACK_RE.test(haystack)) {
-      return {
-        unavailableUntil: fallbackUntil(nowMs),
-        reason: capReason(runtime, "stderr/log matched usage-cap pattern"),
-        evidence: { matched: haystack.slice(0, 300) },
-      };
-    }
-  }
-  return null;
-}
-
 /** Detect from an in-memory NDJSON string (unit tests). */
 export function detectUsageCapFromNdjson(raw: string, runtime: Runtime, nowMs = Date.now()): UsageCapDetection | null {
   const events = parseEventsForRuntime(raw, runtime);
@@ -229,7 +213,8 @@ export function detectUsageCapFromRawLog(raw: string, runtime: Runtime, nowMs = 
   if (fromEvents) return fromEvents;
 
   if (runtime === "codex_local" || runtime === "cursor_local") {
-    if (sessionEndedSuccessfully(events)) return null;
+    // Successful sessions must not open a usage-cap deferral from log body text (NOT-117).
+    if (sessionEndedSuccessfully(events, runtime)) return null;
     const haystack = textFallbackHaystack(raw, events);
     if (CAP_FALLBACK_RE.test(haystack)) {
       return {
@@ -240,6 +225,15 @@ export function detectUsageCapFromRawLog(raw: string, runtime: Runtime, nowMs = 
     }
   }
   return null;
+}
+
+export function detectUsageCapFromLog(
+  logPath: string,
+  runtime: Runtime,
+  nowMs = Date.now()
+): UsageCapDetection | null {
+  if (!fs.existsSync(logPath)) return null;
+  return detectUsageCapFromRawLog(fs.readFileSync(logPath, "utf8"), runtime, nowMs);
 }
 
 /** Persist a cap row when detected; returns the detection or null. */

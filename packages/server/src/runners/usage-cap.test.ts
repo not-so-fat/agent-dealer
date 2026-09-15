@@ -113,3 +113,24 @@ test("NOT-117: successful session ignores stderr usage-cap-like prose (structure
     '{"type":"result","is_error":false,"result":"done"}\n--- stderr ---\nwarning: usage limit reached\n';
   assert.equal(detectUsageCapFromRawLog(raw, "cursor_local"), null);
 });
+
+test("NOT-117: successful Codex turn.completed skips text fallback even when stderr has usage-limit prose", () => {
+  const raw = [
+    '{"type":"thread.started","thread_id":"t1"}',
+    '{"type":"item.completed","item":{"type":"agent_message","text":"Done implementing."}}',
+    '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}',
+    "",
+    "--- stderr ---",
+    "npm warn: your usage limit reached for deprecated flag foo (unrelated to billing)",
+  ].join("\n");
+  assert.equal(detectUsageCapFromRawLog(raw, "codex_local"), null);
+
+  const failed = [
+    '{"type":"thread.started","thread_id":"t1"}',
+    '{"type":"turn.failed","error":{"message":"Rate limit exceeded"}}',
+    "",
+    "--- stderr ---",
+    "noise",
+  ].join("\n");
+  assert.ok(detectUsageCapFromRawLog(failed, "codex_local"));
+});

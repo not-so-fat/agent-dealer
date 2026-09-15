@@ -18,7 +18,7 @@ export interface UsageCappedOutcome {
   reason: string;
   evidence?: unknown;
   /** NOT-117: when the deferred session left commits, carry infra-retry framing for resume. */
-  resume?: { retryReason: string; branch?: string };
+  resume?: { retryReason: string };
 }
 
 const roleFor: Record<WorkItemKind, "developer" | "reviewer"> = {
@@ -80,7 +80,6 @@ export function deferLeasedWorkItemForUsageCap(
       ...payload,
       usageCapDeferredAt: firstDeferredAt,
       ...(cap.resume?.retryReason ? { retryReason: cap.resume.retryReason } : {}),
-      ...(cap.resume?.branch ? { branch: cap.resume.branch } : {}),
     };
 
     const updated = deferWorkItem(live.id, leaseToken, {

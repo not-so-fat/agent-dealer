@@ -573,7 +573,6 @@ export async function runDeveloperEffect(
                 resume: {
                   retryReason:
                     "Prior developer session was deferred for a usage cap after local commits existed. Continue from the existing branch — do not re-implement from scratch.",
-                  branch: branchName,
                 },
               }
             : {}),

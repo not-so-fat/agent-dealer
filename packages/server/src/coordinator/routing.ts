@@ -20,13 +20,14 @@ export type DeveloperOutcome =
   | { kind: "adapter_failure"; reason: string; afterPush?: { branch: string } }
   | { kind: "session_failed"; reason?: string }
   /** Runtime account usage cap — defer until unavailable_until, not an infra failure (NOT-111).
-   * Optional `resume` preserves tip identity when the session left commits (NOT-117). */
+   * Optional `resume.retryReason` frames the next developer prompt when commits remain (NOT-117).
+   * Branch identity stays `issue.branch ?? issue-${id}` — do not dual-write a payload.branch. */
   | {
       kind: "usage_capped";
       until: string;
       reason: string;
       evidence?: unknown;
-      resume?: { retryReason: string; branch?: string };
+      resume?: { retryReason: string };
     };
 
 export type ReviewerOutcome =

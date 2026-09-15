@@ -982,9 +982,8 @@ test("NOT-117: usage_capped after commits resumes with retryReason — no fresh-
   const deferred = listWorkItemsForIssue(issueId)[0]!;
   assert.equal(deferred.status, "pending");
   assert.ok(Date.parse(deferred.availableAt) > Date.now());
-  const payload = JSON.parse(deferred.payloadJson!) as { retryReason?: string; branch?: string };
+  const payload = JSON.parse(deferred.payloadJson!) as { retryReason?: string };
   assert.match(payload.retryReason ?? "", /usage cap after local commits/i);
-  assert.equal(payload.branch, branch);
   assert.equal(await branchExists(repo, branch), true);
   assert.equal(git(repo, "rev-parse", branch), tipAfterFirst);
 
