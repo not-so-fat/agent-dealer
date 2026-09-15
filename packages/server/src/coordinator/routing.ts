@@ -19,8 +19,15 @@ export type DeveloperOutcome =
    * re-run coordinator publish only (no new agent session). */
   | { kind: "adapter_failure"; reason: string; afterPush?: { branch: string } }
   | { kind: "session_failed"; reason?: string }
-  /** Runtime account usage cap — defer until unavailable_until, not an infra failure (NOT-111). */
-  | { kind: "usage_capped"; until: string; reason: string; evidence?: unknown };
+  /** Runtime account usage cap — defer until unavailable_until, not an infra failure (NOT-111).
+   * Optional `resume` preserves tip identity when the session left commits (NOT-117). */
+  | {
+      kind: "usage_capped";
+      until: string;
+      reason: string;
+      evidence?: unknown;
+      resume?: { retryReason: string; branch?: string };
+    };
 
 export type ReviewerOutcome =
   | { kind: "verdict"; result: ReviewerResult }

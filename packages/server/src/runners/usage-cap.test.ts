@@ -18,6 +18,8 @@ const { migrate } = await import("../db/index.js");
 const {
   recordUsageCapFromEvents,
   detectUsageCapFromNdjson,
+  detectUsageCapFromRawLog,
+  detectUsageCapFromLog,
   extractUsageCapFromEvents,
 } = await import("./usage-cap.js");
 const { parseNdjson } = await import("./stream-json.js");
@@ -68,4 +70,46 @@ test("result error without prior event uses fallback cooldown", () => {
   const cap = extractUsageCapFromEvents(events, "claude_code", nowMs);
   assert.ok(cap);
   assert.equal(cap!.unavailableUntil, new Date(nowMs + 1_800_000).toISOString());
+});
+
+test("NOT-117: successful Cursor NDJSON with source text 'infra-attempt limit reached' does not detect or record availability", () => {
+  const fixture = fs.readFileSync(
+    path.join(fixtureDir, "fixtures/cursor-success-with-infra-attempt-limit-text.ndjson"),
+    "utf8"
+  );
+  const cap = detectUsageCapFromRawLog(fixture, "cursor_local");
+  assert.equal(cap, null);
+
+  const logPath = path.join(process.env.AGENT_DEALER_HOME!, "cursor-false-positive.ndjson");
+  fs.writeFileSync(logPath, fixture);
+  assert.equal(detectUsageCapFromLog(logPath, "cursor_local"), null);
+  assert.equal(runtimeAvailability("cursor_local").available, true);
+});
+
+test("NOT-117: Cursor billing_error and usage-limit result errors still detect", () => {
+  const billing = fs.readFileSync(path.join(fixtureDir, "fixtures/cursor-billing-error.ndjson"), "utf8");
+  const usage = fs.readFileSync(path.join(fixtureDir, "fixtures/cursor-result-usage-limit.ndjson"), "utf8");
+  assert.ok(detectUsageCapFromRawLog(billing, "cursor_local"));
+  assert.ok(detectUsageCapFromRawLog(usage, "cursor_local"));
+
+  const rejected = [
+    '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1784283600,"rateLimitType":"five_hour"}}',
+  ].join("\n");
+  assert.ok(detectUsageCapFromRawLog(rejected, "cursor_local"));
+});
+
+test("NOT-117: Cursor stderr trailer with usage limit still detects; bare 'limit reached' in stderr does not", () => {
+  const withUsage =
+    '{"type":"result","is_error":true,"result":"failed"}\n--- stderr ---\nError: usage limit reached for this account\n';
+  assert.ok(detectUsageCapFromRawLog(withUsage, "cursor_local"));
+
+  const bare =
+    '{"type":"result","is_error":true,"result":"failed"}\n--- stderr ---\nError: infra-attempt limit reached\n';
+  assert.equal(detectUsageCapFromRawLog(bare, "cursor_local"), null);
+});
+
+test("NOT-117: successful session ignores stderr usage-cap-like prose (structured path already empty)", () => {
+  const raw =
+    '{"type":"result","is_error":false,"result":"done"}\n--- stderr ---\nwarning: usage limit reached\n';
+  assert.equal(detectUsageCapFromRawLog(raw, "cursor_local"), null);
 });

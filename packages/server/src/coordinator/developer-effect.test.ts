@@ -900,3 +900,104 @@ test("cursor_local + deckId: prepares worker deck connection and passes mcpConfi
   assert.match(spawnSawMcpConfig!, /\.cursor\/mcp\.json$/);
   assert.equal(outcome.kind, "clean_handoff");
 });
+
+test("NOT-117: mid-success usage cap continues publish instead of deferring the tip", async () => {
+  const { fileURLToPath } = await import("node:url");
+  const { clearAllRuntimeAvailability, runtimeAvailability } = await import(
+    "../repository/runtime-availability.js"
+  );
+  clearAllRuntimeAvailability();
+
+  const issueId = await makeIssue();
+  const capLog = path.join(process.env.AGENT_DEALER_HOME!, `not117-mid-success-${issueId}.ndjson`);
+  const fixture = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../runners/fixtures/claude-rate-limit-rejected.ndjson"
+  );
+  fs.copyFileSync(fixture, capLog);
+
+  const midSuccessCapSpawn: SpawnFn = async (input) => {
+    await commitingSpawn(input);
+    return {
+      exitCode: 0,
+      transcript: "Implementation conclusion: added the widget.",
+      logPath: capLog,
+      timedOut: false,
+    };
+  };
+
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: midSuccessCapSpawn, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "successful tip must continue to publish/PR, not defer");
+  assert.ok(issue.branch);
+  assert.ok(issue.prNumber);
+
+  const items = listWorkItemsForIssue(issueId);
+  assert.equal(items.filter((i) => i.status === "pending" && i.kind === "developer").length, 0);
+  assert.equal(runtimeAvailability("claude_code").available, false, "cap is still recorded for future spawns");
+  clearAllRuntimeAvailability();
+});
+
+test("NOT-117: usage_capped after commits resumes with retryReason — no fresh-branch rebuild, tip preserved", async () => {
+  const { fileURLToPath } = await import("node:url");
+  const { clearAllRuntimeAvailability } = await import("../repository/runtime-availability.js");
+  clearAllRuntimeAvailability();
+
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  const capLog = path.join(process.env.AGENT_DEALER_HOME!, `not117-resume-${issueId}.ndjson`);
+  const fixture = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../runners/fixtures/claude-rate-limit-rejected.ndjson"
+  );
+  fs.copyFileSync(fixture, capLog);
+
+  let call = 0;
+  const prompts: string[] = [];
+  let tipAfterFirst = "";
+  const commitThenCapCrash: SpawnFn = async (input) => {
+    call++;
+    prompts.push(input.prompt);
+    if (call === 1) {
+      await commitingSpawn(input);
+      tipAfterFirst = git(input.cwd, "rev-parse", "HEAD");
+      return { exitCode: 1, transcript: "boom after commit", logPath: capLog, timedOut: false };
+    }
+    // Resume: do not add a second tip — prove we reused the prior branch.
+    assert.equal(git(input.cwd, "rev-parse", "HEAD"), tipAfterFirst);
+    return { exitCode: 0, transcript: "continue", logPath: "/dev/null", timedOut: false };
+  };
+
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: commitThenCapCrash, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  const deferred = listWorkItemsForIssue(issueId)[0]!;
+  assert.equal(deferred.status, "pending");
+  assert.ok(Date.parse(deferred.availableAt) > Date.now());
+  const payload = JSON.parse(deferred.payloadJson!) as { retryReason?: string; branch?: string };
+  assert.match(payload.retryReason ?? "", /usage cap after local commits/i);
+  assert.equal(payload.branch, branch);
+  assert.equal(await branchExists(repo, branch), true);
+  assert.equal(git(repo, "rev-parse", branch), tipAfterFirst);
+
+  clearAllRuntimeAvailability();
+  getDb()
+    .prepare(`UPDATE work_items SET available_at = ? WHERE id = ?`)
+    .run(new Date(0).toISOString(), deferred.id);
+
+  await pump(1);
+
+  assert.equal(call, 2);
+  assert.doesNotMatch(prompts[1]!, /fresh branch/);
+  assert.match(prompts[1]!, /do not re-implement from scratch/i);
+  assert.equal(git(repo, "rev-parse", branch), tipAfterFirst, "resume must not mint a parallel tip");
+  clearAllRuntimeAvailability();
+});

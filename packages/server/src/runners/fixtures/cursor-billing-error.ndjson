@@ -1,0 +1,2 @@
+{"type":"system","subtype":"error","error":"billing_error","session_id":"fixture-billing"}
+{"type":"result","subtype":"error","is_error":true,"result":"Billing error — please upgrade.","duration_ms":800,"session_id":"fixture-billing"}
