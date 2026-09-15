@@ -39,7 +39,7 @@ import { getEffectHandler } from "./effect-registry.js";
 import { parseProfileSnapshot } from "@agent-dealer/shared";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
-import { recoverStrandedAutoMerges } from "./auto-merge.js";
+import { recoverCoordinator } from "./recovery.js";
 import { admitNext } from "./admission.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
@@ -306,10 +306,24 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
  * Claims and starts as many work items as free concurrency slots allow, then returns the
  * count started. Not awaited internally — each item runs to completion in the background
  * and is tracked in `active`.
+ *
+ * Each tick also runs `recoverCoordinator` so expired leases are reclaimed without waiting
+ * for another process restart (NOT-116). Startup recovery alone is too early when the
+ * coordinator restarts while leases are still valid — heartbeats are gone, then leases
+ * expire later with nothing polling reclaim.
  */
-export async function runCoordinatorTick(opts?: { leaseOwner?: string }): Promise<number> {
-  // NOT-102: finish auto-merges parked before a crash (no in-memory pendingAutoMerge left).
-  await recoverStrandedAutoMerges();
+export async function runCoordinatorTick(opts?: {
+  leaseOwner?: string;
+  /** Injectable clock for recovery (tests). Defaults to Date.now(). */
+  now?: number;
+}): Promise<number> {
+  // NOT-116 / NOT-102: reclaim expired leases + finish auto-merges stranded before a crash.
+  // recoverCoordinator also runs recoverStrandedAutoMerges.
+  try {
+    await recoverCoordinator({ now: opts?.now });
+  } catch (err) {
+    console.error("[coordinator] recoverCoordinator", err);
+  }
   // NOT-103: level-triggered admission — free slot + eligible queued entry → startWorkflowCore.
   // Not hooked into terminal transitions; polling recovers correctly after restart.
   try {

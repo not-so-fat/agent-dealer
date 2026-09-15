@@ -21,8 +21,12 @@ const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import(
   "../repository/workflow-events.js"
 );
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
-const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
-const { listWorkItemsForIssue, claimWorkItem, getWorkItem } = await import("../repository/work-items.js");
+const { listWorkerSessionsForIssue, createWorkerSession, startSession } = await import(
+  "../repository/worker-sessions.js"
+);
+const { listWorkItemsForIssue, claimWorkItem, getWorkItem, bindWorkItemSession } = await import(
+  "../repository/work-items.js"
+);
 const { startWorkflow, applyCompletion, resolveHumanActionAndAdvanceAsync } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
 const { runCoordinatorTick, drainCoordinator, activeAttemptCount, startCoordinatorLoop, stopCoordinatorLoop } =
@@ -157,6 +161,50 @@ test("crash before effect: a leased item with no completion is recovered and adv
     listWorkItemsForIssue(issueId).filter((i) => i.kind === "developer").length,
     1,
     "the recovered item was reused, not duplicated"
+  );
+});
+
+test("NOT-116: startup too early to reclaim → later poll tick reclaims without a second restart", async () => {
+  // Mid-run restart: leases still valid at boot, so recoverCoordinator() at startup is a
+  // no-op. Heartbeats are gone; once the lease expires the *next poll tick* must reclaim
+  // — not wait for another process restart.
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const devItem = listWorkItemsForIssue(issueId)[0]!;
+
+  const claimed = claimWorkItem("loop-old-pid", { leaseMs: 60_000 })!;
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: null,
+  });
+  startSession(session.id);
+  assert.equal(bindWorkItemSession(devItem.id, session.id, claimed.leaseToken!), true);
+  assert.equal(getWorkItem(devItem.id)!.status, "leased");
+  assert.equal(listWorkerSessionsForIssue(issueId)[0]!.status, "running");
+
+  // Restart recovery while the lease is still valid — no reclaim (the observed bug window).
+  await runCoordinatorTick({ leaseOwner: "loop-restart", now: Date.now() });
+  assert.equal(getWorkItem(devItem.id)!.status, "leased");
+  assert.equal(listWorkerSessionsForIssue(issueId)[0]!.status, "running");
+
+  // Later tick after lease expiry — reclaim via the poll path (manipulate clock; do not
+  // hang a fake handler to simulate the dead worker).
+  registerEffectHandler("developer", async () => cleanHandoff());
+  registerEffectHandler("reviewer", async () => approvedVerdict);
+  await runCoordinatorTick({ leaseOwner: "loop-later", now: Date.now() + 120_000 });
+  await drainCoordinator();
+
+  const orphan = listWorkerSessionsForIssue(issueId).find((s) => s.id === session.id)!;
+  assert.equal(orphan.status, "failed");
+  assert.match(orphan.errorJson ?? "", /presumed dead/);
+  // Reclaim requeued then this same tick claimed + completed the developer work item.
+  assert.equal(getWorkItem(devItem.id)!.status, "done");
+  assert.ok(
+    listWorkerSessionsForIssue(issueId).some((s) => s.id !== session.id && s.role === "developer"),
+    "a fresh developer session ran after reclaim"
   );
 });
 
