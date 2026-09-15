@@ -23,6 +23,10 @@ export const AgentHealthIssue = z.object({
     "deck_unauthorized",
     "workspace_missing",
     "mcp_not_registered",
+    /** GitHub CLI missing — issue workflows need `gh` to open/update draft PRs. */
+    "github_cli_missing",
+    /** `gh auth status` failed / token invalid — PR create will burn a developer round. */
+    "github_auth",
   ]),
   message: z.string(),
 });

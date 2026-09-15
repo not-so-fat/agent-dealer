@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { AgentWithHealth } from "@agent-dealer/shared";
 import {
   abortIssue,
   fetchIssueArtifactTrace,
@@ -16,6 +17,7 @@ import IssueTimeline from "../components/issues/IssueTimeline";
 
 type Props = {
   issueId: string;
+  agents: AgentWithHealth[];
   onBack: () => void;
 };
 
@@ -73,7 +75,7 @@ function nextActionLabel(detail: IssueDetail): string {
   }
 }
 
-export default function IssueDetailPage({ issueId, onBack }: Props) {
+export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [evidence, setEvidence] = useState<IssueEvidence | null>(null);
   const [traces, setTraces] = useState<Record<string, { content: string; loading: boolean; error?: string }>>({});
@@ -97,6 +99,9 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
   if (!detail) return <div className="p-6 text-white/50 text-sm">Loading…</div>;
 
   const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession } = detail;
+  const developerAgent = agents.find((a) => a.id === issue.developerAgentId);
+  const developerBlocked = developerAgent && !developerAgent.healthy;
+  const developerBlockReason = developerAgent?.issues[0]?.message ?? "Developer agent is unhealthy";
   const durationMs = latestWorkflowInstance
     ? new Date(latestWorkflowInstance.completedAt ?? Date.now()).getTime() - new Date(latestWorkflowInstance.startedAt).getTime()
     : 0;
@@ -355,9 +360,22 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
             (startWorkflow's preStart check) already accepts needs_human the same as
             ready; this just stops the resolution from being a dead end in the UI. */}
         {(issue.status === "ready" || (issue.status === "needs_human" && openActions.length === 0)) && (
-          <button type="button" className="btn-gold px-4 py-2 mb-4 disabled:opacity-50" disabled={!readiness.ok || busy} onClick={doStart}>
-            Start
-          </button>
+          <div className="mb-4 space-y-2">
+            {developerBlocked && (
+              <p className="text-sm text-amber-200/90">
+                Fix before Start: {developerBlockReason}
+              </p>
+            )}
+            <button
+              type="button"
+              className="btn-gold px-4 py-2 disabled:opacity-50"
+              disabled={!readiness.ok || busy || !!developerBlocked}
+              title={developerBlocked ? developerBlockReason : undefined}
+              onClick={doStart}
+            >
+              Start
+            </button>
+          </div>
         )}
 
         <div className="border-t border-white/10 pt-3">

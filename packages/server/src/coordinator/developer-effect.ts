@@ -32,6 +32,7 @@ import {
   mergeBase,
   branchExists,
   revParseHead,
+  revParseRef,
   fetchRef,
 } from "../adapters/git-worktree.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
@@ -39,7 +40,7 @@ import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from
 import { getWorkerSession, patchRunningSession } from "../repository/worker-sessions.js";
 import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
-import { createIssueArtifact } from "../repository/artifacts.js";
+import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
 import { recordUsageCapFromLog } from "../runners/usage-cap.js";
@@ -155,6 +156,183 @@ async function reconcilePrHead(
   return view;
 }
 
+/**
+ * Infra retry after a successful push: no agent spawn. Uses the issue repo as `gh` cwd
+ * and `origin/<branch>` as the verified head (worktree was already removed on the prior
+ * failure path).
+ */
+async function runPublishOnlyHandoff(
+  ctx: EffectContext,
+  deps: DeveloperEffectDeps,
+  branchName: string
+): Promise<DeveloperOutcome> {
+  const { issue, workItem, instance } = ctx;
+  const sessionId = workItem.workerSessionId!;
+  const taskSnapshot = getTaskSnapshot(issue);
+  const round = workItem.round;
+  const stage = issue.status;
+  const cwd = issue.repo;
+
+  const milestone = (
+    type: Parameters<typeof emitSessionMilestone>[0]["type"],
+    intent: string,
+    payload?: unknown
+  ) =>
+    emitSessionMilestone({
+      issueId: issue.id,
+      workflowInstanceId: instance.id,
+      workerSessionId: sessionId,
+      role: "developer",
+      stage,
+      round,
+      type,
+      intent,
+      payload,
+    });
+
+  try {
+    setLiveIntent(issue.id, `Developer · retrying GitHub publish (round ${round})`);
+    await fetchRef(cwd, branchName);
+    const remoteHead = await revParseRef(cwd, `origin/${branchName}`);
+
+    let prView = await deps.github.viewPr({ cwd, branch: branchName });
+    if (!prView) {
+      setLiveIntent(issue.id, `Developer · opening draft PR (publish retry, round ${round})`);
+      const prior = latestIssueArtifact(issue.id, "implementation_conclusion");
+      let body = taskSnapshot.description;
+      if (prior?.contentJson) {
+        try {
+          const parsed = JSON.parse(prior.contentJson) as { text?: string };
+          if (typeof parsed.text === "string" && parsed.text.trim()) body = parsed.text.trim();
+        } catch {
+          // keep description
+        }
+      }
+      const bodyDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-pr-body-"));
+      const bodyFilePath = path.join(bodyDir, "body.md");
+      fs.writeFileSync(bodyFilePath, body);
+      const created = await deps.github.createDraftPr({
+        cwd,
+        base: issue.baseBranch,
+        head: branchName,
+        title: taskSnapshot.title,
+        bodyFilePath,
+      });
+      fs.rmSync(bodyDir, { recursive: true, force: true });
+      if (!created.ok) {
+        return created.noCommits
+          ? { kind: "no_pr" }
+          : {
+              kind: "adapter_failure",
+              reason: `Branch already pushed (${branchName}); only draft PR create failed: ${created.reason}`,
+              afterPush: { branch: branchName },
+            };
+      }
+      prView = await deps.github.viewPr({ cwd, branch: branchName });
+      if (!prView) {
+        return {
+          kind: "adapter_failure",
+          reason: `Branch already pushed (${branchName}); PR created but could not be re-verified via gh pr view`,
+          afterPush: { branch: branchName },
+        };
+      }
+    }
+
+    if (prView.headRefOid !== remoteHead) {
+      prView =
+        (await reconcilePrHead(deps.github, {
+          cwd,
+          number: prView.number,
+          branch: branchName,
+          localHead: remoteHead,
+          timeoutMs: developerEffectConfig.headReconcileTimeoutMs,
+          intervalMs: developerEffectConfig.headReconcileIntervalMs,
+        })) ?? prView;
+    }
+    const identityOpts = {
+      branchName,
+      baseBranch: issue.baseBranch,
+      priorPrNumber: issue.prNumber,
+      localHead: remoteHead,
+    };
+    const identity = await validatePrIdentity(prView, identityOpts);
+    if (!identity.ok) {
+      return {
+        kind: "adapter_failure",
+        reason: `Branch already pushed (${branchName}); ${identity.reason}`,
+        afterPush: { branch: branchName },
+      };
+    }
+
+    milestone("checks.started", `Developer · waiting on checks (publish retry, round ${round})`, {
+      prNumber: prView.number,
+      headSha: prView.headRefOid,
+    });
+    const checks = await pollPrChecks(deps.github, {
+      cwd,
+      timeoutMs: developerEffectConfig.checksPollTimeoutMs,
+      intervalMs: developerEffectConfig.checksPollIntervalMs,
+      signal: ctx.signal,
+      number: prView.number,
+    });
+    milestone("checks.completed", `Developer · checks ${checks}`, {
+      snapshot: checks,
+      prNumber: prView.number,
+      headSha: prView.headRefOid,
+    });
+
+    const postPollView = await deps.github.viewPr({ cwd, branch: branchName });
+    if (!postPollView) {
+      return {
+        kind: "adapter_failure",
+        reason: `Branch already pushed (${branchName}); PR could not be re-verified after the checks poll`,
+        afterPush: { branch: branchName },
+      };
+    }
+    const postPollIdentity = await validatePrIdentity(postPollView, identityOpts);
+    if (!postPollIdentity.ok) {
+      return {
+        kind: "adapter_failure",
+        reason: `Branch already pushed (${branchName}); PR changed while waiting on checks: ${postPollIdentity.reason}`,
+        afterPush: { branch: branchName },
+      };
+    }
+    prView = postPollView;
+
+    createIssueArtifact({
+      issueId: issue.id,
+      workerSessionId: sessionId,
+      kind: "checks_evidence",
+      author: "system",
+      content: { snapshot: checks, prNumber: prView.number, headSha: prView.headRefOid },
+    });
+    if (checks === "failure") return { kind: "checks_failed" };
+    if (checks === "timeout") return { kind: "timed_out" };
+
+    await fetchRef(cwd, prView.baseRefName);
+    const baseSha = await mergeBase({
+      repo: cwd,
+      base: `origin/${prView.baseRefName}`,
+      head: prView.headRefOid,
+    });
+
+    return {
+      kind: "clean_handoff",
+      branch: branchName,
+      headSha: prView.headRefOid,
+      baseSha,
+      prNumber: prView.number,
+      prUrl: prView.url,
+    };
+  } catch (err) {
+    return {
+      kind: "adapter_failure",
+      reason: String(err),
+      afterPush: { branch: branchName },
+    };
+  }
+}
+
 export async function runDeveloperEffect(
   ctx: EffectContext,
   deps: DeveloperEffectDeps = defaultDeps
@@ -162,6 +340,23 @@ export async function runDeveloperEffect(
   const { issue, workItem, instance } = ctx;
   const sessionId = workItem.workerSessionId;
   if (!sessionId) return { kind: "session_failed" };
+
+  let payload: {
+    retryReason?: string | null;
+    publishOnly?: boolean;
+    branch?: string;
+  } = {};
+  try {
+    if (workItem.payloadJson) payload = JSON.parse(workItem.payloadJson);
+  } catch {
+    payload = {};
+  }
+
+  // Post-push infra retry: branch is already on origin — only re-run gh/PR/checks.
+  if (payload.publishOnly) {
+    const branchName = payload.branch?.trim() || issue.branch || `issue-${issue.id}`;
+    return runPublishOnlyHandoff(ctx, deps, branchName);
+  }
 
   const session = getWorkerSession(sessionId);
   const snapshot = parseProfileSnapshot(session?.profileSnapshotJson);
@@ -259,22 +454,31 @@ export async function runDeveloperEffect(
       });
     }
 
-    let payload: { retryReason?: string | null } = {};
-    try {
-      if (workItem.payloadJson) payload = JSON.parse(workItem.payloadJson);
-    } catch {
-      payload = {};
-    }
-
     const openFindings = listFindingsForIssue(issue.id).filter(
       (f) => f.status === "open" || f.status === "recurring"
     );
     const guidance = guidanceForNextSession(issue.id, sessionId);
+    const retryReason = payload.retryReason ?? undefined;
+    let priorConclusion: string | undefined;
+    if (retryReason) {
+      const prior = latestIssueArtifact(issue.id, "implementation_conclusion");
+      if (prior?.contentJson) {
+        try {
+          const parsed = JSON.parse(prior.contentJson) as { text?: string };
+          if (typeof parsed.text === "string" && parsed.text.trim()) {
+            priorConclusion = parsed.text.trim();
+          }
+        } catch {
+          // ignore malformed prior conclusion
+        }
+      }
+    }
     const prompt = buildDeveloperPrompt({
       taskSnapshot,
       round: workItem.round,
       findings: openFindings.length ? openFindings : undefined,
-      retryReason: payload.retryReason ?? undefined,
+      retryReason,
+      priorConclusion,
       worktreePath,
       deckId: snapshot?.deckId ?? null,
       playbookIds: snapshot?.playbookIds,
@@ -434,12 +638,20 @@ export async function runDeveloperEffect(
         await bestEffortRemove(issue.repo, worktreePath);
         return created.noCommits
           ? { kind: "no_pr" }
-          : { kind: "adapter_failure", reason: created.reason };
+          : {
+              kind: "adapter_failure",
+              reason: `Branch already pushed (${branchName}); only draft PR create failed: ${created.reason}`,
+              afterPush: { branch: branchName },
+            };
       }
       prView = await deps.github.viewPr({ cwd: worktreePath, branch: branchName });
       if (!prView) {
         await bestEffortRemove(issue.repo, worktreePath);
-        return { kind: "adapter_failure", reason: "PR created but could not be re-verified via gh pr view" };
+        return {
+          kind: "adapter_failure",
+          reason: `Branch already pushed (${branchName}); PR created but could not be re-verified via gh pr view`,
+          afterPush: { branch: branchName },
+        };
       }
     }
 
@@ -459,7 +671,11 @@ export async function runDeveloperEffect(
     const identity = await validatePrIdentity(prView, identityOpts);
     if (!identity.ok) {
       await bestEffortRemove(issue.repo, worktreePath);
-      return { kind: "adapter_failure", reason: identity.reason };
+      return {
+        kind: "adapter_failure",
+        reason: `Branch already pushed (${branchName}); ${identity.reason}`,
+        afterPush: { branch: branchName },
+      };
     }
 
     milestone("checks.started", `Developer · waiting on checks (round ${round})`, {
@@ -492,12 +708,20 @@ export async function runDeveloperEffect(
     const postPollView = await deps.github.viewPr({ cwd: worktreePath, branch: branchName });
     if (!postPollView) {
       await bestEffortRemove(issue.repo, worktreePath);
-      return { kind: "adapter_failure", reason: "PR could not be re-verified after the checks poll" };
+      return {
+        kind: "adapter_failure",
+        reason: `Branch already pushed (${branchName}); PR could not be re-verified after the checks poll`,
+        afterPush: { branch: branchName },
+      };
     }
     const postPollIdentity = await validatePrIdentity(postPollView, identityOpts);
     if (!postPollIdentity.ok) {
       await bestEffortRemove(issue.repo, worktreePath);
-      return { kind: "adapter_failure", reason: `PR changed while waiting on checks: ${postPollIdentity.reason}` };
+      return {
+        kind: "adapter_failure",
+        reason: `Branch already pushed (${branchName}); PR changed while waiting on checks: ${postPollIdentity.reason}`,
+        afterPush: { branch: branchName },
+      };
     }
     prView = postPollView;
 

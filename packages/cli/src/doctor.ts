@@ -38,6 +38,31 @@ export async function runDoctor(): Promise<number> {
     failed = true;
   }
 
+  {
+    const { spawnSync } = await import("node:child_process");
+    const ghVer = spawnSync("gh", ["--version"], { encoding: "utf8" });
+    if (ghVer.error || ghVer.status !== 0) {
+      console.error("✗ GitHub CLI (`gh`) not found — install gh (required to open draft PRs)");
+      failed = true;
+    } else {
+      const auth = spawnSync("gh", ["auth", "status"], { encoding: "utf8" });
+      const out = `${auth.stdout ?? ""}${auth.stderr ?? ""}`.toLowerCase();
+      if (
+        auth.status !== 0 ||
+        out.includes("not logged in") ||
+        out.includes("failed to log in") ||
+        out.includes("token in keyring is invalid") ||
+        out.includes("re-authenticate")
+      ) {
+        console.error("✗ GitHub CLI auth — run: gh auth login -h github.com");
+        console.error("  (Issue workflows open draft PRs via gh; invalid auth wastes agent runs.)");
+        failed = true;
+      } else {
+        console.log("✓ GitHub CLI auth");
+      }
+    }
+  }
+
   try {
     resolveServerEntry();
     console.log("✓ @agent-dealer/server entry");

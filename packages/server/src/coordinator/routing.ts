@@ -13,8 +13,10 @@ export type DeveloperOutcome =
   | { kind: "checks_failed"; details?: string }
   /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll. */
   | { kind: "timed_out" }
-  /** git/gh tooling itself errored during verification — not the agent's fault. */
-  | { kind: "adapter_failure"; reason: string }
+  /** git/gh tooling itself errored during verification — not the agent's fault.
+   * When `afterPush` is set, the branch is already on the remote: infra retry should
+   * re-run coordinator publish only (no new agent session). */
+  | { kind: "adapter_failure"; reason: string; afterPush?: { branch: string } }
   | { kind: "session_failed" }
   /** Runtime account usage cap — defer until unavailable_until, not an infra failure (NOT-111). */
   | { kind: "usage_capped"; until: string; reason: string; evidence?: unknown };
@@ -51,6 +53,8 @@ export type DeveloperRouteResult =
    * plain crash, and (round 1 specifically) would be told to start on a "fresh branch"
    * despite reusing one that already carries a failed attempt's commits. */
   | { next: "retry_developer"; reason: string }
+  /** Branch already on origin; re-run coordinator gh/PR/checks only (no agent spawn). */
+  | { next: "retry_publish"; reason: string; branch: string }
   | {
       next: "human_action";
       actionType: "attempts_exhausted" | "policy_escalation";
@@ -80,11 +84,19 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
         actionType: "policy_escalation",
         reason: `${outcome.reason} Recovery:\n${outcome.recoveryCommands.join("\n")}`,
       };
+    case "adapter_failure": {
+      const reason = infraFailureReason(outcome);
+      if (outcome.afterPush && infraAttemptsRemain(limits)) {
+        return { next: "retry_publish", reason, branch: outcome.afterPush.branch };
+      }
+      return infraAttemptsRemain(limits)
+        ? { next: "retry_developer", reason }
+        : { next: "human_action", actionType: "policy_escalation", reason: `${reason} (infra-attempt limit reached).` };
+    }
     case "no_pr":
     case "session_failed":
     case "timed_out":
-    case "checks_failed":
-    case "adapter_failure": {
+    case "checks_failed": {
       // Unified infra-failure policy: the session/environment failed to produce a
       // reviewable result at all — bounded auto-retry on max_infra_attempts, decoupled
       // from the review-round budget, then a human policy_escalation.

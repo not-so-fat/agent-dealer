@@ -40,6 +40,7 @@ import {
 } from "../repository/human-actions.js";
 import { reconcileFinding } from "../repository/findings.js";
 import { getAgent } from "../repository/agents.js";
+import { githubIssuesSync } from "../adapters/agent-health.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import {
   cancelWorkItem,
@@ -259,6 +260,15 @@ export function startWorkflow(issueId: string): StartResult {
   // that path must still close out the stale action rather than leave it open forever
   // alongside a running workflow.
   const openScopeDecision = preStart ? findOpenHumanAction(issueId, "product_scope_decision") : null;
+
+  // Refuse before enqueueing a developer round when `gh` cannot open the draft PR —
+  // that path otherwise burns a full agent session and lands as adapter_failure.
+  if (preStart) {
+    const ghIssues = githubIssuesSync();
+    if (ghIssues.length > 0) {
+      return { ok: false, code: 409, error: ghIssues[0]!.message };
+    }
+  }
 
   // PRD §6.1: if required product intent cannot be normalized without guessing, ask.
   if (preStart && (!issue.acceptanceCriteria || !issue.acceptanceCriteria.trim())) {
@@ -682,7 +692,12 @@ type AnyRoute =
  * re-derive attempt A's ORIGINAL key (same round, same head) and collide with that
  * now-terminal work item, leaving the issue "reviewing" with no pending item. */
 function isInfraRetry(route: AnyRoute): boolean {
-  return route.next === "retry_developer" || route.next === "retry_reviewer" || route.next === "retry_reviewer_at_new_head";
+  return (
+    route.next === "retry_developer" ||
+    route.next === "retry_publish" ||
+    route.next === "retry_reviewer" ||
+    route.next === "retry_reviewer_at_new_head"
+  );
 }
 
 function applyEffect(
@@ -723,6 +738,8 @@ function applyEffect(
       payload: {
         ...(effect.atHeadSha ? { inputSha: effect.atHeadSha } : {}),
         ...(effect.retryReason ? { retryReason: effect.retryReason } : {}),
+        ...(effect.publishOnly ? { publishOnly: true } : {}),
+        ...(effect.branch ? { branch: effect.branch } : {}),
         profileSnapshot: queuedProfileSnapshot(issue, kind),
       },
       idempotencyKey: `${instance.id}:${kind}:${issueNow.currentRound}${headSuffix}${attemptSuffix}`,

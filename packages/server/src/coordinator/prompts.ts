@@ -28,6 +28,9 @@ export interface DeveloperPromptInput {
    * the branch/worktree may already carry that attempt's partial work, so the opening
    * instruction must say so instead of claiming a fresh start. */
   retryReason?: string;
+  /** Prior session's implementation conclusion when this is an infra retry — the agent
+   * otherwise only sees a short failure string and re-discovers state via git. */
+  priorConclusion?: string;
   /** The generated worktree the agent is actually running in — binding must target this, not the original repo checkout. */
   worktreePath?: string;
   deckId?: string | null;
@@ -80,13 +83,29 @@ function agentDeckSection(worktreePath: string | undefined, deckId: string | nul
 
 export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
   const opening = input.retryReason
-    ? `This is a retry of round ${input.round} after the previous attempt failed: ${input.retryReason} The branch off ${input.taskSnapshot.baseBranch} may already carry partial work from that attempt — check \`git status\`/\`git log\` before starting, and continue rather than assuming a clean slate.`
+    ? `This is a retry of round ${input.round} (same review round — prior attempt did not hand off cleanly).`
     : input.round === 1
       ? `Implement this issue on a fresh branch off ${input.taskSnapshot.baseBranch}.`
       : `This is repair round ${input.round}. Address every blocking finding below, then commit your changes.`;
   const parts = [
     opening,
     ``,
+  ];
+
+  if (input.retryReason) {
+    parts.push(
+      `## Previous attempt`,
+      `- **Last failure:** ${input.retryReason}`,
+      `- Check \`git status\` / \`git log\` on the branch off ${input.taskSnapshot.baseBranch}. Commits from that attempt may already be there — **continue; do not re-implement from scratch**.`,
+      `- If the failure was only coordinator GitHub verification (PR create / checks) after work was already committed or pushed, verify acceptance criteria on the existing commits, fix only gaps, commit if needed, then end. Do not open a PR yourself.`,
+      ``
+    );
+    if (input.priorConclusion?.trim()) {
+      parts.push(`### Prior implementation conclusion`, input.priorConclusion.trim(), ``);
+    }
+  }
+
+  parts.push(
     `## Task`,
     input.taskSnapshot.title,
     input.taskSnapshot.description,
@@ -94,7 +113,7 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
     `## Acceptance criteria`,
     input.taskSnapshot.acceptanceCriteria,
     ``,
-  ];
+  );
 
   if (input.findings?.length) {
     parts.push(`## Findings to address`);

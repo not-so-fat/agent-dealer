@@ -39,6 +39,11 @@ test("every developer projection lands on a legal issue transition and always ha
       { kind: "timed_out" },
       { kind: "checks_failed" },
       { kind: "adapter_failure", reason: "boom" },
+      {
+        kind: "adapter_failure",
+        reason: "Branch already pushed (br); only draft PR create failed: boom",
+        afterPush: { branch: "br" },
+      },
       { kind: "dirty_worktree" },
       { kind: "unpushed_commit", reason: "non-fast-forward" },
       { kind: "worktree_conflict", path: "/data/worktrees/old-developer", reason: "collision", recoveryCommands: ["git status"] as string[] },
@@ -115,6 +120,28 @@ test("infra-class retries — including a stale re-review — spend the infra bu
   );
   assert.equal(devRetry.advance, "infra");
   assert.deepStrictEqual(devRetry.effect, { kind: "enqueue", workItem: "developer", retryReason: "Developer session failed or crashed." });
+
+  const publishRetry = projectDeveloperRoute(
+    routeDeveloperOutcome(
+      {
+        kind: "adapter_failure",
+        reason: "Branch already pushed (br); only draft PR create failed: x",
+        afterPush: { branch: "br" },
+      },
+      REVIEW_ROUNDS_LEFT
+    ),
+    "developing",
+    1
+  );
+  assert.equal(publishRetry.advance, "infra");
+  assert.deepStrictEqual(publishRetry.effect, {
+    kind: "enqueue",
+    workItem: "developer",
+    retryReason: "Git/GitHub verification failed: Branch already pushed (br); only draft PR create failed: x",
+    publishOnly: true,
+    branch: "br",
+  });
+  assert.match(publishRetry.projection.currentIntent, /Retrying GitHub publish/);
 
   const reviewerRetry = projectReviewerRoute(
     routeReviewerOutcome({ kind: "publish_failed" }, REVIEW_ROUNDS_LEFT, PINNED_HEAD),

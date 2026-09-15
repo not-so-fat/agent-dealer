@@ -221,7 +221,11 @@ export default function App() {
             <IssuesListPage agents={snapshot?.agents ?? []} onSelectIssue={setSelectedIssueId} />
           )}
           {view === "issues" && selectedIssueId && (
-            <IssueDetailPage issueId={selectedIssueId} onBack={() => setSelectedIssueId(null)} />
+            <IssueDetailPage
+              issueId={selectedIssueId}
+              agents={snapshot?.agents ?? []}
+              onBack={() => setSelectedIssueId(null)}
+            />
           )}
           {view === "human-actions" && <HumanActionsPage onSelectIssue={goToIssueFromAction} />}
           {view === "ops" && (

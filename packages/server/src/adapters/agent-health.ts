@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import type { AgentHealthIssue, AgentProfile, AgentWithHealth, Runtime } from "@agent-dealer/shared";
 import {
@@ -33,6 +33,13 @@ function capHealthIssues(runtime: Runtime): AgentHealthIssue[] {
 
 const RUNTIME_CACHE_MS = 60_000;
 const runtimeIssueCache = new Map<Runtime, { at: number; issues: AgentHealthIssue[] }>();
+let githubIssueCache: { at: number; issues: AgentHealthIssue[] } | null = null;
+
+/** Exported for tests — clears the shared github + runtime health caches. */
+export function clearAgentHealthCaches(): void {
+  runtimeIssueCache.clear();
+  githubIssueCache = null;
+}
 
 function runCommand(
   cmd: string,
@@ -115,6 +122,88 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
   return issues;
 }
 
+/**
+ * Issue workflows always use `gh` after a developer session (draft PR + checks). A bad
+ * or missing GitHub CLI auth wastes a full agent run and lands as `adapter_failure` —
+ * surface it on every agent so Start / intake can refuse before that spend.
+ */
+export async function githubIssuesUncached(): Promise<AgentHealthIssue[]> {
+  const status = await runCommand("gh", ["auth", "status"]);
+  const out = status.output.toLowerCase();
+  if (
+    out.includes("enoent") ||
+    out.includes("not found") ||
+    out.includes("no such file") ||
+    (out.includes("spawn") && out.includes("gh"))
+  ) {
+    return [{ code: "github_cli_missing", message: "gh CLI not found — install GitHub CLI (`gh`)" }];
+  }
+  if (
+    !status.ok ||
+    out.includes("not logged in") ||
+    out.includes("failed to log in") ||
+    out.includes("token in keyring is invalid") ||
+    out.includes("re-authenticate") ||
+    out.includes("to re-authenticate")
+  ) {
+    return [
+      {
+        code: "github_auth",
+        message: "Run `gh auth login` — GitHub CLI auth required to open PRs",
+      },
+    ];
+  }
+  return [];
+}
+
+/** Synchronous for startWorkflow — issue kick must refuse before spending a developer round. */
+export function githubIssuesSync(): AgentHealthIssue[] {
+  if (githubIssueCache && Date.now() - githubIssueCache.at < RUNTIME_CACHE_MS) {
+    return githubIssueCache.issues;
+  }
+  const result = spawnSync("gh", ["auth", "status"], {
+    encoding: "utf8",
+    timeout: 8000,
+    env: process.env,
+  });
+  const output = `${result.stdout ?? ""}${result.stderr ?? ""}${result.error?.message ?? ""}`;
+  const out = output.toLowerCase();
+  let issues: AgentHealthIssue[] = [];
+  if (
+    result.error ||
+    out.includes("enoent") ||
+    out.includes("not found") ||
+    out.includes("no such file")
+  ) {
+    issues = [{ code: "github_cli_missing", message: "gh CLI not found — install GitHub CLI (`gh`)" }];
+  } else if (
+    result.status !== 0 ||
+    out.includes("not logged in") ||
+    out.includes("failed to log in") ||
+    out.includes("token in keyring is invalid") ||
+    out.includes("re-authenticate") ||
+    out.includes("to re-authenticate")
+  ) {
+    issues = [
+      {
+        code: "github_auth",
+        message: "Run `gh auth login` — GitHub CLI auth required to open PRs",
+      },
+    ];
+  }
+  githubIssueCache = { at: Date.now(), issues };
+  return issues;
+}
+
+async function githubIssues(): Promise<AgentHealthIssue[]> {
+  if (githubIssueCache && Date.now() - githubIssueCache.at < RUNTIME_CACHE_MS) {
+    return githubIssueCache.issues;
+  }
+  const issues = await githubIssuesUncached();
+  githubIssueCache = { at: Date.now(), issues };
+  return issues;
+}
+
 async function runtimeIssues(runtime: Runtime): Promise<AgentHealthIssue[]> {
   const capIssues = capHealthIssues(runtime);
   const cached = runtimeIssueCache.get(runtime);
@@ -173,15 +262,18 @@ export async function healthForAgent(
   agentDeckOnline: boolean,
   runtimeIssuesByRuntime?: Map<Runtime, AgentHealthIssue[]>,
   mcpRegistered?: boolean,
-  deckAccessResult: DeckAccessResult | null = null
+  deckAccessResult: DeckAccessResult | null = null,
+  githubIssuesList?: AgentHealthIssue[]
 ): Promise<AgentWithHealth> {
   const runtime =
     runtimeIssuesByRuntime !== undefined
       ? (runtimeIssuesByRuntime.get(agent.runtime) ?? [])
       : await runtimeIssues(agent.runtime);
   const deckMcpOk = mcpRegistered ?? isAgentDeckMcpRegistered();
+  const github = githubIssuesList ?? (await githubIssues());
   const issues: AgentHealthIssue[] = [
     ...runtime,
+    ...github,
     ...agentSpecificIssues(agent, agentDeckOnline, deckMcpOk, deckAccessResult),
   ];
   return {
@@ -198,14 +290,24 @@ export async function listAgentsWithHealth(agents: AgentProfile[]): Promise<Agen
   const deckAccessResult = agentDeckOnline && needsDeckAccess ? await fetchDecks() : null;
   const runtimes = [...new Set(agents.map((a) => a.runtime))];
   const runtimeIssuesByRuntime = new Map<Runtime, AgentHealthIssue[]>();
-  await Promise.all(
-    runtimes.map(async (runtime) => {
-      runtimeIssuesByRuntime.set(runtime, await runtimeIssues(runtime));
-    })
-  );
+  const [, githubIssuesList] = await Promise.all([
+    Promise.all(
+      runtimes.map(async (runtime) => {
+        runtimeIssuesByRuntime.set(runtime, await runtimeIssues(runtime));
+      })
+    ),
+    githubIssues(),
+  ]);
   return Promise.all(
     agents.map((a) =>
-      healthForAgent(a, agentDeckOnline, runtimeIssuesByRuntime, mcpRegistered, deckAccessResult)
+      healthForAgent(
+        a,
+        agentDeckOnline,
+        runtimeIssuesByRuntime,
+        mcpRegistered,
+        deckAccessResult,
+        githubIssuesList
+      )
     )
   );
 }
