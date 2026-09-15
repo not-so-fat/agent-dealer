@@ -120,6 +120,19 @@ test("an infra-class developer failure never spends the review-round budget, eve
   });
 });
 
+test("usage_capped defers instead of infra retry (NOT-111)", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "usage_capped",
+    until: "2099-01-01T00:00:00.000Z",
+    reason: "claude_code usage capped",
+  };
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_AT_LIMIT), {
+    next: "defer_work",
+    until: outcome.until,
+    reason: outcome.reason,
+  });
+});
+
 // --- Reviewer outcomes ---
 
 test("approved verdict routes to final_review regardless of round", () => {

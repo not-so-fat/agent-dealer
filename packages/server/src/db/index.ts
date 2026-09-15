@@ -338,6 +338,22 @@ export function migrate(): void {
     })();
   }
 
+  // NOT-111: runtime usage-cap availability (one row per runtime account).
+  const runtimeAvail = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_availability'")
+    .get() as { name: string } | undefined;
+  if (!runtimeAvail) {
+    db.exec(`
+      CREATE TABLE runtime_availability (
+        runtime TEXT PRIMARY KEY,
+        unavailable_until TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        evidence_json TEXT,
+        observed_at TEXT NOT NULL
+      );
+    `);
+  }
+
   seedBuiltinAgents(db);
   seedIntakeSettings(db);
   migrateLegacyAgentDeckPort(db);

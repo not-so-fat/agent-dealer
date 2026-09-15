@@ -15,13 +15,16 @@ export type DeveloperOutcome =
   | { kind: "timed_out" }
   /** git/gh tooling itself errored during verification — not the agent's fault. */
   | { kind: "adapter_failure"; reason: string }
-  | { kind: "session_failed" };
+  | { kind: "session_failed" }
+  /** Runtime account usage cap — defer until unavailable_until, not an infra failure (NOT-111). */
+  | { kind: "usage_capped"; until: string; reason: string; evidence?: unknown };
 
 export type ReviewerOutcome =
   | { kind: "verdict"; result: ReviewerResult }
   | { kind: "stale"; currentHeadSha: string }
   | { kind: "session_failed" }
-  | { kind: "publish_failed" };
+  | { kind: "publish_failed" }
+  | { kind: "usage_capped"; until: string; reason: string; evidence?: unknown };
 
 export interface RouteLimits {
   currentRound: number;
@@ -52,7 +55,8 @@ export type DeveloperRouteResult =
       next: "human_action";
       actionType: "attempts_exhausted" | "policy_escalation";
       reason: string;
-    };
+    }
+  | { next: "defer_work"; until: string; reason: string };
 
 export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLimits): DeveloperRouteResult {
   switch (outcome.kind) {
@@ -89,6 +93,8 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
         ? { next: "retry_developer", reason }
         : { next: "human_action", actionType: "policy_escalation", reason: `${reason} (infra-attempt limit reached).` };
     }
+    case "usage_capped":
+      return { next: "defer_work", until: outcome.until, reason: outcome.reason };
   }
 }
 
@@ -123,7 +129,8 @@ export type ReviewerRouteResult =
       next: "human_action";
       actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision";
       reason: string;
-    };
+    }
+  | { next: "defer_work"; until: string; reason: string };
 
 export function routeReviewerOutcome(
   outcome: ReviewerOutcome,
@@ -149,6 +156,8 @@ export function routeReviewerOutcome(
         ? { next: "retry_reviewer", headSha: pinnedHeadSha }
         : { next: "human_action", actionType: "policy_escalation", reason: `${reason} (infra-attempt limit reached).` };
     }
+    case "usage_capped":
+      return { next: "defer_work", until: outcome.until, reason: outcome.reason };
     case "verdict":
       return routeVerdict(outcome.result, limits);
   }

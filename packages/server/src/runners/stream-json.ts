@@ -225,10 +225,18 @@ export function buildStreamTrace(events: StreamEvent[], maxEntries = 80): Stream
     }
 
     if (t === "rate_limit_event") {
-      const info = e.rate_limit_info as { status?: string; rateLimitType?: string } | undefined;
+      const info = e.rate_limit_info as {
+        status?: string;
+        rateLimitType?: string;
+        resetsAt?: number;
+      } | undefined;
+      const reset =
+        typeof info?.resetsAt === "number"
+          ? new Date(info.resetsAt > 1e12 ? info.resetsAt : info.resetsAt * 1000).toISOString()
+          : null;
       entries.push({
         type: "rate_limit",
-        text: `rate limit ${info?.status ?? "?"} (${info?.rateLimitType ?? "?"})`,
+        text: `rate limit ${info?.status ?? "?"} (${info?.rateLimitType ?? "?"})${reset ? ` until ${reset}` : ""}`,
       });
     }
 

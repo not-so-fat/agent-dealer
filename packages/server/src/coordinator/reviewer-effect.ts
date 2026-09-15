@@ -34,6 +34,7 @@ import { parseReviewerResult, ReviewerResult as ReviewerResultSchema, type Revie
 import {
   createRoleWorktree,
   safeRemoveWorktree,
+  isWorktreeClean,
   mergeBase,
   fetchRef,
   diffShas,
@@ -46,6 +47,7 @@ import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
+import { recordUsageCapFromLog } from "../runners/usage-cap.js";
 import {
   emitSessionMilestone,
   setLiveIntent,
@@ -372,6 +374,19 @@ export async function runReviewerEffect(
     if (workerAuthority) {
       await releaseWorkerDeckConnection(workerAuthority);
       workerAuthority = null;
+    }
+
+    const usageCap = recordUsageCapFromLog(spawned.logPath, runtime);
+    if (usageCap) {
+      const clean = await isWorktreeClean(worktreePath).catch(() => false);
+      if (!clean) return { kind: "session_failed" };
+      await bestEffortRemove(issue.repo, worktreePath);
+      return {
+        kind: "usage_capped",
+        until: usageCap.unavailableUntil,
+        reason: usageCap.reason,
+        evidence: usageCap.evidence,
+      };
     }
 
     if (spawned.timedOut || spawned.exitCode !== 0) {

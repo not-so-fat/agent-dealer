@@ -358,3 +358,12 @@ CREATE TABLE IF NOT EXISTS authority_attempts (
 CREATE INDEX IF NOT EXISTS idx_authority_attempts_owner ON authority_attempts(owner_kind, owner_id);
 CREATE INDEX IF NOT EXISTS idx_authority_attempts_stale ON authority_attempts(status, stale_at) WHERE stale_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_authority_attempts_status ON authority_attempts(status);
+
+-- NOT-111: account-level runtime usage caps (keyed per runtime, not per agent profile).
+CREATE TABLE IF NOT EXISTS runtime_availability (
+  runtime TEXT PRIMARY KEY,
+  unavailable_until TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  evidence_json TEXT,
+  observed_at TEXT NOT NULL
+);

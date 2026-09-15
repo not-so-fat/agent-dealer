@@ -18,6 +18,7 @@ export const AgentHealthIssue = z.object({
   code: z.enum([
     "cli_missing",
     "runtime_auth",
+    "usage_capped",
     "deck_offline",
     "deck_unauthorized",
     "workspace_missing",

@@ -42,6 +42,7 @@ import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact } from "../repository/artifacts.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
+import { recordUsageCapFromLog } from "../runners/usage-cap.js";
 import {
   emitSessionMilestone,
   setLiveIntent,
@@ -339,6 +340,19 @@ export async function runDeveloperEffect(
     if (workerAuthority) {
       await releaseWorkerDeckConnection(workerAuthority);
       workerAuthority = null;
+    }
+
+    const usageCap = recordUsageCapFromLog(spawned.logPath, runtime);
+    if (usageCap) {
+      const clean = await isWorktreeClean(worktreePath).catch(() => false);
+      if (!clean) return { kind: "dirty_worktree" };
+      await bestEffortRemove(issue.repo, worktreePath);
+      return {
+        kind: "usage_capped",
+        until: usageCap.unavailableUntil,
+        reason: usageCap.reason,
+        evidence: usageCap.evidence,
+      };
     }
 
     if (spawned.timedOut || spawned.exitCode !== 0) {
