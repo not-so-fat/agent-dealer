@@ -32,7 +32,7 @@ Kick “From Linear” only showed a handful of tickets (e.g. NOT-90/89/47/46) b
 
 Env `LINEAR_STATE_FILTER` still overrides saved filter when set — update examples and local `.env` to the open-state set so live override matches product intent.
 
-One-shot DB migrate: set persisted `assigneeMe` to `false` for existing installs (unlock without a manual settings click).
+One-shot DB migrate: set persisted `assigneeMe` to `false` **only when it is still `true`** (pre-unlock default), and expand `stateFilter` **only when it is still exactly `["Todo"]`**. Deliberate Settings customizations and env-seeded filters (e.g. `Todo,Backlog`) are left alone.
 
 ### List
 
