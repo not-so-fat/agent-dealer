@@ -151,6 +151,27 @@ test("autoMerge on: merge failure escalates to policy_escalation; issue not left
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0);
 });
 
+test("autoMerge on: gh timeout reason escalates (bounded hang must not leave final_review park)", async () => {
+  const { GH_MERGE_TIMEOUT_MS } = await import("./auto-merge.js");
+  setMergePrForTests(async () => ({
+    ok: false,
+    reason: `gh timed out after ${GH_MERGE_TIMEOUT_MS}ms`,
+  }));
+
+  const issueId = newIssue({ autoMerge: true });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  const action = listHumanActionsForIssue(issueId).find(
+    (a) => a.actionType === "policy_escalation" && a.status === "open"
+  );
+  assert.ok(action);
+  assert.match(action!.reason, /timed out after/);
+});
+
 test("listRecentRepos returns distinct local paths newest-first", () => {
   const base = {
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,

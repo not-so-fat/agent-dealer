@@ -38,15 +38,20 @@ export const AUTO_MERGE_INTENT = "Auto-merging approved PR";
 
 const ALREADY_MERGED = /already (been )?merged|pull request is not mergeable:.*merged/i;
 
-function ghErrorReason(err: unknown, fallback: string): string {
+/** True when Node killed the child for exceeding `timeout` (promisify(execFile)). */
+export function isGhTimeoutError(err: unknown): boolean {
+  const e = err as { killed?: boolean; signal?: string | null };
+  return Boolean(e.killed || e.signal === "SIGTERM");
+}
+
+/** Map an execFile failure to a stable reason string (timeout vs stderr/stdout). */
+export function ghErrorReason(err: unknown, fallback: string): string {
   const e = err as {
     stderr?: string;
     stdout?: string;
     message?: string;
-    killed?: boolean;
-    signal?: string | null;
   };
-  if (e.killed || e.signal === "SIGTERM") {
+  if (isGhTimeoutError(err)) {
     return `gh timed out after ${GH_MERGE_TIMEOUT_MS}ms`;
   }
   return (e.stderr || e.stdout || e.message || fallback).trim() || fallback;
@@ -60,7 +65,11 @@ export const realMergePr: MergePr = async ({ cwd, number }) => {
       encoding: "utf8",
       timeout: GH_MERGE_TIMEOUT_MS,
     });
-  } catch {
+  } catch (err) {
+    // Timeout is a hang, not "already ready" — fail closed so we do not burn another 20s on merge.
+    if (isGhTimeoutError(err)) {
+      return { ok: false, reason: ghErrorReason(err, "gh pr ready failed") };
+    }
     // Already ready / not a draft — ignore; merge is the authority.
   }
   try {
