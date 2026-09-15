@@ -19,11 +19,17 @@ import { runDeveloperEffect } from "./coordinator/developer-effect.js";
 import { runReviewerEffect } from "./coordinator/reviewer-effect.js";
 import { registerStaticUi } from "./static-ui.js";
 import { cleanupOrphanedWorkerMcpConfig } from "./paths.js";
+import net from "node:net";
 
 const { mode, envFile } = loadAgentDealerEnv();
 console.log(formatEnvStartupLine(mode, envFile));
 
 const port = Number(process.env.PORT ?? 2221);
+
+// Hosts that publish AAAA records but have no usable IPv6 route make Node's
+// happy-eyeballs burn its whole connect budget on unreachable addresses, so
+// outbound fetch (Linear GraphQL) fails with UND_ERR_CONNECT_TIMEOUT.
+net.setDefaultAutoSelectFamily(false);
 
 async function main(): Promise<void> {
   enrichPathForCliTools();
