@@ -71,10 +71,15 @@ function buildArgs(
   }
   if (runtime === "cursor_local") {
     // Project `.cursor/mcp.json` is written with deck-launch headers (NOT-106). Headless
-    // `-p` needs `--approve-mcps` to load it; approving ambient servers under the same
-    // name is acceptable — the goal is the assigned deck, not MCP isolation.
+    // `-p` needs `--approve-mcps` to *load* the server; that does not auto-approve
+    // individual MCP tool calls — without `--force`, cursor-agent rejects them as
+    // "User rejected MCP: agent-deck-…" (no human to click Approve), which blocks the
+    // deck→Linear path (`list_service_tools` / `call_service_tool`). Prefer `--force`
+    // over `--yolo` (identical alias) for the clearer flag name. Approving ambient
+    // servers under the same name is acceptable — assigned deck, not MCP isolation.
     return [
       "-p",
+      "--force",
       "--trust",
       ...(mcpConfigPath ? ["--approve-mcps"] : []),
       "--output-format",

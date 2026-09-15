@@ -112,3 +112,13 @@ test("buildDeveloperArgs for cursor_local adds --approve-mcps when mcpConfigPath
   const withoutPath = buildDeveloperArgs("cursor_local", "implement");
   assert.ok(!withoutPath.includes("--approve-mcps"));
 });
+
+test("buildDeveloperArgs for cursor_local always passes --force (headless MCP tool approval)", () => {
+  // --approve-mcps only loads servers; without --force, cursor-agent rejects individual
+  // agent-deck tool calls as "User rejected MCP" in -p mode. Prefer --force over --yolo.
+  const args = buildDeveloperArgs("cursor_local", "implement", undefined, undefined, "/tmp/wt/.cursor/mcp.json");
+  assert.ok(args.includes("--force"));
+  assert.ok(!args.includes("--yolo"));
+  const reviewer = buildReviewerArgs("cursor_local", "review", undefined, undefined, "/tmp/wt/.cursor/mcp.json");
+  assert.ok(reviewer.includes("--force"));
+});

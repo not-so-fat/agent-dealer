@@ -56,6 +56,10 @@ function guidanceSection(guidance: string[] | undefined): string[] {
  * habit. Worktrees live under the issue repo (`.agent-dealer-worktrees/`) so the
  * operator's `agent-deck use` grant covers the cwd and bind can succeed.
  *
+ * Linear (and other deck MCPs) must go through Agent Deck (`list_service_tools` /
+ * `call_service_tool`) — never a raw Linear URL / web fetch. When Task/AC only point at
+ * a ticket id, that deck fetch *is* the brief, not optional enrichment.
+ *
  * When there is no deckId: forbid bind/Linear — Task/AC are the full brief.
  */
 function agentDeckSection(worktreePath: string | undefined, deckId: string | null | undefined, playbookIds: string[] | undefined): string[] {
@@ -66,7 +70,7 @@ function agentDeckSection(worktreePath: string | undefined, deckId: string | nul
   }
   const parts = [
     `First equip this agent: bind_workspace({ deckId: "${deckId}", workspaceRoot: "${worktreePath}" }). Do this before any other Agent Deck or Linear call — without that bind you are not running the configured agent.`,
-    `Then get_bound_deck / list_service_tools as needed. The Task and Acceptance criteria above are authoritative; use Linear only to enrich, not to replace a missing brief.`,
+    `Then get_bound_deck / list_service_tools / call_service_tool as needed. Ticket detail (Linear, etc.) is only available through Agent Deck service tools — do not web-fetch Linear URLs. If Task/Acceptance criteria only reference a ticket id, fetch that ticket via Agent Deck before implementing; otherwise treat the Task/Acceptance criteria above as authoritative and use Linear only to enrich.`,
   ];
   for (const playbookId of playbookIds ?? []) {
     parts.push(`Then get_playbook("${playbookId}") and follow it.`);
