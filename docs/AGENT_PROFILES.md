@@ -114,6 +114,7 @@ Permissions are explicit tools and paths — not category presets like "Artifact
 | `workspace_missing` | No `workspaceRoot` configured, or path not found on disk |
 | `cli_missing` | Claude / Cursor / Codex CLI not installed |
 | `runtime_auth` | Cursor or Codex not logged in / missing auth |
+| `cursor_keychain` | Cursor macOS keychain stuck (`errSecDuplicateItem`) — see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md#cursor-macos-keychain-auth) |
 | `deck_offline` | Agent has deck but Agent Deck API unreachable |
 
 ## P2 (documented, not yet implemented)

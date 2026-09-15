@@ -60,7 +60,11 @@ Compat: `npm install -g agent-dealer` still works; `agent-dealer install` switch
 
 Open **http://localhost:2222** — dashboard and API on one port. Day to day: `agent-dealer start --daemon` / `agent-dealer stop` · `agent-dealer status` if something fails. Use plain `agent-dealer start` only when you want a foreground process in an open terminal (logs go to stdout).
 
-Run `agent-dealer doctor` to verify Node, Claude CLI, bundle, and port before first start.
+Run `agent-dealer doctor` to verify Node, Claude CLI, GitHub CLI auth, Cursor auth (when installed), bundle, and port before first start.
+
+## Troubleshooting
+
+Host and runtime recovery (Cursor macOS keychain, etc.): [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 **Linear (optional):** edit `~/.agent-dealer/.env` — set `LINEAR_API_KEY` and `LINEAR_TEAM_ID`. See [LINEAR_INTEGRATION.md](docs/LINEAR_INTEGRATION.md) for Inbox config, write-back sync, and REST automation.
 
