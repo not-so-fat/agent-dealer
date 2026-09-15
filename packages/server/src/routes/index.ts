@@ -63,6 +63,8 @@ import { testAgentDeckConnection } from "../adapters/agent-deck.js";
 import {
   getLinearIssue,
   listLinearCandidates,
+  lookupLinearIssue,
+  parseLinearIssueRef,
   testLinearConnection,
 } from "../adapters/linear-inbox.js";
 import { syncLinearForRun } from "../adapters/linear-sync.js";
@@ -169,6 +171,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return { candidates };
     } catch (e) {
       return reply.status(502).send({ error: String(e), candidates: [] });
+    }
+  });
+
+  /** Free-form kick lookup: `?q=NOT-103` or a Linear issue URL. */
+  app.get("/api/intake/linear/lookup", async (req, reply) => {
+    const q = typeof (req.query as { q?: unknown }).q === "string" ? (req.query as { q: string }).q : "";
+    if (!parseLinearIssueRef(q)) {
+      return reply.status(400).send({ error: "Provide a Linear identifier (e.g. NOT-103) or issue URL" });
+    }
+    try {
+      const candidate = await lookupLinearIssue(q);
+      if (!candidate) return reply.status(404).send({ error: "Linear issue not found" });
+      return { candidate };
+    } catch (e) {
+      return reply.status(502).send({ error: String(e) });
     }
   });
 

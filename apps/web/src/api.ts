@@ -78,6 +78,14 @@ export async function fetchLinearInbox(): Promise<LinearCandidate[]> {
   return json.candidates ?? [];
 }
 
+export async function lookupLinearIssue(q: string): Promise<LinearCandidate> {
+  const res = await fetch(`${API}/api/intake/linear/lookup?q=${encodeURIComponent(q)}`);
+  const body = (await res.json().catch(() => ({}))) as { candidate?: LinearCandidate; error?: string };
+  if (!res.ok) throw new Error(body.error ?? `Lookup failed (${res.status})`);
+  if (!body.candidate) throw new Error("Linear issue not found");
+  return body.candidate;
+}
+
 export async function fetchLinearStatus(): Promise<LinearConnectionStatus> {
   const res = await fetch(`${API}/api/intake/linear/status`);
   if (!res.ok) throw new Error(await res.text());

@@ -341,9 +341,61 @@ export function migrate(): void {
   seedBuiltinAgents(db);
   seedIntakeSettings(db);
   migrateLegacyAgentDeckPort(db);
+  migrateLinearInboxUnlock(db);
 
   // Default agents are normal rows — clear legacy built-in flag.
   db.exec("UPDATE agents SET is_builtin = 0 WHERE is_builtin = 1");
+}
+
+/** One-shot: unlock assigneeMe / stateFilter only when they still hold pre-unlock defaults.
+ * Deliberate Settings customizations and env-seeded filters (e.g. Todo+Backlog) are left alone. */
+function migrateLinearInboxUnlock(db: Database.Database): void {
+  const flag = db
+    .prepare("SELECT value_json FROM intake_settings WHERE key = ?")
+    .get("linear.inboxUnlockV1") as { value_json: string } | undefined;
+  if (flag) return;
+
+  const openStates = ["Backlog", "Todo", "In Progress", "In Review"];
+  const upsert = db.prepare(
+    "INSERT INTO intake_settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json"
+  );
+
+  const assigneeRow = db
+    .prepare("SELECT value_json FROM intake_settings WHERE key = ?")
+    .get("linear.assigneeMe") as { value_json: string } | undefined;
+  let assigneeMe = true; // pre-unlock default when missing
+  if (assigneeRow) {
+    try {
+      assigneeMe = JSON.parse(assigneeRow.value_json) as boolean;
+    } catch {
+      assigneeMe = true;
+    }
+  }
+  if (assigneeMe === true) {
+    upsert.run("linear.assigneeMe", JSON.stringify(false));
+  }
+
+  const stateRow = db
+    .prepare("SELECT value_json FROM intake_settings WHERE key = ?")
+    .get("linear.stateFilter") as { value_json: string } | undefined;
+  let stateFilter: unknown = ["Todo"]; // pre-unlock code default when missing
+  if (stateRow) {
+    try {
+      stateFilter = JSON.parse(stateRow.value_json);
+    } catch {
+      stateFilter = ["Todo"];
+    }
+  }
+  if (isLegacyLinearStateFilterDefault(stateFilter)) {
+    upsert.run("linear.stateFilter", JSON.stringify(openStates));
+  }
+
+  upsert.run("linear.inboxUnlockV1", JSON.stringify(true));
+}
+
+/** Pre-unlock persisted default was exactly `["Todo"]` (see prior getPersistedLinearIntakeConfig). */
+export function isLegacyLinearStateFilterDefault(value: unknown): boolean {
+  return Array.isArray(value) && value.length === 1 && value[0] === "Todo";
 }
 
 function migrateLegacyAgentDeckPort(db: Database.Database): void {
@@ -362,16 +414,17 @@ function migrateLegacyAgentDeckPort(db: Database.Database): void {
 }
 
 function seedIntakeSettings(db: Database.Database): void {
-  const stateFilter = (process.env.LINEAR_STATE_FILTER ?? "Todo")
+  const openDefault = ["Backlog", "Todo", "In Progress", "In Review"];
+  const stateFilter = (process.env.LINEAR_STATE_FILTER ?? openDefault.join(","))
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
   const teamId = process.env.LINEAR_TEAM_ID ?? null;
 
   const defaults: Record<string, unknown> = {
-    "linear.stateFilter": stateFilter.length > 0 ? stateFilter : ["Todo"],
+    "linear.stateFilter": stateFilter.length > 0 ? stateFilter : openDefault,
     "linear.teamId": teamId,
-    "linear.assigneeMe": true,
+    "linear.assigneeMe": false,
     "linear.defaultAgentId": null,
     "linear.syncEnabled": true,
     "linear.routingRules": [],
