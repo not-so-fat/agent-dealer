@@ -18,6 +18,8 @@ process.env.COORDINATOR_HEARTBEAT_MS = "20";
 process.env.COORDINATOR_FAIL_BACKOFF_MS = "0";
 process.env.CHECKS_POLL_TIMEOUT_MS = "60";
 process.env.CHECKS_POLL_INTERVAL_MS = "10";
+process.env.HEAD_RECONCILE_TIMEOUT_MS = "60";
+process.env.HEAD_RECONCILE_INTERVAL_MS = "10";
 
 const { migrate, getDb } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
@@ -372,7 +374,32 @@ test("adapter_failure: a PR based against the wrong branch is rejected rather th
   assert.equal(getIssue(issueId)!.status, "needs_human");
 });
 
-test("adapter_failure: a stale headRefOid (gh's view lags the actual push) is rejected rather than accepted", async () => {
+test("clean handoff: a briefly stale headRefOid (gh's view lags the push) catches up within the reconcile window", async () => {
+  // NOT-110: the first couple of `gh pr view` reads still show the pre-push head — exactly
+  // the GraphQL-lag race observed in production — then GitHub catches up. This must be
+  // reconciled by polling, not treated as a failed developer attempt.
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  const realViewPr = github.viewPr.bind(github);
+  let staleReadsLeft = 2;
+  github.viewPr = async (opts) => {
+    const view = await realViewPr(opts);
+    if (view && staleReadsLeft > 0) {
+      staleReadsLeft--;
+      return { ...view, headRefOid: "0000000000000000000000000000000000dead" };
+    }
+    return view;
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing");
+  assert.equal(staleReadsLeft, 0, "the reconcile loop must actually re-read gh pr view rather than giving up early");
+});
+
+test("adapter_failure: a headRefOid that never catches up is rejected after the bounded reconcile timeout", async () => {
   const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   const realViewPr = github.viewPr.bind(github);

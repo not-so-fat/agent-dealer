@@ -55,6 +55,13 @@ export const developerEffectConfig = {
   get checksPollIntervalMs(): number {
     return num("CHECKS_POLL_INTERVAL_MS", 15_000);
   },
+  /** NOT-110: bounded window to let a lagging `gh pr view` catch up to a just-pushed HEAD. */
+  get headReconcileTimeoutMs(): number {
+    return num("HEAD_RECONCILE_TIMEOUT_MS", 30_000);
+  },
+  get headReconcileIntervalMs(): number {
+    return num("HEAD_RECONCILE_INTERVAL_MS", 3_000);
+  },
 };
 
 export interface DeveloperEffectDeps {
@@ -111,6 +118,33 @@ async function validatePrIdentity(
     return { ok: false, reason: `gh reports head ${prView.headRefOid}, but the locally pushed HEAD is ${opts.localHead}` };
   }
   return { ok: true };
+}
+
+/**
+ * NOT-110: right after a successful `git push`, `gh pr view`'s GraphQL-backed head can
+ * briefly lag the real remote tip — the commit is already on `origin`, but the PR view
+ * hasn't caught up yet. A one-shot mismatch there was indistinguishable from "the push
+ * never actually happened" and got treated as an `adapter_failure` (burning an infra
+ * retry) even though nothing was wrong. Poll `gh pr view` (by the already-identity-
+ * validated PR number, same reason `pollPrChecks` prefers number over branch) until its
+ * headRefOid catches up to `localHead`, or give up at the deadline — the caller's
+ * `validatePrIdentity` then reports a real, persistent mismatch exactly as before. Both
+ * `number` and `branch` are forwarded on every re-read, same selector the caller already
+ * resolved `prView` with (NOT-82: never let a re-fetch regress to bare current-branch
+ * inference).
+ */
+async function reconcilePrHead(
+  github: GithubAdapter,
+  opts: { cwd: string; number: number; branch: string; localHead: string; timeoutMs: number; intervalMs: number }
+): Promise<PrView | null> {
+  const deadline = Date.now() + opts.timeoutMs;
+  const fetch = () => github.viewPr({ cwd: opts.cwd, number: opts.number, branch: opts.branch });
+  let view = await fetch();
+  while (view && view.headRefOid !== opts.localHead && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(opts.intervalMs, Math.max(deadline - Date.now(), 0))));
+    view = await fetch();
+  }
+  return view;
 }
 
 export async function runDeveloperEffect(
@@ -331,6 +365,17 @@ export async function runDeveloperEffect(
     }
 
     const localHead = await revParseHead(worktreePath);
+    if (prView.headRefOid !== localHead) {
+      prView =
+        (await reconcilePrHead(deps.github, {
+          cwd: worktreePath,
+          number: prView.number,
+          branch: branchName,
+          localHead,
+          timeoutMs: developerEffectConfig.headReconcileTimeoutMs,
+          intervalMs: developerEffectConfig.headReconcileIntervalMs,
+        })) ?? prView;
+    }
     const identityOpts = { branchName, baseBranch: issue.baseBranch, priorPrNumber: issue.prNumber, localHead };
     const identity = await validatePrIdentity(prView, identityOpts);
     if (!identity.ok) {
