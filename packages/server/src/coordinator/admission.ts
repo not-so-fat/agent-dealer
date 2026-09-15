@@ -57,7 +57,13 @@ function listOccupyingIssues(): ActiveIssueRef[] {
 
 export type EligibilityResult = { ok: true } | { ok: false; reason: string };
 
-export type EligibilityRule = (issue: Issue) => EligibilityResult | Promise<EligibilityResult>;
+/** Shared per-`admitNext()` context — see `defaultAgentHealth` for why deckOnline lives here. */
+export type EligibilityContext = { deckOnline: boolean };
+
+export type EligibilityRule = (
+  issue: Issue,
+  ctx: EligibilityContext
+) => EligibilityResult | Promise<EligibilityResult>;
 
 export type AgentHealthCheck = (agent: AgentProfile) => Promise<EligibilityResult>;
 
@@ -68,8 +74,7 @@ export function setAdmissionHealthCheckerForTests(checker: AgentHealthCheck | nu
   healthChecker = checker;
 }
 
-async function defaultAgentHealth(agent: AgentProfile): Promise<EligibilityResult> {
-  const deckOnline = await checkAgentDeckHealth();
+async function defaultAgentHealth(agent: AgentProfile, deckOnline: boolean): Promise<EligibilityResult> {
   const health = await healthForAgent(agent, deckOnline);
   // usage_capped is owned by runtimeAvailable — keep agentsHealthy for CLI/workspace/deck.
   const nonCap = health.issues.filter((i) => i.code !== "usage_capped");
@@ -82,8 +87,8 @@ async function defaultAgentHealth(agent: AgentProfile): Promise<EligibilityResul
   return { ok: true };
 }
 
-async function checkAgentsHealthy(issue: Issue): Promise<EligibilityResult> {
-  const check = healthChecker ?? defaultAgentHealth;
+async function checkAgentsHealthy(issue: Issue, ctx: EligibilityContext): Promise<EligibilityResult> {
+  const check = healthChecker ?? ((agent: AgentProfile) => defaultAgentHealth(agent, ctx.deckOnline));
   for (const role of ["developer", "reviewer"] as const) {
     const agentId = role === "developer" ? issue.developerAgentId : issue.reviewerAgentId;
     if (!agentId) return { ok: false, reason: `missing ${role} agent` };
@@ -150,9 +155,9 @@ export function resetEligibilityRulesForTests(): void {
   eligibilityRules = defaultEligibilityRules;
 }
 
-async function evaluateEligibility(issue: Issue): Promise<EligibilityResult> {
+async function evaluateEligibility(issue: Issue, ctx: EligibilityContext): Promise<EligibilityResult> {
   for (const rule of eligibilityRules) {
-    const result = await rule(issue);
+    const result = await rule(issue, ctx);
     if (!result.ok) return result;
   }
   return { ok: true };
@@ -185,14 +190,23 @@ export async function admitNext(): Promise<{ issueId: string } | null> {
   if (freeSlots <= 0) return null;
 
   // Re-list after housekeeping so admitted/removed rows are gone.
-  for (const entry of listQueuedEntries()) {
+  const remaining = listQueuedEntries();
+  if (remaining.length === 0) return null;
+
+  // One deck-health check per tick, shared across every queued entry and role. Each
+  // agent's health check otherwise re-hits agent-deck's uncached /health endpoint per
+  // entry per role; with several issues queued and agent-deck slow/unreachable that
+  // serially stalls this loop, which worker-loop runs before any real work dispatch.
+  const ctx: EligibilityContext = { deckOnline: await checkAgentDeckHealth() };
+
+  for (const entry of remaining) {
     const issue = getIssue(entry.issueId);
     if (!issue) {
       markQueueEntryRemoved(entry.issueId);
       continue;
     }
 
-    const eligibility = await evaluateEligibility(issue);
+    const eligibility = await evaluateEligibility(issue, ctx);
     if (!eligibility.ok) {
       setQueueWaitReason(entry.id, eligibility.reason);
       continue;
