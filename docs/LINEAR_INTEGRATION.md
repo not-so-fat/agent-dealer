@@ -1,6 +1,6 @@
 # Linear integration
 
-Linear is the primary intake path for agent-dealer: issues assigned to you appear in the **Inbox**, you promote them one-by-one into **Operations**, approve the plan, and the agent executes with human gates preserved.
+Linear is the primary intake path for agent-dealer: **open** team issues (Backlog / Todo / In Progress / In Review by default) appear in the **Inbox**; you promote them one-by-one into **Operations**, approve the plan, and the agent executes with human gates preserved. Optionally filter to “assigned to me” in Inbox settings. On Issues kick (**From Linear**), you can also paste a `NOT-xx` id or Linear URL to look up any issue without relying on the inbox list.
 
 **Manual tasks** remain for testing; they are not the main workflow.
 
@@ -9,10 +9,11 @@ Linear is the primary intake path for agent-dealer: issues assigned to you appea
 ```mermaid
 flowchart TB
   subgraph linear [Linear]
-    Issues[Assigned issues]
+    Issues[Open issues]
   end
   subgraph dealer [agent-dealer]
     Inbox[Inbox UI + config]
+    Kick[Issues kick lookup]
     API[REST API]
     Ops[Operations lifecycle]
     Sync[Linear write-back]
@@ -21,8 +22,10 @@ flowchart TB
     AgentCLI[Claude/Cursor + scripts]
   end
   Issues -->|GraphQL read| Inbox
+  Issues -->|GraphQL read| Kick
   Issues -->|GraphQL read| API
   Inbox -->|promote one-by-one| Ops
+  Kick -->|create + start| Ops
   AgentCLI -->|REST not cron| API
   API -->|promote + autoAgent rules| Ops
   Ops -->|plan / review / done| Sync
@@ -78,8 +81,8 @@ Linear issue status write-back (when `syncEnabled`):
 
 > **TODO (P2):** Make this event → Linear status mapping **configurable per team** (Inbox settings or `linear.statusMap` in intake config). v0 hardcodes names in `packages/server/src/adapters/linear-sync.ts` (`STATE_BY_EVENT`) and resolves workflow states case-insensitively against the issue’s Linear team.
 
-1. **Inbox** — Issues matching filters (default: Todo, assigned to me) appear as candidates.
-2. **Promote** — Pick agent → **Kick plan** → run enters Operations at `plan_pending`.
+1. **Inbox / kick** — Open-state issues matching filters (default: Backlog, Todo, In Progress, In Review; **not** limited to assignee) appear as candidates. Issues kick also accepts free-form `NOT-xx` or a Linear URL via lookup. Optional “assigned to me” stays in settings.
+2. **Promote / create** — Inbox: pick agent → **Kick plan** → run enters Operations at `plan_pending`. Issues kick: create issue from Linear fields + start when acceptance criteria are present.
 3. **Planning** — When the agent actually starts drafting → Linear comment + status **Todo**.
 4. **Plan gate** — Review draft → **Approve plan** → Linear comment + status **In Progress**.
 5. **Execute** — Agent runs → transitions to **review** → Linear comment + status **In Review**.
@@ -101,16 +104,25 @@ curl -s http://127.0.0.1:2221/api/intake/linear/status | jq
 # Read config (non-secret)
 curl -s http://127.0.0.1:2221/api/intake/linear/config | jq
 
-# Update filters
+# Update filters (open-state default; assigneeMe optional)
 curl -s -X PATCH http://127.0.0.1:2221/api/intake/linear/config \
   -H 'Content-Type: application/json' \
-  -d '{"stateFilter":["Todo","Backlog"],"assigneeMe":true,"syncEnabled":true}' | jq
+  -d '{"stateFilter":["Backlog","Todo","In Progress","In Review"],"assigneeMe":false,"syncEnabled":true}' | jq
 ```
 
 ### List inbox
 
 ```bash
 curl -s http://127.0.0.1:2221/api/intake/linear | jq '.candidates[] | {id, identifier, title}'
+```
+
+### Free-form lookup (kick)
+
+Resolve a Linear identifier or issue URL without relying on the inbox list (also used by Issues → From Linear → Lookup):
+
+```bash
+curl -s 'http://127.0.0.1:2221/api/intake/linear/lookup?q=NOT-103' | jq '.candidate | {id, identifier, title}'
+# q also accepts a Linear issue URL or UUID
 ```
 
 ### Resolve agent (preview routing)
@@ -145,6 +157,7 @@ No agent-dealer MCP server in this pass. Orchestrator agents may wrap REST as:
 | Tool | Maps to |
 |------|---------|
 | `list_linear_inbox` | `GET /api/intake/linear` |
+| `lookup_linear_issue` | `GET /api/intake/linear/lookup?q=` |
 | `promote_issue` | `POST /api/intake/linear/:issueId/promote` |
 | `resolve_agent` | `POST /api/intake/linear/:issueId/resolve-agent` |
 
