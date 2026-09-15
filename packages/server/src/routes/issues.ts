@@ -3,7 +3,7 @@ import fs from "node:fs";
 import type { FastifyInstance } from "fastify";
 import { CreateIssueInput, IssueStatus, UpdateIssueInput } from "@agent-dealer/shared";
 import { createIssue, getIssue, listIssues, findIssueByExternalId, updateIssue, listRecentRepos } from "../repository/issues.js";
-import { listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
+import { listWorkerSessionsForIssue, getActiveWorkerSessionForIssue } from "../repository/worker-sessions.js";
 import { getIssueArtifact, listArtifactsForIssue } from "../repository/artifacts-for-issue.js";
 import { listUsageEventsForIssue, summarizeIssueUsage } from "../repository/usage-events.js";
 import {
@@ -75,6 +75,7 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     if (!issue) return reply.status(404).send({ error: "Not found" });
     const humanActions = listHumanActionsForIssue(id);
     const instances = listWorkflowInstancesForIssue(id);
+    const activeWorkerSession = getActiveWorkerSessionForIssue(id);
     return {
       issue,
       timeline: listWorkflowEventsForIssue(id),
@@ -87,6 +88,8 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       // Last element, not the active one: a completed/closed issue's duration is still
       // wall-clock start→completion of its (now-finished) workflow instance.
       latestWorkflowInstance: instances.length ? instances[instances.length - 1] : null,
+      // NOT-109: live session strip while developing/reviewing.
+      activeWorkerSession,
     };
   });
 

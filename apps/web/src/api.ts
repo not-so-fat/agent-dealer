@@ -494,6 +494,8 @@ export interface IssueDetail {
   humanWaitMs: number;
   interventionCount: number;
   latestWorkflowInstance: WorkflowInstance | null;
+  /** Running worker session for the live strip (NOT-109); null when idle. */
+  activeWorkerSession?: WorkerSession | null;
 }
 
 export interface IssueEvidence {

@@ -1,11 +1,22 @@
 import type { WorkflowEvent } from "@agent-dealer/shared";
 
+function roleNoun(actorType: WorkflowEvent["actorType"]): string {
+  if (actorType === "developer") return "Developer";
+  if (actorType === "reviewer") return "Reviewer";
+  return "Worker";
+}
+
 const LABELS: Record<string, (e: WorkflowEvent) => string> = {
   "issue.created": () => "Issue created",
   "workflow.started": () => "Workflow started",
-  "worker.started": (e) => `${e.actorType === "developer" ? "Developer" : e.actorType === "reviewer" ? "Reviewer" : "Worker"} started${e.round ? ` (round ${e.round})` : ""}`,
-  "worker.completed": (e) => `${e.actorType === "developer" ? "Developer" : e.actorType === "reviewer" ? "Reviewer" : "Worker"} finished${e.round ? ` (round ${e.round})` : ""}`,
-  "worker.failed": () => "Worker failed",
+  "worker.started": (e) => `${roleNoun(e.actorType)} started${e.round ? ` (round ${e.round})` : ""}`,
+  "worker.completed": (e) => `${roleNoun(e.actorType)} finished${e.round ? ` (round ${e.round})` : ""}`,
+  "worker.failed": (e) => `${roleNoun(e.actorType)} failed${e.round ? ` (round ${e.round})` : ""}`,
+  "worktree.ready": () => "Worktree ready",
+  "deck.connected": () => "Deck connected",
+  "brief.resolved": () => "Brief resolved",
+  "branch.pushed": () => "Branch pushed",
+  "checks.started": () => "Checks started",
   "pull_request.opened": () => "Developer opened the PR",
   "pull_request.updated": () => "Developer updated the PR",
   "checks.completed": () => "Checks completed",
@@ -61,6 +72,40 @@ function EventBody({ e }: { e: WorkflowEvent }) {
   if (e.type === "guidance.added") {
     const payload = parseJson<{ markdown?: string }>(e.payloadJson);
     return payload?.markdown ? <span className="text-sm text-white/55 italic">— {payload.markdown}</span> : null;
+  }
+  if (
+    e.type === "worker.started" ||
+    e.type === "worker.completed" ||
+    e.type === "worker.failed" ||
+    e.type === "worktree.ready" ||
+    e.type === "deck.connected" ||
+    e.type === "brief.resolved" ||
+    e.type === "branch.pushed" ||
+    e.type === "checks.started" ||
+    e.type === "checks.completed"
+  ) {
+    const payload = parseJson<{
+      runtime?: string | null;
+      model?: string | null;
+      sessionId?: string;
+      worktreePath?: string | null;
+      resolution?: string;
+      snapshot?: string;
+      commitsAhead?: number;
+      branch?: string;
+    }>(e.payloadJson);
+    if (!payload) return null;
+    const bits: string[] = [];
+    if (payload.runtime) bits.push(payload.runtime);
+    if (payload.model) bits.push(payload.model);
+    if (payload.sessionId) bits.push(payload.sessionId.slice(0, 8));
+    if (payload.worktreePath) bits.push(payload.worktreePath);
+    if (payload.resolution) bits.push(payload.resolution);
+    if (payload.branch) bits.push(payload.branch);
+    if (payload.commitsAhead != null) bits.push(`${payload.commitsAhead} ahead`);
+    if (payload.snapshot) bits.push(payload.snapshot);
+    if (bits.length === 0) return null;
+    return <span className="text-xs text-white/40">· {bits.join(" · ")}</span>;
   }
   return null;
 }

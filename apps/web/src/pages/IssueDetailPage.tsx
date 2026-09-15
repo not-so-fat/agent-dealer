@@ -40,6 +40,22 @@ function fmtDuration(ms: number): string {
   return `${hr}h ${min % 60}m`;
 }
 
+function fmtHeartbeatAge(iso: string | null): string {
+  if (!iso) return "no heartbeat yet";
+  const ageSec = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (ageSec < 5) return "just now";
+  if (ageSec < 60) return `${ageSec}s ago`;
+  const min = Math.floor(ageSec / 60);
+  return `${min}m ago`;
+}
+
+function shortPath(p: string | null | undefined): string | null {
+  if (!p) return null;
+  const parts = p.split(/[/\\]/).filter(Boolean);
+  if (parts.length <= 2) return p;
+  return parts.slice(-2).join("/");
+}
+
 /** The next allowed action, per the ticket's workflow rail: an open human action's own
  * response options when one exists, otherwise a derived "waiting on X" from currentOwner. */
 function nextActionLabel(detail: IssueDetail): string {
@@ -80,13 +96,17 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
   if (error) return <div className="p-6 text-red-300 text-sm">{error}</div>;
   if (!detail) return <div className="p-6 text-white/50 text-sm">Loading…</div>;
 
-  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance } = detail;
+  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession } = detail;
   const durationMs = latestWorkflowInstance
     ? new Date(latestWorkflowInstance.completedAt ?? Date.now()).getTime() - new Date(latestWorkflowInstance.startedAt).getTime()
     : 0;
   const openActions = humanActions.filter((a) => a.status === "open");
   const canEdit = readiness.ok === false || openActions.some((a) => a.actionType === "product_scope_decision");
   const hasActiveWorkflow = latestWorkflowInstance != null && latestWorkflowInstance.completedAt === null;
+  const sessionLive =
+    activeWorkerSession &&
+    activeWorkerSession.status === "running" &&
+    (issue.status === "developing" || issue.status === "reviewing" || issue.status === "repairing");
 
   const submitGuidance = async () => {
     if (!guidance.trim()) return;
@@ -227,6 +247,33 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
             </button>
           )}
         </div>
+
+        {sessionLive && activeWorkerSession && (
+          <div className="mb-4 p-3 rounded border border-cyber-teal/35 bg-cyber-teal/5 space-y-1.5">
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyber-teal animate-pulse" aria-hidden />
+              <p className="text-xs text-cyber-teal font-medium uppercase tracking-wide">Running now</p>
+            </div>
+            <p className="text-sm text-white/90">
+              <span className="capitalize">{activeWorkerSession.role}</span>
+              {activeWorkerSession.runtime ? ` · ${activeWorkerSession.runtime}` : ""}
+              {activeWorkerSession.model ? ` · ${activeWorkerSession.model}` : ""}
+              {` · round ${activeWorkerSession.round}`}
+            </p>
+            <p className="text-sm text-[#C4B643]">
+              Last progress: {issue.currentIntent ?? "session started"}
+            </p>
+            <p className="text-xs text-white/45">
+              Heartbeat {fmtHeartbeatAge(activeWorkerSession.heartbeatAt)}
+              {shortPath(activeWorkerSession.worktreePath) ? ` · ${shortPath(activeWorkerSession.worktreePath)}` : ""}
+            </p>
+            {activeWorkerSession.logPath && (
+              <p className="text-xs text-white/40 font-mono break-all" title={activeWorkerSession.logPath}>
+                Log: {shortPath(activeWorkerSession.logPath) ?? activeWorkerSession.logPath}
+              </p>
+            )}
+          </div>
+        )}
 
         {!readiness.ok && !openActions.some((a) => a.actionType === "product_scope_decision") && (
           <div className="mb-4 p-3 rounded border border-amber-400/30 bg-amber-500/10">

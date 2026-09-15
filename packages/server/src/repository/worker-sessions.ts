@@ -137,6 +137,49 @@ export function heartbeatSession(id: string): void {
     .run(now, now, id);
 }
 
+export interface PatchRunningSessionInput {
+  worktreePath?: string | null;
+  logPath?: string | null;
+  sessionRef?: string | null;
+}
+
+/** Mid-session bookkeeping for the live strip (worktree / log path) — running only. */
+export function patchRunningSession(id: string, patch: PatchRunningSessionInput): WorkerSession | null {
+  const current = getWorkerSession(id);
+  if (!current || current.status !== "running") return current;
+  const now = new Date().toISOString();
+  getDb()
+    .prepare(`
+      UPDATE worker_sessions SET
+        worktree_path = @worktree_path,
+        log_path = @log_path,
+        session_ref = @session_ref,
+        updated_at = @updated_at
+      WHERE id = @id AND status = 'running'
+    `)
+    .run({
+      id,
+      worktree_path: patch.worktreePath !== undefined ? patch.worktreePath : current.worktreePath,
+      log_path: patch.logPath !== undefined ? patch.logPath : current.logPath,
+      session_ref: patch.sessionRef !== undefined ? patch.sessionRef : current.sessionRef,
+      updated_at: now,
+    });
+  return getWorkerSession(id);
+}
+
+/** Most recent still-running session for an issue — drives the Issue Detail live strip. */
+export function getActiveWorkerSessionForIssue(issueId: string): WorkerSession | null {
+  const row = getDb()
+    .prepare(
+      `SELECT * FROM worker_sessions
+       WHERE issue_id = ? AND status = 'running'
+       ORDER BY started_at DESC, created_at DESC
+       LIMIT 1`
+    )
+    .get(issueId) as WorkerSessionRow | undefined;
+  return row ? rowToSession(row) : null;
+}
+
 export interface CompleteSessionPatch {
   status: Extract<WorkerSessionStatus, "done" | "failed" | "timed_out" | "cancelled">;
   exitCode?: number | null;
