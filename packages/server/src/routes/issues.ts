@@ -18,6 +18,7 @@ import { abortIssue, checkIssueReadiness, startWorkflow } from "../coordinator/c
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
 import { getQueuedEntryForIssue } from "../repository/queue-entries.js";
 import { latestSessionFailureForIssue } from "../coordinator/latest-failure.js";
+import { deriveLiveProgressFromLog } from "../coordinator/session-progress.js";
 
 const TRACE_DEFAULT_MAX_CHARS = 50_000;
 const TRACE_HARD_MAX_CHARS = 200_000;
@@ -92,6 +93,11 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       latestWorkflowInstance: instances.length ? instances[instances.length - 1] : null,
       // NOT-109: live session strip while developing/reviewing.
       activeWorkerSession,
+      // NOT-120: concrete log-tail progress for the live strip (null when idle / unparseable).
+      liveProgress:
+        activeWorkerSession?.status === "running" && activeWorkerSession.logPath
+          ? deriveLiveProgressFromLog(activeWorkerSession.logPath)
+          : null,
       // NOT-113: latest session failure reason without opening evidence JSON.
       latestSessionFailure: latestSessionFailureForIssue(issue),
       // NOT-103: whether this issue is in the admission queue.

@@ -496,6 +496,8 @@ export interface IssueDetail {
   latestWorkflowInstance: WorkflowInstance | null;
   /** Running worker session for the live strip (NOT-109); null when idle. */
   activeWorkerSession?: WorkerSession | null;
+  /** NOT-120: concrete recent work from the session log tail; null when none yet. */
+  liveProgress?: string | null;
   /** NOT-113: latest session failure reason for the detail strip. */
   latestSessionFailure?: {
     reason: string;

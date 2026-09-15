@@ -60,6 +60,13 @@ function shortPath(p: string | null | undefined): string | null {
   return parts.slice(-2).join("/");
 }
 
+/** Sampler writes `Role · {liveProgress} (round N)` into currentIntent — don't echo that under the gold line. */
+function intentDuplicatesLiveProgress(intent: string | null | undefined, progress: string | null | undefined): boolean {
+  if (!intent || !progress) return false;
+  if (intent === progress) return true;
+  return intent.includes(progress);
+}
+
 /** The next allowed action, per the ticket's workflow rail: an open human action's own
  * response options when one exists, otherwise a derived "waiting on X" from currentOwner. */
 function nextActionLabel(detail: IssueDetail): string {
@@ -100,7 +107,7 @@ export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
   if (error) return <div className="p-6 text-red-300 text-sm">{error}</div>;
   if (!detail) return <div className="p-6 text-white/50 text-sm">Loading…</div>;
 
-  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, latestSessionFailure, queued } = detail;
+  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, liveProgress, latestSessionFailure, queued } = detail;
   const developerAgent = agents.find((a) => a.id === issue.developerAgentId);
   const developerBlocked = developerAgent && !developerAgent.healthy;
   const developerBlockReason = developerAgent?.issues[0]?.message ?? "Developer agent is unhealthy";
@@ -295,9 +302,17 @@ export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
               {activeWorkerSession.model ? ` · ${activeWorkerSession.model}` : ""}
               {` · round ${activeWorkerSession.round}`}
             </p>
-            <p className="text-sm text-[#C4B643]">
-              Last progress: {issue.currentIntent ?? "session started"}
+            <p className="text-sm text-[#C4B643] truncate" title={liveProgress ?? issue.currentIntent ?? "session started"}>
+              Last progress: {liveProgress ?? issue.currentIntent ?? "session started"}
             </p>
+            {liveProgress &&
+              issue.currentIntent &&
+              !/session running/i.test(issue.currentIntent) &&
+              !intentDuplicatesLiveProgress(issue.currentIntent, liveProgress) && (
+              <p className="text-xs text-white/45 truncate" title={issue.currentIntent}>
+                {issue.currentIntent}
+              </p>
+            )}
             <p className="text-xs text-white/45">
               Heartbeat {fmtHeartbeatAge(activeWorkerSession.heartbeatAt)}
               {shortPath(activeWorkerSession.worktreePath) ? ` · ${shortPath(activeWorkerSession.worktreePath)}` : ""}
