@@ -12,6 +12,9 @@
 // Network calls are async (promisify(execFile) + timeout) — never spawnSync on the
 // coordinator event loop. A hung `gh` (auth prompt, outage, rate limit) must fail bounded
 // and escalate, not freeze every other issue's work.
+//
+// Concurrency: finalizeAutoMerge is single-flight per issueId (in-process). Success and
+// escalate txns are also defensive if a racer already wrote done / needs_human.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Issue } from "@agent-dealer/shared";
@@ -22,7 +25,11 @@ import {
   completeWorkflowInstance,
   getActiveWorkflowInstance,
 } from "../repository/workflow-events.js";
-import { createHumanAction } from "../repository/human-actions.js";
+import {
+  createHumanAction,
+  findOpenHumanAction,
+  resolveHumanAction,
+} from "../repository/human-actions.js";
 
 const run = promisify(execFile);
 
@@ -104,11 +111,38 @@ export type AutoMergeFinalizeResult = {
 };
 
 /**
+ * In-process single-flight for finalizeAutoMerge. Routing parks at final_review/system
+ * *before* the async gh call; the next coordinator tick's recoverStrandedAutoMerges would
+ * otherwise start a second finalize while the first is still merging. Concurrent callers
+ * for the same issue share one Promise (set synchronously before any await).
+ */
+const finalizeInflight = new Map<string, Promise<AutoMergeFinalizeResult>>();
+
+/** Test hook — clear single-flight state between cases. */
+export function clearFinalizeInflightForTests(): void {
+  finalizeInflight.clear();
+}
+
+/**
  * Completes an auto-merge parked in `final_review` / system ownership after reviewer
  * approve. Success → done + reflect; failure → needs_human + policy_escalation.
  * The `gh` merge runs outside any DB transaction (async); only the follow-up write is txn'd.
+ * Concurrent calls for the same issue coalesce onto one in-flight Promise.
  */
-export async function finalizeAutoMerge(issueId: string): Promise<AutoMergeFinalizeResult> {
+export function finalizeAutoMerge(issueId: string): Promise<AutoMergeFinalizeResult> {
+  const existing = finalizeInflight.get(issueId);
+  if (existing) return existing;
+
+  const promise = finalizeAutoMergeOnce(issueId).finally(() => {
+    if (finalizeInflight.get(issueId) === promise) {
+      finalizeInflight.delete(issueId);
+    }
+  });
+  finalizeInflight.set(issueId, promise);
+  return promise;
+}
+
+async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalizeResult> {
   const issue = getIssue(issueId);
   if (!issue) {
     throw new Error(`finalizeAutoMerge: issue vanished ${issueId}`);
@@ -150,6 +184,17 @@ export async function finalizeAutoMerge(issueId: string): Promise<AutoMergeFinal
         triggerReflect: false,
       };
     }
+    // A racing failure path may have escalated first; a real merge success must still
+    // land on done and dismiss the obsolete policy_escalation (needs_human → done is legal).
+    if (current.status === "needs_human") {
+      const open = findOpenHumanAction(issueId, "policy_escalation");
+      if (open) {
+        resolveHumanAction(open.id, "system", {
+          choice: "dismissed",
+          note: "auto-merge succeeded after concurrent failure escalation",
+        });
+      }
+    }
     transitionIssue(issueId, "done", {
       currentOwner: "system",
       currentIntent: "Auto-merged after reviewer approval",
@@ -183,11 +228,34 @@ function escalateMergeFailure(
 ): AutoMergeFinalizeResult {
   return getDb().transaction((): AutoMergeFinalizeResult => {
     const current = getIssue(issue.id)!;
+    // Concurrent success already completed — never open a dangling escalation on done.
+    if (current.status === "done") {
+      return {
+        applied: true,
+        issueStatus: "done",
+        nextWorkItemId: null,
+        humanActionId: null,
+        instanceCompleted: true,
+        triggerReflect: false,
+      };
+    }
     // Concurrent recovery already escalated — leave the open action alone.
     if (current.status === "needs_human") {
       return {
         applied: true,
         issueStatus: "needs_human",
+        nextWorkItemId: null,
+        humanActionId: null,
+        instanceCompleted: false,
+        triggerReflect: false,
+      };
+    }
+    // Only escalate from the auto-merge park — any other status is a racer or a
+    // non-parked issue; do not invent a policy_escalation there.
+    if (current.status !== "final_review") {
+      return {
+        applied: true,
+        issueStatus: current.status,
         nextWorkItemId: null,
         humanActionId: null,
         instanceCompleted: false,
@@ -230,10 +298,14 @@ function escalateMergeFailure(
   })();
 }
 
-/** Issues parked for auto-merge with no in-memory continuation (process crash / restart). */
+/** Issues parked for auto-merge that are not already being finalized in this process. */
 export function listStrandedAutoMerges(): Issue[] {
   return listIssues("final_review").filter(
-    (i) => i.autoMerge && i.currentOwner === "system" && i.currentIntent === AUTO_MERGE_INTENT
+    (i) =>
+      i.autoMerge &&
+      i.currentOwner === "system" &&
+      i.currentIntent === AUTO_MERGE_INTENT &&
+      !finalizeInflight.has(i.id)
   );
 }
 

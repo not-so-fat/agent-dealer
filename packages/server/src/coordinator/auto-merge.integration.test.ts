@@ -17,7 +17,7 @@ const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import(
 const { claimWorkItem, listWorkItemsForIssue } = await import("../repository/work-items.js");
 const { startWorkflow, applyCompletion } = await import("./commands.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
-const { setMergePrForTests } = await import("./auto-merge.js");
+const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./auto-merge.js");
 
 before(() => migrate());
 beforeEach(() => {
@@ -33,9 +33,13 @@ beforeEach(() => {
     DELETE FROM workflow_instances;
     DELETE FROM issues;
   `);
+  clearFinalizeInflightForTests();
   setMergePrForTests(async () => ({ ok: true }));
 });
-afterEach(() => setMergePrForTests(null));
+afterEach(() => {
+  setMergePrForTests(null);
+  clearFinalizeInflightForTests();
+});
 
 function newIssue(opts: { autoMerge?: boolean; repo?: string } = {}): string {
   return createIssue({
@@ -221,4 +225,137 @@ test("recoverStrandedAutoMerges finalizes a parked auto-merge after a simulated 
   const recovered = await recoverStrandedAutoMerges();
   assert.ok(recovered.finalized.includes(issueId));
   assert.equal(getIssue(issueId)!.status, "done");
+});
+
+/** Park an auto-merge issue at final_review/system/AUTO_MERGE_INTENT with an active workflow. */
+async function parkForAutoMerge(issueId: string): Promise<void> {
+  const { AUTO_MERGE_INTENT } = await import("./auto-merge.js");
+  const { transitionIssue } = await import("../repository/issues.js");
+  transitionIssue(issueId, "reviewing", { currentOwner: "reviewer", currentIntent: "reviewing" });
+  getDb().exec("DELETE FROM work_items");
+  transitionIssue(issueId, "final_review", {
+    currentOwner: "system",
+    currentIntent: AUTO_MERGE_INTENT,
+    prNumber: 42,
+    prUrl: "https://gh/pr/42",
+  });
+}
+
+test("concurrent finalizeAutoMerge calls coalesce: one merge, done, no dangling policy_escalation", async () => {
+  const { finalizeAutoMerge, recoverStrandedAutoMerges } = await import("./auto-merge.js");
+
+  let merges = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  setMergePrForTests(async () => {
+    merges += 1;
+    await gate;
+    return { ok: true };
+  });
+
+  const issueId = newIssue({ autoMerge: true });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await parkForAutoMerge(issueId);
+
+  const p1 = finalizeAutoMerge(issueId);
+  const p2 = finalizeAutoMerge(issueId);
+  const p3 = recoverStrandedAutoMerges();
+  // Give the first finalize a chance to register inflight before recover lists stranded.
+  await Promise.resolve();
+  release();
+  const [r1, r2, recovered] = await Promise.all([p1, p2, p3]);
+
+  assert.equal(merges, 1, "concurrent callers must share one gh merge");
+  assert.equal(r1.issueStatus, "done");
+  assert.equal(r2.issueStatus, "done");
+  assert.equal(getIssue(issueId)!.status, "done");
+  assert.equal(getActiveWorkflowInstance(issueId), null);
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+    0,
+    "must not leave an open policy_escalation on a done issue"
+  );
+  // recover may skip (inflight filter) or coalesce — either way no error and issue is done.
+  assert.equal(recovered.errors.length, 0);
+});
+
+test("success txn dismisses stale needs_human policy_escalation from a racing failure", async () => {
+  const { finalizeAutoMerge } = await import("./auto-merge.js");
+  const { transitionIssue } = await import("../repository/issues.js");
+  const { createHumanAction } = await import("../repository/human-actions.js");
+
+  let issueId = "";
+  setMergePrForTests(async () => {
+    // Simulate a racing escalateMergeFailure that wrote needs_human + open action
+    // before this success path's DB transaction runs.
+    const inst = getActiveWorkflowInstance(issueId)!;
+    transitionIssue(issueId, "needs_human", {
+      currentOwner: "human",
+      currentIntent: "Auto-merge failed: transient rate limit",
+    });
+    createHumanAction({
+      issueId,
+      workflowInstanceId: inst.id,
+      actionType: "policy_escalation",
+      reason: "Auto-merge failed: transient rate limit",
+      question: "Auto-merge failed: transient rate limit Resume development, or close the issue?",
+      responseOptions: [
+        { choice: "resume", label: "Resume development" },
+        { choice: "close", label: "Close" },
+      ],
+    });
+    return { ok: true };
+  });
+
+  issueId = newIssue({ autoMerge: true });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await parkForAutoMerge(issueId);
+
+  const result = await finalizeAutoMerge(issueId);
+  assert.equal(result.issueStatus, "done");
+  assert.equal(getIssue(issueId)!.status, "done");
+  const open = listHumanActionsForIssue(issueId).filter(
+    (a) => a.actionType === "policy_escalation" && a.status === "open"
+  );
+  assert.equal(open.length, 0, "stale policy_escalation must be resolved on success");
+  const resolved = listHumanActionsForIssue(issueId).find(
+    (a) => a.actionType === "policy_escalation" && a.status === "resolved"
+  );
+  assert.ok(resolved, "expected the racing escalation to be marked resolved");
+});
+
+test("escalate txn no-ops when a racing success already marked the issue done", async () => {
+  const { finalizeAutoMerge } = await import("./auto-merge.js");
+  const { transitionIssue } = await import("../repository/issues.js");
+  const { completeWorkflowInstance } = await import("../repository/workflow-events.js");
+
+  let issueId = "";
+  setMergePrForTests(async () => {
+    // Simulate a racing success that completed the issue before this failure path escalates.
+    const inst = getActiveWorkflowInstance(issueId)!;
+    transitionIssue(issueId, "done", {
+      currentOwner: "system",
+      currentIntent: "Auto-merged after reviewer approval",
+    });
+    completeWorkflowInstance(inst.id, "done");
+    return { ok: false, reason: "transient rate limit" };
+  });
+
+  issueId = newIssue({ autoMerge: true });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await parkForAutoMerge(issueId);
+
+  const result = await finalizeAutoMerge(issueId);
+  assert.equal(result.issueStatus, "done");
+  assert.equal(getIssue(issueId)!.status, "done");
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+    0,
+    "must not open policy_escalation on an already-done issue"
+  );
 });
