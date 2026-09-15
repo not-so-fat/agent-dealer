@@ -605,10 +605,12 @@ function applyDeveloper(
         outcome: outcome.kind,
       };
       if (type === "worker.failed") {
+        // Do not read session.errorJson here — worker-loop writes it only *after*
+        // applyCompletion. Reason comes from outcome / logPath / route (same sources
+        // the eventual errorJson is built from).
         payload.reason = reasonForWorkerFailedEvent({
           outcome,
           routeReason: "reason" in route ? route.reason : null,
-          sessionErrorJson: session?.errorJson,
           logPath: session?.logPath,
         });
       }
@@ -667,10 +669,10 @@ function applyReviewer(
         outcome: outcome.kind,
       };
       if (type === "worker.failed") {
+        // See applyDeveloper: session.errorJson is not written until after applyCompletion.
         payload.reason = reasonForWorkerFailedEvent({
           outcome,
           routeReason: "reason" in route ? route.reason : null,
-          sessionErrorJson: session?.errorJson,
           logPath: session?.logPath,
         });
       }

@@ -122,6 +122,10 @@ function fallbackReasonForKind(outcome: DeveloperOutcome | ReviewerOutcome): str
 /**
  * Resolve the prose `reason` for a worker.failed timeline payload.
  * Priority: explicit outcome.reason → session errorJson → log classifier → route reason → kind fallback.
+ *
+ * `sessionErrorJson` is only useful when the caller already has the recorded error
+ * (recovery / detail strip). On the applyCompletion hot path, worker-loop has not
+ * written errorJson yet — pass `logPath` + outcome instead.
  */
 export function reasonForWorkerFailedEvent(opts: {
   outcome: DeveloperOutcome | ReviewerOutcome;
