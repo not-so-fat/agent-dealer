@@ -49,7 +49,10 @@ test("every developer projection lands on a legal issue transition and always ha
         assertLegal(from, projection.issueStatus);
         // Invariant (NOT-63 acceptance criterion): no route ever leaves an issue with
         // neither a next work item nor a human action.
-        assert.ok(["enqueue", "human_action"].includes(effect.kind), `${outcome.kind} at ${JSON.stringify(limits)} produced effect.kind="${effect.kind}"`);
+        assert.ok(
+        ["enqueue", "human_action", "auto_merge"].includes(effect.kind),
+        `${outcome.kind} at ${JSON.stringify(limits)} produced effect.kind="${effect.kind}"`
+      );
       }
     }
   }
@@ -70,7 +73,10 @@ test("every reviewer projection lands on a legal issue transition and always has
       const route = routeReviewerOutcome(outcome, limits, PINNED_HEAD);
       const { projection, effect } = projectReviewerRoute(route, limits.currentRound, outcome.kind === "verdict");
       assertLegal("reviewing", projection.issueStatus);
-      assert.ok(["enqueue", "human_action"].includes(effect.kind), `${outcome.kind} at ${JSON.stringify(limits)} produced effect.kind="${effect.kind}"`);
+      assert.ok(
+        ["enqueue", "human_action", "auto_merge"].includes(effect.kind),
+        `${outcome.kind} at ${JSON.stringify(limits)} produced effect.kind="${effect.kind}"`
+      );
     }
   }
 });

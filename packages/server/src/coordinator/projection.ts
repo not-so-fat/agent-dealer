@@ -9,6 +9,7 @@
 import type { IssueOwner, IssueStatus, WorkflowEventType } from "@agent-dealer/shared";
 import type { DeveloperRouteResult, ReviewerRouteResult } from "./routing.js";
 import type { WorkItemKind } from "../repository/work-items.js";
+import { AUTO_MERGE_INTENT } from "./auto-merge.js";
 
 export interface IssueProjection {
   issueStatus: IssueStatus;
@@ -30,6 +31,9 @@ export type NextEffect =
         | "final_review";
       reason: string;
     }
+  /** NOT-102: merge the PR after approve, then complete or escalate — runs after the
+   * routing transaction so `gh` never holds the SQLite write lock. */
+  | { kind: "auto_merge" }
   | { kind: "none" };
 
 /** Which budget (if any) this transition spends before enqueueing the next effect. */
@@ -111,6 +115,20 @@ export function projectReviewerRoute(
           events: ["worker.completed", ...verdictEvents],
         },
         effect: { kind: "human_action", actionType: "final_review", reason: "Reviewer approved the PR" },
+        advance: "none",
+        hasVerdict,
+      };
+    case "auto_merge":
+      // Park in final_review under system ownership with no human_action — finalizeAutoMerge
+      // then moves to done or needs_human. Intent equals AUTO_MERGE_INTENT for recovery.
+      return {
+        projection: {
+          issueStatus: "final_review",
+          currentOwner: "system",
+          currentIntent: AUTO_MERGE_INTENT,
+          events: ["worker.completed", ...verdictEvents],
+        },
+        effect: { kind: "auto_merge" },
         advance: "none",
         hasVerdict,
       };

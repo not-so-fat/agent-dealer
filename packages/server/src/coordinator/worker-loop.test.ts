@@ -23,17 +23,22 @@ const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import(
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
 const { listWorkItemsForIssue, claimWorkItem, getWorkItem } = await import("../repository/work-items.js");
-const { startWorkflow, applyCompletion, resolveHumanActionAndAdvance } = await import("./commands.js");
+const { startWorkflow, applyCompletion, resolveHumanActionAndAdvanceAsync } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
 const { runCoordinatorTick, drainCoordinator, activeAttemptCount, startCoordinatorLoop, stopCoordinatorLoop } =
   await import("./worker-loop.js");
 const { recoverCoordinator } = await import("./recovery.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
+const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./auto-merge.js");
 
 before(() => migrate());
 // claimWorkItem / recovery scan the whole table (one loop in production); start each
 // case from an empty queue so a prior test's un-processed item is never claimed here.
-beforeEach(() => getDb().exec("DELETE FROM work_items"));
+beforeEach(() => {
+  getDb().exec("DELETE FROM work_items");
+  clearFinalizeInflightForTests();
+  setMergePrForTests(async () => ({ ok: true }));
+});
 afterEach(() => resetEffectHandlers());
 
 function newIssue(maxReviewRounds = 3): string {
@@ -89,7 +94,7 @@ test("happy path: developer → reviewer(approved) → final_review, resolved co
 
   assert.equal(getIssue(issueId)!.status, "final_review");
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review")!;
-  resolveHumanActionAndAdvance(action.id, "yusuke", "complete");
+  await resolveHumanActionAndAdvanceAsync(action.id, "yusuke", "complete");
   assert.equal(getIssue(issueId)!.status, "done");
   assert.equal(getActiveWorkflowInstance(issueId), null);
 
@@ -140,7 +145,7 @@ test("crash before effect: a leased item with no completion is recovered and adv
   assert.equal(getWorkItem(devItem.id)!.status, "leased");
 
   // Recovery requeues the orphaned lease once it has expired…
-  recoverCoordinator({ now: Date.now() + 120_000 });
+  await recoverCoordinator({ now: Date.now() + 120_000 });
   assert.equal(getWorkItem(devItem.id)!.status, "pending");
 
   // …now a working handler picks it up and the issue advances exactly once.
@@ -161,13 +166,13 @@ test("crash after effect: a duplicate applyCompletion (same or stale token) is a
   startWorkflow(issueId);
 
   const claimed = claimWorkItem("w1", { leaseMs: 60_000 })!;
-  const first = applyCompletion(claimed.id, claimed.leaseToken!, handoff);
+  const first = await applyCompletion(claimed.id, claimed.leaseToken!, handoff);
   assert.equal(first.applied, true);
   // The worker "crashed" after committing but before recording success — it retries.
-  const second = applyCompletion(claimed.id, claimed.leaseToken!, handoff);
+  const second = await applyCompletion(claimed.id, claimed.leaseToken!, handoff);
   assert.equal(second.applied, false);
   // Recovery also races an apply against the same (now stale) observed token.
-  const stale = applyCompletion(claimed.id, claimed.leaseToken!, { kind: "session_failed" });
+  const stale = await applyCompletion(claimed.id, claimed.leaseToken!, { kind: "session_failed" });
   assert.equal(stale.applied, false);
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 1);
   assert.equal(
@@ -181,7 +186,7 @@ test("fail-after-done: a completeSession failure never revives a work item that 
   const issueId = newIssue();
   startWorkflow(issueId);
   const claimed = claimWorkItem("w1", { leaseMs: 60_000 })!;
-  applyCompletion(claimed.id, claimed.leaseToken!, cleanHandoff());
+  await applyCompletion(claimed.id, claimed.leaseToken!, cleanHandoff());
   assert.equal(getWorkItem(claimed.id)!.status, "done");
 
   // A late token-fenced failure attempt (what the old catch path would have done) is a no-op.
@@ -203,12 +208,12 @@ test("lease expiry: a hung worker's late completion is dropped; the requeued ite
   await new Promise((r) => setTimeout(r, 40));
 
   // The periodic reclaim requeues the now-expired lease.
-  const res = recoverCoordinator({ now: Date.now() });
+  const res = await recoverCoordinator({ now: Date.now() });
   assert.deepEqual(res.reclaimed, [devItemId]);
   assert.equal(getWorkItem(devItemId)!.status, "pending");
 
   // The hung worker finally wakes and reports success — but its token is dead: no-op.
-  const late = applyCompletion(devItemId, hung.leaseToken!, cleanHandoff());
+  const late = await applyCompletion(devItemId, hung.leaseToken!, cleanHandoff());
   assert.equal(late.applied, false);
 
   // A fresh worker reprocesses the requeued item and drives the workflow forward.
@@ -264,7 +269,7 @@ test("a recovery-requeued re-attempt is tracked separately from its zombie prede
     assert.equal(activeAttemptCount(), 1);
 
     await new Promise((r) => setTimeout(r, 25)); // the 10ms lease expires; no heartbeat fires
-    recoverCoordinator({ now: Date.now() }); // requeues the item + fails A's session
+    await recoverCoordinator({ now: Date.now() }); // requeues the item + fails A's session
     const predecessorSessionId = listWorkerSessionsForIssue(issueId)[0].id;
     assert.equal(listWorkerSessionsForIssue(issueId)[0].status, "failed");
 

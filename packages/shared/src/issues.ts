@@ -45,6 +45,12 @@ export const Issue = z.object({
   headSha: z.string().nullable(),
   prNumber: z.number().int().nullable(),
   prUrl: z.string().nullable(),
+  /**
+   * When true, reviewer `approved` merges the PR and marks the issue done (skips
+   * `final_review`). Kick UI defaults this on; API/CLI omit → false so existing
+   * callers keep the human final-review path.
+   */
+  autoMerge: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -60,12 +66,15 @@ export const CreateIssueInput = z.object({
   reviewerAgentId: z.string().uuid(),
   maxReviewRounds: z.number().int().min(1).default(3),
   maxInfraAttempts: z.number().int().min(0).default(3),
+  /** Kick UI sends true; omit/false preserves final_review after approve. */
+  autoMerge: z.boolean().default(false),
   source: IssueSource.default("manual"),
   externalId: z.string().optional(),
   externalLabel: z.string().optional(),
   externalUrl: z.string().optional(),
 });
-export type CreateIssueInput = z.infer<typeof CreateIssueInput>;
+/** Wire/API body shape — defaults applied by `CreateIssueInput.parse` / repository. */
+export type CreateIssueInput = z.input<typeof CreateIssueInput>;
 
 /** Pre-start (or parked-on-`needs_human`) edits only — the route enforces no active
  * workflow instance; status/owner/intent/branch/SHA/PR stay coordinator-owned. */
@@ -79,6 +88,7 @@ export const UpdateIssueInput = z.object({
   reviewerAgentId: z.string().uuid().optional(),
   maxReviewRounds: z.number().int().min(1).optional(),
   maxInfraAttempts: z.number().int().min(0).optional(),
+  autoMerge: z.boolean().optional(),
 });
 export type UpdateIssueInput = z.infer<typeof UpdateIssueInput>;
 
@@ -99,7 +109,8 @@ export const ISSUE_STATUS_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   // exhausted) resume with a fresh reviewer session at the still-valid pinned head,
   // instead of always routing back through the developer.
   needs_human: ["developing", "reviewing", "repairing", "final_review", "done", "closed"],
-  final_review: ["done", "repairing", "needs_human", "closed"],
+  // Self-loop: human complete parks owner/intent for undraft+merge without leaving the stage.
+  final_review: ["final_review", "done", "repairing", "needs_human", "closed"],
   done: [],
   closed: [],
 };

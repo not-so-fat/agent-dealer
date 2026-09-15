@@ -130,6 +130,17 @@ test("approved verdict routes to final_review regardless of round", () => {
   assert.deepStrictEqual(routeReviewerOutcome(outcome, REVIEW_ROUNDS_LEFT, PINNED_HEAD), { next: "final_review" });
 });
 
+test("approved verdict with autoMerge routes to auto_merge instead of final_review", () => {
+  const outcome: ReviewerOutcome = {
+    kind: "verdict",
+    result: { verdict: "approved", baseSha: "b", headSha: "h", acceptanceCriteriaAssessment: "met", evidenceAssessment: "ok", findings: [], risks: [] },
+  };
+  assert.deepStrictEqual(
+    routeReviewerOutcome(outcome, { ...REVIEW_ROUNDS_LEFT, autoMerge: true }, PINNED_HEAD),
+    { next: "auto_merge" }
+  );
+});
+
 test("changes_requested with rounds remaining retries the developer with findings", () => {
   const outcome: ReviewerOutcome = {
     kind: "verdict",

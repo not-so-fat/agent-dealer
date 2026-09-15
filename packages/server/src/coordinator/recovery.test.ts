@@ -46,7 +46,7 @@ function newIssue(maxReviewRounds = 3, maxInfraAttempts = 3): string {
   }).id;
 }
 
-test("recovery requeues an expired orphaned lease and fails its running session", () => {
+test("recovery requeues an expired orphaned lease and fails its running session", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   const devItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "developer")!;
@@ -65,20 +65,20 @@ test("recovery requeues an expired orphaned lease and fails its running session"
   assert.equal(getWorkItem(devItem.id)!.status, "leased");
   assert.equal(listWorkerSessionsForIssue(issueId)[0].status, "running");
 
-  const res = recoverCoordinator({ now: FUTURE() });
+  const res = await recoverCoordinator({ now: FUTURE() });
   assert.deepEqual(res.reclaimed, [devItem.id]);
   assert.equal(getWorkItem(devItem.id)!.status, "pending");
   assert.equal(listWorkerSessionsForIssue(issueId)[0].status, "failed");
 });
 
-test("recovery ignores a lease that has not expired", () => {
+test("recovery ignores a lease that has not expired", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   claimWorkItem("healthy", { leaseMs: 600_000 });
-  assert.deepEqual(recoverCoordinator({ now: Date.now() }), { reclaimed: [], deadLettered: [] });
+  assert.deepEqual(await recoverCoordinator({ now: Date.now() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
 });
 
-test("recovery leaves a lease alone when a heartbeat renewed it after the snapshot", () => {
+test("recovery leaves a lease alone when a heartbeat renewed it after the snapshot", async () => {
   // Regression for the reviewer's "recovery can reclaim a freshly renewed lease".
   const issueId = newIssue();
   startWorkflow(issueId);
@@ -89,12 +89,12 @@ test("recovery leaves a lease alone when a heartbeat renewed it after the snapsh
   // …but before its CAS runs, the worker heartbeats and renews the lease:
   refreshHeartbeat(devItem.id, claimed.leaseToken!, { leaseMs: 600_000 });
 
-  const res = recoverCoordinator({ now: Date.now() + 1_000 });
-  assert.deepEqual(res, { reclaimed: [], deadLettered: [] });
+  const res = await recoverCoordinator({ now: Date.now() + 1_000 });
+  assert.deepEqual(res, { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
   assert.equal(getWorkItem(devItem.id)!.status, "leased");
 });
 
-test("an expired lease past the attempt cap is dead-lettered AND routed in one step", () => {
+test("an expired lease past the attempt cap is dead-lettered AND routed in one step", async () => {
   // A dead-lettered developer work item routes as an infra failure (session_failed), not a
   // review-round spend — pin maxInfraAttempts to 0 so the very first dead-letter escalates,
   // matching this test's "one step" intent.
@@ -105,7 +105,7 @@ test("an expired lease past the attempt cap is dead-lettered AND routed in one s
   // Exhaust the work item's own lease-crash attempts (max_attempts default 3): claim + expire, three times.
   for (let i = 0; i < 3; i++) {
     claimWorkItem("o", { leaseMs: 1 });
-    recoverCoordinator({ now: FUTURE() });
+    await recoverCoordinator({ now: FUTURE() });
   }
 
   assert.equal(getWorkItem(devItem.id)!.status, "dead");
@@ -116,7 +116,7 @@ test("an expired lease past the attempt cap is dead-lettered AND routed in one s
   );
 
   // A second recovery pass is a no-op — the item is already dead, nothing to reclaim.
-  assert.deepEqual(recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [] });
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
   assert.equal(
     listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
     1,
@@ -124,7 +124,7 @@ test("an expired lease past the attempt cap is dead-lettered AND routed in one s
   );
 });
 
-test("recovery loses its CAS to a worker that completed concurrently", () => {
+test("recovery loses its CAS to a worker that completed concurrently", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   const devItem = listWorkItemsForIssue(issueId)[0];
@@ -133,10 +133,10 @@ test("recovery loses its CAS to a worker that completed concurrently", () => {
   // Worker finishes just before recovery's transaction runs.
   finishWorkItem(devItem.id, claimed.leaseToken!, { status: "done", result: { kind: "no_pr" } });
 
-  assert.deepEqual(recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [] });
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
   assert.equal(getWorkItem(devItem.id)!.status, "done");
 });
 
-test("recoverCoordinator is a no-op on a clean queue", () => {
-  assert.deepEqual(recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [] });
+test("recoverCoordinator is a no-op on a clean queue", async () => {
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
 });

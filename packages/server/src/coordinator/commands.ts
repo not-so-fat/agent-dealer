@@ -61,6 +61,7 @@ import {
 } from "./routing.js";
 import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } from "./projection.js";
 import { parseHumanResolution, resolveHumanActionOutcome, type HumanResolution } from "./human-resolution.js";
+import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
 
 export const WORKFLOW_VERSION = "dev_reviewer_v1";
 
@@ -295,6 +296,10 @@ export type ApplyResult =
       nextWorkItemId: string | null;
       humanActionId: string | null;
       instanceCompleted: boolean;
+      /** Set when auto-merge completed successfully — caller may fire reflect. */
+      triggerReflect?: boolean;
+      /** Internal: routing parked for auto-merge; applyCompletion finalizes outside the txn. */
+      pendingAutoMerge?: boolean;
     }
   | { applied: false; reason: "already_terminal" | "lease_lost" | "no_active_instance" | "not_found" };
 
@@ -304,13 +309,17 @@ export type ApplyResult =
  * routing decision is projected onto the issue, the workflow events appended, and exactly
  * one next effect created. If the CAS matches nothing — a duplicate delivery, or a slow
  * worker whose lease was reclaimed and re-run — nothing is applied.
+ *
+ * When the issue opted into auto-merge and the reviewer approved, a second step runs
+ * *after* the transaction (so `gh` never holds the write lock): merge the PR, then mark
+ * done or escalate on failure (NOT-102).
  */
-export function applyCompletion(
+export async function applyCompletion(
   workItemId: string,
   leaseToken: string,
   outcome: DeveloperOutcome | ReviewerOutcome
-): ApplyResult {
-  return getDb().transaction((): ApplyResult => {
+): Promise<ApplyResult> {
+  const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
     if (!before) return { applied: false, reason: "not_found" };
     if (before.status === "done" || before.status === "dead" || before.status === "cancelled") {
@@ -329,6 +338,12 @@ export function applyCompletion(
 
     return routeAppliedOutcome(issue, instance, item, outcome);
   })();
+
+  if (routed.applied && routed.pendingAutoMerge) {
+    // Await async `gh` merge outside the routing txn — never block the event loop with spawnSync.
+    return finalizeAutoMerge(getWorkItem(workItemId)!.issueId);
+  }
+  return routed;
 }
 
 /**
@@ -453,6 +468,7 @@ function applyReviewer(
       maxReviewRounds: issue.maxReviewRounds,
       infraAttempts: issue.infraAttempts,
       maxInfraAttempts: issue.maxInfraAttempts,
+      autoMerge: issue.autoMerge,
     },
     issue.headSha!
   );
@@ -592,13 +608,17 @@ function applyEffect(
     return { ...base, humanActionId: action.id };
   }
 
+  if (effect.kind === "auto_merge") {
+    return { ...base, pendingAutoMerge: true };
+  }
+
   return base;
 }
 
 function questionFor(actionType: HumanActionType, reason: string, resumeAsReviewer = false): string {
   switch (actionType) {
     case "final_review":
-      return "Accept this work, send it back for another repair round, or close it?";
+      return "Accept and merge this work, send it back for another repair round, or close it?";
     case "attempts_exhausted":
       return "The review-round limit is reached. Retry with a fresh round, or close the issue?";
     case "policy_escalation":
@@ -635,7 +655,7 @@ export function responseOptionsFor(
   switch (actionType) {
     case "final_review":
       return [
-        { choice: "complete", label: "Accept — mark done" },
+        { choice: "complete", label: "Accept — merge & mark done" },
         { choice: "repair", label: "Another repair round" },
         { choice: "close", label: "Close without accepting" },
       ];
@@ -686,10 +706,13 @@ export type ResolveResult =
       nextWorkItemId: string | null;
       instanceCompleted: boolean;
       restarted: boolean;
-      /** True only for final_review:complete — see human-resolution.ts's HumanResolutionResult.
+      /** True after a successful merge-to-done (auto-merge or final_review:complete).
        * Reflect is a best-effort network call and cannot run inside this transaction, so the
        * caller (routes/human-actions.ts) triggers it after this result is returned. */
       triggerReflect: boolean;
+      /** Internal: final_review:complete parked for undraft+merge; use
+       * `resolveHumanActionAndAdvanceAsync` (or await finalizeAutoMerge) to finish. */
+      pendingMerge?: boolean;
     }
   | { ok: false; code: number; error: string };
 
@@ -697,6 +720,10 @@ export type ResolveResult =
  * Resolves an open human action and applies its workflow outcome in one transaction:
  * PRD §6.3's continue / repair / complete / close. A pre-start `product_scope_decision`
  * (no active instance) is resolved and the workflow started fresh.
+ *
+ * `final_review:complete` parks for undraft+merge (same finalize as auto-merge) and
+ * returns `pendingMerge: true` — callers that need the merge to finish must use
+ * `resolveHumanActionAndAdvanceAsync` (HTTP/CLI) rather than this sync entry point alone.
  */
 export function resolveHumanActionAndAdvance(
   actionId: string,
@@ -718,6 +745,37 @@ export function resolveHumanActionAndAdvance(
   const issue = getIssue(action.issueId);
   if (!issue) return { ok: false, code: 404, error: "Issue not found" };
   const instance = getActiveWorkflowInstance(action.issueId);
+
+  // NOT-102: human accept must undraft+merge (never mark done while leaving a draft PR).
+  // Park like auto-merge, then the async wrapper runs finalizeAutoMerge outside this txn.
+  if (instance && resolution.actionType === "final_review" && resolution.choice === "complete") {
+    return getDb().transaction((): ResolveResult => {
+      resolveHumanAction(actionId, resolvedBy, { choice });
+      appendWorkflowEvent({
+        issueId: issue.id,
+        workflowInstanceId: instance.id,
+        type: "human_action.resolved",
+        actorType: "human",
+        actorRef: resolvedBy,
+        stage: "final_review",
+        round: issue.currentRound,
+        payload: { actionType: "final_review", choice: "complete", pendingMerge: true },
+      });
+      transitionIssue(issue.id, "final_review", {
+        currentOwner: "system",
+        currentIntent: AUTO_MERGE_INTENT,
+      });
+      return {
+        ok: true,
+        issueStatus: "final_review",
+        nextWorkItemId: null,
+        instanceCompleted: false,
+        restarted: false,
+        triggerReflect: false,
+        pendingMerge: true,
+      };
+    })();
+  }
 
   // Pre-start product_scope_decision: resolve the action AND start the workflow in one
   // transaction. If the start still can't proceed (criteria not actually added), the whole
@@ -875,6 +933,34 @@ export function resolveHumanActionAndAdvance(
       triggerReflect: false,
     };
   })();
+}
+
+/**
+ * HTTP/CLI entry: same as `resolveHumanActionAndAdvance`, but when `final_review:complete`
+ * parks for merge, awaits undraft+merge (`finalizeAutoMerge`) before returning.
+ */
+export async function resolveHumanActionAndAdvanceAsync(
+  actionId: string,
+  resolvedBy: string,
+  choice: string
+): Promise<ResolveResult> {
+  const result = resolveHumanActionAndAdvance(actionId, resolvedBy, choice);
+  if (!result.ok || !result.pendingMerge) return result;
+
+  const action = getHumanAction(actionId);
+  if (!action?.issueId) {
+    return { ok: false, code: 500, error: "Human action missing issue after merge park" };
+  }
+
+  const merged = await finalizeAutoMerge(action.issueId);
+  return {
+    ok: true,
+    issueStatus: merged.issueStatus,
+    nextWorkItemId: null,
+    instanceCompleted: merged.instanceCompleted,
+    restarted: false,
+    triggerReflect: merged.triggerReflect,
+  };
 }
 
 /**

@@ -109,6 +109,8 @@ function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "sessi
 
 export type ReviewerRouteResult =
   | { next: "final_review" }
+  /** Reviewer approved and the issue opted into per-issue auto-merge (NOT-102). */
+  | { next: "auto_merge" }
   | { next: "retry_developer_with_findings" }
   /** Head moved mid-review — re-review at the freshly verified SHA, never the stale one.
    * Never spends a review round, but DOES spend an infra attempt: an unbounded chain of
@@ -125,7 +127,7 @@ export type ReviewerRouteResult =
 
 export function routeReviewerOutcome(
   outcome: ReviewerOutcome,
-  limits: RouteLimits,
+  limits: RouteLimits & { autoMerge?: boolean },
   pinnedHeadSha: string
 ): ReviewerRouteResult {
   switch (outcome.kind) {
@@ -152,10 +154,10 @@ export function routeReviewerOutcome(
   }
 }
 
-function routeVerdict(result: ReviewerResult, limits: RouteLimits): ReviewerRouteResult {
+function routeVerdict(result: ReviewerResult, limits: RouteLimits & { autoMerge?: boolean }): ReviewerRouteResult {
   switch (result.verdict) {
     case "approved":
-      return { next: "final_review" };
+      return limits.autoMerge ? { next: "auto_merge" } : { next: "final_review" };
     case "changes_requested":
       return roundsRemain(limits)
         ? { next: "retry_developer_with_findings" }

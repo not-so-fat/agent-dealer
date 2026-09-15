@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
-import type { AgentWithHealth, HumanAction, HumanActionType } from "@agent-dealer/shared";
-import { createIssue, fetchHumanActions, fetchIssues, startIssue, type IssueListRow } from "../api";
+import type { AgentWithHealth, HumanAction, HumanActionType, LinearCandidate } from "@agent-dealer/shared";
+import {
+  createIssue,
+  fetchHumanActions,
+  fetchIssues,
+  fetchLinearInbox,
+  fetchRecentRepos,
+  startIssue,
+  type IssueListRow,
+} from "../api";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
 import AlertIcon from "../components/ui/AlertIcon";
 
@@ -31,10 +39,22 @@ function timeAgo(iso: string): string {
   return `${Math.floor(hr / 24)}d ago`;
 }
 
+/** Pull an Acceptance criteria section out of a Linear markdown body when present. */
+export function extractAcceptanceFromLinear(description: string | undefined): string | undefined {
+  if (!description?.trim()) return undefined;
+  const match = description.match(/##\s*Acceptance criteria\s*\n([\s\S]*?)(?=\n##\s|$)/i);
+  const body = match?.[1]?.trim();
+  return body || undefined;
+}
+
 export default function IssuesListPage({ agents, onSelectIssue }: Props) {
   const [issues, setIssues] = useState<IssueListRow[] | null>(null);
   const [actions, setActions] = useState<HumanAction[]>([]);
   const [showCreate, setShowCreate] = useState(false);
+  const [sourceMode, setSourceMode] = useState<"manual" | "linear">("manual");
+  const [candidates, setCandidates] = useState<LinearCandidate[]>([]);
+  const [selectedLinearId, setSelectedLinearId] = useState("");
+  const [recentRepos, setRecentRepos] = useState<string[]>([]);
   const [title, setTitle] = useState("");
   const [repo, setRepo] = useState("");
   const [baseBranch, setBaseBranch] = useState("main");
@@ -42,7 +62,11 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
   const [acceptanceCriteria, setAcceptanceCriteria] = useState("");
   const [developerAgentId, setDeveloperAgentId] = useState("");
   const [reviewerAgentId, setReviewerAgentId] = useState("");
+  const [autoMerge, setAutoMerge] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const selectedLinear = candidates.find((c) => c.id === selectedLinearId) ?? null;
+  const linearLocked = sourceMode === "linear" && selectedLinear != null;
 
   const refresh = () => {
     fetchIssues().then(setIssues).catch((e) => setError(String(e)));
@@ -59,6 +83,35 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
     return () => clearInterval(poll);
   }, []);
 
+  useEffect(() => {
+    if (!showCreate) return;
+    fetchRecentRepos()
+      .then(setRecentRepos)
+      .catch(() => setRecentRepos([]));
+    if (sourceMode === "linear") {
+      fetchLinearInbox()
+        .then(setCandidates)
+        .catch((e) => setError(`Linear inbox: ${String(e)}`));
+    }
+  }, [showCreate, sourceMode]);
+
+  useEffect(() => {
+    if (!selectedLinear) return;
+    setTitle(`${selectedLinear.identifier}: ${selectedLinear.title}`);
+    setDescription(selectedLinear.description ?? "");
+    setAcceptanceCriteria(extractAcceptanceFromLinear(selectedLinear.description) ?? "");
+  }, [selectedLinear]);
+
+  const resetForm = () => {
+    setTitle("");
+    setRepo("");
+    setDescription("");
+    setAcceptanceCriteria("");
+    setSelectedLinearId("");
+    setAutoMerge(true);
+    setBaseBranch("main");
+  };
+
   const submitCreate = async () => {
     if (!title.trim() || !repo.trim() || !developerAgentId || !reviewerAgentId) {
       setError("Title, repo, developer, and reviewer are required");
@@ -67,8 +120,8 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
     try {
       const trimmedAcceptance = acceptanceCriteria.trim();
       const created = await createIssue({
-        title,
-        repo,
+        title: title.trim(),
+        repo: repo.trim(),
         baseBranch: baseBranch.trim() || "main",
         description: description.trim() || undefined,
         acceptanceCriteria: trimmedAcceptance || undefined,
@@ -76,13 +129,14 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
         reviewerAgentId,
         maxReviewRounds: 3,
         maxInfraAttempts: 3,
-        source: "manual",
+        autoMerge,
+        source: sourceMode === "linear" && selectedLinear ? "linear" : "manual",
+        externalId: selectedLinear?.id,
+        externalLabel: selectedLinear?.identifier,
+        externalUrl: selectedLinear?.url,
       });
       setShowCreate(false);
-      setTitle("");
-      setRepo("");
-      setDescription("");
-      setAcceptanceCriteria("");
+      resetForm();
       // Startable the moment it's created — go straight to it and start it, rather than
       // leaving it silently sitting in `ready` until someone opens it.
       if (trimmedAcceptance) {
@@ -133,30 +187,148 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
       {showCreate && (
         <div className="mb-4 p-4 rounded border border-white/10 bg-panel-elevated/60 space-y-2">
           <p className="text-xs text-white/50">
-            Workflow: <span className="text-white/75">developer implements → reviewer (up to 3 rounds) → final human review</span>. agent-dealer coordinates the handoffs and never merges.
+            Workflow:{" "}
+            <span className="text-white/75">
+              developer → reviewer → {autoMerge ? "auto-merge on approve" : "final human review"}
+            </span>
+            .
           </p>
-          <input className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
-          <textarea className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" rows={3} placeholder="Problem statement / description" value={description} onChange={(e) => setDescription(e.target.value)} />
-          <textarea className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" rows={3} placeholder="Acceptance criteria" value={acceptanceCriteria} onChange={(e) => setAcceptanceCriteria(e.target.value)} />
-          <div className="flex gap-2">
-            <input className="flex-1 bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" placeholder="Repo path" value={repo} onChange={(e) => setRepo(e.target.value)} />
-            <input className="w-32 bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" placeholder="Base branch" value={baseBranch} onChange={(e) => setBaseBranch(e.target.value)} />
+          <div className="flex gap-2 text-sm">
+            <button
+              type="button"
+              className={`px-3 py-1 rounded border ${sourceMode === "manual" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
+              onClick={() => {
+                setSourceMode("manual");
+                setSelectedLinearId("");
+              }}
+            >
+              Manual
+            </button>
+            <button
+              type="button"
+              className={`px-3 py-1 rounded border ${sourceMode === "linear" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
+              onClick={() => setSourceMode("linear")}
+            >
+              From Linear
+            </button>
           </div>
-          <select className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" value={developerAgentId} onChange={(e) => setDeveloperAgentId(e.target.value)}>
+
+          {sourceMode === "linear" && (
+            <select
+              className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+              value={selectedLinearId}
+              onChange={(e) => setSelectedLinearId(e.target.value)}
+            >
+              <option value="">Pick a Linear issue…</option>
+              {candidates.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.identifier}: {c.title}
+                </option>
+              ))}
+            </select>
+          )}
+
+          <input
+            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm disabled:opacity-60"
+            placeholder="Title"
+            value={title}
+            disabled={linearLocked}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+          <textarea
+            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm disabled:opacity-60"
+            rows={3}
+            placeholder="Problem statement / description"
+            value={description}
+            disabled={linearLocked}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+          <textarea
+            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+            rows={3}
+            placeholder="Acceptance criteria"
+            value={acceptanceCriteria}
+            onChange={(e) => setAcceptanceCriteria(e.target.value)}
+          />
+          <div className="flex gap-2 items-stretch">
+            <div className="flex-1 space-y-1">
+              {recentRepos.length > 0 && (
+                <select
+                  className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                  value={recentRepos.includes(repo) ? repo : ""}
+                  onChange={(e) => {
+                    if (e.target.value) setRepo(e.target.value);
+                  }}
+                >
+                  <option value="">Recent repo paths…</option>
+                  {recentRepos.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <input
+                className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                placeholder="Repo path (local filesystem)"
+                value={repo}
+                onChange={(e) => setRepo(e.target.value)}
+              />
+            </div>
+            <input
+              className="w-32 bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+              placeholder="Base branch"
+              value={baseBranch}
+              onChange={(e) => setBaseBranch(e.target.value)}
+            />
+          </div>
+          <select
+            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+            value={developerAgentId}
+            onChange={(e) => setDeveloperAgentId(e.target.value)}
+          >
             <option value="">Developer agent…</option>
             {agents.map((a) => (
-              <option key={a.id} value={a.id}>{a.name}</option>
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
             ))}
           </select>
-          <select className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" value={reviewerAgentId} onChange={(e) => setReviewerAgentId(e.target.value)}>
+          <select
+            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+            value={reviewerAgentId}
+            onChange={(e) => setReviewerAgentId(e.target.value)}
+          >
             <option value="">Reviewer agent…</option>
             {agents.map((a) => (
-              <option key={a.id} value={a.id}>{a.name}</option>
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
             ))}
           </select>
+          <label className="flex items-center gap-2 text-sm text-white/70 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoMerge}
+              onChange={(e) => setAutoMerge(e.target.checked)}
+              className="accent-[#C4B643]"
+            />
+            Auto-merge when reviewer approves (skip final human review)
+          </label>
           <div className="flex gap-2">
-            <button type="button" className="btn-gold px-4" onClick={submitCreate}>Create</button>
-            <button type="button" className="px-4 py-2 text-sm text-white/60 hover:text-white" onClick={() => setShowCreate(false)}>Cancel</button>
+            <button type="button" className="btn-gold px-4" onClick={submitCreate}>
+              {sourceMode === "linear" ? "Kick from Linear" : "Create"}
+            </button>
+            <button
+              type="button"
+              className="px-4 py-2 text-sm text-white/60 hover:text-white"
+              onClick={() => {
+                setShowCreate(false);
+                resetForm();
+              }}
+            >
+              Cancel
+            </button>
           </div>
         </div>
       )}

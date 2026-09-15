@@ -1,12 +1,14 @@
 import {
   canTransitionIssue,
-  type CreateIssueInput,
+  CreateIssueInput,
   type Issue,
   type IssueOwner,
   type IssueStatus,
 } from "@agent-dealer/shared";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
+
+type CreateIssueRaw = import("@agent-dealer/shared").CreateIssueInput;
 
 interface IssueRow {
   id: string;
@@ -33,6 +35,7 @@ interface IssueRow {
   head_sha: string | null;
   pr_number: number | null;
   pr_url: string | null;
+  auto_merge: number;
   created_at: string;
   updated_at: string;
 }
@@ -63,12 +66,14 @@ function rowToIssue(row: IssueRow): Issue {
     headSha: row.head_sha,
     prNumber: row.pr_number,
     prUrl: row.pr_url,
+    autoMerge: row.auto_merge !== 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-export function createIssue(input: CreateIssueInput): Issue {
+export function createIssue(raw: CreateIssueRaw): Issue {
+  const input = CreateIssueInput.parse(raw);
   const db = getDb();
   const now = new Date().toISOString();
   const id = uuid();
@@ -97,6 +102,7 @@ export function createIssue(input: CreateIssueInput): Issue {
     head_sha: null,
     pr_number: null,
     pr_url: null,
+    auto_merge: input.autoMerge ? 1 : 0,
     created_at: now,
     updated_at: now,
   };
@@ -106,13 +112,13 @@ export function createIssue(input: CreateIssueInput): Issue {
       acceptance_criteria, repo, base_branch, status, current_owner, current_intent,
       developer_agent_id, reviewer_agent_id, max_review_rounds, current_round,
       max_infra_attempts, infra_attempts,
-      branch, base_sha, head_sha, pr_number, pr_url, created_at, updated_at
+      branch, base_sha, head_sha, pr_number, pr_url, auto_merge, created_at, updated_at
     ) VALUES (
       @id, @source, @external_id, @external_label, @external_url, @title, @description,
       @acceptance_criteria, @repo, @base_branch, @status, @current_owner, @current_intent,
       @developer_agent_id, @reviewer_agent_id, @max_review_rounds, @current_round,
       @max_infra_attempts, @infra_attempts,
-      @branch, @base_sha, @head_sha, @pr_number, @pr_url, @created_at, @updated_at
+      @branch, @base_sha, @head_sha, @pr_number, @pr_url, @auto_merge, @created_at, @updated_at
     )
   `).run(row);
   return rowToIssue(row);
@@ -202,6 +208,7 @@ export interface UpdateIssuePatch {
   reviewerAgentId?: string;
   maxReviewRounds?: number;
   maxInfraAttempts?: number;
+  autoMerge?: boolean;
 }
 
 /** Pre-start (or parked-on-`needs_human`) edits only — the route enforces no active
@@ -223,6 +230,7 @@ export function updateIssue(id: string, patch: UpdateIssuePatch): Issue {
         reviewer_agent_id = @reviewer_agent_id,
         max_review_rounds = @max_review_rounds,
         max_infra_attempts = @max_infra_attempts,
+        auto_merge = @auto_merge,
         updated_at = @updated_at
       WHERE id = @id
     `)
@@ -238,11 +246,27 @@ export function updateIssue(id: string, patch: UpdateIssuePatch): Issue {
       reviewer_agent_id: patch.reviewerAgentId ?? current.reviewerAgentId,
       max_review_rounds: patch.maxReviewRounds ?? current.maxReviewRounds,
       max_infra_attempts: patch.maxInfraAttempts ?? current.maxInfraAttempts,
+      auto_merge: (patch.autoMerge !== undefined ? patch.autoMerge : current.autoMerge) ? 1 : 0,
       updated_at: now,
     });
   const updated = getIssue(id);
   if (!updated) throw new Error(`Issue vanished: ${id}`);
   return updated;
+}
+
+/** Distinct local repo paths from prior issues, most recently used first (NOT-102). */
+export function listRecentRepos(limit = 20): string[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT repo, MAX(updated_at) AS last_used
+       FROM issues
+       WHERE repo IS NOT NULL AND TRIM(repo) != ''
+       GROUP BY repo
+       ORDER BY last_used DESC
+       LIMIT ?`
+    )
+    .all(limit) as Array<{ repo: string }>;
+  return rows.map((r) => r.repo);
 }
 
 export function incrementIssueRound(id: string): Issue {

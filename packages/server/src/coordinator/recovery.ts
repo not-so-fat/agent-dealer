@@ -22,6 +22,7 @@ import {
   requeueWorkItem,
 } from "../repository/work-items.js";
 import { routeAppliedOutcome } from "./commands.js";
+import { recoverStrandedAutoMerges } from "./auto-merge.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -30,6 +31,8 @@ export interface RecoverResult {
   reclaimed: string[];
   /** Work items past the attempt cap — dead-lettered and routed to a human action. */
   deadLettered: string[];
+  /** Issues whose auto-merge park was finalized after a crash (NOT-102). */
+  autoMergesFinalized: string[];
 }
 
 /** Fail a worker_session still `running` for an item whose worker is gone. */
@@ -51,7 +54,7 @@ function failOrphanSession(workerSessionId: string | null): void {
  *                  whose `lease_expires_at` is before this — the recovery latency for an
  *                  orphaned item is bounded by `COORDINATOR_LEASE_MS`.
  */
-export function recoverCoordinator(opts?: { now?: number }): RecoverResult {
+export async function recoverCoordinator(opts?: { now?: number }): Promise<RecoverResult> {
   const now = opts?.now ?? Date.now();
   const nowIso = new Date(now).toISOString();
   const backoffMs = num("COORDINATOR_FAIL_BACKOFF_MS", 10_000);
@@ -101,5 +104,10 @@ export function recoverCoordinator(opts?: { now?: number }): RecoverResult {
     }
   }
 
-  return { reclaimed, deadLettered };
+  const stranded = await recoverStrandedAutoMerges();
+  return {
+    reclaimed,
+    deadLettered,
+    autoMergesFinalized: stranded.finalized,
+  };
 }

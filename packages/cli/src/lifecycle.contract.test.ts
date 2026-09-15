@@ -52,7 +52,7 @@ test("agent-operated CLI contract: discover profiles/issues, start, inspect choi
       { choice: "close", label: "Close" },
     ]),
     openAction("00000000-0000-4000-a000-000000000024", "final_review", [
-      { choice: "complete", label: "Accept — mark done" },
+      { choice: "complete", label: "Accept — merge & mark done" },
       { choice: "repair", label: "Request repair" },
       { choice: "close", label: "Close" },
     ]),
