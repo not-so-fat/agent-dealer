@@ -96,6 +96,7 @@ mkdir -p ~/.agent-dealer-dev
 cp scripts/templates/dev.env.example ~/.agent-dealer-dev/.env
 # Edit ~/.agent-dealer-dev/.env — add LINEAR_API_KEY, etc.
 npm install
+npm run build -w @agent-dealer/shared   # server resolves @agent-dealer/shared/dist
 npm run db:migrate
 npm run dev
 ```
