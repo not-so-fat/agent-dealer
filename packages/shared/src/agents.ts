@@ -18,6 +18,11 @@ export const AgentHealthIssue = z.object({
   code: z.enum([
     "cli_missing",
     "runtime_auth",
+    /**
+     * Cursor macOS keychain stuck (errSecDuplicateItem / exit 45) — sessions die mid-run
+     * even when status briefly looked logged-in (NOT-114 / NOT-103).
+     */
+    "cursor_keychain",
     "usage_capped",
     "deck_offline",
     "deck_unauthorized",

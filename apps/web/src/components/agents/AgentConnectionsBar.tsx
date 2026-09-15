@@ -14,7 +14,7 @@ function runtimeCliStatus(
   const sample = agents.find((a) => a.runtime === runtime);
   if (!sample) return { ok: false, detail: "no agent" };
   const blocker = sample.issues.find(
-    (i) => i.code === "cli_missing" || i.code === "runtime_auth"
+    (i) => i.code === "cli_missing" || i.code === "runtime_auth" || i.code === "cursor_keychain"
   );
   if (blocker) return { ok: false, detail: blocker.message };
   return { ok: true, detail: "CLI ready" };

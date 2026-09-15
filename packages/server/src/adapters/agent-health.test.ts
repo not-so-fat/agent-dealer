@@ -154,3 +154,27 @@ test("githubIssuesUncached reports github_auth when gh auth status fails with an
     assert.ok(issue.message.length > 0);
   }
 });
+
+test("cursor_keychain status/stderr fixture maps to a blocking health issue via cursorAuthIssueFromOutput", async () => {
+  const { cursorAuthIssueFromOutput } = await import("@agent-dealer/shared");
+  const fixture = `Cursor couldn't save your login to the macOS keychain (errSecDuplicateItem, security exit code 45).
+The keychain item is stuck. Delete it and sign in again:
+  security delete-generic-password -s cursor-access-token -a cursor-user
+  agent login
+`;
+  const issue = cursorAuthIssueFromOutput(fixture);
+  assert.equal(issue?.code, "cursor_keychain");
+  assert.match(issue!.message, /delete-generic-password/);
+
+  const agent = createAgent({ name: "cursor-keychain", runtime: "cursor_local", workspaceRoot: "/tmp" });
+  const result = await healthForAgent(
+    agent,
+    true,
+    new Map([["cursor_local", [issue!]]]),
+    true,
+    null,
+    NO_GITHUB
+  );
+  assert.equal(result.healthy, false);
+  assert.equal(result.issues.some((i) => i.code === "cursor_keychain"), true);
+});

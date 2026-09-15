@@ -1,6 +1,8 @@
 import net from "node:net";
 import fs from "node:fs";
-import { claudeAvailable } from "./cli-check.js";
+import path from "node:path";
+import { cursorAuthIssueFromOutput } from "@agent-dealer/shared";
+import { claudeAvailable, cursorAvailable } from "./cli-check.js";
 import {
   loadProdEnvFile,
   prodEnvFilePath,
@@ -36,6 +38,36 @@ export async function runDoctor(): Promise<number> {
     console.error("✗ Claude Code CLI not found — install claude and ensure it is on PATH");
     console.error("  https://docs.anthropic.com/en/docs/claude-code");
     failed = true;
+  }
+
+  {
+    const cursor = await cursorAvailable();
+    if (!cursor.ok) {
+      console.warn("⚠ Cursor Agent CLI not found (optional for cursor_local agents)");
+    } else {
+      const { spawnSync } = await import("node:child_process");
+      const bin = cursor.bin;
+      const statusArgs = path.basename(bin) === "cursor" ? ["agent", "status"] : ["status"];
+      const status = spawnSync(bin, statusArgs, {
+        encoding: "utf8",
+        timeout: 8000,
+        env: process.env,
+      });
+      const output = `${status.stdout ?? ""}${status.stderr ?? ""}${status.error?.message ?? ""}`;
+      const authIssue = cursorAuthIssueFromOutput(output);
+      if (authIssue) {
+        console.error(`✗ Cursor auth — ${authIssue.message}`);
+        console.error("  See docs/TROUBLESHOOTING.md#cursor-macos-keychain-auth");
+        failed = true;
+      } else if (status.error || status.status !== 0) {
+        const detail = (status.error?.message ?? output.trim()) || `exit ${status.status}`;
+        console.error(`✗ Cursor auth — status failed (${detail})`);
+        console.error("  See docs/TROUBLESHOOTING.md#cursor-macos-keychain-auth");
+        failed = true;
+      } else {
+        console.log(`✓ Cursor Agent CLI auth (${bin})`);
+      }
+    }
   }
 
   {

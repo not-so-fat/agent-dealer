@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import type { AgentHealthIssue, AgentProfile, AgentWithHealth, Runtime } from "@agent-dealer/shared";
+import { cursorAuthIssueFromOutput } from "@agent-dealer/shared";
 import {
   claudeBinExists,
   cursorBinExists,
@@ -115,9 +116,9 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
     issues.push({ code: "cli_missing", message: "cursor-agent not found — run: curl https://cursor.com/install -fsS | bash" });
     return issues;
   }
-  const out = status.output.toLowerCase();
-  if (out.includes("not logged in") || out.includes("login required") || out.includes("not authenticated")) {
-    issues.push({ code: "runtime_auth", message: "Run cursor-agent login" });
+  const authIssue = cursorAuthIssueFromOutput(status.output);
+  if (authIssue) {
+    issues.push(authIssue);
   }
   return issues;
 }
