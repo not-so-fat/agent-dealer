@@ -69,6 +69,14 @@ test("recovery requeues an expired orphaned lease and fails its running session"
   assert.deepEqual(res.reclaimed, [devItem.id]);
   assert.equal(getWorkItem(devItem.id)!.status, "pending");
   assert.equal(listWorkerSessionsForIssue(issueId)[0].status, "failed");
+
+  // NOT-113: soft reclaim emits worker.failed with the presumed-dead reason on the timeline.
+  const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
+  const failed = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "worker.failed");
+  assert.equal(failed.length, 1);
+  const payload = JSON.parse(failed[0]!.payloadJson!) as { reason?: string };
+  assert.match(payload.reason ?? "", /presumed dead/);
+  assert.match(listWorkerSessionsForIssue(issueId)[0].errorJson ?? "", /presumed dead/);
 });
 
 test("recovery ignores a lease that has not expired", async () => {
@@ -114,6 +122,13 @@ test("an expired lease past the attempt cap is dead-lettered AND routed in one s
     listHumanActionsForIssue(issueId).find((a) => a.status === "open")!.actionType,
     "policy_escalation"
   );
+
+  // NOT-113: dead-letter path puts presumed-dead on worker.failed timeline payload.
+  const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
+  const failed = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "worker.failed");
+  assert.ok(failed.length >= 1);
+  const last = JSON.parse(failed[failed.length - 1]!.payloadJson!) as { reason?: string };
+  assert.match(last.reason ?? "", /presumed dead/);
 
   // A second recovery pass is a no-op — the item is already dead, nothing to reclaim.
   assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], deferredForCap: [], autoMergesFinalized: [] });

@@ -108,9 +108,9 @@ function EventBody({ e }: { e: WorkflowEvent }) {
     if (payload.branch) bits.push(payload.branch);
     if (payload.commitsAhead != null) bits.push(`${payload.commitsAhead} ahead`);
     if (payload.snapshot) bits.push(payload.snapshot);
-    if (e.type === "worker.deferred") {
+    if (e.type === "worker.deferred" || e.type === "worker.failed") {
       if (payload.reason) bits.push(payload.reason);
-      if (payload.until) {
+      if (e.type === "worker.deferred" && payload.until) {
         bits.push(`until ${new Date(payload.until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
       }
     }

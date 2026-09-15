@@ -496,6 +496,17 @@ export interface IssueDetail {
   latestWorkflowInstance: WorkflowInstance | null;
   /** Running worker session for the live strip (NOT-109); null when idle. */
   activeWorkerSession?: WorkerSession | null;
+  /** NOT-113: latest session failure reason for the detail strip. */
+  latestSessionFailure?: {
+    reason: string;
+    when: string;
+    role: string | null;
+    outcome: string | null;
+    sessionId: string | null;
+    logPath: string | null;
+    infraAttempts: number;
+    maxInfraAttempts: number;
+  } | null;
   /** NOT-103: whether this issue is in the admission queue. */
   queued?: boolean;
 }

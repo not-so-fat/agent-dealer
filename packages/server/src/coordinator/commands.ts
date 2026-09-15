@@ -55,6 +55,7 @@ import { completeSession, getWorkerSession, listWorkerSessionsForIssue } from ".
 import { killRunProcess } from "../runners/spawn-cli.js";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import { workerSessionPayload } from "./session-progress.js";
+import { reasonForWorkerFailedEvent } from "./failure-reason.js";
 import {
   routeDeveloperOutcome,
   routeReviewerOutcome,
@@ -592,18 +593,30 @@ function applyDeveloper(
       patch.prUrl = outcome.prUrl;
     } else if (type === "worker.completed" || type === "worker.failed") {
       // NOT-109: finish events use the developer role badge (same as worker.started).
+      // NOT-113: worker.failed carries a human-readable reason (same pattern as worker.deferred).
       const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
+      const payload: Record<string, unknown> = {
+        ...workerSessionPayload({
+          runtime: session?.runtime,
+          model: session?.model,
+          sessionId: item.workerSessionId ?? session?.id ?? "",
+          worktreePath: session?.worktreePath,
+        }),
+        outcome: outcome.kind,
+      };
+      if (type === "worker.failed") {
+        // Do not read session.errorJson here — worker-loop writes it only *after*
+        // applyCompletion. Reason comes from outcome / logPath / route (same sources
+        // the eventual errorJson is built from).
+        payload.reason = reasonForWorkerFailedEvent({
+          outcome,
+          routeReason: "reason" in route ? route.reason : null,
+          logPath: session?.logPath,
+        });
+      }
       ev.emit(type, {
         actorType: "developer",
-        payload: {
-          ...workerSessionPayload({
-            runtime: session?.runtime,
-            model: session?.model,
-            sessionId: item.workerSessionId ?? session?.id ?? "",
-            worktreePath: session?.worktreePath,
-          }),
-          outcome: outcome.kind,
-        },
+        payload,
       });
     } else {
       ev.emit(type);
@@ -646,17 +659,26 @@ function applyReviewer(
       ev.emit("review.submitted", { actorType: "reviewer", payload: outcome.result });
     } else if (type === "worker.completed" || type === "worker.failed") {
       const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
+      const payload: Record<string, unknown> = {
+        ...workerSessionPayload({
+          runtime: session?.runtime,
+          model: session?.model,
+          sessionId: item.workerSessionId ?? session?.id ?? "",
+          worktreePath: session?.worktreePath,
+        }),
+        outcome: outcome.kind,
+      };
+      if (type === "worker.failed") {
+        // See applyDeveloper: session.errorJson is not written until after applyCompletion.
+        payload.reason = reasonForWorkerFailedEvent({
+          outcome,
+          routeReason: "reason" in route ? route.reason : null,
+          logPath: session?.logPath,
+        });
+      }
       ev.emit(type, {
         actorType: "reviewer",
-        payload: {
-          ...workerSessionPayload({
-            runtime: session?.runtime,
-            model: session?.model,
-            sessionId: item.workerSessionId ?? session?.id ?? "",
-            worktreePath: session?.worktreePath,
-          }),
-          outcome: outcome.kind,
-        },
+        payload,
       });
     } else {
       ev.emit(type);

@@ -328,6 +328,42 @@ test("a crash that also leaves the worktree dirty escalates as dirty_worktree, n
   assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
 });
 
+test("NOT-113: keychain stderr on a dirty crash surfaces auth/keychain on worker.failed + detail API", async () => {
+  const issueId = await makeIssue();
+  const keychainLog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-keychain-")), "session.ndjson");
+  fs.writeFileSync(
+    keychainLog,
+    `{"type":"assistant"}\n--- stderr ---\nCursor couldn't save your login to the macOS keychain (errSecDuplicateItem, security exit code 45).\nThe keychain item is stuck.\n`
+  );
+  const crashingDirtyKeychainSpawn: SpawnFn = async (input) => {
+    fs.writeFileSync(path.join(input.cwd, "half-done.txt"), "oops\n");
+    return { exitCode: 1, transcript: "boom", logPath: keychainLog, timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: crashingDirtyKeychainSpawn, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation");
+  assert.ok(action);
+  assert.match(action!.reason, /keychain|errSecDuplicateItem/i);
+
+  const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
+  const failed = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "worker.failed");
+  assert.ok(failed.length >= 1);
+  const payload = JSON.parse(failed[failed.length - 1]!.payloadJson!) as { reason?: string; outcome?: string };
+  assert.equal(payload.outcome, "dirty_worktree");
+  assert.match(payload.reason ?? "", /keychain|errSecDuplicateItem/i);
+
+  const { latestSessionFailureForIssue } = await import("./latest-failure.js");
+  const latest = latestSessionFailureForIssue(issue);
+  assert.ok(latest);
+  assert.match(latest!.reason, /keychain|errSecDuplicateItem/i);
+});
+
 test("timed_out (session): the spawn wall-clock timeout is reported distinctly from a crash", async () => {
   const issueId = await makeIssue();
   registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: timedOutSpawn, github: fakeGithub() }));

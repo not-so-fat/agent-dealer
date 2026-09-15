@@ -193,7 +193,7 @@ export function projectReviewerRoute(
         projection: {
           issueStatus: "reviewing",
           currentOwner: "reviewer",
-          currentIntent: `Reviewer retrying (infra attempt) at ${route.headSha.slice(0, 8)}`,
+          currentIntent: `Reviewer retrying (infra attempt) at ${route.headSha.slice(0, 8)} — ${route.reason}`,
           events: ["worker.failed"],
         },
         effect: { kind: "enqueue", workItem: "reviewer", atHeadSha: route.headSha },

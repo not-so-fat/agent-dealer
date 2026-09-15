@@ -358,3 +358,85 @@ test("POST /api/issues/:id/abort closes a fresh issue and is idempotent on repea
   assert.equal(detailAfter.timeline.filter((e) => e.type === "issue.closed").length, 1, "a repeated abort must not append another event");
   await app.close();
 });
+
+test("GET /api/issues/:id surfaces latestSessionFailure from worker.failed reason (NOT-113)", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Failure strip",
+        repo: "/repo",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+      },
+    })
+  ).json() as { id: string };
+
+  const { startWorkflowInstance, appendWorkflowEvent } = await import("../repository/workflow-events.js");
+  const { createWorkerSession, startSession, completeSession } = await import("../repository/worker-sessions.js");
+  const instance = startWorkflowInstance(created.id, "dev_reviewer_v1");
+  const session = createWorkerSession({
+    issueId: created.id,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "cursor_local",
+  });
+  startSession(session.id);
+  completeSession(session.id, {
+    status: "failed",
+    errorJson: JSON.stringify({ reason: "recovered — worker process presumed dead" }),
+    logPath: "/tmp/dealer-session.log",
+  });
+  appendWorkflowEvent({
+    issueId: created.id,
+    workflowInstanceId: instance.id,
+    workerSessionId: session.id,
+    type: "worker.failed",
+    actorType: "developer",
+    stage: "developing",
+    round: 1,
+    payload: {
+      runtime: "cursor_local",
+      model: null,
+      sessionId: session.id,
+      outcome: "session_failed",
+      reason: "recovered — worker process presumed dead",
+    },
+  });
+
+  const res = await app.inject({ method: "GET", url: `/api/issues/${created.id}` });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as {
+    latestSessionFailure: {
+      reason: string;
+      logPath: string | null;
+      infraAttempts: number;
+      maxInfraAttempts: number;
+    } | null;
+  };
+  assert.ok(body.latestSessionFailure);
+  assert.match(body.latestSessionFailure!.reason, /presumed dead/);
+  assert.equal(body.latestSessionFailure!.logPath, "/tmp/dealer-session.log");
+  assert.equal(typeof body.latestSessionFailure!.infraAttempts, "number");
+
+  // A later worker.completed supersedes the failure strip (stale-failure-strip).
+  appendWorkflowEvent({
+    issueId: created.id,
+    workflowInstanceId: instance.id,
+    workerSessionId: session.id,
+    type: "worker.completed",
+    actorType: "developer",
+    stage: "reviewing",
+    round: 1,
+    payload: { outcome: "clean_handoff" },
+  });
+  const afterOk = await app.inject({ method: "GET", url: `/api/issues/${created.id}` });
+  assert.equal(afterOk.statusCode, 200);
+  assert.equal((afterOk.json() as { latestSessionFailure: unknown }).latestSessionFailure, null);
+
+  await app.close();
+});

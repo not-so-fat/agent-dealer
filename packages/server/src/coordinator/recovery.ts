@@ -27,6 +27,7 @@ import {
 import { routeAppliedOutcome } from "./commands.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
 import { workerSessionPayload } from "./session-progress.js";
+import { PRESUMED_DEAD_REASON } from "./failure-reason.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -50,9 +51,42 @@ function failOrphanSession(workerSessionId: string | null): void {
   if (row?.status === "running") {
     completeSession(workerSessionId, {
       status: "failed",
-      errorJson: JSON.stringify({ reason: "recovered — worker process presumed dead" }),
+      errorJson: JSON.stringify({ reason: PRESUMED_DEAD_REASON }),
     });
   }
+}
+
+/**
+ * Timeline-visible failure for a soft reclaim (under attempt cap). Does not change issue
+ * status — the item is requeued — but operators need the presumed-dead reason on the
+ * timeline the same way worker.deferred surfaces a cap reason (NOT-113).
+ */
+function emitPresumedDeadFailed(item: WorkItem): void {
+  failOrphanSession(item.workerSessionId);
+  const issue = getIssue(item.issueId);
+  const instance = getActiveWorkflowInstance(item.issueId);
+  if (!issue || !instance || instance.id !== item.workflowInstanceId) return;
+  const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
+  const role = item.kind === "developer" ? "developer" : "reviewer";
+  appendWorkflowEvent({
+    issueId: issue.id,
+    workflowInstanceId: instance.id,
+    workerSessionId: item.workerSessionId,
+    type: "worker.failed",
+    actorType: role,
+    stage: issue.status,
+    round: item.round,
+    payload: {
+      ...workerSessionPayload({
+        runtime: session?.runtime,
+        model: session?.model,
+        sessionId: item.workerSessionId ?? "",
+        worktreePath: session?.worktreePath,
+      }),
+      outcome: "session_failed",
+      reason: PRESUMED_DEAD_REASON,
+    },
+  });
 }
 
 /**
@@ -139,7 +173,7 @@ export async function recoverCoordinator(opts?: { now?: number }): Promise<Recov
             { backoffMs, onlyIfExpiredBefore: nowIso }
           );
           if (!ok) return "lost"; // completed or heartbeated concurrently
-          failOrphanSession(item.workerSessionId);
+          emitPresumedDeadFailed(item);
           return "reclaimed";
         }
 
@@ -154,7 +188,12 @@ export async function recoverCoordinator(opts?: { now?: number }): Promise<Recov
         const issue = getIssue(dead.issueId);
         const instance = getActiveWorkflowInstance(dead.issueId);
         if (issue && instance && instance.id === dead.workflowInstanceId) {
-          routeAppliedOutcome(issue, instance, dead, { kind: "session_failed" });
+          // errorJson already has PRESUMED_DEAD_REASON; attach the same on the outcome so
+          // worker.failed payload reason is set even if the session row was missing.
+          routeAppliedOutcome(issue, instance, dead, {
+            kind: "session_failed",
+            reason: PRESUMED_DEAD_REASON,
+          });
         }
         return "dead";
       })();

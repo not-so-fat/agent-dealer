@@ -45,3 +45,25 @@ agent-dealer doctor
 If delete reports the item was not found, still run `agent login` / `cursor-agent login` and re-check doctor.
 
 Related: NOT-103 (session death → dirty worktree), NOT-114 (this preflight + docs), NOT-113 (post-failure reason surfacing).
+
+## Coordinator lease / heartbeat (NOT-113)
+
+| Env | Default | Role |
+| --- | --- | --- |
+| `COORDINATOR_HEARTBEAT_MS` | `15000` | How often the effect worker refreshes the work-item lease and session heartbeat while `await`ing the agent spawn. |
+| `COORDINATOR_LEASE_MS` | `60000` | How long a lease stays valid without a refresh. Recovery reclaims expired leases as “worker process presumed dead”. |
+
+### Decision (keep defaults)
+
+Investigated against long `cursor_local` runs and the NOT-103 “presumed dead” / dirty-tree incidents:
+
+1. **Heartbeats do not stop while Cursor is alive.** They run on a `setInterval` in the coordinator Node process, in parallel with `await spawn(...)`. A healthy long Cursor session keeps refreshing the lease for the whole spawn.
+2. **60s is not “too short for Cursor thinking.”** Lease expiry means the **coordinator worker process** stopped heartbeating (crash, kill, blocked event loop for > lease). It is not a Cursor-child liveness probe. Cursor wall-clock is `sessionTimeoutMs`, separate from the lease.
+3. **Lease ≈ 4× heartbeat** is intentional: a few missed ticks can be transient; a full lease window without refresh means the Node worker is gone. Moving heartbeats “off the blocked path” is unnecessary today — spawn I/O is async; do not raise the lease without evidence of multi-minute event-loop stalls.
+4. **Observed “presumed dead” on NOT-103** matched coordinator/process recovery after the worker disappeared, not a live Cursor session whose heartbeats were starved by agent think time. Opaque UI was the gap (fixed by failure reasons), not the cadence.
+
+### Override guidance
+
+- Raise `COORDINATOR_LEASE_MS` (and keep heartbeat ≤ ~¼ of lease) only if you have logs showing lease reclaim while the same Node PID was still running the effect and Cursor was healthy.
+- Lower values only for faster crash recovery in labs; too-low leases amplify false “presumed dead” under GC pauses.
+- Failure reasons on the issue timeline / detail strip are the operator-facing fix for mid-run Cursor auth death; do not conflate that with lease tuning.
