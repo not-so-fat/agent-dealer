@@ -55,9 +55,9 @@ flowchart TB
 
 | Key | Default | Notes |
 |-----|---------|-------|
-| `linear.stateFilter` | `["Todo"]` | Saved filter; overridden by `LINEAR_STATE_FILTER` env when set |
+| `linear.stateFilter` | `["Backlog","Todo","In Progress","In Review"]` | Saved filter; overridden by `LINEAR_STATE_FILTER` env when set |
 | `linear.teamId` | null | Saved team; overridden by `LINEAR_TEAM_ID` env when set |
-| `linear.assigneeMe` | true | Filter to API key owner |
+| `linear.assigneeMe` | false | When true, filter to API key owner |
 | `linear.defaultAgentId` | null | Pre-select in Inbox UI |
 | `linear.syncEnabled` | true | Master toggle for write-back |
 | `linear.routingRules` | `[]` | Label → agentId rules for `autoAgent` |

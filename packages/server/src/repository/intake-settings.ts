@@ -8,6 +8,9 @@ import type {
 } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 
+/** Open workflow states — exclude terminal Done / Canceled. Shared with linear-inbox seed. */
+export const DEFAULT_LINEAR_STATE_FILTER = ["Backlog", "Todo", "In Progress", "In Review"] as const;
+
 function getJson<T>(key: string, fallback: T): T {
   const row = getDb()
     .prepare("SELECT value_json FROM intake_settings WHERE key = ?")
@@ -47,9 +50,9 @@ function linearEnvOverrides(): { stateFilter: boolean; teamId: boolean } {
 /** SQLite only — used when saving UI / PATCH. */
 export function getPersistedLinearIntakeConfig(): LinearIntakeConfig {
   return {
-    stateFilter: getJson<string[]>("linear.stateFilter", ["Todo"]),
+    stateFilter: getJson<string[]>("linear.stateFilter", [...DEFAULT_LINEAR_STATE_FILTER]),
     teamId: getJson<string | null>("linear.teamId", null),
-    assigneeMe: getJson<boolean>("linear.assigneeMe", true),
+    assigneeMe: getJson<boolean>("linear.assigneeMe", false),
     defaultAgentId: getJson<string | null>("linear.defaultAgentId", null),
     syncEnabled: getJson<boolean>("linear.syncEnabled", true),
     routingRules: getJson<LinearRoutingRule[]>("linear.routingRules", []),
@@ -89,7 +92,7 @@ export function patchLinearIntakeConfig(patch: LinearIntakeConfigPatch): LinearI
   const next: LinearIntakeConfig = {
     stateFilter: patch.stateFilter ?? current.stateFilter,
     teamId: patch.teamId !== undefined ? patch.teamId : current.teamId,
-    assigneeMe: patch.assigneeMe ?? current.assigneeMe,
+    assigneeMe: patch.assigneeMe !== undefined ? patch.assigneeMe : current.assigneeMe,
     defaultAgentId:
       patch.defaultAgentId !== undefined ? patch.defaultAgentId : current.defaultAgentId,
     syncEnabled: patch.syncEnabled ?? current.syncEnabled,

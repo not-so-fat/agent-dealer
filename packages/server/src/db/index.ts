@@ -341,9 +341,29 @@ export function migrate(): void {
   seedBuiltinAgents(db);
   seedIntakeSettings(db);
   migrateLegacyAgentDeckPort(db);
+  migrateLinearInboxUnlock(db);
 
   // Default agents are normal rows — clear legacy built-in flag.
   db.exec("UPDATE agents SET is_builtin = 0 WHERE is_builtin = 1");
+}
+
+/** One-shot: assigneeMe off + open-state filter for existing installs (inbox unlock). */
+function migrateLinearInboxUnlock(db: Database.Database): void {
+  const flag = db
+    .prepare("SELECT value_json FROM intake_settings WHERE key = ?")
+    .get("linear.inboxUnlockV1") as { value_json: string } | undefined;
+  if (flag) return;
+
+  const openStates = ["Backlog", "Todo", "In Progress", "In Review"];
+  db.prepare(
+    "INSERT INTO intake_settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json"
+  ).run("linear.assigneeMe", JSON.stringify(false));
+  db.prepare(
+    "INSERT INTO intake_settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json"
+  ).run("linear.stateFilter", JSON.stringify(openStates));
+  db.prepare(
+    "INSERT INTO intake_settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json"
+  ).run("linear.inboxUnlockV1", JSON.stringify(true));
 }
 
 function migrateLegacyAgentDeckPort(db: Database.Database): void {
@@ -362,16 +382,17 @@ function migrateLegacyAgentDeckPort(db: Database.Database): void {
 }
 
 function seedIntakeSettings(db: Database.Database): void {
-  const stateFilter = (process.env.LINEAR_STATE_FILTER ?? "Todo")
+  const openDefault = ["Backlog", "Todo", "In Progress", "In Review"];
+  const stateFilter = (process.env.LINEAR_STATE_FILTER ?? openDefault.join(","))
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
   const teamId = process.env.LINEAR_TEAM_ID ?? null;
 
   const defaults: Record<string, unknown> = {
-    "linear.stateFilter": stateFilter.length > 0 ? stateFilter : ["Todo"],
+    "linear.stateFilter": stateFilter.length > 0 ? stateFilter : openDefault,
     "linear.teamId": teamId,
-    "linear.assigneeMe": true,
+    "linear.assigneeMe": false,
     "linear.defaultAgentId": null,
     "linear.syncEnabled": true,
     "linear.routingRules": [],

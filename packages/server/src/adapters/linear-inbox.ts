@@ -1,8 +1,12 @@
 import type { LinearCandidate, LinearIntakeConfig } from "@agent-dealer/shared";
 import { findActiveByExternalId, listRunsReadyForPlanReview } from "../repository/runs.js";
-import { getLinearIntakeConfig } from "../repository/intake-settings.js";
+import { DEFAULT_LINEAR_STATE_FILTER, getLinearIntakeConfig } from "../repository/intake-settings.js";
+
+export { DEFAULT_LINEAR_STATE_FILTER };
 
 const LINEAR_API = "https://api.linear.app/graphql";
+
+const PAGE_SIZE = 50;
 
 interface LinearIssueNode {
   id: string;
@@ -105,6 +109,26 @@ export function buildIssueFilter(
   return filter;
 }
 
+/**
+ * Normalize free-form kick input to a Linear issue id or identifier.
+ * Accepts `NOT-103`, a UUID, or a Linear issue URL.
+ */
+export function parseLinearIssueRef(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const fromUrl = trimmed.match(/linear\.app\/[^/]+\/issue\/([A-Za-z0-9_-]+)/i);
+  if (fromUrl?.[1]) return fromUrl[1];
+
+  if (/^[A-Z][A-Z0-9]*-\d+$/i.test(trimmed)) return trimmed.toUpperCase();
+
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+
+  return null;
+}
+
 function isPromoted(issueId: string): boolean {
   return findActiveByExternalId("linear", issueId) !== null;
 }
@@ -121,19 +145,31 @@ export async function listLinearCandidates(): Promise<LinearCandidate[]> {
   }
 
   const filter = buildIssueFilter(settings, viewerId);
+  const nodes: LinearIssueNode[] = [];
+  let after: string | undefined;
 
-  const data = (await linearQuery(
-    `query PollIssues($filter: IssueFilter) {
-      issues(filter: $filter, first: 30) {
-        nodes { ${ISSUE_FIELDS} }
-      }
-    }`,
-    { filter }
-  )) as { issues: { nodes: LinearIssueNode[] } };
+  for (;;) {
+    const data = (await linearQuery(
+      `query PollIssues($filter: IssueFilter, $after: String) {
+        issues(filter: $filter, first: ${PAGE_SIZE}, after: $after) {
+          nodes { ${ISSUE_FIELDS} }
+          pageInfo { hasNextPage endCursor }
+        }
+      }`,
+      { filter, after: after ?? null }
+    )) as {
+      issues: {
+        nodes: LinearIssueNode[];
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      };
+    };
 
-  return data.issues.nodes
-    .filter((n) => !isPromoted(n.id))
-    .map(nodeToCandidate);
+    nodes.push(...data.issues.nodes);
+    if (!data.issues.pageInfo.hasNextPage || !data.issues.pageInfo.endCursor) break;
+    after = data.issues.pageInfo.endCursor;
+  }
+
+  return nodes.filter((n) => !isPromoted(n.id)).map(nodeToCandidate);
 }
 
 export async function getLinearIssue(issueId: string): Promise<LinearCandidate | null> {
@@ -146,6 +182,13 @@ export async function getLinearIssue(issueId: string): Promise<LinearCandidate |
 
   if (!data.issue) return null;
   return nodeToCandidate(data.issue);
+}
+
+/** Resolve free-form kick text to a Linear candidate (or null if not found / unparseable). */
+export async function lookupLinearIssue(raw: string): Promise<LinearCandidate | null> {
+  const id = parseLinearIssueRef(raw);
+  if (!id) return null;
+  return getLinearIssue(id);
 }
 
 /** Runs with a plan ready for human review. */

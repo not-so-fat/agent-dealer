@@ -17,9 +17,9 @@ export default function LinearConfigPanel({ agents, onSaved }: Props) {
   const [connected, setConnected] = useState<boolean | null>(null);
   const [viewerName, setViewerName] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
-  const [stateFilterText, setStateFilterText] = useState("Todo");
+  const [stateFilterText, setStateFilterText] = useState("Backlog, Todo, In Progress, In Review");
   const [teamId, setTeamId] = useState("");
-  const [assigneeMe, setAssigneeMe] = useState(true);
+  const [assigneeMe, setAssigneeMe] = useState(false);
   const [defaultAgentId, setDefaultAgentId] = useState("");
   const [syncEnabled, setSyncEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -74,7 +74,7 @@ export default function LinearConfigPanel({ agents, onSaved }: Props) {
         .map((s) => s.trim())
         .filter(Boolean);
       const updated = await patchLinearConfig({
-        stateFilter: stateFilter.length > 0 ? stateFilter : ["Todo"],
+        stateFilter: stateFilter.length > 0 ? stateFilter : ["Backlog", "Todo", "In Progress", "In Review"],
         teamId: teamId.trim() || null,
         assigneeMe,
         defaultAgentId: defaultAgentId || null,

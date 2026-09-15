@@ -6,6 +6,7 @@ import {
   fetchIssues,
   fetchLinearInbox,
   fetchRecentRepos,
+  lookupLinearIssue,
   startIssue,
   type IssueListRow,
 } from "../api";
@@ -54,6 +55,8 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
   const [sourceMode, setSourceMode] = useState<"manual" | "linear">("manual");
   const [candidates, setCandidates] = useState<LinearCandidate[]>([]);
   const [selectedLinearId, setSelectedLinearId] = useState("");
+  const [linearRef, setLinearRef] = useState("");
+  const [linearLookupBusy, setLinearLookupBusy] = useState(false);
   const [recentRepos, setRecentRepos] = useState<string[]>([]);
   const [title, setTitle] = useState("");
   const [repo, setRepo] = useState("");
@@ -108,8 +111,33 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
     setDescription("");
     setAcceptanceCriteria("");
     setSelectedLinearId("");
+    setLinearRef("");
     setAutoMerge(true);
     setBaseBranch("main");
+  };
+
+  const applyLinearCandidate = (c: LinearCandidate) => {
+    setCandidates((prev) => (prev.some((x) => x.id === c.id) ? prev : [c, ...prev]));
+    setSelectedLinearId(c.id);
+    setLinearRef(c.identifier);
+  };
+
+  const resolveLinearRef = async () => {
+    const q = linearRef.trim();
+    if (!q) {
+      setError("Paste a Linear id (e.g. NOT-103) or issue URL");
+      return;
+    }
+    setLinearLookupBusy(true);
+    setError(null);
+    try {
+      const c = await lookupLinearIssue(q);
+      applyLinearCandidate(c);
+    } catch (e) {
+      setError(`Linear lookup: ${String(e)}`);
+    } finally {
+      setLinearLookupBusy(false);
+    }
   };
 
   const submitCreate = async () => {
@@ -214,18 +242,47 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
           </div>
 
           {sourceMode === "linear" && (
-            <select
-              className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-              value={selectedLinearId}
-              onChange={(e) => setSelectedLinearId(e.target.value)}
-            >
-              <option value="">Pick a Linear issue…</option>
-              {candidates.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.identifier}: {c.title}
-                </option>
-              ))}
-            </select>
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <input
+                  className="flex-1 bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                  placeholder="NOT-103 or Linear URL"
+                  value={linearRef}
+                  onChange={(e) => setLinearRef(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void resolveLinearRef();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="px-3 py-2 rounded border border-teal/40 text-teal text-sm disabled:opacity-50"
+                  disabled={linearLookupBusy || !linearRef.trim()}
+                  onClick={() => void resolveLinearRef()}
+                >
+                  {linearLookupBusy ? "…" : "Lookup"}
+                </button>
+              </div>
+              <select
+                className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                value={selectedLinearId}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  setSelectedLinearId(id);
+                  const c = candidates.find((x) => x.id === id);
+                  if (c) setLinearRef(c.identifier);
+                }}
+              >
+                <option value="">Or pick from open inbox…</option>
+                {candidates.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.identifier}: {c.title}
+                  </option>
+                ))}
+              </select>
+            </div>
           )}
 
           <input
