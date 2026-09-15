@@ -2,13 +2,16 @@ import { useEffect, useState } from "react";
 import type { AgentWithHealth, HumanAction, HumanActionType, LinearCandidate } from "@agent-dealer/shared";
 import {
   createIssue,
+  dequeueIssue,
   fetchHumanActions,
   fetchIssues,
   fetchLinearInbox,
+  fetchQueue,
   fetchRecentRepos,
   lookupLinearIssue,
   startIssue,
   type IssueListRow,
+  type QueueEntryRow,
 } from "../api";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
 import AlertIcon from "../components/ui/AlertIcon";
@@ -67,12 +70,16 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
   const [reviewerAgentId, setReviewerAgentId] = useState("");
   const [autoMerge, setAutoMerge] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [queue, setQueue] = useState<QueueEntryRow[]>([]);
 
   const selectedLinear = candidates.find((c) => c.id === selectedLinearId) ?? null;
   const linearLocked = sourceMode === "linear" && selectedLinear != null;
 
   const refresh = () => {
     fetchIssues().then(setIssues).catch((e) => setError(String(e)));
+    fetchQueue()
+      .then(setQueue)
+      .catch(() => undefined);
     // Issue-scoped only — a Run-scoped action (outbound-draft delivery parking, NOT-95)
     // has no issue to navigate to and surfaces on the Human Actions page instead.
     fetchHumanActions()
@@ -187,6 +194,49 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
       </div>
 
       {error && <p className="text-sm text-red-300 mb-3">{error}</p>}
+
+      {queue.length > 0 && (
+        <div className="mb-4 rounded border border-cyber-teal/25 bg-cyber-teal/5">
+          <div className="px-4 py-2 border-b border-cyber-teal/20 flex items-center justify-between">
+            <span className="text-sm font-medium text-cyber-teal">Admission queue</span>
+            <span className="text-xs text-white/40">{queue.length} waiting · sequential</span>
+          </div>
+          <div className="divide-y divide-white/5">
+            {queue.map((entry, idx) => (
+              <div key={entry.id} className="px-4 py-2 flex items-start gap-3">
+                <span className="text-xs text-white/35 w-5 shrink-0 pt-0.5">{idx + 1}</span>
+                <button
+                  type="button"
+                  className="flex-1 min-w-0 text-left hover:text-cyber-teal"
+                  onClick={() => onSelectIssue(entry.issueId)}
+                >
+                  <span className="text-sm text-white/85 truncate block">
+                    {entry.title ?? entry.issueId.slice(0, 8)}
+                  </span>
+                  {entry.waitReason ? (
+                    <span className="text-xs text-amber-200/80 block mt-0.5">{entry.waitReason}</span>
+                  ) : (
+                    <span className="text-xs text-white/35 block mt-0.5">
+                      {entry.issueStatus ?? "queued"} · waiting for a free slot
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="text-xs text-white/40 hover:text-white shrink-0"
+                  onClick={() => {
+                    dequeueIssue(entry.issueId)
+                      .then(refresh)
+                      .catch((e) => setError(String(e)));
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {actions.length > 0 && (
         <div className="mb-4 rounded border border-red-400/30 bg-red-500/10">

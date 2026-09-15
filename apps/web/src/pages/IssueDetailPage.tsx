@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   abortIssue,
+  dequeueIssue,
+  enqueueIssue,
   fetchIssueArtifactTrace,
   fetchIssueDetail,
   fetchIssueEvidence,
@@ -96,7 +98,7 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
   if (error) return <div className="p-6 text-red-300 text-sm">{error}</div>;
   if (!detail) return <div className="p-6 text-white/50 text-sm">Loading…</div>;
 
-  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession } = detail;
+  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, queued } = detail;
   const durationMs = latestWorkflowInstance
     ? new Date(latestWorkflowInstance.completedAt ?? Date.now()).getTime() - new Date(latestWorkflowInstance.startedAt).getTime()
     : 0;
@@ -145,6 +147,32 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
     setError(null);
     try {
       await startIssue(issueId);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doEnqueue = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await enqueueIssue(issueId);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doDequeue = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await dequeueIssue(issueId);
       refresh();
     } catch (e) {
       setError(String(e));
@@ -355,9 +383,30 @@ export default function IssueDetailPage({ issueId, onBack }: Props) {
             (startWorkflow's preStart check) already accepts needs_human the same as
             ready; this just stops the resolution from being a dead end in the UI. */}
         {(issue.status === "ready" || (issue.status === "needs_human" && openActions.length === 0)) && (
-          <button type="button" className="btn-gold px-4 py-2 mb-4 disabled:opacity-50" disabled={!readiness.ok || busy} onClick={doStart}>
-            Start
-          </button>
+          <div className="flex flex-wrap gap-2 mb-4">
+            <button type="button" className="btn-gold px-4 py-2 disabled:opacity-50" disabled={!readiness.ok || busy} onClick={doStart}>
+              Start
+            </button>
+            {!queued ? (
+              <button
+                type="button"
+                className="px-4 py-2 text-sm border border-white/15 rounded text-white/80 hover:border-cyber-teal/50 hover:text-cyber-teal disabled:opacity-50"
+                disabled={busy || hasActiveWorkflow}
+                onClick={doEnqueue}
+              >
+                Add to queue
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="px-4 py-2 text-sm border border-white/15 rounded text-white/60 hover:text-white disabled:opacity-50"
+                disabled={busy}
+                onClick={doDequeue}
+              >
+                Remove from queue
+              </button>
+            )}
+          </div>
         )}
 
         <div className="border-t border-white/10 pt-3">

@@ -70,6 +70,7 @@ import {
   usageCapDeferralStartedAt,
   type UsageCappedOutcome,
 } from "./usage-cap-defer.js";
+import { markQueueEntryAdmitted } from "../repository/queue-entries.js";
 
 export const WORKFLOW_VERSION = "dev_reviewer_v1";
 
@@ -153,7 +154,7 @@ const REQUIRED_FIELDS: Array<[keyof Issue, string]> = [
   ["reviewerAgentId", "reviewer profile"],
 ];
 
-class StartPreconditionError extends Error {
+export class StartPreconditionError extends Error {
   constructor(
     readonly code: number,
     message: string
@@ -190,10 +191,13 @@ export function checkIssueReadiness(issue: Issue): IssueReadiness {
 /**
  * The instance + `workflow.started` event + issue transition + round-1 developer work item,
  * all as unconditional writes. Throws on any precondition failure so a caller that runs this
- * inside its own transaction (see resolveHumanActionAndAdvance) rolls the whole step back.
- * Must be called within a transaction.
+ * inside its own transaction (see resolveHumanActionAndAdvance / admitNext) rolls the whole
+ * step back. Must be called within a transaction.
+ *
+ * Exported for NOT-103 admission — callers must already have verified readiness so they
+ * never open a `product_scope_decision` (that path lives only on startWorkflow).
  */
-function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workItem: WorkItem } {
+export function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workItem: WorkItem } {
   const issue = getIssue(issueId);
   if (!issue) throw new StartPreconditionError(404, "Issue not found");
   if (issue.status !== "ready" && issue.status !== "needs_human") {
@@ -239,6 +243,9 @@ function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workI
     payload: { profileSnapshot: queuedProfileSnapshot(issue, "developer") },
     idempotencyKey: `${instance.id}:developer:1`,
   });
+  // NOT-103: every successful start is a force-admit — keep queue state in sync whether
+  // the caller was startWorkflow, admitNext, or product_scope_decision resolve.
+  markQueueEntryAdmitted(issueId);
   return { instance, workItem };
 }
 

@@ -367,3 +367,19 @@ CREATE TABLE IF NOT EXISTS runtime_availability (
   evidence_json TEXT,
   observed_at TEXT NOT NULL
 );
+
+-- NOT-103: operator-owned sequential issue admission queue (order / wait_reason).
+CREATE TABLE IF NOT EXISTS queue_entries (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  enqueued_at TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued', 'admitted', 'removed')),
+  wait_reason TEXT,
+  wait_reason_at TEXT
+);
+-- One live queue row per issue (partial unique — ON CONFLICT must repeat the WHERE).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_entries_queued_issue
+  ON queue_entries(issue_id) WHERE state = 'queued';
+CREATE INDEX IF NOT EXISTS idx_queue_entries_queued_position
+  ON queue_entries(position) WHERE state = 'queued';

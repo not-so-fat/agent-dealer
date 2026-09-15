@@ -496,6 +496,8 @@ export interface IssueDetail {
   latestWorkflowInstance: WorkflowInstance | null;
   /** Running worker session for the live strip (NOT-109); null when idle. */
   activeWorkerSession?: WorkerSession | null;
+  /** NOT-103: whether this issue is in the admission queue. */
+  queued?: boolean;
 }
 
 export interface IssueEvidence {
@@ -589,6 +591,46 @@ export async function abortIssue(id: string, resolvedBy = "web"): Promise<AbortI
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ resolvedBy }),
   });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export async function enqueueIssue(issueId: string): Promise<{
+  id: string;
+  issueId: string;
+  position: number;
+  state: string;
+  waitReason: string | null;
+}> {
+  const res = await fetch(`${API}/api/queue`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ issueId }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export async function dequeueIssue(issueId: string): Promise<{ id: string; state: string }> {
+  const res = await fetch(`${API}/api/queue/${issueId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export interface QueueEntryRow {
+  id: string;
+  issueId: string;
+  position: number;
+  enqueuedAt: string;
+  state: string;
+  waitReason: string | null;
+  waitReasonAt: string | null;
+  title?: string | null;
+  issueStatus?: string | null;
+}
+
+export async function fetchQueue(): Promise<QueueEntryRow[]> {
+  const res = await fetch(`${API}/api/queue`);
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
 }
