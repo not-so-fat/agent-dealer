@@ -322,6 +322,28 @@ test("product_scope_decision resolve force-admits a queued issue (start-path-que
   assert.equal(listActions(issue.id).filter((a) => a.status === "open").length, 0);
 });
 
+test("admitNext closes a stale product_scope_decision when AC was added after the gate opened", async () => {
+  const { createHumanAction, listHumanActionsForIssue: listActions } = await import(
+    "../repository/human-actions.js"
+  );
+  const { listWorkItemsForIssue } = await import("../repository/work-items.js");
+
+  const issue = readyIssue("stale-scope", { acceptanceCriteria: null });
+  enqueueIssue(issue.id);
+  const opened = startWorkflow(issue.id);
+  assert.equal(opened.ok, "needs_scope_decision");
+  const actionId = opened.ok === "needs_scope_decision" ? opened.action.id : assert.fail("expected gate");
+
+  updateIssue(issue.id, { acceptanceCriteria: "AC added via PATCH" });
+  const admitted = await admitNext();
+  assert.equal(admitted?.issueId, issue.id);
+  assert.equal(getIssue(issue.id)!.status, "developing");
+  assert.equal(listActions(issue.id).find((a) => a.id === actionId)?.status, "resolved");
+  assert.equal(listActions(issue.id).filter((a) => a.status === "open").length, 0);
+  // One round-1 developer item only — resolving the stale gate later must not double-enqueue.
+  assert.equal(listWorkItemsForIssue(issue.id).filter((w) => w.kind === "developer").length, 1);
+});
+
 test("housekeeping admits stale queued+active rows even when capacity is full", async () => {
   const running = readyIssue("hk-run");
   const waiting = readyIssue("hk-wait");
