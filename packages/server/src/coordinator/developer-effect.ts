@@ -22,7 +22,7 @@ import type { DeveloperOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
 import { buildDeveloperPrompt } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
-import { realDeveloperSpawn, type DeveloperSpawn } from "./spawn.js";
+import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn } from "./spawn.js";
 import {
   resolveDeveloperWorktree,
   safeRemoveWorktree,
@@ -36,12 +36,19 @@ import {
 } from "../adapters/git-worktree.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
-import { getWorkerSession } from "../repository/worker-sessions.js";
+import { getWorkerSession, patchRunningSession } from "../repository/worker-sessions.js";
 import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact } from "../repository/artifacts.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
+import {
+  emitSessionMilestone,
+  setLiveIntent,
+  shortWorktreePath,
+  startActivitySampler,
+  taskBriefIsComplete,
+} from "./session-progress.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -151,7 +158,7 @@ export async function runDeveloperEffect(
   ctx: EffectContext,
   deps: DeveloperEffectDeps = defaultDeps
 ): Promise<DeveloperOutcome> {
-  const { issue, workItem } = ctx;
+  const { issue, workItem, instance } = ctx;
   const sessionId = workItem.workerSessionId;
   if (!sessionId) return { kind: "session_failed" };
 
@@ -159,6 +166,25 @@ export async function runDeveloperEffect(
   const snapshot = parseProfileSnapshot(session?.profileSnapshotJson);
   const taskSnapshot = getTaskSnapshot(issue);
   const runtime = snapshot?.runtime ?? "claude_code";
+  const round = workItem.round;
+  const stage = issue.status;
+
+  const milestone = (
+    type: Parameters<typeof emitSessionMilestone>[0]["type"],
+    intent: string,
+    payload?: unknown
+  ) =>
+    emitSessionMilestone({
+      issueId: issue.id,
+      workflowInstanceId: instance.id,
+      workerSessionId: sessionId,
+      role: "developer",
+      stage,
+      round,
+      type,
+      intent,
+      payload,
+    });
 
   // issue.branch is only ever written on a verified clean_handoff (design: it's ground
   // truth, not agent self-report), so a first-round attempt after an earlier retryable
@@ -191,6 +217,11 @@ export async function runDeveloperEffect(
     return { kind: "adapter_failure", reason: `worktree setup failed: ${String(err)}` };
   }
 
+  patchRunningSession(sessionId, { worktreePath });
+  milestone("worktree.ready", `Developer · worktree ready (round ${round})`, {
+    worktreePath: shortWorktreePath(worktreePath),
+  });
+
   let workerAuthority: { mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   try {
     if (snapshot?.deckId) {
@@ -208,6 +239,23 @@ export async function runDeveloperEffect(
         mcpConfigPath: prepared.mcpConfigPath,
         mcpEnv: prepared.mcpEnv,
       };
+      milestone("deck.connected", `Developer · deck connected (round ${round})`, {
+        deckId: snapshot.deckId,
+      });
+    }
+
+    if (taskBriefIsComplete(taskSnapshot)) {
+      milestone("brief.resolved", `Developer · brief ready (Task/AC complete)`, {
+        resolution: "task_complete",
+      });
+    } else if (snapshot?.deckId) {
+      milestone("brief.resolved", `Developer · brief via Agent Deck (Linear fetch)`, {
+        resolution: "deferred_to_agent",
+      });
+    } else {
+      milestone("brief.resolved", `Developer · brief from Task fields`, {
+        resolution: "task_fields_only",
+      });
     }
 
     let payload: { retryReason?: string | null } = {};
@@ -244,18 +292,29 @@ export async function runDeveloperEffect(
       return { kind: "session_failed" };
     }
 
+    const logPath = developerSessionLogPath(sessionId);
+    patchRunningSession(sessionId, { logPath, worktreePath });
+    setLiveIntent(issue.id, `Developer · session running (round ${round})`);
+    const sampler = startActivitySampler({ issueId: issue.id, role: "developer", round, logPath });
+
     const spawnStartedAt = Date.now();
-    const spawned = await deps.spawn({
-      sessionId,
-      runtime,
-      policy: snapshot?.permissionPolicy ?? roleCeiling("developer"),
-      model: snapshot?.model ?? null,
-      prompt,
-      cwd: worktreePath,
-      timeoutMs: developerEffectConfig.sessionTimeoutMs,
-      mcpConfigPath: workerAuthority?.mcpConfigPath,
-      mcpEnv: workerAuthority?.mcpEnv,
-    });
+    let spawned;
+    try {
+      spawned = await deps.spawn({
+        sessionId,
+        runtime,
+        policy: snapshot?.permissionPolicy ?? roleCeiling("developer"),
+        model: snapshot?.model ?? null,
+        prompt,
+        cwd: worktreePath,
+        timeoutMs: developerEffectConfig.sessionTimeoutMs,
+        mcpConfigPath: workerAuthority?.mcpConfigPath,
+        mcpEnv: workerAuthority?.mcpEnv,
+        logPath,
+      });
+    } finally {
+      sampler.stop();
+    }
 
     // Recorded unconditionally, before any early return below: cost is incurred the
     // moment the process runs, whether or not the session subsequently timed out,
@@ -325,6 +384,7 @@ export async function runDeveloperEffect(
       return { kind: "no_pr" };
     }
 
+    setLiveIntent(issue.id, `Developer · pushing branch (round ${round})`);
     const pushed = await pushBranch({ worktreePath, branch: branchName });
     if (!pushed.ok) {
       // Local commits preserved either way — never discarded, never force-retried.
@@ -332,6 +392,10 @@ export async function runDeveloperEffect(
         ? { kind: "unpushed_commit", reason: pushed.reason }
         : { kind: "adapter_failure", reason: pushed.reason };
     }
+    milestone("branch.pushed", `Developer · branch pushed (${ahead} commit${ahead === 1 ? "" : "s"})`, {
+      branch: branchName,
+      commitsAhead: ahead,
+    });
     // From here on the branch is safely on the remote — a worktree removal on any
     // subsequent failure path loses nothing (bestEffortRemove is safe to call).
 
@@ -340,6 +404,7 @@ export async function runDeveloperEffect(
     // pushBranch's push does not reliably leave configured (NOT-82).
     let prView = await deps.github.viewPr({ cwd: worktreePath, branch: branchName });
     if (!prView) {
+      setLiveIntent(issue.id, `Developer · opening draft PR (round ${round})`);
       const bodyDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-pr-body-"));
       const bodyFilePath = path.join(bodyDir, "body.md");
       fs.writeFileSync(bodyFilePath, extractConclusion(spawned.transcript) || taskSnapshot.description);
@@ -383,6 +448,10 @@ export async function runDeveloperEffect(
       return { kind: "adapter_failure", reason: identity.reason };
     }
 
+    milestone("checks.started", `Developer · waiting on checks (round ${round})`, {
+      prNumber: prView.number,
+      headSha: prView.headRefOid,
+    });
     const checks = await pollPrChecks(deps.github, {
       cwd: worktreePath,
       timeoutMs: developerEffectConfig.checksPollTimeoutMs,
@@ -392,6 +461,11 @@ export async function runDeveloperEffect(
       // reviewer blocker as NOT-82's original fix: never let the checks-poll stage fall
       // back to a bare `gh pr view` either).
       number: prView.number,
+    });
+    milestone("checks.completed", `Developer · checks ${checks}`, {
+      snapshot: checks,
+      prNumber: prView.number,
+      headSha: prView.headRefOid,
     });
 
     // The poll can run for up to checksPollTimeoutMs (default 10 minutes) — re-fetch and

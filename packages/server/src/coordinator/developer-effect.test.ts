@@ -199,6 +199,25 @@ test("clean handoff: real worktree, real push, fake GitHub — issue moves to re
   assert.equal(usage[0].role, "developer");
   assert.equal(usage[0].workerSessionId, devSession.id);
   assert.ok(usage[0].durationMs !== null && usage[0].durationMs! >= 0);
+
+  const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
+  const events = listWorkflowEventsForIssue(issueId);
+  const started = events.find((e) => e.type === "worker.started");
+  assert.ok(started);
+  assert.equal(started!.actorType, "developer");
+  const payload = started!.payloadJson ? JSON.parse(started!.payloadJson) : null;
+  assert.ok(payload?.sessionId);
+  assert.ok(payload?.runtime);
+  const milestones = events.map((e) => e.type).filter((t) =>
+    ["worktree.ready", "brief.resolved", "branch.pushed", "checks.started", "checks.completed"].includes(t)
+  );
+  assert.ok(milestones.includes("worktree.ready"));
+  assert.ok(milestones.includes("brief.resolved"));
+  assert.ok(milestones.includes("checks.started"));
+  assert.ok(milestones.length >= 3, `expected ≥3 mid-session milestones, got ${milestones.join(",")}`);
+  const finished = events.find((e) => e.type === "worker.completed");
+  assert.ok(finished);
+  assert.equal(finished!.actorType, "developer");
 });
 
 test("no_pr: the agent makes no commits — retried, no reviewer work item", async () => {

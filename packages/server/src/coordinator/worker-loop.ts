@@ -40,6 +40,7 @@ import { parseProfileSnapshot } from "@agent-dealer/shared";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
+import { workerSessionPayload } from "./session-progress.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -182,14 +183,22 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
         throw new Error("lease lost before session setup");
       }
       startSession(s.id);
+      // NOT-109: attribute start to the role (not system) so Issue Detail shows
+      // "Developer started" / "Reviewer started" with a role badge, and carry runtime /
+      // model / session id for ops debugging.
       appendWorkflowEvent({
         issueId: claimed.issueId,
         workflowInstanceId: instance.id,
         workerSessionId: s.id,
         type: "worker.started",
-        actorType: "system",
+        actorType: role,
         stage: issue.status,
         round: claimed.round,
+        payload: workerSessionPayload({
+          runtime: snapshot?.runtime ?? null,
+          model: snapshot?.model ?? null,
+          sessionId: s.id,
+        }),
       });
       return s;
     })();

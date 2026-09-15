@@ -50,9 +50,10 @@ import {
   type WorkItem,
   type WorkItemKind,
 } from "../repository/work-items.js";
-import { completeSession, listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
+import { completeSession, getWorkerSession, listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
 import { killRunProcess } from "../runners/spawn-cli.js";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
+import { workerSessionPayload } from "./session-progress.js";
 import {
   routeDeveloperOutcome,
   routeReviewerOutcome,
@@ -442,6 +443,21 @@ function applyDeveloper(
       patch.baseSha = outcome.baseSha;
       patch.prNumber = outcome.prNumber;
       patch.prUrl = outcome.prUrl;
+    } else if (type === "worker.completed" || type === "worker.failed") {
+      // NOT-109: finish events use the developer role badge (same as worker.started).
+      const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
+      ev.emit(type, {
+        actorType: "developer",
+        payload: {
+          ...workerSessionPayload({
+            runtime: session?.runtime,
+            model: session?.model,
+            sessionId: item.workerSessionId ?? session?.id ?? "",
+            worktreePath: session?.worktreePath,
+          }),
+          outcome: outcome.kind,
+        },
+      });
     } else {
       ev.emit(type);
     }
@@ -482,7 +498,19 @@ function applyReviewer(
     if (type === "review.submitted" && outcome.kind === "verdict") {
       ev.emit("review.submitted", { actorType: "reviewer", payload: outcome.result });
     } else if (type === "worker.completed" || type === "worker.failed") {
-      ev.emit(type, { actorType: "reviewer" });
+      const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
+      ev.emit(type, {
+        actorType: "reviewer",
+        payload: {
+          ...workerSessionPayload({
+            runtime: session?.runtime,
+            model: session?.model,
+            sessionId: item.workerSessionId ?? session?.id ?? "",
+            worktreePath: session?.worktreePath,
+          }),
+          outcome: outcome.kind,
+        },
+      });
     } else {
       ev.emit(type);
     }

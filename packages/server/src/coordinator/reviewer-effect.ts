@@ -29,7 +29,7 @@ import type { ReviewerOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
 import { buildReviewerPrompt, formatDiffForPrompt, TOTAL_DIFF_LIMIT } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
-import { realReviewerSpawn, type ReviewerSpawn } from "./spawn.js";
+import { realReviewerSpawn, reviewerSessionLogPath, type ReviewerSpawn } from "./spawn.js";
 import { parseReviewerResult, ReviewerResult as ReviewerResultSchema, type ReviewerResult, type ReviewerVerdict } from "./reviewer-result.js";
 import {
   createRoleWorktree,
@@ -40,12 +40,19 @@ import {
 } from "../adapters/git-worktree.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adapters/github.js";
-import { getWorkerSession } from "../repository/worker-sessions.js";
+import { getWorkerSession, patchRunningSession } from "../repository/worker-sessions.js";
 import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
+import {
+  emitSessionMilestone,
+  setLiveIntent,
+  shortWorktreePath,
+  startActivitySampler,
+  taskBriefIsComplete,
+} from "./session-progress.js";
 import {
   claimReviewPublication,
   getReviewPublication,
@@ -193,7 +200,7 @@ export async function runReviewerEffect(
   ctx: EffectContext,
   deps: ReviewerEffectDeps = defaultDeps
 ): Promise<ReviewerOutcome> {
-  const { issue, workItem } = ctx;
+  const { issue, workItem, instance } = ctx;
   const sessionId = workItem.workerSessionId;
   if (!sessionId) return { kind: "session_failed" };
   const leaseToken = workItem.leaseToken;
@@ -203,6 +210,25 @@ export async function runReviewerEffect(
   const snapshot = parseProfileSnapshot(session?.profileSnapshotJson);
   const taskSnapshot = getTaskSnapshot(issue);
   const runtime = snapshot?.runtime ?? "claude_code";
+  const round = workItem.round;
+  const stage = issue.status;
+
+  const milestone = (
+    type: Parameters<typeof emitSessionMilestone>[0]["type"],
+    intent: string,
+    payload?: unknown
+  ) =>
+    emitSessionMilestone({
+      issueId: issue.id,
+      workflowInstanceId: instance.id,
+      workerSessionId: sessionId,
+      role: "reviewer",
+      stage,
+      round,
+      type,
+      intent,
+      payload,
+    });
 
   let payload: { inputSha?: string | null } = {};
   try {
@@ -227,6 +253,11 @@ export async function runReviewerEffect(
       ref: headSha,
     });
     worktreePath = worktree.path;
+    patchRunningSession(sessionId, { worktreePath });
+    milestone("worktree.ready", `Reviewer · worktree ready (round ${round})`, {
+      worktreePath: shortWorktreePath(worktreePath),
+      headSha: headSha.slice(0, 8),
+    });
 
     if (snapshot?.deckId) {
       const prepared = await prepareWorkerDeckConnection({
@@ -243,6 +274,23 @@ export async function runReviewerEffect(
         mcpConfigPath: prepared.mcpConfigPath,
         mcpEnv: prepared.mcpEnv,
       };
+      milestone("deck.connected", `Reviewer · deck connected (round ${round})`, {
+        deckId: snapshot.deckId,
+      });
+    }
+
+    if (taskBriefIsComplete(taskSnapshot)) {
+      milestone("brief.resolved", `Reviewer · brief ready (Task/AC complete)`, {
+        resolution: "task_complete",
+      });
+    } else if (snapshot?.deckId) {
+      milestone("brief.resolved", `Reviewer · brief via Agent Deck`, {
+        resolution: "deferred_to_agent",
+      });
+    } else {
+      milestone("brief.resolved", `Reviewer · brief from Task fields`, {
+        resolution: "task_fields_only",
+      });
     }
 
     // Recomputed here rather than trusted off `issue.baseSha`: a retry_reviewer_at_new_head
@@ -281,18 +329,29 @@ export async function runReviewerEffect(
       return { kind: "session_failed" };
     }
 
+    const logPath = reviewerSessionLogPath(sessionId);
+    patchRunningSession(sessionId, { logPath, worktreePath });
+    setLiveIntent(issue.id, `Reviewer · session running (round ${round})`);
+    const sampler = startActivitySampler({ issueId: issue.id, role: "reviewer", round, logPath });
+
     const spawnStartedAt = Date.now();
-    const spawned = await deps.spawn({
-      sessionId,
-      runtime,
-      policy: snapshot?.permissionPolicy ?? roleCeiling("reviewer"),
-      model: snapshot?.model ?? null,
-      prompt,
-      cwd: worktreePath,
-      timeoutMs: reviewerEffectConfig.sessionTimeoutMs,
-      mcpConfigPath: workerAuthority?.mcpConfigPath,
-      mcpEnv: workerAuthority?.mcpEnv,
-    });
+    let spawned;
+    try {
+      spawned = await deps.spawn({
+        sessionId,
+        runtime,
+        policy: snapshot?.permissionPolicy ?? roleCeiling("reviewer"),
+        model: snapshot?.model ?? null,
+        prompt,
+        cwd: worktreePath,
+        timeoutMs: reviewerEffectConfig.sessionTimeoutMs,
+        mcpConfigPath: workerAuthority?.mcpConfigPath,
+        mcpEnv: workerAuthority?.mcpEnv,
+        logPath,
+      });
+    } finally {
+      sampler.stop();
+    }
 
     // See developer-effect.ts's identical call: recorded before any early return so a
     // failed/timed-out reviewer session still attributes its incurred cost.

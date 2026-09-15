@@ -46,6 +46,16 @@ export interface DeveloperSpawnInput {
   mcpConfigPath?: string;
   /** Extra process env the spawned CLI needs to resolve mcpConfigPath (codex's bearer-token env var). */
   mcpEnv?: Record<string, string>;
+  /** When set, write the NDJSON stream here (NOT-109 live strip / activity sampler). */
+  logPath?: string;
+}
+
+export function developerSessionLogPath(sessionId: string): string {
+  return path.join(getTemporalLogsDir(), `${sessionId}-developer-${Date.now()}.ndjson`);
+}
+
+export function reviewerSessionLogPath(sessionId: string): string {
+  return path.join(getTemporalLogsDir(), `${sessionId}-reviewer-${Date.now()}.ndjson`);
 }
 
 export type DeveloperSpawn = (input: DeveloperSpawnInput) => Promise<DeveloperSpawnResult>;
@@ -61,17 +71,9 @@ const BIN_FOR: Record<Runtime, () => string> = {
   codex_local: resolveCodexBin,
 };
 
-function developerLogPath(sessionId: string): string {
-  return path.join(getTemporalLogsDir(), `${sessionId}-developer-${Date.now()}.ndjson`);
-}
-
-function reviewerLogPath(sessionId: string): string {
-  return path.join(getTemporalLogsDir(), `${sessionId}-reviewer-${Date.now()}.ndjson`);
-}
-
 export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
   const args = buildDeveloperArgs(input.runtime, input.prompt, input.model ?? undefined, input.policy, input.mcpConfigPath);
-  const logPath = developerLogPath(input.sessionId);
+  const logPath = input.logPath ?? developerSessionLogPath(input.sessionId);
   const { exitCode, transcript, timedOut } = await spawnCli(
     input.sessionId,
     BIN_FOR[input.runtime](),
@@ -90,7 +92,7 @@ export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
 export const realReviewerSpawn: ReviewerSpawn = async (input) => {
   const args = buildReviewerArgs(input.runtime, input.prompt, input.model ?? undefined, input.policy, input.mcpConfigPath);
   assertReviewerReadOnly(args);
-  const logPath = reviewerLogPath(input.sessionId);
+  const logPath = input.logPath ?? reviewerSessionLogPath(input.sessionId);
   const { exitCode, transcript, timedOut } = await spawnCli(
     input.sessionId,
     BIN_FOR[input.runtime](),
