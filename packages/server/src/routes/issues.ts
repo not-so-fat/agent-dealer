@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import type { FastifyInstance } from "fastify";
 import { CreateIssueInput, IssueStatus, UpdateIssueInput } from "@agent-dealer/shared";
-import { createIssue, getIssue, listIssues, findIssueByExternalId, updateIssue } from "../repository/issues.js";
+import { createIssue, getIssue, listIssues, findIssueByExternalId, updateIssue, listRecentRepos } from "../repository/issues.js";
 import { listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
 import { getIssueArtifact, listArtifactsForIssue } from "../repository/artifacts-for-issue.js";
 import { listUsageEventsForIssue, summarizeIssueUsage } from "../repository/usage-events.js";
@@ -62,6 +62,11 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       updatedAt: issue.updatedAt,
       hasOpenHumanAction: openActionIssueIds.has(issue.id),
     }));
+  });
+
+  /** Recent local filesystem repo paths from prior issues (NOT-102 kick picker). */
+  app.get("/api/issues/recent-repos", async () => {
+    return { repos: listRecentRepos() };
   });
 
   app.get("/api/issues/:id", async (req, reply) => {

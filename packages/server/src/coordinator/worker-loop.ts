@@ -39,6 +39,7 @@ import { getEffectHandler } from "./effect-registry.js";
 import { parseProfileSnapshot } from "@agent-dealer/shared";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
+import { recoverStrandedAutoMerges } from "./auto-merge.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -234,6 +235,10 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     safeCompleteSession(session.id, "cancelled", { reason: result.reason });
     return;
   }
+  if (result.triggerReflect) {
+    const { triggerIssueReflect } = await import("./reflect-trigger.js");
+    void triggerIssueReflect(claimed.issueId).catch(() => {});
+  }
   const sessionStatus = isTimedOutOutcome(outcome) ? "timed_out" : isFailureOutcome(outcome) ? "failed" : "done";
   safeCompleteSession(session.id, sessionStatus);
 }
@@ -244,6 +249,8 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
  * and is tracked in `active`.
  */
 export async function runCoordinatorTick(opts?: { leaseOwner?: string }): Promise<number> {
+  // NOT-102: finish auto-merges parked before a crash (no in-memory pendingAutoMerge left).
+  recoverStrandedAutoMerges();
   const leaseOwner = opts?.leaseOwner ?? `loop-${process.pid}-${uuid().slice(0, 8)}`;
   let started = 0;
   while (active.size < coordinatorConfig.maxConcurrency) {

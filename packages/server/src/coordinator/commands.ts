@@ -61,6 +61,7 @@ import {
 } from "./routing.js";
 import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } from "./projection.js";
 import { parseHumanResolution, resolveHumanActionOutcome, type HumanResolution } from "./human-resolution.js";
+import { finalizeAutoMerge } from "./auto-merge.js";
 
 export const WORKFLOW_VERSION = "dev_reviewer_v1";
 
@@ -295,6 +296,10 @@ export type ApplyResult =
       nextWorkItemId: string | null;
       humanActionId: string | null;
       instanceCompleted: boolean;
+      /** Set when auto-merge completed successfully — caller may fire reflect. */
+      triggerReflect?: boolean;
+      /** Internal: routing parked for auto-merge; applyCompletion finalizes outside the txn. */
+      pendingAutoMerge?: boolean;
     }
   | { applied: false; reason: "already_terminal" | "lease_lost" | "no_active_instance" | "not_found" };
 
@@ -304,13 +309,17 @@ export type ApplyResult =
  * routing decision is projected onto the issue, the workflow events appended, and exactly
  * one next effect created. If the CAS matches nothing — a duplicate delivery, or a slow
  * worker whose lease was reclaimed and re-run — nothing is applied.
+ *
+ * When the issue opted into auto-merge and the reviewer approved, a second step runs
+ * *after* the transaction (so `gh` never holds the write lock): merge the PR, then mark
+ * done or escalate on failure (NOT-102).
  */
 export function applyCompletion(
   workItemId: string,
   leaseToken: string,
   outcome: DeveloperOutcome | ReviewerOutcome
 ): ApplyResult {
-  return getDb().transaction((): ApplyResult => {
+  const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
     if (!before) return { applied: false, reason: "not_found" };
     if (before.status === "done" || before.status === "dead" || before.status === "cancelled") {
@@ -329,6 +338,11 @@ export function applyCompletion(
 
     return routeAppliedOutcome(issue, instance, item, outcome);
   })();
+
+  if (routed.applied && routed.pendingAutoMerge) {
+    return finalizeAutoMerge(getWorkItem(workItemId)!.issueId);
+  }
+  return routed;
 }
 
 /**
@@ -453,6 +467,7 @@ function applyReviewer(
       maxReviewRounds: issue.maxReviewRounds,
       infraAttempts: issue.infraAttempts,
       maxInfraAttempts: issue.maxInfraAttempts,
+      autoMerge: issue.autoMerge,
     },
     issue.headSha!
   );
@@ -590,6 +605,10 @@ function applyEffect(
     if (actionType === "final_review") ev.emit("final_review.requested");
     ev.emit("human_action.requested", { payload: { actionType, actionId: action.id } });
     return { ...base, humanActionId: action.id };
+  }
+
+  if (effect.kind === "auto_merge") {
+    return { ...base, pendingAutoMerge: true };
   }
 
   return base;

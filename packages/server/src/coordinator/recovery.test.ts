@@ -75,7 +75,7 @@ test("recovery ignores a lease that has not expired", () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   claimWorkItem("healthy", { leaseMs: 600_000 });
-  assert.deepEqual(recoverCoordinator({ now: Date.now() }), { reclaimed: [], deadLettered: [] });
+  assert.deepEqual(recoverCoordinator({ now: Date.now() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
 });
 
 test("recovery leaves a lease alone when a heartbeat renewed it after the snapshot", () => {
@@ -90,7 +90,7 @@ test("recovery leaves a lease alone when a heartbeat renewed it after the snapsh
   refreshHeartbeat(devItem.id, claimed.leaseToken!, { leaseMs: 600_000 });
 
   const res = recoverCoordinator({ now: Date.now() + 1_000 });
-  assert.deepEqual(res, { reclaimed: [], deadLettered: [] });
+  assert.deepEqual(res, { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
   assert.equal(getWorkItem(devItem.id)!.status, "leased");
 });
 
@@ -116,7 +116,7 @@ test("an expired lease past the attempt cap is dead-lettered AND routed in one s
   );
 
   // A second recovery pass is a no-op — the item is already dead, nothing to reclaim.
-  assert.deepEqual(recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [] });
+  assert.deepEqual(recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
   assert.equal(
     listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
     1,
@@ -133,10 +133,10 @@ test("recovery loses its CAS to a worker that completed concurrently", () => {
   // Worker finishes just before recovery's transaction runs.
   finishWorkItem(devItem.id, claimed.leaseToken!, { status: "done", result: { kind: "no_pr" } });
 
-  assert.deepEqual(recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [] });
+  assert.deepEqual(recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
   assert.equal(getWorkItem(devItem.id)!.status, "done");
 });
 
 test("recoverCoordinator is a no-op on a clean queue", () => {
-  assert.deepEqual(recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [] });
+  assert.deepEqual(recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], autoMergesFinalized: [] });
 });

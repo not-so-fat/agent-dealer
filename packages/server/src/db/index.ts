@@ -234,6 +234,13 @@ export function migrate(): void {
     db.exec("ALTER TABLE issues ADD COLUMN infra_attempts INTEGER NOT NULL DEFAULT 0");
   }
 
+  // NOT-102: per-issue auto-merge after reviewer approve (kick UI defaults on; existing
+  // rows stay off so in-flight workflows keep the human final_review path).
+  const issueColsForAutoMerge = db.prepare("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+  if (!issueColsForAutoMerge.some((c) => c.name === "auto_merge")) {
+    db.exec("ALTER TABLE issues ADD COLUMN auto_merge INTEGER NOT NULL DEFAULT 0");
+  }
+
   // NOT-93: Deck's own correlation id for the INTERACTION_REQUIRED response that raised a
   // deck_interaction_required action — lets a repeated signal for the same request dedupe
   // to one open action instead of piling up duplicates.

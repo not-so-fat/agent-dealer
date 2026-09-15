@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS issues (
   head_sha TEXT,
   pr_number INTEGER,
   pr_url TEXT,
+  auto_merge INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

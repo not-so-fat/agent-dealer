@@ -79,9 +79,13 @@ async function main(): Promise<void> {
   registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx));
 
   const coordinatorRecovery = recoverCoordinator();
-  if (coordinatorRecovery.reclaimed.length || coordinatorRecovery.deadLettered.length) {
+  if (
+    coordinatorRecovery.reclaimed.length ||
+    coordinatorRecovery.deadLettered.length ||
+    coordinatorRecovery.autoMergesFinalized.length
+  ) {
     console.warn(
-      `[startup] coordinator recovery: reclaimed ${coordinatorRecovery.reclaimed.length}, dead-lettered ${coordinatorRecovery.deadLettered.length}`
+      `[startup] coordinator recovery: reclaimed ${coordinatorRecovery.reclaimed.length}, dead-lettered ${coordinatorRecovery.deadLettered.length}, auto-merges finalized ${coordinatorRecovery.autoMergesFinalized.length}`
     );
   }
   startCoordinatorLoop();

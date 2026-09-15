@@ -49,6 +49,7 @@ test("Issue schema parses a well-formed issue", () => {
     headSha: null,
     prNumber: null,
     prUrl: null,
+    autoMerge: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -65,4 +66,5 @@ test("CreateIssueInput defaults baseBranch to main and maxReviewRounds to 3", ()
   assert.equal(parsed.baseBranch, "main");
   assert.equal(parsed.maxReviewRounds, 3);
   assert.equal(parsed.source, "manual");
+  assert.equal(parsed.autoMerge, false);
 });

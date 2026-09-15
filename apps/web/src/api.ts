@@ -509,6 +509,14 @@ export async function fetchIssues(status?: IssueStatus[]): Promise<IssueListRow[
   return res.json();
 }
 
+/** Recent local repo paths from prior issues for the kick picker (NOT-102). */
+export async function fetchRecentRepos(): Promise<string[]> {
+  const res = await fetch(`${API}/api/issues/recent-repos`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  const json = (await res.json()) as { repos: string[] };
+  return json.repos ?? [];
+}
+
 export async function fetchIssueDetail(id: string): Promise<IssueDetail> {
   const res = await fetch(`${API}/api/issues/${id}`);
   if (!res.ok) throw new Error(await readApiError(res));

@@ -22,6 +22,7 @@ import {
   requeueWorkItem,
 } from "../repository/work-items.js";
 import { routeAppliedOutcome } from "./commands.js";
+import { recoverStrandedAutoMerges } from "./auto-merge.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -30,6 +31,8 @@ export interface RecoverResult {
   reclaimed: string[];
   /** Work items past the attempt cap — dead-lettered and routed to a human action. */
   deadLettered: string[];
+  /** Issues whose auto-merge park was finalized after a crash (NOT-102). */
+  autoMergesFinalized: string[];
 }
 
 /** Fail a worker_session still `running` for an item whose worker is gone. */
@@ -101,5 +104,9 @@ export function recoverCoordinator(opts?: { now?: number }): RecoverResult {
     }
   }
 
-  return { reclaimed, deadLettered };
+  return {
+    reclaimed,
+    deadLettered,
+    autoMergesFinalized: recoverStrandedAutoMerges().finalized,
+  };
 }
