@@ -110,6 +110,8 @@ function fallbackReasonForKind(outcome: DeveloperOutcome | ReviewerOutcome): str
       return "Developer worktree conflict.";
     case "adapter_failure":
       return "Git/GitHub verification failed.";
+    case "deck_failure":
+      return "Agent Deck preflight failed.";
     case "stale":
       return "PR head moved before the reviewer could evaluate it.";
     case "usage_capped":
@@ -161,6 +163,7 @@ export function outcomeShouldRecordError(outcome: DeveloperOutcome | ReviewerOut
     outcome.kind === "no_pr" ||
     outcome.kind === "checks_failed" ||
     outcome.kind === "adapter_failure" ||
+    outcome.kind === "deck_failure" ||
     outcome.kind === "unpushed_commit" ||
     outcome.kind === "worktree_conflict"
   );

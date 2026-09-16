@@ -363,7 +363,7 @@ export async function prepareWorkerDeckConnection(opts: {
       worktreePath: opts.worktreePath,
     });
   } catch (err) {
-    return { ok: false, kind: "infra_failure", reason: `deck MCP materialization failed: ${(err as Error).message}` };
+    return { ok: false, kind: "infra_failure", reason: `MCP materialization failed: ${(err as Error).message}` };
   }
 
   const verified = await verifyDeckConnection({
@@ -379,7 +379,7 @@ export async function prepareWorkerDeckConnection(opts: {
     } catch {
       // best-effort
     }
-    return { ok: false, kind: "infra_failure", reason: `deck preflight failed: ${verified.reason}` };
+    return { ok: false, kind: "infra_failure", reason: `preflight failed: ${verified.reason}` };
   }
 
   return { ok: true, mcpConfigPath: materialized.mcpConfigPath, mcpEnv: materialized.mcpEnv };

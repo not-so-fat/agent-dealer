@@ -42,6 +42,7 @@ const { registerEffectHandler, resetEffectHandlers } = await import("./effect-re
 const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
 const { runDeveloperEffect } = await import("./developer-effect.js");
 const { runReviewerEffect } = await import("./reviewer-effect.js");
+const { routeReviewerOutcome } = await import("./routing.js");
 const { realDeveloperSpawn, realReviewerSpawn } = await import("./spawn.js");
 const { realGithubAdapter } = await import("../adapters/github.js");
 type SpawnFn = typeof realDeveloperSpawn;
@@ -357,7 +358,7 @@ test("session_failed: bounded infra retry re-queues a fresh reviewer session at 
   assert.equal(listUsageEventsForIssue(issueId).filter((u) => u.role === "reviewer").length, 1);
 });
 
-test("session_failed: reviewer deck preflight preserves the failing playbook reason", async () => {
+test("deck_failure: reviewer preflight preserves and routes the failing playbook reason", async () => {
   const deckId = "11111111-1111-4111-a111-111111111111";
   const issueId = await makeIssue({
     reviewerDeck: { deckId, playbookIds: ["pb-required"] },
@@ -382,9 +383,21 @@ test("session_failed: reviewer deck preflight preserves the failing playbook rea
   });
 
   assert.equal(spawnCalled, false, "failed deck preflight must stop before reviewer spawn");
-  assert.equal(outcome.kind, "session_failed");
-  if (outcome.kind === "session_failed") {
+  assert.equal(outcome.kind, "deck_failure");
+  if (outcome.kind === "deck_failure") {
     assert.match(outcome.reason ?? "", /get_playbook\(pb-required\) returned an error: playbook missing/);
+    const routed = routeReviewerOutcome(
+      outcome,
+      { currentRound: 1, maxReviewRounds: 3, infraAttempts: 0, maxInfraAttempts: 3 },
+      getIssue(issueId)!.headSha!
+    );
+    assert.equal(routed.next, "retry_reviewer");
+    if (routed.next === "retry_reviewer") {
+      assert.equal(
+        routed.reason,
+        "Agent Deck preflight failed: get_playbook(pb-required) returned an error: playbook missing"
+      );
+    }
   }
 });
 

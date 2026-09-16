@@ -82,10 +82,10 @@ test("adapter failure is bounded-retried on the infra budget (unified failure po
   });
 });
 
-test("Agent Deck adapter failures are labeled as deck preflight failures", () => {
+test("Agent Deck failures have a structural outcome and deck-specific label", () => {
   const outcome: DeveloperOutcome = {
-    kind: "adapter_failure",
-    reason: "deck connection failed: deck preflight failed: get_playbook(pb-x) returned an error: missing",
+    kind: "deck_failure",
+    reason: "preflight failed: get_playbook(pb-x) returned an error: missing",
   };
   assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
     next: "retry_developer",
@@ -251,15 +251,15 @@ test("reviewer session_failed is bounded-retried at the SAME pinned head, not th
   });
 });
 
-test("reviewer session_failed preserves an explicit deck preflight reason", () => {
+test("reviewer deck_failure preserves and labels the preflight reason", () => {
   const outcome: ReviewerOutcome = {
-    kind: "session_failed",
-    reason: "deck connection failed: get_playbook(pb-x) returned an error: missing",
+    kind: "deck_failure",
+    reason: "preflight failed: get_playbook(pb-x) returned an error: missing",
   };
   assert.deepStrictEqual(routeReviewerOutcome(outcome, INFRA_ATTEMPTS_LEFT, PINNED_HEAD), {
     next: "retry_reviewer",
     headSha: PINNED_HEAD,
-    reason: "deck connection failed: get_playbook(pb-x) returned an error: missing",
+    reason: "Agent Deck preflight failed: get_playbook(pb-x) returned an error: missing",
   });
 });
 

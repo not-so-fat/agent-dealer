@@ -432,7 +432,7 @@ export async function runDeveloperEffect(
       });
       if (!prepared.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
-        return { kind: "adapter_failure", reason: `deck connection failed: ${prepared.reason}` };
+        return { kind: "deck_failure", reason: prepared.reason };
       }
       workerAuthority = {
         mcpConfigPath: prepared.mcpConfigPath,
