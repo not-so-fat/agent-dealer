@@ -146,7 +146,6 @@ function queuedProfileSnapshot(issue: Issue, kind: WorkItemKind): string | null 
 
 export type StartResult =
   | { ok: true; instance: WorkflowInstance; workItem: WorkItem }
-  | { ok: "needs_scope_decision"; action: HumanAction }
   | { ok: false; code: number; error: string };
 
 const REQUIRED_FIELDS: Array<[keyof Issue, string]> = [
@@ -210,6 +209,19 @@ function clearStaleProductScopeDecision(issue: Issue): void {
 }
 
 /**
+ * A bare 409 for "already running" is a dead end for a caller (the UI hides Start in this
+ * state, but the CLI/API do not) — if a human action is already open, name it so the
+ * operator resolves that instead of retrying Start against the same active instance.
+ * Shared by startWorkflowCore and the admission-gated Start entry point.
+ */
+export function activeWorkflowConflictMessage(issueId: string): string {
+  const openAction = listHumanActionsForIssue(issueId).find((a) => a.status === "open");
+  return openAction
+    ? `Issue already has an active workflow — resolve the open ${openAction.actionType} first (POST /api/human-actions/${openAction.id}/resolve): ${openAction.question}`
+    : "Issue already has an active workflow";
+}
+
+/**
  * The instance + `workflow.started` event + issue transition + round-1 developer work item,
  * all as unconditional writes. Throws on any precondition failure so a caller that runs this
  * inside its own transaction (see resolveHumanActionAndAdvance / admitNext) rolls the whole
@@ -227,17 +239,7 @@ export function startWorkflowCore(issueId: string): { instance: WorkflowInstance
     throw new StartPreconditionError(409, `Issue is ${issue.status} — not startable`);
   }
   if (getActiveWorkflowInstance(issueId)) {
-    // A bare 409 here is a dead end for a caller (UI hides Start in this state, but the CLI/
-    // API do not) — if a human action is already open, name it so the operator resolves that
-    // instead of retrying Start against the same active instance (ticket: Start must not be
-    // the only visible control that fails with an opaque conflict while a human gate is open).
-    const openAction = listHumanActionsForIssue(issueId).find((a) => a.status === "open");
-    throw new StartPreconditionError(
-      409,
-      openAction
-        ? `Issue already has an active workflow — resolve the open ${openAction.actionType} first (POST /api/human-actions/${openAction.id}/resolve): ${openAction.question}`
-        : "Issue already has an active workflow"
-    );
+    throw new StartPreconditionError(409, activeWorkflowConflictMessage(issueId));
   }
   const readiness = checkIssueReadiness(issue);
   if (!readiness.ok) {
@@ -276,42 +278,29 @@ export function startWorkflowCore(issueId: string): { instance: WorkflowInstance
 }
 
 /**
- * Starts the issue's one `dev_reviewer_v1` workflow in a single transaction. A second call
- * while an instance is active is **rejected with 409** (not a resume-by-id — callers must
- * not assume the PRD §8 "returns its active instance" behaviour until the API layer adds
- * it). Missing acceptance criteria opens a `product_scope_decision` instead of starting.
+ * Starts the issue's one `dev_reviewer_v1` workflow in a single transaction, with **no
+ * admission gate**. NOT-118 removed the route that called this: every operator/agent entry
+ * point now goes through `startIssueViaQueue` (admission), so this is the internal
+ * force-start used by human-action resume-shaped paths and by tests.
+ *
+ * A second call while an instance is active is **rejected with 409** (not a resume-by-id —
+ * callers must not assume the PRD §8 "returns its active instance" behaviour until the API
+ * layer adds it). Missing acceptance criteria is a plain precondition failure: the pre-start
+ * `product_scope_decision` gate is gone (NOT-118 — an under-specified issue waits in the
+ * queue with a wait reason instead of opening a human action nobody asked for).
  */
 export function startWorkflow(issueId: string): StartResult {
   const issue = getIssue(issueId);
   if (!issue) return { ok: false, code: 404, error: "Issue not found" };
 
-  const preStart = (issue.status === "ready" || issue.status === "needs_human") && !getActiveWorkflowInstance(issueId);
-  // Idempotent lookup when AC is still missing — return the existing gate rather than
-  // creating a duplicate. Stale-gate cleanup after AC lands lives in startWorkflowCore.
-  const openScopeDecision = preStart ? findOpenHumanAction(issueId, "product_scope_decision") : null;
-
   // Refuse before enqueueing a developer round when `gh` cannot open the draft PR —
   // that path otherwise burns a full agent session and lands as adapter_failure.
+  const preStart = (issue.status === "ready" || issue.status === "needs_human") && !getActiveWorkflowInstance(issueId);
   if (preStart) {
     const ghIssues = githubIssuesSync();
     if (ghIssues.length > 0) {
       return { ok: false, code: 409, error: ghIssues[0]!.message };
     }
-  }
-
-  // PRD §6.1: if required product intent cannot be normalized without guessing, ask.
-  if (preStart && (!issue.acceptanceCriteria || !issue.acceptanceCriteria.trim())) {
-    // Idempotent: a repeated pre-criteria /start must return the action already open,
-    // never pile up a duplicate every time it's called.
-    if (openScopeDecision) return { ok: "needs_scope_decision", action: openScopeDecision };
-    const action = createHumanAction({
-      issueId,
-      actionType: "product_scope_decision",
-      reason: "The issue has no acceptance criteria — development needs a testable target.",
-      question: "Add acceptance criteria (or an accepted task snapshot), then start the workflow.",
-      responseOptions: [{ choice: "resume", label: "Acceptance criteria added — start" }],
-    });
-    return { ok: "needs_scope_decision", action };
   }
 
   try {

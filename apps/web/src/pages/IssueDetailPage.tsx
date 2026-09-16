@@ -95,6 +95,8 @@ export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
   const [editDescription, setEditDescription] = useState("");
   const [editAcceptance, setEditAcceptance] = useState("");
   const [busy, setBusy] = useState(false);
+  /** Outcome of the last Start — admitted, or queued at a position with a reason. */
+  const [startNotice, setStartNotice] = useState<string | null>(null);
 
   const refresh = () => fetchIssueDetail(issueId).then(setDetail).catch((e) => setError(String(e)));
 
@@ -107,7 +109,7 @@ export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
   if (error) return <div className="p-6 text-red-300 text-sm">{error}</div>;
   if (!detail) return <div className="p-6 text-white/50 text-sm">Loading…</div>;
 
-  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, liveProgress, latestSessionFailure, queued } = detail;
+  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, liveProgress, latestSessionFailure, queued, queueEntry } = detail;
   const developerAgent = agents.find((a) => a.id === issue.developerAgentId);
   const developerBlocked = developerAgent && !developerAgent.healthy;
   const developerBlockReason = developerAgent?.issues[0]?.message ?? "Developer agent is unhealthy";
@@ -160,7 +162,14 @@ export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
     setBusy(true);
     setError(null);
     try {
-      await startIssue(issueId);
+      // NOT-118: Start moves this issue to the front of the admission queue. It runs now if
+      // a slot is free, otherwise it waits at position 1 — it never jumps the queue.
+      const result = await startIssue(issueId);
+      setStartNotice(
+        result.state === "admitted"
+          ? null
+          : `Queued at position ${result.position}${result.waitReason ? ` — ${result.waitReason}` : ""}`
+      );
       refresh();
     } catch (e) {
       setError(String(e));
@@ -289,6 +298,19 @@ export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
             </button>
           )}
         </div>
+
+        {/* NOT-118: queued is a real state of its own — a `ready` issue waiting in the
+            admission queue must never look like an idle one nobody has picked up. */}
+        {queueEntry && (
+          <div className="mb-4 p-3 rounded border border-cyber-teal/30 bg-cyber-teal/5">
+            <p className="text-xs text-cyber-teal font-medium uppercase tracking-wide">
+              Queued · position {queueEntry.position}
+            </p>
+            <p className="text-sm text-white/80 mt-0.5">
+              {queueEntry.waitReason ?? "Next up — starts as soon as the coordinator ticks"}
+            </p>
+          </div>
+        )}
 
         {sessionLive && activeWorkerSession && (
           <div className="mb-4 p-3 rounded border border-cyber-teal/35 bg-cyber-teal/5 space-y-1.5">
@@ -429,15 +451,20 @@ export default function IssueDetailPage({ issueId, agents, onBack }: Props) {
                 Fix before Start: {developerBlockReason}
               </p>
             )}
+            {startNotice && <p className="text-sm text-amber-200/90">{startNotice}</p>}
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 className="btn-gold px-4 py-2 disabled:opacity-50"
                 disabled={!readiness.ok || busy || !!developerBlocked}
-                title={developerBlocked ? developerBlockReason : undefined}
+                title={
+                  developerBlocked
+                    ? developerBlockReason
+                    : "Move to the front of the admission queue — runs now if a slot is free"
+                }
                 onClick={doStart}
               >
-                Start
+                Run next
               </button>
               {!queued ? (
                 <button

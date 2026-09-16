@@ -8,12 +8,14 @@ import {
   dequeueIssue,
   enqueueIssue,
   getQueuedEntryForIssue,
-  listQueuedEntries,
 } from "../repository/queue-entries.js";
+import { listQueuedEntriesForRead } from "../coordinator/admission.js";
 
 export async function registerQueueRoutes(app: FastifyInstance): Promise<void> {
+  /** NOT-118: positions are 1-based ranks and a full system derives its own
+   * "waiting for slot — running: X" reason at read time (never written per tick). */
   app.get("/api/queue", async () => {
-    return listQueuedEntries();
+    return listQueuedEntriesForRead();
   });
 
   app.post("/api/queue", async (req, reply) => {

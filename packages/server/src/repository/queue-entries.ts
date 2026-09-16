@@ -112,6 +112,25 @@ export function enqueueIssue(issueId: string): QueueEntry {
   return getQueueEntry(id)!;
 }
 
+/**
+ * NOT-118: move a queued entry to position 1 and renumber the rest 2..N in their current
+ * order, so `position` stays a readable 1-based rank instead of drifting into negatives.
+ * This is the only reorder primitive in the repo today — NOT-112's general reorder reuses
+ * it rather than adding a second way to renumber the queue.
+ */
+export function moveQueueEntryToTop(issueId: string): QueueEntry | null {
+  const db = getDb();
+  return db.transaction(() => {
+    const entry = getQueuedEntryForIssue(issueId);
+    if (!entry) return null;
+    const rest = listQueuedEntries().filter((e) => e.issueId !== issueId);
+    const setPosition = db.prepare("UPDATE queue_entries SET position = ? WHERE id = ?");
+    setPosition.run(1, entry.id);
+    rest.forEach((e, index) => setPosition.run(index + 2, e.id));
+    return getQueueEntry(entry.id);
+  })();
+}
+
 /** Operator dequeue — marks removed (keeps history row). Returns the removed entry or null. */
 export function dequeueIssue(issueId: string): QueueEntry | null {
   const entry = getQueuedEntryForIssue(issueId);

@@ -72,6 +72,12 @@ export const CreateIssueInput = z.object({
   externalId: z.string().optional(),
   externalLabel: z.string().optional(),
   externalUrl: z.string().optional(),
+  /**
+   * NOT-118: a create directive, not an issue field — the route enqueues the new issue for
+   * admission by default so creating one never starts a workflow behind the queue's back.
+   * `false` creates a draft that sits outside the queue until someone adds or starts it.
+   */
+  enqueue: z.boolean().default(true),
 });
 /** Wire/API body shape — defaults applied by `CreateIssueInput.parse` / repository. */
 export type CreateIssueInput = z.input<typeof CreateIssueInput>;

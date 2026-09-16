@@ -2,23 +2,37 @@
 //
 // NOT-103: when to call startWorkflowCore on which queued issue.
 // Order (queue_entries) + eligibility rules + CapacityPolicy — not a second execution engine.
+//
+// NOT-118: this is also the *only* entry point a route may use to start an issue
+// (`startIssueViaQueue`). Manual Start moves the entry to the front and admits it when a
+// slot is free — it never bypasses the queue. The single ungated exception is a human
+// action resolving into startWorkflowCore (commands.ts).
 
-import type { AgentProfile, Issue, IssueStatus } from "@agent-dealer/shared";
+import type { AgentProfile, Issue, IssueStatus, WorkflowInstance } from "@agent-dealer/shared";
 import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
 import { healthForAgent } from "../adapters/agent-health.js";
 import { getDb } from "../db/index.js";
 import { getAgent } from "../repository/agents.js";
 import { getIssue, listIssues } from "../repository/issues.js";
 import {
+  enqueueIssue,
   getQueuedEntryForIssue,
   listQueuedEntries,
   markQueueEntryAdmitted,
   markQueueEntryRemoved,
+  moveQueueEntryToTop,
   setQueueWaitReason,
+  type QueueEntryView,
 } from "../repository/queue-entries.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
 import { getActiveWorkflowInstance } from "../repository/workflow-events.js";
-import { checkIssueReadiness, startWorkflowCore, StartPreconditionError } from "./commands.js";
+import { listWorkItemsForIssue, type WorkItem } from "../repository/work-items.js";
+import {
+  activeWorkflowConflictMessage,
+  checkIssueReadiness,
+  startWorkflowCore,
+  StartPreconditionError,
+} from "./commands.js";
 
 /** Statuses that occupy an admission slot (Decision 2). */
 export const occupyingStatuses = new Set<IssueStatus>(["developing", "reviewing", "repairing"]);
@@ -171,7 +185,9 @@ async function evaluateEligibility(issue: Issue, ctx: EligibilityContext): Promi
  * Queue housekeeping (closed / already-running → leave queued) always runs, even when
  * capacity is full — otherwise a start that bypassed admitNext could leave a stale row.
  */
-export async function admitNext(): Promise<{ issueId: string } | null> {
+export type AdmittedIssue = { issueId: string; instance: WorkflowInstance; workItem: WorkItem };
+
+export async function admitNext(): Promise<AdmittedIssue | null> {
   const freeSlots = capacityPolicy(listOccupyingIssues());
   const entries = listQueuedEntries();
 
@@ -213,7 +229,7 @@ export async function admitNext(): Promise<{ issueId: string } | null> {
     }
 
     try {
-      getDb().transaction(() => {
+      const started = getDb().transaction(() => {
         // Dequeue race: operator may have removed the entry during async eligibility checks.
         if (!getQueuedEntryForIssue(entry.issueId)) {
           throw new StartPreconditionError(409, "queue entry no longer queued");
@@ -223,9 +239,9 @@ export async function admitNext(): Promise<{ issueId: string } | null> {
           throw new StartPreconditionError(409, "no free admission slots");
         }
         // Force-admit lives inside startWorkflowCore — single owner for start-path-queue-sync.
-        startWorkflowCore(entry.issueId);
+        return startWorkflowCore(entry.issueId);
       })();
-      return { issueId: entry.issueId };
+      return { issueId: entry.issueId, ...started };
     } catch (err) {
       const message =
         err instanceof StartPreconditionError
@@ -241,4 +257,99 @@ export async function admitNext(): Promise<{ issueId: string } | null> {
     }
   }
   return null;
+}
+
+/**
+ * NOT-118 read-time wait reason. `admitNext` returns before evaluating anything when no
+ * slot is free, so a full system would otherwise leave every queued entry with no reason
+ * (or a stale one from an earlier tick). Derived on read instead of written every tick.
+ */
+export function slotWaitReason(): string | null {
+  const running = listIssues([...occupyingStatuses]);
+  if (capacityPolicy(running.map((i) => ({ id: i.id, status: i.status }))) > 0) return null;
+  const titles = running.map((i) => i.title).join(", ");
+  return titles ? `waiting for slot — running: ${titles}` : "waiting for slot";
+}
+
+/**
+ * The queue as operators read it: 1-based positions (rank, not the raw stored column, which
+ * legacy rows may have left sparse) and the current blocker per entry. While capacity is
+ * full that blocker *is* the missing slot, so the derived reason wins over whatever an
+ * earlier tick persisted; once a slot frees, the entry's own reason (missing acceptance
+ * criteria, unhealthy agent, capped runtime) surfaces again on the next tick.
+ */
+export function listQueuedEntriesForRead(): QueueEntryView[] {
+  const slotReason = slotWaitReason();
+  return listQueuedEntries().map((entry, index) => ({
+    ...entry,
+    position: index + 1,
+    waitReason: slotReason ?? entry.waitReason,
+  }));
+}
+
+export function queueStatusForIssue(
+  issueId: string
+): { position: number; waitReason: string | null } | null {
+  const entry = listQueuedEntriesForRead().find((e) => e.issueId === issueId);
+  return entry ? { position: entry.position, waitReason: entry.waitReason } : null;
+}
+
+export type StartIssueOutcome =
+  | { state: "admitted"; instance: WorkflowInstance; workItem: WorkItem }
+  | { state: "queued"; position: number; waitReason: string | null }
+  | { state: "error"; code: number; error: string };
+
+/** The round-1 developer item an admitted start enqueued, for a start that raced a tick. */
+function developerWorkItemFor(issueId: string, instanceId: string): WorkItem | null {
+  return (
+    listWorkItemsForIssue(issueId).find(
+      (w) => w.workflowInstanceId === instanceId && w.kind === "developer"
+    ) ?? null
+  );
+}
+
+/**
+ * NOT-118 Start: make sure the issue is queued, move its entry to position 1, then admit
+ * synchronously so an idle system still starts immediately. There is no "start now, skip
+ * the queue" escape hatch — when no slot is free (or the issue isn't eligible yet) it waits
+ * at the top of the queue with a reason, and is the next one admitted.
+ *
+ * Every route/CLI/agent start path goes through here. The one ungated exception is a human
+ * action resuming a workflow (resolveHumanActionAndAdvance → startWorkflowCore), which may
+ * briefly exceed capacity by design (NOT-103 decision 5).
+ */
+export async function startIssueViaQueue(issueId: string): Promise<StartIssueOutcome> {
+  const issue = getIssue(issueId);
+  if (!issue) return { state: "error", code: 404, error: "Issue not found" };
+  if (getActiveWorkflowInstance(issueId)) {
+    return { state: "error", code: 409, error: activeWorkflowConflictMessage(issueId) };
+  }
+  if (issue.status !== "ready" && issue.status !== "needs_human") {
+    return { state: "error", code: 409, error: `Issue is ${issue.status} — not startable` };
+  }
+
+  try {
+    enqueueIssue(issueId); // idempotent when it is already queued
+  } catch (err) {
+    // Only reachable if the issue turned terminal / started between the checks above and
+    // here; enqueueIssue tags those with an HTTP code.
+    const code = (err as { code?: number }).code ?? 409;
+    return { state: "error", code, error: err instanceof Error ? err.message : String(err) };
+  }
+  moveQueueEntryToTop(issueId);
+
+  const admitted = await admitNext();
+  if (admitted?.issueId === issueId) {
+    return { state: "admitted", instance: admitted.instance, workItem: admitted.workItem };
+  }
+
+  const queued = queueStatusForIssue(issueId);
+  if (queued) return { state: "queued", ...queued };
+
+  // No longer queued and not admitted by this call — a concurrent coordinator tick admitted
+  // it between the enqueue and the walk, or an operator dequeued it mid-flight.
+  const instance = getActiveWorkflowInstance(issueId);
+  const workItem = instance ? developerWorkItemFor(issueId, instance.id) : null;
+  if (instance && workItem) return { state: "admitted", instance, workItem };
+  return { state: "error", code: 409, error: "Issue left the queue before it could start" };
 }

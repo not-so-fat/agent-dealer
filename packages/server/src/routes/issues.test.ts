@@ -1,5 +1,5 @@
 // packages/server/src/routes/issues.test.ts
-import { test, before } from "node:test";
+import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -15,14 +15,36 @@ function tmpTraceFile(content: string): string {
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-issue-routes-"));
 
-const { migrate } = await import("../db/index.js");
+const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { registerIssueRoutes } = await import("./issues.js");
 const { transitionIssue } = await import("../repository/issues.js");
 const { createIssueArtifact } = await import("../repository/artifacts.js");
+const { getQueuedEntryForIssue, listQueuedEntries } = await import("../repository/queue-entries.js");
+const { setAdmissionHealthCheckerForTests } = await import("../coordinator/admission.js");
 
 before(() => {
   migrate();
+  // Admission runs a real CLI/deck/gh health probe per agent — these route tests assert
+  // routing and response shape, not agent health.
+  setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
+});
+
+after(() => setAdmissionHealthCheckerForTests(null));
+
+// Start is admission-gated (NOT-118) and capacity is sequential, so a `developing` issue
+// left behind by an earlier test would queue every later start instead of admitting it.
+beforeEach(() => {
+  getDb().exec(`
+    DELETE FROM work_items;
+    DELETE FROM human_actions;
+    DELETE FROM workflow_events;
+    DELETE FROM worker_sessions;
+    DELETE FROM artifacts;
+    DELETE FROM workflow_instances;
+    DELETE FROM queue_entries;
+    DELETE FROM issues;
+  `);
 });
 
 async function buildApp() {
@@ -41,10 +63,35 @@ test("POST /api/issues creates an issue, GET lists it", async () => {
   assert.equal(createRes.statusCode, 200);
   const created = createRes.json() as { id: string; status: string };
   assert.equal(created.status, "ready");
+  // NOT-118: create enqueues for admission instead of starting.
+  assert.equal(getQueuedEntryForIssue(created.id)?.state, "queued");
 
   const listRes = await app.inject({ method: "GET", url: "/api/issues" });
   const list = listRes.json() as Array<{ id: string }>;
   assert.ok(list.some((i) => i.id === created.id));
+  await app.close();
+});
+
+test("NOT-118: POST /api/issues with enqueue:false creates a draft that is not queued", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Draft only",
+        repo: "/repo",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+        enqueue: false,
+      },
+    })
+  ).json() as { id: string; status: string };
+  assert.equal(created.status, "ready");
+  assert.equal(getQueuedEntryForIssue(created.id), null);
+  assert.equal(listQueuedEntries().length, 0);
   await app.close();
 });
 
@@ -183,7 +230,8 @@ test("POST /api/issues/:id/start with acceptance criteria starts the workflow", 
 
   const res = await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` });
   assert.equal(res.statusCode, 200);
-  const body = res.json() as { instance: { id: string }; workItem: { id: string; kind: string } };
+  const body = res.json() as { state: string; instance: { id: string }; workItem: { id: string; kind: string } };
+  assert.equal(body.state, "admitted");
   assert.ok(body.instance.id);
   assert.equal(body.workItem.kind, "developer");
 
@@ -194,7 +242,7 @@ test("POST /api/issues/:id/start with acceptance criteria starts the workflow", 
   await app.close();
 });
 
-test("POST /api/issues/:id/start without acceptance criteria opens a product_scope_decision", async () => {
+test("NOT-118: POST /api/issues/:id/start without acceptance criteria queues it with a wait reason, no product_scope_decision", async () => {
   const app = await buildApp();
   const created = (
     await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Underspecified start", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
@@ -202,8 +250,22 @@ test("POST /api/issues/:id/start without acceptance criteria opens a product_sco
 
   const res = await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` });
   assert.equal(res.statusCode, 200);
-  const body = res.json() as { needsScopeDecision: { actionType: string } };
-  assert.equal(body.needsScopeDecision.actionType, "product_scope_decision");
+  const body = res.json() as { state: string; position: number; waitReason: string | null };
+  assert.equal(body.state, "queued");
+  assert.equal(body.position, 1);
+  assert.match(body.waitReason ?? "", /acceptance criteria/i);
+
+  const detail = (await app.inject({ method: "GET", url: `/api/issues/${created.id}` })).json() as {
+    issue: { status: string };
+    humanActions: Array<{ actionType: string }>;
+    queued: boolean;
+    queueEntry: { position: number; waitReason: string | null } | null;
+  };
+  assert.equal(detail.issue.status, "ready");
+  assert.equal(detail.humanActions.length, 0);
+  assert.equal(detail.queued, true);
+  assert.equal(detail.queueEntry?.position, 1);
+  assert.match(detail.queueEntry?.waitReason ?? "", /acceptance criteria/i);
   await app.close();
 });
 

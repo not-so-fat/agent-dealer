@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { WorkflowInstance } from "./workflow.js";
 
 export const QueueEntryState = z.enum(["queued", "admitted", "removed"]);
 export type QueueEntryState = z.infer<typeof QueueEntryState>;
@@ -25,3 +26,16 @@ export const EnqueueIssueInput = z.object({
   issueId: z.string().uuid(),
 });
 export type EnqueueIssueInput = z.infer<typeof EnqueueIssueInput>;
+
+/**
+ * NOT-118 `POST /api/issues/:id/start` response. Start has no queue bypass: it moves the
+ * issue to the front and admits it when a slot is free, otherwise it waits at the top with
+ * a reason. `workItem` is the round-1 developer item the admitted start enqueued.
+ */
+export type StartIssueResponse =
+  | {
+      state: "admitted";
+      instance: WorkflowInstance;
+      workItem: { id: string; kind: string };
+    }
+  | { state: "queued"; position: number; waitReason: string | null };

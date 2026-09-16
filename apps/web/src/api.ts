@@ -23,6 +23,7 @@ import type {
   ResultQaContent,
   RuntimeModelsResponse,
   Run,
+  StartIssueResponse,
   StreamTraceContent,
   UpdateAgentInput,
   UpdateIssueInput,
@@ -511,6 +512,8 @@ export interface IssueDetail {
   } | null;
   /** NOT-103: whether this issue is in the admission queue. */
   queued?: boolean;
+  /** NOT-118: queue position (1-based) and current wait reason while it is queued. */
+  queueEntry?: { position: number; waitReason: string | null } | null;
 }
 
 export interface IssueEvidence {
@@ -583,9 +586,9 @@ export async function patchIssue(id: string, patch: UpdateIssueInput): Promise<I
   return res.json();
 }
 
-export type StartIssueResult =
-  | { instance: WorkflowInstance; workItem: { id: string; kind: string } }
-  | { needsScopeDecision: HumanAction };
+/** NOT-118: Start moves the issue to the front of the admission queue — there is no bypass,
+ * so it either admits immediately or reports where it is waiting and why. */
+export type StartIssueResult = StartIssueResponse;
 
 export async function startIssue(id: string): Promise<StartIssueResult> {
   const res = await fetch(`${API}/api/issues/${id}/start`, { method: "POST" });
