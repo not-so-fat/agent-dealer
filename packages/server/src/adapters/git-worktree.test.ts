@@ -379,3 +379,78 @@ test("resolveDeveloperWorktree reports a conflict for a branch checked out outsi
     execFileSync("git", ["worktree", "remove", "--force", external], { cwd: repo });
   }
 });
+
+// ---------------------------------------------------------------- NOT-127: owner liveness
+
+test("NOT-127: resolveDeveloperWorktree never adopts a leftover whose owning session is still live (clean or dirty)", async () => {
+  const leftover = await createRoleWorktree({ repo, role: "developer", sessionId: "s-live-owner", ref: "issue-1" });
+  // Clean leftover — pre-NOT-127 this would have been silently reused.
+  const clean = await resolveDeveloperWorktree({
+    repo,
+    sessionId: "s-new-live-clean",
+    branchName: "issue-1",
+    baseBranch: "main",
+    reuseBranch: true,
+    ownerLiveness: () => ({ state: "alive", sessionId: "s-live-owner" }),
+  });
+  assert.equal(clean.kind, "live_owner");
+  if (clean.kind === "live_owner") {
+    assert.equal(clean.path, leftover.path);
+    assert.equal(clean.ownerSessionId, "s-live-owner");
+    assert.match(clean.reason, /live process/);
+  }
+
+  // Dirty leftover — pre-NOT-127 this would have escalated as worktree_conflict.
+  fs.writeFileSync(path.join(leftover.path, "wip.txt"), "owner still typing\n");
+  const dirty = await resolveDeveloperWorktree({
+    repo,
+    sessionId: "s-new-live-dirty",
+    branchName: "issue-1",
+    baseBranch: "main",
+    reuseBranch: true,
+    ownerLiveness: () => ({ state: "alive", sessionId: "s-live-owner" }),
+  });
+  assert.equal(dirty.kind, "live_owner");
+  if (dirty.kind === "live_owner") assert.equal(dirty.path, leftover.path);
+  assert.ok(fs.existsSync(leftover.path), "live owner's worktree must never be removed");
+
+  fs.rmSync(leftover.path, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+test("NOT-127: resolveDeveloperWorktree still reuses a clean leftover when the owning session is dead", async () => {
+  const leftover = await createRoleWorktree({ repo, role: "developer", sessionId: "s-dead-clean", ref: "issue-1" });
+  const resolved = await resolveDeveloperWorktree({
+    repo,
+    sessionId: "s-new-dead-clean",
+    branchName: "issue-1",
+    baseBranch: "main",
+    reuseBranch: true,
+    ownerLiveness: () => ({ state: "dead" }),
+  });
+  assert.equal(resolved.kind, "reused");
+  assert.equal(resolved.path, leftover.path);
+  fs.rmSync(leftover.path, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+test("NOT-127: resolveDeveloperWorktree still escalates a dirty leftover when the owning session is dead", async () => {
+  const leftover = await createRoleWorktree({ repo, role: "developer", sessionId: "s-dead-dirty", ref: "issue-1" });
+  fs.writeFileSync(path.join(leftover.path, "abandoned.txt"), "orphan dirt\n");
+  const resolved = await resolveDeveloperWorktree({
+    repo,
+    sessionId: "s-new-dead-dirty",
+    branchName: "issue-1",
+    baseBranch: "main",
+    reuseBranch: true,
+    ownerLiveness: () => ({ state: "dead" }),
+  });
+  assert.equal(resolved.kind, "conflict");
+  if (resolved.kind === "conflict") {
+    assert.equal(resolved.path, leftover.path);
+    assert.match(resolved.reason, /uncommitted changes/);
+  }
+  assert.ok(fs.existsSync(leftover.path), "dead-and-dirty leftover must still never be force-removed");
+  fs.rmSync(leftover.path, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});

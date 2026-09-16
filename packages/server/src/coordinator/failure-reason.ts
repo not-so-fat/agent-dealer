@@ -108,6 +108,8 @@ function fallbackReasonForKind(outcome: DeveloperOutcome | ReviewerOutcome): str
       return "Developer's commits could not be pushed.";
     case "worktree_conflict":
       return "Developer worktree conflict.";
+    case "live_owner":
+      return "Developer worktree still owned by a live predecessor session.";
     case "adapter_failure":
       return "Git/GitHub verification failed.";
     case "deck_failure":
@@ -165,6 +167,7 @@ export function outcomeShouldRecordError(outcome: DeveloperOutcome | ReviewerOut
     outcome.kind === "adapter_failure" ||
     outcome.kind === "deck_failure" ||
     outcome.kind === "unpushed_commit" ||
-    outcome.kind === "worktree_conflict"
+    outcome.kind === "worktree_conflict" ||
+    outcome.kind === "live_owner"
   );
 }

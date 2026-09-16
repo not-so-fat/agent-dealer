@@ -297,7 +297,25 @@ function tryRealpath(p: string): string {
 
 export type DeveloperWorktreeResolution =
   | { kind: "created" | "reused"; path: string }
-  | { kind: "conflict"; path: string; reason: string; recoveryCommands: string[] };
+  | { kind: "conflict"; path: string; reason: string; recoveryCommands: string[] }
+  /** NOT-127: leftover is still owned by a session whose CLI is live — do not adopt or escalate. */
+  | { kind: "live_owner"; path: string; ownerSessionId: string; reason: string };
+
+/**
+ * Session id encoded in a coordinator-managed role worktree path
+ * (`…/.agent-dealer-worktrees/<sessionId>-developer`). Returns null when the basename is
+ * not that shape (external checkouts, hand-renamed dirs).
+ */
+export function sessionIdFromRoleWorktreePath(worktreePath: string): string | null {
+  const base = path.basename(worktreePath);
+  const m = /^(.*)-(developer|reviewer)$/.exec(base);
+  return m?.[1] ?? null;
+}
+
+/** Whether a leftover worktree's owning session still has a live process (NOT-127). */
+export type WorktreeOwnerLiveness =
+  | { state: "dead" }
+  | { state: "alive"; sessionId: string };
 
 /**
  * The developer-setup half of design §"Worktree lifecycle and concurrency"'s crash-recovery
@@ -308,6 +326,11 @@ export type DeveloperWorktreeResolution =
  * outside the coordinator's management, is reported as a conflict for a human to resolve
  * instead of being blindly retried — reusing or force-removing it here would silently discard
  * or hide work exactly like the dirty-handoff case this mirrors (`safeRemoveWorktree`).
+ *
+ * NOT-127: before reuse or conflict, `ownerLiveness` (when provided) asks whether the
+ * session that owns the leftover still has a live process. A live owner is neither adopted
+ * nor escalated as a worktree conflict — that is the same-worker case. Omitting the check
+ * preserves the pre-NOT-127 filesystem-only behaviour (dead owner).
  */
 export async function resolveDeveloperWorktree(opts: {
   repo: string;
@@ -315,6 +338,7 @@ export async function resolveDeveloperWorktree(opts: {
   branchName: string;
   baseBranch: string;
   reuseBranch: boolean;
+  ownerLiveness?: (worktreePath: string) => WorktreeOwnerLiveness | Promise<WorktreeOwnerLiveness>;
 }): Promise<DeveloperWorktreeResolution> {
   return withRepoLock(opts.repo, async () => {
     await pruneWorktrees(opts.repo);
@@ -328,6 +352,16 @@ export async function resolveDeveloperWorktree(opts: {
           path: existing,
           reason: `Branch ${opts.branchName} is already checked out at ${existing}, outside the coordinator's managed worktrees — it cannot be safely reused or removed automatically.`,
           recoveryCommands: [`git -C ${opts.repo} worktree list`, `# free the branch, then Resume: cd ${existing} && git status`],
+        };
+      }
+      // Live owner first — clean/dirty are only meaningful once the predecessor is gone.
+      const owner = opts.ownerLiveness ? await opts.ownerLiveness(existing) : { state: "dead" as const };
+      if (owner.state === "alive") {
+        return {
+          kind: "live_owner",
+          path: tryRealpath(existing),
+          ownerSessionId: owner.sessionId,
+          reason: `Developer worktree for branch ${opts.branchName} at ${existing} is still in use by session ${owner.sessionId} (live process) — refusing to adopt it or escalate as a worktree conflict.`,
         };
       }
       const state = await inspectLeftoverWorktree(existing);
