@@ -33,10 +33,19 @@ function flagValue(args: string[], flag: string): string | null {
 export interface ReviewerSpawnContext {
   /**
    * The attempt's scoped runtime config, as passed to `realReviewerSpawn`. For codex this
-   * is a per-attempt `CODEX_HOME` directory (agent-deck-bind.ts), which *is* the isolation
-   * from `~/.codex/config.toml` — see the codex branch below.
+   * is a per-attempt `CODEX_HOME` directory (agent-deck-bind.ts).
    */
   mcpConfigPath?: string;
+  /**
+   * The extra process env the spawn actually applies. For codex this carries `CODEX_HOME`,
+   * and `CODEX_HOME` — not the path field — is what creates the isolation: codex resolves
+   * config from `$CODEX_HOME`, else `~/.codex` (cli-env.ts). Today
+   * `materializeWorkerMcpConfig` returns the two together so they are equal, but that is a
+   * property of one function, not a guarantee. Asserting on the path would be trusting a
+   * correlate — the same shape of assumption that caused the bug this context exists to
+   * fix — so the codex branch below checks the env.
+   */
+  mcpEnv?: Record<string, string>;
 }
 
 /**
@@ -112,8 +121,14 @@ export function assertReviewerReadOnly(args: string[], ctx: ReviewerSpawnContext
     //     `--ignore-user-config` is deliberately NOT passed here (args.ts), because it
     //     would skip that scoped file too and leave the reviewer with no deck at all.
     //
+    // The second arm checks the env, not `mcpConfigPath`: the env var is what codex reads,
+    // so a future config route returning a path without exporting CODEX_HOME would leave
+    // `~/.codex/config.toml` live while looking isolated here.
+    //
     // Neither present means the ambient table is live: reject.
-    if (!args.includes("--ignore-user-config") && !ctx.mcpConfigPath) {
+    const scopedCodexHome =
+      ctx.mcpEnv?.CODEX_HOME !== undefined && ctx.mcpEnv.CODEX_HOME === ctx.mcpConfigPath;
+    if (!args.includes("--ignore-user-config") && !scopedCodexHome) {
       throw new Error("reviewer codex args do not isolate configured MCP servers");
     }
   }
