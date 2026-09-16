@@ -111,3 +111,35 @@ reclaim:
 
 Seeing `worker process presumed dead` *without* any of the above still means what it always
 meant: the worker really was gone.
+
+### A reclaim republishes the branch, it does not always redo the work (NOT-129)
+
+The gates above reduce *wrong* reclaims; they do not change what a *right* one costs. That
+used to be everything: a reclaim requeued a full developer session regardless of what the
+dead attempt had already produced. On NOT-121 a commit (`959f098`) sat unpushed on the branch
+for roughly three hours while five further agent sessions each re-ran a ~40-minute suite to
+redo it — and throughout that window the PR was `OPEN` and `MERGEABLE` carrying only half the
+fix, so merging it would have silently shipped a partial change.
+
+The branch, not the session, is the durable artifact. A presumed-dead reclaim now inspects it
+first (locally — no network call per expired lease) and picks one of three routes:
+
+| Branch state | Route | Cost |
+| --- | --- | --- |
+| Commits past base that origin does not have | `publishOnly` work item — push + PR + checks | no agent session |
+| Commits already on origin | `publishOnly` work item — PR identity + checks re-verified | no agent session |
+| No branch, no commits past base, or no base to measure against | normal developer attempt | a full agent session |
+
+Both no-agent routes reuse the existing publish path (`developer-effect.ts`'s
+`runPublishOnlyHandoff`), the same one a post-push `adapter_failure` retry takes.
+
+**Telling the two apart.** The `worker.failed` timeline payload carries `recovery`
+(`"republish"` / `"rerun"`) plus `branchState`, and its prose reason spells the choice out
+after the usual `presumed dead` prefix — e.g. `republishing 1 unpushed commit on issue-…
+instead of re-running the developer`. In the logs:
+
+- `[coordinator] N reclaim(s) routed to republish — branch already had commits, no new agent session`
+
+A republish never force-pushes and never discards: a branch that has fallen *behind* origin is
+left alone (origin is the better artifact), and a rejected push surfaces as the same
+`unpushed_commit` policy escalation a live attempt's rejected push gets.

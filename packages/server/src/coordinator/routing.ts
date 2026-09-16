@@ -17,9 +17,12 @@ export type DeveloperOutcome =
   /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll. */
   | { kind: "timed_out"; reason?: string }
   /** git/gh tooling itself errored during verification — not the agent's fault.
-   * When `afterPush` is set, the branch is already on the remote: infra retry should
-   * re-run coordinator publish only (no new agent session). */
-  | { kind: "adapter_failure"; reason: string; afterPush?: { branch: string } }
+   * `publishable` names a branch whose commits the coordinator can still publish on its own:
+   * already on the remote, or recovered from a dead attempt and merely waiting on a push
+   * (NOT-129). Either way the infra retry re-runs coordinator publish only — spawning a fresh
+   * agent to redo committed work is the expensive mistake, and a failed push does not undo
+   * the commits that made the branch publishable in the first place. */
+  | { kind: "adapter_failure"; reason: string; publishable?: { branch: string } }
   /** Agent Deck config, connection, bound-deck, or required-playbook preflight failed. */
   | { kind: "deck_failure"; reason: string }
   | { kind: "session_failed"; reason?: string }
@@ -67,7 +70,10 @@ export type DeveloperRouteResult =
    * plain crash, and (round 1 specifically) would be told to start on a "fresh branch"
    * despite reusing one that already carries a failed attempt's commits. */
   | { next: "retry_developer"; reason: string }
-  /** Branch already on origin; re-run coordinator gh/PR/checks only (no agent spawn). */
+  /** Re-run the coordinator's own publish stage only — no agent spawn. Usually the branch is
+   * already on origin and just gh/PR/checks is redone, but a recovered branch whose push has
+   * not landed yet is pushed first (developer-effect's runPublishOnlyHandoff decides from the
+   * branch, so this route must never be read as "the remote is already correct"). */
   | { next: "retry_publish"; reason: string; branch: string }
   | {
       next: "human_action";
@@ -122,8 +128,8 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
           };
     case "adapter_failure": {
       const reason = infraFailureReason(outcome);
-      if (outcome.afterPush && infraAttemptsRemain(limits)) {
-        return { next: "retry_publish", reason, branch: outcome.afterPush.branch };
+      if (outcome.publishable && infraAttemptsRemain(limits)) {
+        return { next: "retry_publish", reason, branch: outcome.publishable.branch };
       }
       return infraAttemptsRemain(limits)
         ? { next: "retry_developer", reason }

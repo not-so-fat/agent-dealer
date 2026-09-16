@@ -304,6 +304,13 @@ export interface RequeueOpts {
   backoffMs: number;
   /** Recovery guard — see FinishInput.onlyIfExpiredBefore. */
   onlyIfExpiredBefore?: string;
+  /**
+   * Replace the payload as part of the requeue (NOT-129). A reclaim is not always "run the
+   * same thing again": when the dead attempt already committed, the next attempt is a
+   * no-agent republish, and that only differs from a fresh session by its payload. Left
+   * undefined the existing payload is kept, exactly as before.
+   */
+  payloadJson?: string;
 }
 
 export interface DeferWorkItemOpts {
@@ -374,6 +381,7 @@ export function requeueWorkItem(
         status = 'pending',
         error_json = @error,
         available_at = @available_at,
+        payload_json = COALESCE(@payload_json, payload_json),
         lease_owner = NULL,
         lease_token = NULL,
         lease_expires_at = NULL,
@@ -386,6 +394,7 @@ export function requeueWorkItem(
       token: leaseToken,
       error: JSON.stringify(error),
       available_at: new Date(now + opts.backoffMs).toISOString(),
+      payload_json: opts.payloadJson ?? null,
       expired_before: opts.onlyIfExpiredBefore ?? null,
       now: new Date(now).toISOString(),
     });
