@@ -37,6 +37,24 @@ import {
 /** Statuses that occupy an admission slot (Decision 2). */
 export const occupyingStatuses = new Set<IssueStatus>(["developing", "reviewing", "repairing"]);
 
+/**
+ * Statuses admission can actually start: `ready`, or `needs_human` parked back for a human
+ * to unblock. Everything else — mid-flight (`developing`/`reviewing`/`repairing`), awaiting
+ * a human's merge call (`final_review`), or terminal — is not startable.
+ */
+export const startableStatuses = new Set<IssueStatus>(["ready", "needs_human"]);
+
+/**
+ * The single "may this issue enter the queue" predicate, shared by the eligibility rule,
+ * Manual Start and the create route's idempotent re-enqueue. Enqueueing on a looser
+ * predicate creates a row admission can never accept: a migrated `final_review` issue has
+ * no *active* instance but a completed one, so "nonterminal + no active workflow" would
+ * queue it forever with `status final_review — not startable`.
+ */
+export function isStartable(issue: Issue): boolean {
+  return startableStatuses.has(issue.status) && !getActiveWorkflowInstance(issue.id);
+}
+
 export type ActiveIssueRef = { id: string; status: IssueStatus };
 
 /**
@@ -119,7 +137,7 @@ async function checkAgentsHealthy(issue: Issue, ctx: EligibilityContext): Promis
  * checkIssueReadiness must pass — never open product_scope_decision.
  */
 function issueReadinessRule(issue: Issue): EligibilityResult {
-  if (issue.status !== "ready" && issue.status !== "needs_human") {
+  if (!startableStatuses.has(issue.status)) {
     return { ok: false, reason: `issue status is ${issue.status} — not startable` };
   }
   if (getActiveWorkflowInstance(issue.id)) {
@@ -324,7 +342,7 @@ export async function startIssueViaQueue(issueId: string): Promise<StartIssueOut
   if (getActiveWorkflowInstance(issueId)) {
     return { state: "error", code: 409, error: activeWorkflowConflictMessage(issueId) };
   }
-  if (issue.status !== "ready" && issue.status !== "needs_human") {
+  if (!startableStatuses.has(issue.status)) {
     return { state: "error", code: 409, error: `Issue is ${issue.status} — not startable` };
   }
 

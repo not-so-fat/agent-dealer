@@ -16,9 +16,11 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-no
 
 const { migrate, getDb } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
-const { getIssue, updateIssue } = await import("../repository/issues.js");
+const { getIssue, updateIssue, transitionIssue } = await import("../repository/issues.js");
 const { createHumanAction, listHumanActionsForIssue } = await import("../repository/human-actions.js");
-const { getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
+const { getActiveWorkflowInstance, completeWorkflowInstance } = await import(
+  "../repository/workflow-events.js"
+);
 const { listQueuedEntries, getQueuedEntryForIssue, dequeueIssue } = await import(
   "../repository/queue-entries.js"
 );
@@ -248,6 +250,52 @@ test("re-queueing a dequeued issue works, and start 409s once a workflow is acti
 
   const again = await app.inject({ method: "POST", url: `/api/issues/${issueId}/start` });
   assert.equal(again.statusCode, 409);
+  await app.close();
+});
+
+test("re-importing a migrated final_review issue re-enqueues nothing; a still-startable one re-enqueues", async () => {
+  const app = await buildApp();
+  const payload = {
+    title: "Kicked twice from Linear",
+    repo,
+    baseBranch: "main",
+    developerAgentId: dev.id,
+    reviewerAgentId: rev.id,
+    acceptanceCriteria: "It works",
+    source: "linear",
+    externalId: "LIN-FR-1",
+  };
+  const first = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as {
+    id: string;
+  };
+
+  // The shape a migrated issue has: a *completed* instance, parked on final_review awaiting
+  // a human's merge call — nonterminal, and with no active workflow to block on.
+  const started = await startViaApi(app, first.id);
+  assert.equal(started.state, "admitted");
+  if (started.state === "admitted") completeWorkflowInstance(started.instance.id, "migrated");
+  transitionIssue(first.id, "reviewing");
+  transitionIssue(first.id, "final_review");
+  assert.equal(getActiveWorkflowInstance(first.id), null);
+
+  // Re-import stays idempotent, but must not queue an entry admission would reject forever
+  // with `status final_review — not startable`.
+  const second = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as {
+    id: string;
+  };
+  assert.equal(second.id, first.id);
+  assert.equal(getQueuedEntryForIssue(first.id), null, "final_review is not startable");
+  assert.deepEqual(listQueuedEntries().map((e) => e.issueId), []);
+
+  // The other side of the same predicate: a dequeued but still-`ready` import re-enqueues.
+  const readyPayload = { ...payload, title: "Still ready", externalId: "LIN-FR-2" };
+  const ready = (
+    await app.inject({ method: "POST", url: "/api/issues", payload: readyPayload })
+  ).json() as { id: string };
+  dequeueIssue(ready.id);
+  assert.equal(getQueuedEntryForIssue(ready.id), null);
+  await app.inject({ method: "POST", url: "/api/issues", payload: readyPayload });
+  assert.equal(getQueuedEntryForIssue(ready.id)?.state, "queued");
   await app.close();
 });
 

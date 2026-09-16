@@ -15,7 +15,7 @@ import {
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { abortIssue, checkIssueReadiness } from "../coordinator/commands.js";
-import { queueStatusForIssue, startIssueViaQueue } from "../coordinator/admission.js";
+import { isStartable, queueStatusForIssue, startIssueViaQueue } from "../coordinator/admission.js";
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
 import { enqueueIssue, getQueuedEntryForIssue } from "../repository/queue-entries.js";
 import { latestSessionFailureForIssue } from "../coordinator/latest-failure.js";
@@ -144,12 +144,10 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       if (existing) {
         // Idempotent re-create of an already-imported issue: re-enqueue it when it is still
         // startable, so a repeated "kick from Linear" lands it back in the queue instead of
-        // being a silent no-op. A terminal or already-running issue is left alone.
-        const startable =
-          existing.status !== "done" &&
-          existing.status !== "closed" &&
-          !getActiveWorkflowInstance(existing.id);
-        if (input.enqueue && startable) enqueueIssue(existing.id);
+        // being a silent no-op. `isStartable` is admission's own predicate — enqueueing
+        // anything it would reject (a running issue, a `final_review` one awaiting a merge
+        // call, a terminal one) parks a row that can never be admitted.
+        if (input.enqueue && isStartable(existing)) enqueueIssue(existing.id);
         return existing;
       }
     }
