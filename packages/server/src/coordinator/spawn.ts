@@ -48,6 +48,12 @@ export interface DeveloperSpawnInput {
   mcpEnv?: Record<string, string>;
   /** When set, write the NDJSON stream here (NOT-109 live strip / activity sampler). */
   logPath?: string;
+  /**
+   * The attempt's abort signal (NOT-126). Aborting kills the spawned CLI, so an attempt
+   * that loses its lease can never leave an agent running in the worktree that the
+   * successor attempt is about to reuse.
+   */
+  signal?: AbortSignal;
 }
 
 export function developerSessionLogPath(sessionId: string): string {
@@ -79,7 +85,7 @@ export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
     BIN_FOR[input.runtime](),
     args,
     input.cwd,
-    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv }
+    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv, signal: input.signal }
   );
   return { exitCode, transcript: extractResultTranscript(logPath, input.runtime, transcript), logPath, timedOut };
 };
@@ -98,7 +104,7 @@ export const realReviewerSpawn: ReviewerSpawn = async (input) => {
     BIN_FOR[input.runtime](),
     args,
     input.cwd,
-    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv }
+    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv, signal: input.signal }
   );
   return { exitCode, transcript: extractResultTranscript(logPath, input.runtime, transcript), logPath, timedOut };
 };

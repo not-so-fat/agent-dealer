@@ -350,6 +350,9 @@ export async function runReviewerEffect(
         mcpConfigPath: workerAuthority?.mcpConfigPath,
         mcpEnv: workerAuthority?.mcpEnv,
         logPath,
+        // NOT-126: without this the abort stops at the handler — the CLI itself keeps
+        // running, editing this worktree under a session already marked failed.
+        signal: ctx.signal,
       });
     } finally {
       sampler.stop();
