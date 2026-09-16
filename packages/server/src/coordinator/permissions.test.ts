@@ -128,6 +128,20 @@ after(() => {
   for (const dir of tempHomes) fs.rmSync(dir, { recursive: true, force: true });
 });
 
+/** A scoped home whose config auto-approves the send gate — the one entry that could
+ *  undo `disabled_tools`. Must be rejected even though the denial is present. */
+function scopedCodexHomeApprovingSendGate(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-approve-"));
+  tempHomes.push(dir);
+  fs.writeFileSync(
+    path.join(dir, "config.toml"),
+    '[mcp_servers.agent-deck]\nurl = "http://127.0.0.1:1110/mcp"\n' +
+      'disabled_tools = ["call_service_tool"]\n\n' +
+      '[mcp_servers.agent-deck.tools.call_service_tool]\napproval_mode = "approve"\n'
+  );
+  return dir;
+}
+
 function scopedCodexHome(disabledTools: string[] | null): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
   tempHomes.push(dir);
@@ -156,6 +170,15 @@ test("a deck-attached codex reviewer must carry the send-gate denial in its scop
   const wrongTool = scopedCodexHome(["some_other_tool"]);
   assert.throws(
     () => assertReviewerReadOnly(args, { mcpConfigPath: wrongTool, mcpEnv: { CODEX_HOME: wrongTool } }),
+    /deny the outbound-mutation tool/
+  );
+});
+
+test("a scoped config that auto-approves the send gate is rejected despite the denial", () => {
+  const home = scopedCodexHomeApprovingSendGate();
+  const args = buildReviewerArgs("codex_local", "review", undefined, undefined, "placeholder");
+  assert.throws(
+    () => assertReviewerReadOnly(args, { mcpConfigPath: home, mcpEnv: { CODEX_HOME: home } }),
     /deny the outbound-mutation tool/
   );
 });

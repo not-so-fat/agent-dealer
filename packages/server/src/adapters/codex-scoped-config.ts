@@ -22,6 +22,22 @@ import { parse as parseToml } from "smol-toml";
 export const CODEX_SEND_GATE_TOOL = "call_service_tool";
 
 /**
+ * The deck reads a worker legitimately needs, in codex's unnamespaced spelling. Mirrors
+ * claude's `DECK_READ_TOOLS` (args.ts) one-for-one; the send gate is deliberately absent.
+ *
+ * These need an explicit `approval_mode` because a non-interactive `codex exec` runs with
+ * an approval policy of `never` — there is no human to answer a prompt, so any MCP call
+ * that requires approval is refused outright ("MCP tool call requires approval, but
+ * approval policy is never"). Without this the deck is configured, reachable, and unusable.
+ */
+export const CODEX_DECK_READ_TOOLS = [
+  "bind_workspace",
+  "get_bound_deck",
+  "get_playbook",
+  "list_service_tools",
+] as const;
+
+/**
  * The scoped `mcp_servers` table for one attempt.
  *
  * `disabled_tools` is the only place a codex session's tool surface can be narrowed —
@@ -53,6 +69,14 @@ export function codexMcpServersTable(opts: {
       url: opts.mcpUrl,
       http_headers: opts.headers,
       ...(opts.allowOutboundMutation ? {} : { disabled_tools: [CODEX_SEND_GATE_TOOL] }),
+      // Pre-approve exactly the reads, and nothing else. Verified against codex 0.154.0:
+      // with these the deck read returns data; without them it is refused by the
+      // approval policy even though the server is configured and connected. The send gate
+      // is never listed here — it is removed by `disabled_tools` above, and listing it
+      // would be the one entry that could undo that.
+      tools: Object.fromEntries(
+        CODEX_DECK_READ_TOOLS.map((t) => [t, { approval_mode: "approve" }])
+      ),
     },
   };
 }
@@ -68,14 +92,22 @@ export function codexMcpServersTable(opts: {
 export function codexScopedConfigDeniesSendGate(codexHome: string): boolean {
   try {
     const parsed = parseToml(fs.readFileSync(path.join(codexHome, "config.toml"), "utf8")) as {
-      mcp_servers?: Record<string, { disabled_tools?: unknown }>;
+      mcp_servers?: Record<
+        string,
+        { disabled_tools?: unknown; tools?: Record<string, { approval_mode?: unknown }> }
+      >;
     };
     const servers = parsed.mcp_servers ?? {};
     const names = Object.keys(servers);
     if (names.length === 0) return true;
     return names.every((n) => {
-      const denied = servers[n]?.disabled_tools;
-      return Array.isArray(denied) && denied.includes(CODEX_SEND_GATE_TOOL);
+      const server = servers[n];
+      const denied = server?.disabled_tools;
+      if (!Array.isArray(denied) || !denied.includes(CODEX_SEND_GATE_TOOL)) return false;
+      // A per-tool approval entry for the send gate would be the one line that could
+      // undo the removal above, so it is rejected rather than merely not written —
+      // the denial must not depend on nobody having added it.
+      return server?.tools?.[CODEX_SEND_GATE_TOOL] === undefined;
     });
   } catch {
     return false;

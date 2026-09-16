@@ -184,9 +184,25 @@ test("the codex scoped config carries the send-gate denial, and drops it only wh
   assert.equal(denied.ok, true);
   if (denied.ok) {
     const cfg = parseToml(fs.readFileSync(path.join(denied.mcpConfigPath, "config.toml"), "utf8")) as {
-      mcp_servers: Record<string, { disabled_tools?: string[] }>;
+      mcp_servers: Record<
+        string,
+        { disabled_tools?: string[]; tools?: Record<string, { approval_mode?: string }> }
+      >;
     };
     assert.deepEqual(cfg.mcp_servers["agent-deck"].disabled_tools, ["call_service_tool"]);
+    // A non-interactive `codex exec` has approval policy `never`, so the reads need an
+    // explicit approval_mode or the deck is configured, connected and unusable. Exactly
+    // the reads — the send gate must never appear here, since that entry could undo the
+    // removal above.
+    const tools = cfg.mcp_servers["agent-deck"].tools ?? {};
+    assert.deepEqual(Object.keys(tools).sort(), [
+      "bind_workspace",
+      "get_bound_deck",
+      "get_playbook",
+      "list_service_tools",
+    ]);
+    for (const t of Object.keys(tools)) assert.equal(tools[t].approval_mode, "approve");
+    assert.equal(tools["call_service_tool"], undefined);
     assert.equal(codexScopedConfigDeniesSendGate(denied.mcpConfigPath), true);
     await releaseWorkerDeckConnection({ mcpConfigPath: denied.mcpConfigPath });
   }
