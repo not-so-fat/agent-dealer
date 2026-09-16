@@ -49,10 +49,53 @@ test("PermissionPolicy has no push/openPr field — see profile-snapshot.ts for 
   assert.ok(!("openPr" in p));
 });
 
-test("assertReviewerReadOnly passes for generated reviewer args across every runtime", () => {
-  for (const runtime of ["claude_code", "codex_local", "cursor_local"] as const) {
-    assert.doesNotThrow(() => assertReviewerReadOnly(buildReviewerArgs(runtime, "review")));
+// NOT-132: the deck-attached column is the one production always takes, and it was the
+// one never asserted. args.ts omits codex's --ignore-user-config once a scoped CODEX_HOME
+// exists; permissions.ts demanded it unconditionally. Each module's own test passed while
+// the composition threw on every real spawn, so this matrix — not a per-runtime one-off —
+// is the shape that holds the contract.
+const RUNTIMES = ["claude_code", "codex_local", "cursor_local"] as const;
+
+const deckConfigFor = (runtime: (typeof RUNTIMES)[number]): string =>
+  runtime === "codex_local"
+    ? "/tmp/authz/codex-home"
+    : runtime === "cursor_local"
+      ? "/tmp/wt/.cursor/mcp.json"
+      : "/tmp/authz/claude-mcp.json";
+
+test("assertReviewerReadOnly passes for generated reviewer args across every runtime, deck-attached or not", () => {
+  for (const runtime of RUNTIMES) {
+    assert.doesNotThrow(
+      () => assertReviewerReadOnly(buildReviewerArgs(runtime, "review")),
+      `${runtime} without a deck`
+    );
+
+    const mcpConfigPath = deckConfigFor(runtime);
+    const args = buildReviewerArgs(runtime, "review", undefined, undefined, mcpConfigPath);
+    assert.doesNotThrow(
+      () => assertReviewerReadOnly(args, { mcpConfigPath }),
+      `${runtime} with a deck`
+    );
   }
+});
+
+test("a codex reviewer with neither --ignore-user-config nor a scoped CODEX_HOME is rejected", () => {
+  // The ambient ~/.codex/config.toml mcp_servers table would be live. Passing the args
+  // without their spawn context is the strict reading, so it must still throw.
+  const args = buildReviewerArgs("codex_local", "review", undefined, undefined, "/tmp/authz/codex-home");
+  assert.ok(!args.includes("--ignore-user-config"));
+  assert.throws(() => assertReviewerReadOnly(args), /isolate configured MCP servers/);
+  assert.equal(isReviewerReadOnly(args), false);
+  assert.equal(isReviewerReadOnly(args, { mcpConfigPath: "/tmp/authz/codex-home" }), true);
+});
+
+test("a scoped CODEX_HOME does not excuse a writable codex sandbox", () => {
+  // The MCP-isolation escape hatch must not leak into the sandbox check.
+  const writable = ["exec", "--json", "-s", "workspace-write", "review"];
+  assert.throws(
+    () => assertReviewerReadOnly(writable, { mcpConfigPath: "/tmp/authz/codex-home" }),
+    /writable sandbox/
+  );
 });
 
 test("assertReviewerReadOnly rejects developer args (write tools present)", () => {
