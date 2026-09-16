@@ -236,24 +236,73 @@ function assertBoundDeckMatches(result: unknown, expectedDeckId: string): void {
   }
 }
 
+function assertPlaybookMatches(result: unknown, expectedPlaybookId: string): void {
+  const payload = parseDeckToolResult(result);
+  const playbookId = typeof payload.id === "string" ? payload.id : undefined;
+  if (playbookId !== expectedPlaybookId) {
+    throw new Error(
+      `get_playbook returned ${playbookId ?? "(missing id)"}, expected ${expectedPlaybookId}`
+    );
+  }
+}
+
 type VerifyDeckResult = { ok: true } | { ok: false; kind: "infra_failure"; reason: string };
+
+/** Run one preflight operation inside the shared absolute deadline and clear its timer. */
+async function withinPreflightDeadline<T>(opts: {
+  label: string;
+  deadlineMs: number;
+  timeoutMs: number;
+  run: () => Promise<T>;
+}): Promise<T> {
+  const remainingMs = opts.deadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    throw new Error(`${opts.label} timed out after ${opts.timeoutMs}ms total preflight budget`);
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${opts.label} timed out after ${opts.timeoutMs}ms total preflight budget`)),
+      remainingMs
+    );
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(opts.run), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 async function verifyDeckConnection(opts: {
   deckId: string;
   worktreePath: string;
+  playbookIds: string[];
   callTool?: DeckToolCaller;
   timeoutMs: number;
 }): Promise<VerifyDeckResult> {
+  const deadlineMs = Date.now() + opts.timeoutMs;
+  const callBeforeDeadline = <T>(label: string, run: () => Promise<T>) =>
+    withinPreflightDeadline({ label, deadlineMs, timeoutMs: opts.timeoutMs, run });
+
   if (opts.callTool) {
     let result: unknown;
     try {
-      result = await opts.callTool("get_bound_deck", {});
+      result = await callBeforeDeadline("get_bound_deck", () =>
+        opts.callTool!("get_bound_deck", {})
+      );
     } catch (err) {
       return { ok: false, kind: "infra_failure", reason: (err as Error).message };
     }
     try {
       assertToolResultOk(result, "get_bound_deck");
       assertBoundDeckMatches(result, opts.deckId);
+      for (const playbookId of new Set(opts.playbookIds)) {
+        const playbook = await callBeforeDeadline(`get_playbook(${playbookId})`, () =>
+          opts.callTool!("get_playbook", { playbook_id: playbookId })
+        );
+        assertToolResultOk(playbook, `get_playbook(${playbookId})`);
+        assertPlaybookMatches(playbook, playbookId);
+      }
       return { ok: true };
     } catch (err) {
       return { ok: false, kind: "infra_failure", reason: (err as Error).message };
@@ -265,33 +314,42 @@ async function verifyDeckConnection(opts: {
   });
   const client = new Client({ name: "agent-dealer-deck-preflight", version: "0.0.1" });
   try {
-    await client.connect(transport);
-    try {
-      const result = await Promise.race([
-        client.callTool({ name: "get_bound_deck", arguments: {} }),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`get_bound_deck timed out after ${opts.timeoutMs}ms`)), opts.timeoutMs)
-        ),
-      ]);
-      assertToolResultOk(result, "get_bound_deck");
-      assertBoundDeckMatches(result, opts.deckId);
-      return { ok: true };
-    } finally {
-      await client.close();
+    await callBeforeDeadline("Agent Deck connection", () => client.connect(transport));
+    const result = await callBeforeDeadline("get_bound_deck", () =>
+      client.callTool({ name: "get_bound_deck", arguments: {} })
+    );
+    assertToolResultOk(result, "get_bound_deck");
+    assertBoundDeckMatches(result, opts.deckId);
+    for (const playbookId of new Set(opts.playbookIds)) {
+      const playbook = await callBeforeDeadline(`get_playbook(${playbookId})`, () =>
+        client.callTool({ name: "get_playbook", arguments: { playbook_id: playbookId } })
+      );
+      assertToolResultOk(playbook, `get_playbook(${playbookId})`);
+      assertPlaybookMatches(playbook, playbookId);
     }
+    return { ok: true };
   } catch (err) {
     return { ok: false, kind: "infra_failure", reason: (err as Error).message };
+  } finally {
+    try {
+      await client.close();
+    } catch {
+      // best-effort after a connection or deadline failure
+    }
   }
 }
 
 /**
  * Materialize a per-attempt MCP config for the profile's deck and verify with
- * `get_bound_deck` before spawn. No mint, no ledger, no Authorization.
+ * `get_bound_deck` and every configured playbook before spawn. No mint, no ledger, no
+ * Authorization. A deck-bound worker is fail-closed: missing playbook authority is an
+ * infrastructure failure, never permission to improvise without the configured recipe.
  */
 export async function prepareWorkerDeckConnection(opts: {
   deckId: string;
   worktreePath: string;
   runtime: Runtime;
+  playbookIds?: string[];
   verifyCallTool?: DeckToolCaller;
   timeoutMs?: number;
 }): Promise<WorkerDeckConnectionOutcome> {
@@ -305,12 +363,13 @@ export async function prepareWorkerDeckConnection(opts: {
       worktreePath: opts.worktreePath,
     });
   } catch (err) {
-    return { ok: false, kind: "infra_failure", reason: `deck MCP materialization failed: ${(err as Error).message}` };
+    return { ok: false, kind: "infra_failure", reason: `MCP materialization failed: ${(err as Error).message}` };
   }
 
   const verified = await verifyDeckConnection({
     deckId: opts.deckId,
     worktreePath: opts.worktreePath,
+    playbookIds: opts.playbookIds ?? [],
     callTool: opts.verifyCallTool,
     timeoutMs,
   });
@@ -320,7 +379,7 @@ export async function prepareWorkerDeckConnection(opts: {
     } catch {
       // best-effort
     }
-    return { ok: false, kind: "infra_failure", reason: `deck preflight failed: ${verified.reason}` };
+    return { ok: false, kind: "infra_failure", reason: `preflight failed: ${verified.reason}` };
   }
 
   return { ok: true, mcpConfigPath: materialized.mcpConfigPath, mcpEnv: materialized.mcpEnv };

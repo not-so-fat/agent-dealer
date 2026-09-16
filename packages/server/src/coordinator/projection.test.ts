@@ -39,6 +39,7 @@ test("every developer projection lands on a legal issue transition and always ha
       { kind: "timed_out" },
       { kind: "checks_failed" },
       { kind: "adapter_failure", reason: "boom" },
+      { kind: "deck_failure", reason: "preflight failed: missing playbook" },
       {
         kind: "adapter_failure",
         reason: "Branch already pushed (br); only draft PR create failed: boom",
@@ -71,6 +72,7 @@ test("every reviewer projection lands on a legal issue transition and always has
     { kind: "verdict", result: verdict("escalated", "Which behavior is correct?") },
     { kind: "stale", currentHeadSha: "new" },
     { kind: "session_failed" },
+    { kind: "deck_failure", reason: "preflight failed: missing playbook" },
     { kind: "publish_failed" },
   ] as const;
   for (const outcome of outcomes) {

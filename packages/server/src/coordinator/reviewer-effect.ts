@@ -16,10 +16,9 @@
 // `ReviewerOutcome` (routing.ts, accepted in the NOT-59 kernel review) has no separate
 // `timed_out` or `adapter_failure` kind the way `DeveloperOutcome` does — routing.ts's own
 // doc comment for `session_failed` already covers "failed, timed out, or its worktree
-// checkout failed," and "publish_failed" covers both a failed re-verify and a failed
-// `gh pr review` call ("Publication or reviewer infrastructure failure," design §5) —
-// both route to the same `policy_escalation`, so the split below is for a clearer human-
-// facing reason, not different behavior.
+// checkout failed," while `deck_failure` preserves explicit Agent Deck diagnostics and
+// `publish_failed` covers re-verification / GitHub publication infrastructure. All three
+// remain bounded infra failures; the split is for accurate operator-facing reasons.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -267,11 +266,12 @@ export async function runReviewerEffect(
         deckId: snapshot.deckId,
         worktreePath,
         runtime,
+        playbookIds: snapshot.playbookIds,
         verifyCallTool: deps.deckCallTool,
       });
       if (!prepared.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
-        return { kind: "session_failed" };
+        return { kind: "deck_failure", reason: prepared.reason };
       }
       workerAuthority = {
         mcpConfigPath: prepared.mcpConfigPath,

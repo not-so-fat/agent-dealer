@@ -87,6 +87,58 @@ test("prepareWorkerDeckConnection returns infra_failure when verify fails", asyn
   }
 });
 
+test("prepareWorkerDeckConnection preflights every configured playbook before spawn", async () => {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const result = await prepareWorkerDeckConnection({
+    ...BASE_OPTS,
+    playbookIds: ["pb-review", "pb-security", "pb-review"],
+    verifyCallTool: async (name, args) => {
+      calls.push({ name, args });
+      if (name === "get_bound_deck") return textResult({ id: DECK });
+      return textResult({ id: args.playbook_id });
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [
+    { name: "get_bound_deck", args: {} },
+    { name: "get_playbook", args: { playbook_id: "pb-review" } },
+    { name: "get_playbook", args: { playbook_id: "pb-security" } },
+  ]);
+  if (result.ok) await releaseWorkerDeckConnection({ mcpConfigPath: result.mcpConfigPath });
+});
+
+test("prepareWorkerDeckConnection fails closed when a configured playbook is unavailable", async () => {
+  const result = await prepareWorkerDeckConnection({
+    ...BASE_OPTS,
+    playbookIds: ["pb-required"],
+    verifyCallTool: async (name) =>
+      name === "get_bound_deck" ? textResult({ id: DECK }) : errorResult("playbook missing"),
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.kind, "infra_failure");
+    assert.match(result.reason, /get_playbook\(pb-required\) returned an error/);
+  }
+});
+
+test("prepareWorkerDeckConnection shares one timeout budget across all preflight calls", async () => {
+  const result = await prepareWorkerDeckConnection({
+    ...BASE_OPTS,
+    playbookIds: ["pb-one", "pb-two"],
+    timeoutMs: 40,
+    verifyCallTool: async (name, args) => {
+      if (name === "get_bound_deck") return textResult({ id: DECK });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return textResult({ id: args.playbook_id });
+    },
+  });
+
+  assert.equal(result.ok, false, "the second playbook must not receive a fresh timeout budget");
+  if (!result.ok) assert.match(result.reason, /40ms total preflight budget/);
+});
+
 test("prepareWorkerDeckConnection for codex_local writes http_headers (no bearer) and CODEX_HOME env", async () => {
   const result = await prepareWorkerDeckConnection({
     ...BASE_OPTS,

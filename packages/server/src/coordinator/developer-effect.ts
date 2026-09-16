@@ -427,11 +427,12 @@ export async function runDeveloperEffect(
         deckId: snapshot.deckId,
         worktreePath,
         runtime,
+        playbookIds: snapshot.playbookIds,
         verifyCallTool: deps.deckCallTool,
       });
       if (!prepared.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
-        return { kind: "adapter_failure", reason: `deck connection failed: ${prepared.reason}` };
+        return { kind: "deck_failure", reason: prepared.reason };
       }
       workerAuthority = {
         mcpConfigPath: prepared.mcpConfigPath,

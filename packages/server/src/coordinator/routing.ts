@@ -18,6 +18,8 @@ export type DeveloperOutcome =
    * When `afterPush` is set, the branch is already on the remote: infra retry should
    * re-run coordinator publish only (no new agent session). */
   | { kind: "adapter_failure"; reason: string; afterPush?: { branch: string } }
+  /** Agent Deck config, connection, bound-deck, or required-playbook preflight failed. */
+  | { kind: "deck_failure"; reason: string }
   | { kind: "session_failed"; reason?: string }
   /** Runtime account usage cap — defer until unavailable_until, not an infra failure (NOT-111).
    * Optional `resume.retryReason` frames the next developer prompt when commits remain (NOT-117).
@@ -34,6 +36,7 @@ export type ReviewerOutcome =
   | { kind: "verdict"; result: ReviewerResult }
   | { kind: "stale"; currentHeadSha: string }
   | { kind: "session_failed"; reason?: string }
+  | { kind: "deck_failure"; reason: string }
   | { kind: "publish_failed"; reason?: string }
   | { kind: "usage_capped"; until: string; reason: string; evidence?: unknown };
 
@@ -112,7 +115,8 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
     case "no_pr":
     case "session_failed":
     case "timed_out":
-    case "checks_failed": {
+    case "checks_failed":
+    case "deck_failure": {
       // Unified infra-failure policy: the session/environment failed to produce a
       // reviewable result at all — bounded auto-retry on max_infra_attempts, decoupled
       // from the review-round budget, then a human policy_escalation.
@@ -126,7 +130,7 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
   }
 }
 
-function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "session_failed" | "timed_out" | "checks_failed" | "adapter_failure" }): string {
+function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "session_failed" | "timed_out" | "checks_failed" | "adapter_failure" | "deck_failure" }): string {
   switch (outcome.kind) {
     case "no_pr":
       return "Developer session produced no PR.";
@@ -138,6 +142,8 @@ function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "sessi
       return "Developer's PR checks failed.";
     case "adapter_failure":
       return `Git/GitHub verification failed: ${outcome.reason}`;
+    case "deck_failure":
+      return `Agent Deck ${outcome.reason}`;
   }
 }
 
@@ -175,9 +181,12 @@ export function routeReviewerOutcome(
             reason: "The PR head kept moving before the reviewer could evaluate it (infra-attempt limit reached).",
           };
     case "session_failed":
+    case "deck_failure":
     case "publish_failed": {
       const reason =
-        outcome.kind === "session_failed"
+        outcome.kind === "deck_failure"
+          ? `Agent Deck ${outcome.reason}`
+          : outcome.kind === "session_failed"
           ? (outcome.reason ??
             "Reviewer session failed, timed out, its worktree checkout failed, or its output was unparseable.")
           : (outcome.reason ?? "Review publication to GitHub failed.");

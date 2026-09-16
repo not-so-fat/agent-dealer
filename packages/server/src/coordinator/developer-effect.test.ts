@@ -847,6 +847,7 @@ test("cursor_local + deckId: prepares worker deck connection and passes mcpConfi
     runtime: "cursor_local",
     workspaceRoot: repo,
     deckId,
+    playbookIds: ["pb-required"],
   });
   const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
   const issueId = createIssue({
@@ -877,6 +878,7 @@ test("cursor_local + deckId: prepares worker deck connection and passes mcpConfi
   startSession(session.id);
 
   let spawnSawMcpConfig: string | undefined;
+  const deckCalls: string[] = [];
   const spySpawn: SpawnFn = async (input) => {
     spawnSawMcpConfig = input.mcpConfigPath;
     return commitingSpawn(input);
@@ -892,12 +894,27 @@ test("cursor_local + deckId: prepares worker deck connection and passes mcpConfi
     {
       spawn: spySpawn,
       github: fakeGithub(),
-      deckCallTool: async () => ({ content: [{ type: "text", text: JSON.stringify({ id: deckId, name: "dev" }) }] }),
+      deckCallTool: async (name, args) => {
+        deckCalls.push(name);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                name === "get_bound_deck"
+                  ? { id: deckId, name: "dev" }
+                  : { id: args.playbook_id }
+              ),
+            },
+          ],
+        };
+      },
     }
   );
 
   assert.ok(spawnSawMcpConfig, "cursor_local + deckId must materialize a worktree mcp.json");
   assert.match(spawnSawMcpConfig!, /\.cursor\/mcp\.json$/);
+  assert.deepEqual(deckCalls, ["get_bound_deck", "get_playbook"]);
   assert.equal(outcome.kind, "clean_handoff");
 });
 

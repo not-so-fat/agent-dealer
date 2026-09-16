@@ -65,6 +65,8 @@ test("deck section requires bind_workspace first, then lists every playbook id",
   });
   assert.match(prompt, /bind_workspace\(\{ deckId: "deck-1", workspaceRoot: "\/wt" \}\)/);
   assert.match(prompt, /First equip this agent/);
+  assert.match(prompt, /bootstrap is a hard gate/i);
+  assert.match(prompt, /do not improvise without the deck/i);
   assert.match(prompt, /call_service_tool/);
   assert.match(prompt, /do not web-fetch Linear/);
   assert.match(prompt, /get_playbook\("pb-a"\)/);
@@ -149,6 +151,8 @@ test("reviewer prompt deck section requires bind_workspace first, matching the d
   const prompt = buildReviewerPrompt({ ...reviewerBase, worktreePath: "/wt", deckId: "deck-1", playbookIds: ["pb-a", "pb-b"] });
   assert.match(prompt, /bind_workspace\(\{ deckId: "deck-1", workspaceRoot: "\/wt" \}\)/);
   assert.match(prompt, /First equip this agent/);
+  assert.match(prompt, /bootstrap is a hard gate/i);
+  assert.match(prompt, /do not improvise without the deck/i);
   assert.match(prompt, /call_service_tool/);
   assert.match(prompt, /do not web-fetch Linear/);
   assert.match(prompt, /get_playbook\("pb-a"\)/);
