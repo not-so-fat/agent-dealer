@@ -11,6 +11,8 @@ export type DeveloperOutcome =
   /** A prior round's worktree still holds the issue branch and can't be safely reused/removed
    * (dirty/unpushed, or not coordinator-managed) — see git-worktree.ts's resolveDeveloperWorktree. */
   | { kind: "worktree_conflict"; path: string; reason: string; recoveryCommands: string[] }
+  /** NOT-127: leftover worktree still has a live owning process — do not adopt or treat as conflict. */
+  | { kind: "live_owner"; path: string; ownerSessionId: string; reason: string }
   | { kind: "checks_failed"; details?: string }
   /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll. */
   | { kind: "timed_out"; reason?: string }
@@ -103,6 +105,21 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
         actionType: "policy_escalation",
         reason: `${outcome.reason} Recovery:\n${outcome.recoveryCommands.join("\n")}`,
       };
+    case "live_owner":
+      // NOT-127: predecessor CLI is still running in this worktree. Never escalate as a
+      // worktree_conflict (that mislabels live WIP as abandoned dirt) and never adopt the
+      // path. Bounded infra retry — once the predecessor is actually gone, the next attempt
+      // hits the normal clean-reuse / dirty-conflict path.
+      return infraAttemptsRemain(limits)
+        ? {
+            next: "retry_developer",
+            reason: outcome.reason,
+          }
+        : {
+            next: "human_action",
+            actionType: "policy_escalation",
+            reason: `${outcome.reason} (infra-attempt limit reached).`,
+          };
     case "adapter_failure": {
       const reason = infraFailureReason(outcome);
       if (outcome.afterPush && infraAttemptsRemain(limits)) {

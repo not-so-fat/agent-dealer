@@ -48,6 +48,12 @@ test("every developer projection lands on a legal issue transition and always ha
       { kind: "dirty_worktree" },
       { kind: "unpushed_commit", reason: "non-fast-forward" },
       { kind: "worktree_conflict", path: "/data/worktrees/old-developer", reason: "collision", recoveryCommands: ["git status"] as string[] },
+      {
+        kind: "live_owner",
+        path: "/data/worktrees/old-developer",
+        ownerSessionId: "sess-old",
+        reason: "still in use by a live predecessor",
+      },
     ] as const) {
       for (const limits of ALL_LIMITS) {
         const route = routeDeveloperOutcome(outcome, limits);

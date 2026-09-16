@@ -39,6 +39,7 @@ import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckTool
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
 import { getWorkerSession, patchRunningSession, recordSessionProcess } from "../repository/worker-sessions.js";
 import { COORDINATOR_PROCESS_OWNER, readProcessStartTime } from "./process-liveness.js";
+import { checkDeveloperWorktreeOwnerLiveness } from "./worktree-owner-liveness.js";
 import { developerSessionTimeoutMs } from "./session-timeouts.js";
 import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
@@ -401,15 +402,26 @@ export async function runDeveloperEffect(
     // branch (a plain `git worktree add` would collide with it and surface as an opaque
     // adapter_failure — the exact loop this ticket fixes). A clean leftover is reused in
     // place; a dirty/unpushed one is reported as a worktree_conflict escalation instead.
+    // NOT-127: a leftover whose owning session still has a live process is neither adopted
+    // nor escalated as a conflict — that is the same-worker case.
     const resolved = await resolveDeveloperWorktree({
       repo: issue.repo,
       sessionId,
       branchName,
       baseBranch: issue.baseBranch,
       reuseBranch,
+      ownerLiveness: checkDeveloperWorktreeOwnerLiveness,
     });
     if (resolved.kind === "conflict") {
       return { kind: "worktree_conflict", path: resolved.path, reason: resolved.reason, recoveryCommands: resolved.recoveryCommands };
+    }
+    if (resolved.kind === "live_owner") {
+      return {
+        kind: "live_owner",
+        path: resolved.path,
+        ownerSessionId: resolved.ownerSessionId,
+        reason: resolved.reason,
+      };
     }
     worktreePath = resolved.path;
   } catch (err) {

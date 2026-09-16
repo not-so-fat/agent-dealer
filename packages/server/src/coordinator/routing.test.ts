@@ -74,6 +74,24 @@ test("worktree conflict always escalates immediately — never retried, regardle
   assert.match(reason, /git status/);
 });
 
+test("NOT-127: live_owner retries on the infra budget — never escalates as worktree_conflict", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "live_owner",
+    path: "/data/worktrees/old-session-developer",
+    ownerSessionId: "old-session",
+    reason: "still in use by session old-session (live process)",
+  };
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    next: "retry_developer",
+    reason: outcome.reason,
+  });
+  const exhausted = routeDeveloperOutcome(outcome, INFRA_AT_LIMIT);
+  assert.equal(exhausted.next, "human_action");
+  assert.equal((exhausted as { actionType: string }).actionType, "policy_escalation");
+  assert.match((exhausted as { reason: string }).reason, /live process/);
+  assert.doesNotMatch((exhausted as { reason: string }).reason, /uncommitted/);
+});
+
 test("adapter failure is bounded-retried on the infra budget (unified failure policy), not escalated on first occurrence", () => {
   const outcome: DeveloperOutcome = { kind: "adapter_failure", reason: "gh: command not found" };
   assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
