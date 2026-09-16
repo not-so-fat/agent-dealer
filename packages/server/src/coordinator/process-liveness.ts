@@ -99,65 +99,91 @@ function signalProbe(pid: number): "alive" | "dead" | "foreign" {
   }
 }
 
+export interface WorkerProcessCheck {
+  verdict: LivenessVerdict;
+  /**
+   * Whether this exact observation identified the pid as the session's own CLI, and so
+   * authorizes signalling it.
+   *
+   * Deliberately part of the same struct as `verdict`, not a second function: the two are
+   * answers to one question about one moment. Deriving them from separate `ps` calls let
+   * them disagree — a transient `ps` timeout would produce verdict "unknown" (hold nothing,
+   * fall through to reclaim) while a second, successful call authorized a kill, so one
+   * flaky probe would SIGKILL a healthy worker and requeue its item: exactly the restart
+   * failure this module exists to prevent, re-entered through the side door. One
+   * observation makes that state unreachable rather than merely guarded. It is also why
+   * `signalable` is never true alongside an "unknown" verdict — a probe that identified the
+   * process necessarily reached a verdict about it.
+   */
+  signalable: boolean;
+}
+
 /**
+ * One probe of a recorded worker pid, answering both "is it alive?" and "may we signal it?".
+ *
+ * The two answers are deliberately asymmetric. A wrong verdict costs one redundant reclaim;
+ * a wrong *kill* terminates an unrelated program on the developer's machine. So the verdict
+ * may fall back on weaker evidence, while `signalable` requires an exact start-time match
+ * and nothing else — including for this coordinator's own children.
+ *
  * @param pid        `worker_sessions.process_pid`
  * @param owner      `worker_sessions.process_owner`
- * @param startTime  `worker_sessions.process_started_at` — required to reach a verdict for
- *                   a pid this coordinator process did not itself spawn. A row written
- *                   before NOT-131 has none, and must read "unknown" (never "alive"), so a
- *                   pre-upgrade row degrades to the timestamp-only behaviour NOT-116
- *                   shipped instead of being mistaken for a live worker.
+ * @param startTime  `worker_sessions.process_started_at`. Required to reach a verdict for a
+ *                   pid this coordinator did not spawn: a row written before NOT-131 has
+ *                   none and must read "unknown" (never "alive"), degrading to the
+ *                   timestamp-only behaviour NOT-116 shipped.
  */
+export function inspectWorkerProcess(
+  pid: number | null,
+  owner: string | null,
+  startTime: string | null = null
+): WorkerProcessCheck {
+  const unknown: WorkerProcessCheck = { verdict: "unknown", signalable: false };
+  if (!pid || pid <= 0) return unknown;
+
+  const ours = owner === COORDINATOR_PROCESS_OWNER;
+  if (!ours) {
+    if (!owner) return unknown;
+    // Another machine's pid is not ours to probe or signal at all.
+    if (ownerHost(owner) !== os.hostname()) return unknown;
+    if (!startTime) return unknown;
+  }
+
+  // Corroborate whenever there is anything to corroborate with — including for our own
+  // child. `COORDINATOR_PROCESS_OWNER` proves which coordinator wrote the row; it does not
+  // prove the current occupant of that pid number is still the process it named. This
+  // module keeps no `ChildProcess` handle, so a child that exited while its row stayed
+  // `running` can have its pid recycled under a coordinator that is still very much alive.
+  if (startTime) {
+    const current = readProcessStartTime(pid);
+    if (current !== null) {
+      const same = current === startTime;
+      return { verdict: same ? "alive" : "dead", signalable: same };
+    }
+  }
+
+  // No corroboration available: either nothing was recorded, or `ps` just failed. Never
+  // signalable — but the verdict still has to say something useful.
+  const probe = signalProbe(pid);
+  if (ours) {
+    // NOT-124's original behaviour, and the safe direction here: "alive" only blocks a
+    // reclaim, and the NOT-131 hold ceiling bounds how long that can last. Downgrading to
+    // "unknown" on a `ps` hiccup would re-expose the sleeping-laptop teardown NOT-124 fixed.
+    return { verdict: probe === "dead" ? "dead" : "alive", signalable: false };
+  }
+  // `ps` told us nothing about someone else's pid. Separate "the process is gone" (a real
+  // verdict) from "`ps` does not work here" (no verdict at all) — conflating them would
+  // reclaim every live worker on a host without `lstart`.
+  return { verdict: probe === "alive" ? "unknown" : "dead", signalable: false };
+}
+
+/** Verdict-only view of {@link inspectWorkerProcess}. */
 export function processLiveness(
   pid: number | null,
   owner: string | null,
   startTime: string | null = null
 ): LivenessVerdict {
-  if (!pid || pid <= 0) return "unknown";
-
-  // Our own child: we hold the handle, so the pid cannot have been recycled under us.
-  if (owner === COORDINATOR_PROCESS_OWNER) {
-    const probe = signalProbe(pid);
-    return probe === "dead" ? "dead" : "alive";
-  }
-
-  // Spawned by some other process — corroborate, or abstain.
-  if (!owner) return "unknown";
-  // Another machine's pid is not ours to probe or signal at all.
-  if (ownerHost(owner) !== os.hostname()) return "unknown";
-  if (!startTime) return "unknown";
-
-  const current = readProcessStartTime(pid);
-  if (current !== null) return current === startTime ? "alive" : "dead";
-
-  // `ps` told us nothing. Separate "the process is gone" (a real verdict) from "`ps` does
-  // not work here" (no verdict at all) — conflating them would reclaim every live worker
-  // on a host without `lstart`, which is the bug this module exists to prevent.
-  const probe = signalProbe(pid);
-  if (probe === "dead" || probe === "foreign") return "dead";
-  return "unknown";
-}
-
-/**
- * May this coordinator send a signal to `pid` believing it is this session's CLI?
- *
- * Stricter than `processLiveness`, and deliberately so: a wrong verdict costs one
- * unnecessary reclaim, while a wrong *kill* terminates an unrelated program on the
- * developer's machine. Only two things authorize it — we spawned the process ourselves, or
- * the recorded start time still matches exactly. Everything else (another host, a missing
- * start time, a recycled pid) declines, which is why NOT-131 keeps the reclaim-time kill as
- * a safety net rather than a replacement for a correct verdict.
- */
-export function canSignalWorkerProcess(
-  pid: number | null,
-  owner: string | null,
-  startTime: string | null
-): boolean {
-  if (!pid || pid <= 0) return false;
-  if (owner === COORDINATOR_PROCESS_OWNER) return true;
-  if (!owner || ownerHost(owner) !== os.hostname()) return false;
-  if (!startTime) return false;
-  return readProcessStartTime(pid) === startTime;
+  return inspectWorkerProcess(pid, owner, startTime).verdict;
 }
 
 const sleep = (ms: number): Promise<void> =>
@@ -181,18 +207,19 @@ export type TerminationOutcome =
  * actually cleans up the whole tree — then SIGKILL as the backstop, mirroring
  * `spawn-cli.ts`'s abort escalation.
  *
- * Returns "unverified" rather than signalling on an unidentifiable pid; callers must treat
- * that as "an orphan may survive", not as success.
+ * Takes `signalable` from the caller's {@link inspectWorkerProcess} rather than re-deriving
+ * it, so the authorization to kill and the verdict that motivated the kill are the same
+ * observation. Returns "unverified" rather than signalling an unidentified pid; callers
+ * must treat that as "an orphan may survive", not as success.
  */
 export async function terminateWorkerProcess(
   pid: number | null,
-  owner: string | null,
-  startTime: string | null,
+  signalable: boolean,
   opts?: { graceMs?: number; pollMs?: number }
 ): Promise<TerminationOutcome> {
   if (!pid || pid <= 0) return "stopped"; // nothing was ever recorded to outlive us
   if (signalProbe(pid) === "dead") return "stopped";
-  if (!canSignalWorkerProcess(pid, owner, startTime)) return "unverified";
+  if (!signalable) return "unverified";
 
   const graceMs = opts?.graceMs ?? Number(process.env.SPAWN_ABORT_KILL_GRACE_MS ?? 5_000);
   const pollMs = opts?.pollMs ?? 100;

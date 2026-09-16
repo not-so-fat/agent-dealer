@@ -33,7 +33,7 @@ import {
   type WorkItem,
 } from "../repository/work-items.js";
 import { activeClockJumpGrace, type ClockJump } from "./clock-jump.js";
-import { processLiveness, terminateWorkerProcess } from "./process-liveness.js";
+import { inspectWorkerProcess, terminateWorkerProcess } from "./process-liveness.js";
 import { maxAliveHoldMsFor } from "./session-timeouts.js";
 import { routeAppliedOutcome } from "./commands.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
@@ -239,13 +239,16 @@ export async function recoverCoordinator(opts?: {
     // reclaiming every live worker — and it is also why the hold below must be bounded.
     const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
     let aliveButCapped = false;
-    const liveness = processLiveness(
+    // One probe, reused for both the hold decision and the kill authorization below — two
+    // separate probes could disagree, and a `ps` hiccup between them would kill a healthy
+    // worker (see WorkerProcessCheck).
+    const probe = inspectWorkerProcess(
       session?.processPid ?? null,
       session?.processOwner ?? null,
       session?.processStartedAt ?? null
     );
 
-    if (liveness === "alive") {
+    if (probe.verdict === "alive") {
       // NOT-131: the CLI's own wall clock (`spawnCli`'s setTimeout) died with the process
       // that spawned it, so nothing but this bound will ever stop a hung-but-breathing
       // worker. Honouring "alive" forever would trade a destructive reclaim for a permanent
@@ -300,14 +303,11 @@ export async function recoverCoordinator(opts?: {
     // that just died. This is the out-of-process equivalent, and it is deliberately outside
     // the transaction below: signalling is not rollback-able.
     //
-    // A pid we cannot identify is never signalled (`canSignalWorkerProcess`) — a wrong
-    // verdict costs one redundant attempt, a wrong kill takes out an unrelated program.
+    // A pid this probe did not positively identify is never signalled — a wrong verdict
+    // costs one redundant attempt, a wrong kill takes out an unrelated program on the
+    // developer's machine.
     if (session?.processPid) {
-      const stopped = await terminateWorkerProcess(
-        session.processPid,
-        session.processOwner,
-        session.processStartedAt
-      ).catch((err) => {
+      const stopped = await terminateWorkerProcess(session.processPid, probe.signalable).catch((err) => {
         console.error("[coordinator] terminateWorkerProcess", item.id, err);
         return "failed" as const;
       });

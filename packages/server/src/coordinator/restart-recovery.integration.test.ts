@@ -35,8 +35,13 @@ const { getWorkItem, listWorkItemsForIssue, claimWorkItem, bindWorkItemSession }
 );
 const { startWorkflow } = await import("./commands.js");
 const { recoverCoordinator } = await import("./recovery.js");
-const { COORDINATOR_PROCESS_OWNER, processLiveness, readProcessStartTime, terminateWorkerProcess } =
-  await import("./process-liveness.js");
+const {
+  COORDINATOR_PROCESS_OWNER,
+  inspectWorkerProcess,
+  processLiveness,
+  readProcessStartTime,
+  terminateWorkerProcess,
+} = await import("./process-liveness.js");
 
 const LEASE_MS = 60_000;
 /** A clock far enough past any lease that timestamp-only recovery would always reclaim. */
@@ -312,24 +317,122 @@ test("readProcessStartTime identifies a process and distinguishes the next one",
   assert.equal(readProcessStartTime(null), null);
 });
 
-test("processLiveness: our own child needs no corroboration", () => {
-  assert.equal(processLiveness(process.pid, COORDINATOR_PROCESS_OWNER), "alive");
-  assert.equal(processLiveness(process.pid, COORDINATOR_PROCESS_OWNER, "whatever"), "alive");
+test("PR #50 [P1]: a current-owner pid is corroborated too, not trusted on the owner alone", () => {
+  // `COORDINATOR_PROCESS_OWNER` proves which coordinator wrote the row, not that the pid
+  // still belongs to the child it named. This module keeps no `ChildProcess` handle, so a
+  // child that exited while its row stayed `running` can have its pid recycled under a
+  // coordinator that is still alive — and before this, that recycled stranger read "alive"
+  // AND was authorized for a SIGKILL purely because the owner string matched.
+  const child = spawnLiveChild();
+
+  const recycled = inspectWorkerProcess(child.pid, COORDINATOR_PROCESS_OWNER, "Thu Jan  1 00:00:00 1970");
+  assert.equal(recycled.verdict, "dead", "a start-time mismatch is not our worker");
+  assert.equal(recycled.signalable, false, "and must never authorize a kill");
+
+  const real = inspectWorkerProcess(child.pid, COORDINATOR_PROCESS_OWNER, child.startTime);
+  assert.equal(real.verdict, "alive");
+  assert.equal(real.signalable, true);
 });
 
-test("terminateWorkerProcess declines a pid it cannot identify", async () => {
+test("a current-owner pid with no recorded start time keeps NOT-124's verdict, without the kill", () => {
+  // `ps` can fail at spawn time, leaving the column null. The verdict must stay "alive" —
+  // downgrading it would re-expose the sleeping-laptop teardown NOT-124 fixed — but with
+  // nothing to corroborate, signalling is still refused.
   const child = spawnLiveChild();
-  assert.equal(await terminateWorkerProcess(child.pid, DEAD_COORDINATOR, null), "unverified");
-  assert.equal(await terminateWorkerProcess(child.pid, OTHER_HOST, child.startTime), "unverified");
+  const check = inspectWorkerProcess(child.pid, COORDINATOR_PROCESS_OWNER, null);
+  assert.equal(check.verdict, "alive");
+  assert.equal(check.signalable, false);
+  assert.equal(processLiveness(process.pid, COORDINATOR_PROCESS_OWNER), "alive");
+});
+
+/**
+ * A `ps` that fails its FIRST invocation and then works normally — the transient failure
+ * that made the old two-probe design kill a healthy worker. Prepended to PATH so
+ * `readProcessStartTime`'s `execFileSync("ps", ...)` resolves to it.
+ */
+function installFlakyPs(): { dir: string; restore: () => void } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-flaky-ps-"));
+  const state = path.join(dir, "used");
+  fs.writeFileSync(
+    path.join(dir, "ps"),
+    `#!/bin/sh\nif [ ! -f "${state}" ]; then : > "${state}"; exit 1; fi\nexec /bin/ps "$@"\n`,
+    { mode: 0o755 }
+  );
+  const realPath = process.env.PATH;
+  process.env.PATH = `${dir}:${realPath ?? ""}`;
+  return { dir, restore: () => { process.env.PATH = realPath; } };
+}
+
+test("PR #50 [P1]: one transient ps failure must not turn into a kill", async () => {
+  // The exact interleaving the review found. The verdict and the kill authorization used to
+  // be two SEPARATE `ps` calls: the first failed, producing verdict "unknown" (hold nothing,
+  // fall through to reclaim), then the second succeeded, matched the recorded start time,
+  // and authorized SIGTERM/SIGKILL against a perfectly healthy worker — recreating the
+  // restart failure this whole change exists to prevent, from a single flaky probe.
+  //
+  // With one observation serving both answers, "unknown" and "signalable" cannot co-occur.
+  const { itemId, sessionId } = leasedAttempt();
+  const child = spawnLiveChild();
+  recordSessionProcess(sessionId, child.pid, DEAD_COORDINATOR, child.startTime);
+
+  const ps = installFlakyPs();
+  let res;
+  try {
+    res = await recoverCoordinator({ now: LONG_AFTER(), clockJump: null });
+    assert.equal(
+      await exitedWithin(child, 200),
+      "still-running",
+      "a healthy worker must survive a flaky ps"
+    );
+    // The fake is spent, so `ps` works again — proving the outage really was transient, and
+    // that the run above had a *second*, successful call available to it had it asked. That
+    // second call is precisely what used to authorize the kill.
+    assert.equal(readProcessStartTime(child.pid), child.startTime);
+  } finally {
+    ps.restore();
+  }
+
+  // Reclaiming on the timestamp alone is the correct fallback for an inconclusive probe —
+  // killing is not.
+  assert.deepEqual(res.reclaimed, [itemId]);
+  assert.deepEqual(res.unverifiedOrphans, [itemId], "surfaced, since the orphan may survive");
+});
+
+test("a host with no usable ps reaches no verdict, and signals nothing", async () => {
+  // The permanent version (BusyBox has no `lstart`): every cross-owner pid degrades to the
+  // timestamp-only behaviour NOT-116 shipped, rather than every live worker being reclaimed.
+  const child = spawnLiveChild();
+  const emptyBin = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-no-ps-"));
+  const realPath = process.env.PATH;
+  process.env.PATH = emptyBin;
+  try {
+    assert.equal(readProcessStartTime(child.pid), null, "ps is genuinely unavailable here");
+
+    const foreign = inspectWorkerProcess(child.pid, DEAD_COORDINATOR, child.startTime);
+    assert.equal(foreign.verdict, "unknown");
+    assert.equal(foreign.signalable, false);
+
+    // Our own child still holds — a `ps` outage must not re-expose the NOT-124 teardown.
+    const ours = inspectWorkerProcess(child.pid, COORDINATOR_PROCESS_OWNER, child.startTime);
+    assert.equal(ours.verdict, "alive");
+    assert.equal(ours.signalable, false, "but still nothing to corroborate a kill with");
+  } finally {
+    process.env.PATH = realPath;
+  }
+});
+
+test("terminateWorkerProcess declines a pid the caller could not identify", async () => {
+  const child = spawnLiveChild();
+  assert.equal(await terminateWorkerProcess(child.pid, false), "unverified");
   assert.equal(await exitedWithin(child, 200), "still-running");
 });
 
-test("terminateWorkerProcess stops a verified process and reports an already-dead one", async () => {
+test("terminateWorkerProcess stops an identified process and reports an already-dead one", async () => {
   const child = spawnLiveChild();
-  assert.equal(await terminateWorkerProcess(child.pid, DEAD_COORDINATOR, child.startTime), "stopped");
+  assert.equal(await terminateWorkerProcess(child.pid, true), "stopped");
   assert.equal(await exitedWithin(child, 5_000), "exited");
 
   const gone = await deadPid();
-  assert.equal(await terminateWorkerProcess(gone.pid, DEAD_COORDINATOR, gone.startTime), "stopped");
-  assert.equal(await terminateWorkerProcess(null, DEAD_COORDINATOR, null), "stopped");
+  assert.equal(await terminateWorkerProcess(gone.pid, true), "stopped");
+  assert.equal(await terminateWorkerProcess(null, true), "stopped");
 });
