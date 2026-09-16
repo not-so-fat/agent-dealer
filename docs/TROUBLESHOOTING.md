@@ -67,3 +67,47 @@ Investigated against long `cursor_local` runs and the NOT-103 “presumed dead�
 - Raise `COORDINATOR_LEASE_MS` (and keep heartbeat ≤ ~¼ of lease) only if you have logs showing lease reclaim while the same Node PID was still running the effect and Cursor was healthy.
 - Lower values only for faster crash recovery in labs; too-low leases amplify false “presumed dead” under GC pauses.
 - Failure reasons on the issue timeline / detail strip are the operator-facing fix for mid-run Cursor auth death; do not conflate that with lease tuning.
+
+### Host sleep is not a crash (NOT-124 / NOT-125)
+
+The reasoning above holds for a *running* host. It does not hold for one that sleeps: the
+heartbeat is a `setInterval`, and timers do not fire while a laptop is suspended, but
+wall-clock time keeps advancing. Every wake therefore looked exactly like a crash. On
+2026-09-15/16 that failed six healthy developer sessions — one of which had already pushed
+its branch and opened its PR — with `worker process presumed dead`, each failure landing on
+a macOS wake to the second.
+
+Two gates now stand between an expired lease and a reclaim. Neither can *cause* a reclaim,
+and neither replaces the lease-token CAS that fences the write itself:
+
+| Gate | Evidence | What it covers |
+| --- | --- | --- |
+| Process liveness | `worker_sessions.process_pid` + `process_owner`, checked with `kill(pid, 0)` | The spawned CLI is verifiably still running, so the lease is extended instead of reclaimed. |
+| Clock-jump grace | the gap between two poll ticks, measured both against `performance.now()` and against the poll interval itself | The host was suspended, so leases that predate the jump get one `COORDINATOR_LEASE_MS` grace window before they are eligible. |
+
+The pid is only trusted while `process_owner` names the *running* coordinator process. After
+a restart (or on another host) it is discarded rather than believed: the OS recycles pids, so
+a stale row could otherwise match some unrelated program forever and strand the work item —
+a permanent stall, strictly worse than the over-eager reclaim being fixed. With no usable
+pid, reclaim falls back to the timestamp-only behaviour NOT-116 shipped.
+
+| Env | Default | Role |
+| --- | --- | --- |
+| `COORDINATOR_CLOCK_JUMP_THRESHOLD_MS` | `max(COORDINATOR_POLL_INTERVAL_MS × 2, 5000)` | How large a tick gap counts as a host suspension rather than scheduling noise. |
+
+Two signals feed that threshold, and a jump is declared when **either** trips. The
+wall-clock-minus-monotonic delta is the textbook one, but it silently reads zero wherever
+libuv's monotonic clock is `mach_continuous_time()` — which keeps counting while the machine
+sleeps. So the gap between poll ticks is measured too: a 3s timer that took 49 minutes to
+fire did not fire, and the heartbeats that would have renewed those leases did not run
+either, whatever any clock says.
+
+**Reading the logs.** An absorbed sleep is deliberately distinct from a real presumed-dead
+reclaim:
+
+- `[coordinator] host clock jumped 2940s (2939s un-elapsed) — likely host sleep` — the host slept.
+- `[coordinator] clock jump absorbed — holding N lease(s) that predate it` — those N items were spared.
+- `[coordinator] lease expired but worker pid NNN is alive — extending` — that CLI is still running.
+
+Seeing `worker process presumed dead` *without* any of the above still means what it always
+meant: the worker really was gone.

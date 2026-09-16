@@ -37,7 +37,8 @@ import {
 } from "../adapters/git-worktree.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
-import { getWorkerSession, patchRunningSession } from "../repository/worker-sessions.js";
+import { getWorkerSession, patchRunningSession, recordSessionProcess } from "../repository/worker-sessions.js";
+import { COORDINATOR_PROCESS_OWNER } from "./process-liveness.js";
 import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
@@ -520,6 +521,9 @@ export async function runDeveloperEffect(
         // NOT-126: without this the abort stops at the handler — the CLI itself keeps
         // running, editing this worktree under a session already marked failed.
         signal: ctx.signal,
+        // NOT-124: persist the CLI's pid so recovery can verify this worker is really
+        // gone before presuming it dead on an expired lease.
+        onSpawn: (pid) => recordSessionProcess(sessionId, pid, COORDINATOR_PROCESS_OWNER),
       });
     } finally {
       sampler.stop();

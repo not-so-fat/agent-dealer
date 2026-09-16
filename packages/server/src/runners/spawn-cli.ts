@@ -67,6 +67,13 @@ export async function spawnCli(
      * successor attempt then reuses that same worktree, so two live agents share one tree.
      */
     signal?: AbortSignal;
+    /**
+     * Called once with the spawned CLI's pid, as soon as it exists (NOT-124). The
+     * coordinator persists it so recovery can verify the worker is really gone before
+     * presuming it dead — a host that slept froze the heartbeat but not the process.
+     * Never called when the spawn itself fails (no child, so nothing to prove alive).
+     */
+    onSpawn?: (pid: number) => void;
   }
 ): Promise<{ exitCode: number; transcript: string; timedOut: boolean }> {
   await acquireSpawnSlot();
@@ -98,6 +105,14 @@ export async function spawnCli(
         stdio: ["ignore", "pipe", "pipe"],
       });
       registerChild(runId, child, opts.logPath);
+      // Best-effort bookkeeping: a throwing callback must never take down the spawn.
+      if (child.pid !== undefined) {
+        try {
+          opts.onSpawn?.(child.pid);
+        } catch (err) {
+          console.error(`[spawn-cli] onSpawn for ${runId}`, err);
+        }
+      }
 
       const onAbort = () => {
         if (settled) return;

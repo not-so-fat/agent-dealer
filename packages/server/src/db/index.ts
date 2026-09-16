@@ -130,6 +130,20 @@ export function migrate(): void {
   if (!workerSessionCols.some((c) => c.name === "profile_snapshot_json")) {
     db.exec("ALTER TABLE worker_sessions ADD COLUMN profile_snapshot_json TEXT");
   }
+  // NOT-124: spawned-CLI liveness evidence. Existing rows stay NULL, which recovery reads
+  // as "no evidence" and falls back to the timestamp-only reclaim it has always done.
+  //
+  // Each column is guarded on its OWN presence, not on the pair. Every `ALTER TABLE` here
+  // commits separately, so a process killed between two of them leaves the table half
+  // upgraded — and a guard keyed on the first column would then skip the block forever
+  // while every worker_sessions INSERT still names the second, failing permanently. Checked
+  // independently, the same pass that could have produced that state also repairs it.
+  if (!workerSessionCols.some((c) => c.name === "process_pid")) {
+    db.exec("ALTER TABLE worker_sessions ADD COLUMN process_pid INTEGER");
+  }
+  if (!workerSessionCols.some((c) => c.name === "process_owner")) {
+    db.exec("ALTER TABLE worker_sessions ADD COLUMN process_owner TEXT");
+  }
 
   // Tighten the workflow-event idempotency index to UNIQUE for DBs created before the
   // constraint (schema.sql's IF NOT EXISTS won't upgrade an existing non-unique index).

@@ -54,6 +54,14 @@ export interface DeveloperSpawnInput {
    * successor attempt is about to reuse.
    */
   signal?: AbortSignal;
+  /**
+   * Called with the spawned CLI's pid once it is running (NOT-124). The coordinator
+   * persists it on the worker session so recovery can check the process is actually gone
+   * before declaring it presumed dead — a laptop sleeping stops the heartbeat, not the CLI.
+   * Optional on the seam: a test's fake spawn simply never calls it, leaving the session
+   * with no pid, which recovery reads as "no evidence" and handles exactly as before.
+   */
+  onSpawn?: (pid: number) => void;
 }
 
 export function developerSessionLogPath(sessionId: string): string {
@@ -85,7 +93,7 @@ export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
     BIN_FOR[input.runtime](),
     args,
     input.cwd,
-    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv, signal: input.signal }
+    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv, signal: input.signal, onSpawn: input.onSpawn }
   );
   return { exitCode, transcript: extractResultTranscript(logPath, input.runtime, transcript), logPath, timedOut };
 };
@@ -104,7 +112,7 @@ export const realReviewerSpawn: ReviewerSpawn = async (input) => {
     BIN_FOR[input.runtime](),
     args,
     input.cwd,
-    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv, signal: input.signal }
+    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv, signal: input.signal, onSpawn: input.onSpawn }
   );
   return { exitCode, transcript: extractResultTranscript(logPath, input.runtime, transcript), logPath, timedOut };
 };
