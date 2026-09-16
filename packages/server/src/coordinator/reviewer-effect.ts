@@ -261,12 +261,18 @@ export async function runReviewerEffect(
       headSha: headSha.slice(0, 8),
     });
 
+    // One resolution, two consumers: the materialized MCP config's tool surface below and
+    // the spawn args' tool surface further down. They were resolved separately and had to
+    // agree by inspection — the exact shape this stack exists to remove (NOT-134 review).
+    const policy = snapshot?.permissionPolicy ?? roleCeiling("reviewer");
+
     if (snapshot?.deckId) {
       const prepared = await prepareWorkerDeckConnection({
         deckId: snapshot.deckId,
         worktreePath,
         runtime,
         playbookIds: snapshot.playbookIds,
+        policy,
         verifyCallTool: deps.deckCallTool,
       });
       if (!prepared.ok) {
@@ -343,7 +349,7 @@ export async function runReviewerEffect(
       spawned = await deps.spawn({
         sessionId,
         runtime,
-        policy: snapshot?.permissionPolicy ?? roleCeiling("reviewer"),
+        policy,
         model: snapshot?.model ?? null,
         prompt,
         cwd: worktreePath,

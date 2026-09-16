@@ -1,6 +1,9 @@
 // packages/server/src/coordinator/permissions.test.ts
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { serializePermissionPolicyOverride } from "@agent-dealer/shared";
 import { buildDeveloperArgs, buildReviewerArgs } from "./args.js";
 import {
@@ -65,10 +68,13 @@ const deckConfigFor = (runtime: (typeof RUNTIMES)[number]): string =>
 
 /** Mirrors what materializeWorkerMcpConfig hands realReviewerSpawn (agent-deck-bind.ts). */
 const deckContextFor = (runtime: (typeof RUNTIMES)[number]) => {
-  const mcpConfigPath = deckConfigFor(runtime);
-  return runtime === "codex_local"
-    ? { mcpConfigPath, mcpEnv: { CODEX_HOME: mcpConfigPath } }
-    : { mcpConfigPath };
+  if (runtime === "codex_local") {
+    // A real directory: the codex branch reads this config to check the send-gate denial,
+    // the way codex itself will (NOT-134).
+    const home = scopedCodexHome(["call_service_tool"]);
+    return { mcpConfigPath: home, mcpEnv: { CODEX_HOME: home } };
+  }
+  return { mcpConfigPath: deckConfigFor(runtime) };
 };
 
 test("assertReviewerReadOnly passes for generated reviewer args across every runtime, deck-attached or not", () => {
@@ -87,7 +93,7 @@ test("assertReviewerReadOnly passes for generated reviewer args across every run
 test("a codex reviewer with neither --ignore-user-config nor a scoped CODEX_HOME is rejected", () => {
   // The ambient ~/.codex/config.toml mcp_servers table would be live. Passing the args
   // without their spawn context is the strict reading, so it must still throw.
-  const codexHome = "/tmp/authz/codex-home";
+  const codexHome = scopedCodexHome(["call_service_tool"]);
   const args = buildReviewerArgs("codex_local", "review", undefined, undefined, codexHome);
   assert.ok(!args.includes("--ignore-user-config"));
   assert.throws(() => assertReviewerReadOnly(args), /isolate configured MCP servers/);
@@ -108,6 +114,83 @@ test("a config path that never reached the spawn env does not count as codex iso
   assert.equal(
     isReviewerReadOnly(args, { mcpConfigPath: codexHome, mcpEnv: { SOMETHING_ELSE: codexHome } }),
     false
+  );
+});
+
+// NOT-134. codex has no --disallowedTools, so the send-gate denial lives in the scoped
+// config.toml. Verified live against codex 0.154.0: with `disabled_tools` present the
+// session reports NOTOOL and emits no mcp_tool_call; without it the tool is exposed and
+// reachable (the call was then refused by codex's own approval policy — an accident of
+// that default, not something this codebase expresses, which is exactly why it is
+// asserted here).
+const tempHomes: string[] = [];
+after(() => {
+  for (const dir of tempHomes) fs.rmSync(dir, { recursive: true, force: true });
+});
+
+/** A scoped home whose config auto-approves the send gate — the one entry that could
+ *  undo `disabled_tools`. Must be rejected even though the denial is present. */
+function scopedCodexHomeApprovingSendGate(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-approve-"));
+  tempHomes.push(dir);
+  fs.writeFileSync(
+    path.join(dir, "config.toml"),
+    '[mcp_servers.agent-deck]\nurl = "http://127.0.0.1:1110/mcp"\n' +
+      'disabled_tools = ["call_service_tool"]\n\n' +
+      '[mcp_servers.agent-deck.tools.call_service_tool]\napproval_mode = "approve"\n'
+  );
+  return dir;
+}
+
+function scopedCodexHome(disabledTools: string[] | null): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
+  tempHomes.push(dir);
+  const denial = disabledTools ? `disabled_tools = ${JSON.stringify(disabledTools)}\n` : "";
+  fs.writeFileSync(
+    path.join(dir, "config.toml"),
+    `[mcp_servers.agent-deck]\nurl = "http://127.0.0.1:1110/mcp"\n${denial}`
+  );
+  return dir;
+}
+
+test("a deck-attached codex reviewer must carry the send-gate denial in its scoped config", () => {
+  const args = buildReviewerArgs("codex_local", "review", undefined, undefined, "placeholder");
+
+  const denied = scopedCodexHome(["call_service_tool"]);
+  assert.doesNotThrow(() =>
+    assertReviewerReadOnly(args, { mcpConfigPath: denied, mcpEnv: { CODEX_HOME: denied } })
+  );
+
+  const undenied = scopedCodexHome(null);
+  assert.throws(
+    () => assertReviewerReadOnly(args, { mcpConfigPath: undenied, mcpEnv: { CODEX_HOME: undenied } }),
+    /deny the outbound-mutation tool/
+  );
+
+  const wrongTool = scopedCodexHome(["some_other_tool"]);
+  assert.throws(
+    () => assertReviewerReadOnly(args, { mcpConfigPath: wrongTool, mcpEnv: { CODEX_HOME: wrongTool } }),
+    /deny the outbound-mutation tool/
+  );
+});
+
+test("a scoped config that auto-approves the send gate is rejected despite the denial", () => {
+  const home = scopedCodexHomeApprovingSendGate();
+  const args = buildReviewerArgs("codex_local", "review", undefined, undefined, "placeholder");
+  assert.throws(
+    () => assertReviewerReadOnly(args, { mcpConfigPath: home, mcpEnv: { CODEX_HOME: home } }),
+    /deny the outbound-mutation tool/
+  );
+});
+
+test("an unreadable scoped codex config is treated as not denied", () => {
+  // An assertion must only ever over-reject: a config we cannot read is not evidence.
+  const missing = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-empty-"));
+  tempHomes.push(missing);
+  const args = buildReviewerArgs("codex_local", "review", undefined, undefined, "placeholder");
+  assert.throws(
+    () => assertReviewerReadOnly(args, { mcpConfigPath: missing, mcpEnv: { CODEX_HOME: missing } }),
+    /deny the outbound-mutation tool/
   );
 });
 

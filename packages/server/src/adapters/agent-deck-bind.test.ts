@@ -14,6 +14,11 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-de
 
 const { migrate } = await import("../db/index.js");
 const { prepareWorkerDeckConnection, releaseWorkerDeckConnection, parseDeckToolResult } = await import("./agent-deck-bind.js");
+const { codexScopedConfigDeniesSendGate } = await import("./codex-scoped-config.js");
+const { roleCeiling } = await import("@agent-dealer/shared");
+
+/** Default worker policy: outboundMutation is false for BOTH roles (NOT-134). */
+const DENIED = roleCeiling("reviewer");
 
 migrate();
 
@@ -42,6 +47,7 @@ test("parseDeckToolResult extracts and parses the text payload", () => {
 test("prepareWorkerDeckConnection verifies and writes a claude MCP config with deck headers, no Auth", async () => {
   let verifyCalled = false;
   const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
     ...BASE_OPTS,
     verifyCallTool: async (name) => {
       verifyCalled = true;
@@ -65,6 +71,7 @@ test("prepareWorkerDeckConnection verifies and writes a claude MCP config with d
 
 test("prepareWorkerDeckConnection rejects when get_bound_deck reports a different deck", async () => {
   const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
     ...BASE_OPTS,
     verifyCallTool: async () => textResult({ id: "some-other-deck-id" }),
   });
@@ -77,6 +84,7 @@ test("prepareWorkerDeckConnection rejects when get_bound_deck reports a differen
 
 test("prepareWorkerDeckConnection returns infra_failure when verify fails", async () => {
   const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
     ...BASE_OPTS,
     verifyCallTool: async () => errorResult("no session"),
   });
@@ -90,6 +98,7 @@ test("prepareWorkerDeckConnection returns infra_failure when verify fails", asyn
 test("prepareWorkerDeckConnection preflights every configured playbook before spawn", async () => {
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
   const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
     ...BASE_OPTS,
     playbookIds: ["pb-review", "pb-security", "pb-review"],
     verifyCallTool: async (name, args) => {
@@ -110,6 +119,7 @@ test("prepareWorkerDeckConnection preflights every configured playbook before sp
 
 test("prepareWorkerDeckConnection fails closed when a configured playbook is unavailable", async () => {
   const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
     ...BASE_OPTS,
     playbookIds: ["pb-required"],
     verifyCallTool: async (name) =>
@@ -125,6 +135,7 @@ test("prepareWorkerDeckConnection fails closed when a configured playbook is una
 
 test("prepareWorkerDeckConnection shares one timeout budget across all preflight calls", async () => {
   const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
     ...BASE_OPTS,
     playbookIds: ["pb-one", "pb-two"],
     timeoutMs: 40,
@@ -141,6 +152,7 @@ test("prepareWorkerDeckConnection shares one timeout budget across all preflight
 
 test("prepareWorkerDeckConnection for codex_local writes http_headers (no bearer) and CODEX_HOME env", async () => {
   const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
     ...BASE_OPTS,
     runtime: "codex_local",
     verifyCallTool: async () => textResult({ id: DECK }),
@@ -157,6 +169,56 @@ test("prepareWorkerDeckConnection for codex_local writes http_headers (no bearer
     assert.equal(result.mcpEnv?.AGENT_DECK_AUTHORITY_BEARER, undefined);
     await releaseWorkerDeckConnection({ mcpConfigPath: result.mcpConfigPath });
     assert.equal(fs.existsSync(result.mcpConfigPath), false);
+  }
+});
+
+test("the codex scoped config carries the send-gate denial, and drops it only when policy allows", async () => {
+  // NOT-134: codex has no --disallowedTools, so this file is the only place the denial
+  // can exist. Both roles default to outboundMutation:false, so both get it.
+  const denied = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    runtime: "codex_local",
+    verifyCallTool: async () => textResult({ id: DECK }),
+  });
+  assert.equal(denied.ok, true);
+  if (denied.ok) {
+    const cfg = parseToml(fs.readFileSync(path.join(denied.mcpConfigPath, "config.toml"), "utf8")) as {
+      mcp_servers: Record<
+        string,
+        { disabled_tools?: string[]; tools?: Record<string, { approval_mode?: string }> }
+      >;
+    };
+    assert.deepEqual(cfg.mcp_servers["agent-deck"].disabled_tools, ["call_service_tool"]);
+    // A non-interactive `codex exec` has approval policy `never`, so the reads need an
+    // explicit approval_mode or the deck is configured, connected and unusable. Exactly
+    // the reads — the send gate must never appear here, since that entry could undo the
+    // removal above.
+    const tools = cfg.mcp_servers["agent-deck"].tools ?? {};
+    assert.deepEqual(Object.keys(tools).sort(), [
+      "bind_workspace",
+      "get_bound_deck",
+      "get_playbook",
+      "list_service_tools",
+    ]);
+    for (const t of Object.keys(tools)) assert.equal(tools[t].approval_mode, "approve");
+    assert.equal(tools["call_service_tool"], undefined);
+    assert.equal(codexScopedConfigDeniesSendGate(denied.mcpConfigPath), true);
+    await releaseWorkerDeckConnection({ mcpConfigPath: denied.mcpConfigPath });
+  }
+
+  const allowed = await prepareWorkerDeckConnection({
+    policy: { ...DENIED, outboundMutation: true },
+    ...BASE_OPTS,
+    runtime: "codex_local",
+    verifyCallTool: async () => textResult({ id: DECK }),
+  });
+  assert.equal(allowed.ok, true);
+  if (allowed.ok) {
+    const toml = fs.readFileSync(path.join(allowed.mcpConfigPath, "config.toml"), "utf8");
+    assert.doesNotMatch(toml, /disabled_tools/);
+    assert.equal(codexScopedConfigDeniesSendGate(allowed.mcpConfigPath), false);
+    await releaseWorkerDeckConnection({ mcpConfigPath: allowed.mcpConfigPath });
   }
 });
 
@@ -179,6 +241,7 @@ test("prepareWorkerDeckConnection for codex_local symlinks ambient auth.json and
   process.env.CODEX_HOME = ambientCodexHome;
   try {
     const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
       ...BASE_OPTS,
       runtime: "codex_local",
       verifyCallTool: async () => textResult({ id: DECK }),
@@ -217,6 +280,7 @@ test("prepareWorkerDeckConnection for codex_local tolerates no ambient auth.json
   process.env.CODEX_HOME = ambientCodexHome;
   try {
     const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
       ...BASE_OPTS,
       runtime: "codex_local",
       verifyCallTool: async () => textResult({ id: DECK }),
@@ -248,6 +312,7 @@ test("prepareWorkerDeckConnection for cursor_local writes mcp.json and excludes 
   initGitRepo(repo);
   try {
     const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
       deckId: DECK,
       worktreePath: repo,
       runtime: "cursor_local",
@@ -283,6 +348,7 @@ test("prepareWorkerDeckConnection refuses cursor_local when .cursor/mcp.json is 
     execFileSync("git", ["commit", "-m", "track mcp"], { cwd: repo, stdio: "ignore" });
 
     const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
       deckId: DECK,
       worktreePath: repo,
       runtime: "cursor_local",

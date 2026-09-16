@@ -15,10 +15,11 @@ import { execFileSync } from "node:child_process";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Runtime } from "@agent-dealer/shared";
+import type { PermissionPolicy, Runtime } from "@agent-dealer/shared";
 import { getAgentDeckMcpUrl } from "./agent-deck.js";
 import { getWorkerMcpConfigDir } from "../paths.js";
 import { resolveAmbientCodexHome } from "../cli-env.js";
+import { codexMcpServersTable } from "./codex-scoped-config.js";
 
 const CODEX_HOME_ENV_VAR = "CODEX_HOME";
 
@@ -162,6 +163,12 @@ async function materializeWorkerMcpConfig(opts: {
   runtime: Runtime;
   deckId: string;
   worktreePath: string;
+  /**
+   * The session's resolved policy. The scoped config is the only place a codex session's
+   * tool surface can be narrowed — codex has no `--disallowedTools` equivalent — so a
+   * policy-blind config silently grants whatever the deck exposes (NOT-134).
+   */
+  policy: PermissionPolicy;
 }): Promise<MaterializedMcpConfig> {
   const mcpBase = getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "");
   const mcpUrl = `${mcpBase}/mcp`;
@@ -182,9 +189,11 @@ async function materializeWorkerMcpConfig(opts: {
       }
       const toml = stringifyToml({
         ...readAmbientCodexAuthPolicy(ambientHome),
-        mcp_servers: {
-          "agent-deck": { url: mcpUrl, http_headers: headers },
-        },
+        mcp_servers: codexMcpServersTable({
+          mcpUrl,
+          headers,
+          allowOutboundMutation: opts.policy.outboundMutation,
+        }),
       });
       fs.writeFileSync(path.join(codexHome, "config.toml"), toml, { mode: 0o600 });
     } catch (err) {
@@ -350,6 +359,8 @@ export async function prepareWorkerDeckConnection(opts: {
   worktreePath: string;
   runtime: Runtime;
   playbookIds?: string[];
+  /** Session policy — narrows the materialized MCP config's tool surface (NOT-134). */
+  policy: PermissionPolicy;
   verifyCallTool?: DeckToolCaller;
   timeoutMs?: number;
 }): Promise<WorkerDeckConnectionOutcome> {
@@ -361,6 +372,7 @@ export async function prepareWorkerDeckConnection(opts: {
       runtime: opts.runtime,
       deckId: opts.deckId,
       worktreePath: opts.worktreePath,
+      policy: opts.policy,
     });
   } catch (err) {
     return { ok: false, kind: "infra_failure", reason: `MCP materialization failed: ${(err as Error).message}` };
