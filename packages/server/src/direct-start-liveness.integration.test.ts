@@ -6,9 +6,9 @@
 // running" for the two most common ways this app is actually launched. This spawns that
 // real entrypoint (not a fake), the same way `npm run dev` does, and drives
 // migrate-to-issues.ts's isServiceRunning() against it end to end.
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,8 +17,21 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
-const tsxBin = path.join(repoRoot, "node_modules", ".bin", "tsx");
 const serverEntry = path.join(repoRoot, "packages", "server", "src", "index.ts");
+
+/** `node_modules/.bin/tsx`, found the way Node resolves modules: by walking up from the
+ * repo root. A git worktree has no node_modules of its own and resolves everything from the
+ * main checkout above it, so hardcoding `<repoRoot>/node_modules` makes every spawn in this
+ * file fail with ENOENT when it runs from one. */
+function resolveTsxBin(): string {
+  for (let dir = repoRoot; ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, "node_modules", ".bin", "tsx");
+    if (fs.existsSync(candidate)) return candidate;
+    if (path.dirname(dir) === dir) throw new Error(`could not find node_modules/.bin/tsx at or above ${repoRoot}`);
+  }
+}
+
+const tsxBin = resolveTsxBin();
 
 const { isServiceRunning, runMigration } = await import("./db/migrate-to-issues.js");
 const Database = (await import("better-sqlite3")).default;
@@ -48,8 +61,41 @@ async function waitUntil(check: () => boolean | Promise<boolean>, timeoutMs: num
   }
 }
 
+/** A temp AGENT_DEALER_HOME that is deleted when the test ends, however it ends. Registered
+ * as a test hook rather than dropped in a `finally` on purpose: teardown here asserts (that
+ * the server it stopped is really dead), and an assertion that throws must not be able to
+ * skip the cleanup and leave a directory behind — which is precisely how $TMPDIR filled up
+ * with hundreds of these. Runs after the body's own `finally`, so servers are stopped by
+ * then. */
+function makeHome(t: TestContext, prefix: string): string {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  return home;
+}
+
+// Every server spawned by this file that stopServer() has not yet confirmed dead. A
+// detached child sits in its own session, so it no longer receives the terminal's SIGINT
+// along with the test runner — the usual "Ctrl-C reaps the whole foreground group" safety
+// net does not cover these, and an interrupted run would leak exactly what this file was
+// leaking before. This registry is that net, re-implemented explicitly.
+const liveServers = new Set<ChildProcess>();
+
+function killAllServerGroups(): void {
+  for (const child of liveServers) signalGroup(child, "SIGKILL");
+  liveServers.clear();
+}
+
+process.on("exit", killAllServerGroups);
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  // Registering a listener suppresses the default terminate, so exit explicitly.
+  process.on(signal, () => {
+    killAllServerGroups();
+    process.exit(1);
+  });
+}
+
 function spawnServer(home: string, port: number) {
-  return spawn(tsxBin, [serverEntry], {
+  const child = spawn(tsxBin, [serverEntry], {
     cwd: repoRoot,
     env: {
       ...process.env,
@@ -58,7 +104,115 @@ function spawnServer(home: string, port: number) {
       PORT: String(port),
     },
     stdio: "ignore",
+    // The launcher and the child it forks get their own process group (pgid == launcher
+    // pid), so stopServer() can signal both at once.
+    detached: true,
   });
+  // Every test awaits its own teardown, so this handle is never what keeps the run
+  // correct — but while it is ref'd it *does* keep the runner's event loop alive, so a
+  // teardown that throws before stopping a server wedges the whole file at 100% "waiting
+  // for a child that will never exit" instead of failing. unref() + killAllServerGroups()
+  // on exit is the pair that makes the failure path terminate and still reap.
+  child.unref();
+  liveServers.add(child);
+  return child;
+}
+
+function hasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The process group `pid` belongs to, or undefined once it is gone. */
+function pgidOf(pid: number): number | undefined {
+  try {
+    const pgid = Number.parseInt(execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).trim(), 10);
+    return Number.isFinite(pgid) ? pgid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The pid recorded in `<home>/server.pid`, but only when that pid is part of `child`'s
+ * process group — i.e. only when this particular server is the marker's current owner.
+ *
+ * These tests deliberately point two servers at one AGENT_DEALER_HOME, and the loser never
+ * writes the marker, so "the pid in server.pid" is emphatically *not* "the pid of the
+ * server I am holding a handle to". Signalling or asserting on it unconditionally would
+ * reach across to the healthy server the test is still using.
+ */
+function ownedRecordedPid(child: ChildProcess, home: string): number | undefined {
+  if (child.pid === undefined) return undefined;
+  let recorded: unknown;
+  try {
+    recorded = (JSON.parse(fs.readFileSync(path.join(home, "server.pid"), "utf8")) as { pid?: unknown }).pid;
+  } catch {
+    return undefined; // no marker (never claimed, or already released on a clean exit)
+  }
+  if (typeof recorded !== "number" || !Number.isFinite(recorded)) return undefined;
+  return pgidOf(recorded) === child.pid ? recorded : undefined;
+}
+
+function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    // ESRCH — the whole group is already gone, which is exactly what we were after.
+  }
+}
+
+interface StopResult {
+  /** True when the group was gone within 10s of SIGTERM, with no SIGKILL backstop needed. */
+  exitedOnTerm: boolean;
+  /** The pid this server recorded in `<home>/server.pid`, when it owned that marker. */
+  recordedPid?: number;
+}
+
+/**
+ * The one place in this file that knows how to terminate a server spawned by
+ * spawnServer() — every case goes through it, so this knowledge is not re-derived per test.
+ *
+ * spawnServer() launches `node_modules/.bin/tsx`, not node, and that bin *forks a child* to
+ * actually run the TypeScript: `child.pid` is the launcher, and the real server is its
+ * grandchild. tsx forwards a catchable SIGTERM but cannot forward an unblockable SIGKILL,
+ * so `child.kill("SIGKILL")` reaps the launcher and leaves the server alive, reparented to
+ * init, still bound to its PORT — forever. (pid-marker-hold-arbiter-child.ts documents the
+ * same wrapper behaviour for the same reason.) Hence: signal the whole process group,
+ * SIGTERM first so the server can release its own marker, SIGKILL only as a backstop, and
+ * then prove the pid the server actually recorded is dead rather than trusting the launcher
+ * handle's exit code to speak for it.
+ */
+async function stopServer(child: ChildProcess, home: string): Promise<StopResult> {
+  // Read while the server is still alive: a clean shutdown deletes the marker.
+  const recordedPid = ownedRecordedPid(child, home);
+  const allDead = () => hasExited(child) && (recordedPid === undefined || !isPidAlive(recordedPid));
+
+  signalGroup(child, "SIGTERM");
+  const exitedOnTerm = await waitUntil(allDead, 10000);
+  if (!exitedOnTerm) {
+    signalGroup(child, "SIGKILL");
+    await waitUntil(allDead, 5000);
+  }
+
+  if (recordedPid !== undefined) {
+    assert.equal(
+      isPidAlive(recordedPid),
+      false,
+      `the server pid recorded in server.pid (${recordedPid}) survived teardown — the tsx launcher (${child.pid}) was reaped but its server child leaked`
+    );
+  }
+  liveServers.delete(child);
+  return { exitedOnTerm, recordedPid };
 }
 
 async function waitForHealth(port: number, timeoutMs: number): Promise<boolean> {
@@ -75,8 +229,8 @@ async function waitForHealth(port: number, timeoutMs: number): Promise<boolean> 
 test(
   "a directly-launched server (npm run dev's exact entrypoint) is detected as running, and stops being detected once it exits",
   { timeout: 45000 },
-  async () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-direct-start-"));
+  async (t) => {
+    const home = makeHome(t, "dealer-direct-start-");
     const dbPath = path.join(home, "dealer.db");
     const port = await getEphemeralPort();
 
@@ -90,16 +244,13 @@ test(
       assert.equal(running.running, true, "a directly-launched server should be detected as running");
       assert.ok(running.detail?.includes("server.pid"), `expected server.pid evidence, got: ${running.detail}`);
 
-      child.kill("SIGTERM");
-      const exited = await waitUntil(() => child.exitCode !== null || child.signalCode !== null, 10000);
-      assert.ok(exited, "the server should exit within 10s of SIGTERM");
+      const { exitedOnTerm } = await stopServer(child, home);
+      assert.ok(exitedOnTerm, "the server should exit within 10s of SIGTERM");
 
       const stopped = await waitUntil(() => !isServiceRunning(dbPath).running, 5000);
       assert.ok(stopped, "the server should no longer be detected as running once it has exited");
     } finally {
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-      }
+      await stopServer(child, home);
     }
   }
 );
@@ -107,17 +258,18 @@ test(
 test(
   "a second server losing the port race does not corrupt or delete the first server's liveness marker",
   { timeout: 45000 },
-  async () => {
+  async (t) => {
     // Reproduces the reviewer's exact second-round finding: two real index.ts launches
     // sharing one AGENT_DEALER_HOME and port. Before the ownership-aware fix, B's write
     // clobbered A's marker with B's own (dead-after-exit) pid, and B's unconditional exit
     // cleanup then deleted it — leaving a healthy A with no liveness marker at all.
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-direct-start-race-"));
+    const home = makeHome(t, "dealer-direct-start-race-");
     const dbPath = path.join(home, "dealer.db");
     const port = await getEphemeralPort();
 
     const serverA = spawnServer(home, port);
     let serverB: ReturnType<typeof spawnServer> | undefined;
+    let serverAActualPid: number | undefined;
 
     try {
       const aHealthy = await waitForHealth(port, 20000);
@@ -126,9 +278,10 @@ test(
       // The marker's own recorded pid is the real process.pid inside index.ts, which is
       // *not* necessarily serverA.pid: the tsx bin wrapper spawn() returns forks a child
       // to actually run the TypeScript, so serverA.pid is the launcher, not the server.
-      // Compare against this recorded value, not serverA.pid, for that reason.
+      // Compare against this recorded value, not serverA.pid, for that reason — and, just
+      // as importantly, signal that value too (stopServer()), not serverA.pid.
       const stateBeforeB = JSON.parse(fs.readFileSync(path.join(home, "server.pid"), "utf8"));
-      const serverAActualPid: number = stateBeforeB.pid;
+      serverAActualPid = stateBeforeB.pid;
       assert.ok(Number.isFinite(serverAActualPid));
 
       // Same home, same port — B can only ever lose the app.listen() race.
@@ -150,10 +303,14 @@ test(
       const stateAfterB = JSON.parse(fs.readFileSync(path.join(home, "server.pid"), "utf8"));
       assert.equal(stateAfterB.pid, serverAActualPid, "the marker must still name server A, not server B");
     } finally {
-      if (serverB && serverB.exitCode === null && serverB.signalCode === null) {
-        serverB.kill("SIGKILL");
+      if (serverB) await stopServer(serverB, home);
+      // A is healthy and unsignalled at this point, so this teardown is the *only* thing
+      // between it and outliving the test run: it must reach the real server, not the
+      // launcher (see stopServer()).
+      const { recordedPid } = await stopServer(serverA, home);
+      if (serverAActualPid !== undefined) {
+        assert.equal(recordedPid, serverAActualPid, "teardown must have signalled server A's own recorded pid, not the launcher's");
       }
-      serverA.kill("SIGKILL");
     }
   }
 );
@@ -161,13 +318,13 @@ test(
 test(
   "a second server on a different port is refused at startup rather than running unmonitored",
   { timeout: 45000 },
-  async () => {
+  async (t) => {
     // Reproduces the reviewer's exact third-round finding: with a *different* port, B is
     // no longer stopped by app.listen()'s EADDRINUSE. Before treating a failed claim as
     // fatal, B ran to completion fully healthy but untracked (A owns server.pid), so once
     // A stopped — correctly removing its own marker — B kept running with no liveness
     // marker at all, and isServiceRunning() returned false despite B being very much alive.
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-direct-start-diffport-"));
+    const home = makeHome(t, "dealer-direct-start-diffport-");
     const dbPath = path.join(home, "dealer.db");
     const portA = await getEphemeralPort();
     const portB = await getEphemeralPort();
@@ -206,26 +363,26 @@ test(
       const stateAfterB = JSON.parse(fs.readFileSync(path.join(home, "server.pid"), "utf8"));
       assert.equal(stateAfterB.pid, stateBeforeB.pid);
 
+      assert.equal(isServiceRunning(dbPath).running, true);
+
       // And once A stops (removing its own marker as intended), isServiceRunning correctly
       // reports nothing running — B never having claimed the marker means there is no
       // now-invisible second server left behind for this check to miss.
-      assert.equal(isServiceRunning(dbPath).running, true);
+      const { exitedOnTerm } = await stopServer(serverA, home);
+      assert.ok(exitedOnTerm, "server A should exit within 10s of SIGTERM");
+      assert.equal(isServiceRunning(dbPath).running, false, "nothing should be left running or tracked after A stops");
     } finally {
-      if (serverB && serverB.exitCode === null && serverB.signalCode === null) {
-        serverB.kill("SIGKILL");
-      }
-      serverA.kill("SIGTERM");
-      await waitUntil(() => serverA.exitCode !== null || serverA.signalCode !== null, 10000);
+      if (serverB) await stopServer(serverB, home);
+      await stopServer(serverA, home);
     }
-    assert.equal(isServiceRunning(dbPath).running, false, "nothing should be left running or tracked after A stops");
   }
 );
 
 test(
   "a real running server blocks the migration end to end, and the migration succeeds once the server is stopped",
   { timeout: 45000 },
-  async () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-direct-start-migration-"));
+  async (t) => {
+    const home = makeHome(t, "dealer-direct-start-migration-");
     const dbPath = path.join(home, "dealer.db");
     const port = await getEphemeralPort();
 
@@ -252,18 +409,15 @@ test(
       assert.match(refused.mismatches[0], /service is running/);
       assert.equal(fs.existsSync(`${dbPath}.pre-issue-migration-backup`), false);
 
-      server.kill("SIGTERM");
-      const exited = await waitUntil(() => server.exitCode !== null || server.signalCode !== null, 10000);
-      assert.ok(exited, "the server should exit within 10s of SIGTERM");
+      const { exitedOnTerm } = await stopServer(server, home);
+      assert.ok(exitedOnTerm, "the server should exit within 10s of SIGTERM");
       await waitUntil(() => !isServiceRunning(dbPath).running, 5000);
 
       const succeeded = runMigration(dbPath);
       assert.deepStrictEqual(succeeded.mismatches, []);
       assert.equal(succeeded.issuesCreated, 1);
     } finally {
-      if (server.exitCode === null && server.signalCode === null) {
-        server.kill("SIGKILL");
-      }
+      await stopServer(server, home);
     }
   }
 );
