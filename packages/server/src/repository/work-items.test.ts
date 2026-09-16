@@ -117,6 +117,26 @@ test("requeueWorkItem returns a leased item to pending behind a backoff gate, fe
   assert.equal(claimWorkItem("o", { leaseMs: 60_000 }), null);
 });
 
+test("NOT-128: requeueWorkItem can refund the claim-time attempt bump", () => {
+  const { issueId, instanceId } = freshInstance();
+  const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
+
+  // Default: the attempt is charged, exactly as an observed failure should be.
+  const first = claimWorkItem("o", { leaseMs: 60_000 })!;
+  assert.equal(requeueWorkItem(item.id, first.leaseToken!, { e: 1 }, { backoffMs: 0 }), true);
+  assert.equal(getWorkItem(item.id)!.attemptCount, 1);
+
+  // Refunded: a requeue bounded by some other budget (recovery's infra attempts) leaves the
+  // developer allowance where it was, so a chain of them can never exhaust max_attempts.
+  const second = claimWorkItem("o", { leaseMs: 60_000 })!;
+  assert.equal(getWorkItem(item.id)!.attemptCount, 2);
+  assert.equal(
+    requeueWorkItem(item.id, second.leaseToken!, { e: 2 }, { backoffMs: 0, revertAttemptCount: true }),
+    true
+  );
+  assert.equal(getWorkItem(item.id)!.attemptCount, 1);
+});
+
 test("listExpiredLeases returns only leases whose lease_expires_at is past the given clock", () => {
   const { issueId, instanceId } = freshInstance();
   const item = enqueueWorkItem({ issueId, workflowInstanceId: instanceId, kind: "developer", round: 1 });
