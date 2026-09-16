@@ -23,6 +23,7 @@ interface WorkerSessionRow {
   profile_snapshot_json: string | null;
   process_pid: number | null;
   process_owner: string | null;
+  process_started_at: string | null;
   created_at: string;
   started_at: string | null;
   heartbeat_at: string | null;
@@ -51,6 +52,7 @@ function rowToSession(row: WorkerSessionRow): WorkerSession {
     profileSnapshotJson: row.profile_snapshot_json,
     processPid: row.process_pid,
     processOwner: row.process_owner,
+    processStartedAt: row.process_started_at,
     createdAt: row.created_at,
     startedAt: row.started_at,
     heartbeatAt: row.heartbeat_at,
@@ -82,6 +84,7 @@ export function createWorkerSession(input: CreateWorkerSessionInput): WorkerSess
     profile_snapshot_json: input.profileSnapshotJson ?? null,
     process_pid: null,
     process_owner: null,
+    process_started_at: null,
     created_at: now,
     started_at: null,
     heartbeat_at: null,
@@ -92,12 +95,12 @@ export function createWorkerSession(input: CreateWorkerSessionInput): WorkerSess
     INSERT INTO worker_sessions (
       id, issue_id, role, round, agent_id, runtime, model, budget_json, worktree_path,
       input_sha, status, session_ref, log_path, exit_code, error_json, metadata_json,
-      profile_snapshot_json, process_pid, process_owner, created_at, started_at, heartbeat_at,
+      profile_snapshot_json, process_pid, process_owner, process_started_at, created_at, started_at, heartbeat_at,
       completed_at, updated_at
     ) VALUES (
       @id, @issue_id, @role, @round, @agent_id, @runtime, @model, @budget_json, @worktree_path,
       @input_sha, @status, @session_ref, @log_path, @exit_code, @error_json, @metadata_json,
-      @profile_snapshot_json, @process_pid, @process_owner, @created_at, @started_at, @heartbeat_at,
+      @profile_snapshot_json, @process_pid, @process_owner, @process_started_at, @created_at, @started_at, @heartbeat_at,
       @completed_at, @updated_at
     )
   `).run(row);
@@ -176,19 +179,31 @@ export function patchRunningSession(id: string, patch: PatchRunningSessionInput)
 }
 
 /**
- * Records the pid of the CLI this session just spawned, plus the identity of the
- * coordinator process that owns it (NOT-124). Recovery reads the pair back to verify a
- * worker is really gone before presuming it dead, instead of inferring death from an
- * expired lease alone. `running` only — a session that already went terminal has nothing
- * live to point at.
+ * Records the pid of the CLI this session just spawned, the identity of the coordinator
+ * process that owns it (NOT-124), and that pid's OS-reported start time (NOT-131).
+ * Recovery reads the triple back to verify a worker is really gone before presuming it
+ * dead, instead of inferring death from an expired lease alone.
+ *
+ * The start time is what makes the pid survive a coordinator restart as evidence: without
+ * it a successor has only the owner, which never matches again, so every live worker read
+ * as "no evidence" and was reclaimed while its CLI was still running. `startTime` may be
+ * null when `ps` cannot report one — that degrades to the pre-NOT-131 behaviour for this
+ * session rather than asserting anything false about it.
+ *
+ * `running` only — a session that already went terminal has nothing live to point at.
  */
-export function recordSessionProcess(id: string, pid: number, owner: string): void {
+export function recordSessionProcess(
+  id: string,
+  pid: number,
+  owner: string,
+  startTime: string | null = null
+): void {
   getDb()
     .prepare(
-      `UPDATE worker_sessions SET process_pid = ?, process_owner = ?, updated_at = ?
+      `UPDATE worker_sessions SET process_pid = ?, process_owner = ?, process_started_at = ?, updated_at = ?
        WHERE id = ? AND status = 'running'`
     )
-    .run(pid, owner, new Date().toISOString(), id);
+    .run(pid, owner, startTime, new Date().toISOString(), id);
 }
 
 /** Most recent still-running session for an issue — drives the Issue Detail live strip. */

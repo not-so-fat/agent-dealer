@@ -83,7 +83,7 @@ test("recovery ignores a lease that has not expired", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   claimWorkItem("healthy", { leaseMs: 600_000 });
-  assert.deepEqual(await recoverCoordinator({ now: Date.now() }), { reclaimed: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: Date.now() }), { reclaimed: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
 });
 
 test("recovery leaves a lease alone when a heartbeat renewed it after the snapshot", async () => {
@@ -98,7 +98,7 @@ test("recovery leaves a lease alone when a heartbeat renewed it after the snapsh
   refreshHeartbeat(devItem.id, claimed.leaseToken!, { leaseMs: 600_000 });
 
   const res = await recoverCoordinator({ now: Date.now() + 1_000 });
-  assert.deepEqual(res, { reclaimed: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
+  assert.deepEqual(res, { reclaimed: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
   assert.equal(getWorkItem(devItem.id)!.status, "leased");
 });
 
@@ -131,7 +131,7 @@ test("an expired lease past the attempt cap is dead-lettered AND routed in one s
   assert.match(last.reason ?? "", /presumed dead/);
 
   // A second recovery pass is a no-op — the item is already dead, nothing to reclaim.
-  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
   assert.equal(
     listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
     1,
@@ -148,7 +148,7 @@ test("recovery loses its CAS to a worker that completed concurrently", async () 
   // Worker finishes just before recovery's transaction runs.
   finishWorkItem(devItem.id, claimed.leaseToken!, { status: "done", result: { kind: "no_pr" } });
 
-  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
   assert.equal(getWorkItem(devItem.id)!.status, "done");
 });
 
@@ -188,6 +188,8 @@ test("an expired lease on a usage-capped runtime is deferred, not dead-lettered 
       deadLettered: [],
       deferredForCap: [devItem.id],
       heldAlive: [],
+      heldAliveExpired: [],
+      unverifiedOrphans: [],
       heldAcrossClockJump: [],
       autoMergesFinalized: [],
     });
@@ -206,5 +208,5 @@ test("an expired lease on a usage-capped runtime is deferred, not dead-lettered 
 });
 
 test("recoverCoordinator is a no-op on a clean queue", async () => {
-  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
 });

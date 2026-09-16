@@ -20,6 +20,7 @@
 import { getDb } from "../db/index.js";
 import { getIssue, transitionIssue } from "../repository/issues.js";
 import { appendWorkflowEvent, getActiveWorkflowInstance } from "../repository/workflow-events.js";
+import type { WorkerSession } from "@agent-dealer/shared";
 import { completeSession, getWorkerSession } from "../repository/worker-sessions.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
 import {
@@ -32,7 +33,8 @@ import {
   type WorkItem,
 } from "../repository/work-items.js";
 import { activeClockJumpGrace, type ClockJump } from "./clock-jump.js";
-import { processLiveness } from "./process-liveness.js";
+import { inspectWorkerProcess, terminateWorkerProcess } from "./process-liveness.js";
+import { maxAliveHoldMsFor } from "./session-timeouts.js";
 import { routeAppliedOutcome } from "./commands.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
 import { workerSessionPayload } from "./session-progress.js";
@@ -51,6 +53,18 @@ export interface RecoverResult {
   deferredForCap: string[];
   /** Expired leases left alone because their spawned CLI is verifiably still running (NOT-124). */
   heldAlive: string[];
+  /**
+   * Reclaimed despite a live CLI, because the hold ran past `maxAliveHoldMsFor` (NOT-131).
+   * The CLI is killed first — this is the bound that stops a hung worker holding a lease
+   * forever now that an "alive" verdict survives a coordinator restart.
+   */
+  heldAliveExpired: string[];
+  /**
+   * Reclaims that could NOT confirm the predecessor's CLI was stopped (NOT-131): another
+   * host, or a row written before the start-time evidence existed. An orphan may still be
+   * running for these, so they are surfaced rather than silently assumed clean.
+   */
+  unverifiedOrphans: string[];
   /** Expired leases left alone because the host was suspended across them (NOT-125). */
   heldAcrossClockJump: string[];
 }
@@ -168,6 +182,24 @@ function protectedByClockJump(item: WorkItem, grace: ClockJump | null): boolean 
 }
 
 /**
+ * Has this session been held alive past the point any healthy run could still be going
+ * (NOT-131)?
+ *
+ * The session's own wall clock is a `setTimeout` inside `spawnCli`, in the process that
+ * spawned it. After a restart that timer is gone, so an "alive" verdict — which NOT-131
+ * makes survive restarts — would otherwise re-extend a hung CLI's lease on every tick and
+ * the item would never resolve. Measured from `started_at` (falling back to `created_at`,
+ * so there is no branch that holds forever) against a ceiling that is generously larger
+ * than the role's timeout, because `started_at` predates the spawn itself.
+ */
+function aliveHoldExpired(session: WorkerSession | null, now: number): boolean {
+  if (!session) return false; // no session row: nothing was ever held on liveness evidence
+  const since = Date.parse(session.startedAt ?? session.createdAt);
+  if (!Number.isFinite(since)) return false;
+  return now - since > maxAliveHoldMsFor(session.role);
+}
+
+/**
  * @param opts.now  current epoch ms (injectable for tests). Recovery reclaims every lease
  *                  whose `lease_expires_at` is before this — the recovery latency for an
  *                  orphaned item is bounded by `COORDINATOR_LEASE_MS`.
@@ -189,6 +221,8 @@ export async function recoverCoordinator(opts?: {
   const deadLettered: string[] = [];
   const deferredForCap: string[] = [];
   const heldAlive: string[] = [];
+  const heldAliveExpired: string[] = [];
+  const unverifiedOrphans: string[] = [];
   const heldAcrossClockJump: string[] = [];
 
   for (const item of candidates) {
@@ -199,27 +233,92 @@ export async function recoverCoordinator(opts?: {
     // stopped running. Only the second one is evidence. A live CLI gets its lease extended
     // — the heartbeat timer that should have done so was frozen by the host, not by a
     // crash, and leaving the lease expired would just re-raise this candidate every tick.
+    //
+    // NOT-131: the verdict now survives a coordinator restart, because `process_started_at`
+    // identifies the pid rather than merely naming it. That is what stops a restart from
+    // reclaiming every live worker — and it is also why the hold below must be bounded.
     const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
-    if (processLiveness(session?.processPid ?? null, session?.processOwner ?? null) === "alive") {
-      // Token-fenced like every other write here: a false return means this attempt already
-      // lost its lease to a peer, in which case there is nothing here to reclaim either.
-      if (refreshHeartbeat(item.id, token, { leaseMs })) {
-        heldAlive.push(item.id);
-        console.warn(
-          `[coordinator] lease expired but worker pid ${session?.processPid} is alive — extending`,
-          { workItemId: item.id, workerSessionId: item.workerSessionId }
-        );
+    let aliveButCapped = false;
+    // One probe, reused for both the hold decision and the kill authorization below — two
+    // separate probes could disagree, and a `ps` hiccup between them would kill a healthy
+    // worker (see WorkerProcessCheck).
+    const probe = inspectWorkerProcess(
+      session?.processPid ?? null,
+      session?.processOwner ?? null,
+      session?.processStartedAt ?? null
+    );
+
+    if (probe.verdict === "alive") {
+      // NOT-131: the CLI's own wall clock (`spawnCli`'s setTimeout) died with the process
+      // that spawned it, so nothing but this bound will ever stop a hung-but-breathing
+      // worker. Honouring "alive" forever would trade a destructive reclaim for a permanent
+      // stall — strictly the worse failure, and the one this module's own comment warns of.
+      const heldTooLong = aliveHoldExpired(session, now);
+      if (!heldTooLong) {
+        // Token-fenced like every other write here: a false return means this attempt already
+        // lost its lease to a peer, in which case there is nothing here to reclaim either.
+        if (refreshHeartbeat(item.id, token, { leaseMs })) {
+          heldAlive.push(item.id);
+          console.warn(
+            `[coordinator] lease expired but worker pid ${session?.processPid} is alive — extending`,
+            { workItemId: item.id, workerSessionId: item.workerSessionId }
+          );
+        }
+        continue;
       }
-      continue;
+      aliveButCapped = true;
     }
 
     // NOT-125: no usable pid (or a dead one) is not enough when the host itself was
     // suspended across this lease — the CLI may have finished cleanly while the coordinator
     // was frozen mid-publish. Hold pre-jump leases for one grace window; a worker that is
     // genuinely gone is still reclaimed once it passes.
+    //
+    // Checked before the ceiling above takes effect, and deliberately so: a host that slept
+    // burned this session's wall-clock budget without the CLI running for any of it, so the
+    // ceiling can fire on a perfectly healthy run. One grace window is enough for the
+    // resumed heartbeat to renew the lease and drop the item from the candidate set.
     if (protectedByClockJump(item, grace)) {
       heldAcrossClockJump.push(item.id);
       continue;
+    }
+
+    if (aliveButCapped) {
+      heldAliveExpired.push(item.id);
+      console.warn(
+        `[coordinator] worker pid ${session?.processPid} still alive past its session ceiling — reclaiming`,
+        {
+          workItemId: item.id,
+          workerSessionId: item.workerSessionId,
+          startedAt: session?.startedAt,
+          maxHoldMs: maxAliveHoldMsFor(session?.role ?? null),
+        }
+      );
+    }
+
+    // NOT-131 AC 2: never two live agents on one issue. Everything below reclaims the item,
+    // and a later tick will spawn a successor into the same worktree — so the predecessor's
+    // CLI must be gone *first*. NOT-126 kills it from the AbortController, but that lives in
+    // the memory of the process that spawned it, which in the restart case is the process
+    // that just died. This is the out-of-process equivalent, and it is deliberately outside
+    // the transaction below: signalling is not rollback-able.
+    //
+    // A pid this probe did not positively identify is never signalled — a wrong verdict
+    // costs one redundant attempt, a wrong kill takes out an unrelated program on the
+    // developer's machine.
+    if (session?.processPid) {
+      const stopped = await terminateWorkerProcess(session.processPid, probe.signalable).catch((err) => {
+        console.error("[coordinator] terminateWorkerProcess", item.id, err);
+        return "failed" as const;
+      });
+      if (stopped !== "stopped") {
+        unverifiedOrphans.push(item.id);
+        console.warn(
+          `[coordinator] could not confirm worker pid ${session.processPid} is stopped (${stopped}) — ` +
+            "a successor may run alongside it",
+          { workItemId: item.id, workerSessionId: item.workerSessionId }
+        );
+      }
     }
 
     try {
@@ -288,6 +387,8 @@ export async function recoverCoordinator(opts?: {
     deadLettered,
     deferredForCap,
     heldAlive,
+    heldAliveExpired,
+    unverifiedOrphans,
     heldAcrossClockJump,
     autoMergesFinalized: stranded.finalized,
   };

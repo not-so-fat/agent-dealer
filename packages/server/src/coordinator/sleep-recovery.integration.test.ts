@@ -148,11 +148,15 @@ test("NOT-124: a session with no recorded pid falls back to timestamp-only recla
   assert.equal(getWorkItem(itemId)!.status, "pending");
 });
 
-test("NOT-124: a pid recorded by a previous coordinator process proves nothing", async () => {
+test("NOT-124: an uncorroborated pid from another coordinator proves nothing", async () => {
   // The pid-reuse hazard: after a restart the OS may have handed this number to an
-  // unrelated program, so kill(pid, 0) would succeed forever and strand the item. An owner
-  // that is not this process degrades to timestamp-only — which is the correct behaviour
-  // for a restart anyway (NOT-116).
+  // unrelated program, so kill(pid, 0) would succeed forever and strand the item — which is
+  // why a foreign owner is not on its own sufficient evidence.
+  //
+  // NOT-131 narrowed this rather than reversing it: a pid from a dead coordinator on THIS
+  // host is now corroborated by its recorded start time (see
+  // restart-recovery.integration.test.ts). What still proves nothing, and is asserted here,
+  // is a pid on another machine — unprobeable and unsignallable from here at any time.
   const { itemId, sessionId } = leasedAttempt();
   recordSessionProcess(sessionId, process.pid, "some-other-host:999:abcd1234");
 

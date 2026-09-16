@@ -144,6 +144,12 @@ export function migrate(): void {
   if (!workerSessionCols.some((c) => c.name === "process_owner")) {
     db.exec("ALTER TABLE worker_sessions ADD COLUMN process_owner TEXT");
   }
+  // NOT-131: portable liveness evidence. Added NULL on existing rows, which processLiveness
+  // reads as "unknown" — a session in flight across the upgrade degrades to timestamp-only
+  // reclaim rather than being mistaken for alive.
+  if (!workerSessionCols.some((c) => c.name === "process_started_at")) {
+    db.exec("ALTER TABLE worker_sessions ADD COLUMN process_started_at TEXT");
+  }
 
   // Tighten the workflow-event idempotency index to UNIQUE for DBs created before the
   // constraint (schema.sql's IF NOT EXISTS won't upgrade an existing non-unique index).

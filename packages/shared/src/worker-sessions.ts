@@ -41,14 +41,20 @@ export const WorkerSession = z.object({
    */
   profileSnapshotJson: z.string().nullable(),
   /**
-   * The spawned CLI's OS pid, and the identity of the coordinator process that spawned it
-   * (NOT-124). Recovery treats the pid as liveness evidence only while `processOwner` still
-   * names the running coordinator — across a restart the pid may have been recycled by an
-   * unrelated program, so it proves nothing. Both null until the CLI actually starts, and
-   * for any session whose spawn never reports one.
+   * The spawned CLI's OS pid, the identity of the coordinator process that spawned it
+   * (NOT-124), and that pid's OS-reported start time (NOT-131). All null until the CLI
+   * actually starts, and for any session whose spawn never reports one.
+   *
+   * `processOwner` alone settles liveness for a pid this coordinator spawned. Across a
+   * restart it no longer matches, and the pid on its own proves nothing — the OS recycles
+   * pids, so `kill(pid, 0)` could succeed forever against an unrelated program.
+   * `processStartedAt` is what keeps the evidence usable there: a recycled pid always
+   * started later, so an exact match identifies the process and not merely the number. A
+   * row written before NOT-131 has none and reads as "no evidence", never as alive.
    */
   processPid: z.number().int().nullable(),
   processOwner: z.string().nullable(),
+  processStartedAt: z.string().nullable(),
   createdAt: z.string(),
   startedAt: z.string().nullable(),
   heartbeatAt: z.string().nullable(),
