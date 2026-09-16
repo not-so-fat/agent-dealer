@@ -420,6 +420,11 @@ export async function runDeveloperEffect(
     worktreePath: shortWorktreePath(worktreePath),
   });
 
+  // One resolution, two consumers: the materialized MCP config's tool surface below and
+  // the spawn args' tool surface further down. They were resolved separately and had to
+  // agree by inspection — the exact shape this stack exists to remove (NOT-134 review).
+  const policy = snapshot?.permissionPolicy ?? roleCeiling("developer");
+
   let workerAuthority: { mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   try {
     if (snapshot?.deckId) {
@@ -428,6 +433,7 @@ export async function runDeveloperEffect(
         worktreePath,
         runtime,
         playbookIds: snapshot.playbookIds,
+        policy,
         verifyCallTool: deps.deckCallTool,
       });
       if (!prepared.ok) {
@@ -511,7 +517,7 @@ export async function runDeveloperEffect(
       spawned = await deps.spawn({
         sessionId,
         runtime,
-        policy: snapshot?.permissionPolicy ?? roleCeiling("developer"),
+        policy,
         model: snapshot?.model ?? null,
         prompt,
         cwd: worktreePath,

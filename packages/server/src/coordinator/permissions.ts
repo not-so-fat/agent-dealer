@@ -6,6 +6,7 @@
 // (ADR 0003 §Role permissions; NOT-60 acceptance criteria).
 import type { PermissionPolicy, WorkerSessionRole } from "@agent-dealer/shared";
 import { parsePermissionPolicyOverride, resolvePermissionPolicy } from "@agent-dealer/shared";
+import { codexScopedConfigDeniesSendGate } from "../adapters/codex-scoped-config.js";
 
 export { resolvePermissionPolicy };
 
@@ -102,6 +103,15 @@ export function assertReviewerReadOnly(args: string[], ctx: ReviewerSpawnContext
   if (isCursor && !(flagValue(args, "--mode") === "ask")) {
     throw new Error("reviewer cursor args are not constrained to ask mode");
   }
+  // KNOWN GAP (NOT-134): cursor's outbound-mutation denial is NOT enforced here, and this
+  // comment exists so the header's promise is not silently false for this runtime.
+  // `--force` is load-bearing — headless cursor-agent rejects every MCP tool call without
+  // it, since there is no human to approve — and its own help says it force-allows
+  // "unless explicitly denied". The only deny list found is `permissions.deny` in the
+  // user-global `~/.cursor/cli-config.json` (entries shaped like `Shell(ls)`): global,
+  // shared by concurrent attempts, and the operator's own file, so a per-attempt worker
+  // must not write it. No per-invocation override flag exists (`cursor-agent --help`).
+  // Until a per-attempt mechanism is found, a cursor reviewer can reach the send gate.
   const isCodex = args[0] === "exec";
   if (isCodex) {
     if (flagValue(args, "-s") !== "read-only") {
@@ -126,10 +136,19 @@ export function assertReviewerReadOnly(args: string[], ctx: ReviewerSpawnContext
     // `~/.codex/config.toml` live while looking isolated here.
     //
     // Neither present means the ambient table is live: reject.
-    const scopedCodexHome =
-      ctx.mcpEnv?.CODEX_HOME !== undefined && ctx.mcpEnv.CODEX_HOME === ctx.mcpConfigPath;
+    const codexHome = ctx.mcpEnv?.CODEX_HOME;
+    const scopedCodexHome = codexHome !== undefined && codexHome === ctx.mcpConfigPath;
     if (!args.includes("--ignore-user-config") && !scopedCodexHome) {
       throw new Error("reviewer codex args do not isolate configured MCP servers");
+    }
+
+    // NOT-134. codex has no `--disallowedTools`, so the outbound-mutation denial this
+    // function's header promises can only be expressed in the scoped config.toml. While
+    // `--ignore-user-config` was in play it was satisfied vacuously (no servers loaded at
+    // all); once a deck is attached, the server is loaded and the denial must be real.
+    // Read the file codex will read rather than trusting a flag passed alongside it.
+    if (scopedCodexHome && !codexScopedConfigDeniesSendGate(codexHome)) {
+      throw new Error("reviewer codex scoped config does not deny the outbound-mutation tool");
     }
   }
 
