@@ -115,7 +115,7 @@ test("adapter failure after push retries publish only (no full developer session
   const outcome: DeveloperOutcome = {
     kind: "adapter_failure",
     reason: "Branch already pushed (issue-1); only draft PR create failed: boom",
-    afterPush: { branch: "issue-1" },
+    publishable: { branch: "issue-1" },
   };
   assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
     next: "retry_publish",
@@ -128,7 +128,7 @@ test("adapter failure after push still escalates once infra attempts are exhaust
   const outcome: DeveloperOutcome = {
     kind: "adapter_failure",
     reason: "Branch already pushed (issue-1); only draft PR create failed: boom",
-    afterPush: { branch: "issue-1" },
+    publishable: { branch: "issue-1" },
   };
   const result = routeDeveloperOutcome(outcome, INFRA_AT_LIMIT);
   assert.equal(result.next, "human_action");

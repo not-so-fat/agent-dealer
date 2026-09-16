@@ -224,9 +224,19 @@ async function runPublishOnlyHandoff(
       if (!recovered.ok) {
         // Same policy as a live attempt's push: a clean rejection is a human decision, a
         // tooling error is a bounded infra retry. Either way the commits stay on the branch.
+        //
+        // The retry must stay publish-only. A transient remote failure (DNS, a dropped
+        // connection) says nothing about whether the work exists — it plainly still does, on
+        // this branch — so dropping the marker here would spend the very ~40-minute agent
+        // rerun this path was built to avoid, on the one failure most likely to be gone by
+        // the next attempt.
         return recovered.rejected
           ? { kind: "unpushed_commit", reason: recovered.reason }
-          : { kind: "adapter_failure", reason: `push of recovered branch ${branchName} failed: ${recovered.reason}` };
+          : {
+              kind: "adapter_failure",
+              reason: `push of recovered branch ${branchName} failed: ${recovered.reason}`,
+              publishable: { branch: branchName },
+            };
       }
       milestone(
         "branch.pushed",
@@ -268,7 +278,7 @@ async function runPublishOnlyHandoff(
           : {
               kind: "adapter_failure",
               reason: `Branch already pushed (${branchName}); only draft PR create failed: ${created.reason}`,
-              afterPush: { branch: branchName },
+              publishable: { branch: branchName },
             };
       }
       prView = await deps.github.viewPr({ cwd, branch: branchName });
@@ -276,7 +286,7 @@ async function runPublishOnlyHandoff(
         return {
           kind: "adapter_failure",
           reason: `Branch already pushed (${branchName}); PR created but could not be re-verified via gh pr view`,
-          afterPush: { branch: branchName },
+          publishable: { branch: branchName },
         };
       }
     }
@@ -303,7 +313,7 @@ async function runPublishOnlyHandoff(
       return {
         kind: "adapter_failure",
         reason: `Branch already pushed (${branchName}); ${identity.reason}`,
-        afterPush: { branch: branchName },
+        publishable: { branch: branchName },
       };
     }
 
@@ -329,7 +339,7 @@ async function runPublishOnlyHandoff(
       return {
         kind: "adapter_failure",
         reason: `Branch already pushed (${branchName}); PR could not be re-verified after the checks poll`,
-        afterPush: { branch: branchName },
+        publishable: { branch: branchName },
       };
     }
     const postPollIdentity = await validatePrIdentity(postPollView, identityOpts);
@@ -337,7 +347,7 @@ async function runPublishOnlyHandoff(
       return {
         kind: "adapter_failure",
         reason: `Branch already pushed (${branchName}); PR changed while waiting on checks: ${postPollIdentity.reason}`,
-        afterPush: { branch: branchName },
+        publishable: { branch: branchName },
       };
     }
     prView = postPollView;
@@ -371,7 +381,7 @@ async function runPublishOnlyHandoff(
     return {
       kind: "adapter_failure",
       reason: String(err),
-      afterPush: { branch: branchName },
+      publishable: { branch: branchName },
     };
   }
 }
@@ -395,7 +405,8 @@ export async function runDeveloperEffect(
     payload = {};
   }
 
-  // Post-push infra retry: branch is already on origin — only re-run gh/PR/checks.
+  // No-agent infra retry: the branch already carries the work, so publish it — push only if
+  // origin is behind (NOT-129's reclaim), then gh/PR/checks.
   if (payload.publishOnly) {
     const branchName = payload.branch?.trim() || issue.branch || `issue-${issue.id}`;
     return runPublishOnlyHandoff(ctx, deps, branchName);
@@ -735,7 +746,7 @@ export async function runDeveloperEffect(
           : {
               kind: "adapter_failure",
               reason: `Branch already pushed (${branchName}); only draft PR create failed: ${created.reason}`,
-              afterPush: { branch: branchName },
+              publishable: { branch: branchName },
             };
       }
       prView = await deps.github.viewPr({ cwd: worktreePath, branch: branchName });
@@ -744,7 +755,7 @@ export async function runDeveloperEffect(
         return {
           kind: "adapter_failure",
           reason: `Branch already pushed (${branchName}); PR created but could not be re-verified via gh pr view`,
-          afterPush: { branch: branchName },
+          publishable: { branch: branchName },
         };
       }
     }
@@ -768,7 +779,7 @@ export async function runDeveloperEffect(
       return {
         kind: "adapter_failure",
         reason: `Branch already pushed (${branchName}); ${identity.reason}`,
-        afterPush: { branch: branchName },
+        publishable: { branch: branchName },
       };
     }
 
@@ -805,7 +816,7 @@ export async function runDeveloperEffect(
       return {
         kind: "adapter_failure",
         reason: `Branch already pushed (${branchName}); PR could not be re-verified after the checks poll`,
-        afterPush: { branch: branchName },
+        publishable: { branch: branchName },
       };
     }
     const postPollIdentity = await validatePrIdentity(postPollView, identityOpts);
@@ -814,7 +825,7 @@ export async function runDeveloperEffect(
       return {
         kind: "adapter_failure",
         reason: `Branch already pushed (${branchName}); PR changed while waiting on checks: ${postPollIdentity.reason}`,
-        afterPush: { branch: branchName },
+        publishable: { branch: branchName },
       };
     }
     prView = postPollView;

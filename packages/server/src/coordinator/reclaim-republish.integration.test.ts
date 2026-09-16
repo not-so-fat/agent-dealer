@@ -245,6 +245,55 @@ test("NOT-129: a presumed-dead reclaim with unpushed commits enqueues a publishO
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 1);
 });
 
+// --------------------------------- state 1b: the recovered push itself fails, transiently
+
+test("NOT-129: a recovered push that fails transiently retries publish-only, then publishes without an agent", async () => {
+  const issueId = makeIssue();
+  const branch = `issue-${issueId}`;
+  startWorkflow(issueId);
+  const { itemId } = leasedAttempt(issueId);
+  const sha = commitOnBranch(branch, "transient.ts");
+  assert.deepEqual((await recoverCoordinator({ now: FUTURE() })).republished, [itemId]);
+
+  // One github across both attempts: the retry must reuse whatever the first one left behind.
+  const github = fakeGithub();
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: forbiddenSpawn, github }));
+
+  // The remote is unreachable for this attempt — a dropped connection, not a rejection. It
+  // says nothing about the commits, which are still sitting on the branch. `origin` is shared
+  // with every other test in this file, so it is restored in `finally`: a failure here must
+  // stay this test's failure rather than becoming four unrelated git transport errors.
+  const originUrl = git(repo, "remote", "get-url", "origin");
+  try {
+    git(repo, "remote", "set-url", "origin", path.join(os.tmpdir(), "dealer-republish-unreachable"));
+    await pump(1);
+
+    const afterFailure = getIssue(issueId)!;
+    assert.notEqual(afterFailure.status, "reviewing", "the publish failed");
+    assert.match(afterFailure.currentIntent ?? "", /Retrying GitHub publish \(no agent\)/);
+    const pending = listWorkItemsForIssue(issueId).filter((i) => i.kind === "developer" && i.status === "pending");
+    assert.equal(pending.length, 1, "the failed publish leaves exactly one pending developer item");
+    const payload = JSON.parse(pending[0]!.payloadJson!) as { publishOnly?: boolean; branch?: string };
+    assert.equal(payload.publishOnly, true, "a transient push failure must not cost a full agent rerun");
+    assert.equal(payload.branch, branch, "…and the retry must still be pointed at the recovered branch");
+  } finally {
+    git(repo, "remote", "set-url", "origin", originUrl);
+  }
+
+  // Remote back: the same commits publish, still with no agent behind them.
+  await pump(1);
+
+  assert.equal(
+    git(repo, "ls-remote", "origin", `refs/heads/${branch}`).startsWith(sha),
+    true,
+    "the recovered commit reached origin on the retry"
+  );
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing");
+  assert.equal(issue.headSha, sha);
+  assert.ok(issue.prNumber, "a PR now carries the recovered commit");
+});
+
 // ------------------------------------------------- state 2: already pushed, PR already open
 
 test("NOT-129: a presumed-dead reclaim whose branch is already pushed with an open PR re-verifies it instead of re-running the agent", async () => {

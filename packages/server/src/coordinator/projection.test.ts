@@ -43,7 +43,7 @@ test("every developer projection lands on a legal issue transition and always ha
       {
         kind: "adapter_failure",
         reason: "Branch already pushed (br); only draft PR create failed: boom",
-        afterPush: { branch: "br" },
+        publishable: { branch: "br" },
       },
       { kind: "dirty_worktree" },
       { kind: "unpushed_commit", reason: "non-fast-forward" },
@@ -134,7 +134,7 @@ test("infra-class retries — including a stale re-review — spend the infra bu
       {
         kind: "adapter_failure",
         reason: "Branch already pushed (br); only draft PR create failed: x",
-        afterPush: { branch: "br" },
+        publishable: { branch: "br" },
       },
       REVIEW_ROUNDS_LEFT
     ),

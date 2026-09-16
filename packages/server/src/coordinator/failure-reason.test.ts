@@ -8,6 +8,7 @@ import {
   PRESUMED_DEAD_REASON,
   classifyRunnerLogFailure,
   parseErrorJsonReason,
+  presumedDeadReclaimReason,
   reasonForDirtyWorktree,
   reasonForSessionCrash,
   reasonForWorkerFailedEvent,
@@ -57,6 +58,25 @@ test("parseErrorJsonReason reads recovery presumed-dead shape", () => {
   assert.equal(
     parseErrorJsonReason(JSON.stringify({ reason: PRESUMED_DEAD_REASON })),
     PRESUMED_DEAD_REASON
+  );
+});
+
+test("presumedDeadReclaimReason names the role that is actually being re-run (NOT-129)", () => {
+  // A reviewer item has no branch of its own to publish, so republish is always null for it —
+  // the message must not claim the developer is being re-run, nor mention a branch.
+  const reviewer = presumedDeadReclaimReason("reviewer", null);
+  assert.match(reviewer, /presumed dead/);
+  assert.match(reviewer, /re-running the reviewer/);
+  assert.doesNotMatch(reviewer, /branch|developer/);
+
+  assert.match(presumedDeadReclaimReason("developer", null), /nothing on the branch to publish, re-running the developer/);
+  assert.match(
+    presumedDeadReclaimReason("developer", { branch: "issue-1", commits: 2, alreadyPushed: false }),
+    /republishing 2 unpushed commits on issue-1/
+  );
+  assert.match(
+    presumedDeadReclaimReason("developer", { branch: "issue-1", commits: 1, alreadyPushed: true }),
+    /issue-1 is already on origin, re-verifying the PR/
   );
 });
 

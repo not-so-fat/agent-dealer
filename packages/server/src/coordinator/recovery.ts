@@ -115,6 +115,7 @@ function emitPresumedDeadFailed(item: WorkItem, republish: PublishableBranch | n
   const alreadyPushed = republish?.state === "published";
   const commits = republish === null ? 0 : republish.state === "unpushed" ? republish.unpushed : republish.ahead;
   const reason = presumedDeadReclaimReason(
+    role,
     republish ? { branch: republish.branch, commits, alreadyPushed } : null
   );
   appendWorkflowEvent({

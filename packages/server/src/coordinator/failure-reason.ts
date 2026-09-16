@@ -16,10 +16,16 @@ export const PRESUMED_DEAD_REASON = "recovered — worker process presumed dead"
  * PRESUMED_DEAD_REASON as their prefix — the cause is the same, only the remedy differs.
  */
 export function presumedDeadReclaimReason(
+  role: "developer" | "reviewer",
   republish: { branch: string; commits: number; alreadyPushed: boolean } | null
 ): string {
   if (!republish) {
-    return `${PRESUMED_DEAD_REASON} — nothing on the branch to publish, re-running the developer`;
+    // Only a developer item ever had a branch to publish; saying so for a reclaimed reviewer
+    // would describe a choice that was never on the table, and name the wrong role as the one
+    // being re-run.
+    return role === "developer"
+      ? `${PRESUMED_DEAD_REASON} — nothing on the branch to publish, re-running the developer`
+      : `${PRESUMED_DEAD_REASON} — re-running the reviewer`;
   }
   if (republish.alreadyPushed) {
     return `${PRESUMED_DEAD_REASON} — ${republish.branch} is already on origin, re-verifying the PR instead of re-running the developer`;
