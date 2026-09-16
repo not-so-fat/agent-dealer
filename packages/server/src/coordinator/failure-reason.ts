@@ -10,6 +10,24 @@ import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 /** Written to worker_sessions.errorJson when recovery reclaims an expired lease. */
 export const PRESUMED_DEAD_REASON = "recovered — worker process presumed dead";
 
+/**
+ * NOT-129: a reclaim that republishes what the dead attempt already committed must read
+ * differently on the timeline from one that starts a whole new agent session. Both keep
+ * PRESUMED_DEAD_REASON as their prefix — the cause is the same, only the remedy differs.
+ */
+export function presumedDeadReclaimReason(
+  republish: { branch: string; commits: number; alreadyPushed: boolean } | null
+): string {
+  if (!republish) {
+    return `${PRESUMED_DEAD_REASON} — nothing on the branch to publish, re-running the developer`;
+  }
+  if (republish.alreadyPushed) {
+    return `${PRESUMED_DEAD_REASON} — ${republish.branch} is already on origin, re-verifying the PR instead of re-running the developer`;
+  }
+  const n = republish.commits;
+  return `${PRESUMED_DEAD_REASON} — republishing ${n} unpushed commit${n === 1 ? "" : "s"} on ${republish.branch} instead of re-running the developer`;
+}
+
 const RECONNECT_EXHAUSTED_RE =
   /reconnect(?:ion)?s?\s+(?:exhausted|failed|gave up)|failed to reconnect|unable to reconnect|connection (?:lost|closed|reset).{0,40}(?:retries|attempts)/i;
 

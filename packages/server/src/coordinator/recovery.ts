@@ -17,6 +17,7 @@
 // between recovery's read-only snapshot and its write keeps/wins its lease. A dead-lettered
 // item is CAS'd to `dead` and routed together, so a crash can't strand it with no next
 // effect; and one item that fails to route never rolls back the others.
+import { canTransitionIssue } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 import { getIssue, transitionIssue } from "../repository/issues.js";
 import { appendWorkflowEvent, getActiveWorkflowInstance } from "../repository/workflow-events.js";
@@ -38,13 +39,23 @@ import { maxAliveHoldMsFor } from "./session-timeouts.js";
 import { routeAppliedOutcome } from "./commands.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
 import { workerSessionPayload } from "./session-progress.js";
-import { PRESUMED_DEAD_REASON } from "./failure-reason.js";
+import { PRESUMED_DEAD_REASON, presumedDeadReclaimReason } from "./failure-reason.js";
+import {
+  baseRefCandidates,
+  developerBranchName,
+  hasPublishableWork,
+  inspectBranchProgress,
+  type PublishableBranch,
+} from "./branch-progress.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
 export interface RecoverResult {
-  /** Work items requeued for another attempt. */
+  /** Work items requeued for another (full) attempt. */
   reclaimed: string[];
+  /** Reclaims re-pointed at the no-agent publish path because the branch already had
+   * commits (NOT-129) — disjoint from `reclaimed`. */
+  republished: string[];
   /** Work items past the attempt cap — dead-lettered and routed to a human action. */
   deadLettered: string[];
   /** Issues whose auto-merge park was finalized after a crash (NOT-102). */
@@ -87,14 +98,25 @@ function failOrphanSession(workerSessionId: string | null): void {
  * Timeline-visible failure for a soft reclaim (under attempt cap). Does not change issue
  * status — the item is requeued — but operators need the presumed-dead reason on the
  * timeline the same way worker.deferred surfaces a cap reason (NOT-113).
+ *
+ * `republish` (NOT-129) makes the two shapes of reclaim distinguishable: "we're just
+ * republishing what it already did" must not look like "the agent is redoing this". Both the
+ * prose reason and the machine-readable `recovery`/`branchState` fields carry it, and the
+ * republish case additionally rewrites the issue's live intent — during the three-hour
+ * NOT-121 window nothing on screen said which of the two was happening.
  */
-function emitPresumedDeadFailed(item: WorkItem): void {
+function emitPresumedDeadFailed(item: WorkItem, republish: PublishableBranch | null): void {
   failOrphanSession(item.workerSessionId);
   const issue = getIssue(item.issueId);
   const instance = getActiveWorkflowInstance(item.issueId);
   if (!issue || !instance || instance.id !== item.workflowInstanceId) return;
   const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
   const role = item.kind === "developer" ? "developer" : "reviewer";
+  const alreadyPushed = republish?.state === "published";
+  const commits = republish === null ? 0 : republish.state === "unpushed" ? republish.unpushed : republish.ahead;
+  const reason = presumedDeadReclaimReason(
+    republish ? { branch: republish.branch, commits, alreadyPushed } : null
+  );
   appendWorkflowEvent({
     issueId: issue.id,
     workflowInstanceId: instance.id,
@@ -111,9 +133,60 @@ function emitPresumedDeadFailed(item: WorkItem): void {
         worktreePath: session?.worktreePath,
       }),
       outcome: "session_failed",
-      reason: PRESUMED_DEAD_REASON,
+      reason,
+      recovery: republish ? "republish" : "rerun",
+      ...(republish ? { branchState: republish.state, branch: republish.branch, commits } : {}),
     },
   });
+
+  // The live intent is cosmetic; the reclaim is not. Only stages with a legal self-loop are
+  // touched, so a status that cannot re-enter itself can never throw here and roll back the
+  // requeue that shares this transaction.
+  if (!republish || !canTransitionIssue(issue.status, issue.status)) return;
+  transitionIssue(issue.id, issue.status, {
+    currentOwner: role,
+    currentIntent: alreadyPushed
+      ? `Re-verifying the PR for ${republish.branch} (no agent) — recovered attempt`
+      : `Republishing ${commits} recovered commit${commits === 1 ? "" : "s"} (no agent)`,
+  });
+}
+
+/**
+ * Should this reclaim republish the branch instead of re-running the agent (NOT-129)?
+ *
+ * Called OUTSIDE the reclaim transaction: git is async and the reclaim is a synchronous
+ * SQLite transaction. That is safe because the answer is advisory — the reclaim CAS is still
+ * fenced on the lease token, so an attempt that heartbeats in the meantime keeps its lease
+ * and this result is simply discarded. The branch can only have gained commits by then,
+ * never lost them, so a stale read can under-report work, never invent it.
+ */
+async function republishTargetFor(item: WorkItem): Promise<PublishableBranch | null> {
+  // Reviewer items publish nothing of their own, and a dead-lettered item goes to a human
+  // rather than to any next attempt.
+  if (item.kind !== "developer" || attemptCapReached(item)) return null;
+  const issue = getIssue(item.issueId);
+  if (!issue) return null;
+  const progress = await inspectBranchProgress({
+    repo: issue.repo,
+    branch: developerBranchName(issue),
+    baseRefs: baseRefCandidates(issue),
+  });
+  return hasPublishableWork(progress) ? progress : null;
+}
+
+/**
+ * Re-point the requeued item at developer-effect's no-agent publish path, preserving the
+ * frozen execution-profile snapshot the original enqueue put on the payload (a publishOnly
+ * item still opens a worker_session, so it still needs one).
+ */
+function republishPayloadJson(item: WorkItem, branch: string): string {
+  let payload: Record<string, unknown> = {};
+  try {
+    if (item.payloadJson) payload = JSON.parse(item.payloadJson) as Record<string, unknown>;
+  } catch {
+    payload = {};
+  }
+  return JSON.stringify({ ...payload, publishOnly: true, branch });
 }
 
 /**
@@ -218,6 +291,7 @@ export async function recoverCoordinator(opts?: {
   const candidates = listExpiredLeases(now);
 
   const reclaimed: string[] = [];
+  const republished: string[] = [];
   const deadLettered: string[] = [];
   const deferredForCap: string[] = [];
   const heldAlive: string[] = [];
@@ -320,9 +394,19 @@ export async function recoverCoordinator(opts?: {
         );
       }
     }
+    // NOT-129: the session is not the unit of progress, the branch is. A dead attempt that
+    // already committed is republished (push + PR + checks, no agent) rather than redone
+    // from zero by a fresh ~40-minute session. Resolved before the transaction below — see
+    // republishTargetFor for why doing this outside the CAS is safe.
+    //
+    // Read *after* the kill above, deliberately: a predecessor CLI still running could land
+    // another commit between the read and the requeue, and the republish would then push a
+    // branch state nobody inspected. Once the pid is confirmed stopped, what git reports is
+    // what the successor will publish.
+    const republish = await republishTargetFor(item);
 
     try {
-      const kind = getDb().transaction((): "reclaimed" | "dead" | "lost" | "deferred" => {
+      const kind = getDb().transaction((): "reclaimed" | "republished" | "dead" | "lost" | "deferred" => {
         if (deferExpiredLeaseForCap(item, token, nowIso)) return "deferred";
 
         if (!attemptCapReached(item)) {
@@ -330,11 +414,15 @@ export async function recoverCoordinator(opts?: {
             item.id,
             token,
             { reason: "lease expired" },
-            { backoffMs, onlyIfExpiredBefore: nowIso }
+            {
+              backoffMs,
+              onlyIfExpiredBefore: nowIso,
+              payloadJson: republish ? republishPayloadJson(item, republish.branch) : undefined,
+            }
           );
           if (!ok) return "lost"; // completed or heartbeated concurrently
-          emitPresumedDeadFailed(item);
-          return "reclaimed";
+          emitPresumedDeadFailed(item, republish);
+          return republish ? "republished" : "reclaimed";
         }
 
         const dead = finishWorkItem(item.id, token, {
@@ -358,6 +446,7 @@ export async function recoverCoordinator(opts?: {
         return "dead";
       })();
       if (kind === "reclaimed") reclaimed.push(item.id);
+      else if (kind === "republished") republished.push(item.id);
       else if (kind === "dead") deadLettered.push(item.id);
       else if (kind === "deferred") deferredForCap.push(item.id);
     } catch (err) {
@@ -381,9 +470,17 @@ export async function recoverCoordinator(opts?: {
     );
   }
 
+  if (republished.length) {
+    console.warn(
+      `[coordinator] ${republished.length} reclaim(s) routed to republish — branch already had commits, no new agent session`,
+      { workItemIds: republished }
+    );
+  }
+
   const stranded = await recoverStrandedAutoMerges();
   return {
     reclaimed,
+    republished,
     deadLettered,
     deferredForCap,
     heldAlive,

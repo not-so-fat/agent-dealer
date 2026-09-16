@@ -194,10 +194,46 @@ export async function pushBranch(opts: { worktreePath: string; branch: string })
   }
 }
 
+/**
+ * Push an existing local branch by ref, from the repo itself rather than a checkout. The
+ * republish path (NOT-129) recovers commits a dead attempt left on the branch, and by then
+ * there is no worktree whose HEAD `pushBranch` could use — the branch ref in the shared repo
+ * is the only durable handle on that work.
+ */
+export async function pushBranchRef(opts: { repo: string; branch: string }): Promise<PushResult> {
+  try {
+    await git(opts.repo, ["push", "-u", "origin", `refs/heads/${opts.branch}:refs/heads/${opts.branch}`]);
+    return { ok: true };
+  } catch (err) {
+    const message = (err as Error).message;
+    return { ok: false, reason: message, rejected: PUSH_REJECTION_PATTERNS.test(message) };
+  }
+}
+
 /** Commits on HEAD not on `baseRef` — zero means the developer produced nothing to push/PR. */
 export async function commitsAhead(opts: { worktreePath: string; baseRef: string }): Promise<number> {
   const { stdout } = await git(opts.worktreePath, ["rev-list", "--count", `${opts.baseRef}..HEAD`]);
   return Number(stdout.trim());
+}
+
+/** `commitsAhead` between two arbitrary refs — no worktree, no HEAD (see `pushBranchRef`). */
+export async function countCommitsBetween(opts: {
+  repo: string;
+  base: string;
+  head: string;
+}): Promise<number> {
+  const { stdout } = await git(opts.repo, ["rev-list", "--count", `${opts.base}..${opts.head}`]);
+  return Number(stdout.trim());
+}
+
+/** Whether any ref (SHA, `origin/<branch>`, branch name) resolves to a commit in this repo. */
+export async function refExists(repo: string, ref: string): Promise<boolean> {
+  try {
+    await git(repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

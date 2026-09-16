@@ -89,12 +89,13 @@ async function main(): Promise<void> {
   const coordinatorRecovery = await recoverCoordinator();
   if (
     coordinatorRecovery.reclaimed.length ||
+    coordinatorRecovery.republished.length ||
     coordinatorRecovery.deadLettered.length ||
     coordinatorRecovery.deferredForCap.length ||
     coordinatorRecovery.autoMergesFinalized.length
   ) {
     console.warn(
-      `[startup] coordinator recovery: reclaimed ${coordinatorRecovery.reclaimed.length}, dead-lettered ${coordinatorRecovery.deadLettered.length}, deferred for cap ${coordinatorRecovery.deferredForCap.length}, auto-merges finalized ${coordinatorRecovery.autoMergesFinalized.length}`
+      `[startup] coordinator recovery: reclaimed ${coordinatorRecovery.reclaimed.length}, republished ${coordinatorRecovery.republished.length}, dead-lettered ${coordinatorRecovery.deadLettered.length}, deferred for cap ${coordinatorRecovery.deferredForCap.length}, auto-merges finalized ${coordinatorRecovery.autoMergesFinalized.length}`
     );
   }
   startCoordinatorLoop();

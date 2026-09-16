@@ -31,10 +31,12 @@ import {
   pushBranch,
   mergeBase,
   branchExists,
+  pushBranchRef,
   revParseHead,
   revParseRef,
   fetchRef,
 } from "../adapters/git-worktree.js";
+import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
 import { getWorkerSession, patchRunningSession, recordSessionProcess } from "../repository/worker-sessions.js";
@@ -161,9 +163,15 @@ async function reconcilePrHead(
 }
 
 /**
- * Infra retry after a successful push: no agent spawn. Uses the issue repo as `gh` cwd
- * and `origin/<branch>` as the verified head (worktree was already removed on the prior
- * failure path).
+ * Infra retry that skips the agent: publish whatever the branch already carries. Uses the
+ * issue repo as `gh` cwd and `origin/<branch>` as the verified head (any worktree was
+ * already removed on the prior failure path).
+ *
+ * Two callers reach here. The post-push `adapter_failure` retry (routing.ts) arrives with
+ * the branch already on origin and only the gh/PR/checks stage left to redo. A presumed-dead
+ * reclaim (NOT-129) may instead arrive with commits that exist ONLY locally — the attempt
+ * died between `git commit` and the coordinator's push — so this also pushes when, and only
+ * when, the local branch is strictly ahead of its remote-tracking ref.
  */
 async function runPublishOnlyHandoff(
   ctx: EffectContext,
@@ -196,6 +204,37 @@ async function runPublishOnlyHandoff(
 
   try {
     setLiveIntent(issue.id, `Developer · retrying GitHub publish (round ${round})`);
+
+    // Only a branch strictly ahead of origin is pushed here: the post-push retry path must
+    // keep touching the remote not at all, and a local ref that has somehow fallen BEHIND
+    // origin (someone pushed outside the coordinator) must not be turned into a rejected
+    // push and a spurious escalation — origin is the better artifact in that case.
+    const progress = await inspectBranchProgress({
+      repo: cwd,
+      branch: branchName,
+      baseRefs: baseRefCandidates(issue),
+      fetch: true,
+    });
+    if (progress.state === "unpushed") {
+      setLiveIntent(
+        issue.id,
+        `Developer · pushing ${progress.unpushed} recovered commit${progress.unpushed === 1 ? "" : "s"} (round ${round})`
+      );
+      const recovered = await pushBranchRef({ repo: cwd, branch: branchName });
+      if (!recovered.ok) {
+        // Same policy as a live attempt's push: a clean rejection is a human decision, a
+        // tooling error is a bounded infra retry. Either way the commits stay on the branch.
+        return recovered.rejected
+          ? { kind: "unpushed_commit", reason: recovered.reason }
+          : { kind: "adapter_failure", reason: `push of recovered branch ${branchName} failed: ${recovered.reason}` };
+      }
+      milestone(
+        "branch.pushed",
+        `Developer · recovered branch pushed (${progress.unpushed} commit${progress.unpushed === 1 ? "" : "s"})`,
+        { branch: branchName, commitsAhead: progress.ahead, recoveredCommits: progress.unpushed }
+      );
+    }
+
     await fetchRef(cwd, branchName);
     const remoteHead = await revParseRef(cwd, `origin/${branchName}`);
 
