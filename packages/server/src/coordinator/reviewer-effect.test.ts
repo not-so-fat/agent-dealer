@@ -85,9 +85,17 @@ function issueBranchName(issueId: string): string {
   return `issue-${issueId}`;
 }
 
-async function makeIssue(opts: { maxInfraAttempts?: number } = {}): Promise<string> {
+async function makeIssue(opts: {
+  maxInfraAttempts?: number;
+  reviewerDeck?: { deckId: string; playbookIds: string[] };
+} = {}): Promise<string> {
   const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
-  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
+  const rev = createAgent({
+    name: `rev-${Math.random()}`,
+    runtime: "claude_code",
+    workspaceRoot: repo,
+    ...(opts.reviewerDeck ?? {}),
+  });
   return createIssue({
     title: "Add widget",
     description: "Build the widget.",
@@ -249,6 +257,13 @@ function reviewerCtxFactory(issueId: string) {
   const issue = getIssue(issueId)!;
   const instance = getActiveWorkflowInstance(issueId)!;
   const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  const profileSnapshotJson = (() => {
+    try {
+      return (JSON.parse(workItem.payloadJson ?? "{}") as { profileSnapshot?: string }).profileSnapshot;
+    } catch {
+      return undefined;
+    }
+  })();
   return (leaseToken: string): EffectContext => {
     const session = createWorkerSession({
       issueId: issue.id,
@@ -256,6 +271,7 @@ function reviewerCtxFactory(issueId: string) {
       round: workItem.round,
       agentId: issue.reviewerAgentId,
       runtime: "claude_code",
+      profileSnapshotJson,
     });
     return {
       workItem: { ...workItem, workerSessionId: session.id, leaseToken },
@@ -339,6 +355,37 @@ test("session_failed: bounded infra retry re-queues a fresh reviewer session at 
   // Cost is incurred the moment the process runs — recorded even though the transcript
   // could not be parsed as a verdict (see reviewer-effect.ts: recorded before that check).
   assert.equal(listUsageEventsForIssue(issueId).filter((u) => u.role === "reviewer").length, 1);
+});
+
+test("session_failed: reviewer deck preflight preserves the failing playbook reason", async () => {
+  const deckId = "11111111-1111-4111-a111-111111111111";
+  const issueId = await makeIssue({
+    reviewerDeck: { deckId, playbookIds: ["pb-required"] },
+  });
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  const ctxWithLease = reviewerCtxFactory(issueId);
+  setWorkItemLease(workItem.id, "token-deck-failure");
+
+  let spawnCalled = false;
+  const outcome = await runReviewerEffect(ctxWithLease("token-deck-failure"), {
+    spawn: async (input) => {
+      spawnCalled = true;
+      return verdictSpawn({ verdict: "approved" })(input);
+    },
+    github,
+    deckCallTool: async (name) =>
+      name === "get_bound_deck"
+        ? { content: [{ type: "text", text: JSON.stringify({ id: deckId }) }] }
+        : { isError: true, content: [{ type: "text", text: "playbook missing" }] },
+  });
+
+  assert.equal(spawnCalled, false, "failed deck preflight must stop before reviewer spawn");
+  assert.equal(outcome.kind, "session_failed");
+  if (outcome.kind === "session_failed") {
+    assert.match(outcome.reason ?? "", /get_playbook\(pb-required\) returned an error: playbook missing/);
+  }
 });
 
 test("publish is idempotent: re-running the effect for the same PR/head (simulating a crash before the work item's completion CAS, then recovery) does not submit a second review", async () => {

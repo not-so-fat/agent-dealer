@@ -123,6 +123,22 @@ test("prepareWorkerDeckConnection fails closed when a configured playbook is una
   }
 });
 
+test("prepareWorkerDeckConnection shares one timeout budget across all preflight calls", async () => {
+  const result = await prepareWorkerDeckConnection({
+    ...BASE_OPTS,
+    playbookIds: ["pb-one", "pb-two"],
+    timeoutMs: 40,
+    verifyCallTool: async (name, args) => {
+      if (name === "get_bound_deck") return textResult({ id: DECK });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return textResult({ id: args.playbook_id });
+    },
+  });
+
+  assert.equal(result.ok, false, "the second playbook must not receive a fresh timeout budget");
+  if (!result.ok) assert.match(result.reason, /40ms total preflight budget/);
+});
+
 test("prepareWorkerDeckConnection for codex_local writes http_headers (no bearer) and CODEX_HOME env", async () => {
   const result = await prepareWorkerDeckConnection({
     ...BASE_OPTS,

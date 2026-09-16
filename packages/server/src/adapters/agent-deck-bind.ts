@@ -248,6 +248,31 @@ function assertPlaybookMatches(result: unknown, expectedPlaybookId: string): voi
 
 type VerifyDeckResult = { ok: true } | { ok: false; kind: "infra_failure"; reason: string };
 
+/** Run one preflight operation inside the shared absolute deadline and clear its timer. */
+async function withinPreflightDeadline<T>(opts: {
+  label: string;
+  deadlineMs: number;
+  timeoutMs: number;
+  run: () => Promise<T>;
+}): Promise<T> {
+  const remainingMs = opts.deadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    throw new Error(`${opts.label} timed out after ${opts.timeoutMs}ms total preflight budget`);
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${opts.label} timed out after ${opts.timeoutMs}ms total preflight budget`)),
+      remainingMs
+    );
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(opts.run), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 async function verifyDeckConnection(opts: {
   deckId: string;
   worktreePath: string;
@@ -255,10 +280,16 @@ async function verifyDeckConnection(opts: {
   callTool?: DeckToolCaller;
   timeoutMs: number;
 }): Promise<VerifyDeckResult> {
+  const deadlineMs = Date.now() + opts.timeoutMs;
+  const callBeforeDeadline = <T>(label: string, run: () => Promise<T>) =>
+    withinPreflightDeadline({ label, deadlineMs, timeoutMs: opts.timeoutMs, run });
+
   if (opts.callTool) {
     let result: unknown;
     try {
-      result = await opts.callTool("get_bound_deck", {});
+      result = await callBeforeDeadline("get_bound_deck", () =>
+        opts.callTool!("get_bound_deck", {})
+      );
     } catch (err) {
       return { ok: false, kind: "infra_failure", reason: (err as Error).message };
     }
@@ -266,7 +297,9 @@ async function verifyDeckConnection(opts: {
       assertToolResultOk(result, "get_bound_deck");
       assertBoundDeckMatches(result, opts.deckId);
       for (const playbookId of new Set(opts.playbookIds)) {
-        const playbook = await opts.callTool("get_playbook", { playbook_id: playbookId });
+        const playbook = await callBeforeDeadline(`get_playbook(${playbookId})`, () =>
+          opts.callTool!("get_playbook", { playbook_id: playbookId })
+        );
         assertToolResultOk(playbook, `get_playbook(${playbookId})`);
         assertPlaybookMatches(playbook, playbookId);
       }
@@ -281,32 +314,28 @@ async function verifyDeckConnection(opts: {
   });
   const client = new Client({ name: "agent-dealer-deck-preflight", version: "0.0.1" });
   try {
-    await client.connect(transport);
-    try {
-      const result = await Promise.race([
-        client.callTool({ name: "get_bound_deck", arguments: {} }),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`get_bound_deck timed out after ${opts.timeoutMs}ms`)), opts.timeoutMs)
-        ),
-      ]);
-      assertToolResultOk(result, "get_bound_deck");
-      assertBoundDeckMatches(result, opts.deckId);
-      for (const playbookId of new Set(opts.playbookIds)) {
-        const playbook = await Promise.race([
-          client.callTool({ name: "get_playbook", arguments: { playbook_id: playbookId } }),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error(`get_playbook(${playbookId}) timed out after ${opts.timeoutMs}ms`)), opts.timeoutMs)
-          ),
-        ]);
-        assertToolResultOk(playbook, `get_playbook(${playbookId})`);
-        assertPlaybookMatches(playbook, playbookId);
-      }
-      return { ok: true };
-    } finally {
-      await client.close();
+    await callBeforeDeadline("Agent Deck connection", () => client.connect(transport));
+    const result = await callBeforeDeadline("get_bound_deck", () =>
+      client.callTool({ name: "get_bound_deck", arguments: {} })
+    );
+    assertToolResultOk(result, "get_bound_deck");
+    assertBoundDeckMatches(result, opts.deckId);
+    for (const playbookId of new Set(opts.playbookIds)) {
+      const playbook = await callBeforeDeadline(`get_playbook(${playbookId})`, () =>
+        client.callTool({ name: "get_playbook", arguments: { playbook_id: playbookId } })
+      );
+      assertToolResultOk(playbook, `get_playbook(${playbookId})`);
+      assertPlaybookMatches(playbook, playbookId);
     }
+    return { ok: true };
   } catch (err) {
     return { ok: false, kind: "infra_failure", reason: (err as Error).message };
+  } finally {
+    try {
+      await client.close();
+    } catch {
+      // best-effort after a connection or deadline failure
+    }
   }
 }
 

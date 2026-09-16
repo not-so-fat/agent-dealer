@@ -136,8 +136,17 @@ function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "sessi
       return outcome.reason ?? "Developer session timed out.";
     case "checks_failed":
       return "Developer's PR checks failed.";
-    case "adapter_failure":
-      return `Git/GitHub verification failed: ${outcome.reason}`;
+    case "adapter_failure": {
+      const connectionPrefix = "deck connection failed:";
+      if (!outcome.reason.startsWith(connectionPrefix)) {
+        return `Git/GitHub verification failed: ${outcome.reason}`;
+      }
+      const detail = outcome.reason.slice(connectionPrefix.length).trim();
+      const preflightPrefix = "deck preflight failed:";
+      return detail.startsWith(preflightPrefix)
+        ? `Agent Deck preflight failed:${detail.slice(preflightPrefix.length)}`
+        : `Agent Deck connection failed: ${detail}`;
+    }
   }
 }
 

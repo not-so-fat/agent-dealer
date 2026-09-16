@@ -272,7 +272,7 @@ export async function runReviewerEffect(
       });
       if (!prepared.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
-        return { kind: "session_failed" };
+        return { kind: "session_failed", reason: `deck connection failed: ${prepared.reason}` };
       }
       workerAuthority = {
         mcpConfigPath: prepared.mcpConfigPath,
