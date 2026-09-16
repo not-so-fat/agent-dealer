@@ -41,7 +41,8 @@ import {
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adapters/github.js";
 import { getWorkerSession, patchRunningSession, recordSessionProcess } from "../repository/worker-sessions.js";
-import { COORDINATOR_PROCESS_OWNER } from "./process-liveness.js";
+import { COORDINATOR_PROCESS_OWNER, readProcessStartTime } from "./process-liveness.js";
+import { reviewerSessionTimeoutMs } from "./session-timeouts.js";
 import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
@@ -68,7 +69,7 @@ const num = (name: string, dflt: number): number => Number(process.env[name] ?? 
 
 export const reviewerEffectConfig = {
   get sessionTimeoutMs(): number {
-    return num("REVIEWER_TIMEOUT_MS", 30 * 60_000);
+    return reviewerSessionTimeoutMs();
   },
   /** How long a loser waits for an in-flight claimant before giving up as `publish_failed`. */
   get publicationWaitAttempts(): number {
@@ -362,7 +363,10 @@ export async function runReviewerEffect(
         signal: ctx.signal,
         // NOT-124: persist the CLI's pid so recovery can verify this worker is really
         // gone before presuming it dead on an expired lease.
-        onSpawn: (pid) => recordSessionProcess(sessionId, pid, COORDINATOR_PROCESS_OWNER),
+        // NOT-131: the start time is read here, while the process is known to be this
+        // spawn's child, so a successor coordinator can still identify it after a restart.
+        onSpawn: (pid) =>
+          recordSessionProcess(sessionId, pid, COORDINATOR_PROCESS_OWNER, readProcessStartTime(pid)),
       });
     } finally {
       sampler.stop();
