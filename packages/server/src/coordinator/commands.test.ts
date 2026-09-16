@@ -13,7 +13,7 @@ const { createIssue, getIssue, updateIssue } = await import("../repository/issue
 const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
   "../repository/workflow-events.js"
 );
-const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
+const { createHumanAction, listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue } = await import("../repository/findings.js");
 const { claimWorkItem, listWorkItemsForIssue, getWorkItem } = await import("../repository/work-items.js");
 const { createWorkerSession, startSession, listWorkerSessionsForIssue } = await import(
@@ -134,40 +134,38 @@ test("checkIssueReadiness reports missing acceptance criteria and is silent once
   assert.deepEqual(ready, { ok: true, missing: [] });
 });
 
-test("startWorkflow with no acceptance criteria asks for a product scope decision and starts nothing", () => {
+test("NOT-118: startWorkflow with no acceptance criteria fails the precondition and opens no product_scope_decision", () => {
   const issueId = newIssue({ acceptanceCriteria: null });
   const res = startWorkflow(issueId);
-  assert.equal(res.ok, "needs_scope_decision");
+  assert.equal(res.ok, false);
+  if (res.ok === false) {
+    assert.equal(res.code, 400);
+    assert.match(res.error, /acceptance criteria/i);
+  }
   assert.equal(getActiveWorkflowInstance(issueId), null);
   assert.equal(getIssue(issueId)!.status, "ready");
-  assert.equal(listHumanActionsForIssue(issueId)[0].actionType, "product_scope_decision");
+  // Under-specified issues wait in the admission queue with a reason — they never open a
+  // human action nobody asked for (NOT-118 reverses the pre-start scope gate).
+  assert.equal(listHumanActionsForIssue(issueId).length, 0);
 });
 
-test("repeated startWorkflow calls before criteria are added never create a duplicate product_scope_decision", () => {
+test("starting after criteria are added closes out a stale product_scope_decision instead of leaving it open", () => {
   const issueId = newIssue({ acceptanceCriteria: null });
-  const first = startWorkflow(issueId);
-  const second = startWorkflow(issueId);
-  assert.equal(first.ok, "needs_scope_decision");
-  assert.equal(second.ok, "needs_scope_decision");
-  if (first.ok === "needs_scope_decision" && second.ok === "needs_scope_decision") {
-    assert.equal(first.action.id, second.action.id);
-  }
-  const scopeActions = listHumanActionsForIssue(issueId).filter((a) => a.actionType === "product_scope_decision");
-  assert.equal(scopeActions.length, 1);
-});
-
-test("starting directly (not via resolve) after criteria are added closes out the stale product_scope_decision instead of leaving it open", () => {
-  const issueId = newIssue({ acceptanceCriteria: null });
-  const opened = startWorkflow(issueId);
-  assert.equal(opened.ok, "needs_scope_decision");
-  const actionId = opened.ok === "needs_scope_decision" ? opened.action.id : assert.fail("expected needs_scope_decision");
+  // A reviewer-escalated scope gate (routing.ts) that the operator answered by editing the
+  // issue: it must not stay open beside a running workflow.
+  const action = createHumanAction({
+    issueId,
+    actionType: "product_scope_decision",
+    reason: "no acceptance criteria",
+    question: "Add acceptance criteria",
+    responseOptions: [{ choice: "resume", label: "Added — start" }],
+  });
 
   updateIssue(issueId, { acceptanceCriteria: "It works now" });
   const started = startWorkflow(issueId);
   assert.equal(started.ok, true);
 
-  const action = listHumanActionsForIssue(issueId).find((a) => a.id === actionId)!;
-  assert.equal(action.status, "resolved");
+  assert.equal(listHumanActionsForIssue(issueId).find((a) => a.id === action.id)!.status, "resolved");
   assert.equal(getIssue(issueId)!.status, "developing");
 });
 
@@ -549,9 +547,13 @@ test("applyCompletion on an unknown / never-leased work item is a no-op", async 
 
 test("pre-start product_scope_decision: resolving without criteria leaves the action open", () => {
   const issueId = newIssue({ acceptanceCriteria: null });
-  const started = startWorkflow(issueId);
-  assert.equal(started.ok, "needs_scope_decision");
-  const actionId = listHumanActionsForIssue(issueId)[0].id;
+  const actionId = createHumanAction({
+    issueId,
+    actionType: "product_scope_decision",
+    reason: "no acceptance criteria",
+    question: "Add acceptance criteria",
+    responseOptions: [{ choice: "resume", label: "Added — start" }],
+  }).id;
 
   const bad = resolveHumanActionAndAdvance(actionId, "yusuke", "resume");
   assert.equal(bad.ok, false);
@@ -595,10 +597,14 @@ test("abortIssue mid-workflow cancels the pending work item, closes the instance
 
 test("abortIssue resolves an open human action and drops it out of the open set", () => {
   const issueId = newIssue({ acceptanceCriteria: null });
-  const started = startWorkflow(issueId);
-  assert.equal(started.ok, "needs_scope_decision");
-  if (started.ok !== "needs_scope_decision") return;
-  assert.equal(started.action.status, "open");
+  const action = createHumanAction({
+    issueId,
+    actionType: "product_scope_decision",
+    reason: "no acceptance criteria",
+    question: "Add acceptance criteria",
+    responseOptions: [{ choice: "resume", label: "Added — start" }],
+  });
+  assert.equal(action.status, "open");
 
   const result = abortIssue(issueId, "yusuke");
   assert.deepEqual(result, { ok: true, issueStatus: "closed", alreadyClosed: false });

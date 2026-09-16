@@ -92,9 +92,11 @@ test("agent-operated CLI contract: discover profiles/issues, start, inspect choi
       ],
     },
     {
+      // NOT-118: start answers with the admission outcome — admitted (with the instance and
+      // round-1 work item) or queued at a position with a wait reason.
       path: `/api/issues/${issueId}/start`,
       method: "POST",
-      response: { instance: { id: "wf-1" }, workItem: { id: "work-1" } },
+      response: { state: "admitted", instance: { id: "wf-1" }, workItem: { id: "work-1", kind: "developer" } },
     },
     { path: "/api/human-actions", method: "GET", response: actions },
     ...actions.map((action, index): ExpectedCall => ({

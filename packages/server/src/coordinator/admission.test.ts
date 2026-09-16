@@ -330,9 +330,14 @@ test("admitNext closes a stale product_scope_decision when AC was added after th
 
   const issue = readyIssue("stale-scope", { acceptanceCriteria: null });
   enqueueIssue(issue.id);
-  const opened = startWorkflow(issue.id);
-  assert.equal(opened.ok, "needs_scope_decision");
-  const actionId = opened.ok === "needs_scope_decision" ? opened.action.id : assert.fail("expected gate");
+  // A reviewer-escalated scope gate (routing.ts) left open while the issue sat queued.
+  const actionId = createHumanAction({
+    issueId: issue.id,
+    actionType: "product_scope_decision",
+    reason: "no acceptance criteria",
+    question: "Add acceptance criteria",
+    responseOptions: [{ choice: "resume", label: "Added — start" }],
+  }).id;
 
   updateIssue(issue.id, { acceptanceCriteria: "AC added via PATCH" });
   const admitted = await admitNext();

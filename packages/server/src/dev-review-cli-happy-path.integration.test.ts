@@ -60,6 +60,7 @@ const { registerEffectHandler, resetEffectHandlers } = await import("./coordinat
 const { runDeveloperEffect } = await import("./coordinator/developer-effect.js");
 const { runReviewerEffect } = await import("./coordinator/reviewer-effect.js");
 const { startCoordinatorLoop, stopCoordinatorLoop } = await import("./coordinator/worker-loop.js");
+const { setAdmissionHealthCheckerForTests } = await import("./coordinator/admission.js");
 const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./coordinator/auto-merge.js");
 type DeveloperDeps = Parameters<typeof runDeveloperEffect>[1];
 type ReviewerDeps = Parameters<typeof runReviewerEffect>[1];
@@ -73,8 +74,13 @@ before(() => {
   migrate();
   // final_review:complete undrafts+merges (NOT-102); hermetic suite must not shell out to `gh`.
   setMergePrForTests(async () => ({ ok: true }));
+  // NOT-118: `issue start` now goes through admission, whose default eligibility probes the
+  // real Claude/Cursor/gh CLIs and Agent Deck. This suite runs fixture effect handlers, so
+  // agent health is stubbed the same way the fixture PR/deck adapters are.
+  setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
 });
 after(() => {
+  setAdmissionHealthCheckerForTests(null);
   stopCoordinatorLoop();
   resetEffectHandlers();
   clearFinalizeInflightForTests();
@@ -278,7 +284,10 @@ test(
       JSON.stringify({ host: "127.0.0.1", port, serverPid: process.pid, cliPid: process.pid, startedAt: new Date().toISOString() }, null, 2)
     );
 
-    startCoordinatorLoop();
+    // The loop starts at step 5, after the CLI's own create + start: with queue-by-default
+    // (NOT-118) a loop running here would admit the freshly created issue itself, and the
+    // CLI's `issue start` would race it. Steps 5+ still prove the real timer-driven
+    // coordinator — not a manual pump — drives the workflow to completion.
 
     // 1. Discover profiles from only the CLI — no ambient knowledge of the IDs just created.
     const agents = cliJson(await runCli(["agent", "list"])) as { agents: Array<{ id: string; deckId: string | null; deckName: string | null }> };
@@ -314,9 +323,16 @@ test(
     const listed = cliJson(await runCli(["issue", "list", "--status", "ready"])) as Array<{ id: string }>;
     assert.ok(listed.some((i) => i.id === issueId), "the newly created issue must be discoverable via `issue list`");
 
-    // 4. Start it from the CLI.
-    const started = cliJson(await runCli(["issue", "start", issueId])) as { instance: { id: string } };
+    // 4. Start it from the CLI. Create already enqueued it for admission (NOT-118), so this
+    // moves it to the front of the queue and — with the slot free — admits it immediately.
+    const started = cliJson(await runCli(["issue", "start", issueId])) as {
+      state: string;
+      instance: { id: string };
+    };
+    assert.equal(started.state, "admitted");
     assert.ok(started.instance?.id);
+
+    startCoordinatorLoop();
 
     // 5-6. The real, timer-driven coordinator loop (not a manual pump) now runs the
     // developer worker, verifies + records the PR/SHA evidence, and runs the reviewer

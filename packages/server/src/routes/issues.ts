@@ -14,9 +14,10 @@ import {
 } from "../repository/workflow-events.js";
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
-import { abortIssue, checkIssueReadiness, startWorkflow } from "../coordinator/commands.js";
+import { abortIssue, checkIssueReadiness } from "../coordinator/commands.js";
+import { isStartable, queueStatusForIssue, startIssueViaQueue } from "../coordinator/admission.js";
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
-import { getQueuedEntryForIssue } from "../repository/queue-entries.js";
+import { enqueueIssue, getQueuedEntryForIssue } from "../repository/queue-entries.js";
 import { latestSessionFailureForIssue } from "../coordinator/latest-failure.js";
 import { deriveLiveProgressFromLog } from "../coordinator/session-progress.js";
 
@@ -102,6 +103,8 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       latestSessionFailure: latestSessionFailureForIssue(issue),
       // NOT-103: whether this issue is in the admission queue.
       queued: getQueuedEntryForIssue(id) != null,
+      // NOT-118: position + current wait reason so a queued `ready` issue never reads as idle.
+      queueEntry: queueStatusForIssue(id),
     };
   });
 
@@ -138,10 +141,21 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     const input = parsed.data;
     if (input.externalId) {
       const existing = findIssueByExternalId(input.source, input.externalId);
-      if (existing) return existing;
+      if (existing) {
+        // Idempotent re-create of an already-imported issue: re-enqueue it when it is still
+        // startable, so a repeated "kick from Linear" lands it back in the queue instead of
+        // being a silent no-op. `isStartable` is admission's own predicate — enqueueing
+        // anything it would reject (a running issue, a `final_review` one awaiting a merge
+        // call, a terminal one) parks a row that can never be admitted.
+        if (input.enqueue && isStartable(existing)) enqueueIssue(existing.id);
+        return existing;
+      }
     }
     const issue = createIssue(input);
     appendWorkflowEvent({ issueId: issue.id, type: "issue.created", actorType: "human", stage: issue.status });
+    // NOT-118: create enqueues, it never starts. Server-side so the UI, CLI and agents all
+    // behave the same — callers hold no workflow logic. `enqueue: false` creates a draft.
+    if (input.enqueue) enqueueIssue(issue.id);
     return issue;
   });
 
@@ -166,12 +180,16 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     return updateIssue(id, parsed.data);
   });
 
+  /**
+   * NOT-118: Start = move to front of the admission queue, then admit if a slot is free.
+   * No bypass — a busy or not-yet-eligible issue answers `{ state: "queued", ... }` and is
+   * the next one admitted, instead of piling up as another "in progress" issue.
+   */
   app.post("/api/issues/:id/start", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const result = startWorkflow(id);
-    if (result.ok === true) return { instance: result.instance, workItem: result.workItem };
-    if (result.ok === "needs_scope_decision") return { needsScopeDecision: result.action };
-    return reply.status(result.code).send({ error: result.error });
+    const result = await startIssueViaQueue(id);
+    if (result.state === "error") return reply.status(result.code).send({ error: result.error });
+    return result;
   });
 
   app.post("/api/issues/:id/abort", async (req, reply) => {

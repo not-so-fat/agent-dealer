@@ -33,15 +33,17 @@ agent-dealer issue create \
   --base-branch main
 ```
 
-`acceptance-criteria` can be omitted at create time, but `issue start` then opens a
-`product_scope_decision` human action instead of starting. Once acceptance criteria are
-added (via the API/dashboard — there is no `issue update` CLI command yet), either path
-closes that action and starts the workflow in one step:
+Creating **enqueues the issue for admission** — it never starts a workflow directly, so
+creating several in a row is always safe. Pass `--no-enqueue` for a draft that stays out of
+the queue until you add it back (`agent-dealer queue add <issueId>`) or start it.
+
+`acceptance-criteria` can be omitted at create time; the issue then waits in the queue with
+the wait reason `missing acceptance criteria` instead of starting. Adding criteria (via the
+API/dashboard — there is no `issue update` CLI command yet) unblocks it on the next
+coordinator tick, with no action to resolve.
 
 ```bash
-agent-dealer issue start <issueId>                                        # retry directly
-# or
-agent-dealer action resolve <actionId> --choice resume --by <yourName>    # explicit resolve
+agent-dealer queue list     # position + wait reason for everything waiting
 ```
 
 The response's `id` from `issue create` is the issue id used by every command below.
@@ -57,6 +59,21 @@ agent-dealer issue list --status ready
 ```bash
 agent-dealer issue start <issueId>
 ```
+
+Start means "run this next": it moves the issue to the front of the admission queue and
+admits it right away when a slot is free. There is no queue bypass — the response is either
+
+```json
+{ "state": "admitted", "instance": { "…": "…" }, "workItem": { "…": "…" } }
+```
+
+or, when the system is busy or the issue is not eligible yet,
+
+```json
+{ "state": "queued", "position": 1, "waitReason": "waiting for slot — running: Add widget" }
+```
+
+in which case it is the next issue admitted. A queued issue needs no second Start.
 
 From here the coordinator's own timer-driven loop takes over: it launches the developer
 worker in an isolated worktree with the snapshotted profile/deck, verifies and records

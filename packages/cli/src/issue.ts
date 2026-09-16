@@ -1,7 +1,8 @@
+import type { StartIssueResponse } from "@agent-dealer/shared";
 import { apiFetch } from "./http.js";
 
 export type ParsedIssueArgs =
-  | { subcommand: "create"; title: string; repo: string; developerAgentId: string; reviewerAgentId: string; description?: string; acceptanceCriteria?: string; baseBranch?: string }
+  | { subcommand: "create"; title: string; repo: string; developerAgentId: string; reviewerAgentId: string; description?: string; acceptanceCriteria?: string; baseBranch?: string; enqueue: boolean }
   | { subcommand: "import"; externalId: string; externalLabel?: string; title: string; repo: string; developerAgentId: string; reviewerAgentId: string }
   | { subcommand: "list"; status?: string }
   | { subcommand: "show"; id: string; includeEvidence: boolean }
@@ -30,7 +31,8 @@ export function parseIssueArgs(args: string[]): ParsedIssueArgs {
         if (!externalId) throw new Error("import requires --external-id");
         return { subcommand: "import", externalId, externalLabel: flag(rest, "--external-label"), title, repo, developerAgentId, reviewerAgentId };
       }
-      return { subcommand: "create", title, repo, developerAgentId, reviewerAgentId, description: flag(rest, "--description"), acceptanceCriteria: flag(rest, "--acceptance-criteria"), baseBranch: flag(rest, "--base-branch") };
+      // NOT-118: create enqueues for admission by default; --no-enqueue leaves a draft out.
+      return { subcommand: "create", title, repo, developerAgentId, reviewerAgentId, description: flag(rest, "--description"), acceptanceCriteria: flag(rest, "--acceptance-criteria"), baseBranch: flag(rest, "--base-branch"), enqueue: !rest.includes("--no-enqueue") };
     }
     case "list": {
       return { subcommand: "list", status: flag(rest, "--status") };
@@ -68,8 +70,14 @@ export async function runIssueCommand(args: string[]): Promise<number> {
   try {
     switch (parsed.subcommand) {
       case "create": {
-        const result = await apiFetch("/api/issues", { method: "POST", body: { title: parsed.title, repo: parsed.repo, developerAgentId: parsed.developerAgentId, reviewerAgentId: parsed.reviewerAgentId, description: parsed.description, acceptanceCriteria: parsed.acceptanceCriteria, baseBranch: parsed.baseBranch, source: "agent" } });
+        const result = await apiFetch("/api/issues", { method: "POST", body: { title: parsed.title, repo: parsed.repo, developerAgentId: parsed.developerAgentId, reviewerAgentId: parsed.reviewerAgentId, description: parsed.description, acceptanceCriteria: parsed.acceptanceCriteria, baseBranch: parsed.baseBranch, source: "agent", enqueue: parsed.enqueue } });
         console.log(JSON.stringify(result, null, 2));
+        // stdout stays pure JSON for agents that pipe it — the hint goes to stderr.
+        console.error(
+          parsed.enqueue
+            ? "Queued for admission — `agent-dealer queue list` shows position and wait reason."
+            : "Created as a draft (not queued) — `agent-dealer queue add <id>` when it is ready."
+        );
         return 0;
       }
       case "import": {
@@ -94,8 +102,15 @@ export async function runIssueCommand(args: string[]): Promise<number> {
         return 0;
       }
       case "start": {
-        const result = await apiFetch(`/api/issues/${parsed.id}/start`, { method: "POST" });
+        // NOT-118: start moves the issue to the front of the admission queue. It either
+        // admits it right away or leaves it waiting at position 1 — never a queue bypass.
+        const result = (await apiFetch(`/api/issues/${parsed.id}/start`, { method: "POST" })) as StartIssueResponse;
         console.log(JSON.stringify(result, null, 2));
+        console.error(
+          result.state === "admitted"
+            ? "Admitted — the workflow started."
+            : `Queued at position ${result.position}${result.waitReason ? ` — ${result.waitReason}` : ""}.`
+        );
         return 0;
       }
       case "guide": {

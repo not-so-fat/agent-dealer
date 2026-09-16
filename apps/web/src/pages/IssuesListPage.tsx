@@ -9,7 +9,6 @@ import {
   fetchQueue,
   fetchRecentRepos,
   lookupLinearIssue,
-  startIssue,
   type IssueListRow,
   type QueueEntryRow,
 } from "../api";
@@ -153,13 +152,12 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
       return;
     }
     try {
-      const trimmedAcceptance = acceptanceCriteria.trim();
-      const created = await createIssue({
+      await createIssue({
         title: title.trim(),
         repo: repo.trim(),
         baseBranch: baseBranch.trim() || "main",
         description: description.trim() || undefined,
-        acceptanceCriteria: trimmedAcceptance || undefined,
+        acceptanceCriteria: acceptanceCriteria.trim() || undefined,
         developerAgentId,
         reviewerAgentId,
         maxReviewRounds: 3,
@@ -172,12 +170,9 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
       });
       setShowCreate(false);
       resetForm();
-      // Startable the moment it's created — go straight to it and start it, rather than
-      // leaving it silently sitting in `ready` until someone opens it.
-      if (trimmedAcceptance) {
-        await startIssue(created.id);
-        onSelectIssue(created.id);
-      }
+      // NOT-118: the server enqueues every new issue for admission — creating never starts
+      // a workflow here, so making several in a row is always safe. The queue panel below
+      // shows where it landed and what it is waiting for.
       refresh();
     } catch (e) {
       setError(String(e));
@@ -202,9 +197,9 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
             <span className="text-xs text-white/40">{queue.length} waiting · sequential</span>
           </div>
           <div className="divide-y divide-white/5">
-            {queue.map((entry, idx) => (
+            {queue.map((entry) => (
               <div key={entry.id} className="px-4 py-2 flex items-start gap-3">
-                <span className="text-xs text-white/35 w-5 shrink-0 pt-0.5">{idx + 1}</span>
+                <span className="text-xs text-white/35 w-5 shrink-0 pt-0.5">{entry.position}</span>
                 <button
                   type="button"
                   className="flex-1 min-w-0 text-left hover:text-cyber-teal"
@@ -217,7 +212,7 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
                     <span className="text-xs text-amber-200/80 block mt-0.5">{entry.waitReason}</span>
                   ) : (
                     <span className="text-xs text-white/35 block mt-0.5">
-                      {entry.issueStatus ?? "queued"} · waiting for a free slot
+                      {entry.issueStatus ?? "queued"} · next up
                     </span>
                   )}
                 </button>
@@ -446,23 +441,40 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
         <p className="text-white/45 text-sm">No issues yet — create one to get started.</p>
       ) : (
         <div className="space-y-2">
-          {issues.map((issue) => (
-            <button
-              key={issue.id}
-              type="button"
-              onClick={() => onSelectIssue(issue.id)}
-              className="w-full text-left flex items-center gap-3 px-4 py-3 rounded border border-white/10 bg-panel-elevated/40 hover:bg-panel-elevated/70 transition-colors"
-            >
-              {issue.hasOpenHumanAction && <AlertIcon className="w-4 h-4 shrink-0 text-red-400" />}
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-white/90 truncate">{issue.title}</p>
-                {issue.currentIntent && <p className="text-xs text-white/50 truncate">{issue.currentIntent}</p>}
-              </div>
-              <span className="text-xs text-white/40 capitalize shrink-0">{issue.currentOwner}</span>
-              <IssueStatusBadge status={issue.status} />
-              <span className="text-xs text-white/35 shrink-0 w-16 text-right">{timeAgo(issue.updatedAt)}</span>
-            </button>
-          ))}
+          {issues.map((issue) => {
+            // NOT-118: a queued `ready` issue must not read as an idle one — show its
+            // position and what it is waiting for, right on the row.
+            const entry = queue.find((e) => e.issueId === issue.id);
+            return (
+              <button
+                key={issue.id}
+                type="button"
+                onClick={() => onSelectIssue(issue.id)}
+                className="w-full text-left flex items-center gap-3 px-4 py-3 rounded border border-white/10 bg-panel-elevated/40 hover:bg-panel-elevated/70 transition-colors"
+              >
+                {issue.hasOpenHumanAction && <AlertIcon className="w-4 h-4 shrink-0 text-red-400" />}
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-white/90 truncate">{issue.title}</p>
+                  {entry?.waitReason ? (
+                    <p className="text-xs text-amber-200/80 truncate">{entry.waitReason}</p>
+                  ) : (
+                    issue.currentIntent && <p className="text-xs text-white/50 truncate">{issue.currentIntent}</p>
+                  )}
+                </div>
+                <span className="text-xs text-white/40 capitalize shrink-0">{issue.currentOwner}</span>
+                {entry && (
+                  <span
+                    className="text-xs px-2 py-0.5 rounded border border-cyber-teal/40 text-cyber-teal shrink-0"
+                    title={entry.waitReason ?? "Next up for admission"}
+                  >
+                    Queued #{entry.position}
+                  </span>
+                )}
+                <IssueStatusBadge status={issue.status} />
+                <span className="text-xs text-white/35 shrink-0 w-16 text-right">{timeAgo(issue.updatedAt)}</span>
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
