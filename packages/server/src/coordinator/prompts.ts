@@ -73,6 +73,7 @@ function agentDeckSection(worktreePath: string | undefined, deckId: string | nul
   }
   const parts = [
     `First equip this agent: bind_workspace({ deckId: "${deckId}", workspaceRoot: "${worktreePath}" }). Do this before any other Agent Deck or Linear call — without that bind you are not running the configured agent.`,
+    `This bootstrap is a hard gate. If bind_workspace, get_bound_deck, or any configured get_playbook call fails, stop before inspecting or changing the task and report the bootstrap failure — do not improvise without the deck.`,
     `Then get_bound_deck / list_service_tools / call_service_tool as needed. Ticket detail (Linear, etc.) is only available through Agent Deck service tools — do not web-fetch Linear URLs. If Task/Acceptance criteria only reference a ticket id, fetch that ticket via Agent Deck before implementing; otherwise treat the Task/Acceptance criteria above as authoritative and use Linear only to enrich.`,
   ];
   for (const playbookId of playbookIds ?? []) {

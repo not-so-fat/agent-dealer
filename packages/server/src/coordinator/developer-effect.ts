@@ -427,6 +427,7 @@ export async function runDeveloperEffect(
         deckId: snapshot.deckId,
         worktreePath,
         runtime,
+        playbookIds: snapshot.playbookIds,
         verifyCallTool: deps.deckCallTool,
       });
       if (!prepared.ok) {

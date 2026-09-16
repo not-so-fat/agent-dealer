@@ -236,11 +236,22 @@ function assertBoundDeckMatches(result: unknown, expectedDeckId: string): void {
   }
 }
 
+function assertPlaybookMatches(result: unknown, expectedPlaybookId: string): void {
+  const payload = parseDeckToolResult(result);
+  const playbookId = typeof payload.id === "string" ? payload.id : undefined;
+  if (playbookId !== expectedPlaybookId) {
+    throw new Error(
+      `get_playbook returned ${playbookId ?? "(missing id)"}, expected ${expectedPlaybookId}`
+    );
+  }
+}
+
 type VerifyDeckResult = { ok: true } | { ok: false; kind: "infra_failure"; reason: string };
 
 async function verifyDeckConnection(opts: {
   deckId: string;
   worktreePath: string;
+  playbookIds: string[];
   callTool?: DeckToolCaller;
   timeoutMs: number;
 }): Promise<VerifyDeckResult> {
@@ -254,6 +265,11 @@ async function verifyDeckConnection(opts: {
     try {
       assertToolResultOk(result, "get_bound_deck");
       assertBoundDeckMatches(result, opts.deckId);
+      for (const playbookId of new Set(opts.playbookIds)) {
+        const playbook = await opts.callTool("get_playbook", { playbook_id: playbookId });
+        assertToolResultOk(playbook, `get_playbook(${playbookId})`);
+        assertPlaybookMatches(playbook, playbookId);
+      }
       return { ok: true };
     } catch (err) {
       return { ok: false, kind: "infra_failure", reason: (err as Error).message };
@@ -275,6 +291,16 @@ async function verifyDeckConnection(opts: {
       ]);
       assertToolResultOk(result, "get_bound_deck");
       assertBoundDeckMatches(result, opts.deckId);
+      for (const playbookId of new Set(opts.playbookIds)) {
+        const playbook = await Promise.race([
+          client.callTool({ name: "get_playbook", arguments: { playbook_id: playbookId } }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`get_playbook(${playbookId}) timed out after ${opts.timeoutMs}ms`)), opts.timeoutMs)
+          ),
+        ]);
+        assertToolResultOk(playbook, `get_playbook(${playbookId})`);
+        assertPlaybookMatches(playbook, playbookId);
+      }
       return { ok: true };
     } finally {
       await client.close();
@@ -286,12 +312,15 @@ async function verifyDeckConnection(opts: {
 
 /**
  * Materialize a per-attempt MCP config for the profile's deck and verify with
- * `get_bound_deck` before spawn. No mint, no ledger, no Authorization.
+ * `get_bound_deck` and every configured playbook before spawn. No mint, no ledger, no
+ * Authorization. A deck-bound worker is fail-closed: missing playbook authority is an
+ * infrastructure failure, never permission to improvise without the configured recipe.
  */
 export async function prepareWorkerDeckConnection(opts: {
   deckId: string;
   worktreePath: string;
   runtime: Runtime;
+  playbookIds?: string[];
   verifyCallTool?: DeckToolCaller;
   timeoutMs?: number;
 }): Promise<WorkerDeckConnectionOutcome> {
@@ -311,6 +340,7 @@ export async function prepareWorkerDeckConnection(opts: {
   const verified = await verifyDeckConnection({
     deckId: opts.deckId,
     worktreePath: opts.worktreePath,
+    playbookIds: opts.playbookIds ?? [],
     callTool: opts.verifyCallTool,
     timeoutMs,
   });
