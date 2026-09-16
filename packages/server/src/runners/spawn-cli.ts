@@ -40,12 +40,34 @@ export function timeoutMsForMode(mode: "plan" | "execute" | "reflect" | "qa"): n
   return defaults[mode];
 }
 
+/**
+ * Grace period between the SIGTERM an abort sends and the SIGKILL that follows it. The
+ * agent CLIs spawn their own children (login shells, test runners), and they reap those
+ * themselves on SIGTERM the way they do on Ctrl-C — so terminating politely first is what
+ * actually cleans up the whole tree. SIGKILL is only the backstop for a CLI that ignores
+ * the first signal.
+ */
+function abortKillGraceMs(): number {
+  return Number(process.env.SPAWN_ABORT_KILL_GRACE_MS ?? 5_000);
+}
+
 export async function spawnCli(
   runId: string,
   cmd: string,
   args: string[],
   cwd: string,
-  opts: { logPath: string; timeoutMs: number; env?: Record<string, string> }
+  opts: {
+    logPath: string;
+    timeoutMs: number;
+    env?: Record<string, string>;
+    /**
+     * Aborting terminates the spawned CLI (NOT-126). Without this, an attempt that loses
+     * its lease leaves its agent process running: still editing the worktree, still
+     * spending tokens, under a session the DB has already marked failed — and the
+     * successor attempt then reuses that same worktree, so two live agents share one tree.
+     */
+    signal?: AbortSignal;
+  }
 ): Promise<{ exitCode: number; transcript: string; timedOut: boolean }> {
   await acquireSpawnSlot();
   try {
@@ -54,6 +76,7 @@ export async function spawnCli(
       const stderrChunks: string[] = [];
       let timedOut = false;
       let settled = false;
+      let killEscalation: ReturnType<typeof setTimeout> | undefined;
 
       const logStream = fs.createWriteStream(opts.logPath, { flags: "w" });
       // A WriteStream's 'error' event has no default handler — left unguarded, any
@@ -76,10 +99,39 @@ export async function spawnCli(
       });
       registerChild(runId, child, opts.logPath);
 
+      const onAbort = () => {
+        if (settled) return;
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // Already exited between the abort firing and this kill — nothing to signal.
+        }
+        killEscalation = setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // Same race as above; the 'close' handler still settles the promise.
+          }
+        }, abortKillGraceMs());
+        killEscalation.unref?.();
+      };
+      // Not cleared on settle alone — `cleanupAbort` also drops the listener, so a
+      // long-lived signal (one AbortController per work item, reused across the
+      // handler's later stages) never retains this closure after the child is gone.
+      const cleanupAbort = () => {
+        if (killEscalation) clearTimeout(killEscalation);
+        opts.signal?.removeEventListener("abort", onAbort);
+      };
+      if (opts.signal) {
+        if (opts.signal.aborted) onAbort();
+        else opts.signal.addEventListener("abort", onAbort, { once: true });
+      }
+
       const finish = (exitCode: number) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        cleanupAbort();
         unregisterChild(runId);
         // Write any stderr BEFORE ending the stream — writing after end() throws
         // ERR_STREAM_WRITE_AFTER_END (this crashed the whole process on any real CLI
@@ -147,6 +199,7 @@ export async function spawnCli(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        cleanupAbort();
         unregisterChild(runId);
         logStream.end();
         reject(err);

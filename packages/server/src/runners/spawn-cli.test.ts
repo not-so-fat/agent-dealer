@@ -71,3 +71,89 @@ test(
     assert.match(result.transcript, /done/, "the in-memory transcript is unaffected by the log file write failing");
   }
 );
+
+// NOT-126: an attempt that loses its lease aborts, but the abort used to stop at the
+// handler -- the spawned CLI kept running, kept editing the worktree, and the successor
+// attempt was then handed that same worktree, so two live agents shared one tree. These
+// use `process.execPath` rather than `sh -c '... sleep 30'` deliberately: a shell's
+// orphaned grandchild inherits the stdout pipe and holds it open, so 'close' would not
+// fire promptly and the test would pass for the wrong reason.
+const nodeChild = (body: string) => ({ cmd: process.execPath, args: ["-e", body] });
+
+async function waitForStart(logPath: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if (fs.readFileSync(logPath, "utf8").includes("started")) return;
+    } catch {
+      // The log file is created asynchronously by the write stream -- keep polling.
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error("child never reported that it had started");
+}
+
+test("spawnCli terminates the child when the attempt is aborted", { timeout: 15_000 }, async () => {
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+  const { cmd, args } = nodeChild("console.log('started'); setInterval(() => {}, 1000);");
+  const controller = new AbortController();
+
+  const startedAt = Date.now();
+  // timeoutMs is deliberately far longer than the test timeout: if the abort does not
+  // kill the child, nothing else will, and this test fails by timing out.
+  const promise = spawnCli("test-run-abort", cmd, args, process.cwd(), {
+    logPath,
+    timeoutMs: 600_000,
+    signal: controller.signal,
+  });
+
+  await waitForStart(logPath);
+  controller.abort();
+  const result = await promise;
+
+  assert.ok(Date.now() - startedAt < 15_000, "resolved on the abort, not on the 10-minute timeout");
+  assert.equal(result.timedOut, false, "an abort is a lost lease, not a wall-clock timeout");
+  assert.match(result.transcript, /started/, "output produced before the abort is still returned");
+});
+
+test("spawnCli escalates to SIGKILL when the child ignores SIGTERM", { timeout: 15_000 }, async () => {
+  const previous = process.env.SPAWN_ABORT_KILL_GRACE_MS;
+  process.env.SPAWN_ABORT_KILL_GRACE_MS = "250";
+  try {
+    const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+    const { cmd, args } = nodeChild(
+      "process.on('SIGTERM', () => {}); console.log('started'); setInterval(() => {}, 1000);"
+    );
+    const controller = new AbortController();
+
+    const promise = spawnCli("test-run-abort-sigkill", cmd, args, process.cwd(), {
+      logPath,
+      timeoutMs: 600_000,
+      signal: controller.signal,
+    });
+
+    await waitForStart(logPath);
+    controller.abort();
+    // Only the SIGKILL backstop can end this child -- it swallows SIGTERM outright.
+    const result = await promise;
+    assert.equal(result.timedOut, false);
+  } finally {
+    if (previous === undefined) delete process.env.SPAWN_ABORT_KILL_GRACE_MS;
+    else process.env.SPAWN_ABORT_KILL_GRACE_MS = previous;
+  }
+});
+
+test("spawnCli runs normally when an un-aborted signal is supplied", { timeout: 10_000 }, async () => {
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+  const controller = new AbortController();
+
+  const result = await spawnCli("test-run-abort-unused", "sh", ["-c", "echo untouched"], process.cwd(), {
+    logPath,
+    timeoutMs: 5000,
+    signal: controller.signal,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.timedOut, false);
+  assert.match(result.transcript, /untouched/);
+});
