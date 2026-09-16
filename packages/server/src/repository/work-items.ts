@@ -305,6 +305,13 @@ export interface RequeueOpts {
   /** Recovery guard — see FinishInput.onlyIfExpiredBefore. */
   onlyIfExpiredBefore?: string;
   /**
+   * Undo the claim-time attempt_count bump (NOT-128), same refund deferWorkItem already
+   * offers: a requeue that is bounded by some *other* budget must not also charge the
+   * developer's. Recovery's presumed-dead reclaim spends `issues.infra_attempts` instead —
+   * the agent never failed, so its bounded retry allowance stays unspent.
+   */
+  revertAttemptCount?: boolean;
+  /**
    * Replace the payload as part of the requeue (NOT-129). A reclaim is not always "run the
    * same thing again": when the dead attempt already committed, the next attempt is a
    * no-agent republish, and that only differs from a fresh session by its payload. Left
@@ -381,6 +388,7 @@ export function requeueWorkItem(
         status = 'pending',
         error_json = @error,
         available_at = @available_at,
+        attempt_count = CASE WHEN @revert = 1 THEN MAX(0, attempt_count - 1) ELSE attempt_count END,
         payload_json = COALESCE(@payload_json, payload_json),
         lease_owner = NULL,
         lease_token = NULL,
@@ -394,6 +402,7 @@ export function requeueWorkItem(
       token: leaseToken,
       error: JSON.stringify(error),
       available_at: new Date(now + opts.backoffMs).toISOString(),
+      revert: opts.revertAttemptCount ? 1 : 0,
       payload_json: opts.payloadJson ?? null,
       expired_before: opts.onlyIfExpiredBefore ?? null,
       now: new Date(now).toISOString(),

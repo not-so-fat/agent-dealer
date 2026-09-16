@@ -6,6 +6,13 @@
 // an observed failure — never merely a status rewrite (design §"Durable dispatch and
 // recovery"). Mirrors recoverOrphanedRuns() in queue/dispatcher.ts, for the kernel.
 //
+// NOT-128: "the same policy" means the same *budget*. A presumed-dead reclaim is a host- or
+// coordinator-level failure, so it spends `issues.infra_attempts` (bounded by
+// `max_infra_attempts`, exhaustion escalating through routing's policy_escalation) and
+// refunds the claim-time `attempt_count` bump. Three sleeping-laptop reclaims used to burn a
+// ticket's entire developer allowance and dump it on a human, even though the agent never
+// failed once — `attempt_count` is no longer load-bearing on this path at all.
+//
 // An expired lease is a *suspicion*, not a verdict (NOT-124/125). Before reclaiming, two
 // gates ask whether the worker is actually gone: the spawned CLI's pid is checked for
 // liveness, and a wall-clock jump that outran the monotonic clock (the host slept) buys
@@ -19,13 +26,12 @@
 // effect; and one item that fails to route never rolls back the others.
 import { canTransitionIssue } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
-import { getIssue, transitionIssue } from "../repository/issues.js";
+import { getIssue, incrementIssueInfraAttempts, transitionIssue } from "../repository/issues.js";
 import { appendWorkflowEvent, getActiveWorkflowInstance } from "../repository/workflow-events.js";
 import type { WorkerSession } from "@agent-dealer/shared";
 import { completeSession, getWorkerSession } from "../repository/worker-sessions.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
 import {
-  attemptCapReached,
   deferWorkItem,
   finishWorkItem,
   listExpiredLeases,
@@ -33,6 +39,7 @@ import {
   requeueWorkItem,
   type WorkItem,
 } from "../repository/work-items.js";
+import { infraAttemptsRemain } from "./routing.js";
 import { activeClockJumpGrace, type ClockJump } from "./clock-jump.js";
 import { inspectWorkerProcess, terminateWorkerProcess } from "./process-liveness.js";
 import { maxAliveHoldMsFor } from "./session-timeouts.js";
@@ -56,7 +63,8 @@ export interface RecoverResult {
   /** Reclaims re-pointed at the no-agent publish path because the branch already had
    * commits (NOT-129) — disjoint from `reclaimed`. */
   republished: string[];
-  /** Work items past the attempt cap — dead-lettered and routed to a human action. */
+  /** Work items past the issue's infra-attempt limit — dead-lettered and routed to a human
+   * action. Never bounded by `attempt_count`: the agent didn't fail (NOT-128). */
   deadLettered: string[];
   /** Issues whose auto-merge park was finalized after a crash (NOT-102). */
   autoMergesFinalized: string[];
@@ -94,8 +102,32 @@ function failOrphanSession(workerSessionId: string | null): void {
   }
 }
 
+/** Commits the reclaim is about to republish, by branch state (0 when there is nothing). */
+function republishCommits(republish: PublishableBranch | null): number {
+  if (republish === null) return 0;
+  return republish.state === "unpushed" ? republish.unpushed : republish.ahead;
+}
+
 /**
- * Timeline-visible failure for a soft reclaim (under attempt cap). Does not change issue
+ * The prose reason for one reclaim, resolved once per item so the timeline event, the next
+ * session's `retryReason` prompt and the work item's `error_json` all say the same thing.
+ */
+function reclaimReason(item: WorkItem, republish: PublishableBranch | null): string {
+  const role = item.kind === "developer" ? "developer" : "reviewer";
+  return presumedDeadReclaimReason(
+    role,
+    republish
+      ? {
+          branch: republish.branch,
+          commits: republishCommits(republish),
+          alreadyPushed: republish.state === "published",
+        }
+      : null
+  );
+}
+
+/**
+ * Timeline-visible failure for a soft reclaim (infra budget remaining). Does not change issue
  * status — the item is requeued — but operators need the presumed-dead reason on the
  * timeline the same way worker.deferred surfaces a cap reason (NOT-113).
  *
@@ -105,7 +137,7 @@ function failOrphanSession(workerSessionId: string | null): void {
  * republish case additionally rewrites the issue's live intent — during the three-hour
  * NOT-121 window nothing on screen said which of the two was happening.
  */
-function emitPresumedDeadFailed(item: WorkItem, republish: PublishableBranch | null): void {
+function emitPresumedDeadFailed(item: WorkItem, republish: PublishableBranch | null, reason: string): void {
   failOrphanSession(item.workerSessionId);
   const issue = getIssue(item.issueId);
   const instance = getActiveWorkflowInstance(item.issueId);
@@ -113,11 +145,7 @@ function emitPresumedDeadFailed(item: WorkItem, republish: PublishableBranch | n
   const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
   const role = item.kind === "developer" ? "developer" : "reviewer";
   const alreadyPushed = republish?.state === "published";
-  const commits = republish === null ? 0 : republish.state === "unpushed" ? republish.unpushed : republish.ahead;
-  const reason = presumedDeadReclaimReason(
-    role,
-    republish ? { branch: republish.branch, commits, alreadyPushed } : null
-  );
+  const commits = republishCommits(republish);
   appendWorkflowEvent({
     issueId: issue.id,
     workflowInstanceId: instance.id,
@@ -162,11 +190,11 @@ function emitPresumedDeadFailed(item: WorkItem, republish: PublishableBranch | n
  * never lost them, so a stale read can under-report work, never invent it.
  */
 async function republishTargetFor(item: WorkItem): Promise<PublishableBranch | null> {
-  // Reviewer items publish nothing of their own, and a dead-lettered item goes to a human
-  // rather than to any next attempt.
-  if (item.kind !== "developer" || attemptCapReached(item)) return null;
+  // Reviewer items publish nothing of their own, and an item whose infra budget is spent goes
+  // to a human rather than to any next attempt.
+  if (item.kind !== "developer") return null;
   const issue = getIssue(item.issueId);
-  if (!issue) return null;
+  if (!issue || !infraAttemptsRemain(issue)) return null;
   const progress = await inspectBranchProgress({
     repo: issue.repo,
     branch: developerBranchName(issue),
@@ -176,18 +204,26 @@ async function republishTargetFor(item: WorkItem): Promise<PublishableBranch | n
 }
 
 /**
- * Re-point the requeued item at developer-effect's no-agent publish path, preserving the
- * frozen execution-profile snapshot the original enqueue put on the payload (a publishOnly
- * item still opens a worker_session, so it still needs one).
+ * Payload for the requeued attempt. Always carries `retryReason` so the next session opens
+ * with the presumed-dead cause (NOT-128) the way every routed infra retry does — an in-place
+ * requeue used to be the one retry that told the next agent nothing about why it was running.
+ * When there is something to republish the item is additionally re-pointed at
+ * developer-effect's no-agent publish path (NOT-129). Either way the frozen
+ * execution-profile snapshot the original enqueue put on the payload is preserved — a
+ * publishOnly item still opens a worker_session, so it still needs one.
  */
-function republishPayloadJson(item: WorkItem, branch: string): string {
+function reclaimPayloadJson(item: WorkItem, reason: string, republish: PublishableBranch | null): string {
   let payload: Record<string, unknown> = {};
   try {
     if (item.payloadJson) payload = JSON.parse(item.payloadJson) as Record<string, unknown>;
   } catch {
     payload = {};
   }
-  return JSON.stringify({ ...payload, publishOnly: true, branch });
+  return JSON.stringify({
+    ...payload,
+    retryReason: reason,
+    ...(republish ? { publishOnly: true, branch: republish.branch } : {}),
+  });
 }
 
 /**
@@ -405,30 +441,46 @@ export async function recoverCoordinator(opts?: {
     // branch state nobody inspected. Once the pid is confirmed stopped, what git reports is
     // what the successor will publish.
     const republish = await republishTargetFor(item);
+    const reason = reclaimReason(item, republish);
 
     try {
       const kind = getDb().transaction((): "reclaimed" | "republished" | "dead" | "lost" | "deferred" => {
         if (deferExpiredLeaseForCap(item, token, nowIso)) return "deferred";
 
-        if (!attemptCapReached(item)) {
+        // NOT-128: which budget bounds this loop. A presumed-dead reclaim is an infra
+        // failure — the same bucket routing.ts puts an observed `session_failed` in — so it
+        // is bounded by `max_infra_attempts` and charged to `issues.infra_attempts`, and the
+        // claim-time `attempt_count` bump is refunded (the NOT-111 precedent). Read inside
+        // the transaction: the snapshot `item` is from before the CAS, and a concurrent route
+        // may have spent the budget since.
+        //
+        // No issue row at all can only mean it was deleted out from under the queue: there is
+        // no budget to consult and no issue to escalate onto, so requeue (the harmless half)
+        // and spend nothing.
+        const budgetIssue = getIssue(item.issueId);
+        if (!budgetIssue || infraAttemptsRemain(budgetIssue)) {
           const ok = requeueWorkItem(
             item.id,
             token,
-            { reason: "lease expired" },
+            { reason },
             {
               backoffMs,
               onlyIfExpiredBefore: nowIso,
-              payloadJson: republish ? republishPayloadJson(item, republish.branch) : undefined,
+              revertAttemptCount: true,
+              payloadJson: reclaimPayloadJson(item, reason, republish),
             }
           );
           if (!ok) return "lost"; // completed or heartbeated concurrently
-          emitPresumedDeadFailed(item, republish);
+          emitPresumedDeadFailed(item, republish, reason);
+          // After the requeue, never before: an infra attempt is only spent once the reclaim
+          // has actually happened, and the CAS above is what decides that.
+          if (budgetIssue) incrementIssueInfraAttempts(budgetIssue.id);
           return republish ? "republished" : "reclaimed";
         }
 
         const dead = finishWorkItem(item.id, token, {
           status: "dead",
-          error: { reason: "lease expired after the attempt cap" },
+          error: { reason: `${PRESUMED_DEAD_REASON} (infra-attempt limit reached)` },
           onlyIfExpiredBefore: nowIso,
         });
         if (!dead) return "lost";

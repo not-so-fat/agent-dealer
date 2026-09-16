@@ -102,21 +102,20 @@ test("recovery leaves a lease alone when a heartbeat renewed it after the snapsh
   assert.equal(getWorkItem(devItem.id)!.status, "leased");
 });
 
-test("an expired lease past the attempt cap is dead-lettered AND routed in one step", async () => {
+test("an expired lease past the infra-attempt limit is dead-lettered AND routed in one step", async () => {
   // A dead-lettered developer work item routes as an infra failure (session_failed), not a
-  // review-round spend — pin maxInfraAttempts to 0 so the very first dead-letter escalates,
-  // matching this test's "one step" intent.
+  // review-round spend — pin maxInfraAttempts to 0 so the very first reclaim has no infra
+  // budget to spend and escalates, matching this test's "one step" intent. NOT-128: the
+  // *infra* budget is what bounds the reclaim; max_attempts (3, untouched here) is not.
   const issueId = newIssue(3, 0);
   startWorkflow(issueId);
   const devItem = listWorkItemsForIssue(issueId)[0];
 
-  // Exhaust the work item's own lease-crash attempts (max_attempts default 3): claim + expire, three times.
-  for (let i = 0; i < 3; i++) {
-    claimWorkItem("o", { leaseMs: 1 });
-    await recoverCoordinator({ now: FUTURE() });
-  }
+  claimWorkItem("o", { leaseMs: 1 });
+  await recoverCoordinator({ now: FUTURE() });
 
   assert.equal(getWorkItem(devItem.id)!.status, "dead");
+  assert.equal(getWorkItem(devItem.id)!.attemptCount, 1, "one claim — the developer budget is nowhere near spent");
   assert.equal(getIssue(issueId)!.status, "needs_human");
   assert.equal(
     listHumanActionsForIssue(issueId).find((a) => a.status === "open")!.actionType,

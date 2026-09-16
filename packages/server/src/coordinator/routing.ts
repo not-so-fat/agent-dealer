@@ -57,7 +57,15 @@ function roundsRemain(limits: RouteLimits): boolean {
   return limits.currentRound < limits.maxReviewRounds;
 }
 
-function infraAttemptsRemain(limits: RouteLimits): boolean {
+/**
+ * The one definition of "is there infra budget left". Exported because recovery.ts asks the
+ * same question about a presumed-dead reclaim (NOT-128): a host/coordinator failure is bounded
+ * by `max_infra_attempts` exactly like an observed session failure, and a second copy of this
+ * comparison living in recovery is the thing that would drift.
+ */
+export function infraAttemptsRemain(
+  limits: Pick<RouteLimits, "infraAttempts" | "maxInfraAttempts">
+): boolean {
   return limits.infraAttempts < limits.maxInfraAttempts;
 }
 
