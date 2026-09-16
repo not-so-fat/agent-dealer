@@ -105,7 +105,7 @@ export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
  */
 export const realReviewerSpawn: ReviewerSpawn = async (input) => {
   const args = buildReviewerArgs(input.runtime, input.prompt, input.model ?? undefined, input.policy, input.mcpConfigPath);
-  assertReviewerReadOnly(args);
+  assertReviewerReadOnly(args, { mcpConfigPath: input.mcpConfigPath, mcpEnv: input.mcpEnv });
   const logPath = input.logPath ?? reviewerSessionLogPath(input.sessionId);
   const { exitCode, transcript, timedOut } = await spawnCli(
     input.sessionId,

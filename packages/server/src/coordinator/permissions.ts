@@ -26,11 +26,38 @@ function flagValue(args: string[], flag: string): string | null {
 }
 
 /**
+ * Spawn context the invariant cannot read off `args` alone (NOT-132). Codex takes its MCP
+ * configuration from `$CODEX_HOME/config.toml`, not from a flag, so whether the ambient
+ * `~/.codex` table is reachable depends on the process env as much as on the argv.
+ */
+export interface ReviewerSpawnContext {
+  /**
+   * The attempt's scoped runtime config, as passed to `realReviewerSpawn`. For codex this
+   * is a per-attempt `CODEX_HOME` directory (agent-deck-bind.ts).
+   */
+  mcpConfigPath?: string;
+  /**
+   * The extra process env the spawn actually applies. For codex this carries `CODEX_HOME`,
+   * and `CODEX_HOME` — not the path field — is what creates the isolation: codex resolves
+   * config from `$CODEX_HOME`, else `~/.codex` (cli-env.ts). Today
+   * `materializeWorkerMcpConfig` returns the two together so they are equal, but that is a
+   * property of one function, not a guarantee. Asserting on the path would be trusting a
+   * correlate — the same shape of assumption that caused the bug this context exists to
+   * fix — so the codex branch below checks the env.
+   */
+  mcpEnv?: Record<string, string>;
+}
+
+/**
  * Invariant check on generated CLI args: throws if a reviewer invocation could write,
  * run shell, or reach an outbound-mutation tool. Used as a spawn preflight and asserted
  * directly in tests so the read-only guarantee cannot silently regress.
+ *
+ * `ctx` carries the spawn's env-level isolation. Omitting it is the strict reading (no
+ * scoped CODEX_HOME), so a caller that forgets it can only ever over-reject, never
+ * under-reject.
  */
-export function assertReviewerReadOnly(args: string[]): void {
+export function assertReviewerReadOnly(args: string[], ctx: ReviewerSpawnContext = {}): void {
   // Dangerous permission bypasses are never allowed for a reviewer.
   for (const arg of args) {
     if (arg.startsWith("--dangerously")) {
@@ -82,8 +109,26 @@ export function assertReviewerReadOnly(args: string[]): void {
     }
     // codex's read-only sandbox does not gate configured MCP/plugin calls, and merging a
     // `-c mcp_servers={}` override does not clear them (verified against the installed
-    // CLI) — only skipping config.toml entirely does.
-    if (!args.includes("--ignore-user-config")) {
+    // CLI). There are exactly two ways to keep the ambient `~/.codex/config.toml`
+    // mcp_servers table out of the session, and this invariant must accept both or it
+    // rejects the one shape production actually builds (NOT-132):
+    //
+    //   * `--ignore-user-config` — skips config.toml entirely. What a deckless reviewer
+    //     gets, since it needs no MCP server at all.
+    //   * a scoped `CODEX_HOME` — codex resolves config from `$CODEX_HOME`, else `~/.codex`
+    //     (cli-env.ts), so pointing it at the per-attempt directory means the only
+    //     config.toml codex can load is the one defining the single deck-header server.
+    //     `--ignore-user-config` is deliberately NOT passed here (args.ts), because it
+    //     would skip that scoped file too and leave the reviewer with no deck at all.
+    //
+    // The second arm checks the env, not `mcpConfigPath`: the env var is what codex reads,
+    // so a future config route returning a path without exporting CODEX_HOME would leave
+    // `~/.codex/config.toml` live while looking isolated here.
+    //
+    // Neither present means the ambient table is live: reject.
+    const scopedCodexHome =
+      ctx.mcpEnv?.CODEX_HOME !== undefined && ctx.mcpEnv.CODEX_HOME === ctx.mcpConfigPath;
+    if (!args.includes("--ignore-user-config") && !scopedCodexHome) {
       throw new Error("reviewer codex args do not isolate configured MCP servers");
     }
   }
@@ -93,9 +138,9 @@ export function assertReviewerReadOnly(args: string[]): void {
   }
 }
 
-export function isReviewerReadOnly(args: string[]): boolean {
+export function isReviewerReadOnly(args: string[], ctx: ReviewerSpawnContext = {}): boolean {
   try {
-    assertReviewerReadOnly(args);
+    assertReviewerReadOnly(args, ctx);
     return true;
   } catch {
     return false;
