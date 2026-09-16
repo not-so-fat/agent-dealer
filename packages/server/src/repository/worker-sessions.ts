@@ -21,6 +21,8 @@ interface WorkerSessionRow {
   error_json: string | null;
   metadata_json: string | null;
   profile_snapshot_json: string | null;
+  process_pid: number | null;
+  process_owner: string | null;
   created_at: string;
   started_at: string | null;
   heartbeat_at: string | null;
@@ -47,6 +49,8 @@ function rowToSession(row: WorkerSessionRow): WorkerSession {
     errorJson: row.error_json,
     metadataJson: row.metadata_json,
     profileSnapshotJson: row.profile_snapshot_json,
+    processPid: row.process_pid,
+    processOwner: row.process_owner,
     createdAt: row.created_at,
     startedAt: row.started_at,
     heartbeatAt: row.heartbeat_at,
@@ -76,6 +80,8 @@ export function createWorkerSession(input: CreateWorkerSessionInput): WorkerSess
     error_json: null,
     metadata_json: input.metadataJson ?? null,
     profile_snapshot_json: input.profileSnapshotJson ?? null,
+    process_pid: null,
+    process_owner: null,
     created_at: now,
     started_at: null,
     heartbeat_at: null,
@@ -86,11 +92,13 @@ export function createWorkerSession(input: CreateWorkerSessionInput): WorkerSess
     INSERT INTO worker_sessions (
       id, issue_id, role, round, agent_id, runtime, model, budget_json, worktree_path,
       input_sha, status, session_ref, log_path, exit_code, error_json, metadata_json,
-      profile_snapshot_json, created_at, started_at, heartbeat_at, completed_at, updated_at
+      profile_snapshot_json, process_pid, process_owner, created_at, started_at, heartbeat_at,
+      completed_at, updated_at
     ) VALUES (
       @id, @issue_id, @role, @round, @agent_id, @runtime, @model, @budget_json, @worktree_path,
       @input_sha, @status, @session_ref, @log_path, @exit_code, @error_json, @metadata_json,
-      @profile_snapshot_json, @created_at, @started_at, @heartbeat_at, @completed_at, @updated_at
+      @profile_snapshot_json, @process_pid, @process_owner, @created_at, @started_at, @heartbeat_at,
+      @completed_at, @updated_at
     )
   `).run(row);
   return rowToSession(row);
@@ -165,6 +173,22 @@ export function patchRunningSession(id: string, patch: PatchRunningSessionInput)
       updated_at: now,
     });
   return getWorkerSession(id);
+}
+
+/**
+ * Records the pid of the CLI this session just spawned, plus the identity of the
+ * coordinator process that owns it (NOT-124). Recovery reads the pair back to verify a
+ * worker is really gone before presuming it dead, instead of inferring death from an
+ * expired lease alone. `running` only — a session that already went terminal has nothing
+ * live to point at.
+ */
+export function recordSessionProcess(id: string, pid: number, owner: string): void {
+  getDb()
+    .prepare(
+      `UPDATE worker_sessions SET process_pid = ?, process_owner = ?, updated_at = ?
+       WHERE id = ? AND status = 'running'`
+    )
+    .run(pid, owner, new Date().toISOString(), id);
 }
 
 /** Most recent still-running session for an issue — drives the Issue Detail live strip. */

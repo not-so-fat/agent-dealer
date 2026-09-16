@@ -40,6 +40,15 @@ export const WorkerSession = z.object({
    * session is created, so a later profile edit never rewrites this session's contract.
    */
   profileSnapshotJson: z.string().nullable(),
+  /**
+   * The spawned CLI's OS pid, and the identity of the coordinator process that spawned it
+   * (NOT-124). Recovery treats the pid as liveness evidence only while `processOwner` still
+   * names the running coordinator — across a restart the pid may have been recycled by an
+   * unrelated program, so it proves nothing. Both null until the CLI actually starts, and
+   * for any session whose spawn never reports one.
+   */
+  processPid: z.number().int().nullable(),
+  processOwner: z.string().nullable(),
   createdAt: z.string(),
   startedAt: z.string().nullable(),
   heartbeatAt: z.string().nullable(),

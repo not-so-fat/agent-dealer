@@ -40,6 +40,7 @@ import { parseProfileSnapshot } from "@agent-dealer/shared";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 import { recoverCoordinator } from "./recovery.js";
+import { observeClockJump } from "./clock-jump.js";
 import { admitNext } from "./admission.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
@@ -358,6 +359,24 @@ export function startCoordinatorLoop(): void {
   if (loopTimer) return;
   const leaseOwner = `loop-${process.pid}-${uuid().slice(0, 8)}`;
   loopTimer = setInterval(() => {
+    // NOT-125: sampled HERE, in the timer itself, rather than inside runCoordinatorTick.
+    // Half of what this measures is "did the poll timer fire on schedule?", and only this
+    // callback runs on a schedule — runCoordinatorTick is also driven ad hoc (tests, manual
+    // recovery), where the gap between two calls means nothing and would read as a sleep.
+    // Before the `ticking` guard, too, so a tick that overruns the interval still leaves the
+    // clock baseline advancing at the true cadence.
+    const jump = observeClockJump();
+    if (jump) {
+      console.warn(
+        `[coordinator] host clock jumped ${Math.round(jump.wallGapMs / 1000)}s between poll ticks — likely host sleep`,
+        {
+          unelapsedMs: Math.round(jump.unelapsedMs),
+          unobservedMs: Math.round(jump.unobservedMs),
+          graceUntil: new Date(jump.graceUntil).toISOString(),
+        }
+      );
+    }
+
     if (ticking) return; // non-overlapping polling
     ticking = true;
     runCoordinatorTick({ leaseOwner })

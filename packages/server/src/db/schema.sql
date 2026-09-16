@@ -144,6 +144,12 @@ CREATE TABLE IF NOT EXISTS worker_sessions (
   error_json TEXT,
   metadata_json TEXT,
   profile_snapshot_json TEXT,
+  -- NOT-124: the spawned CLI's OS pid, and the identity of the coordinator process that
+  -- spawned it. Recovery verifies liveness with kill(pid, 0) before presuming the worker
+  -- dead, but ONLY while process_owner still names the running coordinator — a pid from a
+  -- previous process may since have been reused by an unrelated program.
+  process_pid INTEGER,
+  process_owner TEXT,
   created_at TEXT NOT NULL,
   started_at TEXT,
   heartbeat_at TEXT,

@@ -21,6 +21,8 @@ test("WorkerSession schema parses a queued developer session", () => {
     errorJson: null,
     metadataJson: null,
     profileSnapshotJson: null,
+    processPid: null,
+    processOwner: null,
     createdAt: new Date().toISOString(),
     startedAt: null,
     heartbeatAt: null,

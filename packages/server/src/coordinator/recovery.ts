@@ -6,6 +6,12 @@
 // an observed failure — never merely a status rewrite (design §"Durable dispatch and
 // recovery"). Mirrors recoverOrphanedRuns() in queue/dispatcher.ts, for the kernel.
 //
+// An expired lease is a *suspicion*, not a verdict (NOT-124/125). Before reclaiming, two
+// gates ask whether the worker is actually gone: the spawned CLI's pid is checked for
+// liveness, and a wall-clock jump that outran the monotonic clock (the host slept) buys
+// every pre-jump lease one grace window. Both only ever BLOCK a reclaim — neither can
+// cause one, and neither replaces the lease-token CAS that fences the write itself.
+//
 // Each candidate is reclaimed in its OWN transaction. The reclaim CAS is fenced on both
 // the lease token AND `lease_expires_at < now`, so a worker that heartbeats or completes
 // between recovery's read-only snapshot and its write keeps/wins its lease. A dead-lettered
@@ -21,9 +27,12 @@ import {
   deferWorkItem,
   finishWorkItem,
   listExpiredLeases,
+  refreshHeartbeat,
   requeueWorkItem,
   type WorkItem,
 } from "../repository/work-items.js";
+import { activeClockJumpGrace, type ClockJump } from "./clock-jump.js";
+import { processLiveness } from "./process-liveness.js";
 import { routeAppliedOutcome } from "./commands.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
 import { workerSessionPayload } from "./session-progress.js";
@@ -40,6 +49,10 @@ export interface RecoverResult {
   autoMergesFinalized: string[];
   /** Expired leases deferred (not spent) because the runtime is known usage-capped (NOT-111). */
   deferredForCap: string[];
+  /** Expired leases left alone because their spawned CLI is verifiably still running (NOT-124). */
+  heldAlive: string[];
+  /** Expired leases left alone because the host was suspended across them (NOT-125). */
+  heldAcrossClockJump: string[];
 }
 
 /** Fail a worker_session still `running` for an item whose worker is gone. */
@@ -144,23 +157,71 @@ function deferExpiredLeaseForCap(item: WorkItem, token: string, nowIso: string):
 }
 
 /**
+ * A lease that expired at or before the moment a clock jump was detected was healthy when
+ * the host went down — the gap was suspension, not silence, so it is not evidence of a dead
+ * worker (NOT-125). Leases that expired *after* the jump elapsed in real time and are
+ * reclaimed normally.
+ */
+function protectedByClockJump(item: WorkItem, grace: ClockJump | null): boolean {
+  if (!grace || !item.leaseExpiresAt) return false;
+  return Date.parse(item.leaseExpiresAt) <= grace.detectedAt;
+}
+
+/**
  * @param opts.now  current epoch ms (injectable for tests). Recovery reclaims every lease
  *                  whose `lease_expires_at` is before this — the recovery latency for an
  *                  orphaned item is bounded by `COORDINATOR_LEASE_MS`.
+ * @param opts.clockJump  overrides the ambient clock-jump grace window (tests). Pass `null`
+ *                  to force plain timestamp behaviour.
  */
-export async function recoverCoordinator(opts?: { now?: number }): Promise<RecoverResult> {
+export async function recoverCoordinator(opts?: {
+  now?: number;
+  clockJump?: ClockJump | null;
+}): Promise<RecoverResult> {
   const now = opts?.now ?? Date.now();
   const nowIso = new Date(now).toISOString();
   const backoffMs = num("COORDINATOR_FAIL_BACKOFF_MS", 10_000);
+  const leaseMs = num("COORDINATOR_LEASE_MS", 60_000);
+  const grace = opts?.clockJump !== undefined ? opts.clockJump : activeClockJumpGrace(now);
   const candidates = listExpiredLeases(now);
 
   const reclaimed: string[] = [];
   const deadLettered: string[] = [];
   const deferredForCap: string[] = [];
+  const heldAlive: string[] = [];
+  const heldAcrossClockJump: string[] = [];
 
   for (const item of candidates) {
     if (!item.leaseToken) continue;
     const token = item.leaseToken;
+
+    // NOT-124: the lease says this worker stopped heartbeating; the pid says whether it
+    // stopped running. Only the second one is evidence. A live CLI gets its lease extended
+    // — the heartbeat timer that should have done so was frozen by the host, not by a
+    // crash, and leaving the lease expired would just re-raise this candidate every tick.
+    const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
+    if (processLiveness(session?.processPid ?? null, session?.processOwner ?? null) === "alive") {
+      // Token-fenced like every other write here: a false return means this attempt already
+      // lost its lease to a peer, in which case there is nothing here to reclaim either.
+      if (refreshHeartbeat(item.id, token, { leaseMs })) {
+        heldAlive.push(item.id);
+        console.warn(
+          `[coordinator] lease expired but worker pid ${session?.processPid} is alive — extending`,
+          { workItemId: item.id, workerSessionId: item.workerSessionId }
+        );
+      }
+      continue;
+    }
+
+    // NOT-125: no usable pid (or a dead one) is not enough when the host itself was
+    // suspended across this lease — the CLI may have finished cleanly while the coordinator
+    // was frozen mid-publish. Hold pre-jump leases for one grace window; a worker that is
+    // genuinely gone is still reclaimed once it passes.
+    if (protectedByClockJump(item, grace)) {
+      heldAcrossClockJump.push(item.id);
+      continue;
+    }
+
     try {
       const kind = getDb().transaction((): "reclaimed" | "dead" | "lost" | "deferred" => {
         if (deferExpiredLeaseForCap(item, token, nowIso)) return "deferred";
@@ -207,11 +268,27 @@ export async function recoverCoordinator(opts?: { now?: number }): Promise<Recov
     }
   }
 
+  if (heldAcrossClockJump.length) {
+    // The operator-facing half of NOT-125's AC: "laptop slept" must read differently from
+    // "worker hung", and it is exactly these items that would have been wrongly failed.
+    console.warn(
+      `[coordinator] clock jump absorbed — holding ${heldAcrossClockJump.length} lease(s) that predate it`,
+      {
+        unelapsedMs: grace?.unelapsedMs,
+        wallGapMs: grace?.wallGapMs,
+        graceUntil: grace ? new Date(grace.graceUntil).toISOString() : undefined,
+        workItemIds: heldAcrossClockJump,
+      }
+    );
+  }
+
   const stranded = await recoverStrandedAutoMerges();
   return {
     reclaimed,
     deadLettered,
     deferredForCap,
+    heldAlive,
+    heldAcrossClockJump,
     autoMergesFinalized: stranded.finalized,
   };
 }

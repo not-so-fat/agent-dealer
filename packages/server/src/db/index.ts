@@ -130,6 +130,12 @@ export function migrate(): void {
   if (!workerSessionCols.some((c) => c.name === "profile_snapshot_json")) {
     db.exec("ALTER TABLE worker_sessions ADD COLUMN profile_snapshot_json TEXT");
   }
+  // NOT-124: spawned-CLI liveness evidence. Existing rows stay NULL, which recovery reads
+  // as "no evidence" and falls back to the timestamp-only reclaim it has always done.
+  if (!workerSessionCols.some((c) => c.name === "process_pid")) {
+    db.exec("ALTER TABLE worker_sessions ADD COLUMN process_pid INTEGER");
+    db.exec("ALTER TABLE worker_sessions ADD COLUMN process_owner TEXT");
+  }
 
   // Tighten the workflow-event idempotency index to UNIQUE for DBs created before the
   // constraint (schema.sql's IF NOT EXISTS won't upgrade an existing non-unique index).
