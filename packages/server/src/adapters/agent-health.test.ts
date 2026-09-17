@@ -266,12 +266,23 @@ test("logged-in `codex login status` capture leaves the codex runtime healthy", 
   assert.deepEqual(issues, []);
 });
 
+test("a cursor probe that cannot spawn reports the missing CLI, not unconfirmed auth", async () => {
+  // A spawn failure resolves with `spawn <bin> ENOENT` as its *output*, so the
+  // empty-output test for a missing binary never fires and the operator would be told to
+  // check their login when the binary is what is absent.
+  const missing = path.join(os.tmpdir(), `dealer-absent-cursor-agent-${randomUUID()}`);
+  const issues = await withEnv("CURSOR_CLI", missing, () => runtimeIssuesUncached("cursor_local"));
+  assert.deepEqual(issues.map((i) => i.code), ["cli_missing"]);
+  assert.match(issues[0]!.message, /cursor\.com\/install/);
+});
+
 test("logged-out `claude auth status` capture blocks the claude runtime", async () => {
   // Claude had no auth preflight at all before NOT-133 — a logged-out Claude agent was
-  // admitted exactly the way the logged-out Cursor ones were.
+  // admitted exactly the way the logged-out Cursor ones were. Exit 1 with a JSON body: the
+  // classifier reads `"loggedIn": false`, never the status code.
   const issues = await withEnv(
     "CLAUDE_CLI",
-    stubCli("claude", "claude-auth-status-logged-out.txt", 0),
+    stubCli("claude", "claude-auth-status-logged-out.txt", 1),
     () => runtimeIssuesUncached("claude_code")
   );
   assert.deepEqual(issues.map((i) => i.code), ["runtime_auth"]);

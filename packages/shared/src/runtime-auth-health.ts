@@ -82,8 +82,11 @@ const CODEX_AUTH_PATTERNS: RegExp[] = [
   // `codex login status` when logged out (codex-login-status-logged-out.txt) — exits 1.
   /not logged in/i,
   // `codex exec` when logged out (codex-exec-logged-out.txt): the session spawns and then
-  // fails every request, so this is what a dead codex session's log actually contains.
-  /401 unauthorized/i,
+  // fails every request, so this is what a dead codex session's log actually contains. Every
+  // such line in the capture names the endpoint it was refused by, and that qualifier stays
+  // in the pattern: a bare `401 Unauthorized` is not Codex's voice — the agent's own test run
+  // or curl shares the CLI's stderr, and an unrelated API's 401 must not read as a login.
+  /401 unauthorized[^\n]*api\.openai\.com/i,
   /missing bearer or basic authentication/i,
 ];
 
@@ -110,10 +113,13 @@ const CLAUDE_AUTH_PATTERNS: RegExp[] = [
 const RUNTIME_VENDOR_ANCHORS: Record<Runtime, RegExp[]> = {
   // "set CURSOR_API_KEY environment variable" / "run `cursor-agent login`".
   cursor_local: [/cursor[_-]api[_-]key/i, /cursor-agent\b/i],
-  // "OpenAI Codex v0.154.0", "url: wss://api.openai.com/...", OPENAI_API_KEY, `codex login`.
-  codex_local: [/openai/i, /\bcodex\b/i],
-  // "Please run /login", ANTHROPIC_API_KEY, `claude auth login`.
-  claude_code: [/anthropic/i, /please run \/login/i, /\bclaude\b/i],
+  // "OpenAI Codex v0.154.0", `codex login`, the `codex_api::` tracing target. A bare
+  // `openai` is not an anchor: any runtime's session can talk to api.openai.com.
+  codex_local: [/openai codex/i, /\bcodex\b/i],
+  // "Please run /login", ANTHROPIC_API_KEY, `claude auth login`. A bare `claude` is
+  // deliberately *not* an anchor: Cursor and Codex both name Claude models (`--model
+  // claude-...`), so it identifies a model, not the CLI that printed the line.
+  claude_code: [/anthropic/i, /please run \/login/i, /claude\s+(?:auth\s+)?login/i],
 };
 
 const AUTH_PATTERNS_BY_RUNTIME: Record<Runtime, RegExp[]> = {
@@ -145,6 +151,11 @@ export function isCursorKeychainStuckOutput(output: string): boolean {
 /**
  * Classify one runtime's status/login/stderr text.
  * Cursor's keychain case wins over its plain logged-out case — same symptom, different fix.
+ *
+ * For callers that *know* what they just ran — the health preflight probes one CLI and reads
+ * its output. Callers holding a log plus an unreliable label want
+ * `runtimeAuthClassificationForLog`: several runtimes print the same `Not logged in`, so
+ * "does this read as Cursor's auth failure" is not the same question as "did Cursor write it".
  */
 export function runtimeAuthIssueFromOutput(
   runtime: Runtime,
@@ -174,19 +185,28 @@ export type RuntimeAuthClassification = {
 };
 
 /**
- * Classify a log whose runtime is unknown — the failure-reason classifier reads a spawn log
- * by path and does not always know which CLI wrote it (worker_sessions.runtime is nullable,
- * and older rows disagree with what actually ran).
+ * Classify a log and say which CLI wrote it, without trusting a caller's label over the
+ * text. The failure-reason classifier reads a spawn log by path and its idea of the runtime
+ * is a hint at best: `worker_sessions.runtime` is nullable, and older rows can disagree with
+ * what actually ran.
  *
  * Attribution is deliberately conservative, in this order:
- *  1. a single vendor anchor in text that also reads as that runtime's auth failure;
- *  2. otherwise, an auth failure only one runtime's patterns recognise at all;
- *  3. otherwise unattributed (`runtime: null`) with the generic remediation.
+ *  1. a single vendor anchor in text that also reads as that runtime's auth failure — this
+ *     outranks `recordedRuntime`, because the log naming its own CLI is stronger evidence
+ *     than a row saying what was supposed to run;
+ *  2. otherwise `recordedRuntime`, when its own patterns recognise the text (nothing in the
+ *     log contradicts it, so the caller's label is the best evidence available);
+ *  3. otherwise, an auth failure only one runtime's patterns recognise at all;
+ *  4. otherwise unattributed (`runtime: null`) with the generic remediation.
  *
- * Trying the runtimes in a fixed order instead would report Claude's `Not logged in · Please
- * run /login` as Cursor, because Cursor's list carries the shared `not logged in` too.
+ * Trying the runtimes in a fixed order — or taking `recordedRuntime` at its word — reports
+ * Claude's `Not logged in · Please run /login` as Cursor, because Cursor's list carries the
+ * shared `not logged in` too, and hands the operator `cursor-agent login` for a Claude death.
  */
-export function anyRuntimeAuthIssueFromOutput(output: string): RuntimeAuthClassification | null {
+export function runtimeAuthClassificationForLog(
+  output: string,
+  recordedRuntime?: Runtime | null
+): RuntimeAuthClassification | null {
   // The keychain signature names Cursor on its own (errSecDuplicateItem / macOS keychain).
   if (isCursorKeychainStuckOutput(output)) {
     return { runtime: "cursor_local", issue: { ...CURSOR_KEYCHAIN_HEALTH_ISSUE } };
@@ -198,9 +218,21 @@ export function anyRuntimeAuthIssueFromOutput(output: string): RuntimeAuthClassi
   // Anchors are only consulted within the runtimes whose auth prose matched, so a log that
   // merely mentions another CLI by name cannot steal the attribution.
   const anchored = matched.filter((r) => RUNTIME_VENDOR_ANCHORS[r].some((re) => re.test(output)));
-  const named = anchored.length === 1 ? anchored[0] : matched.length === 1 ? matched[0] : null;
+  const named =
+    anchored.length === 1
+      ? anchored[0]
+      : recordedRuntime && matched.includes(recordedRuntime)
+        ? recordedRuntime
+        : matched.length === 1
+          ? matched[0]
+          : null;
   if (named) {
     return { runtime: named, issue: { code: "runtime_auth", message: REMEDIATION_BY_RUNTIME[named] } };
   }
   return { runtime: null, issue: { code: "runtime_auth", message: AMBIGUOUS_AUTH_REMEDIATION } };
+}
+
+/** `runtimeAuthClassificationForLog` for callers that hold no runtime label at all. */
+export function anyRuntimeAuthIssueFromOutput(output: string): RuntimeAuthClassification | null {
+  return runtimeAuthClassificationForLog(output, null);
 }

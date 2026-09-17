@@ -94,8 +94,10 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
     // NOT-133: Claude had no auth preflight at all, so a logged-out Claude agent was admitted
     // exactly the way a logged-out Cursor one was. `claude auth status` is local, offline and
     // free (it reads the credential store and prints JSON) — unlike `claude -p`, which bills.
-    // Only a positive logged-out signal blocks: an older CLI without the subcommand prints an
-    // unknown-command error that matches nothing, and must not become a false block.
+    // Its output is what gets classified, not its exit code: logged out it prints
+    // `"loggedIn": false` *and* exits 1, so only the positive signal in the body blocks. An
+    // older CLI without the subcommand prints an unknown-command error that matches nothing,
+    // and must not become a false block.
     if (!claudeUsesThirdPartyProvider()) {
       const auth = await runCommand(resolveClaudeBin(), ["auth", "status"]);
       const authIssue = runtimeAuthIssueFromOutput("claude_code", auth.output);
@@ -133,7 +135,10 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
   }
 
   const status = await runCommand(resolveCursorBin(), cursorInvokeArgs(["status"]));
-  if (!status.ok && !status.output.trim() && !cursorBinExists()) {
+  // A failed *spawn* resolves with the error message as its output (`spawn cursor-agent
+  // ENOENT`), not with empty output — so an absent binary must be recognised here or it
+  // falls through to the unconfirmed-auth branch below and names the wrong remedy.
+  if (!status.ok && (/\bENOENT\b/.test(status.output) || (!status.output.trim() && !cursorBinExists()))) {
     issues.push({ code: "cli_missing", message: "cursor-agent not found — run: curl https://cursor.com/install -fsS | bash" });
     return issues;
   }
@@ -142,11 +147,13 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
     issues.push(authIssue);
     return issues;
   }
-  // NOT-133: an unclassified *failure* of the probe itself (non-zero exit, timeout, spawn
-  // error) used to be read as "healthy" and admitted the agent. Silence is not evidence of
-  // auth — refusing to admit costs one queue tick, while admitting on a guess cost 12 dead
-  // sessions and three issues parked on a human. Reported as runtime_auth so the existing
-  // agents-page CLI status renders it; the message says plainly that it is unconfirmed.
+  // NOT-133: an unclassified *failure* of the probe itself (non-zero exit, timeout) used to
+  // be read as "healthy" and admitted the agent. Silence is not evidence of auth, so this
+  // fails closed: the agent stays unhealthy — and its issues stay queued — until the probe
+  // succeeds. That is a deliberate trade against the incident, where admitting on a guess
+  // cost 12 dead sessions and parked three issues on a human. Reported as runtime_auth so
+  // the existing agents-page CLI status renders it, with a message that says plainly the
+  // state is unconfirmed rather than asserting the agent is logged out.
   if (!status.ok) {
     const detail = status.output.trim().split("\n").slice(-1)[0] ?? "no output";
     issues.push({

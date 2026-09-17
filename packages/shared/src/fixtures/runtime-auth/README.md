@@ -32,7 +32,7 @@ env -i PATH="$PATH" HOME="$PROBE" <cli> <args> </dev/null > <fixture> 2>&1
 | `codex-login-status-logged-in.txt` | `codex login status` (real HOME) | 0 |
 | `claude-print-logged-out.txt` | `claude -p "hello"` | 1 |
 | `claude-print-invalid-api-key.txt` | `ANTHROPIC_API_KEY=sk-ant-invalid-000 claude -p "hello"` | 1 |
-| `claude-auth-status-logged-out.txt` | `claude auth status` | 0 |
+| `claude-auth-status-logged-out.txt` | `claude auth status` | 1 |
 | `claude-auth-status-logged-in.txt` | `claude auth status` (real HOME) | 0 |
 
 Notes:
@@ -41,10 +41,15 @@ Notes:
   why the NOT-133 admission gate was not the half that broke. The `-p` run is the one that
   says `Authentication required`.
 - `cursor-agent status` and `codex login status` print the **same bytes** (`Not logged in`)
-  when logged out, and `claude -p` starts its line the same way. That is why a log with no
-  recorded runtime is only attributed to a CLI when the text names one (`CURSOR_API_KEY`,
-  `api.openai.com`, `/login`); otherwise it is classified as an auth failure with a
-  remediation covering all three, rather than guessed at.
+  when logged out, and `claude -p` starts its line the same way. That is why a log is only
+  attributed to a CLI when the text names one (`CURSOR_API_KEY`, `OpenAI Codex`,
+  `Please run /login`) — and why that naming outranks a session row's recorded runtime, which
+  is nullable and can disagree with what ran. Text that names nothing is classified as an auth
+  failure with a remediation covering all three, rather than guessed at.
+- `claude auth status` exits **1** when logged out but still prints its JSON body, so the
+  classifier reads `"loggedIn": false` from the output and never the exit code. An older CLI
+  without the subcommand prints an unknown-command error that matches nothing, which is
+  deliberate: a missing subcommand must not be read as a missing login.
 - Captures keep their ANSI escapes (`cursor-agent` colourises `✓` and its warnings); the
   classifier must cope with them rather than assume stripped output.
 - Two captures are redacted, and *only* for identity: the account e-mail in

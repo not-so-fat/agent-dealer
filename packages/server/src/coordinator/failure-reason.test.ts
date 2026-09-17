@@ -145,6 +145,119 @@ test("NOT-133: a recorded runtime still names that CLI for the shared `Not logge
   assert.match(classifyRunnerLogFailure(logPath, "cursor_local")!, /Cursor auth required mid-run/);
 });
 
+test("NOT-133: a log that names its own CLI outranks a wrong recorded runtime", () => {
+  // worker_sessions.runtime can disagree with what ran (nullable column, older rows, an agent
+  // whose runtime was edited between attempts). Telling the operator `cursor-agent login`
+  // because the row said cursor_local, when Claude printed the failure, is the same class of
+  // wrong answer NOT-133 is about — a confident remediation for the wrong CLI.
+  const claudeLog = writeLog(`\n--- stderr ---\n${capture("claude-print-logged-out.txt")}`);
+  for (const wrong of ["cursor_local", "codex_local"] as const) {
+    const reason = classifyRunnerLogFailure(claudeLog, wrong)!;
+    assert.match(reason, /Claude Code auth required mid-run/, `recorded ${wrong} must not win`);
+    assert.match(reason, /claude auth login/);
+    assert.doesNotMatch(reason, /cursor|codex/i);
+  }
+
+  const codexLog = writeLog(`\n--- stderr ---\n${capture("codex-exec-logged-out.txt")}`);
+  assert.match(classifyRunnerLogFailure(codexLog, "cursor_local")!, /Codex auth required mid-run/);
+
+  const cursorLog = writeAuthDeathLog();
+  assert.match(classifyRunnerLogFailure(cursorLog, "claude_code")!, /Cursor auth required mid-run/);
+});
+
+/**
+ * A worker transcript that *discusses* auth failures — the NOT-133 session itself quotes every
+ * capture in this directory — must not be read as one. Every runner spawns its CLI in a
+ * structured output mode, so transcript prose always arrives inside stream events; only
+ * stderr and terminal error events describe how the session died.
+ */
+const TRANSCRIPT_QUOTING_AUTH_PROSE = [
+  JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [
+        {
+          type: "text",
+          text:
+            `The classifier missed the real string. Captures:\n` +
+            `${capture("cursor-agent-print-logged-out.txt")}` +
+            `${capture("claude-print-logged-out.txt")}` +
+            `${capture("codex-exec-logged-out.txt")}` +
+            `${capture("cursor-agent-print-invalid-api-key.txt")}`,
+        },
+      ],
+    },
+  }),
+  // Codex's native JSONL transcript shape carries the same prose in `item.text`.
+  JSON.stringify({
+    type: "item.completed",
+    item: { type: "agent_message", text: capture("claude-print-invalid-api-key.txt") },
+  }),
+  JSON.stringify({ type: "result", is_error: true, result: "exit 1" }),
+].join("\n");
+
+test("NOT-133: auth prose inside a non-error transcript event is not an auth failure", () => {
+  const logPath = writeLog(`${TRANSCRIPT_QUOTING_AUTH_PROSE}\n`);
+  for (const runtime of [undefined, "cursor_local", "codex_local", "claude_code"] as const) {
+    assert.equal(
+      classifyRunnerLogFailure(logPath, runtime),
+      null,
+      `transcript prose must not classify as auth for runtime=${runtime}`
+    );
+  }
+  assert.equal(
+    reasonForSessionCrash({ timedOut: false, logPath, runtime: "cursor_local" }),
+    "Developer session failed or crashed."
+  );
+});
+
+test("NOT-133: the same prose in a terminal error result IS an auth failure", () => {
+  // The narrowed haystack must not lose the signal: a CLI that reports its auth failure as
+  // the session's error result, rather than on stderr, still has to be classified.
+  const logPath = writeLog(
+    `${JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "starting" }] } })}\n` +
+      `${JSON.stringify({
+        type: "result",
+        is_error: true,
+        result: capture("cursor-agent-print-logged-out.txt"),
+      })}\n`
+  );
+  assert.match(classifyRunnerLogFailure(logPath)!, /Cursor auth required mid-run/);
+  assert.match(classifyRunnerLogFailure(logPath, "cursor_local")!, /CURSOR_API_KEY/);
+});
+
+test("NOT-133: a Codex turn.failed error message is classified", () => {
+  const logPath = writeLog(
+    `${JSON.stringify({ type: "thread.started", thread_id: "t1" })}\n` +
+      `${JSON.stringify({
+        type: "turn.failed",
+        error: { message: capture("codex-exec-logged-out.txt") },
+      })}\n`
+  );
+  assert.match(classifyRunnerLogFailure(logPath, "codex_local")!, /Codex auth required mid-run/);
+});
+
+test("NOT-133: an error event carries its message whether nested or flat", () => {
+  // `error` arrives as a bare string in some events and `{ message }` in others; reading
+  // only one shape silently loses the failure and falls back to "failed or crashed".
+  for (const error of [
+    capture("cursor-agent-print-logged-out.txt"),
+    { message: capture("cursor-agent-print-logged-out.txt") },
+  ]) {
+    const logPath = writeLog(`${JSON.stringify({ type: "error", error })}\n`);
+    assert.match(classifyRunnerLogFailure(logPath)!, /Cursor auth required mid-run/);
+  }
+});
+
+test("NOT-133: a timestamped plain-text CLI line is still classified", () => {
+  // Not every CLI diagnostic is a JSON event; a bracketed prefix must not make one look
+  // like a transcript line and get skipped.
+  const logPath = writeLog(
+    `[2026-09-16T05:05:53Z] ${capture("cursor-agent-print-logged-out.txt")}`
+  );
+  assert.match(classifyRunnerLogFailure(logPath)!, /Cursor auth required mid-run/);
+});
+
 test("NOT-133: a worker.failed event for an auth death carries the auth reason", () => {
   const reason = reasonForWorkerFailedEvent({
     outcome: { kind: "session_failed" },

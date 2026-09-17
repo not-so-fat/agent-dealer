@@ -18,6 +18,7 @@ import {
   anyRuntimeAuthIssueFromOutput,
   cursorAuthIssueFromOutput,
   isCursorKeychainStuckOutput,
+  runtimeAuthClassificationForLog,
   runtimeAuthIssueFromOutput,
 } from "./runtime-auth-health.js";
 
@@ -72,6 +73,24 @@ test("codex logged-out captures classify as runtime_auth", () => {
     assert.equal(issue?.code, "runtime_auth", `${name} should classify`);
     assert.equal(issue?.message, CODEX_AUTH_REMEDIATION);
   }
+});
+
+test("someone else's 401 is not the runtime's login problem", () => {
+  // A worker shares stderr with everything it spawns, so an unrelated API refusing the
+  // *agent's own* request would otherwise be reported as "run `codex login`". The captured
+  // Codex lines all name the endpoint that refused them; that qualifier is what separates
+  // them from a test suite's 401.
+  const unrelated =
+    "  ✗ POST /v1/things 401 Unauthorized (expected 200)\n" +
+    "1 failing test: Error: request failed with 401 Unauthorized\n";
+  assert.equal(runtimeAuthIssueFromOutput("codex_local", unrelated), null);
+  assert.equal(anyRuntimeAuthIssueFromOutput(unrelated), null);
+  // The real capture is still classified.
+  assert.match(capture("codex-exec-logged-out.txt"), /401 Unauthorized/);
+  assert.equal(
+    runtimeAuthIssueFromOutput("codex_local", capture("codex-exec-logged-out.txt"))?.code,
+    "runtime_auth"
+  );
 });
 
 test("a logged-in `codex login status` capture is not a runtime_auth issue", () => {
@@ -163,6 +182,44 @@ test("a known runtime still gets its own remediation for the shared `Not logged 
   const status = capture("cursor-agent-status-logged-out.txt");
   assert.equal(runtimeAuthIssueFromOutput("cursor_local", status)?.message, CURSOR_AUTH_REMEDIATION);
   assert.equal(runtimeAuthIssueFromOutput("codex_local", status)?.message, CODEX_AUTH_REMEDIATION);
+});
+
+test("a log that names its own CLI outranks a conflicting recorded runtime", () => {
+  // The worst outcome of trusting the row: the operator is told to run `cursor-agent login`
+  // because a session row said cursor_local, while the log is Claude's own logged-out line.
+  for (const recorded of ["cursor_local", "codex_local"] as const) {
+    const claude = runtimeAuthClassificationForLog(capture("claude-print-logged-out.txt"), recorded);
+    assert.equal(claude?.runtime, "claude_code", `recorded ${recorded} must not win`);
+    assert.equal(claude?.issue.message, CLAUDE_AUTH_REMEDIATION);
+    assert.doesNotMatch(claude!.issue.message, /cursor|codex/i);
+  }
+
+  const codex = runtimeAuthClassificationForLog(capture("codex-exec-logged-out.txt"), "claude_code");
+  assert.equal(codex?.runtime, "codex_local");
+  assert.equal(codex?.issue.message, CODEX_AUTH_REMEDIATION);
+
+  const cursor = runtimeAuthClassificationForLog(
+    capture("cursor-agent-print-logged-out.txt"),
+    "claude_code"
+  );
+  assert.equal(cursor?.runtime, "cursor_local");
+  assert.equal(cursor?.issue.message, CURSOR_AUTH_REMEDIATION);
+});
+
+test("a recorded runtime settles text that names no CLI", () => {
+  // `Not logged in` on its own: no anchor either way, so the caller's label is the best
+  // evidence there is — and beats the generic three-CLI remediation.
+  const shared = capture("codex-login-status-logged-out.txt");
+  assert.equal(runtimeAuthClassificationForLog(shared, "codex_local")?.runtime, "codex_local");
+  assert.equal(runtimeAuthClassificationForLog(shared, "cursor_local")?.runtime, "cursor_local");
+  assert.equal(runtimeAuthClassificationForLog(shared, null)?.runtime, null);
+});
+
+test("a recorded runtime cannot invent an auth failure that no capture matches", () => {
+  assert.equal(
+    runtimeAuthClassificationForLog(capture("cursor-agent-status-logged-in.txt"), "cursor_local"),
+    null
+  );
 });
 
 test("a stuck keychain is attributed to Cursor even with no recorded runtime", () => {

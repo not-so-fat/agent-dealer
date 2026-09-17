@@ -8,9 +8,8 @@ import type { Runtime, RuntimeAuthClassification } from "@agent-dealer/shared";
 import {
   CURSOR_KEYCHAIN_REMEDIATION,
   RUNTIME_AUTH_LABEL,
-  anyRuntimeAuthIssueFromOutput,
   isCursorKeychainStuckOutput,
-  runtimeAuthIssueFromOutput,
+  runtimeAuthClassificationForLog,
 } from "@agent-dealer/shared";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 
@@ -44,18 +43,89 @@ export function presumedDeadReclaimReason(
 const RECONNECT_EXHAUSTED_RE =
   /reconnect(?:ion)?s?\s+(?:exhausted|failed|gave up)|failed to reconnect|unable to reconnect|connection (?:lost|closed|reset).{0,40}(?:retries|attempts)/i;
 
+const STDERR_MARKER = "\n--- stderr ---\n";
+
 function stripStderrTrailer(raw: string): string {
-  const idx = raw.indexOf("\n--- stderr ---\n");
+  const idx = raw.indexOf(STDERR_MARKER);
   return idx >= 0 ? raw.slice(0, idx) : raw;
 }
 
-/** Full log text + stderr trailer for classifiers (mirrors usage-cap log reading). */
-export function readSpawnLogHaystack(logPath: string | null | undefined): string {
+/**
+ * Strings from one stream event that describe a *failure*. Everything else an event can
+ * carry — assistant text, thinking, tool arguments, file contents — is the worker's own
+ * prose, and a worker that merely discusses `not logged in` or `401 Unauthorized` (this
+ * ticket's own session does) must not be reported as an auth death.
+ *
+ * Covers all three runtimes' terminal shapes: Claude/Cursor `result`+`is_error` and
+ * `system`/`error` events, Codex native JSONL `turn.failed` / `error`.
+ */
+function failureTextFromEvent(e: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const push = (v: unknown) => {
+    if (typeof v === "string" && v.trim()) out.push(v);
+    // `error` is a bare string in some events and `{ message }` in others (Codex
+    // `turn.failed`), and either shape can appear under any of the keys below.
+    else if (v && typeof v === "object") push((v as { message?: unknown }).message);
+  };
+  switch (e.type) {
+    case "result":
+      if (e.is_error) push(e.result);
+      break;
+    case "system":
+      if (e.subtype === "error" || e.subtype === "api_retry") push(e.error);
+      break;
+    case "error":
+    case "stream_error":
+    case "turn.failed":
+      push(e.message);
+      push(e.error);
+      break;
+    default:
+      break;
+  }
+  return out;
+}
+
+/**
+ * The failure-bearing text of a spawn log: its stderr trailer, plus any terminal error
+ * strings from the structured stream, plus stdout lines the CLI printed outside that stream.
+ *
+ * Deliberately *not* the whole log. Every runner runs its CLI in a structured output mode
+ * (`--output-format stream-json` / `--json`), so transcript bodies always arrive as JSON
+ * event lines; scanning those made a worker's own discussion of an auth error read as an
+ * auth error. Lines that are not JSON events are CLI diagnostics rather than model output,
+ * so they stay in — that is where a text-mode warning like Cursor's rejected-API-key notice
+ * lands. Mirrors the usage-cap classifier's haystack (runners/usage-cap.ts, NOT-117).
+ */
+export function readSpawnLogFailureText(logPath: string | null | undefined): string {
   if (!logPath || !fs.existsSync(logPath)) return "";
   try {
     const raw = fs.readFileSync(logPath, "utf8");
-    const stderr = raw.includes("\n--- stderr ---\n") ? (raw.split("\n--- stderr ---\n")[1] ?? "") : "";
-    return `${stripStderrTrailer(raw)}\n${stderr}`;
+    const idx = raw.indexOf(STDERR_MARKER);
+    const stderr = idx >= 0 ? raw.slice(idx + STDERR_MARKER.length) : "";
+    const parts: string[] = [];
+    for (const line of stripStderrTrailer(raw).split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      // A line the CLI meant as a stream event: only its failure fields count. Unparseable
+      // ones (a transcript truncated by a kill) are skipped rather than read as raw text.
+      // Only `{` starts an event — all three runners emit one JSON object per line, so a
+      // `[`-prefixed line is timestamped CLI text (`[error] not logged in`), not an event.
+      if (t.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(t) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            parts.push(...failureTextFromEvent(parsed as Record<string, unknown>));
+          }
+        } catch {
+          // not an event after all — and not trusted as prose either
+        }
+        continue;
+      }
+      parts.push(line);
+    }
+    parts.push(stderr);
+    return parts.join("\n");
   } catch {
     return "";
   }
@@ -65,17 +135,17 @@ export function readSpawnLogHaystack(logPath: string | null | undefined): string
  * Classify runner stderr into an actionable failure reason.
  * Keychain / auth / reconnect win over generic crash labels.
  *
- * `runtime` only decides which CLI the prose names first — every runtime's captured strings
- * are still tried when it does not match, because callers like the recovery/detail strip
- * hold nothing but a log path and a session row whose runtime may be null. In that case the
- * log must name its own CLI to be attributed to one; shared prose (`Not logged in`) yields
- * an auth reason that names no runtime rather than a plausible-looking wrong one.
+ * `runtime` is a hint, not the answer. Callers like the recovery/detail strip hold a log
+ * path and a session row whose runtime may be null — or may disagree with what actually ran
+ * — so a log that names its own CLI outranks the row. Shared prose (`Not logged in`) falls
+ * back to the recorded runtime, and failing that yields an auth reason naming no runtime
+ * rather than a plausible-looking wrong one.
  */
 export function classifyRunnerLogFailure(
   logPath: string | null | undefined,
   runtime?: Runtime
 ): string | null {
-  const haystack = readSpawnLogHaystack(logPath);
+  const haystack = readSpawnLogFailureText(logPath);
   if (!haystack.trim()) return null;
   // The keychain signature is unmistakable and could only have come from Cursor, so it is
   // never gated on the session's recorded runtime — which is null on older rows.
@@ -84,13 +154,10 @@ export function classifyRunnerLogFailure(
   if (isCursorKeychainStuckOutput(haystack)) {
     return `Cursor auth/keychain died mid-run. ${CURSOR_KEYCHAIN_REMEDIATION}`;
   }
-  // Prefer the CLI that actually wrote the log, then fall back to every runtime's captured
-  // strings: a missing or mislabelled runtime must not turn a named auth death back into
-  // the generic crash reason.
-  const preferred = runtime ? runtimeAuthIssueFromOutput(runtime, haystack) : null;
-  const classified: RuntimeAuthClassification | null = preferred
-    ? { runtime: runtime!, issue: preferred }
-    : anyRuntimeAuthIssueFromOutput(haystack);
+  const classified: RuntimeAuthClassification | null = runtimeAuthClassificationForLog(
+    haystack,
+    runtime ?? null
+  );
   if (classified?.issue.code === "runtime_auth") {
     // NOT-133: this is the branch the operator never saw, because cursor-agent's own
     // "Authentication required" matched nothing and the strip fell back to "failed or crashed".
