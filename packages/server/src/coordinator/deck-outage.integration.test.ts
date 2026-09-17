@@ -103,7 +103,13 @@ test("a deck outage at preflight spends no infra attempts and never reaches need
   assert.equal(items.length, 1);
   assert.equal(items[0]!.status, "pending", "the item waits, it is not dead-lettered");
   assert.equal(items[0]!.attemptCount, 0, "the claim-time attempt bump is reverted");
-  assert.ok(Date.parse(items[0]!.availableAt) > Date.now(), "the next preflight is gated behind a wait");
+  // Measured against when the deferral was written, not against "now": the backoff here is
+  // 20ms and the pump iterations that follow the last deferral can outlast it on a loaded
+  // runner, so a wall-clock comparison flakes without asserting anything extra.
+  assert.ok(
+    Date.parse(items[0]!.availableAt) > Date.parse(items[0]!.updatedAt),
+    "the next preflight is gated behind a wait"
+  );
 
   assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
 
