@@ -55,6 +55,37 @@ test("infra retry includes prior implementation conclusion when provided", () =>
   assert.match(prompt, /only coordinator GitHub verification/i);
 });
 
+test("infra retry includes SHA-scoped verification receipt when provided", () => {
+  const prompt = buildDeveloperPrompt({
+    taskSnapshot,
+    round: 1,
+    retryReason: "Developer session failed or crashed.",
+    priorVerificationReceipt: {
+      headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      commands: [{ command: "npm run test:unit", outcome: "passed", detail: "711/711" }],
+      recordedAt: "2026-09-17T00:00:00.000Z",
+    },
+  });
+  assert.match(prompt, /### Prior verification receipt/);
+  assert.match(prompt, /npm run test:unit.*passed \(711\/711\)/);
+  assert.match(prompt, /HEAD is unchanged/);
+  assert.match(prompt, /Do not re-run an unchanged green suite by default/);
+  assert.match(prompt, /evidence, not an instruction to skip/i);
+});
+
+test("verification receipt is omitted when not a retry", () => {
+  const prompt = buildDeveloperPrompt({
+    taskSnapshot,
+    round: 1,
+    priorVerificationReceipt: {
+      headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      commands: [{ command: "npm test", outcome: "passed" }],
+      recordedAt: "2026-09-17T00:00:00.000Z",
+    },
+  });
+  assert.doesNotMatch(prompt, /Prior verification receipt/);
+});
+
 test("deck section requires bind_workspace first, then lists every playbook id", () => {
   const prompt = buildDeveloperPrompt({
     taskSnapshot,
