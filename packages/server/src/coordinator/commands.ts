@@ -67,11 +67,9 @@ import { parseHumanResolution, resolveHumanActionOutcome, type HumanResolution }
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
 import {
   capEscalationEvents,
-  deckOutageDeferralStartedAt,
   deferLeasedWorkItemForDeckOutage,
   deferLeasedWorkItemForUsageCap,
   formatCapEscalationReason,
-  formatDeckOutageEscalationReason,
   usageCapDeferralStartedAt,
   type DeckUnavailableOutcome,
   type DeferralOutcome,
@@ -398,13 +396,16 @@ function parseWorkItemPayload(json: string | null): Record<string, unknown> {
 /**
  * NOT-111 / NOT-136: defer without finishing the work item or spending infra/attempt
  * budgets. Shared by both blockers — only `defer` and `escalate` differ.
+ *
+ * `escalate` is optional because only a usage cap has a ceiling: a deck outage always stays
+ * retryable, so its `defer` never reports `escalated` and there is nothing to route.
  */
 function applyDeferralCompletion(
   workItemId: string,
   leaseToken: string,
   result: DeferralOutcome,
   defer: (item: WorkItem, issue: Issue, instance: WorkflowInstance) => DeferWorkItemResult,
-  escalate: (issue: Issue, instance: WorkflowInstance, item: WorkItem) => ApplyResult
+  escalate?: (issue: Issue, instance: WorkflowInstance, item: WorkItem) => ApplyResult
 ): ApplyResult {
   return getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
@@ -431,7 +432,7 @@ function applyDeferralCompletion(
         instanceCompleted: false,
       };
     }
-    if (deferResult.escalated) {
+    if (deferResult.escalated && escalate) {
       const item = finishWorkItem(workItemId, leaseToken, { status: "done", result });
       if (!item) return { applied: false, reason: "lease_lost" };
       return escalate(issue, instance, item);
@@ -454,30 +455,33 @@ function applyUsageCapCompletion(
   );
 }
 
+/** NOT-136: no escalation arm — the item waits for the deck for as long as it takes. */
 function applyDeckOutageCompletion(
   workItemId: string,
   leaseToken: string,
   outage: DeckUnavailableOutcome
 ): ApplyResult {
-  return applyDeferralCompletion(
-    workItemId,
-    leaseToken,
-    outage,
-    (item, issue, instance) => deferLeasedWorkItemForDeckOutage(item, leaseToken, outage, issue, instance),
-    (issue, instance, item) => routeDeckOutageEscalation(issue, instance, item, outage)
+  return applyDeferralCompletion(workItemId, leaseToken, outage, (item, issue, instance) =>
+    deferLeasedWorkItemForDeckOutage(item, leaseToken, outage, issue, instance)
   );
 }
 
 /**
- * Deferral ceiling exceeded — escalate with the blocker's evidence without spending infra
- * attempts. Used when applyCompletion or the worker loop cannot defer any longer.
+ * Deferral ceiling exceeded — escalate with cap evidence without spending infra attempts.
+ * Used when applyCompletion or the worker loop cannot defer any longer.
+ *
+ * Only the usage cap comes here. A deck outage (NOT-136) has no ceiling: escalating it would
+ * strand an issue that the deck's return would otherwise unblock on its own.
  */
-function routeDeferralEscalation(
+export function routeCapEscalation(
   issue: Issue,
   instance: WorkflowInstance,
   item: WorkItem,
-  detail: { reason: string; eventPayload: Record<string, unknown>; evidence: unknown }
+  cap: UsageCappedOutcome
 ): ApplyResult {
+  const payload = parseWorkItemPayload(item.payloadJson);
+  const firstDeferredAt = usageCapDeferralStartedAt(payload) ?? new Date().toISOString();
+  const reason = formatCapEscalationReason(cap, firstDeferredAt);
   const role = item.kind === "developer" ? "developer" : "reviewer";
 
   const ev = eventEmitter(issue, instance, item.workerSessionId, "needs_human", issue.currentRound);
@@ -492,7 +496,10 @@ function routeDeferralEscalation(
           sessionId: item.workerSessionId ?? "",
           worktreePath: session?.worktreePath,
         }),
-        ...detail.eventPayload,
+        outcome: "usage_capped",
+        until: cap.until,
+        reason: cap.reason,
+        evidence: cap.evidence,
       },
     });
   }
@@ -502,7 +509,7 @@ function routeDeferralEscalation(
     {
       issueStatus: "needs_human",
       currentOwner: "human",
-      currentIntent: detail.reason,
+      currentIntent: reason,
       events: capEscalationEvents(),
     },
     {}
@@ -512,9 +519,9 @@ function routeDeferralEscalation(
     issueId: issue.id,
     workflowInstanceId: instance.id,
     actionType: "policy_escalation",
-    reason: detail.reason,
-    question: questionFor("policy_escalation", detail.reason),
-    evidence: detail.evidence,
+    reason,
+    question: questionFor("policy_escalation", reason),
+    evidence: { usageCap: cap, firstDeferredAt },
     responseOptions: responseOptionsFor("policy_escalation"),
   });
   ev.emit("human_action.requested", { payload: { actionType: "policy_escalation", actionId: action.id } });
@@ -526,46 +533,6 @@ function routeDeferralEscalation(
     humanActionId: action.id,
     instanceCompleted: false,
   };
-}
-
-export function routeCapEscalation(
-  issue: Issue,
-  instance: WorkflowInstance,
-  item: WorkItem,
-  cap: UsageCappedOutcome
-): ApplyResult {
-  const payload = parseWorkItemPayload(item.payloadJson);
-  const firstDeferredAt = usageCapDeferralStartedAt(payload) ?? new Date().toISOString();
-  return routeDeferralEscalation(issue, instance, item, {
-    reason: formatCapEscalationReason(cap, firstDeferredAt),
-    eventPayload: {
-      outcome: "usage_capped",
-      until: cap.until,
-      reason: cap.reason,
-      evidence: cap.evidence,
-    },
-    evidence: { usageCap: cap, firstDeferredAt },
-  });
-}
-
-/** NOT-136: the deck stayed unreachable past the ceiling — this is no longer a restart. */
-export function routeDeckOutageEscalation(
-  issue: Issue,
-  instance: WorkflowInstance,
-  item: WorkItem,
-  outage: DeckUnavailableOutcome
-): ApplyResult {
-  const payload = parseWorkItemPayload(item.payloadJson);
-  const firstDeferredAt = deckOutageDeferralStartedAt(payload) ?? new Date().toISOString();
-  return routeDeferralEscalation(issue, instance, item, {
-    reason: formatDeckOutageEscalationReason(outage, firstDeferredAt),
-    eventPayload: {
-      outcome: "deck_unavailable",
-      reason: outage.reason,
-      evidence: outage.evidence,
-    },
-    evidence: { deckOutage: outage, firstDeferredAt },
-  });
 }
 
 export function routeAppliedOutcome(

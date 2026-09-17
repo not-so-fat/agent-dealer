@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { parse as parseToml } from "smol-toml";
+import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deckbind-"));
 
@@ -389,9 +390,44 @@ test("isDeckUnreachableError separates transport death from a deck-reported erro
   assert.equal(isDeckUnreachableError(new Error("get_bound_deck returned an error: no session")), false);
   assert.equal(isDeckUnreachableError(new Error("invalid_token")), false);
   assert.equal(isDeckUnreachableError(null), false);
-  // A deck-authored message can still *read* like transport death; what keeps that out of
-  // the deferral path is where this predicate is applied (only to an error thrown out of an
-  // awaited call), not the predicate itself — see the upstream-dead test below.
+});
+
+test("an HTTP status beats a transport-looking message — the deck answered", () => {
+  // The SDK pastes the response body into the error message, so a deck that is up and
+  // returns 500 with the body `fetch failed` (NOT-101's shape, reported over HTTP) throws
+  // something that reads exactly like a dead port. The status proves bytes came back.
+  assert.equal(
+    isDeckUnreachableError(new StreamableHTTPError(500, "Error POSTing to endpoint: fetch failed")),
+    false
+  );
+  assert.equal(
+    isDeckUnreachableError(new StreamableHTTPError(502, "Error POSTing to endpoint: ECONNREFUSED upstream")),
+    false
+  );
+  // Structural, not instanceof-dependent: a numeric status anywhere in the chain is enough.
+  assert.equal(isDeckUnreachableError(Object.assign(new Error("fetch failed"), { status: 503 })), false);
+  assert.equal(
+    isDeckUnreachableError(new Error("connect failed", { cause: Object.assign(new Error("fetch failed"), { code: 500 }) })),
+    false
+  );
+  // …and it does not swallow the real thing: a string code is a transport code, not a status.
+  assert.equal(isDeckUnreachableError(fetchFailed("ECONNREFUSED")), true);
+});
+
+test("preflight defers only when nothing answered, never on an HTTP error body", async () => {
+  const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    verifyCallTool: async () => {
+      throw new StreamableHTTPError(500, "Error POSTing to endpoint: fetch failed");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.kind, "infra_failure");
+    assert.match(result.reason, /preflight failed: Streamable HTTP error/);
+  }
 });
 
 test("preflight against a dead deck returns deck_unavailable, not infra_failure", async () => {

@@ -14,7 +14,10 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  StreamableHTTPClientTransport,
+  StreamableHTTPError,
+} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { PermissionPolicy, Runtime } from "@agent-dealer/shared";
 import { getAgentDeckMcpUrl } from "./agent-deck.js";
 import { getWorkerMcpConfigDir } from "../paths.js";
@@ -83,18 +86,52 @@ const UNREACHABLE_ERROR_CODES = new Set([
 
 /** `fetch failed` is what undici surfaces to us when the port is dead — the literal string
  * observed in the NOT-136 incident. The rest are the same conditions reported as prose by
- * intermediate layers that dropped the `cause` chain. */
+ * intermediate layers that dropped the `cause` chain. Prose is the *last* resort, and only
+ * after `deckAnswered` has ruled out a response — see below. */
 const UNREACHABLE_MESSAGE_RE =
   /\bfetch failed\b|\bsocket hang up\b|\bgetaddrinfo\b|\bECONNREFUSED\b|\bECONNRESET\b|\bENOTFOUND\b|\bEAI_AGAIN\b|\bEHOSTUNREACH\b|\bENETUNREACH\b/i;
 
+/** An HTTP status code — the range a real response can carry. */
+function isHttpStatus(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599;
+}
+
+/**
+ * Structural proof that the deck **answered**, which vetoes every heuristic below.
+ *
+ * The MCP SDK reports a non-2xx response by throwing `StreamableHTTPError(status, "Error
+ * POSTing to endpoint: <body>")` — the response body is pasted into the message. So a deck
+ * that is up and returns HTTP 500 with the body `fetch failed` (the NOT-101 shape, where the
+ * deck's own upstream is down) produces an error that reads exactly like a dead port. Message
+ * matching cannot tell those apart; an HTTP status can, and it is dispositive: bytes came
+ * back, so this is a real deck error and must still fail the attempt (NOT-136).
+ */
+function deckAnswered(err: unknown, depth = 0): boolean {
+  if (!err || typeof err !== "object" || depth > 5) return false;
+  if (err instanceof StreamableHTTPError) return true;
+  const e = err as { code?: unknown; status?: unknown; statusCode?: unknown; cause?: unknown; errors?: unknown };
+  // Belt and braces for a duplicated SDK copy, where `instanceof` silently fails:
+  // StreamableHTTPError carries the response status as a *numeric* `code` (node's transport
+  // errors all use string codes like ECONNREFUSED), and other clients use status/statusCode.
+  if (isHttpStatus(e.code) || isHttpStatus(e.status) || isHttpStatus(e.statusCode)) return true;
+  if (Array.isArray(e.errors) && e.errors.some((nested) => deckAnswered(nested, depth + 1))) return true;
+  return e.cause !== undefined && deckAnswered(e.cause, depth + 1);
+}
+
 /** Walks `cause` / `AggregateError.errors` — node's fetch buries the real code one or two levels down. */
-export function isDeckUnreachableError(err: unknown, depth = 0): boolean {
+function hasUnreachableSignal(err: unknown, depth = 0): boolean {
   if (!err || typeof err !== "object" || depth > 5) return false;
   const e = err as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
   if (typeof e.code === "string" && UNREACHABLE_ERROR_CODES.has(e.code)) return true;
   if (typeof e.message === "string" && UNREACHABLE_MESSAGE_RE.test(e.message)) return true;
-  if (Array.isArray(e.errors) && e.errors.some((nested) => isDeckUnreachableError(nested, depth + 1))) return true;
-  return e.cause !== undefined && isDeckUnreachableError(e.cause, depth + 1);
+  if (Array.isArray(e.errors) && e.errors.some((nested) => hasUnreachableSignal(nested, depth + 1))) return true;
+  return e.cause !== undefined && hasUnreachableSignal(e.cause, depth + 1);
+}
+
+/** True only when nothing answered: a transport signal *and* no sign of an HTTP response. */
+export function isDeckUnreachableError(err: unknown): boolean {
+  if (deckAnswered(err)) return false;
+  return hasUnreachableSignal(err);
 }
 
 function resultText(result: unknown): string {

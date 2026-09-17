@@ -169,31 +169,42 @@ test("consecutive outages back off exponentially instead of retrying every ~3s",
   );
 });
 
-test("an outage that outlives the ceiling escalates instead of waiting in silence forever", async () => {
-  const prev = process.env.DECK_OUTAGE_DEFERRAL_CEILING_MS;
-  process.env.DECK_OUTAGE_DEFERRAL_CEILING_MS = "50";
+test("a prolonged outage keeps waiting — it says how long, and still recovers on its own", async () => {
+  const prev = process.env.DECK_OUTAGE_PROLONGED_AFTER_MS;
+  // Long enough that the wait stops reading as "the deck is restarting".
+  process.env.DECK_OUTAGE_PROLONGED_AFTER_MS = "40";
   try {
-    const issueId = makeIssue("ceiling");
+    const issueId = makeIssue("prolonged");
+    let down = true;
+    let ranAfterRecovery = 0;
     registerEffectHandler("developer", async () => {
-      return { kind: "deck_unavailable", reason: UNREACHABLE } satisfies DeveloperOutcome;
+      if (down) return { kind: "deck_unavailable", reason: UNREACHABLE } satisfies DeveloperOutcome;
+      ranAfterRecovery++;
+      return { kind: "no_pr" } satisfies DeveloperOutcome;
     });
 
     assert.equal(startWorkflow(issueId).ok, true);
-    await pump(1); // first observation — defers and starts the ceiling clock
-    assert.equal(getIssue(issueId)!.status, "developing");
-
-    await new Promise((r) => setTimeout(r, 70)); // elapse the ceiling
+    await pump(1); // first observation — starts the outage clock
+    await new Promise((r) => setTimeout(r, 60)); // outlive the "prolonged" threshold
     await pump();
 
-    const issue = getIssue(issueId)!;
-    assert.equal(issue.status, "needs_human");
-    assert.equal(issue.infraAttempts, 0, "even the escalation spends no infra attempts");
-    const escalation = listHumanActionsForIssue(issueId).find((a) => a.status === "open");
-    assert.equal(escalation?.actionType, "policy_escalation");
-    assert.match(escalation?.reason ?? "", /unreachable for over/);
+    const waiting = getIssue(issueId)!;
+    assert.notEqual(waiting.status, "needs_human", "a long outage is still a wait, not a handoff");
+    assert.equal(waiting.infraAttempts, 0);
+    assert.match(waiting.currentIntent ?? "", /Waiting for Agent Deck/);
+    assert.match(waiting.currentIntent ?? "", /unreachable for \d+s/, "the timeline names the outage length");
+    assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
+    assert.equal(listWorkItemsForIssue(issueId)[0]!.status, "pending", "the item is still retryable");
+
+    // The whole point of not escalating: whenever the deck returns, the issue moves again.
+    down = false;
+    const pending = listWorkItemsForIssue(issueId)[0]!;
+    await new Promise((r) => setTimeout(r, Math.max(0, Date.parse(pending.availableAt) - Date.now()) + 5));
+    await pump();
+    assert.ok(ranAfterRecovery > 0, "the deferred item resumed on its own once the deck answered");
   } finally {
-    if (prev === undefined) delete process.env.DECK_OUTAGE_DEFERRAL_CEILING_MS;
-    else process.env.DECK_OUTAGE_DEFERRAL_CEILING_MS = prev;
+    if (prev === undefined) delete process.env.DECK_OUTAGE_PROLONGED_AFTER_MS;
+    else process.env.DECK_OUTAGE_PROLONGED_AFTER_MS = prev;
   }
 });
 

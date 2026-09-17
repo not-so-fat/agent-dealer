@@ -25,10 +25,11 @@ export function deckOutageBackoffMs(priorDeferrals: number): number {
 }
 
 /**
- * How long one item may wait on the deck before it stops being "the deck is restarting" and
- * becomes something a human should look at. Mirrors the usage-cap deferral ceiling — waiting
- * forever in silence is its own failure mode.
+ * After this long the wait stops reading as "the deck is restarting" and the timeline says
+ * how long it has been down. Deliberately *not* a deferral ceiling: the item keeps
+ * re-preflighting on the capped backoff, so an outage of any length still resolves itself
+ * the moment the deck comes back, with no human in the loop.
  */
-export function deckOutageDeferralCeilingMs(): number {
-  return num("DECK_OUTAGE_DEFERRAL_CEILING_MS", 24 * 60 * 60_000);
+export function deckOutageProlongedAfterMs(): number {
+  return num("DECK_OUTAGE_PROLONGED_AFTER_MS", 15 * 60_000);
 }

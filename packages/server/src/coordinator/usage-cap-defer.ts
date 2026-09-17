@@ -4,9 +4,10 @@
 // returns, without spending infra attempts or (when reverting) the claim attempt_count bump.
 //
 // NOT-136 reuses it for a second blocker of exactly the same shape: an unreachable Agent
-// Deck. Both mean "nothing was attempted and nothing is wrong with the work" — the only
-// differences are what sets the retry time (a cap reports its own reset; a dead dependency
-// gets exponential backoff) and how the wait reads on the timeline.
+// Deck. Both mean "nothing was attempted and nothing is wrong with the work"; they differ in
+// what sets the retry time (a cap reports its own reset; a dead dependency gets exponential
+// backoff), how the wait reads on the timeline, and whether the wait can ever end in a human
+// handoff — a cap has a ceiling, an outage does not.
 
 import type { Issue, WorkflowInstance, WorkflowEventType } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
@@ -14,7 +15,7 @@ import { appendWorkflowEvent } from "../repository/workflow-events.js";
 import { transitionIssue } from "../repository/issues.js";
 import { deferWorkItem, getWorkItem, type WorkItem, type WorkItemKind } from "../repository/work-items.js";
 import { getWorkerSession } from "../repository/worker-sessions.js";
-import { deckOutageBackoffMs, deckOutageDeferralCeilingMs } from "./deck-outage-config.js";
+import { deckOutageBackoffMs, deckOutageProlongedAfterMs } from "./deck-outage-config.js";
 import { usageCapDeferralCeilingMs } from "./usage-cap-config.js";
 import { workerSessionPayload } from "./session-progress.js";
 
@@ -80,10 +81,19 @@ export function deferralCeilingExceeded(firstDeferredAt: string, nowMs = Date.no
   return nowMs - start >= usageCapDeferralCeilingMs();
 }
 
-export function deckOutageCeilingExceeded(firstDeferredAt: string, nowMs = Date.now()): boolean {
+/**
+ * How the wait reads on the timeline once it has lasted long enough to be worth naming.
+ * Purely cosmetic — an outage never stops being retryable, however long it runs (NOT-136),
+ * so this is the only thing that changes as one drags on.
+ */
+export function deckOutageWaitLabel(firstDeferredAt: string, nowMs = Date.now()): string {
   const start = Date.parse(firstDeferredAt);
-  if (!Number.isFinite(start)) return false;
-  return nowMs - start >= deckOutageDeferralCeilingMs();
+  const elapsedMs = Number.isFinite(start) ? nowMs - start : 0;
+  if (elapsedMs < deckOutageProlongedAfterMs()) return "";
+  const seconds = Math.round(elapsedMs / 1000);
+  if (seconds < 120) return `unreachable for ${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  return minutes < 120 ? `unreachable for ${minutes}m` : `unreachable for ${Math.round(minutes / 60)}h`;
 }
 
 export interface DeferWorkItemResult {
@@ -194,6 +204,11 @@ export function deferLeasedWorkItemForUsageCap(
  * NOT-136: the same deferral for an unreachable Agent Deck. The retry time is computed here
  * (not supplied by the caller) so the backoff curve has a single owner and counts *this
  * item's* consecutive waits — an effect that only sees one failed preflight cannot know it.
+ *
+ * Unlike the usage cap this never escalates. A cap has a known reset, so passing the ceiling
+ * means something other than the cap is wrong; an outage has no ETA, and handing it to a
+ * human would freeze an issue that would otherwise resume by itself the moment the deck
+ * answers. The wait simply continues on the capped backoff, saying how long it has run.
  */
 export function deferLeasedWorkItemForDeckOutage(
   item: WorkItem,
@@ -209,12 +224,9 @@ export function deferLeasedWorkItemForDeckOutage(
 
     const payload = parsePayload(live.payloadJson);
     const firstDeferredAt = deckOutageDeferralStartedAt(payload) ?? new Date(nowMs).toISOString();
-    if (deckOutageCeilingExceeded(firstDeferredAt, nowMs)) {
-      return { deferred: false, escalated: true };
-    }
-
     const priorDeferrals = deckOutageDeferralCount(payload);
     const until = new Date(nowMs + deckOutageBackoffMs(priorDeferrals)).toISOString();
+    const waitLabel = deckOutageWaitLabel(firstDeferredAt, nowMs);
 
     return applyDeferral(live, leaseToken, issue, instance, {
       until,
@@ -226,7 +238,8 @@ export function deferLeasedWorkItemForDeckOutage(
         deckUnavailableSince: firstDeferredAt,
         deckUnavailableDeferrals: priorDeferrals + 1,
       }),
-      intent: (_role, untilLabel) => `Waiting for Agent Deck — ${outage.reason} (retrying ${untilLabel})`,
+      intent: (_role, untilLabel) =>
+        `Waiting for Agent Deck — ${outage.reason}${waitLabel ? ` (${waitLabel})` : ""} (retrying ${untilLabel})`,
     });
   })();
 }
@@ -234,14 +247,6 @@ export function deferLeasedWorkItemForDeckOutage(
 export function formatCapEscalationReason(cap: UsageCappedOutcome, firstDeferredAt: string): string {
   const hours = Math.round(usageCapDeferralCeilingMs() / 3_600_000);
   return `${cap.reason} Work deferred for over ${hours}h (since ${firstDeferredAt}).`;
-}
-
-export function formatDeckOutageEscalationReason(
-  outage: DeckUnavailableOutcome,
-  firstDeferredAt: string
-): string {
-  const hours = Math.round(deckOutageDeferralCeilingMs() / 3_600_000);
-  return `${outage.reason} Agent Deck has been unreachable for over ${hours}h (since ${firstDeferredAt}).`;
 }
 
 /** Event types for a cap escalation after the deferral ceiling — mirrors worker.failed routing. */
