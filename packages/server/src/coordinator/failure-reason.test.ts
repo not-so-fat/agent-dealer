@@ -106,6 +106,45 @@ test("NOT-133: codex and claude auth deaths are named too", () => {
   assert.match(claude!, /claude auth login/);
 });
 
+test("NOT-133: a runtime-less Claude log is named Claude, not Cursor", () => {
+  // worker_sessions.runtime is nullable; "Not logged in · Please run /login" is Claude's, but
+  // Cursor's pattern list carries "not logged in" too, so order-of-trial named Cursor here.
+  const reason = classifyRunnerLogFailure(
+    writeLog(`\n--- stderr ---\n${capture("claude-print-logged-out.txt")}`)
+  );
+  assert.match(reason!, /Claude Code auth required mid-run/);
+  assert.match(reason!, /claude auth login/);
+  assert.doesNotMatch(reason!, /cursor/i);
+});
+
+test("NOT-133: a runtime-less Codex log is named Codex, not Cursor", () => {
+  const reason = classifyRunnerLogFailure(
+    writeLog(`\n--- stderr ---\n${capture("codex-exec-logged-out.txt")}`)
+  );
+  assert.match(reason!, /Codex auth required mid-run/);
+  assert.match(reason!, /codex login/);
+  assert.doesNotMatch(reason!, /cursor/i);
+});
+
+test("NOT-133: a runtime-less log that names no CLI reports auth without guessing one", () => {
+  // `cursor-agent status` and `codex login status` both print exactly "Not logged in".
+  const reason = classifyRunnerLogFailure(
+    writeLog(`\n--- stderr ---\n${capture("codex-login-status-logged-out.txt")}`)
+  );
+  assert.match(reason!, /Runtime auth required mid-run/);
+  assert.match(reason!, /cursor-agent login/);
+  assert.match(reason!, /codex login/);
+  assert.match(reason!, /claude auth login/);
+  // Still better than the thing NOT-133 was filed about.
+  assert.notEqual(reason, "Developer session failed or crashed.");
+});
+
+test("NOT-133: a recorded runtime still names that CLI for the shared `Not logged in`", () => {
+  const logPath = writeLog(`\n--- stderr ---\n${capture("codex-login-status-logged-out.txt")}`);
+  assert.match(classifyRunnerLogFailure(logPath, "codex_local")!, /Codex auth required mid-run/);
+  assert.match(classifyRunnerLogFailure(logPath, "cursor_local")!, /Cursor auth required mid-run/);
+});
+
 test("NOT-133: a worker.failed event for an auth death carries the auth reason", () => {
   const reason = reasonForWorkerFailedEvent({
     outcome: { kind: "session_failed" },

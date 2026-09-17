@@ -39,6 +39,16 @@ export const CLAUDE_AUTH_REMEDIATION =
   "Claude Code is not authenticated — run `claude auth login` (`/login` inside a session), " +
   "or set ANTHROPIC_API_KEY for automation";
 
+/**
+ * Used when text proves an auth failure but does not say which CLI printed it. All three
+ * runtimes print a bare `Not logged in`, so naming one of them there would be a guess — and
+ * a confidently wrong remediation (`cursor-agent login` for a Codex log) is worse than the
+ * generic crash reason it replaces.
+ */
+export const AMBIGUOUS_AUTH_REMEDIATION =
+  "A runtime CLI reported it is not authenticated, but the log does not say which one — " +
+  "check the agent's runtime login: `cursor-agent login`, `codex login`, or `claude auth login`";
+
 const KEYCHAIN_STUCK_PATTERNS: RegExp[] = [
   /errsecduplicateitem/i,
   /security exit code 45/i,
@@ -89,11 +99,30 @@ const CLAUDE_AUTH_PATTERNS: RegExp[] = [
   /api key is invalid/i,
 ];
 
+/**
+ * Which CLI *wrote* this text, as opposed to what it said. The auth pattern lists above
+ * overlap by design — `not logged in` is printed verbatim by cursor-agent, codex and claude
+ * alike — so they answer "is this an auth failure", never "whose failure is it". These
+ * anchors answer the second question: each names its own vendor, binary or credential
+ * variable, which no other runtime has a reason to print. Anything that matches none of them
+ * (or more than one) is left unattributed rather than guessed at.
+ */
+const RUNTIME_VENDOR_ANCHORS: Record<Runtime, RegExp[]> = {
+  // "set CURSOR_API_KEY environment variable" / "run `cursor-agent login`".
+  cursor_local: [/cursor[_-]api[_-]key/i, /cursor-agent\b/i],
+  // "OpenAI Codex v0.154.0", "url: wss://api.openai.com/...", OPENAI_API_KEY, `codex login`.
+  codex_local: [/openai/i, /\bcodex\b/i],
+  // "Please run /login", ANTHROPIC_API_KEY, `claude auth login`.
+  claude_code: [/anthropic/i, /please run \/login/i, /\bclaude\b/i],
+};
+
 const AUTH_PATTERNS_BY_RUNTIME: Record<Runtime, RegExp[]> = {
   cursor_local: CURSOR_AUTH_PATTERNS,
   codex_local: CODEX_AUTH_PATTERNS,
   claude_code: CLAUDE_AUTH_PATTERNS,
 };
+
+const ALL_RUNTIMES = ["cursor_local", "codex_local", "claude_code"] as const;
 
 const REMEDIATION_BY_RUNTIME: Record<Runtime, string> = {
   cursor_local: CURSOR_AUTH_REMEDIATION,
@@ -138,18 +167,40 @@ export function cursorAuthIssueFromOutput(output: string): AgentHealthIssue | nu
   return runtimeAuthIssueFromOutput("cursor_local", output);
 }
 
+/** `runtime: null` means "definitely an auth failure, but the text does not name the CLI". */
+export type RuntimeAuthClassification = {
+  runtime: Runtime | null;
+  issue: AgentHealthIssue;
+};
+
 /**
  * Classify a log whose runtime is unknown — the failure-reason classifier reads a spawn log
- * by path and does not always know which CLI wrote it. Cursor is tried first because its
- * keychain branch is the most specific classification available; the remaining runtimes'
- * patterns are distinct enough that the first match names the right CLI.
+ * by path and does not always know which CLI wrote it (worker_sessions.runtime is nullable,
+ * and older rows disagree with what actually ran).
+ *
+ * Attribution is deliberately conservative, in this order:
+ *  1. a single vendor anchor in text that also reads as that runtime's auth failure;
+ *  2. otherwise, an auth failure only one runtime's patterns recognise at all;
+ *  3. otherwise unattributed (`runtime: null`) with the generic remediation.
+ *
+ * Trying the runtimes in a fixed order instead would report Claude's `Not logged in · Please
+ * run /login` as Cursor, because Cursor's list carries the shared `not logged in` too.
  */
-export function anyRuntimeAuthIssueFromOutput(
-  output: string
-): { runtime: Runtime; issue: AgentHealthIssue } | null {
-  for (const runtime of ["cursor_local", "codex_local", "claude_code"] as const) {
-    const issue = runtimeAuthIssueFromOutput(runtime, output);
-    if (issue) return { runtime, issue };
+export function anyRuntimeAuthIssueFromOutput(output: string): RuntimeAuthClassification | null {
+  // The keychain signature names Cursor on its own (errSecDuplicateItem / macOS keychain).
+  if (isCursorKeychainStuckOutput(output)) {
+    return { runtime: "cursor_local", issue: { ...CURSOR_KEYCHAIN_HEALTH_ISSUE } };
   }
-  return null;
+  const matched = ALL_RUNTIMES.filter((r) =>
+    AUTH_PATTERNS_BY_RUNTIME[r].some((re) => re.test(output))
+  );
+  if (matched.length === 0) return null;
+  // Anchors are only consulted within the runtimes whose auth prose matched, so a log that
+  // merely mentions another CLI by name cannot steal the attribution.
+  const anchored = matched.filter((r) => RUNTIME_VENDOR_ANCHORS[r].some((re) => re.test(output)));
+  const named = anchored.length === 1 ? anchored[0] : matched.length === 1 ? matched[0] : null;
+  if (named) {
+    return { runtime: named, issue: { code: "runtime_auth", message: REMEDIATION_BY_RUNTIME[named] } };
+  }
+  return { runtime: null, issue: { code: "runtime_auth", message: AMBIGUOUS_AUTH_REMEDIATION } };
 }

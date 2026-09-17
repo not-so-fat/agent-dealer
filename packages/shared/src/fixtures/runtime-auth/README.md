@@ -40,6 +40,11 @@ Notes:
 - `cursor-agent status` prints **`Not logged in`** and exits **0** when logged out — that is
   why the NOT-133 admission gate was not the half that broke. The `-p` run is the one that
   says `Authentication required`.
+- `cursor-agent status` and `codex login status` print the **same bytes** (`Not logged in`)
+  when logged out, and `claude -p` starts its line the same way. That is why a log with no
+  recorded runtime is only attributed to a CLI when the text names one (`CURSOR_API_KEY`,
+  `api.openai.com`, `/login`); otherwise it is classified as an auth failure with a
+  remediation covering all three, rather than guessed at.
 - Captures keep their ANSI escapes (`cursor-agent` colourises `✓` and its warnings); the
   classifier must cope with them rather than assume stripped output.
 - Two captures are redacted, and *only* for identity: the account e-mail in

@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  AMBIGUOUS_AUTH_REMEDIATION,
   CLAUDE_AUTH_REMEDIATION,
   CODEX_AUTH_REMEDIATION,
   CURSOR_AUTH_REMEDIATION,
@@ -102,14 +103,72 @@ test("a logged-in `claude auth status` capture is not a runtime_auth issue", () 
 test("anyRuntimeAuthIssueFromOutput names the runtime a log came from", () => {
   const cursor = anyRuntimeAuthIssueFromOutput(capture("cursor-agent-print-logged-out.txt"));
   assert.equal(cursor?.runtime, "cursor_local");
+  assert.equal(cursor?.issue.message, CURSOR_AUTH_REMEDIATION);
 
   const codex = anyRuntimeAuthIssueFromOutput(capture("codex-exec-logged-out.txt"));
   assert.equal(codex?.runtime, "codex_local");
+  assert.equal(codex?.issue.message, CODEX_AUTH_REMEDIATION);
 
   const claude = anyRuntimeAuthIssueFromOutput(capture("claude-print-invalid-api-key.txt"));
   assert.equal(claude?.runtime, "claude_code");
+  assert.equal(claude?.issue.message, CLAUDE_AUTH_REMEDIATION);
 
   assert.equal(anyRuntimeAuthIssueFromOutput(capture("codex-login-status-logged-in.txt")), null);
+});
+
+test("a Claude log with no recorded runtime is not reported as Cursor", () => {
+  // `Not logged in · Please run /login`. Cursor's pattern list also carries "not logged in",
+  // so trying the runtimes in a fixed order attributed this capture — and Cursor's
+  // remediation — to Cursor. `/login` is Claude's own wording and settles it.
+  const claude = anyRuntimeAuthIssueFromOutput(capture("claude-print-logged-out.txt"));
+  assert.equal(claude?.runtime, "claude_code");
+  assert.equal(claude?.issue.message, CLAUDE_AUTH_REMEDIATION);
+  assert.doesNotMatch(claude!.issue.message, /cursor/i);
+});
+
+test("a Claude `auth status` JSON body with no recorded runtime is attributed to Claude", () => {
+  const claude = anyRuntimeAuthIssueFromOutput(capture("claude-auth-status-logged-out.txt"));
+  assert.equal(claude?.runtime, "claude_code");
+  assert.equal(claude?.issue.message, CLAUDE_AUTH_REMEDIATION);
+});
+
+test("a Codex exec log with no recorded runtime is attributed to Codex, not Cursor", () => {
+  const codex = anyRuntimeAuthIssueFromOutput(capture("codex-exec-logged-out.txt"));
+  assert.equal(codex?.runtime, "codex_local");
+  assert.doesNotMatch(codex!.issue.message, /cursor/i);
+});
+
+test("a bare `Not logged in` is classified as auth but attributed to no runtime", () => {
+  // cursor-agent status and codex login status print the identical line: the two captures are
+  // byte-for-byte the same, so nothing in the text can name the CLI that wrote it.
+  assert.equal(
+    capture("cursor-agent-status-logged-out.txt"),
+    capture("codex-login-status-logged-out.txt")
+  );
+  for (const name of ["cursor-agent-status-logged-out.txt", "codex-login-status-logged-out.txt"]) {
+    const classified = anyRuntimeAuthIssueFromOutput(capture(name));
+    assert.equal(classified?.issue.code, "runtime_auth", `${name} is still an auth failure`);
+    assert.equal(classified?.runtime, null, `${name} must not be attributed to a runtime`);
+    assert.equal(classified?.issue.message, AMBIGUOUS_AUTH_REMEDIATION);
+    // The generic remediation covers every runtime rather than betting on one.
+    assert.match(classified!.issue.message, /cursor-agent login/);
+    assert.match(classified!.issue.message, /codex login/);
+    assert.match(classified!.issue.message, /claude auth login/);
+  }
+});
+
+test("a known runtime still gets its own remediation for the shared `Not logged in`", () => {
+  // The ambiguity above only applies when the caller cannot say what ran. The health
+  // preflight always can, and must keep naming the CLI it just probed.
+  const status = capture("cursor-agent-status-logged-out.txt");
+  assert.equal(runtimeAuthIssueFromOutput("cursor_local", status)?.message, CURSOR_AUTH_REMEDIATION);
+  assert.equal(runtimeAuthIssueFromOutput("codex_local", status)?.message, CODEX_AUTH_REMEDIATION);
+});
+
+test("a stuck keychain is attributed to Cursor even with no recorded runtime", () => {
+  const classified = anyRuntimeAuthIssueFromOutput(RECONSTRUCTED_KEYCHAIN_STDERR);
+  assert.equal(classified?.runtime, "cursor_local");
+  assert.equal(classified?.issue.code, "cursor_keychain");
 });
 
 // NOT-114's keychain branch has no capture — the stuck-keychain state cannot be provoked

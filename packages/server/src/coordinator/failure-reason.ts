@@ -4,7 +4,7 @@
 // failure strip (NOT-113). Prefer classified runner stderr (keychain / auth /
 // reconnect) over opaque outcome kinds like dirty_worktree / session_failed.
 import fs from "node:fs";
-import type { Runtime } from "@agent-dealer/shared";
+import type { Runtime, RuntimeAuthClassification } from "@agent-dealer/shared";
 import {
   CURSOR_KEYCHAIN_REMEDIATION,
   RUNTIME_AUTH_LABEL,
@@ -67,7 +67,9 @@ export function readSpawnLogHaystack(logPath: string | null | undefined): string
  *
  * `runtime` only decides which CLI the prose names first — every runtime's captured strings
  * are still tried when it does not match, because callers like the recovery/detail strip
- * hold nothing but a log path and a session row whose runtime may be null.
+ * hold nothing but a log path and a session row whose runtime may be null. In that case the
+ * log must name its own CLI to be attributed to one; shared prose (`Not logged in`) yields
+ * an auth reason that names no runtime rather than a plausible-looking wrong one.
  */
 export function classifyRunnerLogFailure(
   logPath: string | null | undefined,
@@ -86,13 +88,16 @@ export function classifyRunnerLogFailure(
   // strings: a missing or mislabelled runtime must not turn a named auth death back into
   // the generic crash reason.
   const preferred = runtime ? runtimeAuthIssueFromOutput(runtime, haystack) : null;
-  const classified = preferred
+  const classified: RuntimeAuthClassification | null = preferred
     ? { runtime: runtime!, issue: preferred }
     : anyRuntimeAuthIssueFromOutput(haystack);
   if (classified?.issue.code === "runtime_auth") {
     // NOT-133: this is the branch the operator never saw, because cursor-agent's own
     // "Authentication required" matched nothing and the strip fell back to "failed or crashed".
-    return `${RUNTIME_AUTH_LABEL[classified.runtime]} auth required mid-run — ${classified.issue.message}`;
+    // Without a recorded runtime the log may not name its CLI either — say "Runtime" rather
+    // than pick one, since the remediation that follows then covers all three.
+    const label = classified.runtime ? RUNTIME_AUTH_LABEL[classified.runtime] : "Runtime";
+    return `${label} auth required mid-run — ${classified.issue.message}`;
   }
   if (RECONNECT_EXHAUSTED_RE.test(haystack)) {
     return "Cursor runtime reconnect exhausted mid-run.";
