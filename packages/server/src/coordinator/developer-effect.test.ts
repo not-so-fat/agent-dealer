@@ -1172,3 +1172,64 @@ test("NOT-130: a green suite on a dirty worktree is not persisted as tip evidenc
   );
   assert.equal(getIssue(issueId)!.status, "needs_human");
 });
+
+test("NOT-130: checks_failed retry does not carry a prior green receipt into the prompt", async () => {
+  const issueId = await makeIssue();
+  const logPath = writeVerificationLog({
+    command: "npm run test:unit",
+    output: "711/711 tests passed\n",
+  });
+
+  let call = 0;
+  const prompts: string[] = [];
+  const commitVerifyThenCiFail: SpawnFn = async (input) => {
+    call++;
+    prompts.push(input.prompt);
+    if (call === 1) {
+      await commitingSpawn(input);
+      return { exitCode: 0, transcript: "green locally", logPath, timedOut: false };
+    }
+    if (call === 2) {
+      // Same tip — crash after CI already rejected it; must still not re-carry the receipt.
+      return { exitCode: 1, transcript: "boom while reproducing CI", logPath: "/dev/null", timedOut: false };
+    }
+    return { exitCode: 0, transcript: "reproducing CI", logPath: "/dev/null", timedOut: false };
+  };
+
+  const github = fakeGithub({ checks: "failure" });
+  let checkPass = false;
+  github.checksSnapshot = async () => (checkPass ? "success" : "failure");
+
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: commitVerifyThenCiFail, github })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.ok(
+    listArtifactsForIssue(issueId).some((a) => a.kind === "verification_receipt"),
+    "receipt is still persisted from the green local suite"
+  );
+  assert.ok(listArtifactsForIssue(issueId).some((a) => a.kind === "checks_evidence"));
+  assert.equal(getIssue(issueId)!.status, "developing");
+
+  await pump(1);
+  assert.equal(call, 2);
+  assert.match(prompts[1]!, /Developer's PR checks failed/);
+  assert.doesNotMatch(
+    prompts[1]!,
+    /Prior verification receipt/,
+    "checks_failed must not tell the agent the suite at this SHA is already green"
+  );
+
+  // Later infra retry at the same tip uses session_failed prose — still no receipt.
+  checkPass = true;
+  await pump(1);
+  assert.equal(call, 3);
+  assert.match(prompts[2]!, /failed or crashed|timed out|session/i);
+  assert.doesNotMatch(
+    prompts[2]!,
+    /Prior verification receipt/,
+    "CI-rejected tip must not re-authorize skip-suite on a later crash retry"
+  );
+});

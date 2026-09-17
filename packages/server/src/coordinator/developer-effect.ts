@@ -62,6 +62,8 @@ import {
   extractVerificationReceiptFromLog,
   parseVerificationReceipt,
   receiptForCurrentHead,
+  receiptSupersededByFailedChecks,
+  shouldCarryVerificationReceipt,
   type VerificationReceipt,
 } from "./verification-receipt.js";
 
@@ -143,7 +145,21 @@ function loadPriorVerificationReceipt(
   if (!art?.contentJson) return undefined;
   try {
     const parsed = parseVerificationReceipt(JSON.parse(art.contentJson));
-    return receiptForCurrentHead(parsed, currentHeadSha) ?? undefined;
+    const atHead = receiptForCurrentHead(parsed, currentHeadSha);
+    if (!atHead) return undefined;
+    const checksArt = latestIssueArtifact(issueId, "checks_evidence");
+    if (checksArt?.contentJson) {
+      try {
+        const evidence = JSON.parse(checksArt.contentJson) as {
+          snapshot?: unknown;
+          headSha?: unknown;
+        };
+        if (receiptSupersededByFailedChecks(atHead, evidence)) return undefined;
+      } catch {
+        // ignore malformed checks evidence
+      }
+    }
+    return atHead;
   } catch {
     return undefined;
   }
@@ -592,9 +608,13 @@ export async function runDeveloperEffect(
           // ignore malformed prior conclusion
         }
       }
-      // SHA gate: only carry the receipt when this worktree tip still matches.
-      const currentHead = await revParseHead(worktreePath).catch(() => null);
-      priorVerificationReceipt = loadPriorVerificationReceipt(issue.id, currentHead);
+      // SHA gate + reason gate: only carry when tip still matches AND this retry is not
+      // checks_failed (local green at this SHA is what CI just rejected — do not tell the
+      // agent to skip re-running).
+      if (shouldCarryVerificationReceipt(retryReason)) {
+        const currentHead = await revParseHead(worktreePath).catch(() => null);
+        priorVerificationReceipt = loadPriorVerificationReceipt(issue.id, currentHead);
+      }
     }
     const prompt = buildDeveloperPrompt({
       taskSnapshot,

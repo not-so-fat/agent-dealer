@@ -4,22 +4,51 @@
 // SHA-scoped receipt so an infra retry can carry "already green at this tip" evidence
 // without a runtime-level `--resume`. A receipt never instructs the agent to skip — it
 // is evidence. HEAD move (new commits after the checks) invalidates it automatically.
-import fs from "node:fs";
-import { parseNdjson } from "../runners/stream-json.js";
+import { parseNdjsonFile } from "../runners/stream-json.js";
 
 export const VERIFICATION_RECEIPT_KIND = "verification_receipt";
 
-/** Aligns with session-progress `isTestCommand` — suite / typecheck / flow gates. */
-const VERIFICATION_COMMAND_RE =
-  /pytest|npm test|npm run test|vitest|jest|node --test|flow:verify|typecheck|poc:integration|test:unit|test:ci/i;
+/**
+ * A command segment is verification only when a runner invocation starts the segment
+ * (start of string / after && || ; |), not when a keyword appears mid-line in `rg typecheck`.
+ */
+const VERIFICATION_SEGMENT_RE =
+  /^(?:cd\s+\S+\s*(?:&&|;)\s+)*(?:npx\s+|pnpm\s+(?:exec\s+|run\s+)?|yarn\s+(?:run\s+)?|uv\s+run\s+)?(?:npm\s+test\b|npm\s+run\s+(?:test\b[\w:-]*|typecheck\b|flow:verify\b|poc:integration\b)|pytest\b|vitest\b|jest\b|node\s+--test\b)/i;
 
+/**
+ * Match real commit-shaped invocations, including `git -c … commit`, `git -C dir commit`,
+ * and `git-yubikey-commit`. False positives that clear the receipt are safer than missing
+ * a tip-changing command (which would pin a green suite to an unverified tip).
+ */
 const HEAD_CHANGING_RE =
-  /\bgit\s+(?:commit|amend|rebase|reset|merge|cherry-pick|revert|pull|checkout)\b/i;
+  /\bgit(?:-[a-z0-9-]+)?\b[^;&|\n]*\b(?:commit|amend|rebase|reset|merge|cherry-pick|revert|pull|checkout|apply|am)\b/i;
 
-const REV_PARSE_HEAD_RE = /\bgit\s+rev-parse\s+HEAD\b/i;
+const REV_PARSE_HEAD_RE = /\bgit(?:\s+-C\s+\S+)?\s+rev-parse\s+HEAD\b/i;
 const FULL_SHA_RE = /\b([0-9a-f]{40})\b/i;
-const DETAIL_RE =
-  /(\d+)\s*\/\s*(\d+)|(\d+)\s+(?:passed|passing)|tests?\s*[:=]?\s*(\d+)\s+passed/i;
+
+/** Prefer runner-shaped counts over a bare n/m (dates, coverage ratios, progress). */
+const DETAIL_PATTERNS: Array<{ re: RegExp; format: (m: RegExpMatchArray) => string | undefined }> = [
+  {
+    re: /#\s*pass\s+(\d+)/i,
+    format: (m) => `${m[1]} passed`,
+  },
+  {
+    re: /(\d+)\s+passed,\s*(\d+)\s+total/i,
+    format: (m) => `${m[1]}/${m[2]}`,
+  },
+  {
+    re: /Tests?\s+(\d+)\s+passed/i,
+    format: (m) => `${m[1]} passed`,
+  },
+  {
+    re: /(\d+)\s+passed(?:ing)?\b/i,
+    format: (m) => `${m[1]} passed`,
+  },
+  {
+    re: /(\d+)\s*\/\s*(\d+)\s+tests?\s+passed/i,
+    format: (m) => `${m[1]}/${m[2]}`,
+  },
+];
 
 export type VerificationOutcome = "passed" | "failed" | "unknown";
 
@@ -37,7 +66,19 @@ export interface VerificationReceipt {
 }
 
 export function isVerificationCommand(command: string): boolean {
-  return VERIFICATION_COMMAND_RE.test(command);
+  return command
+    .split(/(?:&&|\|\||;|\|)/)
+    .some((seg) => VERIFICATION_SEGMENT_RE.test(seg.trim()));
+}
+
+/**
+ * Carry a prior receipt only for interrupted / crashed style retries — not when the job
+ * is to reproduce a CI/check failure at this same SHA (checks_failed).
+ */
+export function shouldCarryVerificationReceipt(retryReason: string | null | undefined): boolean {
+  if (!retryReason?.trim()) return false;
+  if (/PR checks failed|checks failed/i.test(retryReason)) return false;
+  return true;
 }
 
 function normalizeCommand(command: string): string {
@@ -72,11 +113,12 @@ function outcomeFromExitCode(exitCode: number | null | undefined): VerificationO
 }
 
 function detailFromOutput(text: string): string | undefined {
-  const m = text.match(DETAIL_RE);
-  if (!m) return undefined;
-  if (m[1] && m[2]) return `${m[1]}/${m[2]}`;
-  if (m[3]) return `${m[3]} passed`;
-  if (m[4]) return `${m[4]} passed`;
+  for (const { re, format } of DETAIL_PATTERNS) {
+    const m = text.match(re);
+    if (!m) continue;
+    const detail = format(m);
+    if (detail) return detail;
+  }
   return undefined;
 }
 
@@ -110,17 +152,19 @@ function cursorShellEntry(
   };
 }
 
-function claudeBashCommand(e: Record<string, unknown>): { id: string; command: string } | null {
-  if (e.type !== "assistant") return null;
+/** Every Bash/Shell tool_use in an assistant event (parallel batches included). */
+function claudeBashCommands(e: Record<string, unknown>): Array<{ id: string; command: string }> {
+  if (e.type !== "assistant") return [];
   const msg = e.message as
     | { content?: Array<{ type?: string; id?: string; name?: string; input?: { command?: string } }> }
     | undefined;
+  const out: Array<{ id: string; command: string }> = [];
   for (const c of msg?.content ?? []) {
     if (c.type === "tool_use" && (c.name === "Bash" || c.name === "Shell") && c.id && c.input?.command) {
-      return { id: c.id, command: c.input.command };
+      out.push({ id: c.id, command: c.input.command });
     }
   }
-  return null;
+  return out;
 }
 
 function claudeToolResults(
@@ -160,14 +204,13 @@ export function extractVerificationReceiptFromLog(
   logPath: string,
   opts?: { headShaHint?: string | null; now?: () => string }
 ): VerificationReceipt | null {
-  if (!logPath || !fs.existsSync(logPath)) return null;
-  let raw: string;
+  if (!logPath) return null;
+  let events: Record<string, unknown>[];
   try {
-    raw = fs.readFileSync(logPath, "utf8");
+    events = parseNdjsonFile(logPath);
   } catch {
     return null;
   }
-  const events = parseNdjson(raw);
   if (!events.length) return null;
 
   let observedHead: string | null = null;
@@ -205,8 +248,9 @@ export function extractVerificationReceiptFromLog(
   };
 
   for (const e of events) {
-    const bash = claudeBashCommand(e);
-    if (bash) pendingBash.set(bash.id, bash.command);
+    for (const bash of claudeBashCommands(e)) {
+      pendingBash.set(bash.id, bash.command);
+    }
 
     for (const result of claudeToolResults(e)) {
       const command = pendingBash.get(result.toolUseId);
@@ -231,9 +275,8 @@ export function extractVerificationReceiptFromLog(
   if (!headSha || !FULL_SHA_RE.test(headSha)) return null;
   // Tip moved after the checks (or agent never re-verified after committing).
   if (hint && observedHead && hint !== observedHead) return null;
-  if (hint && !observedHead) {
-    // Safe: no HEAD-changing command after the last verification (those clear byCommand).
-  }
+  // When only headShaHint is available, it is safe iff no HEAD-changing command ran after
+  // the last verification (those clear byCommand, so we would not reach a receipt here).
 
   return {
     headSha,
@@ -284,6 +327,23 @@ export function receiptForCurrentHead(
   return receipt;
 }
 
+/**
+ * CI already rejected this tip — a later crash/timeout retry at the same SHA must not
+ * re-inject "do not re-run an unchanged green suite" (class: ci-rejected-local-green).
+ */
+export function receiptSupersededByFailedChecks(
+  receipt: VerificationReceipt,
+  checksEvidence: { snapshot?: unknown; headSha?: unknown } | null | undefined
+): boolean {
+  if (!checksEvidence || checksEvidence.snapshot !== "failure") return false;
+  if (typeof checksEvidence.headSha !== "string" || !checksEvidence.headSha.trim()) return false;
+  return checksEvidence.headSha.trim().toLowerCase() === receipt.headSha.toLowerCase();
+}
+
+function receiptIsUniformlyGreen(receipt: VerificationReceipt): boolean {
+  return receipt.commands.length > 0 && receipt.commands.every((c) => c.outcome === "passed");
+}
+
 /** Prompt lines under ## Previous attempt — evidence only. */
 export function formatVerificationReceiptSection(receipt: VerificationReceipt): string[] {
   const short = receipt.headSha.slice(0, 8);
@@ -295,9 +355,15 @@ export function formatVerificationReceiptSection(receipt: VerificationReceipt): 
     const detail = c.detail ? ` (${c.detail})` : "";
     lines.push(`- \`${c.command}\` ${c.outcome}${detail}`);
   }
-  lines.push(
-    `This is evidence, not an instruction to skip — re-run anything you doubt. Do not re-run an unchanged green suite by default.`,
-    ``
-  );
+  if (receiptIsUniformlyGreen(receipt)) {
+    lines.push(
+      `This is evidence, not an instruction to skip — re-run anything you doubt. Do not re-run an unchanged green suite by default.`
+    );
+  } else {
+    lines.push(
+      `This is evidence, not an instruction to skip — re-run anything you doubt. Treat only commands marked passed as already green; re-check failed or unknown ones.`
+    );
+  }
+  lines.push(``);
   return lines;
 }
