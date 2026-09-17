@@ -111,6 +111,21 @@ test("Agent Deck failures have a structural outcome and deck-specific label", ()
   });
 });
 
+test("an unreachable deck defers instead of spending an infra attempt (NOT-136)", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "deck_unavailable",
+    reason: "Agent Deck is unreachable — fetch failed",
+  };
+  // Even with the infra budget already exhausted it waits — nothing was attempted, so
+  // there is nothing to escalate.
+  for (const limits of [INFRA_ATTEMPTS_LEFT, INFRA_AT_LIMIT]) {
+    assert.deepStrictEqual(routeDeveloperOutcome(outcome, limits), {
+      next: "defer_work",
+      reason: "Agent Deck is unreachable — fetch failed",
+    });
+  }
+});
+
 test("adapter failure after push retries publish only (no full developer session)", () => {
   const outcome: DeveloperOutcome = {
     kind: "adapter_failure",
@@ -279,6 +294,19 @@ test("reviewer deck_failure preserves and labels the preflight reason", () => {
     headSha: PINNED_HEAD,
     reason: "Agent Deck preflight failed: get_playbook(pb-x) returned an error: missing",
   });
+});
+
+test("reviewer deck_unavailable defers rather than burning the reviewer's infra budget", () => {
+  const outcome: ReviewerOutcome = {
+    kind: "deck_unavailable",
+    reason: "Agent Deck is unreachable — fetch failed",
+  };
+  for (const limits of [INFRA_ATTEMPTS_LEFT, INFRA_AT_LIMIT]) {
+    assert.deepStrictEqual(routeReviewerOutcome(outcome, limits, PINNED_HEAD), {
+      next: "defer_work",
+      reason: "Agent Deck is unreachable — fetch failed",
+    });
+  }
 });
 
 test("reviewer session_failed escalates once the infra-attempt limit is reached", () => {

@@ -9,11 +9,13 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { parse as parseToml } from "smol-toml";
+import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deckbind-"));
 
 const { migrate } = await import("../db/index.js");
-const { prepareWorkerDeckConnection, releaseWorkerDeckConnection, parseDeckToolResult } = await import("./agent-deck-bind.js");
+const { prepareWorkerDeckConnection, releaseWorkerDeckConnection, parseDeckToolResult, isDeckUnreachableError } =
+  await import("./agent-deck-bind.js");
 const { codexScopedConfigDeniesSendGate } = await import("./codex-scoped-config.js");
 const { roleCeiling } = await import("@agent-dealer/shared");
 
@@ -362,4 +364,147 @@ test("prepareWorkerDeckConnection refuses cursor_local when .cursor/mcp.json is 
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// NOT-136: unreachable deck vs. a deck that answered with an error.
+// ---------------------------------------------------------------------------
+
+/** What node's fetch actually throws when nothing is listening on the deck port. */
+function fetchFailed(code: string): Error {
+  const err = new TypeError("fetch failed");
+  (err as { cause?: unknown }).cause = Object.assign(new Error(`connect ${code} 127.0.0.1:1110`), { code });
+  return err;
+}
+
+test("isDeckUnreachableError separates transport death from a deck-reported error", () => {
+  assert.equal(isDeckUnreachableError(fetchFailed("ECONNREFUSED")), true);
+  assert.equal(isDeckUnreachableError(Object.assign(new Error("boom"), { code: "ENOTFOUND" })), true);
+  assert.equal(
+    isDeckUnreachableError(new AggregateError([Object.assign(new Error("x"), { code: "ECONNREFUSED" })], "all failed")),
+    true
+  );
+
+  // Anything the deck itself produced must stay a real failure.
+  assert.equal(isDeckUnreachableError(new Error("Error POSTing to endpoint (HTTP 500): boom")), false);
+  assert.equal(isDeckUnreachableError(new Error("get_bound_deck returned an error: no session")), false);
+  assert.equal(isDeckUnreachableError(new Error("invalid_token")), false);
+  assert.equal(isDeckUnreachableError(null), false);
+});
+
+test("an HTTP status beats a transport-looking message — the deck answered", () => {
+  // The SDK pastes the response body into the error message, so a deck that is up and
+  // returns 500 with the body `fetch failed` (NOT-101's shape, reported over HTTP) throws
+  // something that reads exactly like a dead port. The status proves bytes came back.
+  assert.equal(
+    isDeckUnreachableError(new StreamableHTTPError(500, "Error POSTing to endpoint: fetch failed")),
+    false
+  );
+  assert.equal(
+    isDeckUnreachableError(new StreamableHTTPError(502, "Error POSTing to endpoint: ECONNREFUSED upstream")),
+    false
+  );
+  // Structural, not instanceof-dependent: a numeric status anywhere in the chain is enough.
+  assert.equal(isDeckUnreachableError(Object.assign(new Error("fetch failed"), { status: 503 })), false);
+  assert.equal(
+    isDeckUnreachableError(new Error("connect failed", { cause: Object.assign(new Error("fetch failed"), { code: 500 }) })),
+    false
+  );
+  // …and it does not swallow the real thing: a string code is a transport code, not a status.
+  assert.equal(isDeckUnreachableError(fetchFailed("ECONNREFUSED")), true);
+});
+
+test("preflight defers only when nothing answered, never on an HTTP error body", async () => {
+  const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    verifyCallTool: async () => {
+      throw new StreamableHTTPError(500, "Error POSTing to endpoint: fetch failed");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.kind, "infra_failure");
+    assert.match(result.reason, /preflight failed: Streamable HTTP error/);
+  }
+});
+
+test("preflight against a dead deck returns deck_unavailable, not infra_failure", async () => {
+  const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    verifyCallTool: async () => {
+      throw fetchFailed("ECONNREFUSED");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.kind, "deck_unavailable");
+    assert.match(result.reason, /Agent Deck is unreachable — fetch failed/);
+  }
+});
+
+test("preflight that exhausts its budget with no answer is deck_unavailable", async () => {
+  const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    timeoutMs: 20,
+    verifyCallTool: () => new Promise(() => {}),
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.kind, "deck_unavailable");
+    assert.match(result.reason, /total preflight budget/);
+  }
+});
+
+test("a reachable deck that answers with an HTTP error still fails the attempt", async () => {
+  const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    verifyCallTool: async () => {
+      throw new Error("Error POSTing to endpoint (HTTP 500): internal error");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.kind, "infra_failure");
+    assert.match(result.reason, /preflight failed: Error POSTing/);
+  }
+});
+
+test("a deck that answers, reporting its own upstream as dead, is not mistaken for a dead deck", async () => {
+  // NOT-101's shape: the deck is up and replies, but a proxied MCP service behind it is
+  // down, so its `isError` text is the literal string a dead port produces. Classifying on
+  // prose would defer this forever; it is a real deck error and must spend the attempt.
+  const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    verifyCallTool: async () => errorResult("fetch failed"),
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.kind, "infra_failure");
+    assert.match(result.reason, /preflight failed: get_bound_deck returned an error: fetch failed/);
+  }
+});
+
+test("a deck that loses the connection mid-playbook is deck_unavailable", async () => {
+  const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    playbookIds: ["pb-review"],
+    verifyCallTool: async (name) => {
+      if (name === "get_bound_deck") return textResult({ id: DECK });
+      throw fetchFailed("ECONNRESET");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.kind, "deck_unavailable");
 });

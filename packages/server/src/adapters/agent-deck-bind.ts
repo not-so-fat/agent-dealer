@@ -14,7 +14,10 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  StreamableHTTPClientTransport,
+  StreamableHTTPError,
+} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { PermissionPolicy, Runtime } from "@agent-dealer/shared";
 import { getAgentDeckMcpUrl } from "./agent-deck.js";
 import { getWorkerMcpConfigDir } from "../paths.js";
@@ -35,7 +38,101 @@ export type WorkerDeckConnectionOutcome =
       /** Extra env the spawned CLI needs — codex needs `CODEX_HOME` pointed at the scoped directory. */
       mcpEnv?: Record<string, string>;
     }
-  | { ok: false; kind: "infra_failure"; reason: string };
+  | { ok: false; kind: "infra_failure"; reason: string }
+  /** NOT-136: nothing answered at all (refused / DNS / timeout). Not the agent's fault and
+   * not retryable on a ~3s cadence — the caller defers instead of spending an infra attempt. */
+  | { ok: false; kind: "deck_unavailable"; reason: string };
+
+/**
+ * NOT-136: a preflight call got no answer at all. Raised **only** where a call is awaited
+ * (`withinPreflightDeadline`), never by the assertions that judge an answer we did receive —
+ * so a deck that is up and reports its own upstream as down (`isError: true` with the text
+ * `fetch failed`, the NOT-101 shape) still fails the attempt instead of looking like a dead
+ * port just because its prose reads like one.
+ */
+class DeckUnreachableError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
+/** The shared preflight budget ran out — no answer, as opposed to an answer we rejected. */
+class PreflightTimeoutError extends DeckUnreachableError {
+  constructor(message: string) {
+    super(new Error(message));
+  }
+}
+
+/**
+ * NOT-136: the shape of a transport-level failure — *nothing was listening / nothing
+ * answered*. A shape test alone cannot separate "the deck is down" from "the deck told us
+ * something that reads like it", so this is only ever applied to an error thrown out of an
+ * awaited call, never to one raised about a received result.
+ */
+const UNREACHABLE_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "ERR_SOCKET_CONNECTION_TIMEOUT",
+]);
+
+/** `fetch failed` is what undici surfaces to us when the port is dead — the literal string
+ * observed in the NOT-136 incident. The rest are the same conditions reported as prose by
+ * intermediate layers that dropped the `cause` chain. Prose is the *last* resort, and only
+ * after `deckAnswered` has ruled out a response — see below. */
+const UNREACHABLE_MESSAGE_RE =
+  /\bfetch failed\b|\bsocket hang up\b|\bgetaddrinfo\b|\bECONNREFUSED\b|\bECONNRESET\b|\bENOTFOUND\b|\bEAI_AGAIN\b|\bEHOSTUNREACH\b|\bENETUNREACH\b/i;
+
+/** An HTTP status code — the range a real response can carry. */
+function isHttpStatus(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599;
+}
+
+/**
+ * Structural proof that the deck **answered**, which vetoes every heuristic below.
+ *
+ * The MCP SDK reports a non-2xx response by throwing `StreamableHTTPError(status, "Error
+ * POSTing to endpoint: <body>")` — the response body is pasted into the message. So a deck
+ * that is up and returns HTTP 500 with the body `fetch failed` (the NOT-101 shape, where the
+ * deck's own upstream is down) produces an error that reads exactly like a dead port. Message
+ * matching cannot tell those apart; an HTTP status can, and it is dispositive: bytes came
+ * back, so this is a real deck error and must still fail the attempt (NOT-136).
+ */
+function deckAnswered(err: unknown, depth = 0): boolean {
+  if (!err || typeof err !== "object" || depth > 5) return false;
+  if (err instanceof StreamableHTTPError) return true;
+  const e = err as { code?: unknown; status?: unknown; statusCode?: unknown; cause?: unknown; errors?: unknown };
+  // Belt and braces for a duplicated SDK copy, where `instanceof` silently fails:
+  // StreamableHTTPError carries the response status as a *numeric* `code` (node's transport
+  // errors all use string codes like ECONNREFUSED), and other clients use status/statusCode.
+  if (isHttpStatus(e.code) || isHttpStatus(e.status) || isHttpStatus(e.statusCode)) return true;
+  if (Array.isArray(e.errors) && e.errors.some((nested) => deckAnswered(nested, depth + 1))) return true;
+  return e.cause !== undefined && deckAnswered(e.cause, depth + 1);
+}
+
+/** Walks `cause` / `AggregateError.errors` — node's fetch buries the real code one or two levels down. */
+function hasUnreachableSignal(err: unknown, depth = 0): boolean {
+  if (!err || typeof err !== "object" || depth > 5) return false;
+  const e = err as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
+  if (typeof e.code === "string" && UNREACHABLE_ERROR_CODES.has(e.code)) return true;
+  if (typeof e.message === "string" && UNREACHABLE_MESSAGE_RE.test(e.message)) return true;
+  if (Array.isArray(e.errors) && e.errors.some((nested) => hasUnreachableSignal(nested, depth + 1))) return true;
+  return e.cause !== undefined && hasUnreachableSignal(e.cause, depth + 1);
+}
+
+/** True only when nothing answered: a transport signal *and* no sign of an HTTP response. */
+export function isDeckUnreachableError(err: unknown): boolean {
+  if (deckAnswered(err)) return false;
+  return hasUnreachableSignal(err);
+}
 
 function resultText(result: unknown): string {
   const content = (result as { content?: Array<{ type?: string; text?: string }> } | null)?.content;
@@ -255,9 +352,26 @@ function assertPlaybookMatches(result: unknown, expectedPlaybookId: string): voi
   }
 }
 
-type VerifyDeckResult = { ok: true } | { ok: false; kind: "infra_failure"; reason: string };
+type VerifyDeckResult =
+  | { ok: true }
+  | { ok: false; kind: "infra_failure" | "deck_unavailable"; reason: string };
 
-/** Run one preflight operation inside the shared absolute deadline and clear its timer. */
+/**
+ * Single classification point for every preflight error. The split is decided by *where* the
+ * error came from, not by how it reads: only the call boundary raises `DeckUnreachableError`.
+ */
+function verifyFailed(err: unknown): VerifyDeckResult {
+  const reason = err instanceof Error ? err.message : String(err);
+  return err instanceof DeckUnreachableError
+    ? { ok: false, kind: "deck_unavailable", reason }
+    : { ok: false, kind: "infra_failure", reason };
+}
+
+/**
+ * Run one preflight operation inside the shared absolute deadline and clear its timer.
+ * This is the one place a preflight awaits the deck, so it is also the one place a
+ * transport failure is recognized as the deck being unreachable (NOT-136).
+ */
 async function withinPreflightDeadline<T>(opts: {
   label: string;
   deadlineMs: number;
@@ -266,17 +380,20 @@ async function withinPreflightDeadline<T>(opts: {
 }): Promise<T> {
   const remainingMs = opts.deadlineMs - Date.now();
   if (remainingMs <= 0) {
-    throw new Error(`${opts.label} timed out after ${opts.timeoutMs}ms total preflight budget`);
+    throw new PreflightTimeoutError(`${opts.label} timed out after ${opts.timeoutMs}ms total preflight budget`);
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`${opts.label} timed out after ${opts.timeoutMs}ms total preflight budget`)),
+      () => reject(new PreflightTimeoutError(`${opts.label} timed out after ${opts.timeoutMs}ms total preflight budget`)),
       remainingMs
     );
   });
   try {
     return await Promise.race([Promise.resolve().then(opts.run), timeout]);
+  } catch (err) {
+    if (err instanceof DeckUnreachableError) throw err;
+    throw isDeckUnreachableError(err) ? new DeckUnreachableError(err) : err;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -300,7 +417,7 @@ async function verifyDeckConnection(opts: {
         opts.callTool!("get_bound_deck", {})
       );
     } catch (err) {
-      return { ok: false, kind: "infra_failure", reason: (err as Error).message };
+      return verifyFailed(err);
     }
     try {
       assertToolResultOk(result, "get_bound_deck");
@@ -314,7 +431,7 @@ async function verifyDeckConnection(opts: {
       }
       return { ok: true };
     } catch (err) {
-      return { ok: false, kind: "infra_failure", reason: (err as Error).message };
+      return verifyFailed(err);
     }
   }
   const mcpBase = getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "");
@@ -338,7 +455,7 @@ async function verifyDeckConnection(opts: {
     }
     return { ok: true };
   } catch (err) {
-    return { ok: false, kind: "infra_failure", reason: (err as Error).message };
+    return verifyFailed(err);
   } finally {
     try {
       await client.close();
@@ -353,6 +470,10 @@ async function verifyDeckConnection(opts: {
  * `get_bound_deck` and every configured playbook before spawn. No mint, no ledger, no
  * Authorization. A deck-bound worker is fail-closed: missing playbook authority is an
  * infrastructure failure, never permission to improvise without the configured recipe.
+ *
+ * NOT-136: "the deck said no" and "the deck is not running" are different outcomes. Only the
+ * former is `infra_failure` (a spent attempt); an unreachable deck returns `deck_unavailable`
+ * so the caller can wait for it to come back.
  */
 export async function prepareWorkerDeckConnection(opts: {
   deckId: string;
@@ -391,7 +512,9 @@ export async function prepareWorkerDeckConnection(opts: {
     } catch {
       // best-effort
     }
-    return { ok: false, kind: "infra_failure", reason: `preflight failed: ${verified.reason}` };
+    return verified.kind === "deck_unavailable"
+      ? { ok: false, kind: "deck_unavailable", reason: `Agent Deck is unreachable — ${verified.reason}` }
+      : { ok: false, kind: "infra_failure", reason: `preflight failed: ${verified.reason}` };
   }
 
   return { ok: true, mcpConfigPath: materialized.mcpConfigPath, mcpEnv: materialized.mcpEnv };
