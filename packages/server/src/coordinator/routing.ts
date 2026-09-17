@@ -25,6 +25,10 @@ export type DeveloperOutcome =
   | { kind: "adapter_failure"; reason: string; publishable?: { branch: string } }
   /** Agent Deck config, connection, bound-deck, or required-playbook preflight failed. */
   | { kind: "deck_failure"; reason: string }
+  /** NOT-136: Agent Deck was unreachable at preflight — nothing spawned, nothing attempted.
+   * Deferred like a usage cap (no infra attempt, exponential backoff), never routed as a
+   * worker failure. `until` is computed by the deferral, not by the effect. */
+  | { kind: "deck_unavailable"; reason: string }
   | { kind: "session_failed"; reason?: string }
   /** Runtime account usage cap — defer until unavailable_until, not an infra failure (NOT-111).
    * Optional `resume.retryReason` frames the next developer prompt when commits remain (NOT-117).
@@ -42,6 +46,8 @@ export type ReviewerOutcome =
   | { kind: "stale"; currentHeadSha: string }
   | { kind: "session_failed"; reason?: string }
   | { kind: "deck_failure"; reason: string }
+  /** NOT-136 — see DeveloperOutcome's deck_unavailable. */
+  | { kind: "deck_unavailable"; reason: string }
   | { kind: "publish_failed"; reason?: string }
   | { kind: "usage_capped"; until: string; reason: string; evidence?: unknown };
 
@@ -80,7 +86,10 @@ export type DeveloperRouteResult =
       actionType: "attempts_exhausted" | "policy_escalation";
       reason: string;
     }
-  | { next: "defer_work"; until: string; reason: string };
+  /** `until` is only known up front when the blocker reports its own reset time (a usage
+   * cap). An unreachable Agent Deck gives no ETA, so its retry time comes from the deferral
+   * backoff schedule instead (NOT-136). */
+  | { next: "defer_work"; reason: string; until?: string };
 
 export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLimits): DeveloperRouteResult {
   switch (outcome.kind) {
@@ -150,6 +159,10 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
     }
     case "usage_capped":
       return { next: "defer_work", until: outcome.until, reason: outcome.reason };
+    case "deck_unavailable":
+      // NOT-136: a hard-down dependency is not retryable on the infra-attempt timescale, and
+      // nothing was spawned, so there is no attempt to charge. Wait for the deck instead.
+      return { next: "defer_work", reason: outcome.reason };
   }
 }
 
@@ -187,7 +200,8 @@ export type ReviewerRouteResult =
       actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision";
       reason: string;
     }
-  | { next: "defer_work"; until: string; reason: string };
+  /** See DeveloperRouteResult's defer_work — `until` is absent for an unreachable deck. */
+  | { next: "defer_work"; reason: string; until?: string };
 
 export function routeReviewerOutcome(
   outcome: ReviewerOutcome,
@@ -219,6 +233,9 @@ export function routeReviewerOutcome(
     }
     case "usage_capped":
       return { next: "defer_work", until: outcome.until, reason: outcome.reason };
+    case "deck_unavailable":
+      // See routeDeveloperOutcome — the reviewer never spawned either (NOT-136).
+      return { next: "defer_work", reason: outcome.reason };
     case "verdict":
       return routeVerdict(outcome.result, limits);
   }

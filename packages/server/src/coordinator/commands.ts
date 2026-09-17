@@ -67,9 +67,15 @@ import { parseHumanResolution, resolveHumanActionOutcome, type HumanResolution }
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
 import {
   capEscalationEvents,
+  deckOutageDeferralStartedAt,
+  deferLeasedWorkItemForDeckOutage,
   deferLeasedWorkItemForUsageCap,
   formatCapEscalationReason,
+  formatDeckOutageEscalationReason,
   usageCapDeferralStartedAt,
+  type DeckUnavailableOutcome,
+  type DeferralOutcome,
+  type DeferWorkItemResult,
   type UsageCappedOutcome,
 } from "./usage-cap-defer.js";
 import { markQueueEntryAdmitted } from "../repository/queue-entries.js";
@@ -347,6 +353,11 @@ export async function applyCompletion(
   if (outcome.kind === "usage_capped") {
     return applyUsageCapCompletion(workItemId, leaseToken, outcome);
   }
+  // NOT-136: same shape as a usage cap — the work item goes back on the queue behind an
+  // availability window instead of being finished and routed as a failed attempt.
+  if (outcome.kind === "deck_unavailable") {
+    return applyDeckOutageCompletion(workItemId, leaseToken, outcome);
+  }
 
   const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
@@ -384,11 +395,16 @@ function parseWorkItemPayload(json: string | null): Record<string, unknown> {
   }
 }
 
-/** NOT-111: defer without finishing the work item or spending infra/attempt budgets. */
-function applyUsageCapCompletion(
+/**
+ * NOT-111 / NOT-136: defer without finishing the work item or spending infra/attempt
+ * budgets. Shared by both blockers — only `defer` and `escalate` differ.
+ */
+function applyDeferralCompletion(
   workItemId: string,
   leaseToken: string,
-  cap: UsageCappedOutcome
+  result: DeferralOutcome,
+  defer: (item: WorkItem, issue: Issue, instance: WorkflowInstance) => DeferWorkItemResult,
+  escalate: (issue: Issue, instance: WorkflowInstance, item: WorkItem) => ApplyResult
 ): ApplyResult {
   return getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
@@ -404,7 +420,7 @@ function applyUsageCapCompletion(
       return { applied: false, reason: "no_active_instance" };
     }
 
-    const deferResult = deferLeasedWorkItemForUsageCap(before, leaseToken, cap, issue, instance);
+    const deferResult = defer(before, issue, instance);
     if (deferResult.deferred) {
       const issueNow = getIssue(issue.id)!;
       return {
@@ -416,27 +432,52 @@ function applyUsageCapCompletion(
       };
     }
     if (deferResult.escalated) {
-      const item = finishWorkItem(workItemId, leaseToken, { status: "done", result: cap });
+      const item = finishWorkItem(workItemId, leaseToken, { status: "done", result });
       if (!item) return { applied: false, reason: "lease_lost" };
-      return routeCapEscalation(issue, instance, item, cap);
+      return escalate(issue, instance, item);
     }
     return { applied: false, reason: "lease_lost" };
   })();
 }
 
+function applyUsageCapCompletion(
+  workItemId: string,
+  leaseToken: string,
+  cap: UsageCappedOutcome
+): ApplyResult {
+  return applyDeferralCompletion(
+    workItemId,
+    leaseToken,
+    cap,
+    (item, issue, instance) => deferLeasedWorkItemForUsageCap(item, leaseToken, cap, issue, instance),
+    (issue, instance, item) => routeCapEscalation(issue, instance, item, cap)
+  );
+}
+
+function applyDeckOutageCompletion(
+  workItemId: string,
+  leaseToken: string,
+  outage: DeckUnavailableOutcome
+): ApplyResult {
+  return applyDeferralCompletion(
+    workItemId,
+    leaseToken,
+    outage,
+    (item, issue, instance) => deferLeasedWorkItemForDeckOutage(item, leaseToken, outage, issue, instance),
+    (issue, instance, item) => routeDeckOutageEscalation(issue, instance, item, outage)
+  );
+}
+
 /**
- * Deferral ceiling exceeded — escalate with cap evidence without spending infra attempts.
- * Used when applyCompletion or the worker loop cannot defer any longer.
+ * Deferral ceiling exceeded — escalate with the blocker's evidence without spending infra
+ * attempts. Used when applyCompletion or the worker loop cannot defer any longer.
  */
-export function routeCapEscalation(
+function routeDeferralEscalation(
   issue: Issue,
   instance: WorkflowInstance,
   item: WorkItem,
-  cap: UsageCappedOutcome
+  detail: { reason: string; eventPayload: Record<string, unknown>; evidence: unknown }
 ): ApplyResult {
-  const payload = parseWorkItemPayload(item.payloadJson);
-  const firstDeferredAt = usageCapDeferralStartedAt(payload) ?? new Date().toISOString();
-  const reason = formatCapEscalationReason(cap, firstDeferredAt);
   const role = item.kind === "developer" ? "developer" : "reviewer";
 
   const ev = eventEmitter(issue, instance, item.workerSessionId, "needs_human", issue.currentRound);
@@ -451,10 +492,7 @@ export function routeCapEscalation(
           sessionId: item.workerSessionId ?? "",
           worktreePath: session?.worktreePath,
         }),
-        outcome: "usage_capped",
-        until: cap.until,
-        reason: cap.reason,
-        evidence: cap.evidence,
+        ...detail.eventPayload,
       },
     });
   }
@@ -464,7 +502,7 @@ export function routeCapEscalation(
     {
       issueStatus: "needs_human",
       currentOwner: "human",
-      currentIntent: reason,
+      currentIntent: detail.reason,
       events: capEscalationEvents(),
     },
     {}
@@ -474,9 +512,9 @@ export function routeCapEscalation(
     issueId: issue.id,
     workflowInstanceId: instance.id,
     actionType: "policy_escalation",
-    reason,
-    question: questionFor("policy_escalation", reason),
-    evidence: { usageCap: cap, firstDeferredAt },
+    reason: detail.reason,
+    question: questionFor("policy_escalation", detail.reason),
+    evidence: detail.evidence,
     responseOptions: responseOptionsFor("policy_escalation"),
   });
   ev.emit("human_action.requested", { payload: { actionType: "policy_escalation", actionId: action.id } });
@@ -488,6 +526,46 @@ export function routeCapEscalation(
     humanActionId: action.id,
     instanceCompleted: false,
   };
+}
+
+export function routeCapEscalation(
+  issue: Issue,
+  instance: WorkflowInstance,
+  item: WorkItem,
+  cap: UsageCappedOutcome
+): ApplyResult {
+  const payload = parseWorkItemPayload(item.payloadJson);
+  const firstDeferredAt = usageCapDeferralStartedAt(payload) ?? new Date().toISOString();
+  return routeDeferralEscalation(issue, instance, item, {
+    reason: formatCapEscalationReason(cap, firstDeferredAt),
+    eventPayload: {
+      outcome: "usage_capped",
+      until: cap.until,
+      reason: cap.reason,
+      evidence: cap.evidence,
+    },
+    evidence: { usageCap: cap, firstDeferredAt },
+  });
+}
+
+/** NOT-136: the deck stayed unreachable past the ceiling — this is no longer a restart. */
+export function routeDeckOutageEscalation(
+  issue: Issue,
+  instance: WorkflowInstance,
+  item: WorkItem,
+  outage: DeckUnavailableOutcome
+): ApplyResult {
+  const payload = parseWorkItemPayload(item.payloadJson);
+  const firstDeferredAt = deckOutageDeferralStartedAt(payload) ?? new Date().toISOString();
+  return routeDeferralEscalation(issue, instance, item, {
+    reason: formatDeckOutageEscalationReason(outage, firstDeferredAt),
+    eventPayload: {
+      outcome: "deck_unavailable",
+      reason: outage.reason,
+      evidence: outage.evidence,
+    },
+    evidence: { deckOutage: outage, firstDeferredAt },
+  });
 }
 
 export function routeAppliedOutcome(

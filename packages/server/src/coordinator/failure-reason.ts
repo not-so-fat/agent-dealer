@@ -138,6 +138,8 @@ function fallbackReasonForKind(outcome: DeveloperOutcome | ReviewerOutcome): str
       return "Git/GitHub verification failed.";
     case "deck_failure":
       return "Agent Deck preflight failed.";
+    case "deck_unavailable":
+      return "Agent Deck is unreachable.";
     case "stale":
       return "PR head moved before the reviewer could evaluate it.";
     case "usage_capped":
@@ -179,7 +181,11 @@ export function reasonForWorkerFailedEvent(opts: {
   return fallbackReasonForKind(opts.outcome);
 }
 
-/** Whether this outcome should persist errorJson on the worker_session row. */
+/**
+ * Whether this outcome should persist errorJson on the worker_session row.
+ * `deck_unavailable` and `usage_capped` are deliberately absent — they are waits, not
+ * failures, and worker-loop records their reason on the deferral path instead (NOT-136).
+ */
 export function outcomeShouldRecordError(outcome: DeveloperOutcome | ReviewerOutcome): boolean {
   return (
     outcome.kind === "session_failed" ||

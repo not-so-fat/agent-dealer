@@ -114,7 +114,7 @@ export function projectDeveloperRoute(
         advance: "none",
       };
     case "defer_work":
-      throw new Error("defer_work is applied by applyUsageCapCompletion, not projection");
+      throw new Error("defer_work is applied by the deferral path in commands.ts, not projection");
   }
 }
 
@@ -213,6 +213,6 @@ export function projectReviewerRoute(
         hasVerdict,
       };
     case "defer_work":
-      throw new Error("defer_work is applied by applyUsageCapCompletion, not projection");
+      throw new Error("defer_work is applied by the deferral path in commands.ts, not projection");
   }
 }

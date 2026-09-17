@@ -19,6 +19,8 @@
 // checkout failed," while `deck_failure` preserves explicit Agent Deck diagnostics and
 // `publish_failed` covers re-verification / GitHub publication infrastructure. All three
 // remain bounded infra failures; the split is for accurate operator-facing reasons.
+// `deck_unavailable` (NOT-136) is the one that is NOT an infra failure — it means the deck
+// never answered, so there is nothing to charge an attempt for.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -278,7 +280,10 @@ export async function runReviewerEffect(
       });
       if (!prepared.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
-        return { kind: "deck_failure", reason: prepared.reason };
+        // NOT-136: see developer-effect — unreachable deck defers, deck errors still fail.
+        return prepared.kind === "deck_unavailable"
+          ? { kind: "deck_unavailable", reason: prepared.reason }
+          : { kind: "deck_failure", reason: prepared.reason };
       }
       workerAuthority = {
         mcpConfigPath: prepared.mcpConfigPath,

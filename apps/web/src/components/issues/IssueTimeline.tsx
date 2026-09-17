@@ -12,7 +12,11 @@ const LABELS: Record<string, (e: WorkflowEvent) => string> = {
   "worker.started": (e) => `${roleNoun(e.actorType)} started${e.round ? ` (round ${e.round})` : ""}`,
   "worker.completed": (e) => `${roleNoun(e.actorType)} finished${e.round ? ` (round ${e.round})` : ""}`,
   "worker.failed": (e) => `${roleNoun(e.actorType)} failed${e.round ? ` (round ${e.round})` : ""}`,
-  "worker.deferred": (e) => `${roleNoun(e.actorType)} deferred${e.round ? ` (round ${e.round})` : ""}`,
+  // NOT-136: a deck outage is not a worker problem — say what is actually being waited on.
+  "worker.deferred": (e) =>
+    parseJson<{ outcome?: string }>(e.payloadJson)?.outcome === "deck_unavailable"
+      ? `Waiting for Agent Deck${e.round ? ` (round ${e.round})` : ""}`
+      : `${roleNoun(e.actorType)} deferred${e.round ? ` (round ${e.round})` : ""}`,
   "worktree.ready": () => "Worktree ready",
   "deck.connected": () => "Deck connected",
   "brief.resolved": () => "Brief resolved",
