@@ -501,7 +501,10 @@ export async function runDeveloperEffect(
       });
       if (!prepared.ok) {
         await bestEffortRemove(issue.repo, worktreePath);
-        return { kind: "deck_failure", reason: prepared.reason };
+        // NOT-136: an unreachable deck is a wait, not a failed attempt — nothing spawned.
+        return prepared.kind === "deck_unavailable"
+          ? { kind: "deck_unavailable", reason: prepared.reason }
+          : { kind: "deck_failure", reason: prepared.reason };
       }
       workerAuthority = {
         mcpConfigPath: prepared.mcpConfigPath,

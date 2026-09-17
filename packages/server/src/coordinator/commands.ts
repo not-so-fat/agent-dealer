@@ -67,9 +67,13 @@ import { parseHumanResolution, resolveHumanActionOutcome, type HumanResolution }
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
 import {
   capEscalationEvents,
+  deferLeasedWorkItemForDeckOutage,
   deferLeasedWorkItemForUsageCap,
   formatCapEscalationReason,
   usageCapDeferralStartedAt,
+  type DeckUnavailableOutcome,
+  type DeferralOutcome,
+  type DeferWorkItemResult,
   type UsageCappedOutcome,
 } from "./usage-cap-defer.js";
 import { markQueueEntryAdmitted } from "../repository/queue-entries.js";
@@ -347,6 +351,11 @@ export async function applyCompletion(
   if (outcome.kind === "usage_capped") {
     return applyUsageCapCompletion(workItemId, leaseToken, outcome);
   }
+  // NOT-136: same shape as a usage cap — the work item goes back on the queue behind an
+  // availability window instead of being finished and routed as a failed attempt.
+  if (outcome.kind === "deck_unavailable") {
+    return applyDeckOutageCompletion(workItemId, leaseToken, outcome);
+  }
 
   const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
@@ -384,11 +393,19 @@ function parseWorkItemPayload(json: string | null): Record<string, unknown> {
   }
 }
 
-/** NOT-111: defer without finishing the work item or spending infra/attempt budgets. */
-function applyUsageCapCompletion(
+/**
+ * NOT-111 / NOT-136: defer without finishing the work item or spending infra/attempt
+ * budgets. Shared by both blockers — only `defer` and `escalate` differ.
+ *
+ * `escalate` is optional because only a usage cap has a ceiling: a deck outage always stays
+ * retryable, so its `defer` never reports `escalated` and there is nothing to route.
+ */
+function applyDeferralCompletion(
   workItemId: string,
   leaseToken: string,
-  cap: UsageCappedOutcome
+  result: DeferralOutcome,
+  defer: (item: WorkItem, issue: Issue, instance: WorkflowInstance) => DeferWorkItemResult,
+  escalate?: (issue: Issue, instance: WorkflowInstance, item: WorkItem) => ApplyResult
 ): ApplyResult {
   return getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
@@ -404,7 +421,7 @@ function applyUsageCapCompletion(
       return { applied: false, reason: "no_active_instance" };
     }
 
-    const deferResult = deferLeasedWorkItemForUsageCap(before, leaseToken, cap, issue, instance);
+    const deferResult = defer(before, issue, instance);
     if (deferResult.deferred) {
       const issueNow = getIssue(issue.id)!;
       return {
@@ -415,18 +432,46 @@ function applyUsageCapCompletion(
         instanceCompleted: false,
       };
     }
-    if (deferResult.escalated) {
-      const item = finishWorkItem(workItemId, leaseToken, { status: "done", result: cap });
+    if (deferResult.escalated && escalate) {
+      const item = finishWorkItem(workItemId, leaseToken, { status: "done", result });
       if (!item) return { applied: false, reason: "lease_lost" };
-      return routeCapEscalation(issue, instance, item, cap);
+      return escalate(issue, instance, item);
     }
     return { applied: false, reason: "lease_lost" };
   })();
 }
 
+function applyUsageCapCompletion(
+  workItemId: string,
+  leaseToken: string,
+  cap: UsageCappedOutcome
+): ApplyResult {
+  return applyDeferralCompletion(
+    workItemId,
+    leaseToken,
+    cap,
+    (item, issue, instance) => deferLeasedWorkItemForUsageCap(item, leaseToken, cap, issue, instance),
+    (issue, instance, item) => routeCapEscalation(issue, instance, item, cap)
+  );
+}
+
+/** NOT-136: no escalation arm — the item waits for the deck for as long as it takes. */
+function applyDeckOutageCompletion(
+  workItemId: string,
+  leaseToken: string,
+  outage: DeckUnavailableOutcome
+): ApplyResult {
+  return applyDeferralCompletion(workItemId, leaseToken, outage, (item, issue, instance) =>
+    deferLeasedWorkItemForDeckOutage(item, leaseToken, outage, issue, instance)
+  );
+}
+
 /**
  * Deferral ceiling exceeded — escalate with cap evidence without spending infra attempts.
  * Used when applyCompletion or the worker loop cannot defer any longer.
+ *
+ * Only the usage cap comes here. A deck outage (NOT-136) has no ceiling: escalating it would
+ * strand an issue that the deck's return would otherwise unblock on its own.
  */
 export function routeCapEscalation(
   issue: Issue,

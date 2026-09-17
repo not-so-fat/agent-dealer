@@ -282,6 +282,12 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     const { triggerIssueReflect } = await import("./reflect-trigger.js");
     void triggerIssueReflect(claimed.issueId).catch(() => {});
   }
+  // NOT-136: a deck-unavailable session never spawned anything — `cancelled`, not `failed`
+  // (which would read as a worker crash) and not `done` (which would claim it ran).
+  if (outcome.kind === "deck_unavailable") {
+    safeCompleteSession(session.id, "cancelled", { reason: outcome.reason });
+    return;
+  }
   const sessionStatus =
     outcome.kind === "usage_capped"
       ? "done"

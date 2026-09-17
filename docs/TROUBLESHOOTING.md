@@ -143,3 +143,58 @@ instead of re-running the developer`. In the logs:
 A republish never force-pushes and never discards: a branch that has fallen *behind* origin is
 left alone (origin is the better artifact), and a rejected push surfaces as the same
 `unpushed_commit` policy escalation a live attempt's rejected push gets.
+
+## "Waiting for Agent Deck" — a deck outage is a wait, not a failed attempt (NOT-136)
+
+Every deck-bound session preflights Agent Deck (`get_bound_deck` + every configured
+playbook) before it spawns. That preflight used to have one failure mode, so a deck that was
+merely *restarting* looked identical to a deck that had rejected the session. On 2026-09-16
+that cost a healthy round its entire infra budget in nine seconds: four reviewer attempts at
+`12:01:55`–`12:02:04`, all `preflight failed: fetch failed`, none with a pid or a log path —
+nothing ever spawned — and the issue parked on a human for a condition that fixed itself when
+the deck came back.
+
+Preflight now distinguishes two outcomes:
+
+| Outcome | What it means | Cost |
+| --- | --- | --- |
+| `deck_unavailable` | Nothing answered — connection refused, DNS failure, or the preflight budget elapsed with no reply | **no** infra attempt, no review round; the work item is deferred and re-tried automatically |
+| `deck_failure` | The deck answered and the answer was wrong — HTTP error, `isError` tool result, wrong bound deck, missing playbook | unchanged: a bounded infra retry, then `policy_escalation` |
+
+Only transport-level death classifies as unavailable, so a reachable-but-broken deck still
+fails loudly. Two independent guards keep that true:
+
+- **Where the error came from.** Only an error thrown out of an awaited preflight call can be
+  unavailable. A deck that is up can report its own proxied service as down (NOT-101) with the
+  literal text `fetch failed` in an `isError` result — judging an answer we received is never
+  a wait.
+- **Whether anything answered over HTTP.** The MCP SDK reports a non-2xx response by throwing
+  `StreamableHTTPError(status, "Error POSTing to endpoint: <body>")`, pasting the response body
+  into the message — so an HTTP 500 whose body reads `fetch failed` would otherwise look like a
+  dead port. An HTTP status anywhere in the error chain is proof that bytes came back, and it
+  overrides every message heuristic.
+
+The deferral reuses the NOT-111 usage-cap path (`deferWorkItem` + `revertAttemptCount`), so
+the claim-time `attempt_count` bump is undone too.
+
+**Reading it.** The issue stays in `developing` / `reviewing` with the live intent
+`Waiting for Agent Deck — …`, and the timeline shows `Waiting for Agent Deck (round N)`
+(a `worker.deferred` event with `outcome: "deck_unavailable"`), not a worker failure. No
+human action is created and none is needed — start the deck and the next retry proceeds.
+
+Unlike a usage cap, an outage has **no deferral ceiling and never escalates**: the item keeps
+re-preflighting on the capped backoff for as long as the deck is down, because handing it to a
+human would freeze an issue the deck's return would otherwise unblock by itself. Once the wait
+passes `DECK_OUTAGE_PROLONGED_AFTER_MS` the intent starts naming its length
+(`Waiting for Agent Deck — … (unreachable for 3h) (retrying 14:05)`), so a long outage is
+visible without being terminal.
+
+| Env | Default | Role |
+| --- | --- | --- |
+| `DECK_OUTAGE_BACKOFF_BASE_MS` | `15000` | Wait before the first re-preflight. |
+| `DECK_OUTAGE_BACKOFF_MAX_MS` | `600000` | Ceiling on the doubling backoff, so a long outage re-probes every 10 minutes rather than in a tight loop. |
+| `DECK_OUTAGE_PROLONGED_AFTER_MS` | `900000` | When the live intent starts reporting how long the deck has been unreachable. Display only — it does not stop the retries. |
+
+If an issue *is* waiting and the deck is up, check that the deck the agent profile names is
+the one being served: a deck that answers but reports a different `id` is a `deck_failure`,
+not a wait, and will show as a worker failure with the mismatched id in its reason.
