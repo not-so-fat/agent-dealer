@@ -519,11 +519,13 @@ function seedBuiltinAgents(db: Database.Database): void {
   insert.run(BUILTIN_AGENT_CURSOR_ID, "Cursor", "cursor_local", now, now);
   insert.run(BUILTIN_AGENT_CODEX_ID, "Codex", "codex_local", now, now);
 
+  // NOT-71: seeds the role-neutral column the issue workflow actually reads. The legacy
+  // default_plan_model / default_execute_model columns are read-only compatibility now
+  // (profile-snapshot.ts falls back to them for profiles saved before default_model existed).
   db.prepare(
     `UPDATE agents SET
-      default_plan_model = COALESCE(default_plan_model, ?),
-      default_execute_model = COALESCE(default_execute_model, ?),
+      default_model = COALESCE(default_model, ?),
       updated_at = ?
      WHERE id = ? AND runtime = 'cursor_local'`
-  ).run(CURSOR_DEFAULT_MODEL, CURSOR_DEFAULT_MODEL, now, BUILTIN_AGENT_CURSOR_ID);
+  ).run(CURSOR_DEFAULT_MODEL, now, BUILTIN_AGENT_CURSOR_ID);
 }

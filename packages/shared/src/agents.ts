@@ -45,13 +45,14 @@ export const AgentProfile = z.object({
   deckId: z.string().uuid().nullable(),
   deckName: z.string().nullable(),
   playbookId: z.string().nullable(),
-  /** CLI model id for planning; null = runtime default */
+  /**
+   * Legacy phase defaults, read-only since NOT-71: nothing writes these any more, but
+   * profile-snapshot.ts still falls back to them so profiles saved before `defaultModel` /
+   * `defaultBudgetJson` existed keep their configured model and caps.
+   */
   defaultPlanModel: z.string().nullable(),
-  /** CLI model id for execution; null = runtime default */
   defaultExecuteModel: z.string().nullable(),
-  /** Serialized PhaseBudget; null = runtime default (no CLI caps) */
   defaultPlanBudgetJson: z.string().nullable(),
-  /** Serialized PhaseBudget; null = runtime default (no CLI caps) */
   defaultExecuteBudgetJson: z.string().nullable(),
   /** Role-neutral CLI model id for issue-centric developer/reviewer sessions; null = runtime default. */
   defaultModel: z.string().nullable(),
@@ -83,10 +84,6 @@ export const CreateAgentInput = z.object({
   workspaceRoot: z.string().min(1),
   deckId: z.string().uuid().optional(),
   playbookId: z.string().optional(),
-  defaultPlanModel: z.string().nullable().optional(),
-  defaultExecuteModel: z.string().nullable().optional(),
-  defaultPlanBudget: PhaseBudget.nullable().optional(),
-  defaultExecuteBudget: PhaseBudget.nullable().optional(),
   defaultModel: z.string().nullable().optional(),
   defaultBudget: PhaseBudget.nullable().optional(),
   purpose: z.string().nullable().optional(),
@@ -102,10 +99,6 @@ export const UpdateAgentInput = z.object({
   workspaceRoot: z.string().nullable().optional(),
   deckId: z.string().uuid().nullable().optional(),
   playbookId: z.string().nullable().optional(),
-  defaultPlanModel: z.string().nullable().optional(),
-  defaultExecuteModel: z.string().nullable().optional(),
-  defaultPlanBudget: PhaseBudget.nullable().optional(),
-  defaultExecuteBudget: PhaseBudget.nullable().optional(),
   defaultModel: z.string().nullable().optional(),
   defaultBudget: PhaseBudget.nullable().optional(),
   purpose: z.string().nullable().optional(),

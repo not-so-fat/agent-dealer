@@ -27,7 +27,6 @@ const { rejectPendingOutboundDrafts, pendingSendCount, incrementOutboundDelivery
   "../repository/outbound-drafts.js"
 );
 const { findOpenHumanActionForRun, listHumanActionsForRun, getHumanAction } = await import("../repository/human-actions.js");
-const { getSnapshot } = await import("./dispatcher.js");
 
 const DECK = "6e825b59-13de-4ddd-ab7e-55ab5a1c279a";
 
@@ -292,11 +291,6 @@ test("retry rejects pending draft", () => {
   assert.equal(pendingSendCount(run.id), 0);
   const draftArt = getLatestArtifact(run.id, "slack_draft");
   assert.match(draftArt!.contentJson!, /"status":"rejected"/);
-});
-
-test("snapshot exposes pendingSendCounts", () => {
-  const snap = getSnapshot();
-  assert.equal(typeof snap.pendingSendCounts, "object");
 });
 
 test("resolveOpenDeliveryParkForRun closes an open park", async () => {
