@@ -246,12 +246,14 @@ function relationToBlocker(node: LinearRelationNode): LinearBlockerNode {
  * `includeArchived` is on because a queued dealer issue whose Linear ticket was archived
  * must still resolve; archived blockers are judged by their state type, not the flag.
  *
- * One query (paged) for the whole batch — per-entry queries would make a 10-entry queue at
- * a 60s TTL cost ~600 Linear requests/hour. Ids Linear does not return are simply absent
- * from the map; the caller treats that as "unknown", never as "no blockers". An issue with
- * more relations than fit in one page is *paged through* rather than dropped: `related` and
+ * Every request covers the whole batch — per-entry queries would make a 10-entry queue at a
+ * 60s TTL cost ~600 Linear requests/hour. Ids Linear does not return are simply absent from
+ * the map; the caller treats that as "unknown", never as "no blockers". An issue with more
+ * relations than fit in one page is *paged through* rather than dropped: `related` and
  * `duplicate` links share that connection, so a well-linked ticket would otherwise park for
- * good on relations that were never meant to gate it.
+ * good on relations that were never meant to gate it. Those nested pages are walked in
+ * rounds, one request per round across every issue still paging, so relation volume costs
+ * extra requests only in depth (rare) and never in queue width.
  */
 export async function fetchLinearBlockers(
   issueIds: string[],
@@ -264,6 +266,11 @@ export async function fetchLinearBlockers(
   // coordinator tick, and a queue deeper than one page must not multiply it.
   const deadlineAt = opts.timeoutMs ? Date.now() + opts.timeoutMs : null;
   const remaining = () => (deadlineAt ? Math.max(1, deadlineAt - Date.now()) : undefined);
+
+  // Relations gathered so far per issue. Deleting an id here is how an incomplete list stays
+  // "unknown": it never reaches `out`, and the caller parks the entry for this tick only.
+  const relationsById = new Map<string, LinearRelationNode[]>();
+  let paging: PendingRelationPage[] = [];
 
   let after: string | undefined;
   for (;;) {
@@ -290,61 +297,109 @@ export async function fetchLinearBlockers(
       // A list we did not get at all is unknown, not "no blockers": the one unsatisfied
       // blocker may be exactly the relation we are missing.
       if (!node.inverseRelations) continue;
-      const relations = [...(node.inverseRelations.nodes ?? [])];
-      const rest = await fetchRemainingInverseRelations(node.id, node.inverseRelations, remaining);
-      // Same reasoning as above for a list we only partly saw.
-      if (!rest) continue;
-      relations.push(...rest);
-      out.set(node.id, relations.filter((r) => r.type === "blocks").map(relationToBlocker));
+      relationsById.set(node.id, [...(node.inverseRelations.nodes ?? [])]);
+      const next = nextRelationCursor(node.inverseRelations, null);
+      if (next === INCOMPLETE) relationsById.delete(node.id);
+      else if (next) paging.push({ id: node.id, after: next });
     }
 
     if (!data.issues.pageInfo.hasNextPage || !data.issues.pageInfo.endCursor) break;
     after = data.issues.pageInfo.endCursor;
   }
 
+  // One request per round, however many issues are still paging.
+  while (paging.length > 0) {
+    const pages = await fetchInverseRelationRound(paging, remaining);
+    const nextRound: PendingRelationPage[] = [];
+    for (const pending of paging) {
+      const page = pages.get(pending.id);
+      const relations = relationsById.get(pending.id);
+      // Linear stopped returning the issue mid-walk: we saw part of the list and the blocker
+      // that matters may be in the part we did not.
+      if (!page || !relations) {
+        relationsById.delete(pending.id);
+        continue;
+      }
+      relations.push(...(page.nodes ?? []));
+      const next = nextRelationCursor(page, pending.after);
+      if (next === INCOMPLETE) relationsById.delete(pending.id);
+      else if (next) nextRound.push({ id: pending.id, after: next });
+    }
+    paging = nextRound;
+  }
+
+  for (const [id, relations] of relationsById) {
+    out.set(id, relations.filter((r) => r.type === "blocks").map(relationToBlocker));
+  }
   return out;
 }
 
+interface PendingRelationPage {
+  id: string;
+  after: string;
+}
+
+/** A relation list Linear will not let us finish — the id stays out of the result. */
+const INCOMPLETE = Symbol("incomplete relation page");
+
 /**
- * Page the *nested* relation connection for one issue past its first page.
- *
- * Returns the relations after `firstPage`, or `null` when the list cannot be completed
- * (Linear stopped returning the issue mid-walk, or paged without advancing) — the caller
- * turns that into "unknown" for this id, which parks the entry for this tick only.
+ * Where to continue a relation connection: `null` when the list is complete, a cursor when
+ * there is more, `INCOMPLETE` when Linear claims more but hands back no usable cursor (which
+ * would otherwise loop forever).
  */
-async function fetchRemainingInverseRelations(
-  issueId: string,
-  firstPage: RelationPage,
+function nextRelationCursor(
+  page: RelationPage,
+  after: string | null
+): string | null | typeof INCOMPLETE {
+  if (!page.pageInfo?.hasNextPage) return null;
+  const cursor = page.pageInfo.endCursor;
+  if (!cursor || cursor === after) return INCOMPLETE;
+  return cursor;
+}
+
+/**
+ * Advance every still-paging issue by one nested page in a single request.
+ *
+ * Each issue needs its own cursor, which one `issues(filter:)` selection cannot express, so
+ * the round is built as one aliased selection per issue. That keeps the cost of deep relation
+ * lists at one request per *round* rather than one per entry — the acceptance criterion is
+ * "no per-entry queries", and a queue of well-linked tickets is exactly where the naive
+ * version multiplies. Issues Linear omits come back absent from the map.
+ */
+async function fetchInverseRelationRound(
+  pending: PendingRelationPage[],
   remaining: () => number | undefined
-): Promise<LinearRelationNode[] | null> {
-  if (!firstPage.pageInfo?.hasNextPage) return [];
+): Promise<Map<string, RelationPage>> {
+  const varDefs: string[] = [];
+  const selections: string[] = [];
+  const variables: Record<string, unknown> = {};
 
-  const rest: LinearRelationNode[] = [];
-  let after = firstPage.pageInfo.endCursor;
-  while (after) {
-    const data = (await linearQuery(
-      `query BlockingRelationsPage($ids: [ID!], $after: String) {
-        issues(filter: { id: { in: $ids } }, first: 1, includeArchived: true) {
-          nodes {
-            id
-            inverseRelations(first: ${PAGE_SIZE}, after: $after) { ${RELATION_PAGE_FIELDS} }
-          }
+  pending.forEach((entry, i) => {
+    varDefs.push(`$ids${i}: [ID!], $after${i}: String`);
+    selections.push(
+      `r${i}: issues(filter: { id: { in: $ids${i} } }, first: 1, includeArchived: true) {
+        nodes {
+          id
+          inverseRelations(first: ${PAGE_SIZE}, after: $after${i}) { ${RELATION_PAGE_FIELDS} }
         }
-      }`,
-      { ids: [issueId], after },
-      { timeoutMs: remaining() }
-    )) as { issues: { nodes: Array<{ id: string; inverseRelations?: RelationPage }> } };
+      }`
+    );
+    variables[`ids${i}`] = [entry.id];
+    variables[`after${i}`] = entry.after;
+  });
 
-    const page = data.issues.nodes.find((n) => n.id === issueId)?.inverseRelations;
-    if (!page) return null;
-    rest.push(...(page.nodes ?? []));
-    if (!page.pageInfo?.hasNextPage) return rest;
-    // A page that claims more but hands back no cursor would loop forever; treat the list
-    // as incomplete instead.
-    if (!page.pageInfo.endCursor || page.pageInfo.endCursor === after) return null;
-    after = page.pageInfo.endCursor;
-  }
-  return null;
+  const data = (await linearQuery(
+    `query BlockingRelationsPage(${varDefs.join(", ")}) {\n${selections.join("\n")}\n}`,
+    variables,
+    { timeoutMs: remaining() }
+  )) as Record<string, { nodes?: Array<{ id: string; inverseRelations?: RelationPage }> } | null>;
+
+  const out = new Map<string, RelationPage>();
+  pending.forEach((entry, i) => {
+    const page = data[`r${i}`]?.nodes?.find((n) => n.id === entry.id)?.inverseRelations;
+    if (page) out.set(entry.id, page);
+  });
+  return out;
 }
 
 /** Resolve free-form kick text to a Linear candidate (or null if not found / unparseable). */
