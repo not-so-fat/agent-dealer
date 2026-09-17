@@ -50,6 +50,7 @@ import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
+import { classifyRunnerLogFailure } from "./failure-reason.js";
 import { recordUsageCapFromLog } from "../runners/usage-cap.js";
 import {
   emitSessionMilestone,
@@ -413,7 +414,12 @@ export async function runReviewerEffect(
 
     if (spawned.timedOut || spawned.exitCode !== 0) {
       await bestEffortRemove(issue.repo, worktreePath);
-      return { kind: "session_failed" };
+      // NOT-133: a reviewer that died on runtime auth reads as "Worker session failed or
+      // crashed" without this. Null when nothing classifies, which keeps that fallback.
+      return {
+        kind: "session_failed",
+        reason: classifyRunnerLogFailure(spawned.logPath, runtime) ?? undefined,
+      };
     }
 
     // Persisted as soon as the session itself completes, regardless of how verification/

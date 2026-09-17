@@ -1,7 +1,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import type { AgentHealthIssue, AgentProfile, AgentWithHealth, Runtime } from "@agent-dealer/shared";
-import { cursorAuthIssueFromOutput } from "@agent-dealer/shared";
+import {
+  CODEX_AUTH_REMEDIATION,
+  cursorAuthIssueFromOutput,
+  runtimeAuthIssueFromOutput,
+} from "@agent-dealer/shared";
 import {
   claudeBinExists,
   cursorBinExists,
@@ -80,10 +84,24 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
   const issues: AgentHealthIssue[] = [];
 
   if (runtime === "claude_code") {
-    if (claudeBinExists()) return issues;
-    const ver = await runCommand(resolveClaudeBin(), ["--version"]);
-    if (!ver.ok) {
-      issues.push({ code: "cli_missing", message: "Claude CLI not found — install Claude Code" });
+    if (!claudeBinExists()) {
+      const ver = await runCommand(resolveClaudeBin(), ["--version"]);
+      if (!ver.ok) {
+        issues.push({ code: "cli_missing", message: "Claude CLI not found — install Claude Code" });
+        return issues;
+      }
+    }
+    // NOT-133: Claude had no auth preflight at all, so a logged-out Claude agent was admitted
+    // exactly the way a logged-out Cursor one was. `claude auth status` is local, offline and
+    // free (it reads the credential store and prints JSON) — unlike `claude -p`, which bills.
+    // Its output is what gets classified, not its exit code: logged out it prints
+    // `"loggedIn": false` *and* exits 1, so only the positive signal in the body blocks. An
+    // older CLI without the subcommand prints an unknown-command error that matches nothing,
+    // and must not become a false block.
+    if (!claudeUsesThirdPartyProvider()) {
+      const auth = await runCommand(resolveClaudeBin(), ["auth", "status"]);
+      const authIssue = runtimeAuthIssueFromOutput("claude_code", auth.output);
+      if (authIssue) issues.push(authIssue);
     }
     return issues;
   }
@@ -98,29 +116,62 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
     }
     // `codex --version` succeeds without auth — use login status for auth health.
     const login = await runCommand(resolveCodexBin(), ["login", "status"]);
+    // The classifier runs first: `codex login status` prints "Not logged in" and the
+    // exit-code heuristic below would read that as "logged in" on its own, because the
+    // substring "logged in" is inside it.
+    const authIssue = runtimeAuthIssueFromOutput("codex_local", login.output);
+    if (authIssue) {
+      issues.push(authIssue);
+      return issues;
+    }
     const out = login.output.toLowerCase();
     const loggedIn =
       login.ok &&
       (out.includes("logged in") || out.includes("authenticated") || out.includes("api key"));
     if (!loggedIn) {
-      issues.push({
-        code: "runtime_auth",
-        message: "Run `codex login` (or set OPENAI_API_KEY for automation)",
-      });
+      issues.push({ code: "runtime_auth", message: CODEX_AUTH_REMEDIATION });
     }
     return issues;
   }
 
   const status = await runCommand(resolveCursorBin(), cursorInvokeArgs(["status"]));
-  if (!status.ok && !status.output.trim() && !cursorBinExists()) {
+  // A failed *spawn* resolves with the error message as its output (`spawn cursor-agent
+  // ENOENT`), not with empty output — so an absent binary must be recognised here or it
+  // falls through to the unconfirmed-auth branch below and names the wrong remedy.
+  if (!status.ok && (/\bENOENT\b/.test(status.output) || (!status.output.trim() && !cursorBinExists()))) {
     issues.push({ code: "cli_missing", message: "cursor-agent not found — run: curl https://cursor.com/install -fsS | bash" });
     return issues;
   }
   const authIssue = cursorAuthIssueFromOutput(status.output);
   if (authIssue) {
     issues.push(authIssue);
+    return issues;
+  }
+  // NOT-133: an unclassified *failure* of the probe itself (non-zero exit, timeout) used to
+  // be read as "healthy" and admitted the agent. Silence is not evidence of auth, so this
+  // fails closed: the agent stays unhealthy — and its issues stay queued — until the probe
+  // succeeds. That is a deliberate trade against the incident, where admitting on a guess
+  // cost 12 dead sessions and parked three issues on a human. Reported as runtime_auth so
+  // the existing agents-page CLI status renders it, with a message that says plainly the
+  // state is unconfirmed rather than asserting the agent is logged out.
+  if (!status.ok) {
+    const detail = status.output.trim().split("\n").slice(-1)[0] ?? "no output";
+    issues.push({
+      code: "runtime_auth",
+      message: `Could not confirm Cursor auth — \`cursor-agent status\` failed (${detail})`,
+    });
   }
   return issues;
+}
+
+/**
+ * Bedrock/Vertex installs authenticate through AWS/GCP credentials instead of a Claude
+ * login, so `claude auth status` is not the authority on whether they can run.
+ */
+function claudeUsesThirdPartyProvider(): boolean {
+  return (
+    process.env.CLAUDE_CODE_USE_BEDROCK === "1" || process.env.CLAUDE_CODE_USE_VERTEX === "1"
+  );
 }
 
 /**

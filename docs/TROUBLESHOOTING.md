@@ -46,6 +46,45 @@ If delete reports the item was not found, still run `agent login` / `cursor-agen
 
 Related: NOT-103 (session death → dirty worktree), NOT-114 (this preflight + docs), NOT-113 (post-failure reason surfacing).
 
+## Runtime not logged in (NOT-133)
+
+A runtime CLI that is simply logged out is a different failure from the keychain one above, and for a while it was an *invisible* one: the classifier's pattern list never covered what `cursor-agent` actually prints, so twelve sessions across three issues spawned, died in about a second each, and were reported as `Developer session failed or crashed.`
+
+Health issue code is `runtime_auth` for all three runtimes. What each CLI prints when logged out (verbatim captures live in `packages/shared/src/fixtures/runtime-auth/`):
+
+```text
+# cursor-agent -p …
+Error: Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable.
+
+# cursor-agent status   (exits 0 — the text is the only signal)
+Not logged in
+
+# codex exec …
+ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header
+
+# claude -p …
+Not logged in · Please run /login
+```
+
+### Recovery
+
+```bash
+cursor-agent login   # or: agent login, or export CURSOR_API_KEY=…
+codex login          # or: export OPENAI_API_KEY=…
+claude auth login    # or `/login` in a session, or export ANTHROPIC_API_KEY=…
+```
+
+Then `agent-dealer doctor`, or just let the queue re-evaluate — an issue whose agent fails this preflight **waits in the queue with the auth message as its wait reason** rather than being admitted. It does not spend infra attempts and does not park on a human.
+
+Two related notes:
+
+- `cursor-agent status` failing for an unclassifiable reason (non-zero exit, timeout) is also reported as `runtime_auth`, worded "Could not confirm Cursor auth". Silence is not evidence of health, and waiting a tick is cheaper than a burnt round.
+- Bedrock/Vertex Claude installs (`CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1`) authenticate through AWS/GCP, so the `claude auth status` preflight is skipped for them.
+
+Whenever a runtime reworded one of these strings, add its capture to `packages/shared/src/fixtures/runtime-auth/` and extend `runtime-auth-health.ts` — never a phrasing typed from memory. That is the exact mistake NOT-133 was.
+
+Related: NOT-114 (keychain branch), NOT-113 (failure strip), NOT-128 (runtime-auth failures should not spend developer attempts).
+
 ## Coordinator lease / heartbeat (NOT-113)
 
 | Env | Default | Role |

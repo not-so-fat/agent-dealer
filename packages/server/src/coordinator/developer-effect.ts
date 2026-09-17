@@ -711,7 +711,7 @@ export async function runDeveloperEffect(
     const usageCap = recordUsageCapFromLog(spawned.logPath, runtime);
     if (usageCap) {
       const clean = await isWorktreeClean(worktreePath).catch(() => false);
-      if (!clean) return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath) };
+      if (!clean) return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath, runtime) };
 
       const sessionOk = !spawned.timedOut && spawned.exitCode === 0;
       const ahead = await commitsAhead({
@@ -752,11 +752,11 @@ export async function runDeveloperEffect(
       // NOT-113: when Cursor stderr shows keychain/auth death, keep dirty_worktree but
       // attach an actionable reason so the UI isn't just "dirty tree".
       const clean = await isWorktreeClean(worktreePath).catch(() => false);
-      if (!clean) return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath) };
+      if (!clean) return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath, runtime) };
       await bestEffortRemove(issue.repo, worktreePath);
       return spawned.timedOut
-        ? { kind: "timed_out", reason: reasonForSessionCrash({ timedOut: true, logPath: spawned.logPath }) }
-        : { kind: "session_failed", reason: reasonForSessionCrash({ timedOut: false, logPath: spawned.logPath }) };
+        ? { kind: "timed_out", reason: reasonForSessionCrash({ timedOut: true, logPath: spawned.logPath, runtime }) }
+        : { kind: "session_failed", reason: reasonForSessionCrash({ timedOut: false, logPath: spawned.logPath, runtime }) };
     }
 
     // Persisted as soon as the session itself completes — a review round found these
@@ -779,7 +779,7 @@ export async function runDeveloperEffect(
     });
 
     if (!(await isWorktreeClean(worktreePath))) {
-      return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath) };
+      return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath, runtime) };
     }
 
     const ahead = await commitsAhead({ worktreePath, baseRef: `origin/${issue.baseBranch}` });

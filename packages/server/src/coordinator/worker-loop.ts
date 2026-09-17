@@ -303,6 +303,7 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
         reason: reasonForWorkerFailedEvent({
           outcome,
           logPath: session.logPath,
+          runtime: session.runtime ?? undefined,
         }),
       }
     : undefined;

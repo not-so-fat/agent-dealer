@@ -11,6 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import type { AgentHealthIssue } from "@agent-dealer/shared";
 import type { DeckAccessResult } from "./agent-deck.js";
 
@@ -177,4 +178,131 @@ The keychain item is stuck. Delete it and sign in again:
   );
   assert.equal(result.healthy, false);
   assert.equal(result.issues.some((i) => i.code === "cursor_keychain"), true);
+});
+
+// ---------------------------------------------------------------------------
+// NOT-133: the admission preflight classifies each runtime's *captured* logged-out
+// output. Stubs replay the fixtures in packages/shared/src/fixtures/runtime-auth/.
+// ---------------------------------------------------------------------------
+
+const FIXTURES = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../shared/src/fixtures/runtime-auth"
+);
+
+/** A CLI stub that prints a captured fixture verbatim and exits with the captured code. */
+function stubCli(name: string, fixture: string, exitCode: number): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cli-stub-"));
+  const bin = path.join(dir, name);
+  fs.writeFileSync(
+    bin,
+    `#!/bin/sh\ncat ${JSON.stringify(path.join(FIXTURES, fixture))}\nexit ${exitCode}\n`
+  );
+  fs.chmodSync(bin, 0o755);
+  return bin;
+}
+
+async function withEnv<T>(key: string, value: string, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env[key];
+  process.env[key] = value;
+  clearAgentHealthCaches();
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env[key];
+    else process.env[key] = prev;
+    clearAgentHealthCaches();
+  }
+}
+
+test("logged-out `cursor-agent status` capture blocks the cursor runtime (exit 0 — output is the only signal)", async () => {
+  const issues = await withEnv(
+    "CURSOR_CLI",
+    stubCli("cursor-agent", "cursor-agent-status-logged-out.txt", 0),
+    () => runtimeIssuesUncached("cursor_local")
+  );
+  assert.deepEqual(issues.map((i) => i.code), ["runtime_auth"]);
+  assert.match(issues[0]!.message, /cursor-agent login/);
+  assert.match(issues[0]!.message, /CURSOR_API_KEY/);
+});
+
+test("logged-in `cursor-agent status` capture leaves the cursor runtime healthy", async () => {
+  const issues = await withEnv(
+    "CURSOR_CLI",
+    stubCli("cursor-agent", "cursor-agent-status-logged-in.txt", 0),
+    () => runtimeIssuesUncached("cursor_local")
+  );
+  assert.deepEqual(issues, []);
+});
+
+test("a cursor status probe that fails without a classifiable reason blocks rather than admits", async () => {
+  // NOT-133: silence used to be read as health, so an agent that could not be checked was
+  // admitted anyway. Unknown auth must wait, not spend infra attempts on ~1s dead sessions.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cli-stub-"));
+  const bin = path.join(dir, "cursor-agent");
+  fs.writeFileSync(bin, "#!/bin/sh\necho 'panic: runtime broke' >&2\nexit 7\n");
+  fs.chmodSync(bin, 0o755);
+  const issues = await withEnv("CURSOR_CLI", bin, () => runtimeIssuesUncached("cursor_local"));
+  assert.deepEqual(issues.map((i) => i.code), ["runtime_auth"]);
+  assert.match(issues[0]!.message, /Could not confirm Cursor auth/);
+});
+
+test("logged-out `codex login status` capture blocks the codex runtime", async () => {
+  const issues = await withEnv(
+    "CODEX_CLI",
+    stubCli("codex", "codex-login-status-logged-out.txt", 1),
+    () => runtimeIssuesUncached("codex_local")
+  );
+  assert.deepEqual(issues.map((i) => i.code), ["runtime_auth"]);
+  assert.match(issues[0]!.message, /codex login/);
+});
+
+test("logged-in `codex login status` capture leaves the codex runtime healthy", async () => {
+  const issues = await withEnv(
+    "CODEX_CLI",
+    stubCli("codex", "codex-login-status-logged-in.txt", 0),
+    () => runtimeIssuesUncached("codex_local")
+  );
+  assert.deepEqual(issues, []);
+});
+
+test("a cursor probe that cannot spawn reports the missing CLI, not unconfirmed auth", async () => {
+  // A spawn failure resolves with `spawn <bin> ENOENT` as its *output*, so the
+  // empty-output test for a missing binary never fires and the operator would be told to
+  // check their login when the binary is what is absent.
+  const missing = path.join(os.tmpdir(), `dealer-absent-cursor-agent-${randomUUID()}`);
+  const issues = await withEnv("CURSOR_CLI", missing, () => runtimeIssuesUncached("cursor_local"));
+  assert.deepEqual(issues.map((i) => i.code), ["cli_missing"]);
+  assert.match(issues[0]!.message, /cursor\.com\/install/);
+});
+
+test("logged-out `claude auth status` capture blocks the claude runtime", async () => {
+  // Claude had no auth preflight at all before NOT-133 — a logged-out Claude agent was
+  // admitted exactly the way the logged-out Cursor ones were. Exit 1 with a JSON body: the
+  // classifier reads `"loggedIn": false`, never the status code.
+  const issues = await withEnv(
+    "CLAUDE_CLI",
+    stubCli("claude", "claude-auth-status-logged-out.txt", 1),
+    () => runtimeIssuesUncached("claude_code")
+  );
+  assert.deepEqual(issues.map((i) => i.code), ["runtime_auth"]);
+  assert.match(issues[0]!.message, /claude auth login/);
+});
+
+test("logged-in `claude auth status` capture leaves the claude runtime healthy", async () => {
+  const issues = await withEnv(
+    "CLAUDE_CLI",
+    stubCli("claude", "claude-auth-status-logged-in.txt", 0),
+    () => runtimeIssuesUncached("claude_code")
+  );
+  assert.deepEqual(issues, []);
+});
+
+test("an older claude CLI without `auth status` is not a false block", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cli-stub-"));
+  const bin = path.join(dir, "claude");
+  fs.writeFileSync(bin, "#!/bin/sh\necho \"error: unknown command 'auth'\" >&2\nexit 1\n");
+  fs.chmodSync(bin, 0o755);
+  const issues = await withEnv("CLAUDE_CLI", bin, () => runtimeIssuesUncached("claude_code"));
+  assert.deepEqual(issues, []);
 });

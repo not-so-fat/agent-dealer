@@ -4,7 +4,13 @@
 // failure strip (NOT-113). Prefer classified runner stderr (keychain / auth /
 // reconnect) over opaque outcome kinds like dirty_worktree / session_failed.
 import fs from "node:fs";
-import { cursorAuthIssueFromOutput } from "@agent-dealer/shared";
+import type { Runtime, RuntimeAuthClassification } from "@agent-dealer/shared";
+import {
+  CURSOR_KEYCHAIN_REMEDIATION,
+  RUNTIME_AUTH_LABEL,
+  isCursorKeychainStuckOutput,
+  runtimeAuthClassificationForLog,
+} from "@agent-dealer/shared";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 
 /** Written to worker_sessions.errorJson when recovery reclaims an expired lease. */
@@ -37,37 +43,128 @@ export function presumedDeadReclaimReason(
 const RECONNECT_EXHAUSTED_RE =
   /reconnect(?:ion)?s?\s+(?:exhausted|failed|gave up)|failed to reconnect|unable to reconnect|connection (?:lost|closed|reset).{0,40}(?:retries|attempts)/i;
 
+const STDERR_MARKER = "\n--- stderr ---\n";
+
 function stripStderrTrailer(raw: string): string {
-  const idx = raw.indexOf("\n--- stderr ---\n");
+  const idx = raw.indexOf(STDERR_MARKER);
   return idx >= 0 ? raw.slice(0, idx) : raw;
 }
 
-/** Full log text + stderr trailer for classifiers (mirrors usage-cap log reading). */
-export function readSpawnLogHaystack(logPath: string | null | undefined): string {
+/**
+ * Strings from one stream event that describe a *failure*. Everything else an event can
+ * carry — assistant text, thinking, tool arguments, file contents — is the worker's own
+ * prose, and a worker that merely discusses `not logged in` or `401 Unauthorized` (this
+ * ticket's own session does) must not be reported as an auth death.
+ *
+ * Covers all three runtimes' terminal shapes: Claude/Cursor `result`+`is_error` and
+ * `system`/`error` events, Codex native JSONL `turn.failed` / `error`.
+ */
+function failureTextFromEvent(e: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const push = (v: unknown) => {
+    if (typeof v === "string" && v.trim()) out.push(v);
+    // `error` is a bare string in some events and `{ message }` in others (Codex
+    // `turn.failed`), and either shape can appear under any of the keys below.
+    else if (v && typeof v === "object") push((v as { message?: unknown }).message);
+  };
+  switch (e.type) {
+    case "result":
+      if (e.is_error) push(e.result);
+      break;
+    case "system":
+      if (e.subtype === "error" || e.subtype === "api_retry") push(e.error);
+      break;
+    case "error":
+    case "stream_error":
+    case "turn.failed":
+      push(e.message);
+      push(e.error);
+      break;
+    default:
+      break;
+  }
+  return out;
+}
+
+/**
+ * The failure-bearing text of a spawn log: its stderr trailer, plus any terminal error
+ * strings from the structured stream, plus stdout lines the CLI printed outside that stream.
+ *
+ * Deliberately *not* the whole log. Every runner runs its CLI in a structured output mode
+ * (`--output-format stream-json` / `--json`), so transcript bodies always arrive as JSON
+ * event lines; scanning those made a worker's own discussion of an auth error read as an
+ * auth error. Lines that are not JSON events are CLI diagnostics rather than model output,
+ * so they stay in — that is where a text-mode warning like Cursor's rejected-API-key notice
+ * lands. Mirrors the usage-cap classifier's haystack (runners/usage-cap.ts, NOT-117).
+ */
+export function readSpawnLogFailureText(logPath: string | null | undefined): string {
   if (!logPath || !fs.existsSync(logPath)) return "";
   try {
     const raw = fs.readFileSync(logPath, "utf8");
-    const stderr = raw.includes("\n--- stderr ---\n") ? (raw.split("\n--- stderr ---\n")[1] ?? "") : "";
-    return `${stripStderrTrailer(raw)}\n${stderr}`;
+    const idx = raw.indexOf(STDERR_MARKER);
+    const stderr = idx >= 0 ? raw.slice(idx + STDERR_MARKER.length) : "";
+    const parts: string[] = [];
+    for (const line of stripStderrTrailer(raw).split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      // A line the CLI meant as a stream event: only its failure fields count. Unparseable
+      // ones (a transcript truncated by a kill) are skipped rather than read as raw text.
+      // Only `{` starts an event — all three runners emit one JSON object per line, so a
+      // `[`-prefixed line is timestamped CLI text (`[error] not logged in`), not an event.
+      if (t.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(t) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            parts.push(...failureTextFromEvent(parsed as Record<string, unknown>));
+          }
+        } catch {
+          // not an event after all — and not trusted as prose either
+        }
+        continue;
+      }
+      parts.push(line);
+    }
+    parts.push(stderr);
+    return parts.join("\n");
   } catch {
     return "";
   }
 }
 
 /**
- * Classify Cursor/runtime stderr into an actionable failure reason.
+ * Classify runner stderr into an actionable failure reason.
  * Keychain / auth / reconnect win over generic crash labels.
+ *
+ * `runtime` is a hint, not the answer. Callers like the recovery/detail strip hold a log
+ * path and a session row whose runtime may be null — or may disagree with what actually ran
+ * — so a log that names its own CLI outranks the row. Shared prose (`Not logged in`) falls
+ * back to the recorded runtime, and failing that yields an auth reason naming no runtime
+ * rather than a plausible-looking wrong one.
  */
-export function classifyRunnerLogFailure(logPath: string | null | undefined): string | null {
-  const haystack = readSpawnLogHaystack(logPath);
+export function classifyRunnerLogFailure(
+  logPath: string | null | undefined,
+  runtime?: Runtime
+): string | null {
+  const haystack = readSpawnLogFailureText(logPath);
   if (!haystack.trim()) return null;
-  const auth = cursorAuthIssueFromOutput(haystack);
-  if (auth?.code === "cursor_keychain") {
-    // auth.message already names keychain / errSecDuplicateItem + remediation — don't stack a second copy.
-    return `Cursor auth/keychain died mid-run. ${auth.message}`;
+  // The keychain signature is unmistakable and could only have come from Cursor, so it is
+  // never gated on the session's recorded runtime — which is null on older rows.
+  // CURSOR_KEYCHAIN_REMEDIATION already names keychain / errSecDuplicateItem + the fix,
+  // so don't stack a second copy.
+  if (isCursorKeychainStuckOutput(haystack)) {
+    return `Cursor auth/keychain died mid-run. ${CURSOR_KEYCHAIN_REMEDIATION}`;
   }
-  if (auth?.code === "runtime_auth") {
-    return `Cursor auth required mid-run — ${auth.message}`;
+  const classified: RuntimeAuthClassification | null = runtimeAuthClassificationForLog(
+    haystack,
+    runtime ?? null
+  );
+  if (classified?.issue.code === "runtime_auth") {
+    // NOT-133: this is the branch the operator never saw, because cursor-agent's own
+    // "Authentication required" matched nothing and the strip fell back to "failed or crashed".
+    // Without a recorded runtime the log may not name its CLI either — say "Runtime" rather
+    // than pick one, since the remediation that follows then covers all three.
+    const label = classified.runtime ? RUNTIME_AUTH_LABEL[classified.runtime] : "Runtime";
+    return `${label} auth required mid-run — ${classified.issue.message}`;
   }
   if (RECONNECT_EXHAUSTED_RE.test(haystack)) {
     return "Cursor runtime reconnect exhausted mid-run.";
@@ -89,8 +186,11 @@ export function parseErrorJsonReason(errorJson: string | null | undefined): stri
 }
 
 /** dirty_worktree keeps preservation behavior; reason mentions auth when stderr says so. */
-export function reasonForDirtyWorktree(logPath: string | null | undefined): string {
-  const classified = classifyRunnerLogFailure(logPath);
+export function reasonForDirtyWorktree(
+  logPath: string | null | undefined,
+  runtime?: Runtime
+): string {
+  const classified = classifyRunnerLogFailure(logPath, runtime);
   if (classified) {
     return `${classified} Worktree preserved with uncommitted changes.`;
   }
@@ -100,8 +200,9 @@ export function reasonForDirtyWorktree(logPath: string | null | undefined): stri
 export function reasonForSessionCrash(opts: {
   timedOut: boolean;
   logPath: string | null | undefined;
+  runtime?: Runtime;
 }): string {
-  const classified = classifyRunnerLogFailure(opts.logPath);
+  const classified = classifyRunnerLogFailure(opts.logPath, opts.runtime);
   if (classified) return classified;
   return opts.timedOut ? "Developer session timed out." : "Developer session failed or crashed.";
 }
@@ -162,6 +263,7 @@ export function reasonForWorkerFailedEvent(opts: {
   routeReason?: string | null;
   sessionErrorJson?: string | null;
   logPath?: string | null;
+  runtime?: Runtime;
 }): string {
   const explicit = outcomeExplicitReason(opts.outcome);
   if (explicit) return explicit;
@@ -169,7 +271,7 @@ export function reasonForWorkerFailedEvent(opts: {
   const fromSession = parseErrorJsonReason(opts.sessionErrorJson);
   if (fromSession) return fromSession;
 
-  const fromLog = classifyRunnerLogFailure(opts.logPath);
+  const fromLog = classifyRunnerLogFailure(opts.logPath, opts.runtime);
   if (fromLog) {
     if (opts.outcome.kind === "dirty_worktree") {
       return `${fromLog} Worktree preserved with uncommitted changes.`;
