@@ -7,7 +7,7 @@ import type { HumanAction, HumanActionType } from "@agent-dealer/shared";
  * `responseOptionsJson`, so a new action type surfaces correctly without a UI change.
  */
 
-export const ACTION_LABELS: Record<HumanActionType, string> = {
+const ACTION_LABELS: Record<HumanActionType, string> = {
   final_review: "Final review",
   attempts_exhausted: "Attempts exhausted",
   policy_escalation: "Policy escalation",

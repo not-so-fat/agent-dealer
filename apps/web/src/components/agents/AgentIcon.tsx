@@ -58,25 +58,6 @@ export function CodexIcon({ className = "h-8 w-8" }: IconProps) {
   );
 }
 
-export function AgentRuntimeLogo({
-  runtime,
-  className = "h-3.5 w-3.5 shrink-0",
-}: {
-  runtime: Runtime | null;
-  className?: string;
-}) {
-  if (runtime === "claude_code") {
-    return <img src={claudeLogo} alt="" className={`object-contain ${className}`} draggable={false} />;
-  }
-  if (runtime === "cursor_local") {
-    return <img src={cursorLogo} alt="" className={`object-contain ${className}`} draggable={false} />;
-  }
-  if (runtime === "codex_local") {
-    return <CodexIcon className={className} />;
-  }
-  return null;
-}
-
 export function AgentRuntimeIcon({
   runtime,
   className = "h-8 w-8 shrink-0",

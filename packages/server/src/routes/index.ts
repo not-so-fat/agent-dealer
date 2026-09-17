@@ -1,10 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import {
-  AgentDeckConfigPatch,
-  CreateAgentInput,
-  UpdateAgentInput,
-  Runtime,
-} from "@agent-dealer/shared";
+import { CreateAgentInput, UpdateAgentInput, Runtime } from "@agent-dealer/shared";
 import {
   createAgent,
   deleteAgent,
@@ -19,7 +14,6 @@ import {
   lookupLinearIssue,
   parseLinearIssueRef,
 } from "../adapters/linear-inbox.js";
-import { getAgentDeckConfig, patchAgentDeckConfig } from "../repository/intake-settings.js";
 import { listRuntimeModels } from "../runners/models.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
@@ -105,18 +99,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/api/agent-deck/status", async () => testAgentDeckConnection());
-
-  app.get("/api/agent-deck/config", async () => getAgentDeckConfig());
-
-  app.patch("/api/agent-deck/config", async (req, reply) => {
-    try {
-      const patch = AgentDeckConfigPatch.parse(req.body);
-      const config = patchAgentDeckConfig(patch);
-      return config;
-    } catch (e) {
-      return reply.status(400).send({ error: String(e) });
-    }
-  });
 
   app.get("/api/agent-deck/decks", async (_req, reply) => {
     const result = await fetchDecks();

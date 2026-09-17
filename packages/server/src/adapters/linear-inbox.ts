@@ -1,5 +1,4 @@
 import type { LinearCandidate, LinearIntakeConfig } from "@agent-dealer/shared";
-import { findActiveByExternalId, listRunsReadyForPlanReview } from "../repository/runs.js";
 import { DEFAULT_LINEAR_STATE_FILTER, getLinearIntakeConfig } from "../repository/intake-settings.js";
 
 export { DEFAULT_LINEAR_STATE_FILTER };
@@ -81,23 +80,6 @@ export async function getLinearViewer(): Promise<LinearViewer | null> {
   return data.viewer;
 }
 
-export async function testLinearConnection(): Promise<{
-  connected: boolean;
-  viewer?: LinearViewer;
-  error?: string;
-}> {
-  if (!hasApiKey()) {
-    return { connected: false, error: "LINEAR_API_KEY not set" };
-  }
-  try {
-    const viewer = await getLinearViewer();
-    if (!viewer) return { connected: false, error: "No viewer returned" };
-    return { connected: true, viewer };
-  } catch (e) {
-    return { connected: false, error: String(e) };
-  }
-}
-
 export function buildIssueFilter(
   settings: LinearIntakeConfig,
   viewerId?: string
@@ -132,10 +114,6 @@ export function parseLinearIssueRef(raw: string): string | null {
   }
 
   return null;
-}
-
-function isPromoted(issueId: string): boolean {
-  return findActiveByExternalId("linear", issueId) !== null;
 }
 
 export async function listLinearCandidates(): Promise<LinearCandidate[]> {
@@ -174,7 +152,7 @@ export async function listLinearCandidates(): Promise<LinearCandidate[]> {
     after = data.issues.pageInfo.endCursor;
   }
 
-  return nodes.filter((n) => !isPromoted(n.id)).map(nodeToCandidate);
+  return nodes.map(nodeToCandidate);
 }
 
 export async function getLinearIssue(issueId: string): Promise<LinearCandidate | null> {
@@ -407,9 +385,4 @@ export async function lookupLinearIssue(raw: string): Promise<LinearCandidate | 
   const id = parseLinearIssueRef(raw);
   if (!id) return null;
   return getLinearIssue(id);
-}
-
-/** Runs with a plan ready for human review. */
-export function listAwaitingPlanReview() {
-  return listRunsReadyForPlanReview();
 }

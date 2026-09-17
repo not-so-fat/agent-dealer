@@ -7,20 +7,20 @@ import path from "node:path";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-snap-"));
 
-const { migrate } = await import("../db/index.js");
-const { createAgent, updateAgent } = await import("../repository/agents.js");
+const { migrate, getDb } = await import("../db/index.js");
+const { createAgent, getAgent, updateAgent } = await import("../repository/agents.js");
 const { buildProfileSnapshot } = await import("./profile-snapshot.js");
 
 before(() => migrate());
 
 test("resolves the role-neutral model, falling back to the legacy execute column", () => {
-  const legacy = createAgent({
-    name: "legacy",
-    runtime: "claude_code",
-    workspaceRoot: "/repo",
-    defaultExecuteModel: "claude-sonnet-5",
-    defaultPlanModel: "claude-haiku-4-5",
-  });
+  // NOT-71 removed the write path for the plan/execute columns, so the only way a row
+  // carries them now is by predating that change — write them directly to reproduce one.
+  const created = createAgent({ name: "legacy", runtime: "claude_code", workspaceRoot: "/repo" });
+  getDb()
+    .prepare("UPDATE agents SET default_execute_model = ?, default_plan_model = ? WHERE id = ?")
+    .run("claude-sonnet-5", "claude-haiku-4-5", created.id);
+  const legacy = getAgent(created.id)!;
   assert.equal(buildProfileSnapshot(legacy, "developer").model, "claude-sonnet-5");
 
   const modern = updateAgent(legacy.id, { defaultModel: "claude-opus-5" })!;

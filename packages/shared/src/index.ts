@@ -8,9 +8,7 @@ export * from "./agents.js";
 export * from "./runtime-auth-health.js";
 export * from "./budget.js";
 export * from "./execution.js";
-export * from "./plan-triage.js";
 export * from "./outbound-draft.js";
-export * from "./result-qa.js";
 export * from "./playbook-reflect.js";
 export * from "./issues.js";
 export * from "./worker-sessions.js";
@@ -332,50 +330,12 @@ export const LinearIntakeConfig = z.object({
 });
 export type LinearIntakeConfig = z.infer<typeof LinearIntakeConfig>;
 
-/** GET /api/intake/linear/config — effective config plus persistence hints for the UI */
-export const LinearIntakeConfigView = LinearIntakeConfig.extend({
-  persisted: LinearIntakeConfig,
-  envOverrides: z.object({
-    stateFilter: z.boolean(),
-    teamId: z.boolean(),
-  }),
-});
-export type LinearIntakeConfigView = z.infer<typeof LinearIntakeConfigView>;
-
-export const LinearIntakeConfigPatch = LinearIntakeConfig.partial();
-export type LinearIntakeConfigPatch = z.infer<typeof LinearIntakeConfigPatch>;
-
-export const LinearConnectionStatus = z.object({
-  connected: z.boolean(),
-  viewer: z
-    .object({
-      id: z.string(),
-      name: z.string(),
-      email: z.string().optional(),
-    })
-    .optional(),
-  error: z.string().optional(),
-});
-export type LinearConnectionStatus = z.infer<typeof LinearConnectionStatus>;
-
-export const ResolveAgentResult = z.object({
-  agentId: z.string().uuid(),
-  reason: z.string(),
-});
-export type ResolveAgentResult = z.infer<typeof ResolveAgentResult>;
-
 export const AgentDeckConfig = z.object({
   host: z.string(),
   port: z.number().int().min(1).max(65535),
   envOverride: z.boolean(),
 });
 export type AgentDeckConfig = z.infer<typeof AgentDeckConfig>;
-
-export const AgentDeckConfigPatch = z.object({
-  host: z.string().min(1).optional(),
-  port: z.number().int().min(1).max(65535).optional(),
-});
-export type AgentDeckConfigPatch = z.infer<typeof AgentDeckConfigPatch>;
 
 /** Typed outcomes for deck-metadata discovery — never collapse to an empty list. */
 export const DeckAccessErrorCode = z.enum([

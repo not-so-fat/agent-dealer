@@ -49,6 +49,7 @@ export default function NeedsAttentionPanel({ actions, busyActionId, onOpenIssue
             );
           }
 
+          const options = parseResponseOptions(action);
           return (
             <div key={action.id} className="px-4 py-3 space-y-1.5">
               <div className="flex items-baseline justify-between gap-2">
@@ -66,11 +67,20 @@ export default function NeedsAttentionPanel({ actions, busyActionId, onOpenIssue
                   {line}
                 </p>
               ))}
-              <HumanActionChoices
-                options={parseResponseOptions(action)}
-                disabled={busyActionId === action.id}
-                onChoose={(choice) => onResolve(action.id, choice)}
-              />
+              {options.length > 0 ? (
+                <HumanActionChoices
+                  options={options}
+                  disabled={busyActionId === action.id}
+                  onChoose={(choice) => onResolve(action.id, choice)}
+                />
+              ) : (
+                // Nothing here invents a choice the server would reject: an action that
+                // declares no response options has no safe resolution from the UI.
+                <p className="text-xs text-amber-200/80">
+                  This item declares no response options — resolve it from the CLI
+                  (<code>agent-dealer action</code>).
+                </p>
+              )}
             </div>
           );
         })}

@@ -37,7 +37,7 @@ function timeAgo(iso: string): string {
 }
 
 /** Pull an Acceptance criteria section out of a Linear markdown body when present. */
-export function extractAcceptanceFromLinear(description: string | undefined): string | undefined {
+function extractAcceptanceFromLinear(description: string | undefined): string | undefined {
   if (!description?.trim()) return undefined;
   const match = description.match(/##\s*Acceptance criteria\s*\n([\s\S]*?)(?=\n##\s|$)/i);
   const body = match?.[1]?.trim();

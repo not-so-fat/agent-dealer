@@ -2,6 +2,15 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## Unreleased
+
+### Reduced to the issue queue (NOT-71)
+
+- **Dashboard is Issues + Agents only** — the Operations, Inbox, Done, and standalone Human actions destinations are gone. They were the UI of the older run-oriented plan/execute product, which no longer exists.
+- **Human actions moved onto the Issues home** — a "Needs your attention" panel lists *every* open action, including run-scoped ones with no issue (outbound-draft delivery parks), with the server's own response options. Issue-scoped items open their issue; the rest resolve inline. The Issues nav carries the open count.
+- **Removed with those screens:** the run dispatcher and its plan gate / plan delegation / result QA / execute persistence, the run and intake HTTP routes, the legacy per-run runners and prompt builders (reflect excepted), the plan-triage and result-QA shared schemas, and the run-detail trace/usage rollups.
+- **Kept on purpose:** resolving a persisted, run-scoped `outbound_delivery_interaction_required` action (and the delivery/reflect code it reaches) so no already-open blocker is stranded by the cleanup. No rows or tables were dropped — existing data is untouched.
+
 ## 0.3.0 — 2026-09-09
 
 ### Runtimes
