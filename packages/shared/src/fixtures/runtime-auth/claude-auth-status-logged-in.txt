@@ -1,0 +1,8 @@
+{
+  "loggedIn": true,
+  "authMethod": "oauth_token",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/Users/operator/.claude/projects",
+  "configDirectory": "/Users/operator/.claude"
+}

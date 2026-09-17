@@ -1,7 +1,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import type { AgentHealthIssue, AgentProfile, AgentWithHealth, Runtime } from "@agent-dealer/shared";
-import { cursorAuthIssueFromOutput } from "@agent-dealer/shared";
+import {
+  CODEX_AUTH_REMEDIATION,
+  cursorAuthIssueFromOutput,
+  runtimeAuthIssueFromOutput,
+} from "@agent-dealer/shared";
 import {
   claudeBinExists,
   cursorBinExists,
@@ -80,10 +84,22 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
   const issues: AgentHealthIssue[] = [];
 
   if (runtime === "claude_code") {
-    if (claudeBinExists()) return issues;
-    const ver = await runCommand(resolveClaudeBin(), ["--version"]);
-    if (!ver.ok) {
-      issues.push({ code: "cli_missing", message: "Claude CLI not found — install Claude Code" });
+    if (!claudeBinExists()) {
+      const ver = await runCommand(resolveClaudeBin(), ["--version"]);
+      if (!ver.ok) {
+        issues.push({ code: "cli_missing", message: "Claude CLI not found — install Claude Code" });
+        return issues;
+      }
+    }
+    // NOT-133: Claude had no auth preflight at all, so a logged-out Claude agent was admitted
+    // exactly the way a logged-out Cursor one was. `claude auth status` is local, offline and
+    // free (it reads the credential store and prints JSON) — unlike `claude -p`, which bills.
+    // Only a positive logged-out signal blocks: an older CLI without the subcommand prints an
+    // unknown-command error that matches nothing, and must not become a false block.
+    if (!claudeUsesThirdPartyProvider()) {
+      const auth = await runCommand(resolveClaudeBin(), ["auth", "status"]);
+      const authIssue = runtimeAuthIssueFromOutput("claude_code", auth.output);
+      if (authIssue) issues.push(authIssue);
     }
     return issues;
   }
@@ -98,15 +114,20 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
     }
     // `codex --version` succeeds without auth — use login status for auth health.
     const login = await runCommand(resolveCodexBin(), ["login", "status"]);
+    // The classifier runs first: `codex login status` prints "Not logged in" and the
+    // exit-code heuristic below would read that as "logged in" on its own, because the
+    // substring "logged in" is inside it.
+    const authIssue = runtimeAuthIssueFromOutput("codex_local", login.output);
+    if (authIssue) {
+      issues.push(authIssue);
+      return issues;
+    }
     const out = login.output.toLowerCase();
     const loggedIn =
       login.ok &&
       (out.includes("logged in") || out.includes("authenticated") || out.includes("api key"));
     if (!loggedIn) {
-      issues.push({
-        code: "runtime_auth",
-        message: "Run `codex login` (or set OPENAI_API_KEY for automation)",
-      });
+      issues.push({ code: "runtime_auth", message: CODEX_AUTH_REMEDIATION });
     }
     return issues;
   }
@@ -119,8 +140,31 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
   const authIssue = cursorAuthIssueFromOutput(status.output);
   if (authIssue) {
     issues.push(authIssue);
+    return issues;
+  }
+  // NOT-133: an unclassified *failure* of the probe itself (non-zero exit, timeout, spawn
+  // error) used to be read as "healthy" and admitted the agent. Silence is not evidence of
+  // auth — refusing to admit costs one queue tick, while admitting on a guess cost 12 dead
+  // sessions and three issues parked on a human. Reported as runtime_auth so the existing
+  // agents-page CLI status renders it; the message says plainly that it is unconfirmed.
+  if (!status.ok) {
+    const detail = status.output.trim().split("\n").slice(-1)[0] ?? "no output";
+    issues.push({
+      code: "runtime_auth",
+      message: `Could not confirm Cursor auth — \`cursor-agent status\` failed (${detail})`,
+    });
   }
   return issues;
+}
+
+/**
+ * Bedrock/Vertex installs authenticate through AWS/GCP credentials instead of a Claude
+ * login, so `claude auth status` is not the authority on whether they can run.
+ */
+function claudeUsesThirdPartyProvider(): boolean {
+  return (
+    process.env.CLAUDE_CODE_USE_BEDROCK === "1" || process.env.CLAUDE_CODE_USE_VERTEX === "1"
+  );
 }
 
 /**

@@ -646,6 +646,7 @@ function applyDeveloper(
           outcome,
           routeReason: "reason" in route ? route.reason : null,
           logPath: session?.logPath,
+          runtime: session?.runtime ?? undefined,
         });
       }
       ev.emit(type, {
@@ -708,6 +709,7 @@ function applyReviewer(
           outcome,
           routeReason: "reason" in route ? route.reason : null,
           logPath: session?.logPath,
+          runtime: session?.runtime ?? undefined,
         });
       }
       ev.emit(type, {

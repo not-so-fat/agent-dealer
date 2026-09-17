@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-admit-"));
 
@@ -366,4 +367,48 @@ test("housekeeping admits stale queued+active rows even when capacity is full", 
   assert.equal(await admitNext(), null); // capacity full — no new admission
   assert.equal(getQueuedEntryForIssue(running.id), null); // stale row cleaned
   assert.equal(getQueuedEntryForIssue(waiting.id)?.state, "queued");
+});
+
+// NOT-133 acceptance: with Cursor logged out, a cursor_local issue must wait with an auth
+// reason instead of being admitted and burning its infra attempts on ~1s dead sessions.
+// The stub replays the verbatim `cursor-agent status` capture (shared/src/fixtures/
+// runtime-auth/README.md) through the *real* admission health checker — no injected result.
+test("NOT-133: a logged-out Cursor runtime is not admitted; it waits with an auth reason", async () => {
+  const { clearAgentHealthCaches } = await import("../adapters/agent-health.js");
+  const fixture = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../../../shared/src/fixtures/runtime-auth/cursor-agent-status-logged-out.txt"
+  );
+  const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cursor-stub-"));
+  const stub = path.join(stubDir, "cursor-agent");
+  // `cursor-agent status` exits 0 when logged out — the stub must too, or the test would
+  // pass on the exit code rather than on the classification under test.
+  fs.writeFileSync(stub, `#!/bin/sh\ncat ${JSON.stringify(fixture)}\nexit 0\n`);
+  fs.chmodSync(stub, 0o755);
+
+  const prev = process.env.CURSOR_CLI;
+  process.env.CURSOR_CLI = stub;
+  setAdmissionHealthCheckerForTests(null);
+  clearAgentHealthCaches();
+  try {
+    const issue = readyIssue("cursor-logged-out", {
+      runtimes: { dev: "cursor_local", rev: "cursor_local" },
+    });
+    enqueueIssue(issue.id);
+
+    assert.equal(await admitNext(), null);
+    assert.equal(getIssue(issue.id)!.status, "ready");
+    assert.equal(getActiveWorkflowInstance(issue.id), null);
+
+    const entry = getQueuedEntryForIssue(issue.id);
+    assert.equal(entry?.state, "queued");
+    assert.match(entry!.waitReason!, /agent unhealthy/);
+    assert.match(entry!.waitReason!, /not authenticated/i);
+    assert.match(entry!.waitReason!, /cursor-agent login/);
+  } finally {
+    if (prev === undefined) delete process.env.CURSOR_CLI;
+    else process.env.CURSOR_CLI = prev;
+    clearAgentHealthCaches();
+    setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
+  }
 });

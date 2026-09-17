@@ -4,7 +4,14 @@
 // failure strip (NOT-113). Prefer classified runner stderr (keychain / auth /
 // reconnect) over opaque outcome kinds like dirty_worktree / session_failed.
 import fs from "node:fs";
-import { cursorAuthIssueFromOutput } from "@agent-dealer/shared";
+import type { Runtime } from "@agent-dealer/shared";
+import {
+  CURSOR_KEYCHAIN_REMEDIATION,
+  RUNTIME_AUTH_LABEL,
+  anyRuntimeAuthIssueFromOutput,
+  isCursorKeychainStuckOutput,
+  runtimeAuthIssueFromOutput,
+} from "@agent-dealer/shared";
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 
 /** Written to worker_sessions.errorJson when recovery reclaims an expired lease. */
@@ -55,19 +62,37 @@ export function readSpawnLogHaystack(logPath: string | null | undefined): string
 }
 
 /**
- * Classify Cursor/runtime stderr into an actionable failure reason.
+ * Classify runner stderr into an actionable failure reason.
  * Keychain / auth / reconnect win over generic crash labels.
+ *
+ * `runtime` only decides which CLI the prose names first — every runtime's captured strings
+ * are still tried when it does not match, because callers like the recovery/detail strip
+ * hold nothing but a log path and a session row whose runtime may be null.
  */
-export function classifyRunnerLogFailure(logPath: string | null | undefined): string | null {
+export function classifyRunnerLogFailure(
+  logPath: string | null | undefined,
+  runtime?: Runtime
+): string | null {
   const haystack = readSpawnLogHaystack(logPath);
   if (!haystack.trim()) return null;
-  const auth = cursorAuthIssueFromOutput(haystack);
-  if (auth?.code === "cursor_keychain") {
-    // auth.message already names keychain / errSecDuplicateItem + remediation — don't stack a second copy.
-    return `Cursor auth/keychain died mid-run. ${auth.message}`;
+  // The keychain signature is unmistakable and could only have come from Cursor, so it is
+  // never gated on the session's recorded runtime — which is null on older rows.
+  // CURSOR_KEYCHAIN_REMEDIATION already names keychain / errSecDuplicateItem + the fix,
+  // so don't stack a second copy.
+  if (isCursorKeychainStuckOutput(haystack)) {
+    return `Cursor auth/keychain died mid-run. ${CURSOR_KEYCHAIN_REMEDIATION}`;
   }
-  if (auth?.code === "runtime_auth") {
-    return `Cursor auth required mid-run — ${auth.message}`;
+  // Prefer the CLI that actually wrote the log, then fall back to every runtime's captured
+  // strings: a missing or mislabelled runtime must not turn a named auth death back into
+  // the generic crash reason.
+  const preferred = runtime ? runtimeAuthIssueFromOutput(runtime, haystack) : null;
+  const classified = preferred
+    ? { runtime: runtime!, issue: preferred }
+    : anyRuntimeAuthIssueFromOutput(haystack);
+  if (classified?.issue.code === "runtime_auth") {
+    // NOT-133: this is the branch the operator never saw, because cursor-agent's own
+    // "Authentication required" matched nothing and the strip fell back to "failed or crashed".
+    return `${RUNTIME_AUTH_LABEL[classified.runtime]} auth required mid-run — ${classified.issue.message}`;
   }
   if (RECONNECT_EXHAUSTED_RE.test(haystack)) {
     return "Cursor runtime reconnect exhausted mid-run.";
@@ -89,8 +114,11 @@ export function parseErrorJsonReason(errorJson: string | null | undefined): stri
 }
 
 /** dirty_worktree keeps preservation behavior; reason mentions auth when stderr says so. */
-export function reasonForDirtyWorktree(logPath: string | null | undefined): string {
-  const classified = classifyRunnerLogFailure(logPath);
+export function reasonForDirtyWorktree(
+  logPath: string | null | undefined,
+  runtime?: Runtime
+): string {
+  const classified = classifyRunnerLogFailure(logPath, runtime);
   if (classified) {
     return `${classified} Worktree preserved with uncommitted changes.`;
   }
@@ -100,8 +128,9 @@ export function reasonForDirtyWorktree(logPath: string | null | undefined): stri
 export function reasonForSessionCrash(opts: {
   timedOut: boolean;
   logPath: string | null | undefined;
+  runtime?: Runtime;
 }): string {
-  const classified = classifyRunnerLogFailure(opts.logPath);
+  const classified = classifyRunnerLogFailure(opts.logPath, opts.runtime);
   if (classified) return classified;
   return opts.timedOut ? "Developer session timed out." : "Developer session failed or crashed.";
 }
@@ -162,6 +191,7 @@ export function reasonForWorkerFailedEvent(opts: {
   routeReason?: string | null;
   sessionErrorJson?: string | null;
   logPath?: string | null;
+  runtime?: Runtime;
 }): string {
   const explicit = outcomeExplicitReason(opts.outcome);
   if (explicit) return explicit;
@@ -169,7 +199,7 @@ export function reasonForWorkerFailedEvent(opts: {
   const fromSession = parseErrorJsonReason(opts.sessionErrorJson);
   if (fromSession) return fromSession;
 
-  const fromLog = classifyRunnerLogFailure(opts.logPath);
+  const fromLog = classifyRunnerLogFailure(opts.logPath, opts.runtime);
   if (fromLog) {
     if (opts.outcome.kind === "dirty_worktree") {
       return `${fromLog} Worktree preserved with uncommitted changes.`;

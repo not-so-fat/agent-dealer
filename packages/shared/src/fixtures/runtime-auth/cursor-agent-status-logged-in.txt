@@ -1,0 +1,1 @@
+[32m✓[39m Logged in as operator@example.com

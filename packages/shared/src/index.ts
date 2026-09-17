@@ -5,7 +5,7 @@ import { PhaseBudget, RunBudget } from "./budget.js";
 
 export * from "./runtime.js";
 export * from "./agents.js";
-export * from "./cursor-auth-health.js";
+export * from "./runtime-auth-health.js";
 export * from "./budget.js";
 export * from "./execution.js";
 export * from "./plan-triage.js";
