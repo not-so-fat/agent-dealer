@@ -33,6 +33,9 @@ const {
   resetCapacityPolicyForTests,
   resetEligibilityRulesForTests,
 } = await import("./admission.js");
+const { setBlockersProviderForTests, resetDependenciesForTests } = await import(
+  "./dependencies.js"
+);
 
 before(() => migrate());
 
@@ -49,11 +52,17 @@ beforeEach(() => {
   `);
   // Admission otherwise probes the real Claude/Cursor/gh CLIs per queued entry.
   setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
+  // NOT-104 is fail-closed, so a Linear-sourced issue with no reachable Linear parks. These
+  // cases are about queue-by-default, not dependencies — declare "no blockers" for all.
+  setBlockersProviderForTests(async (issues) => new Map(issues.map((i) => [i.externalId!, []])));
   resetCapacityPolicyForTests();
   resetEligibilityRulesForTests();
 });
 
-after(() => setAdmissionHealthCheckerForTests(null));
+after(() => {
+  setAdmissionHealthCheckerForTests(null);
+  resetDependenciesForTests();
+});
 
 async function buildApp() {
   const app = Fastify();

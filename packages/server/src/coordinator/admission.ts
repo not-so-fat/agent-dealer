@@ -33,6 +33,13 @@ import {
   startWorkflowCore,
   StartPreconditionError,
 } from "./commands.js";
+import {
+  blockerSnapshotFor,
+  DEPENDENCY_STATE_UNAVAILABLE,
+  isDependencyTracked,
+  unsatisfiedBlockerReason,
+  type BlockerSnapshot,
+} from "./dependencies.js";
 
 /** Statuses that occupy an admission slot (Decision 2). */
 export const occupyingStatuses = new Set<IssueStatus>(["developing", "reviewing", "repairing"]);
@@ -89,8 +96,11 @@ function listOccupyingIssues(): ActiveIssueRef[] {
 
 export type EligibilityResult = { ok: true } | { ok: false; reason: string };
 
-/** Shared per-`admitNext()` context — see `defaultAgentHealth` for why deckOnline lives here. */
-export type EligibilityContext = { deckOnline: boolean };
+/**
+ * Shared per-`admitNext()` context — see `defaultAgentHealth` for why deckOnline lives here,
+ * and NOT-104 for why the blocker snapshot is fetched once per tick rather than per entry.
+ */
+export type EligibilityContext = { deckOnline: boolean; blockers: BlockerSnapshot };
 
 export type EligibilityRule = (
   issue: Issue,
@@ -170,11 +180,34 @@ function runtimeAvailableRule(issue: Issue): EligibilityResult {
   return { ok: true };
 }
 
+/**
+ * NOT-104: park a Linear-sourced issue while its *declared* blockers are unsatisfied, so a
+ * dependent never branches from a base that is missing its upstream work.
+ *
+ * Manual (`source != 'linear'`) issues have no declared dependency data, so this is a
+ * permanent no-op for them — including while Linear is unreachable, which is what keeps a
+ * Linear outage from pausing the whole queue.
+ *
+ * There is no bypass flag: the escape hatch is editing Linear (drop the relation, or cancel
+ * an abandoned blocker), which fixes the cause for every future dependent too. Cycles are
+ * not detected — both entries simply park pointing at each other, which is a stalled pair
+ * the operator can see and fix, never a wrong run.
+ */
+function blockedByDependency(issue: Issue, ctx: EligibilityContext): EligibilityResult {
+  if (!isDependencyTracked(issue)) return { ok: true };
+  const blockers = ctx.blockers.get(issue.externalId);
+  // Absent means unknown, not unblocked (see BlockerSnapshot) — park until the next fetch.
+  if (!blockers) return { ok: false, reason: DEPENDENCY_STATE_UNAVAILABLE };
+  const reason = unsatisfiedBlockerReason(blockers);
+  return reason ? { ok: false, reason } : { ok: true };
+}
+
 /** Initial eligibility rules — NOT-104 adds blockedByDependency here, not new machinery. */
 export const defaultEligibilityRules: EligibilityRule[] = [
   issueReadinessRule,
   checkAgentsHealthy,
   runtimeAvailableRule,
+  blockedByDependency,
 ];
 
 let eligibilityRules: EligibilityRule[] = defaultEligibilityRules;
@@ -231,7 +264,18 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
   // agent's health check otherwise re-hits agent-deck's uncached /health endpoint per
   // entry per role; with several issues queued and agent-deck slow/unreachable that
   // serially stalls this loop, which worker-loop runs before any real work dispatch.
-  const ctx: EligibilityContext = { deckOnline: await checkAgentDeckHealth() };
+  //
+  // Same shape for NOT-104's blocker snapshot: one batched, timeout-bounded Linear query
+  // for the whole remaining queue, and only on a tick that actually has a slot to fill —
+  // the early return above means a busy system makes zero Linear calls.
+  const queuedIssues = remaining
+    .map((entry) => getIssue(entry.issueId))
+    .filter((issue): issue is Issue => issue !== null);
+  const [deckOnline, blockers] = await Promise.all([
+    checkAgentDeckHealth(),
+    blockerSnapshotFor(queuedIssues),
+  ]);
+  const ctx: EligibilityContext = { deckOnline, blockers };
 
   for (const entry of remaining) {
     const issue = getIssue(entry.issueId);

@@ -91,6 +91,25 @@ Linear issue status write-back (when `syncEnabled`):
 
 Promote is blocked (409) if an active run already exists for the same Linear issue (`source=linear`, `external_id=issue.id`).
 
+## Dependency readiness (NOT-104)
+
+A Linear-sourced issue waits in the admission queue while its **declared** blockers are
+unsatisfied, so a dependent never branches from a base that is missing its upstream work.
+Dealer never infers a dependency — the only edge it reads is an explicit `blocks` relation a
+human wrote in Linear (`related`, `duplicate` and the parent/sub-issue hierarchy are ignored,
+so an open epic does not block its own children).
+
+| Topic | Behavior |
+|-------|----------|
+| **Satisfied** | Blocker also kicked into dealer → dealer `done` (the PR actually merged). Not in dealer → Linear state type `completed` or `canceled` |
+| **Reason** | The queue entry shows `waiting on NOT-123 (In Progress)`, or `dependency state unavailable` when Linear can't be read |
+| **Fetch** | One batched, timeout-bounded GraphQL query per admission tick that has a free slot, cached ~60s; a busy system makes no Linear calls |
+| **Outage** | No `LINEAR_API_KEY` / Linear down → Linear-sourced issues **park** (stay `queued`, never dropped) and resume on the next successful fetch. Manual issues keep running |
+| **Escape hatch** | Edit Linear: remove the relation, or mark an abandoned blocker that dealer never picked up `canceled`. A blocker already in dealer releases only at dealer `done`, so drop its relation. There is no per-issue bypass flag |
+
+Cycles are not detected: two issues blocking each other both park naming the other, and the
+operator fixes the relation in Linear.
+
 ## REST API (orchestrator agents)
 
 Base URL: `http://127.0.0.1:3221` (development) or `http://127.0.0.1:2221` (production). See [PROD_SETUP.md](PROD_SETUP.md).
