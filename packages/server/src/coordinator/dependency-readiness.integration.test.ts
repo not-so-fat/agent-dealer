@@ -167,6 +167,26 @@ test("satisfaction (decision 2): unlinked blocker needs completed/canceled; deal
 
   getDb().prepare("UPDATE issues SET status = 'done' WHERE id = ?").run(upstream.id);
   assert.equal((await admitNext())?.issueId, dependent.id);
+
+  // Nor does Linear `canceled` release a dealer-linked blocker: the dealer issue is still
+  // unmerged, so the dependent would branch from a base without it. Dealer status is the
+  // only authority once the blocker is in dealer — even after it is closed there.
+  resetTables();
+  const abandoned = seedIssue({ source: "linear", externalId: "lin-ab" });
+  const downstream = seedIssue({ source: "linear", externalId: "lin-down" });
+  enqueueIssue(downstream.id);
+  provideBlockers({
+    "lin-down": [
+      blocker({ id: "lin-ab", identifier: "NOT-AB", stateName: "Canceled", stateType: "canceled" }),
+    ],
+  });
+
+  assert.equal(await admitNext(), null, "canceled in Linear, still developing in dealer");
+  assert.equal(waitReason(downstream.id), "waiting on NOT-AB (ready)");
+
+  getDb().prepare("UPDATE issues SET status = 'closed' WHERE id = ?").run(abandoned.id);
+  assert.equal(await admitNext(), null, "dealer `closed` is not `done` either");
+  assert.equal(waitReason(downstream.id), "waiting on NOT-AB (closed)");
 });
 
 test("blocker merges: the entry is admitted on the next tick, with no unblock event and across a restart", async () => {
@@ -365,14 +385,21 @@ test("overlapping ticks share one fetch: the second parks instead of opening a s
   assert.equal(fetches, 1);
 });
 
-/** Stub the one Linear GraphQL call `fetchLinearBlockers` makes; returns the request bodies. */
-function stubLinearIssues(nodes: unknown[]): { requests: Array<{ query: string; variables: { ids: string[] } }>; restore: () => void } {
-  const requests: Array<{ query: string; variables: { ids: string[] } }> = [];
+type StubRequest = { query: string; variables: { ids: string[]; after: string | null } };
+
+/**
+ * Stub Linear's GraphQL endpoint for `fetchLinearBlockers`: one `issues.nodes` payload per
+ * call, in order (the last one repeats). Returns the request bodies so a test can assert how
+ * many queries were made and which cursor each carried.
+ */
+function stubLinearIssues(pages: unknown[][]): { requests: StubRequest[]; restore: () => void } {
+  const requests: StubRequest[] = [];
   const originalFetch = globalThis.fetch;
   const originalKey = process.env.LINEAR_API_KEY;
   process.env.LINEAR_API_KEY = "lin_test";
   globalThis.fetch = (async (_url: unknown, init: { body?: string }) => {
     requests.push(JSON.parse(init.body ?? "{}"));
+    const nodes = pages[Math.min(requests.length - 1, pages.length - 1)] ?? [];
     return {
       ok: true,
       json: async () => ({ data: { issues: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } }),
@@ -388,21 +415,31 @@ function stubLinearIssues(nodes: unknown[]): { requests: Array<{ query: string; 
   };
 }
 
+/** `n` relations of one type, enough to fill a page — none of them a `blocks` edge. */
+function noiseRelations(n: number, type: "related" | "duplicate"): unknown[] {
+  return Array.from({ length: n }, (_, i) => ({
+    type,
+    issue: { id: `lin-noise-${i}`, identifier: `NOT-N${i}`, state: { name: "Todo", type: "unstarted" } },
+  }));
+}
+
 test("only `blocks` relations from inverseRelations gate admission", async () => {
   const { requests, restore } = stubLinearIssues([
-    {
-      id: "lin-a",
-      inverseRelations: {
-        nodes: [
-          { type: "blocks", issue: { id: "lin-b", identifier: "NOT-B", state: { name: "In Progress", type: "started" } } },
-          { type: "related", issue: { id: "lin-c", identifier: "NOT-C", state: { name: "Todo", type: "unstarted" } } },
-          { type: "duplicate", issue: { id: "lin-d", identifier: "NOT-D", state: { name: "Todo", type: "unstarted" } } },
-          // An unreadable blocker (other team / deleted) is still unsatisfied.
-          { type: "blocks", issue: null },
-        ],
-        pageInfo: { hasNextPage: false },
+    [
+      {
+        id: "lin-a",
+        inverseRelations: {
+          nodes: [
+            { type: "blocks", issue: { id: "lin-b", identifier: "NOT-B", state: { name: "In Progress", type: "started" } } },
+            { type: "related", issue: { id: "lin-c", identifier: "NOT-C", state: { name: "Todo", type: "unstarted" } } },
+            { type: "duplicate", issue: { id: "lin-d", identifier: "NOT-D", state: { name: "Todo", type: "unstarted" } } },
+            // An unreadable blocker (other team / deleted) is still unsatisfied.
+            { type: "blocks", issue: null },
+          ],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
       },
-    },
+    ],
   ]);
 
   try {
@@ -424,13 +461,93 @@ test("only `blocks` relations from inverseRelations gate admission", async () =>
   assert.equal((await admitNext())?.issueId, child.id);
 });
 
-test("a relation list Linear truncated is unknown, not `no blockers`", async () => {
+test("a relation list longer than one page is paged through, not treated as a failure", async () => {
+  // `related` and `duplicate` share the connection with `blocks`, so a heavily cross-linked
+  // ticket can push its real blocker onto a later page. Dropping the issue there would park
+  // it forever — every tick would re-read the same first page.
+  const { requests, restore } = stubLinearIssues([
+    [
+      {
+        id: "lin-a",
+        inverseRelations: {
+          nodes: noiseRelations(50, "related"),
+          pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+        },
+      },
+    ],
+    [
+      {
+        id: "lin-a",
+        inverseRelations: {
+          nodes: [
+            ...noiseRelations(3, "duplicate"),
+            { type: "blocks", issue: { id: "lin-b", identifier: "NOT-B", state: { name: "In Progress", type: "started" } } },
+          ],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      },
+    ],
+  ]);
+
+  try {
+    const blockers = await fetchLinearBlockers(["lin-a"]);
+    assert.deepEqual(blockers.get("lin-a")?.map((b) => b.identifier), ["NOT-B"]);
+    assert.equal(requests.length, 2, "the nested connection is paged, not re-read");
+    assert.deepEqual(requests[1]?.variables, { ids: ["lin-a"], after: "cursor-1" });
+  } finally {
+    restore();
+  }
+});
+
+test("relation volume alone never blocks: 51 non-`blocks` relations resolve to no blockers", async () => {
   const { restore } = stubLinearIssues([
-    {
-      id: "lin-a",
-      // More relations than one page: the blocker that matters may be on the page we never saw.
-      inverseRelations: { nodes: [{ type: "related", issue: null }], pageInfo: { hasNextPage: true } },
-    },
+    [
+      {
+        id: "lin-a",
+        inverseRelations: {
+          nodes: noiseRelations(50, "related"),
+          pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+        },
+      },
+    ],
+    [
+      {
+        id: "lin-a",
+        inverseRelations: {
+          nodes: noiseRelations(1, "duplicate"),
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      },
+    ],
+  ]);
+
+  try {
+    assert.deepEqual((await fetchLinearBlockers(["lin-a"])).get("lin-a"), []);
+  } finally {
+    restore();
+  }
+
+  const issue = seedIssue({ source: "linear", externalId: "lin-a" });
+  enqueueIssue(issue.id);
+  provideBlockers({ "lin-a": [] });
+  assert.equal((await admitNext())?.issueId, issue.id);
+});
+
+test("a relation list Linear will not finish is unknown, not `no blockers`", async () => {
+  // The follow-up page comes back without the issue: we saw part of the list, and the
+  // blocker that matters may be in the part we did not. That is unknown → park for this
+  // tick, and the next tick simply asks again.
+  const { restore } = stubLinearIssues([
+    [
+      {
+        id: "lin-a",
+        inverseRelations: {
+          nodes: [{ type: "related", issue: null }],
+          pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+        },
+      },
+    ],
+    [],
   ]);
 
   try {

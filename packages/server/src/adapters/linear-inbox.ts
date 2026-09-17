@@ -206,6 +206,16 @@ interface LinearRelationNode {
   issue?: { id: string; identifier: string; state?: { name?: string; type?: string } } | null;
 }
 
+interface RelationPage {
+  nodes?: LinearRelationNode[];
+  pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+}
+
+const RELATION_PAGE_FIELDS = `
+  nodes { type issue { id identifier state { name type } } }
+  pageInfo { hasNextPage endCursor }
+`;
+
 /** A blocker Linear won't let us read (other team, no permission, deleted) — never satisfied. */
 const UNREADABLE_BLOCKER: LinearBlockerNode = {
   id: "",
@@ -238,9 +248,10 @@ function relationToBlocker(node: LinearRelationNode): LinearBlockerNode {
  *
  * One query (paged) for the whole batch — per-entry queries would make a 10-entry queue at
  * a 60s TTL cost ~600 Linear requests/hour. Ids Linear does not return are simply absent
- * from the map; the caller treats that as "unknown", never as "no blockers". An issue whose
- * relation list is itself longer than one page is left out for the same reason: a truncated
- * list could hide the one unsatisfied blocker and admit the run this rule exists to stop.
+ * from the map; the caller treats that as "unknown", never as "no blockers". An issue with
+ * more relations than fit in one page is *paged through* rather than dropped: `related` and
+ * `duplicate` links share that connection, so a well-linked ticket would otherwise park for
+ * good on relations that were never meant to gate it.
  */
 export async function fetchLinearBlockers(
   issueIds: string[],
@@ -261,10 +272,7 @@ export async function fetchLinearBlockers(
         issues(filter: { id: { in: $ids } }, first: ${PAGE_SIZE}, after: $after, includeArchived: true) {
           nodes {
             id
-            inverseRelations(first: ${PAGE_SIZE}) {
-              nodes { type issue { id identifier state { name type } } }
-              pageInfo { hasNextPage }
-            }
+            inverseRelations(first: ${PAGE_SIZE}) { ${RELATION_PAGE_FIELDS} }
           }
           pageInfo { hasNextPage endCursor }
         }
@@ -273,22 +281,21 @@ export async function fetchLinearBlockers(
       { timeoutMs: remaining() }
     )) as {
       issues: {
-        nodes: Array<{
-          id: string;
-          inverseRelations?: { nodes?: LinearRelationNode[]; pageInfo?: { hasNextPage: boolean } };
-        }>;
+        nodes: Array<{ id: string; inverseRelations?: RelationPage }>;
         pageInfo: { hasNextPage: boolean; endCursor: string | null };
       };
     };
 
     for (const node of data.issues.nodes) {
-      // A list we only partly saw (or did not get at all) is unknown, not "no blockers":
-      // the one unsatisfied blocker may be exactly the relation we are missing.
-      if (!node.inverseRelations || node.inverseRelations.pageInfo?.hasNextPage) continue;
-      const blockers = (node.inverseRelations.nodes ?? [])
-        .filter((r) => r.type === "blocks")
-        .map(relationToBlocker);
-      out.set(node.id, blockers);
+      // A list we did not get at all is unknown, not "no blockers": the one unsatisfied
+      // blocker may be exactly the relation we are missing.
+      if (!node.inverseRelations) continue;
+      const relations = [...(node.inverseRelations.nodes ?? [])];
+      const rest = await fetchRemainingInverseRelations(node.id, node.inverseRelations, remaining);
+      // Same reasoning as above for a list we only partly saw.
+      if (!rest) continue;
+      relations.push(...rest);
+      out.set(node.id, relations.filter((r) => r.type === "blocks").map(relationToBlocker));
     }
 
     if (!data.issues.pageInfo.hasNextPage || !data.issues.pageInfo.endCursor) break;
@@ -296,6 +303,48 @@ export async function fetchLinearBlockers(
   }
 
   return out;
+}
+
+/**
+ * Page the *nested* relation connection for one issue past its first page.
+ *
+ * Returns the relations after `firstPage`, or `null` when the list cannot be completed
+ * (Linear stopped returning the issue mid-walk, or paged without advancing) — the caller
+ * turns that into "unknown" for this id, which parks the entry for this tick only.
+ */
+async function fetchRemainingInverseRelations(
+  issueId: string,
+  firstPage: RelationPage,
+  remaining: () => number | undefined
+): Promise<LinearRelationNode[] | null> {
+  if (!firstPage.pageInfo?.hasNextPage) return [];
+
+  const rest: LinearRelationNode[] = [];
+  let after = firstPage.pageInfo.endCursor;
+  while (after) {
+    const data = (await linearQuery(
+      `query BlockingRelationsPage($ids: [ID!], $after: String) {
+        issues(filter: { id: { in: $ids } }, first: 1, includeArchived: true) {
+          nodes {
+            id
+            inverseRelations(first: ${PAGE_SIZE}, after: $after) { ${RELATION_PAGE_FIELDS} }
+          }
+        }
+      }`,
+      { ids: [issueId], after },
+      { timeoutMs: remaining() }
+    )) as { issues: { nodes: Array<{ id: string; inverseRelations?: RelationPage }> } };
+
+    const page = data.issues.nodes.find((n) => n.id === issueId)?.inverseRelations;
+    if (!page) return null;
+    rest.push(...(page.nodes ?? []));
+    if (!page.pageInfo?.hasNextPage) return rest;
+    // A page that claims more but hands back no cursor would loop forever; treat the list
+    // as incomplete instead.
+    if (!page.pageInfo.endCursor || page.pageInfo.endCursor === after) return null;
+    after = page.pageInfo.endCursor;
+  }
+  return null;
 }
 
 /** Resolve free-form kick text to a Linear candidate (or null if not found / unparseable). */

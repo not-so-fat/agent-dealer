@@ -105,7 +105,7 @@ so an open epic does not block its own children).
 | **Reason** | The queue entry shows `waiting on NOT-123 (In Progress)`, or `dependency state unavailable` when Linear can't be read |
 | **Fetch** | One batched, timeout-bounded GraphQL query per admission tick that has a free slot, cached ~60s; a busy system makes no Linear calls |
 | **Outage** | No `LINEAR_API_KEY` / Linear down → Linear-sourced issues **park** (stay `queued`, never dropped) and resume on the next successful fetch. Manual issues keep running |
-| **Escape hatch** | Edit Linear: remove the relation, or mark an abandoned blocker `canceled`. There is no per-issue bypass flag |
+| **Escape hatch** | Edit Linear: remove the relation, or mark an abandoned blocker that dealer never picked up `canceled`. A blocker already in dealer releases only at dealer `done`, so drop its relation. There is no per-issue bypass flag |
 
 Cycles are not detected: two issues blocking each other both park naming the other, and the
 operator fixes the relation in Linear.

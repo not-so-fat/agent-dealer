@@ -243,15 +243,16 @@ export type BlockerVerdict = { satisfied: boolean; state: string };
  *   before the code lands, which is precisely the doomed run this rule prevents.
  * - **unlinked** → satisfied when the Linear state type is `completed` or `canceled`.
  *
- * `canceled` also releases a dealer-linked blocker, because decision 6 offers exactly two
- * escape hatches — drop the relation, or cancel an abandoned blocker — and the second one
- * has to work whether or not the abandoned ticket was ever kicked into dealer.
+ * Once a blocker resolves to a dealer issue, dealer status is the *only* answer — a Linear
+ * `canceled` on a ticket dealer is still developing would admit the dependent onto a base
+ * without that work. Canceling remains decision 6's escape hatch for a blocker dealer never
+ * picked up; for one it did, the fix is to drop the `blocks` relation.
  */
 export function blockerVerdict(blocker: BlockerState): BlockerVerdict {
   const dealerIssue = blocker.id ? findIssueByExternalId("linear", blocker.id) : null;
   if (dealerIssue) {
     return {
-      satisfied: dealerIssue.status === "done" || blocker.stateType === "canceled",
+      satisfied: dealerIssue.status === "done",
       // The dealer status is the honest answer to "why am I still waiting" — a blocker
       // sitting at `waiting on NOT-123 (Done)` reads like a bug.
       state: dealerIssue.status,
