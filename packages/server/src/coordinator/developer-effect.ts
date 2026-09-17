@@ -57,6 +57,15 @@ import {
   startActivitySampler,
   taskBriefIsComplete,
 } from "./session-progress.js";
+import {
+  VERIFICATION_RECEIPT_KIND,
+  extractVerificationReceiptFromLog,
+  parseVerificationReceipt,
+  receiptForCurrentHead,
+  receiptSupersededByFailedChecks,
+  shouldCarryVerificationReceipt,
+  type VerificationReceipt,
+} from "./verification-receipt.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -103,6 +112,57 @@ function extractConclusion(transcript: string): string {
   const trimmed = transcript.trim();
   if (!trimmed) return "";
   return trimmed.length > 4000 ? trimmed.slice(-4000) : trimmed;
+}
+
+/** NOT-130: mine + persist a SHA-scoped suite receipt while the worktree still exists.
+ * Tip-tree equivalence: only vouch for HEAD when the tree is clean — a green suite on a
+ * dirty checkout must not be reloaded as tip evidence after a later clean/revert. */
+async function persistVerificationReceiptIfAny(opts: {
+  issueId: string;
+  sessionId: string;
+  logPath: string;
+  worktreePath: string;
+}): Promise<void> {
+  const clean = await isWorktreeClean(opts.worktreePath).catch(() => false);
+  if (!clean) return;
+  const headShaHint = await revParseHead(opts.worktreePath).catch(() => null);
+  const receipt = extractVerificationReceiptFromLog(opts.logPath, { headShaHint });
+  if (!receipt) return;
+  createIssueArtifact({
+    issueId: opts.issueId,
+    workerSessionId: opts.sessionId,
+    kind: VERIFICATION_RECEIPT_KIND,
+    author: "system",
+    content: receipt,
+  });
+}
+
+function loadPriorVerificationReceipt(
+  issueId: string,
+  currentHeadSha: string | null
+): VerificationReceipt | undefined {
+  const art = latestIssueArtifact(issueId, VERIFICATION_RECEIPT_KIND);
+  if (!art?.contentJson) return undefined;
+  try {
+    const parsed = parseVerificationReceipt(JSON.parse(art.contentJson));
+    const atHead = receiptForCurrentHead(parsed, currentHeadSha);
+    if (!atHead) return undefined;
+    const checksArt = latestIssueArtifact(issueId, "checks_evidence");
+    if (checksArt?.contentJson) {
+      try {
+        const evidence = JSON.parse(checksArt.contentJson) as {
+          snapshot?: unknown;
+          headSha?: unknown;
+        };
+        if (receiptSupersededByFailedChecks(atHead, evidence)) return undefined;
+      } catch {
+        // ignore malformed checks evidence
+      }
+    }
+    return atHead;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -535,6 +595,7 @@ export async function runDeveloperEffect(
     const guidance = guidanceForNextSession(issue.id, sessionId);
     const retryReason = payload.retryReason ?? undefined;
     let priorConclusion: string | undefined;
+    let priorVerificationReceipt: VerificationReceipt | undefined;
     if (retryReason) {
       const prior = latestIssueArtifact(issue.id, "implementation_conclusion");
       if (prior?.contentJson) {
@@ -547,6 +608,13 @@ export async function runDeveloperEffect(
           // ignore malformed prior conclusion
         }
       }
+      // SHA gate + reason gate: only carry when tip still matches AND this retry is not
+      // checks_failed (local green at this SHA is what CI just rejected — do not tell the
+      // agent to skip re-running).
+      if (shouldCarryVerificationReceipt(retryReason)) {
+        const currentHead = await revParseHead(worktreePath).catch(() => null);
+        priorVerificationReceipt = loadPriorVerificationReceipt(issue.id, currentHead);
+      }
     }
     const prompt = buildDeveloperPrompt({
       taskSnapshot,
@@ -554,6 +622,7 @@ export async function runDeveloperEffect(
       findings: openFindings.length ? openFindings : undefined,
       retryReason,
       priorConclusion,
+      priorVerificationReceipt,
       worktreePath,
       deckId: snapshot?.deckId ?? null,
       playbookIds: snapshot?.playbookIds,
@@ -604,6 +673,15 @@ export async function runDeveloperEffect(
     } finally {
       sampler.stop();
     }
+
+    // NOT-130: record suite evidence even when the session later fails/times out — an
+    // interrupted-but-verified tip must carry the receipt into the retry prompt.
+    await persistVerificationReceiptIfAny({
+      issueId: issue.id,
+      sessionId,
+      logPath: spawned.logPath,
+      worktreePath,
+    });
 
     // Recorded unconditionally, before any early return below: cost is incurred the
     // moment the process runs, whether or not the session subsequently timed out,

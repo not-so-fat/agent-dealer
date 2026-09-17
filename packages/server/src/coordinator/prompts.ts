@@ -10,6 +10,10 @@
 // (`READ_ONLY_BUILTIN_TOOLS` in args.ts) has no Bash at all, so it cannot shell out —
 // every artifact it needs to judge must already be in the prompt.
 import type { Finding } from "@agent-dealer/shared";
+import {
+  formatVerificationReceiptSection,
+  type VerificationReceipt,
+} from "./verification-receipt.js";
 
 export interface TaskSnapshot {
   title: string;
@@ -31,6 +35,9 @@ export interface DeveloperPromptInput {
   /** Prior session's implementation conclusion when this is an infra retry — the agent
    * otherwise only sees a short failure string and re-discovers state via git. */
   priorConclusion?: string;
+  /** NOT-130: prior session's SHA-scoped verification receipt when HEAD is unchanged —
+   * evidence that the suite already passed on this tip; never an instruction to skip. */
+  priorVerificationReceipt?: VerificationReceipt;
   /** The generated worktree the agent is actually running in — binding must target this, not the original repo checkout. */
   worktreePath?: string;
   deckId?: string | null;
@@ -103,6 +110,9 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
     );
     if (input.priorConclusion?.trim()) {
       parts.push(`### Prior implementation conclusion`, input.priorConclusion.trim(), ``);
+    }
+    if (input.priorVerificationReceipt) {
+      parts.push(...formatVerificationReceiptSection(input.priorVerificationReceipt));
     }
   }
 

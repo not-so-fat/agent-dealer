@@ -1017,3 +1017,219 @@ test("NOT-117: usage_capped after commits resumes with retryReason — no fresh-
   assert.equal(git(repo, "rev-parse", branch), tipAfterFirst, "resume must not mint a parallel tip");
   clearAllRuntimeAvailability();
 });
+
+function writeVerificationLog(opts: { command: string; output: string; isError?: boolean }): string {
+  const logPath = path.join(
+    process.env.AGENT_DEALER_HOME!,
+    `not130-receipt-${Math.random().toString(16).slice(2)}.ndjson`
+  );
+  const lines = [
+    {
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", id: "t1", name: "Bash", input: { command: opts.command } },
+        ],
+      },
+    },
+    {
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t1",
+            is_error: opts.isError ?? false,
+            content: opts.output,
+          },
+        ],
+      },
+    },
+  ];
+  fs.writeFileSync(logPath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  return logPath;
+}
+
+test("NOT-130: interrupted-but-verified attempt persists receipt and retry prompt carries it at unchanged HEAD", async () => {
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  const logPath = writeVerificationLog({
+    command: "npm run test:unit",
+    output: "711/711 tests passed\n",
+  });
+
+  let call = 0;
+  const prompts: string[] = [];
+  let tipAfterFirst = "";
+  const commitVerifyThenCrash: SpawnFn = async (input) => {
+    call++;
+    prompts.push(input.prompt);
+    if (call === 1) {
+      await commitingSpawn(input);
+      tipAfterFirst = git(input.cwd, "rev-parse", "HEAD");
+      return { exitCode: 1, transcript: "boom after green suite", logPath, timedOut: false };
+    }
+    assert.equal(git(input.cwd, "rev-parse", "HEAD"), tipAfterFirst);
+    return { exitCode: 0, transcript: "continue without re-suite", logPath: "/dev/null", timedOut: false };
+  };
+
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: commitVerifyThenCrash, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  const receipt = listArtifactsForIssue(issueId).find((a) => a.kind === "verification_receipt");
+  assert.ok(receipt, "verification receipt must be persisted even when the session crashes");
+  const content = JSON.parse(receipt!.contentJson!) as { headSha: string; commands: Array<{ command: string }> };
+  assert.equal(content.headSha, tipAfterFirst);
+  assert.match(content.commands[0]!.command, /npm run test:unit/);
+
+  assert.equal(getIssue(issueId)!.status, "developing");
+  await pump(1);
+
+  assert.equal(call, 2);
+  assert.match(prompts[1]!, /### Prior verification receipt/);
+  assert.match(prompts[1]!, /npm run test:unit.*passed \(711\/711\)/);
+  assert.match(prompts[1]!, /Do not re-run an unchanged green suite by default/);
+  assert.equal(git(repo, "rev-parse", branch), tipAfterFirst);
+});
+
+test("NOT-130: receipt is dropped from the retry prompt when HEAD moved after it was recorded", async () => {
+  const issueId = await makeIssue();
+  const logPath = writeVerificationLog({
+    command: "npm run test:unit",
+    output: "711/711 tests passed\n",
+  });
+
+  let call = 0;
+  const prompts: string[] = [];
+  const verifyCrashThenMoveHead: SpawnFn = async (input) => {
+    call++;
+    prompts.push(input.prompt);
+    if (call === 1) {
+      await commitingSpawn(input);
+      return { exitCode: 1, transcript: "boom", logPath, timedOut: false };
+    }
+    // New commit on the reused branch — tip no longer matches the receipt SHA.
+    fs.writeFileSync(path.join(input.cwd, "moved.txt"), "moved\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "move head");
+    return { exitCode: 0, transcript: "new tip", logPath: "/dev/null", timedOut: false };
+  };
+
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: verifyCrashThenMoveHead, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+  assert.ok(listArtifactsForIssue(issueId).some((a) => a.kind === "verification_receipt"));
+
+  // Mutate the branch tip *before* the retry session starts so the prompt SHA gate fails.
+  const branch = issueBranchName(issueId);
+  const wt = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not130-move-"));
+  try {
+    git(repo, "worktree", "add", wt, branch);
+    fs.writeFileSync(path.join(wt, "pre-retry.txt"), "x\n");
+    git(wt, "add", ".");
+    git(wt, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "pre-retry move");
+  } finally {
+    try {
+      git(repo, "worktree", "remove", "--force", wt);
+    } catch {
+      fs.rmSync(wt, { recursive: true, force: true });
+    }
+  }
+
+  await pump(1);
+  assert.equal(call, 2);
+  assert.doesNotMatch(prompts[1]!, /Prior verification receipt/);
+});
+
+test("NOT-130: a green suite on a dirty worktree is not persisted as tip evidence", async () => {
+  const issueId = await makeIssue();
+  const logPath = writeVerificationLog({
+    command: "npm run test:unit",
+    output: "711/711 tests passed\n",
+  });
+
+  const dirtyAfterVerify: SpawnFn = async (input) => {
+    await commitingSpawn(input);
+    fs.writeFileSync(path.join(input.cwd, "scratch.txt"), "uncommitted\n");
+    return { exitCode: 0, transcript: "dirty after suite", logPath, timedOut: false };
+  };
+
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: dirtyAfterVerify, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.equal(
+    listArtifactsForIssue(issueId).some((a) => a.kind === "verification_receipt"),
+    false,
+    "dirty tree must not mint a tip-scoped verification receipt"
+  );
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+});
+
+test("NOT-130: checks_failed retry does not carry a prior green receipt into the prompt", async () => {
+  const issueId = await makeIssue();
+  const logPath = writeVerificationLog({
+    command: "npm run test:unit",
+    output: "711/711 tests passed\n",
+  });
+
+  let call = 0;
+  const prompts: string[] = [];
+  const commitVerifyThenCiFail: SpawnFn = async (input) => {
+    call++;
+    prompts.push(input.prompt);
+    if (call === 1) {
+      await commitingSpawn(input);
+      return { exitCode: 0, transcript: "green locally", logPath, timedOut: false };
+    }
+    if (call === 2) {
+      // Same tip — crash after CI already rejected it; must still not re-carry the receipt.
+      return { exitCode: 1, transcript: "boom while reproducing CI", logPath: "/dev/null", timedOut: false };
+    }
+    return { exitCode: 0, transcript: "reproducing CI", logPath: "/dev/null", timedOut: false };
+  };
+
+  const github = fakeGithub({ checks: "failure" });
+  let checkPass = false;
+  github.checksSnapshot = async () => (checkPass ? "success" : "failure");
+
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: commitVerifyThenCiFail, github })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.ok(
+    listArtifactsForIssue(issueId).some((a) => a.kind === "verification_receipt"),
+    "receipt is still persisted from the green local suite"
+  );
+  assert.ok(listArtifactsForIssue(issueId).some((a) => a.kind === "checks_evidence"));
+  assert.equal(getIssue(issueId)!.status, "developing");
+
+  await pump(1);
+  assert.equal(call, 2);
+  assert.match(prompts[1]!, /Developer's PR checks failed/);
+  assert.doesNotMatch(
+    prompts[1]!,
+    /Prior verification receipt/,
+    "checks_failed must not tell the agent the suite at this SHA is already green"
+  );
+
+  // Later infra retry at the same tip uses session_failed prose — still no receipt.
+  checkPass = true;
+  await pump(1);
+  assert.equal(call, 3);
+  assert.match(prompts[2]!, /failed or crashed|timed out|session/i);
+  assert.doesNotMatch(
+    prompts[2]!,
+    /Prior verification receipt/,
+    "CI-rejected tip must not re-authorize skip-suite on a later crash retry"
+  );
+});
