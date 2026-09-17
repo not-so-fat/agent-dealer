@@ -1,35 +1,19 @@
 import type {
-  AgentDeckConfig,
-  AgentDeckConfigPatch,
   AgentDeckStatus,
   AgentWithHealth,
-  Artifact,
-  DeckAccessErrorCode,
   CreateAgentInput,
   CreateIssueInput,
-  DocumentContent,
-  ExecutionResultContent,
+  DeckAccessErrorCode,
   Finding,
   HumanAction,
   Issue,
   IssueStatus,
   LinearCandidate,
-  LinearConnectionStatus,
-  LinearIntakeConfig,
-  LinearIntakeConfigPatch,
-  LinearIntakeConfigView,
-  PhaseBudget,
-  QueueSnapshot,
-  ResultQaContent,
   RuntimeModelsResponse,
-  Run,
   StartIssueResponse,
-  StreamTraceContent,
   UpdateAgentInput,
   UpdateIssueInput,
-  UsageContent,
   UsageEvent,
-  UsageSummary,
   WorkerSession,
   WorkflowEvent,
   WorkflowInstance,
@@ -37,8 +21,6 @@ import type {
 import { clearCachedRuntimeModels, fetchRuntimeModelsDeduped } from "./lib/runtimeModelsCache";
 
 const API = "";
-
-type RunEvent = { type: string; payloadJson?: string | null };
 
 async function readApiError(res: Response): Promise<string> {
   const text = await res.text();
@@ -54,24 +36,6 @@ async function readApiError(res: Response): Promise<string> {
   return text;
 }
 
-export async function fetchSnapshot(): Promise<QueueSnapshot> {
-  const res = await fetch(`${API}/api/snapshot`);
-  if (!res.ok) throw new Error("Failed to fetch snapshot");
-  return res.json();
-}
-
-export async function fetchRunDetail(id: string): Promise<{
-  run: Run;
-  artifacts: Artifact[];
-  events?: RunEvent[];
-  usageSummary?: UsageSummary;
-  traceSummary?: StreamTraceContent;
-}> {
-  const res = await fetch(`${API}/api/runs/${id}`);
-  if (!res.ok) throw new Error("Not found");
-  return res.json();
-}
-
 export async function fetchLinearInbox(): Promise<LinearCandidate[]> {
   const res = await fetch(`${API}/api/intake/linear`);
   if (!res.ok) throw new Error(await res.text());
@@ -85,51 +49,6 @@ export async function lookupLinearIssue(q: string): Promise<LinearCandidate> {
   if (!res.ok) throw new Error(body.error ?? `Lookup failed (${res.status})`);
   if (!body.candidate) throw new Error("Linear issue not found");
   return body.candidate;
-}
-
-export async function fetchLinearStatus(): Promise<LinearConnectionStatus> {
-  const res = await fetch(`${API}/api/intake/linear/status`);
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function fetchLinearConfig(): Promise<LinearIntakeConfigView> {
-  const res = await fetch(`${API}/api/intake/linear/config`);
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function patchLinearConfig(patch: LinearIntakeConfigPatch): Promise<LinearIntakeConfigView> {
-  const res = await fetch(`${API}/api/intake/linear/config`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function promoteLinearIssue(
-  issueId: string,
-  body: { agentId?: string; autoAgent?: boolean; planModel?: string | null }
-): Promise<Run> {
-  const res = await fetch(`${API}/api/intake/linear/${issueId}/promote`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function resolveLinearAgent(issueId: string): Promise<{ agentId: string; reason: string }> {
-  const res = await fetch(`${API}/api/intake/linear/${issueId}/resolve-agent`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
 }
 
 export async function fetchAgents(): Promise<{ agents: AgentWithHealth[]; issueCount: number }> {
@@ -163,169 +82,6 @@ export async function deleteAgent(id: string): Promise<void> {
   if (!res.ok) throw new Error(await res.text());
 }
 
-export async function cancelRun(id: string): Promise<Run> {
-  const res = await fetch(`${API}/api/runs/${id}/cancel`, { method: "POST" });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function createRun(body: {
-  title: string;
-  description?: string;
-  taskCategory?: string;
-  repo?: string;
-  artifactWorkspace?: string;
-  acceptanceCriteria?: string;
-  agentId: string;
-  planModel?: string | null;
-  executeModel?: string | null;
-}): Promise<Run> {
-  const res = await fetch(`${API}/api/runs`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function updatePlan(
-  id: string,
-  planMarkdown: string,
-  approve: boolean,
-  opts?: {
-    executeModel?: string | null;
-    planModel?: string | null;
-    planBudget?: PhaseBudget | null;
-    executeBudget?: PhaseBudget | null;
-  }
-): Promise<Run> {
-  const res = await fetch(`${API}/api/runs/${id}/plan`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      planMarkdown,
-      approve,
-      ...(opts?.planModel !== undefined ? { planModel: opts.planModel } : {}),
-      ...(opts?.executeModel !== undefined ? { executeModel: opts.executeModel } : {}),
-      ...(opts?.planBudget !== undefined ? { planBudget: opts.planBudget } : {}),
-      ...(opts?.executeBudget !== undefined ? { executeBudget: opts.executeBudget } : {}),
-    }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function draftPlan(
-  id: string,
-  planModel?: string | null,
-  planBudget?: PhaseBudget | null,
-  opts?: { feedback?: string; editedMarkdown?: string }
-): Promise<Run> {
-  const res = await fetch(`${API}/api/runs/${id}/draft-plan`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ...(planModel !== undefined ? { planModel } : {}),
-      ...(planBudget !== undefined ? { planBudget } : {}),
-      ...(opts?.feedback !== undefined ? { feedback: opts.feedback } : {}),
-      ...(opts?.editedMarkdown !== undefined ? { editedMarkdown: opts.editedMarkdown } : {}),
-    }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function configureAgent(
-  id: string,
-  body: { runtime: string; deckId?: string; playbookId?: string }
-): Promise<Run> {
-  const res = await fetch(`${API}/api/runs/${id}/agent`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function kickRun(
-  id: string,
-  executeModel?: string | null,
-  executeBudget?: PhaseBudget | null
-): Promise<Run> {
-  const res = await fetch(`${API}/api/runs/${id}/kick`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ...(executeModel?.trim() ? { executeModel: executeModel.trim() } : {}),
-      ...(executeBudget !== undefined ? { executeBudget } : {}),
-    }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function submitPlanAnswers(
-  id: string,
-  answers: Array<{ questionId: string; selectedLabel?: string; freeText?: string }>,
-  opts?: { executeModel?: string | null; executeBudget?: PhaseBudget | null }
-): Promise<{ run: Run; outcome: "approved" | "redraft" }> {
-  const res = await fetch(`${API}/api/runs/${id}/plan/answers`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      answers,
-      ...(opts?.executeModel !== undefined ? { executeModel: opts.executeModel } : {}),
-      ...(opts?.executeBudget !== undefined ? { executeBudget: opts.executeBudget } : {}),
-    }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function approveRun(id: string, outboundBody?: string): Promise<Run> {
-  const res = await fetch(`${API}/api/runs/${id}/approve`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(outboundBody ? { outboundBody } : {}),
-  });
-  if (!res.ok) throw new Error(await readApiError(res));
-  return res.json();
-}
-
-export async function askResultQuestion(
-  id: string,
-  question: string
-): Promise<{ exchange: ResultQaContent }> {
-  const res = await fetch(`${API}/api/runs/${id}/qa`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
-  });
-  if (!res.ok) throw new Error(await readApiError(res));
-  return res.json();
-}
-
-export async function retryRun(
-  id: string,
-  feedback: string,
-  executeModel?: string | null,
-  executeBudget?: PhaseBudget | null
-): Promise<Run> {
-  const res = await fetch(`${API}/api/runs/${id}/retry`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      feedback,
-      ...(executeModel !== undefined ? { executeModel } : {}),
-      ...(executeBudget !== undefined ? { executeBudget } : {}),
-    }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
 export async function fetchRuntimeModels(
   runtime: string,
   opts?: { refresh?: boolean }
@@ -341,22 +97,6 @@ export async function fetchRuntimeModels(
 
 export async function fetchAgentDeckStatus(): Promise<AgentDeckStatus> {
   const res = await fetch(`${API}/api/agent-deck/status`);
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function fetchAgentDeckConfig(): Promise<AgentDeckConfig> {
-  const res = await fetch(`${API}/api/agent-deck/config`);
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function patchAgentDeckConfig(patch: AgentDeckConfigPatch): Promise<AgentDeckConfig> {
-  const res = await fetch(`${API}/api/agent-deck/config`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -397,82 +137,6 @@ export async function fetchDeckPlaybooks(deckId: string): Promise<PlaybookListRe
   } catch (e) {
     return { ok: false, message: e instanceof Error ? e.message : String(e) };
   }
-}
-
-export function subscribeEvents(onSnapshot: (s: QueueSnapshot) => void): () => void {
-  const es = new EventSource(`${API}/api/events`);
-  es.onmessage = (ev) => {
-    try {
-      onSnapshot(JSON.parse(ev.data));
-    } catch {
-      // ignore
-    }
-  };
-  es.onerror = () => {
-    es.close();
-  };
-  return () => es.close();
-}
-
-export async function fetchLogTail(runId: string, kind = "transcript"): Promise<string> {
-  const res = await fetch(`${API}/api/runs/${runId}/log-tail?kind=${kind}`);
-  if (!res.ok) throw new Error(await res.text());
-  const json = (await res.json()) as { content: string };
-  return json.content;
-}
-
-export function parseArtifact<T>(a: Artifact): T | null {
-  if (!a.contentJson) return null;
-  try {
-    return JSON.parse(a.contentJson) as T;
-  } catch {
-    return null;
-  }
-}
-
-export function artifactMarkdown(a: Artifact): string {
-  if (!a.contentJson) return a.blobPath ?? "";
-  try {
-    const parsed = JSON.parse(a.contentJson) as {
-      markdown?: string;
-      excerpt?: string;
-      resultText?: string;
-    };
-    return parsed.markdown ?? parsed.resultText ?? parsed.excerpt ?? a.contentJson;
-  } catch {
-    return a.contentJson;
-  }
-}
-
-export function latestArtifact(artifacts: Artifact[], kind: Artifact["kind"]): Artifact | undefined {
-  return [...artifacts].reverse().find((a) => a.kind === kind);
-}
-
-/** Linear issue URL from task_snapshot (set at promote). */
-export function linearUrlFromArtifacts(artifacts: Artifact[]): string | null {
-  const snap = latestArtifact(artifacts, "task_snapshot");
-  if (!snap?.contentJson) return null;
-  try {
-    const parsed = JSON.parse(snap.contentJson) as { url?: string };
-    const url = parsed.url?.trim();
-    return url?.startsWith("http") ? url : null;
-  } catch {
-    return null;
-  }
-}
-
-export function latestByPhase<T extends { phase?: string }>(
-  artifacts: Artifact[],
-  kind: Artifact["kind"],
-  phase: "plan" | "execute"
-): T | null {
-  const matches = artifacts.filter((a) => a.kind === kind);
-  for (let i = matches.length - 1; i >= 0; i--) {
-    const parsed = parseArtifact<T>(matches[i]);
-    if (parsed && (parsed as { phase?: string }).phase === phase) return parsed;
-  }
-  const last = matches[matches.length - 1];
-  return last ? parseArtifact<T>(last) : null;
 }
 
 export interface IssueListRow {
@@ -688,4 +352,3 @@ export async function resolveHumanAction(
   return res.json();
 }
 
-export type { StreamTraceContent, UsageContent, UsageSummary, ExecutionResultContent, DocumentContent, LinearCandidate, ResultQaContent };

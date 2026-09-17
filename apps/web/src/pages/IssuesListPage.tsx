@@ -1,36 +1,30 @@
 import { useEffect, useState } from "react";
-import type { AgentWithHealth, HumanAction, HumanActionType, LinearCandidate } from "@agent-dealer/shared";
+import type { AgentWithHealth, HumanAction, LinearCandidate } from "@agent-dealer/shared";
 import {
   createIssue,
   dequeueIssue,
-  fetchHumanActions,
   fetchIssues,
   fetchLinearInbox,
   fetchQueue,
   fetchRecentRepos,
   lookupLinearIssue,
+  resolveHumanAction,
   type IssueListRow,
   type QueueEntryRow,
 } from "../api";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
+import NeedsAttentionPanel from "../components/issues/NeedsAttentionPanel";
 import AlertIcon from "../components/ui/AlertIcon";
 
 type Props = {
   agents: AgentWithHealth[];
+  /** Every open human action, issue-scoped and run-scoped — polled by the shell. */
+  humanActions: HumanAction[];
   onSelectIssue: (id: string) => void;
+  onHumanActionsChanged: () => void;
 };
 
-const ACTION_LABELS: Record<HumanActionType, string> = {
-  final_review: "Final review",
-  attempts_exhausted: "Attempts exhausted",
-  policy_escalation: "Policy escalation",
-  product_scope_decision: "Product scope decision",
-  deck_interaction_required: "Agent Deck interaction required",
-  reflection_interaction_required: "Reflection interaction required",
-  // Filtered out of this page's own `actions` state (issueId !== null) — kept here only so
-  // this map stays total over HumanActionType.
-  outbound_delivery_interaction_required: "Outbound delivery interaction required",
-};
+const RESOLVED_BY = "web";
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -50,9 +44,14 @@ export function extractAcceptanceFromLinear(description: string | undefined): st
   return body || undefined;
 }
 
-export default function IssuesListPage({ agents, onSelectIssue }: Props) {
+export default function IssuesListPage({
+  agents,
+  humanActions,
+  onSelectIssue,
+  onHumanActionsChanged,
+}: Props) {
   const [issues, setIssues] = useState<IssueListRow[] | null>(null);
-  const [actions, setActions] = useState<HumanAction[]>([]);
+  const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [sourceMode, setSourceMode] = useState<"manual" | "linear">("manual");
   const [candidates, setCandidates] = useState<LinearCandidate[]>([]);
@@ -79,11 +78,21 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
     fetchQueue()
       .then(setQueue)
       .catch(() => undefined);
-    // Issue-scoped only — a Run-scoped action (outbound-draft delivery parking, NOT-95)
-    // has no issue to navigate to and surfaces on the Human Actions page instead.
-    fetchHumanActions()
-      .then((all) => setActions(all.filter((a) => a.issueId !== null)))
-      .catch(() => undefined);
+  };
+
+  /** Resolve an action inline (run-scoped items have no issue page to resolve them on). */
+  const resolveAction = async (actionId: string, choice: string) => {
+    setBusyActionId(actionId);
+    setError(null);
+    try {
+      await resolveHumanAction(actionId, RESOLVED_BY, choice);
+      onHumanActionsChanged();
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyActionId(null);
+    }
   };
 
   useEffect(() => {
@@ -233,29 +242,12 @@ export default function IssuesListPage({ agents, onSelectIssue }: Props) {
         </div>
       )}
 
-      {actions.length > 0 && (
-        <div className="mb-4 rounded border border-red-400/30 bg-red-500/10">
-          <div className="px-4 py-2 flex items-center gap-2 border-b border-red-400/20">
-            <AlertIcon className="w-4 h-4 shrink-0 text-red-300" />
-            <span className="text-sm font-medium text-red-200">
-              {actions.length} {actions.length === 1 ? "issue needs" : "issues need"} your attention
-            </span>
-          </div>
-          <div className="divide-y divide-white/5">
-            {actions.map((a) => (
-              <button
-                key={a.id}
-                type="button"
-                onClick={() => onSelectIssue(a.issueId!)}
-                className="w-full text-left px-4 py-2 hover:bg-white/5 transition-colors"
-              >
-                <span className="text-xs uppercase tracking-wide text-red-300/80">{ACTION_LABELS[a.actionType]}</span>
-                <span className="text-sm text-white/80 ml-2">{a.question}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      <NeedsAttentionPanel
+        actions={humanActions}
+        busyActionId={busyActionId}
+        onOpenIssue={onSelectIssue}
+        onResolve={(actionId, choice) => void resolveAction(actionId, choice)}
+      />
 
       {showCreate && (
         <div className="mb-4 p-4 rounded border border-white/10 bg-panel-elevated/60 space-y-2">

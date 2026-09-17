@@ -1,104 +1,62 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { QueueSnapshot, Run } from "@agent-dealer/shared";
-import RunDrawer from "./components/drawer/RunDrawer";
+import { useCallback, useEffect, useState } from "react";
+import type { AgentWithHealth, HumanAction } from "@agent-dealer/shared";
 import AgentsPage from "./pages/AgentsPage";
-import DonePage from "./pages/DonePage";
-import IntakePage from "./pages/IntakePage";
-import OperationsPage from "./pages/OperationsPage";
 import IssuesListPage from "./pages/IssuesListPage";
 import IssueDetailPage from "./pages/IssueDetailPage";
-import HumanActionsPage from "./pages/HumanActionsPage";
-import { fetchHumanActions, fetchSnapshot, subscribeEvents } from "./api";
-import { nextInQueue, queueIndex, reviewQueueForRun } from "./lib/reviewQueue";
+import { fetchAgentDeckStatus, fetchAgents, fetchHumanActions } from "./api";
 import AmbientBackground from "./components/ui/AmbientBackground";
 import AlertIcon from "./components/ui/AlertIcon";
 import AgentsNavIcon from "./components/ui/AgentsNavIcon";
 import Logo from "./components/ui/Logo";
 
-// NOT-58: the issue-centric shell ("issues") is the new primary surface. The
-// run-oriented views (Operations / Inbox / Done) stay available for existing
-// plan/review/running work until the legacy→issue cutover lands in NOT-66 — this ticket
-// (NOT-65) only adds "Human actions" alongside them, it does not remove any of these.
-type View = "issues" | "ops" | "intake" | "done" | "agents" | "human-actions";
+// NOT-71: Agent Dealer is an issue queue and execution control plane. The run-oriented
+// plan/execute product (Operations / Inbox / Done) and the standalone Human actions
+// destination are gone — open human actions are part of the issue queue home now.
+type View = "issues" | "agents";
+
+const POLL_MS = 5000;
 
 export default function App() {
   const [view, setView] = useState<View>("issues");
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
-  const [snapshot, setSnapshot] = useState<QueueSnapshot | null>(null);
-  const [selectedRun, setSelectedRun] = useState<Run | null>(null);
-  const [openHumanActionCount, setOpenHumanActionCount] = useState(0);
+  const [agents, setAgents] = useState<AgentWithHealth[]>([]);
+  const [agentIssueCount, setAgentIssueCount] = useState(0);
+  const [agentDeckOnline, setAgentDeckOnline] = useState(false);
+  const [humanActions, setHumanActions] = useState<HumanAction[]>([]);
 
-  const refresh = useCallback(() => {
-    fetchSnapshot().then(setSnapshot).catch(console.error);
+  const refreshAgents = useCallback(() => {
+    fetchAgents()
+      .then(({ agents: list, issueCount }) => {
+        setAgents(list);
+        setAgentIssueCount(issueCount);
+      })
+      .catch(console.error);
+    fetchAgentDeckStatus()
+      .then((s) => setAgentDeckOnline(s.connected))
+      .catch(() => setAgentDeckOnline(false));
   }, []);
 
-  useEffect(() => {
-    const poll = () => fetchHumanActions().then((a) => setOpenHumanActionCount(a.length)).catch(() => undefined);
-    poll();
-    const id = setInterval(poll, 5000);
-    return () => clearInterval(id);
-  }, []);
-
-  const goToIssueFromAction = useCallback((issueId: string) => {
-    setView("issues");
-    setSelectedIssueId(issueId);
-  }, []);
-
-  useEffect(() => {
-    refresh();
-    const unsub = subscribeEvents(setSnapshot);
-    const poll = setInterval(refresh, 5000);
-    return () => {
-      unsub();
-      clearInterval(poll);
-    };
-  }, [refresh]);
-
-  useEffect(() => {
-    if (!selectedRun || !snapshot) return;
-    const updated = snapshot.runs.find((r) => r.id === selectedRun.id);
-    if (updated) setSelectedRun(updated);
-  }, [snapshot, selectedRun?.id]);
-
-  const resultReviewCount = snapshot?.resultReviewRuns?.length ?? 0;
-  const planReviewCount = snapshot?.awaitingPlanReview?.length ?? 0;
-  const doneCount = snapshot?.runs.filter((r) => r.status === "done").length ?? 0;
-  const agentCount = snapshot?.agents?.length ?? 0;
-  const agentIssueCount = snapshot?.agentIssueCount ?? 0;
-
-  const actionTotal = planReviewCount + resultReviewCount;
-
-  const reviewQueue = useMemo(() => {
-    if (!selectedRun || !snapshot) return [];
-    return reviewQueueForRun(selectedRun, snapshot, view === "ops" || view === "done" ? view : "ops");
-  }, [selectedRun, snapshot, view]);
-
-  const reviewIndex = selectedRun ? queueIndex(reviewQueue, selectedRun.id) : -1;
-
-  const goToReviewAt = useCallback((index: number) => {
-    const run = reviewQueue[index];
-    if (run) setSelectedRun(run);
-  }, [reviewQueue]);
-
-  const advanceAfterAction = useCallback(
-    async (currentId: string) => {
-      if (!snapshot) return;
-      const queue = reviewQueueForRun(
-        snapshot.runs.find((r) => r.id === currentId) ?? selectedRun!,
-        snapshot,
-        view === "ops" || view === "done" ? view : "ops"
-      );
-      const next = nextInQueue(queue, currentId);
-      const snap = await fetchSnapshot();
-      setSnapshot(snap);
-      if (!next) {
-        setSelectedRun(null);
-        return;
-      }
-      setSelectedRun(snap.runs.find((r) => r.id === next.id) ?? null);
-    },
-    [snapshot, selectedRun, view]
+  // One poll for every open action, shared by the header badge and the Issues home panel —
+  // the two used to poll `/api/human-actions` separately.
+  const refreshHumanActions = useCallback(
+    () => fetchHumanActions().then(setHumanActions).catch(() => undefined),
+    []
   );
+
+  useEffect(() => {
+    refreshAgents();
+    const poll = setInterval(refreshAgents, POLL_MS);
+    return () => clearInterval(poll);
+  }, [refreshAgents]);
+
+  useEffect(() => {
+    void refreshHumanActions();
+    const poll = setInterval(() => void refreshHumanActions(), POLL_MS);
+    return () => clearInterval(poll);
+  }, [refreshHumanActions]);
+
+  const openHumanActionCount = humanActions.length;
+  const agentCount = agents.length;
 
   const navClass = (v: View) =>
     `px-3 py-2 text-base rounded ${view === v ? "bg-cyber-teal/20 text-cyber-teal" : "text-white/60 hover:text-white"}`;
@@ -140,9 +98,6 @@ export default function App() {
             <nav className="flex gap-1">
               <button type="button" onClick={goIssues} className={navClass("issues")}>
                 Issues
-              </button>
-              <button type="button" onClick={() => setView("human-actions")} className={navClass("human-actions")}>
-                Human actions
                 {openHumanActionCount > 0 && (
                   <span
                     className="ml-1.5 inline-flex items-center gap-0.5 text-xs leading-none bg-red-500/20 text-red-300 px-1.5 py-0.5 rounded tabular-nums border border-red-400/30 align-middle"
@@ -151,38 +106,6 @@ export default function App() {
                     <AlertIcon className="w-3 h-3 shrink-0" />
                     {openHumanActionCount}
                   </span>
-                )}
-              </button>
-              <button type="button" onClick={() => setView("ops")} className={navClass("ops")}>
-                Operations
-                {actionTotal > 0 && (
-                  <span className="ml-1.5 inline-flex items-center gap-1 align-middle">
-                    {planReviewCount > 0 && (
-                      <span
-                        className="text-xs leading-none bg-cyber-violet/20 text-cyber-violet-light px-1.5 py-0.5 rounded tabular-nums border border-cyber-violet/35"
-                        title={`${planReviewCount} plan${planReviewCount === 1 ? "" : "s"} ready to review`}
-                      >
-                        {planReviewCount}
-                      </span>
-                    )}
-                    {resultReviewCount > 0 && (
-                      <span
-                        className="text-xs leading-none bg-[#C4B643]/30 text-[#E8DC7A] px-1.5 py-0.5 rounded tabular-nums"
-                        title={`${resultReviewCount} result${resultReviewCount === 1 ? "" : "s"} to review`}
-                      >
-                        {resultReviewCount}
-                      </span>
-                    )}
-                  </span>
-                )}
-              </button>
-              <button type="button" onClick={() => setView("intake")} className={navClass("intake")}>
-                Inbox
-              </button>
-              <button type="button" onClick={() => setView("done")} className={navClass("done")}>
-                Done
-                {doneCount > 0 && (
-                  <span className="ml-1 text-xs bg-white/10 px-1.5 py-0.5 rounded">{doneCount}</span>
                 )}
               </button>
             </nav>
@@ -218,74 +141,25 @@ export default function App() {
 
         <main className="flex-1 flex overflow-hidden">
           {view === "issues" && !selectedIssueId && (
-            <IssuesListPage agents={snapshot?.agents ?? []} onSelectIssue={setSelectedIssueId} />
+            <IssuesListPage
+              agents={agents}
+              humanActions={humanActions}
+              onSelectIssue={setSelectedIssueId}
+              onHumanActionsChanged={refreshHumanActions}
+            />
           )}
           {view === "issues" && selectedIssueId && (
             <IssueDetailPage
               issueId={selectedIssueId}
-              agents={snapshot?.agents ?? []}
+              agents={agents}
               onBack={() => setSelectedIssueId(null)}
-            />
-          )}
-          {view === "human-actions" && <HumanActionsPage onSelectIssue={goToIssueFromAction} />}
-          {view === "ops" && (
-            <OperationsPage
-              snapshot={snapshot}
-              selectedRunId={selectedRun?.id ?? null}
-              onSelectRun={setSelectedRun}
-            />
-          )}
-          {view === "intake" && (
-            <IntakePage
-              agents={snapshot?.agents ?? []}
-              onRefresh={refresh}
-              onGoOperations={() => setView("ops")}
-              onManageAgents={goAgents}
-            />
-          )}
-          {view === "done" && (
-            <DonePage
-              runs={snapshot?.runs ?? []}
-              selectedRunId={selectedRun?.id ?? null}
-              onSelectRun={setSelectedRun}
-              sentRunIds={snapshot?.sentRunIds ?? []}
+              onHumanActionsChanged={refreshHumanActions}
             />
           )}
           {view === "agents" && (
-            <AgentsPage
-              agents={snapshot?.agents ?? []}
-              agentDeckOnline={snapshot?.agentDeckOnline ?? false}
-              onRefresh={refresh}
-            />
+            <AgentsPage agents={agents} agentDeckOnline={agentDeckOnline} onRefresh={refreshAgents} />
           )}
         </main>
-
-        {selectedRun && (
-          <RunDrawer
-            run={selectedRun}
-            agents={snapshot?.agents ?? []}
-            onClose={() => setSelectedRun(null)}
-            onRefresh={refresh}
-            onApproved={refresh}
-            onApprovedAndNext={() => advanceAfterAction(selectedRun.id)}
-            onDoneAndNext={() => advanceAfterAction(selectedRun.id)}
-            queueNav={
-              reviewQueue.length > 1
-                ? {
-                    runs: reviewQueue,
-                    index: reviewIndex,
-                    onPrev: () => goToReviewAt(reviewIndex - 1),
-                    onNext: () => goToReviewAt(reviewIndex + 1),
-                  }
-                : undefined
-            }
-            onRetry={(newRun) => {
-              setSelectedRun(newRun);
-              setView("ops");
-              refresh();
-            }}
-          />
-        )}
       </div>
     </>
   );
