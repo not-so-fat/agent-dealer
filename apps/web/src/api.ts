@@ -121,25 +121,6 @@ export async function fetchDecks(): Promise<DeckListResult> {
   }
 }
 
-export type PlaybookListResult =
-  | { ok: true; playbooks: Array<{ id: string; title: string }> }
-  | { ok: false; message: string };
-
-export async function fetchDeckPlaybooks(deckId: string): Promise<PlaybookListResult> {
-  try {
-    const res = await fetch(`${API}/api/agent-deck/decks/${deckId}/playbooks`);
-    const json = (await res.json().catch(() => null)) as
-      | { data?: Array<{ id: string; title: string }>; error?: string }
-      | null;
-    if (!res.ok) {
-      return { ok: false, message: json?.error ?? `Agent Deck error (${res.status})` };
-    }
-    return { ok: true, playbooks: json?.data ?? [] };
-  } catch (e) {
-    return { ok: false, message: e instanceof Error ? e.message : String(e) };
-  }
-}
-
 export interface IssueListRow {
   id: string;
   title: string;

@@ -300,7 +300,7 @@ export function updateIssue(id: string, patch: UpdateIssuePatch): Issue {
   return updated;
 }
 
-/** Distinct local repo paths from prior issues, most recently used first (NOT-102). */
+/** Distinct repo identities from prior issues, most recently used first (NOT-102). */
 export function listRecentRepos(limit = 20): string[] {
   const rows = getDb()
     .prepare(

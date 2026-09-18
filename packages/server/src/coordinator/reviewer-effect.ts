@@ -27,7 +27,7 @@ import path from "node:path";
 import { parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
 import type { EffectContext } from "./effect-registry.js";
 import type { ReviewerOutcome } from "./routing.js";
-import { getTaskSnapshot, TASK_SNAPSHOT_ARTIFACT_KIND } from "./commands.js";
+import { getTaskSnapshot } from "./commands.js";
 import { buildReviewerPrompt, formatDiffForPrompt, TOTAL_DIFF_LIMIT } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realReviewerSpawn, reviewerSessionLogPath, type ReviewerSpawn } from "./spawn.js";
@@ -53,7 +53,6 @@ import { reviewerSessionTimeoutMs } from "./session-timeouts.js";
 import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
-import { updateIssue } from "../repository/issues.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
 import { classifyRunnerLogFailure } from "./failure-reason.js";
@@ -65,6 +64,7 @@ import {
   startActivitySampler,
   taskBriefIsComplete,
 } from "./session-progress.js";
+import { syncIssueBaseBranch } from "./sync-issue-base-branch.js";
 import {
   claimReviewPublication,
   getReviewPublication,
@@ -263,21 +263,7 @@ export async function runReviewerEffect(
     const checkout = await ensureIssueRepoCheckout(issue.repo);
     repoPath = checkout.repoPath;
     baseBranch = resolveCheckoutBaseBranch(issue.baseBranch, checkout);
-    // Align issue row + frozen task_snapshot with the base this session uses (prompts /
-    // baseRefCandidates / UI all read issue.baseBranch).
-    if (baseBranch !== issue.baseBranch) {
-      updateIssue(issue.id, { baseBranch });
-      issue.baseBranch = baseBranch;
-      const snap = getTaskSnapshot(issue);
-      if (snap.baseBranch !== baseBranch) {
-        createIssueArtifact({
-          issueId: issue.id,
-          kind: TASK_SNAPSHOT_ARTIFACT_KIND,
-          author: "system",
-          content: { ...snap, baseBranch },
-        });
-      }
-    }
+    syncIssueBaseBranch(issue, baseBranch);
     const worktree = await createRoleWorktree({
       repo: repoPath,
       role: "reviewer",
