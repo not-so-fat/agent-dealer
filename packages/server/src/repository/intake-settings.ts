@@ -1,4 +1,4 @@
-import type { AgentDeckConfig, LinearIntakeConfig, LinearRoutingRule } from "@agent-dealer/shared";
+import type { AgentDeckConfig, LinearIntakeConfig } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 
 /** Open workflow states — exclude terminal Done / Canceled. Shared with linear-inbox seed. */
@@ -31,9 +31,7 @@ export function getPersistedLinearIntakeConfig(): LinearIntakeConfig {
     stateFilter: getJson<string[]>("linear.stateFilter", [...DEFAULT_LINEAR_STATE_FILTER]),
     teamId: getJson<string | null>("linear.teamId", null),
     assigneeMe: getJson<boolean>("linear.assigneeMe", false),
-    defaultAgentId: getJson<string | null>("linear.defaultAgentId", null),
     syncEnabled: getJson<boolean>("linear.syncEnabled", true),
-    routingRules: getJson<LinearRoutingRule[]>("linear.routingRules", []),
   };
 }
 

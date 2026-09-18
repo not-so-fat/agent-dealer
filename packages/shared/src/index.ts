@@ -314,19 +314,15 @@ export const LinearCandidate = z.object({
 });
 export type LinearCandidate = z.infer<typeof LinearCandidate>;
 
-export const LinearRoutingRule = z.object({
-  label: z.string().min(1),
-  agentId: z.string().uuid(),
-});
-export type LinearRoutingRule = z.infer<typeof LinearRoutingRule>;
-
+// NOT-71: defaultAgentId and routingRules (label -> agent `autoAgent` routing) are gone
+// with intake/agent-routing.ts and the promote endpoint that consumed them. The persisted
+// `linear.defaultAgentId` / `linear.routingRules` rows are left in intake_settings — this
+// ticket removes no user data — but nothing reads them into the config any more.
 export const LinearIntakeConfig = z.object({
   stateFilter: z.array(z.string()),
   teamId: z.string().nullable(),
   assigneeMe: z.boolean(),
-  defaultAgentId: z.string().uuid().nullable(),
   syncEnabled: z.boolean(),
-  routingRules: z.array(LinearRoutingRule),
 });
 export type LinearIntakeConfig = z.infer<typeof LinearIntakeConfig>;
 
