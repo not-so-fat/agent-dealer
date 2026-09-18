@@ -17,7 +17,7 @@
 
 import type { Issue } from "@agent-dealer/shared";
 import { fetchLinearBlockers, type LinearBlockerNode } from "../adapters/linear-inbox.js";
-import { findIssueByExternalId } from "../repository/issues.js";
+import { listIssuesByExternalId } from "../repository/issues.js";
 
 export type BlockerState = LinearBlockerNode;
 
@@ -249,13 +249,18 @@ export type BlockerVerdict = { satisfied: boolean; state: string };
  * picked up; for one it did, the fix is to drop the `blocks` relation.
  */
 export function blockerVerdict(blocker: BlockerState): BlockerVerdict {
-  const dealerIssue = blocker.id ? findIssueByExternalId("linear", blocker.id) : null;
-  if (dealerIssue) {
+  // NOT-141: a ticket may have several dealer passes (newest first) once a terminal one no
+  // longer blocks a re-import. A merged pass stays merged, so *any* `done` pass satisfies —
+  // an abandoned follow-up must not un-satisfy a blocker whose code already landed.
+  const dealerPasses = blocker.id ? listIssuesByExternalId("linear", blocker.id) : [];
+  if (dealerPasses.length > 0) {
+    const merged = dealerPasses.find((issue) => issue.status === "done");
     return {
-      satisfied: dealerIssue.status === "done",
+      satisfied: merged != null,
       // The dealer status is the honest answer to "why am I still waiting" — a blocker
-      // sitting at `waiting on NOT-123 (Done)` reads like a bug.
-      state: dealerIssue.status,
+      // sitting at `waiting on NOT-123 (Done)` reads like a bug. Unsatisfied reports the
+      // current (newest) pass, which is the one that still has to land.
+      state: (merged ?? dealerPasses[0]).status,
     };
   }
   return { satisfied: SATISFIED_STATE_TYPES.has(blocker.stateType), state: blocker.stateName };

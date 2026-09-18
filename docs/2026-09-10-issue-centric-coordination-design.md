@@ -228,7 +228,7 @@ New `packages/server/src/routes/issues.ts`:
 - `GET /api/issues` — list (id, title, status, current_owner, current_intent, updated_at, human-action marker)
 - `GET /api/issues/:id` — header + timeline (`workflow_events` joined with artifact references) + computed intent forecast + linked human actions + findings + usage summary
 - `GET /api/issues/:id/evidence` — paginated worker sessions, artifacts, usage events, and raw transcript/provider references for the evidence disclosure and programmatic inspection
-- `POST /api/issues` — create/import (manual or Linear), idempotent on `(source, external_id)`
+- `POST /api/issues` — create/import (manual or Linear). Guarded on *live* `(source, external_id)` only (NOT-141): a match that is still startable is re-enqueued and answers `created: false`, any other live match answers 409 with `existingIssueId`, and a ticket whose only issues are terminal gets a new row (`priorPasses > 0`) so a second pass is possible
 - `POST /api/issues/:id/start` — start the issue's one workflow; idempotently returns its active instance when already running and rejects a terminal issue unless an explicit restart policy is added later
 - `POST /api/issues/:id/guidance` — append human guidance to the timeline (PRD §7.4 composer)
 - `GET /api/human-actions` — global queue (open actions across issues)

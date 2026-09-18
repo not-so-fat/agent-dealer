@@ -467,7 +467,7 @@ Additional provider events may be stored raw without appearing in the default is
 - Structured workflow events are the coordination source of truth.
 - GitHub and Linear remain authoritative for their own artifacts.
 - Raw runtime transcripts and provider payloads are preserved as evidence, not interpreted as workflow state.
-- Re-ingestion and webhooks must be idempotent.
+- Re-ingestion and webhooks must be idempotent *against a live issue*: re-importing a ticket that is still in flight never creates a second issue. Idempotency ends at the pass boundary — once every issue for a ticket is terminal, a re-import opens a new pass (NOT-141).
 - A visible timeline event must link back to the structured record and authoritative artifact when one exists.
 
 ## 10. Measurements

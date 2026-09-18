@@ -1,8 +1,14 @@
 // packages/server/src/routes/issues.ts
 import fs from "node:fs";
 import type { FastifyInstance } from "fastify";
-import { CreateIssueInput, IssueStatus, UpdateIssueInput } from "@agent-dealer/shared";
-import { createIssue, getIssue, listIssues, findIssueByExternalId, updateIssue, listRecentRepos } from "../repository/issues.js";
+import {
+  CreateIssueInput,
+  type CreateIssueResult,
+  type ExistingIssueConflict,
+  IssueStatus,
+  UpdateIssueInput,
+} from "@agent-dealer/shared";
+import { createIssue, getIssue, listIssues, findActiveIssueByExternalId, listIssuesByExternalId, updateIssue, listRecentRepos } from "../repository/issues.js";
 import { listWorkerSessionsForIssue, getActiveWorkerSessionForIssue } from "../repository/worker-sessions.js";
 import { getIssueArtifact, listArtifactsForIssue } from "../repository/artifacts-for-issue.js";
 import { listUsageEventsForIssue, summarizeIssueUsage } from "../repository/usage-events.js";
@@ -139,16 +145,33 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     const parsed = CreateIssueInput.safeParse(req.body);
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.message });
     const input = parsed.data;
+    // Terminal passes already on record for this ticket — 0 for a manual create. Reported
+    // back so "this is the second pass on NOT-128" never reads like a first import.
+    let priorPasses = 0;
     if (input.externalId) {
-      const existing = findIssueByExternalId(input.source, input.externalId);
+      // NOT-141: the guard is scoped to *live* issues, mirroring runs' findActiveByExternalId.
+      // A terminal (`done`/`closed`) row falls through to create a second, independent issue
+      // for the same ticket — a regression, a follow-up, or a retry of an abandoned pass —
+      // rather than making the ticket single-use for the lifetime of the database.
+      const existing = findActiveIssueByExternalId(input.source, input.externalId);
+      priorPasses = listIssuesByExternalId(input.source, input.externalId).length;
       if (existing) {
-        // Idempotent re-create of an already-imported issue: re-enqueue it when it is still
-        // startable, so a repeated "kick from Linear" lands it back in the queue instead of
-        // being a silent no-op. `isStartable` is admission's own predicate — enqueueing
-        // anything it would reject (a running issue, a `final_review` one awaiting a merge
-        // call, a terminal one) parks a row that can never be admitted.
-        if (input.enqueue && isStartable(existing)) enqueueIssue(existing.id);
-        return existing;
+        // Re-import of a ticket already in flight: never a duplicate row, and never a bare
+        // 200 the caller cannot interpret. A still-startable issue goes back in the queue, so
+        // a repeated "kick from Linear" is not a silent no-op; `isStartable` is admission's
+        // own predicate — enqueueing anything it would reject (a running issue, a
+        // `final_review` one awaiting a merge call) parks a row that can never be admitted.
+        if (input.enqueue && isStartable(existing)) {
+          enqueueIssue(existing.id);
+          return { ...existing, created: false, enqueued: true, priorPasses } satisfies CreateIssueResult;
+        }
+        // Anything else is a real conflict: say which issue holds the ticket and in what
+        // state, the way POST /api/intake/linear/:issueId/promote answers with its run id.
+        return reply.status(409).send({
+          error: `Issue ${existing.id} is already tracking ${input.source} ${input.externalId} (${existing.status})`,
+          existingIssueId: existing.id,
+          existingIssueStatus: existing.status,
+        } satisfies ExistingIssueConflict);
       }
     }
     const issue = createIssue(input);
@@ -156,7 +179,7 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     // NOT-118: create enqueues, it never starts. Server-side so the UI, CLI and agents all
     // behave the same — callers hold no workflow logic. `enqueue: false` creates a draft.
     if (input.enqueue) enqueueIssue(issue.id);
-    return issue;
+    return { ...issue, created: true, enqueued: input.enqueue, priorPasses } satisfies CreateIssueResult;
   });
 
   app.patch("/api/issues/:id", async (req, reply) => {

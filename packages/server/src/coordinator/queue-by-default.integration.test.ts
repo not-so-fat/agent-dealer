@@ -262,7 +262,7 @@ test("re-queueing a dequeued issue works, and start 409s once a workflow is acti
   await app.close();
 });
 
-test("re-importing a migrated final_review issue re-enqueues nothing; a still-startable one re-enqueues", async () => {
+test("re-importing a migrated final_review issue conflicts; a still-startable one re-enqueues", async () => {
   const app = await buildApp();
   const payload = {
     title: "Kicked twice from Linear",
@@ -287,12 +287,12 @@ test("re-importing a migrated final_review issue re-enqueues nothing; a still-st
   transitionIssue(first.id, "final_review");
   assert.equal(getActiveWorkflowInstance(first.id), null);
 
-  // Re-import stays idempotent, but must not queue an entry admission would reject forever
-  // with `status final_review — not startable`.
-  const second = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as {
-    id: string;
-  };
-  assert.equal(second.id, first.id);
+  // Re-import must not duplicate the row, and must not queue an entry admission would reject
+  // forever with `status final_review — not startable`. NOT-141: it says so with a 409 naming
+  // the issue rather than a 200 the caller cannot tell from a fresh import.
+  const second = await app.inject({ method: "POST", url: "/api/issues", payload });
+  assert.equal(second.statusCode, 409);
+  assert.equal((second.json() as { existingIssueId: string }).existingIssueId, first.id);
   assert.equal(getQueuedEntryForIssue(first.id), null, "final_review is not startable");
   assert.deepEqual(listQueuedEntries().map((e) => e.issueId), []);
 
@@ -303,7 +303,12 @@ test("re-importing a migrated final_review issue re-enqueues nothing; a still-st
   ).json() as { id: string };
   dequeueIssue(ready.id);
   assert.equal(getQueuedEntryForIssue(ready.id), null);
-  await app.inject({ method: "POST", url: "/api/issues", payload: readyPayload });
+  const reimport = await app.inject({ method: "POST", url: "/api/issues", payload: readyPayload });
+  assert.equal(reimport.statusCode, 200);
+  const reimported = reimport.json() as { id: string; created: boolean; enqueued: boolean };
+  assert.equal(reimported.id, ready.id);
+  assert.equal(reimported.created, false);
+  assert.equal(reimported.enqueued, true);
   assert.equal(getQueuedEntryForIssue(ready.id)?.state, "queued");
   await app.close();
 });

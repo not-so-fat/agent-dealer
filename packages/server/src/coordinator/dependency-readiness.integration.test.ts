@@ -189,6 +189,27 @@ test("satisfaction (decision 2): unlinked blocker needs completed/canceled; deal
   assert.equal(waitReason(downstream.id), "waiting on NOT-AB (closed)");
 });
 
+test("NOT-141: a blocker with several dealer passes is satisfied by the merged one, not the newest", async () => {
+  const merged = seedIssue({ source: "linear", externalId: "lin-multi", title: "Blocker pass 1" });
+  const dependent = seedIssue({ source: "linear", externalId: "lin-multi-dep" });
+  enqueueIssue(dependent.id);
+  provideBlockers({
+    "lin-multi-dep": [
+      blocker({ id: "lin-multi", identifier: "NOT-MULTI", stateName: "In Progress", stateType: "started" }),
+    ],
+  });
+
+  assert.equal(await admitNext(), null, "the blocker has not merged yet");
+  getDb().prepare("UPDATE issues SET status = 'done' WHERE id = ?").run(merged.id);
+
+  // A follow-up pass on the same ticket that was abandoned must not un-satisfy a blocker
+  // whose code already landed — re-imports after a terminal pass make this shape normal.
+  const followUp = seedIssue({ source: "linear", externalId: "lin-multi", title: "Blocker pass 2" });
+  getDb().prepare("UPDATE issues SET status = 'closed' WHERE id = ?").run(followUp.id);
+
+  assert.equal((await admitNext())?.issueId, dependent.id);
+});
+
 test("blocker merges: the entry is admitted on the next tick, with no unblock event and across a restart", async () => {
   const upstream = seedIssue({ source: "linear", externalId: "lin-up" });
   const dependent = seedIssue({ source: "linear", externalId: "lin-dep" });

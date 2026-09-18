@@ -126,6 +126,43 @@ export function canTransitionIssue(from: IssueStatus, to: IssueStatus): boolean 
 }
 
 /**
+ * The statuses a pass can never leave — derived from the transition table so the two cannot
+ * drift. "Terminal" is a property of the *local* issue row, not of the upstream ticket: a
+ * closed dealer issue for a still-open Linear ticket is the normal case a re-import serves
+ * (NOT-141).
+ */
+export const TERMINAL_ISSUE_STATUSES: readonly IssueStatus[] = (
+  Object.keys(ISSUE_STATUS_TRANSITIONS) as IssueStatus[]
+).filter((status) => ISSUE_STATUS_TRANSITIONS[status].length === 0);
+
+/**
+ * NOT-141: `POST /api/issues` answers with the issue *plus* what the server did with it.
+ * `created: false` means the request matched a live issue for the same `(source,
+ * externalId)` and re-enqueued it instead of making a second row — without these flags a
+ * caller cannot tell an import from a no-op, and the CLI printed "Queued for admission" for
+ * requests that queued nothing.
+ */
+export const CreateIssueResult = Issue.extend({
+  created: z.boolean(),
+  enqueued: z.boolean(),
+  /**
+   * How many issues already existed for this `(source, externalId)` before the request (0
+   * for a manual create). With `created: true` they are all terminal, so a non-zero count
+   * means this import opened a *second* pass on a ticket dealer has already finished once —
+   * callers should say that out loud instead of presenting it as a first import.
+   */
+  priorPasses: z.number().int().min(0),
+});
+export type CreateIssueResult = z.infer<typeof CreateIssueResult>;
+
+/** 409 body when a re-import collides with a live issue — mirrors the runs promote path. */
+export interface ExistingIssueConflict {
+  error: string;
+  existingIssueId: string;
+  existingIssueStatus: IssueStatus;
+}
+
+/**
  * Issue-scoped artifact. Distinct from the legacy run-scoped `Artifact`: it is keyed
  * by `issueId` (+ optional `workerSessionId`), never a `runId`, so it validates on its
  * own terms rather than failing `Artifact.runId`'s UUID check.

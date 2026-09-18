@@ -8,7 +8,15 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-is
 
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
-const { createIssue, getIssue, listIssues, transitionIssue, incrementIssueRound } = await import("./issues.js");
+const {
+  createIssue,
+  getIssue,
+  listIssues,
+  transitionIssue,
+  incrementIssueRound,
+  findActiveIssueByExternalId,
+  listIssuesByExternalId,
+} = await import("./issues.js");
 
 before(() => {
   migrate();
@@ -53,4 +61,29 @@ test("increments the round counter", () => {
   const issue = createIssue(makeInput("Round me"));
   const bumped = incrementIssueRound(issue.id);
   assert.equal(bumped.currentRound, 2);
+});
+
+test("NOT-141: the active-by-external-id lookup ignores terminal rows; the list keeps every pass", () => {
+  const linear = { ...makeInput("Linear pass 1"), source: "linear" as const, externalId: "NOT-999" };
+  const first = createIssue(linear);
+  assert.equal(findActiveIssueByExternalId("linear", "NOT-999")?.id, first.id);
+
+  transitionIssue(first.id, "closed");
+  assert.equal(findActiveIssueByExternalId("linear", "NOT-999"), null, "a closed pass is not in flight");
+  // The terminal pass is still on record — dependency verdicts read every pass.
+  assert.deepEqual(listIssuesByExternalId("linear", "NOT-999").map((i) => i.id), [first.id]);
+
+  // (source, external_id) is deliberately non-unique: a second pass is a second row.
+  const second = createIssue({ ...linear, title: "Linear pass 2" });
+  assert.notEqual(second.id, first.id);
+  assert.equal(findActiveIssueByExternalId("linear", "NOT-999")?.id, second.id);
+  // Newest first, so callers that want one answer get the current pass.
+  assert.deepEqual(listIssuesByExternalId("linear", "NOT-999").map((i) => i.id), [second.id, first.id]);
+});
+
+test("terminal-scoped lookup is per (source, externalId) pair", () => {
+  createIssue({ ...makeInput("Other source"), source: "agent" as const, externalId: "SHARED-1" });
+  const linear = createIssue({ ...makeInput("Linear side"), source: "linear" as const, externalId: "SHARED-1" });
+  assert.equal(findActiveIssueByExternalId("linear", "SHARED-1")?.id, linear.id);
+  assert.equal(findActiveIssueByExternalId("manual", "SHARED-1"), null);
 });

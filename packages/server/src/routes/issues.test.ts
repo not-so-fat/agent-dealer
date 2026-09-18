@@ -18,7 +18,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-is
 const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { registerIssueRoutes } = await import("./issues.js");
-const { transitionIssue } = await import("../repository/issues.js");
+const { transitionIssue, listIssuesByExternalId } = await import("../repository/issues.js");
 const { createIssueArtifact } = await import("../repository/artifacts.js");
 const { getQueuedEntryForIssue, listQueuedEntries } = await import("../repository/queue-entries.js");
 const { setAdmissionHealthCheckerForTests } = await import("../coordinator/admission.js");
@@ -95,12 +95,58 @@ test("NOT-118: POST /api/issues with enqueue:false creates a draft that is not q
   await app.close();
 });
 
-test("POST /api/issues is idempotent on (source, externalId)", async () => {
+test("POST /api/issues re-enqueues a live (source, externalId) match instead of duplicating it", async () => {
   const app = await buildApp();
   const payload = { title: "Linear task", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, source: "linear", externalId: "LIN-1" };
+  const first = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as { id: string; created: boolean };
+  assert.equal(first.created, true);
+  const secondRes = await app.inject({ method: "POST", url: "/api/issues", payload });
+  assert.equal(secondRes.statusCode, 200);
+  const second = secondRes.json() as { id: string; created: boolean; enqueued: boolean };
+  assert.equal(second.id, first.id);
+  // NOT-141: the caller can tell nothing new was created.
+  assert.equal(second.created, false);
+  assert.equal(second.enqueued, true);
+  assert.equal(listIssuesByExternalId("linear", "LIN-1").length, 1);
+  await app.close();
+});
+
+test("NOT-141: re-importing a ticket whose only issue is terminal creates a new, queued issue", async () => {
+  const app = await buildApp();
+  const payload = { title: "Second pass", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, source: "linear", externalId: "LIN-CLOSED" };
   const first = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as { id: string };
-  const second = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as { id: string };
-  assert.equal(first.id, second.id);
+  transitionIssue(first.id, "closed");
+
+  const secondRes = await app.inject({ method: "POST", url: "/api/issues", payload });
+  assert.equal(secondRes.statusCode, 200);
+  const second = secondRes.json() as { id: string; status: string; created: boolean; enqueued: boolean; priorPasses: number };
+  assert.notEqual(second.id, first.id, "a terminal row must not block a second pass");
+  assert.equal(second.created, true);
+  assert.equal(second.priorPasses, 1, "the caller is told this is a second pass, not a first import");
+  assert.equal(second.status, "ready");
+  assert.equal(getQueuedEntryForIssue(second.id)?.state, "queued");
+  // Both rows keep the same external id — (source, external_id) stays non-unique.
+  const rows = listIssuesByExternalId("linear", "LIN-CLOSED");
+  assert.deepEqual(rows.map((i) => i.status).sort(), ["closed", "ready"]);
+  await app.close();
+});
+
+test("NOT-141: re-importing a ticket that is mid-flight answers 409 with the issue that holds it", async () => {
+  const app = await buildApp();
+  const payload = { title: "In flight", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, source: "linear", externalId: "LIN-LIVE" };
+  const first = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as { id: string };
+  transitionIssue(first.id, "developing");
+  const queuedBefore = listQueuedEntries().map((e) => e.issueId);
+
+  const conflict = await app.inject({ method: "POST", url: "/api/issues", payload });
+  assert.equal(conflict.statusCode, 409);
+  const body = conflict.json() as { error: string; existingIssueId: string; existingIssueStatus: string };
+  assert.equal(body.existingIssueId, first.id);
+  assert.equal(body.existingIssueStatus, "developing");
+  assert.match(body.error, /already tracking/);
+  // Still one row, and the queue is exactly as it was — no entry invented for a second pass.
+  assert.equal(listIssuesByExternalId("linear", "LIN-LIVE").length, 1);
+  assert.deepEqual(listQueuedEntries().map((e) => e.issueId), queuedBefore);
   await app.close();
 });
 
