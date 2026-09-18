@@ -2,6 +2,19 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.0.1 — 2026-09-18
+
+Patch over 1.0.0: auto-merge + reviewer contract fixes for the issue Dev→PR→Review path.
+
+### Fixes
+
+- **Auto-merge after portable repos** — merge `gh` uses the managed clone path, not `github.com/…` as cwd (that looked like `spawn gh ENOENT`). Missing clone fails with a clear reason; bad-cwd vs missing-`gh` are distinguished.
+- **Friend-path docs** — install/setup tips and PROD_SETUP state `gh` + `gh auth login`, prefer managed `~/.local/bin`, and doctor green before kicking issues.
+
+### Reviewer contract
+
+- **Blocking / truncate ⇒ changes_requested; shippable ⇒ Merge** — reviewer + coordinator verdict contract (NOT-150) so incomplete or blocking findings cannot read as shippable.
+
 ## 1.0.0 — 2026-09-18
 
 First major release: **issue queue + Dev→PR→Review** replaces the older run-oriented plan/execute product.
