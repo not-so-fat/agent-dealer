@@ -8,7 +8,7 @@ Issue workflows always shell out to **GitHub CLI** (draft PR create, checks, aut
 
 1. Install `gh` (`brew install gh` on macOS) and run `gh auth login -h github.com`
 2. Prefer managed install at `~/.local/bin/agent-dealer` (`export PATH="$HOME/.local/bin:$PATH"`). Remove leftover `npm i -g agent-dealer` binaries under `/opt/homebrew/bin` (or similar) so an old global does not shadow 1.0.0+
-3. Confirm with `agent-dealer doctor` — GitHub CLI + auth must be green. Start / admission refuse when `gh` is missing or auth is invalid (same class as runtime auth)
+3. Confirm with `agent-dealer doctor` — GitHub must be green before kicking issues (Start refuses when `gh` is missing or auth is invalid)
 
 ## Layout
 

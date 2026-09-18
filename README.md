@@ -48,7 +48,7 @@ Prerequisites: Node.js 20+ · [Claude Code](https://docs.anthropic.com/en/docs/c
 
 1. Install GitHub CLI and sign in: `brew install gh` then `gh auth login -h github.com`
 2. Prefer the **managed** install (`~/.local/bin/agent-dealer`). Remove leftover `npm i -g agent-dealer` / Homebrew-prefix globals so PATH does not shadow 1.0.0+
-3. Run `agent-dealer doctor` — GitHub must be green before kicking issues (Start refuses bad `gh` auth)
+3. Run `agent-dealer doctor` — GitHub must be green before kicking issues (Start refuses when `gh` is missing or auth is invalid)
 
 **Recommended (managed install — auto-updates, keeps existing `~/.agent-dealer` data):**
 
