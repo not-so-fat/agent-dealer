@@ -40,8 +40,7 @@ const {
   inspectWorkerProcess,
   processLiveness,
   readProcessStartTime,
-  terminateWorkerProcess,
-} = await import("./process-liveness.js");
+  terminateWorkerProcess} = await import("./process-liveness.js");
 
 const LEASE_MS = 60_000;
 /** A clock far enough past any lease that timestamp-only recovery would always reclaim. */
@@ -86,8 +85,7 @@ function spawnLiveChild(): LiveChild {
       } catch {
         /* already gone */
       }
-    },
-  };
+    }};
   spawnedChildren.push(live);
   return live;
 }
@@ -121,14 +119,13 @@ function newIssue(): string {
   return createIssue({
     title: "Survive the restart",
     acceptanceCriteria: "It survives",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 /** A leased developer work item with a running session bound to it, as a live attempt has. */
@@ -142,8 +139,7 @@ function leasedAttempt(leaseMs = LEASE_MS): { issueId: string; itemId: string; s
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: null,
-  });
+    runtime: null});
   startSession(session.id);
   assert.equal(bindWorkItemSession(item.id, session.id, claimed.leaseToken!), true);
   return { issueId, itemId: item.id, sessionId: session.id };
@@ -293,8 +289,7 @@ test("NOT-131: a sleep grace still protects a lease the ceiling would otherwise 
     const now = Date.now() + 60_000;
     const res = await recoverCoordinator({
       now,
-      clockJump: { detectedAt: now, graceUntil: now + 60_000, wallGapMs: 0, unelapsedMs: 0, unobservedMs: 0 },
-    });
+      clockJump: { detectedAt: now, graceUntil: now + 60_000, wallGapMs: 0, unelapsedMs: 0, unobservedMs: 0 }});
 
     assert.deepEqual(res.reclaimed, []);
     assert.deepEqual(res.heldAliveExpired, [], "held, so not reported as reclaimed either");

@@ -17,8 +17,8 @@ import type { DeckAccessResult } from "./agent-deck.js";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-agenthealth-"));
 
-const { migrate } = await import("../db/index.js");
-const { createAgent } = await import("../repository/agents.js");
+const { migrate, getDb } = await import("../db/index.js");
+const { createAgent, getAgent } = await import("../repository/agents.js");
 const { healthForAgent, runtimeIssuesUncached, githubIssuesUncached, clearAgentHealthCaches } =
   await import("./agent-health.js");
 
@@ -29,20 +29,23 @@ const FAILURE: DeckAccessResult = { ok: false, code: "DECK_UNAVAILABLE", message
 /** Tests inject an empty github list so host `gh auth` does not pollute assertions. */
 const NO_GITHUB: AgentHealthIssue[] = [];
 
-test("agentDeckOnline but no deckId configured: no deck-related issue", async () => {
-  const agent = createAgent({ name: "no-deck", runtime: "claude_code", workspaceRoot: "/tmp" });
+test("missing deckId: reports deck_missing", async () => {
+  const created = createAgent({
+    name: "no-deck",
+    runtime: "claude_code",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
+  getDb().prepare("UPDATE agents SET deck_id = NULL WHERE id = ?").run(created.id);
+  const agent = getAgent(created.id)!;
   const result = await healthForAgent(agent, true, new Map(), true, FAILURE, NO_GITHUB);
-  assert.equal(
-    result.issues.some((i) => i.code === "deck_unauthorized" || i.code === "deck_offline"),
-    false
-  );
+  assert.equal(result.issues.some((i) => i.code === "deck_missing"), true);
+  assert.equal(result.healthy, false);
 });
 
 test("agent deck offline: reports deck_offline, not deck_unauthorized", async () => {
   const agent = createAgent({
     name: "offline",
     runtime: "claude_code",
-    workspaceRoot: "/tmp",
     deckId: randomUUID(),
   });
   const result = await healthForAgent(agent, false, new Map(), true, FAILURE, NO_GITHUB);
@@ -56,7 +59,6 @@ test("agent deck online but metadata unavailable: reports deck_unauthorized with
   const agent = createAgent({
     name: "unavailable",
     runtime: "claude_code",
-    workspaceRoot: "/tmp",
     deckId: randomUUID(),
   });
   const result = await healthForAgent(agent, true, new Map(), true, FAILURE, NO_GITHUB);
@@ -67,7 +69,7 @@ test("agent deck online but metadata unavailable: reports deck_unauthorized with
 
 test("agent deck online, metadata call succeeds, but this deck isn't in the returned set: reports deck_unauthorized", async () => {
   const deckId = randomUUID();
-  const agent = createAgent({ name: "stale-deck", runtime: "claude_code", workspaceRoot: "/tmp", deckId });
+  const agent = createAgent({ name: "stale-deck", runtime: "claude_code", deckId });
   const deckAccessResult: DeckAccessResult = { ok: true, decks: [{ id: randomUUID(), name: "some-other-deck" }] };
   const result = await healthForAgent(agent, true, new Map(), true, deckAccessResult, NO_GITHUB);
   const issue = result.issues.find((i) => i.code === "deck_unauthorized");
@@ -76,7 +78,7 @@ test("agent deck online, metadata call succeeds, but this deck isn't in the retu
 
 test("agent deck online and this deck is in the returned set: healthy on the deck axis", async () => {
   const deckId = randomUUID();
-  const agent = createAgent({ name: "healthy", runtime: "claude_code", workspaceRoot: "/tmp", deckId });
+  const agent = createAgent({ name: "healthy", runtime: "claude_code", deckId });
   const deckAccessResult: DeckAccessResult = { ok: true, decks: [{ id: deckId, name: "healthy-deck" }] };
   const result = await healthForAgent(agent, true, new Map(), true, deckAccessResult, NO_GITHUB);
   assert.equal(
@@ -89,7 +91,6 @@ test("agent deck online with no deck-access result computed (e.g. no agent neede
   const agent = createAgent({
     name: "no-result",
     runtime: "claude_code",
-    workspaceRoot: "/tmp",
     deckId: randomUUID(),
   });
   const result = await healthForAgent(agent, true, new Map(), true, null, NO_GITHUB);
@@ -118,7 +119,6 @@ test("cursor_local with a bound deck: no deck access issue (launch MCP is suppor
   const agent = createAgent({
     name: "cursor-with-deck",
     runtime: "cursor_local",
-    workspaceRoot: "/tmp",
     deckId: randomUUID(),
   });
   const result = await healthForAgent(agent, true, new Map(), true, null, NO_GITHUB);
@@ -129,7 +129,11 @@ test("cursor_local with a bound deck: no deck access issue (launch MCP is suppor
 });
 
 test("github_auth issues mark the agent unhealthy so Start can refuse before a wasted run", async () => {
-  const agent = createAgent({ name: "needs-gh", runtime: "claude_code", workspaceRoot: "/tmp" });
+  const agent = createAgent({
+    name: "needs-gh",
+    runtime: "claude_code",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
   const gh: AgentHealthIssue[] = [
     { code: "github_auth", message: "Run `gh auth login` — GitHub CLI auth required to open PRs" },
   ];
@@ -167,7 +171,11 @@ The keychain item is stuck. Delete it and sign in again:
   assert.equal(issue?.code, "cursor_keychain");
   assert.match(issue!.message, /delete-generic-password/);
 
-  const agent = createAgent({ name: "cursor-keychain", runtime: "cursor_local", workspaceRoot: "/tmp" });
+  const agent = createAgent({
+    name: "cursor-keychain",
+    runtime: "cursor_local",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
   const result = await healthForAgent(
     agent,
     true,

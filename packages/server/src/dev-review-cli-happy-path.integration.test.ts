@@ -139,8 +139,7 @@ function reviewerTranscript(baseSha: string, headSha: string): string {
     acceptanceCriteriaAssessment: "Met.",
     evidenceAssessment: "Evidence checked.",
     findings: [],
-    risks: [],
-  };
+    risks: []};
   return `\`\`\`json\n${JSON.stringify(body)}\n\`\`\`\n`;
 }
 
@@ -179,8 +178,7 @@ function fakeGithub(): GithubFn {
     async publishReview({ event }) {
       const finalEvent: ReviewEvent = event;
       return { ok: true, event: finalEvent, usedCommentFallback: false };
-    },
-  };
+    }};
   return adapter;
 }
 
@@ -231,8 +229,7 @@ function runCli(args: string[]): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(tsxBin, [cliEntry, ...args], {
       cwd: repoRoot,
-      env: { ...process.env, AGENT_DEALER_HOME: home, NO_COLOR: "1" },
-    });
+      env: { ...process.env, AGENT_DEALER_HOME: home, NO_COLOR: "1" }});
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += String(d)));
@@ -254,8 +251,8 @@ test(
     // Two fixture-registered agent profiles, each bound to the same test deck — proves
     // "Verify the selected Agent Deck ID reaches the worker profile snapshot and bind
     // evidence" (NOT-79 acceptance criteria), not just that the workflow completes.
-    const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo, deckId: DECK_ID }, "test-deck");
-    const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo, deckId: DECK_ID }, "test-deck");
+    const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: DECK_ID }, "test-deck");
+    const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", deckId: DECK_ID }, "test-deck");
 
     // One shared in-memory PR store — the developer opens the PR, and the reviewer must
     // see the SAME one via its own `viewPr` lookup (two independent fakes would each see

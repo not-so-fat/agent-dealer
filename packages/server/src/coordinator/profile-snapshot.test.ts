@@ -16,7 +16,11 @@ before(() => migrate());
 test("resolves the role-neutral model, falling back to the legacy execute column", () => {
   // NOT-71 removed the write path for the plan/execute columns, so the only way a row
   // carries them now is by predating that change — write them directly to reproduce one.
-  const created = createAgent({ name: "legacy", runtime: "claude_code", workspaceRoot: "/repo" });
+  const created = createAgent({
+    name: "legacy",
+    runtime: "claude_code",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
   getDb()
     .prepare("UPDATE agents SET default_execute_model = ?, default_plan_model = ? WHERE id = ?")
     .run("claude-sonnet-5", "claude-haiku-4-5", created.id);
@@ -28,38 +32,53 @@ test("resolves the role-neutral model, falling back to the legacy execute column
 });
 
 test("developer and reviewer snapshots carry different permission policies", () => {
-  const agent = createAgent({ name: "roles", runtime: "claude_code", workspaceRoot: "/repo" });
+  const agent = createAgent({
+    name: "roles",
+    runtime: "claude_code",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
   const dev = buildProfileSnapshot(agent, "developer");
   const rev = buildProfileSnapshot(agent, "reviewer");
   assert.equal(dev.permissionPolicy.worktreeWrite, true);
   assert.equal(rev.permissionPolicy.worktreeWrite, false);
 });
 
-test("playbookIds falls back to the single legacy playbook_id, then honours the multi list", () => {
+test("snapshot omits legacy workspace/playbook/memory fields (NOT-149)", () => {
   const agent = createAgent({
     name: "pb",
     runtime: "claude_code",
-    workspaceRoot: "/repo",
-    playbookId: "pb_solo",
+    deckId: "00000000-0000-4000-a000-000000000099",
   });
-  assert.deepEqual(buildProfileSnapshot(agent, "developer").playbookIds, ["pb_solo"]);
-
-  const multi = updateAgent(agent.id, { playbookIds: ["pb_a", "pb_b"] })!;
-  assert.deepEqual(buildProfileSnapshot(multi, "developer").playbookIds, ["pb_a", "pb_b"]);
+  // Legacy columns may still exist on the row, but the frozen snapshot must not carry them.
+  getDb()
+    .prepare(
+      "UPDATE agents SET workspace_root = ?, playbook_id = ?, playbook_ids_json = ?, external_memory_refs_json = ? WHERE id = ?"
+    )
+    .run(
+      "/work/app",
+      "pb_solo",
+      JSON.stringify(["pb_a", "pb_b"]),
+      JSON.stringify(["vault://a"]),
+      agent.id
+    );
+  const snap = buildProfileSnapshot(getAgent(agent.id)!, "developer");
+  assert.equal("workspaceRoot" in snap, false);
+  assert.equal("playbookIds" in snap, false);
+  assert.equal("externalMemoryRefs" in snap, false);
+  assert.equal(snap.deckId, "00000000-0000-4000-a000-000000000099");
 });
 
-test("snapshot captures deck, workspace, purpose and external memory refs", () => {
+test("snapshot captures deck, purpose, and runtime", () => {
+  const deckId = "00000000-0000-4000-a000-000000000099";
   const agent = createAgent({
     name: "full",
     runtime: "codex_local",
-    workspaceRoot: "/work/app",
     purpose: "payments backend",
-    externalMemoryRefs: ["vault://a", "  ", "vault://b"],
+    deckId,
   });
   const snap = buildProfileSnapshot(agent, "developer");
-  assert.equal(snap.workspaceRoot, "/work/app");
+  assert.equal(snap.deckId, deckId);
   assert.equal(snap.purpose, "payments backend");
-  assert.deepEqual(snap.externalMemoryRefs, ["vault://a", "vault://b"]);
   assert.equal(snap.runtime, "codex_local");
   assert.equal(snap.version, 1);
 });
@@ -67,7 +86,11 @@ test("snapshot captures deck, workspace, purpose and external memory refs", () =
 test("editing a legacy profile collapses the plan/execute columns instead of stranding them", () => {
   // Reported on PR #59: startEdit read only the role-neutral column, so a legacy profile
   // showed blank controls while the snapshot kept resolving the hidden legacy value.
-  const created = createAgent({ name: "collapse", runtime: "claude_code", workspaceRoot: "/repo" });
+  const created = createAgent({
+    name: "collapse",
+    runtime: "claude_code",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
   getDb()
     .prepare(
       "UPDATE agents SET default_execute_model = ?, default_execute_budget_json = ? WHERE id = ?"
@@ -96,7 +119,11 @@ test("editing a legacy profile collapses the plan/execute columns instead of str
 test("switching runtime does not carry the old runtime's legacy model into the new snapshot", () => {
   // Reviewer's repro: a legacy Cursor profile on `auto`, switched to Claude with the model
   // cleared, still produced a Claude snapshot running Cursor's `auto`.
-  const created = createAgent({ name: "switch", runtime: "cursor_local", workspaceRoot: "/repo" });
+  const created = createAgent({
+    name: "switch",
+    runtime: "cursor_local",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
   getDb().prepare("UPDATE agents SET default_execute_model = ? WHERE id = ?").run("auto", created.id);
 
   const switched = updateAgent(created.id, { runtime: "claude_code", defaultModel: null })!;
@@ -109,9 +136,9 @@ test("snapshot freezes defaultEffort alongside the model", () => {
   const agent = createAgent({
     name: "effort",
     runtime: "codex_local",
-    workspaceRoot: "/repo",
     defaultModel: "gpt-5",
     defaultEffort: "high",
+    deckId: "00000000-0000-4000-a000-000000000099",
   });
   const snap = buildProfileSnapshot(agent, "developer");
   assert.equal(snap.effort, "high");

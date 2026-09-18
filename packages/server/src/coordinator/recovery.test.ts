@@ -22,8 +22,7 @@ const {
   claimWorkItem,
   bindWorkItemSession,
   finishWorkItem,
-  refreshHeartbeat,
-} = await import("../repository/work-items.js");
+  refreshHeartbeat} = await import("../repository/work-items.js");
 const { startWorkflow } = await import("./commands.js");
 const { recoverCoordinator } = await import("./recovery.js");
 
@@ -36,14 +35,13 @@ function newIssue(maxReviewRounds = 3, maxInfraAttempts = 3): string {
   return createIssue({
     title: "Recover me",
     acceptanceCriteria: "It works",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds,
     maxInfraAttempts,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 test("recovery requeues an expired orphaned lease and fails its running session", async () => {
@@ -57,8 +55,7 @@ test("recovery requeues an expired orphaned lease and fails its running session"
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: null,
-  });
+    runtime: null});
   startSession(session.id);
   assert.equal(bindWorkItemSession(devItem.id, session.id, claimed.leaseToken!), true);
 
@@ -169,8 +166,7 @@ test("an expired lease on a usage-capped runtime is deferred, not dead-lettered 
       role: "developer",
       round: 1,
       agentId: BUILTIN_AGENT_CLAUDE_ID,
-      runtime: "claude_code",
-    });
+      runtime: "claude_code"});
     startSession(session.id);
     assert.equal(bindWorkItemSession(devItem.id, session.id, claimed.leaseToken!), true);
 
@@ -178,8 +174,7 @@ test("an expired lease on a usage-capped runtime is deferred, not dead-lettered 
     recordRuntimeAvailability({
       runtime: "claude_code",
       unavailableUntil: until,
-      reason: "claude_code usage capped — plan limit rejected",
-    });
+      reason: "claude_code usage capped — plan limit rejected"});
 
     const res = await recoverCoordinator({ now: FUTURE() });
     assert.deepEqual(res, {
@@ -191,8 +186,7 @@ test("an expired lease on a usage-capped runtime is deferred, not dead-lettered 
       heldAliveExpired: [],
       unverifiedOrphans: [],
       heldAcrossClockJump: [],
-      autoMergesFinalized: [],
-    });
+      autoMergesFinalized: []});
     assert.equal(getWorkItem(devItem.id)!.status, "pending");
     assert.equal(getWorkItem(devItem.id)!.attemptCount, 0, "claim's attempt bump is reverted, like a live cap deferral");
     assert.equal(getWorkItem(devItem.id)!.availableAt, until);

@@ -156,7 +156,7 @@ export default function IssuesListPage({
 
   const submitCreate = async () => {
     if (!title.trim() || !repo.trim() || !developerAgentId || !reviewerAgentId) {
-      setError("Title, repo, developer, and reviewer are required");
+      setError("Title, GitHub repository, developer, and reviewer are required");
       return;
     }
     try {
@@ -351,7 +351,7 @@ export default function IssuesListPage({
                     if (e.target.value) setRepo(e.target.value);
                   }}
                 >
-                  <option value="">Recent repo paths…</option>
+                  <option value="">Recent repositories…</option>
                   {recentRepos.map((r) => (
                     <option key={r} value={r}>
                       {r}
@@ -361,7 +361,7 @@ export default function IssuesListPage({
               )}
               <input
                 className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-                placeholder="Repo path (local filesystem)"
+                placeholder="GitHub URL or owner/repo"
                 value={repo}
                 onChange={(e) => setRepo(e.target.value)}
               />

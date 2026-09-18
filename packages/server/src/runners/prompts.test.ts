@@ -9,13 +9,11 @@ process.env.MAX_CONCURRENT_RUNS = "0";
 
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID } = await import("@agent-dealer/shared");
-const { updateAgent } = await import("../repository/agents.js");
 const { addArtifact, createRun } = await import("../repository/runs.js");
 const { buildReflectPrompt } = await import("./prompts.js");
 
 before(() => {
   migrate();
-  updateAgent(BUILTIN_AGENT_CLAUDE_ID, { workspaceRoot: process.env.AGENT_DEALER_HOME! });
 });
 
 function makeRun() {
@@ -23,8 +21,7 @@ function makeRun() {
     title: "Prompt test task",
     taskCategory: "other",
     status: "plan_pending",
-    agentId: BUILTIN_AGENT_CLAUDE_ID,
-  });
+    agentId: BUILTIN_AGENT_CLAUDE_ID});
 }
 
 test("reflect prompt restates the task and the read-only patch contract", () => {

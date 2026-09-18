@@ -31,14 +31,13 @@ function newIssue(): string {
     title: "Abort mid-flight",
     description: "d",
     acceptanceCriteria: "It works",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 test("abortIssue fences a developer effect that completes after the abort already committed", async () => {

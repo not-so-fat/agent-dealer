@@ -31,8 +31,7 @@ const {
   admitNext,
   setAdmissionHealthCheckerForTests,
   resetCapacityPolicyForTests,
-  resetEligibilityRulesForTests,
-} = await import("./admission.js");
+  resetEligibilityRulesForTests} = await import("./admission.js");
 const { setBlockersProviderForTests, resetDependenciesForTests } = await import(
   "./dependencies.js"
 );
@@ -72,8 +71,8 @@ async function buildApp() {
 }
 
 const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not118-repo-"));
-const dev = createAgent({ name: `not118-dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
-const rev = createAgent({ name: `not118-rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
+const dev = createAgent({ name: `not118-dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+const rev = createAgent({ name: `not118-rev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
 
 type CreateOverrides = { acceptanceCriteria?: string | null; enqueue?: boolean };
 
@@ -92,9 +91,7 @@ async function createIssueViaApi(
       developerAgentId: dev.id,
       reviewerAgentId: rev.id,
       ...(overrides.acceptanceCriteria === null ? {} : { acceptanceCriteria: overrides.acceptanceCriteria ?? "It works" }),
-      ...(overrides.enqueue === undefined ? {} : { enqueue: overrides.enqueue }),
-    },
-  });
+      ...(overrides.enqueue === undefined ? {} : { enqueue: overrides.enqueue })}});
   assert.equal(res.statusCode, 200);
   return (res.json() as { id: string }).id;
 }
@@ -235,8 +232,7 @@ test("human-action resume stays ungated — it may exceed capacity", async () =>
     actionType: "product_scope_decision",
     reason: "no acceptance criteria",
     question: "Add acceptance criteria",
-    responseOptions: [{ choice: "resume", label: "Added — start" }],
-  });
+    responseOptions: [{ choice: "resume", label: "Added — start" }]});
   updateIssue(parked, { acceptanceCriteria: "Now testable" });
 
   const resolved = resolveHumanActionAndAdvance(action.id, "tester", "resume");
@@ -272,8 +268,7 @@ test("re-importing a migrated final_review issue conflicts; a still-startable on
     reviewerAgentId: rev.id,
     acceptanceCriteria: "It works",
     source: "linear",
-    externalId: "LIN-FR-1",
-  };
+    externalId: "LIN-FR-1"};
   const first = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as {
     id: string;
   };

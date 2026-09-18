@@ -19,14 +19,13 @@ before(() => {
 function seedIssue(title: string): string {
   return createIssue({
     title,
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 test("appends and lists events in timestamp order", () => {
@@ -36,14 +35,12 @@ test("appends and lists events in timestamp order", () => {
     type: "issue.created",
     actorType: "system",
     stage: "ready",
-    payload: { note: "created" },
-  });
+    payload: { note: "created" }});
   appendWorkflowEvent({
     issueId,
     type: "guidance.added",
     actorType: "human",
-    stage: "ready",
-  });
+    stage: "ready"});
   const events = listWorkflowEventsForIssue(issueId);
   assert.deepStrictEqual(events.map((e) => e.type), ["issue.created", "guidance.added"]);
   assert.deepStrictEqual(JSON.parse(events[0].payloadJson!), { note: "created" });
@@ -56,15 +53,13 @@ test("a repeated idempotency key does not create a duplicate event", () => {
     type: "pull_request.updated",
     actorType: "system",
     stage: "developing",
-    idempotencyKey: "gh-delivery-abc123",
-  });
+    idempotencyKey: "gh-delivery-abc123"});
   const second = appendWorkflowEvent({
     issueId,
     type: "pull_request.updated",
     actorType: "system",
     stage: "developing",
-    idempotencyKey: "gh-delivery-abc123",
-  });
+    idempotencyKey: "gh-delivery-abc123"});
   assert.equal(second.id, first.id);
   assert.equal(listWorkflowEventsForIssue(issueId).length, 1);
 });

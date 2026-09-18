@@ -1,14 +1,13 @@
 import { useEffect, useState } from "react";
 import type { PermissionPolicyOverride, ReasoningEffort, Runtime } from "@agent-dealer/shared";
 import { CURSOR_DEFAULT_MODEL } from "@agent-dealer/shared";
-import { fetchDeckPlaybooks, fetchDecks } from "./api";
+import { fetchDecks } from "./api";
 import ModelSelect from "./components/agents/ModelSelect";
 import { type BudgetFormValue } from "./lib/budgetForm";
 
 export type AgentConfigValue = {
   runtime: Runtime;
   deckId: string;
-  playbookId: string;
   // Issue-centric (developer/reviewer) session defaults — snapshotted per session.
   // NOT-71/NOT-80: the old plan/execute model+budget pair is gone from this form. Issue
   // workflows read `defaultModel` / `defaultEffort` / `defaultBudget`; profile-snapshot.ts
@@ -19,8 +18,6 @@ export type AgentConfigValue = {
   /** Reasoning effort for Codex/Claude; empty string = runtime default. Ignored for Cursor. */
   defaultEffort: "" | ReasoningEffort;
   defaultBudget: BudgetFormValue;
-  playbookIds: string[];
-  externalMemoryRefs: string;
   /**
    * Worktree write access this profile allows — unchecking pins it off, enforced by the
    * CLI's own tool grant (no Write/Edit/Bash, or a read-only sandbox). There is no
@@ -51,7 +48,6 @@ export function permissionFlagsFromJson(json: string | null | undefined): {
 }
 
 type Deck = { id: string; name: string };
-type Playbook = { id: string; title: string };
 
 type Props = {
   value: AgentConfigValue;
@@ -63,8 +59,6 @@ type Props = {
 export default function AgentConfigFields({ value, onChange, agentDeckOnline, disabled }: Props) {
   const [decks, setDecks] = useState<Deck[]>([]);
   const [deckError, setDeckError] = useState<string | null>(null);
-  const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
-  const [playbookError, setPlaybookError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchDecks().then((result) => {
@@ -77,23 +71,6 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
       }
     });
   }, []);
-
-  useEffect(() => {
-    if (!value.deckId) {
-      setPlaybooks([]);
-      setPlaybookError(null);
-      return;
-    }
-    fetchDeckPlaybooks(value.deckId).then((result) => {
-      if (result.ok) {
-        setPlaybooks(result.playbooks);
-        setPlaybookError(null);
-      } else {
-        setPlaybooks([]);
-        setPlaybookError(result.message);
-      }
-    });
-  }, [value.deckId]);
 
   const set = (patch: Partial<AgentConfigValue>) => onChange({ ...value, ...patch });
   const supportsEffort = value.runtime === "codex_local" || value.runtime === "claude_code";
@@ -120,15 +97,20 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
         <option value="cursor_local">Cursor local (cursor-agent -p)</option>
         <option value="codex_local">Codex local (codex exec)</option>
       </select>
-      <label className="text-xs text-[#A8C4C0] uppercase">Agent Deck (optional)</label>
+      <label className="text-xs text-[#A8C4C0] uppercase">Agent Deck (required)</label>
       <select
         className="field"
         disabled={disabled || !agentDeckOnline || !!deckError}
         value={value.deckId}
-        onChange={(e) => set({ deckId: e.target.value, playbookId: "", playbookIds: [] })}
+        onChange={(e) => set({ deckId: e.target.value })}
+        required
       >
-        <option value="">
-          {!agentDeckOnline ? "Agent Deck offline" : deckError ? "Agent Deck error — see below" : "No deck — degraded mode"}
+        <option value="" disabled={!!value.deckId}>
+          {!agentDeckOnline
+            ? "Agent Deck offline"
+            : deckError
+              ? "Agent Deck error — see below"
+              : "Select a deck…"}
         </option>
         {decks.map((d) => (
           <option key={d.id} value={d.id}>
@@ -138,30 +120,6 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
       </select>
       {agentDeckOnline && deckError && (
         <p className="text-xs text-amber-300/90">{deckError}</p>
-      )}
-      {value.deckId && playbookError && (
-        <p className="text-xs text-amber-300/90">Playbooks unavailable: {playbookError}</p>
-      )}
-      {value.deckId && playbooks.length > 0 && (
-        <>
-          <label className="text-xs text-[#A8C4C0] uppercase">Playbook (optional)</label>
-          <select
-            className="field"
-            disabled={disabled}
-            value={value.playbookId}
-            onChange={(e) => set({ playbookId: e.target.value })}
-          >
-            <option value="">No playbook — agent uses task + plan only</option>
-            {playbooks.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.title}
-              </option>
-            ))}
-          </select>
-        </>
-      )}
-      {!value.deckId && value.runtime && (
-        <p className="text-xs text-white/45">Degraded mode: no deck MCP. Audit trail still captured.</p>
       )}
 
       <div className="pt-2 mt-2 border-t border-white/10 space-y-2">
@@ -243,42 +201,6 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
             />
           </label>
         </div>
-        {value.deckId && playbooks.length > 0 && (
-          <label className="block space-y-1">
-            <span className="text-xs text-[#A8C4C0] uppercase">Playbooks (multi-select)</span>
-            <select
-              className="field text-sm"
-              multiple
-              size={Math.min(4, Math.max(2, playbooks.length))}
-              disabled={disabled}
-              value={value.playbookIds}
-              onChange={(e) =>
-                set({
-                  playbookIds: Array.from(e.target.selectedOptions, (o) => o.value),
-                })
-              }
-            >
-              {playbooks.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.title}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-        <label className="block space-y-1">
-          <span className="text-xs text-[#A8C4C0] uppercase">
-            External memory refs (one per line)
-          </span>
-          <textarea
-            className="field text-sm font-mono"
-            rows={2}
-            placeholder={"vault://decisions/payments\nhttps://docs.internal/runbook"}
-            disabled={disabled}
-            value={value.externalMemoryRefs}
-            onChange={(e) => set({ externalMemoryRefs: e.target.value })}
-          />
-        </label>
         <div className="space-y-1">
           <span className="text-xs text-[#A8C4C0] uppercase">Developer capabilities</span>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-white/70">
@@ -302,12 +224,4 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
       </div>
     </div>
   );
-}
-
-/** Split a newline/comma separated textarea into a trimmed, non-empty list. */
-export function parseRefList(raw: string): string[] {
-  return raw
-    .split(/[\n,]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
 }

@@ -18,12 +18,10 @@ const { claimWorkItem } = await import("../repository/work-items.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { createRun, getRun, transitionRun, addArtifact, updateRunFields } = await import("../repository/runs.js");
 const { pendingSendCount, getPendingOutboundDraft } = await import("../repository/outbound-drafts.js");
-const { updateAgent } = await import("../repository/agents.js");
 const { setMergePrForTests, clearFinalizeInflightForTests } = await import("../coordinator/auto-merge.js");
 
 before(() => {
   migrate();
-  updateAgent(BUILTIN_AGENT_CLAUDE_ID, { workspaceRoot: process.env.AGENT_DEALER_HOME! });
 });
 // claimWorkItem is global FIFO, not issue-scoped — a leftover queued item from an earlier
 // test would otherwise be claimed instead of the issue this test just started.
@@ -41,7 +39,7 @@ async function buildApp() {
 }
 
 function seedIssueAwaitingFinalReview() {
-  const issue = createIssue({ title: "Awaiting review", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
+  const issue = createIssue({ title: "Awaiting review", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
   transitionIssue(issue.id, "developing");
   transitionIssue(issue.id, "reviewing");
   transitionIssue(issue.id, "final_review", { currentOwner: "human" });
@@ -54,7 +52,7 @@ function seedIssueAwaitingFinalReview() {
  * (unlike seedIssueAwaitingFinalReview's hand-crafted transitions) — needed to exercise
  * resolveHumanActionAndAdvance's actual transactional path through the route. */
 async function seedRealIssueAwaitingFinalReview(): Promise<{ issueId: string; actionId: string }> {
-  const issue = createIssue({ title: "Real workflow", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
+  const issue = createIssue({ title: "Real workflow", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
   const start = startWorkflow(issue.id);
   assert.equal(start.ok, true);
 
@@ -65,8 +63,7 @@ async function seedRealIssueAwaitingFinalReview(): Promise<{ issueId: string; ac
     headSha: "a".repeat(40),
     baseSha: "b".repeat(40),
     prNumber: 1,
-    prUrl: "https://gh/pr/1",
-  });
+    prUrl: "https://gh/pr/1"});
 
   const reviewItem = claimWorkItem(`route-test-${issue.id}-rev`, { leaseMs: 60_000 })!;
   await applyCompletion(reviewItem.id, reviewItem.leaseToken!, {
@@ -78,9 +75,7 @@ async function seedRealIssueAwaitingFinalReview(): Promise<{ issueId: string; ac
       acceptanceCriteriaAssessment: "met",
       evidenceAssessment: "fine",
       findings: [],
-      risks: [],
-    }),
-  });
+      risks: []})});
 
   assert.ok(getIssue(issue.id));
   const humanAction = listHumanActionsForIssue(issue.id).find((a) => a.actionType === "final_review")!;
@@ -191,8 +186,7 @@ test("POST resolve on a reflection_interaction_required action bypasses the work
       { choice: "retry", label: "Retry reflection" },
       { choice: "dismiss", label: "Dismiss" },
     ],
-    requestId: "req_route_test",
-  });
+    requestId: "req_route_test"});
 
   const res = await app.inject({ method: "POST", url: `/api/human-actions/${reflectAction.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "dismiss" } });
   assert.equal(res.statusCode, 200);
@@ -213,8 +207,7 @@ function seedRunAwaitingDeliveryDecision() {
     title: "Send gate action-route test",
     taskCategory: "communication",
     status: "plan_pending",
-    agentId: BUILTIN_AGENT_CLAUDE_ID,
-  });
+    agentId: BUILTIN_AGENT_CLAUDE_ID});
   updateRunFields(run.id, { deck_id: "6e825b59-13de-4ddd-ab7e-55ab5a1c279a" });
   transitionRun(run.id, "plan_approved");
   transitionRun(run.id, "running");
@@ -226,10 +219,8 @@ function seedRunAwaitingDeliveryDecision() {
       draft: {
         actionType: "slack_message",
         summary: { target: "#test", body: "Hello action-route test" },
-        toolCall: { serviceName: "svc-1", toolName: "chat_postMessage", arguments: { channel: "C1", text: "Hello action-route test" } },
-      },
-      status: "pending",
-    },
+        toolCall: { serviceName: "svc-1", toolName: "chat_postMessage", arguments: { channel: "C1", text: "Hello action-route test" } }},
+      status: "pending"},
     "agent"
   );
   const action = createHumanAction({
@@ -241,8 +232,7 @@ function seedRunAwaitingDeliveryDecision() {
       { choice: "retry_send", label: "Retry send" },
       { choice: "reject", label: "Reject draft" },
     ],
-    requestId: "req_delivery_route_test",
-  });
+    requestId: "req_delivery_route_test"});
   return { run, action };
 }
 
@@ -309,8 +299,7 @@ test("POST resolve 400s on a choice not valid for reflection_interaction_require
     responseOptions: [
       { choice: "retry", label: "Retry reflection" },
       { choice: "dismiss", label: "Dismiss" },
-    ],
-  });
+    ]});
   const res = await app.inject({ method: "POST", url: `/api/human-actions/${reflectAction.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "close" } });
   assert.equal(res.statusCode, 400);
   await app.close();

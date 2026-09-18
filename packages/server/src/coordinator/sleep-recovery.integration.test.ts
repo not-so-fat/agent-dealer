@@ -27,8 +27,7 @@ const {
   startSession,
   recordSessionProcess,
   getWorkerSession,
-  listWorkerSessionsForIssue,
-} = await import("../repository/worker-sessions.js");
+  listWorkerSessionsForIssue} = await import("../repository/worker-sessions.js");
 const { getWorkItem, listWorkItemsForIssue, claimWorkItem, bindWorkItemSession } = await import(
   "../repository/work-items.js"
 );
@@ -53,14 +52,13 @@ function newIssue(): string {
   return createIssue({
     title: "Sleep through it",
     acceptanceCriteria: "It survives",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 /** A leased developer work item with a running session bound to it, as a live attempt has. */
@@ -74,8 +72,7 @@ function leasedAttempt(leaseMs = LEASE_MS): { issueId: string; itemId: string; s
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: null,
-  });
+    runtime: null});
   startSession(session.id);
   assert.equal(bindWorkItemSession(item.id, session.id, claimed.leaseToken!), true);
   return { issueId, itemId: item.id, sessionId: session.id };

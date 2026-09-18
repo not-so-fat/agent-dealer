@@ -5,7 +5,6 @@ import {
   resolveProfileModel,
   serializePermissionPolicyOverride,
   serializePhaseBudget,
-  serializeStringList,
 } from "@agent-dealer/shared";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
@@ -97,16 +96,16 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
     id,
     input.name.trim(),
     input.runtime,
-    input.deckId ?? null,
+    input.deckId,
     deckName ?? null,
-    input.playbookId ?? null,
-    input.workspaceRoot.trim(),
+    null, // playbook_id — dead legacy (NOT-149)
+    null, // workspace_root — dead legacy (NOT-149)
     input.defaultModel ?? null,
     input.defaultEffort ?? null,
     serializePhaseBudget(input.defaultBudget),
     input.purpose?.trim() || null,
-    serializeStringList(input.playbookIds),
-    serializeStringList(input.externalMemoryRefs),
+    null, // playbook_ids_json — dead legacy
+    null, // external_memory_refs_json — dead legacy
     serializePermissionPolicyOverride(input.permissionPolicy),
     now,
     now
@@ -121,10 +120,11 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
   const now = new Date().toISOString();
   const name = input.name?.trim() ?? existing.name;
   const runtime = input.runtime ?? existing.runtime;
-  const workspaceRoot =
-    input.workspaceRoot !== undefined ? input.workspaceRoot?.trim() || null : existing.workspaceRoot;
+  // workspace / playbook / external-memory columns are dead legacy (NOT-149) — leave
+  // whatever was stored so in-flight migration stays recoverable; never rewrite from API.
+  const workspaceRoot = existing.workspaceRoot;
   const deckId = input.deckId !== undefined ? input.deckId : existing.deckId;
-  const playbookId = input.playbookId !== undefined ? input.playbookId : existing.playbookId;
+  const playbookId = existing.playbookId;
   // Collapse the pre-NOT-71 plan/execute columns into the role-neutral one on every write,
   // and clear them below. Reading them back (resolveProfile*) is deliberate compatibility for
   // rows written before the migration; continuing to *keep* them is not. Without this, editing
@@ -141,12 +141,8 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
       : resolveProfileBudgetJson(existing);
   const purpose =
     input.purpose !== undefined ? input.purpose?.trim() || null : existing.purpose;
-  const playbookIdsJson =
-    input.playbookIds !== undefined ? serializeStringList(input.playbookIds) : existing.playbookIdsJson;
-  const externalMemoryRefsJson =
-    input.externalMemoryRefs !== undefined
-      ? serializeStringList(input.externalMemoryRefs)
-      : existing.externalMemoryRefsJson;
+  const playbookIdsJson = existing.playbookIdsJson;
+  const externalMemoryRefsJson = existing.externalMemoryRefsJson;
   const permissionPolicyJson =
     input.permissionPolicy !== undefined
       ? serializePermissionPolicyOverride(input.permissionPolicy)
@@ -195,10 +191,8 @@ export type ResolvedAgent = {
   agentId: string;
   agentName: string;
   runtime: Runtime;
-  workspaceRoot?: string;
   deckId?: string;
   deckName?: string | null;
-  playbookId?: string;
 };
 
 export function resolveAgent(agentId: string): ResolvedAgent {
@@ -208,9 +202,7 @@ export function resolveAgent(agentId: string): ResolvedAgent {
     agentId: agent.id,
     agentName: agent.name,
     runtime: agent.runtime,
-    workspaceRoot: agent.workspaceRoot ?? undefined,
     deckId: agent.deckId ?? undefined,
     deckName: agent.deckName,
-    playbookId: agent.playbookId ?? undefined,
   };
 }

@@ -7,9 +7,8 @@ const taskSnapshot = {
   title: "Add widget",
   description: "Build the widget.",
   acceptanceCriteria: "Widget renders.",
-  repo: "/repo",
-  baseBranch: "main",
-};
+  repo: "acme/app",
+  baseBranch: "main"};
 
 test("round 1 prompt instructs a fresh branch off base and never mentions push/PR", () => {
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1 });
@@ -33,8 +32,7 @@ test("repair round includes findings and references the round number", () => {
   const prompt = buildDeveloperPrompt({
     taskSnapshot,
     round: 2,
-    findings: [{ fingerprint: "f1", severity: "blocking", title: "Bug", rationale: "It breaks", file: "a.ts", line: 10, status: "open", firstRound: 1, lastRound: 1, issueId: "i" } as never],
-  });
+    findings: [{ fingerprint: "f1", severity: "blocking", title: "Bug", rationale: "It breaks", file: "a.ts", line: 10, status: "open", firstRound: 1, lastRound: 1, issueId: "i" } as never]});
   assert.match(prompt, /repair round 2/);
   assert.match(prompt, /\[blocking\] Bug \(a\.ts:10\): It breaks/);
 });
@@ -59,8 +57,7 @@ test("infra retry includes prior implementation conclusion when provided", () =>
     taskSnapshot,
     round: 1,
     retryReason: "Branch already pushed; only draft PR create failed: gh auth",
-    priorConclusion: "Added queue_entries and admission.ts.",
-  });
+    priorConclusion: "Added queue_entries and admission.ts."});
   assert.match(prompt, /### Prior implementation conclusion/);
   assert.match(prompt, /Added queue_entries and admission\.ts\./);
   assert.match(prompt, /only coordinator GitHub verification/i);
@@ -74,9 +71,7 @@ test("infra retry includes SHA-scoped verification receipt when provided", () =>
     priorVerificationReceipt: {
       headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       commands: [{ command: "npm run test:unit", outcome: "passed", detail: "711/711" }],
-      recordedAt: "2026-09-17T00:00:00.000Z",
-    },
-  });
+      recordedAt: "2026-09-17T00:00:00.000Z"}});
   assert.match(prompt, /### Prior verification receipt/);
   assert.match(prompt, /npm run test:unit.*passed \(711\/711\)/);
   assert.match(prompt, /HEAD is unchanged/);
@@ -91,19 +86,16 @@ test("verification receipt is omitted when not a retry", () => {
     priorVerificationReceipt: {
       headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       commands: [{ command: "npm test", outcome: "passed" }],
-      recordedAt: "2026-09-17T00:00:00.000Z",
-    },
-  });
+      recordedAt: "2026-09-17T00:00:00.000Z"}});
   assert.doesNotMatch(prompt, /Prior verification receipt/);
 });
 
-test("deck section requires bind_workspace first, then lists every playbook id", () => {
+test("deck section requires bind_workspace first (playbooks chosen dynamically inside the deck)", () => {
   const prompt = buildDeveloperPrompt({
     taskSnapshot,
     round: 1,
     worktreePath: "/wt",
     deckId: "deck-1",
-    playbookIds: ["pb-a", "pb-b"],
   });
   assert.match(prompt, /bind_workspace\(\{ deckId: "deck-1", workspaceRoot: "\/wt" \}\)/);
   assert.match(prompt, /First equip this agent/);
@@ -111,20 +103,16 @@ test("deck section requires bind_workspace first, then lists every playbook id",
   assert.match(prompt, /do not improvise without the deck/i);
   assert.match(prompt, /call_service_tool/);
   assert.match(prompt, /do not web-fetch Linear/);
-  assert.match(prompt, /get_playbook\("pb-a"\)/);
-  assert.match(prompt, /get_playbook\("pb-b"\)/);
+  assert.doesNotMatch(prompt, /get_playbook\(/);
 });
 
-test("no deckId: explicitly told not to touch Agent Deck/Linear, not just left silent", () => {
-  // A silent [] here (the prior behavior) left the model free to try its own ambient
-  // Agent Deck config anyway — cursor_local loads the operator's global .cursor/mcp.json
-  // regardless of this prompt (args.ts) — which always fails against an unbound worktree
-  // and got narrated into review/implementation output as if the ticket were unavailable,
-  // even though the Task/Acceptance criteria sections above already have everything.
+test("no deckId: misconfigured stop message, not ambient Agent Deck improvisation", () => {
+  // Workers are fail-closed without a deck (NOT-149). A silent [] left cursor_local free to
+  // try the operator's ambient .cursor/mcp.json against an unbound worktree.
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, worktreePath: "/wt", deckId: null });
   assert.doesNotMatch(prompt, /bind_workspace/);
-  assert.match(prompt, /no Agent Deck\/Linear binding/i);
-  assert.match(prompt, /Do not attempt to bind a workspace, fetch the ticket from Linear, or call any Agent Deck tool/);
+  assert.match(prompt, /misconfigured/i);
+  assert.match(prompt, /do not improvise without the deck/i);
 });
 
 test("guidance since the last session is surfaced in the developer prompt", () => {
@@ -145,8 +133,7 @@ test("guidance since the last session is surfaced in the reviewer prompt", () =>
     baseSha: "a".repeat(40),
     headSha: "b".repeat(40),
     diff: "diff --git a/x b/x\n",
-    guidance: ["Pay extra attention to the auth module."],
-  });
+    guidance: ["Pay extra attention to the auth module."]});
   assert.match(prompt, /## Guidance from the team/);
   assert.match(prompt, /Pay extra attention to the auth module\./);
 });
@@ -156,8 +143,7 @@ const reviewerBase = {
   round: 1,
   baseSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   headSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  diff: "diff --git a/x b/x\n+added line\n",
-};
+  diff: "diff --git a/x b/x\n+added line\n"};
 
 test("reviewer prompt embeds the diff, echoes the exact SHAs to report, and forbids editing", () => {
   const prompt = buildReviewerPrompt(reviewerBase);
@@ -174,8 +160,7 @@ test("reviewer prompt includes the developer's conclusion, checks summary, and p
     checksSummary: "success (at deadbeef)",
     findings: [
       { id: "f1", issueId: "i", fingerprint: "fp1", severity: "blocking", title: "Bug", rationale: "It breaks", evidenceRef: null, file: "a.ts", line: 10, status: "recurring", firstRound: 1, lastRound: 1 },
-    ],
-  });
+    ]});
   assert.match(prompt, /Added the widget per spec\./);
   assert.match(prompt, /success \(at deadbeef\)/);
   assert.match(prompt, /\[recurring\/blocking\] Bug \(a\.ts:10\): It breaks/);
@@ -190,13 +175,12 @@ test("reviewer prompt omits optional sections when absent", () => {
 });
 
 test("reviewer prompt deck section requires bind_workspace first, matching the developer prompt", () => {
-  const prompt = buildReviewerPrompt({ ...reviewerBase, worktreePath: "/wt", deckId: "deck-1", playbookIds: ["pb-a", "pb-b"] });
+  const prompt = buildReviewerPrompt({ ...reviewerBase, worktreePath: "/wt", deckId: "deck-1" });
   assert.match(prompt, /bind_workspace\(\{ deckId: "deck-1", workspaceRoot: "\/wt" \}\)/);
   assert.match(prompt, /First equip this agent/);
   assert.match(prompt, /bootstrap is a hard gate/i);
   assert.match(prompt, /do not improvise without the deck/i);
   assert.match(prompt, /call_service_tool/);
   assert.match(prompt, /do not web-fetch Linear/);
-  assert.match(prompt, /get_playbook\("pb-a"\)/);
-  assert.match(prompt, /get_playbook\("pb-b"\)/);
+  assert.doesNotMatch(prompt, /get_playbook\(/);
 });

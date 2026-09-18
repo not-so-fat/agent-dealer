@@ -47,33 +47,28 @@ const approvedVerdict = {
     acceptanceCriteriaAssessment: "ok",
     evidenceAssessment: "ok",
     findings: [],
-    risks: [],
-  }),
-};
+    risks: []})};
 
 function issueWith(developerAgentId: string, reviewerAgentId: string): string {
   return createIssue({
     title: "Exec env",
     acceptanceCriteria: "works",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId,
     reviewerAgentId,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 test("editing the profile after the work is queued does not change the eventual session", async () => {
   const dev = createAgent({
     name: "dev-freeze",
     runtime: "claude_code",
-    workspaceRoot: "/repo",
     defaultModel: "model-when-queued",
-    defaultEffort: "low",
-  });
-  const rev = createAgent({ name: "rev-freeze", runtime: "claude_code", workspaceRoot: "/repo" });
+    defaultEffort: "low", deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: "rev-freeze", runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
   const issueId = issueWith(dev.id, rev.id);
 
   registerEffectHandler("developer", async () => ({
@@ -82,8 +77,7 @@ test("editing the profile after the work is queued does not change the eventual 
     headSha: "head1",
     baseSha: "base1",
     prNumber: 7,
-    prUrl: "u",
-  }));
+    prUrl: "u"}));
   registerEffectHandler("reviewer", async () => approvedVerdict);
 
   // Queue the work, THEN edit the profile before any dispatcher tick runs — the
@@ -103,8 +97,8 @@ test("editing the profile after the work is queued does not change the eventual 
   assert.equal(updateAgent(dev.id, {})!.defaultEffort, "high", "the live profile effort moved on");
 });
 test("the reviewer session snapshot yields a read-only permission policy and read-only args", async () => {
-  const dev = createAgent({ name: "dev-ro", runtime: "claude_code", workspaceRoot: "/repo" });
-  const rev = createAgent({ name: "rev-ro", runtime: "codex_local", workspaceRoot: "/repo" });
+  const dev = createAgent({ name: "dev-ro", runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: "rev-ro", runtime: "codex_local", deckId: "00000000-0000-4000-a000-000000000099"});
   const issueId = issueWith(dev.id, rev.id);
 
   registerEffectHandler("developer", async () => ({
@@ -113,8 +107,7 @@ test("the reviewer session snapshot yields a read-only permission policy and rea
     headSha: "head1",
     baseSha: "base1",
     prNumber: 7,
-    prUrl: "u",
-  }));
+    prUrl: "u"}));
   registerEffectHandler("reviewer", async () => approvedVerdict);
 
   startWorkflow(issueId);
@@ -130,7 +123,6 @@ test("the reviewer session snapshot yields a read-only permission policy and rea
     role: "reviewer",
     prompt: "review the diff",
     model: snap.model ?? undefined,
-    policy: snap.permissionPolicy,
-  });
+    policy: snap.permissionPolicy});
   assert.doesNotThrow(() => assertReviewerReadOnly(args));
 });

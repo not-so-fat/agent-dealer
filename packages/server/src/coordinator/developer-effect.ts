@@ -38,6 +38,10 @@ import {
   salvageDirtyWorktree,
   dirtyWorktreeRecoveryCommands,
 } from "../adapters/git-worktree.js";
+import {
+  ensureIssueRepoCheckout,
+  roleWorktreePathForResolution,
+} from "../adapters/managed-repo.js";
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
@@ -245,7 +249,7 @@ async function runPublishOnlyHandoff(
   const taskSnapshot = getTaskSnapshot(issue);
   const round = workItem.round;
   const stage = issue.status;
-  const cwd = issue.repo;
+  const cwd = (await ensureIssueRepoCheckout(issue.repo)).repoPath;
 
   const milestone = (
     type: Parameters<typeof emitSessionMilestone>[0]["type"],
@@ -510,7 +514,31 @@ export async function runDeveloperEffect(
   // round reproduced this directly. Check the branch itself, not just issue.branch, and
   // reuse it (preserving whatever local commits it already carries) when it's there.
   const branchName = issue.branch ?? `issue-${issue.id}`;
-  const reuseBranch = issue.branch != null || (await branchExists(issue.repo, branchName));
+  let repoPath: string;
+  let desiredWorktreePath: string;
+  let baseBranch: string;
+  try {
+    const checkout = await ensureIssueRepoCheckout(issue.repo);
+    repoPath = checkout.repoPath;
+    desiredWorktreePath = roleWorktreePathForResolution(checkout, sessionId, "developer");
+    // Freshly fetched remote default for new work; explicit issue.baseBranch wins when set
+    // to something other than the historical default, or when legacy local checkouts apply.
+    baseBranch =
+      checkout.kind === "managed" && checkout.defaultBranch && !issue.branch
+        ? checkout.defaultBranch
+        : issue.baseBranch;
+    if (checkout.kind === "managed" && checkout.defaultBranch) {
+      try {
+        await fetchRef(repoPath, checkout.defaultBranch);
+      } catch {
+        /* local objects may still suffice */
+      }
+    }
+  } catch (err) {
+    return { kind: "adapter_failure", reason: `repository checkout failed: ${String(err)}` };
+  }
+
+  const reuseBranch = issue.branch != null || (await branchExists(repoPath, branchName));
 
   let worktreePath: string;
   try {
@@ -521,11 +549,12 @@ export async function runDeveloperEffect(
     // NOT-127: a leftover whose owning session still has a live process is neither adopted
     // nor escalated as a conflict — that is the same-worker case.
     const resolved = await resolveDeveloperWorktree({
-      repo: issue.repo,
+      repo: repoPath,
       sessionId,
       branchName,
-      baseBranch: issue.baseBranch,
+      baseBranch,
       reuseBranch,
+      worktreePath: desiredWorktreePath,
       ownerLiveness: checkDeveloperWorktreeOwnerLiveness,
     });
     if (resolved.kind === "conflict") {
@@ -556,17 +585,23 @@ export async function runDeveloperEffect(
 
   let workerAuthority: { mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   try {
-    if (snapshot?.deckId) {
+    if (!snapshot?.deckId) {
+      await bestEffortRemove(repoPath, worktreePath);
+      return {
+        kind: "deck_failure",
+        reason: "Agent profile has no Agent Deck — workers never start without one",
+      };
+    }
+    {
       const prepared = await prepareWorkerDeckConnection({
         deckId: snapshot.deckId,
         worktreePath,
         runtime,
-        playbookIds: snapshot.playbookIds,
         policy,
         verifyCallTool: deps.deckCallTool,
       });
       if (!prepared.ok) {
-        await bestEffortRemove(issue.repo, worktreePath);
+        await bestEffortRemove(repoPath, worktreePath);
         // NOT-136: an unreachable deck is a wait, not a failed attempt — nothing spawned.
         return prepared.kind === "deck_unavailable"
           ? { kind: "deck_unavailable", reason: prepared.reason }
@@ -585,13 +620,9 @@ export async function runDeveloperEffect(
       milestone("brief.resolved", `Developer · brief ready (Task/AC complete)`, {
         resolution: "task_complete",
       });
-    } else if (snapshot?.deckId) {
+    } else {
       milestone("brief.resolved", `Developer · brief via Agent Deck (Linear fetch)`, {
         resolution: "deferred_to_agent",
-      });
-    } else {
-      milestone("brief.resolved", `Developer · brief from Task fields`, {
-        resolution: "task_fields_only",
       });
     }
 
@@ -631,7 +662,7 @@ export async function runDeveloperEffect(
       priorVerificationReceipt,
       worktreePath,
       deckId: snapshot?.deckId ?? null,
-      playbookIds: snapshot?.playbookIds,
+      
       guidance: guidance.length ? guidance : undefined,
     });
 
@@ -723,7 +754,7 @@ export async function runDeveloperEffect(
           kind: "dirty_worktree",
           reason: reasonForDirtyWorktree(spawned.logPath, runtime),
           path: worktreePath,
-          recoveryCommands: dirtyWorktreeRecoveryCommands(issue.repo, worktreePath),
+          recoveryCommands: dirtyWorktreeRecoveryCommands(repoPath, worktreePath),
         };
       }
 
@@ -737,7 +768,7 @@ export async function runDeveloperEffect(
       // for future agent spawns; deferring here discarded the tip and the resume prompt
       // looked like a blank round-1 rebuild.
       if (!(sessionOk && ahead > 0)) {
-        await bestEffortRemove(issue.repo, worktreePath);
+        await bestEffortRemove(repoPath, worktreePath);
         return {
           kind: "usage_capped",
           until: usageCap.unavailableUntil,
@@ -775,7 +806,7 @@ export async function runDeveloperEffect(
           let removed = false;
           try {
             const removal = await safeRemoveWorktree({
-              repo: issue.repo,
+              repo: repoPath,
               path: worktreePath,
               role: "developer",
               branchPushed: true,
@@ -790,7 +821,7 @@ export async function runDeveloperEffect(
               kind: "dirty_worktree",
               reason: `${dirtyReason} Salvage tip ${salvaged.message} (${salvaged.commitSha.slice(0, 7)}) landed but the worktree could not be removed for retry.`,
               path: worktreePath,
-              recoveryCommands: dirtyWorktreeRecoveryCommands(issue.repo, worktreePath),
+              recoveryCommands: dirtyWorktreeRecoveryCommands(repoPath, worktreePath),
             };
           }
           const crashReason = reasonForSessionCrash({
@@ -809,10 +840,10 @@ export async function runDeveloperEffect(
           kind: "dirty_worktree",
           reason: `${dirtyReason} Auto-commit salvage failed: ${salvaged.reason}`,
           path: worktreePath,
-          recoveryCommands: dirtyWorktreeRecoveryCommands(issue.repo, worktreePath),
+          recoveryCommands: dirtyWorktreeRecoveryCommands(repoPath, worktreePath),
         };
       }
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return spawned.timedOut
         ? { kind: "timed_out", reason: reasonForSessionCrash({ timedOut: true, logPath: spawned.logPath, runtime }) }
         : { kind: "session_failed", reason: reasonForSessionCrash({ timedOut: false, logPath: spawned.logPath, runtime }) };
@@ -842,13 +873,13 @@ export async function runDeveloperEffect(
         kind: "dirty_worktree",
         reason: reasonForDirtyWorktree(spawned.logPath, runtime),
         path: worktreePath,
-        recoveryCommands: dirtyWorktreeRecoveryCommands(issue.repo, worktreePath),
+        recoveryCommands: dirtyWorktreeRecoveryCommands(repoPath, worktreePath),
       };
     }
 
     const ahead = await commitsAhead({ worktreePath, baseRef: `origin/${issue.baseBranch}` });
     if (ahead === 0) {
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return { kind: "no_pr" };
     }
 
@@ -889,7 +920,7 @@ export async function runDeveloperEffect(
       });
       fs.rmSync(bodyDir, { recursive: true, force: true });
       if (!created.ok) {
-        await bestEffortRemove(issue.repo, worktreePath);
+        await bestEffortRemove(repoPath, worktreePath);
         return created.noCommits
           ? { kind: "no_pr" }
           : {
@@ -900,7 +931,7 @@ export async function runDeveloperEffect(
       }
       prView = await deps.github.viewPr({ cwd: worktreePath, branch: branchName });
       if (!prView) {
-        await bestEffortRemove(issue.repo, worktreePath);
+        await bestEffortRemove(repoPath, worktreePath);
         return {
           kind: "adapter_failure",
           reason: `Branch already pushed (${branchName}); PR created but could not be re-verified via gh pr view`,
@@ -924,7 +955,7 @@ export async function runDeveloperEffect(
     const identityOpts = { branchName, baseBranch: issue.baseBranch, priorPrNumber: issue.prNumber, localHead };
     const identity = await validatePrIdentity(prView, identityOpts);
     if (!identity.ok) {
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return {
         kind: "adapter_failure",
         reason: `Branch already pushed (${branchName}); ${identity.reason}`,
@@ -961,7 +992,7 @@ export async function runDeveloperEffect(
     // as the verified handoff, breaking the exact-current-SHA contract.
     const postPollView = await deps.github.viewPr({ cwd: worktreePath, branch: branchName });
     if (!postPollView) {
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return {
         kind: "adapter_failure",
         reason: `Branch already pushed (${branchName}); PR could not be re-verified after the checks poll`,
@@ -970,7 +1001,7 @@ export async function runDeveloperEffect(
     }
     const postPollIdentity = await validatePrIdentity(postPollView, identityOpts);
     if (!postPollIdentity.ok) {
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return {
         kind: "adapter_failure",
         reason: `Branch already pushed (${branchName}); PR changed while waiting on checks: ${postPollIdentity.reason}`,
@@ -987,11 +1018,11 @@ export async function runDeveloperEffect(
       content: { snapshot: checks, prNumber: prView.number, headSha: prView.headRefOid },
     });
     if (checks === "failure") {
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return { kind: "checks_failed" };
     }
     if (checks === "timeout") {
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return { kind: "timed_out" };
     }
 
@@ -1002,7 +1033,7 @@ export async function runDeveloperEffect(
     await fetchRef(worktreePath, prView.baseRefName);
     const baseSha = await mergeBase({ repo: worktreePath, base: `origin/${prView.baseRefName}`, head: prView.headRefOid });
 
-    await bestEffortRemove(issue.repo, worktreePath);
+    await bestEffortRemove(repoPath, worktreePath);
     return {
       kind: "clean_handoff",
       branch: branchName,

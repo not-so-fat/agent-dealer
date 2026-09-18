@@ -63,8 +63,8 @@ async function pump(max = 10): Promise<void> {
 
 function makeIssue(name: string, maxInfraAttempts = 3): string {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), `dealer-deckout-${name}-`));
-  const dev = createAgent({ name: `dev-${name}`, runtime: "codex_local", workspaceRoot: repo });
-  const rev = createAgent({ name: `rev-${name}`, runtime: "codex_local", workspaceRoot: repo });
+  const dev = createAgent({ name: `dev-${name}`, runtime: "codex_local", deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: `rev-${name}`, runtime: "codex_local", deckId: "00000000-0000-4000-a000-000000000099"});
   return createIssue({
     title: `Deck outage ${name}`,
     description: "d",
@@ -75,8 +75,7 @@ function makeIssue(name: string, maxInfraAttempts = 3): string {
     reviewerAgentId: rev.id,
     maxReviewRounds: 2,
     maxInfraAttempts,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 test("a deck outage at preflight spends no infra attempts and never reaches needs_human", async () => {
@@ -220,8 +219,7 @@ test("a deck that is reachable but answers with an error still fails the attempt
   registerEffectHandler("developer", async () => {
     return {
       kind: "deck_failure",
-      reason: "preflight failed: get_playbook(pb-x) returned an error: missing",
-    } satisfies DeveloperOutcome;
+      reason: "preflight failed: get_playbook(pb-x) returned an error: missing"} satisfies DeveloperOutcome;
   });
 
   assert.equal(startWorkflow(issueId).ok, true);

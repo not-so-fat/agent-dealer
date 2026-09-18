@@ -1,15 +1,19 @@
 import {
   canTransitionIssue,
   CreateIssueInput,
+  looksLikeLocalRepoPath,
+  parseGitHubRepoInput,
   type Issue,
   type IssueOwner,
   type IssueStatus,
   TERMINAL_ISSUE_STATUSES,
 } from "@agent-dealer/shared";
+import fs from "node:fs";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
 
-type CreateIssueRaw = import("@agent-dealer/shared").CreateIssueInput;
+/** Wire body or internal create — `repo` may be a GitHub ref or an existing legacy local path. */
+type CreateIssueRaw = Omit<import("@agent-dealer/shared").CreateIssueInput, "repo"> & { repo: string };
 
 interface IssueRow {
   id: string;
@@ -73,8 +77,29 @@ function rowToIssue(row: IssueRow): Issue {
   };
 }
 
+/**
+ * Persistable `issues.repo` value (NOT-149):
+ * - GitHub URL / owner/repo → canonical `github.com/owner/repo`
+ * - Existing local filesystem path → kept as-is for in-flight recovery / tests
+ * - Missing local path → hard error (never guess a remote)
+ */
+export function normalizeStoredIssueRepo(repoRaw: string): string {
+  const trimmed = repoRaw.trim();
+  if (looksLikeLocalRepoPath(trimmed)) {
+    if (!fs.existsSync(trimmed)) {
+      throw new Error(
+        `Legacy issue repo path is missing (${trimmed}). Re-create the issue with a GitHub URL, or restore the checkout — Dealer will not guess a remote.`
+      );
+    }
+    return trimmed;
+  }
+  return parseGitHubRepoInput(trimmed).identity;
+}
+
 export function createIssue(raw: CreateIssueRaw): Issue {
-  const input = CreateIssueInput.parse(raw);
+  const { repo: repoRaw, ...rest } = raw;
+  const input = CreateIssueInput.omit({ repo: true }).parse(rest);
+  const repo = normalizeStoredIssueRepo(repoRaw);
   const db = getDb();
   const now = new Date().toISOString();
   const id = uuid();
@@ -87,7 +112,7 @@ export function createIssue(raw: CreateIssueRaw): Issue {
     title: input.title,
     description: input.description ?? null,
     acceptance_criteria: input.acceptanceCriteria ?? null,
-    repo: input.repo,
+    repo,
     base_branch: input.baseBranch,
     status: "ready",
     current_owner: "system",
@@ -267,7 +292,7 @@ export function updateIssue(id: string, patch: UpdateIssuePatch): Issue {
       description: patch.description !== undefined ? patch.description : current.description,
       acceptance_criteria:
         patch.acceptanceCriteria !== undefined ? patch.acceptanceCriteria : current.acceptanceCriteria,
-      repo: patch.repo ?? current.repo,
+      repo: patch.repo !== undefined ? normalizeStoredIssueRepo(patch.repo) : current.repo,
       base_branch: patch.baseBranch ?? current.baseBranch,
       developer_agent_id: patch.developerAgentId ?? current.developerAgentId,
       reviewer_agent_id: patch.reviewerAgentId ?? current.reviewerAgentId,

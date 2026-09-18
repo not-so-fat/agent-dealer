@@ -156,9 +156,11 @@ export async function branchExists(repo: string, branch: string): Promise<boolea
 
 export { withRepoLock };
 
-/** Where role worktrees are checked out for this issue repo — under the repo tree so the
- * agent's deck grant (typically rooted at the same checkout or an ancestor) covers the
- * worker cwd and bind-first equip can succeed. */
+/**
+ * Legacy layout: worktrees under `<repo>/.agent-dealer-worktrees/` (pre-NOT-149).
+ * New managed checkouts use `roleWorktreePathForResolution` from managed-repo.ts;
+ * callers that still pass a local repo path keep this helper for recovery.
+ */
 export function worktreesRoot(repo: string): string {
   return path.join(repo, WORKTREES_DIR_NAME);
 }
@@ -167,6 +169,11 @@ export function roleWorktreePath(repo: string, sessionId: string, role: WorkerSe
   return path.join(worktreesRoot(repo), `${sessionId}-${role}`);
 }
 
+function ensureParentDir(worktreePath: string): void {
+  fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+}
+
+/** @deprecated use ensureParentDir — kept so any stray call sites compile during migration. */
 function ensureWorktreesRoot(repo: string): void {
   fs.mkdirSync(worktreesRoot(repo), { recursive: true });
 }
@@ -215,12 +222,18 @@ export async function createRoleWorktree(opts: {
   ref: string;
   /** Developer round 1 only: create this branch off `ref` instead of checking it out. */
   newBranch?: string;
+  /**
+   * Explicit worktree path (NOT-149 managed layout). When omitted, falls back to the
+   * legacy `<repo>/.agent-dealer-worktrees/<sessionId>-<role>` layout for recovery.
+   */
+  worktreePath?: string;
 }): Promise<RoleWorktree> {
   const detached = opts.role === "reviewer";
-  const worktreePath = roleWorktreePath(opts.repo, opts.sessionId, opts.role);
+  const worktreePath =
+    opts.worktreePath ?? roleWorktreePath(opts.repo, opts.sessionId, opts.role);
   await withRepoLock(opts.repo, async () => {
     await pruneWorktrees(opts.repo);
-    ensureWorktreesRoot(opts.repo);
+    ensureParentDir(worktreePath);
     await addWorktree({
       repo: opts.repo,
       path: worktreePath,
@@ -554,14 +567,21 @@ export async function resolveDeveloperWorktree(opts: {
   branchName: string;
   baseBranch: string;
   reuseBranch: boolean;
+  /**
+   * NOT-149: managed worktree path. When set, new checkouts use this path and leftover
+   * detection looks under its parent directory instead of `<repo>/.agent-dealer-worktrees`.
+   */
+  worktreePath?: string;
   ownerLiveness?: (worktreePath: string) => WorktreeOwnerLiveness | Promise<WorktreeOwnerLiveness>;
 }): Promise<DeveloperWorktreeResolution> {
   return withRepoLock(opts.repo, async () => {
     await pruneWorktrees(opts.repo);
     const existing = await findWorktreeForBranch(opts.repo, opts.branchName);
     if (existing) {
-      const root = tryRealpath(worktreesRoot(opts.repo));
-      const underRoot = tryRealpath(existing).startsWith(root + path.sep);
+      const managedRoot = opts.worktreePath
+        ? tryRealpath(path.dirname(opts.worktreePath))
+        : tryRealpath(worktreesRoot(opts.repo));
+      const underRoot = tryRealpath(existing).startsWith(managedRoot + path.sep);
       if (!underRoot) {
         return {
           kind: "conflict",
@@ -617,8 +637,9 @@ export async function resolveDeveloperWorktree(opts: {
       }
       await pruneWorktrees(opts.repo);
     }
-    ensureWorktreesRoot(opts.repo);
-    const worktreePath = roleWorktreePath(opts.repo, opts.sessionId, "developer");
+    const worktreePath =
+      opts.worktreePath ?? roleWorktreePath(opts.repo, opts.sessionId, "developer");
+    ensureParentDir(worktreePath);
     await addWorktree({
       repo: opts.repo,
       path: worktreePath,

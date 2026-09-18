@@ -16,22 +16,20 @@ const {
   getActiveWorkflowInstance,
   getWorkflowInstance,
   listWorkflowInstancesForIssue,
-  WorkflowAlreadyActiveError,
-} = await import("../repository/workflow-events.js");
+  WorkflowAlreadyActiveError} = await import("../repository/workflow-events.js");
 
 before(() => migrate());
 
 function newIssue(): string {
   return createIssue({
     title: "WF host",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 test("startWorkflowInstance creates one active instance", () => {

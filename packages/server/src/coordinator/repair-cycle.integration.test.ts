@@ -81,8 +81,8 @@ function issueBranchName(issueId: string): string {
 }
 
 async function makeIssue(): Promise<string> {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
-  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
   return createIssue({
     title: "Add widget",
     description: "Build the widget.",
@@ -93,8 +93,7 @@ async function makeIssue(): Promise<string> {
     reviewerAgentId: rev.id,
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 async function pump(max = 20): Promise<void> {
@@ -140,8 +139,7 @@ function reviewerTranscript(verdict: "changes_requested" | "approved", baseSha: 
     acceptanceCriteriaAssessment: verdict === "approved" ? "Met." : "Not yet — missing test coverage.",
     evidenceAssessment: "Evidence checked.",
     findings: verdict === "changes_requested" ? [ROUND1_FINDING] : [],
-    risks: [],
-  };
+    risks: []};
   return `\`\`\`json\n${JSON.stringify(body)}\n\`\`\`\n`;
 }
 
@@ -192,8 +190,7 @@ function fakeGithub(): GithubFn {
     async publishReview({ event }) {
       const finalEvent: ReviewEvent = event;
       return { ok: true, event: finalEvent, usedCommentFallback: false };
-    },
-  };
+    }};
   return adapter;
 }
 

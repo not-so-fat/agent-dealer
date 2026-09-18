@@ -33,7 +33,7 @@ test("Issue schema parses a well-formed issue", () => {
     title: "Fix login bug",
     description: null,
     acceptanceCriteria: null,
-    repo: "/repo",
+    repo: "acme/app",
     baseBranch: "main",
     status: "ready",
     currentOwner: "system",
@@ -51,20 +51,32 @@ test("Issue schema parses a well-formed issue", () => {
     prUrl: null,
     autoMerge: false,
     createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
+    updatedAt: new Date().toISOString()};
   assert.deepStrictEqual(Issue.parse(issue), issue);
 });
 
 test("CreateIssueInput defaults baseBranch to main and maxReviewRounds to 3", () => {
   const parsed = CreateIssueInput.parse({
     title: "Fix login bug",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: "22222222-2222-2222-2222-222222222222",
-    reviewerAgentId: "33333333-3333-3333-3333-333333333333",
-  });
+    reviewerAgentId: "33333333-3333-3333-3333-333333333333"});
   assert.equal(parsed.baseBranch, "main");
   assert.equal(parsed.maxReviewRounds, 3);
   assert.equal(parsed.source, "manual");
   assert.equal(parsed.autoMerge, false);
+  assert.equal(parsed.repo, "github.com/acme/app");
+});
+
+test("CreateIssueInput rejects local filesystem paths (NOT-149)", () => {
+  assert.throws(
+    () =>
+      CreateIssueInput.parse({
+        title: "Local",
+        repo: "/repo",
+        developerAgentId: "22222222-2222-2222-2222-222222222222",
+        reviewerAgentId: "33333333-3333-3333-3333-333333333333",
+      }),
+    /Local filesystem|Invalid/
+  );
 });

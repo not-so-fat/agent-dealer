@@ -1,4 +1,4 @@
-# Agent profiles — workspace, treasure, and temporal scratch
+# Agent profiles — operating configuration and temporal scratch
 
 How agent-dealer binds execution context to saved agents and separates durable artifacts from disposable filesystem scratch.
 
@@ -27,49 +27,47 @@ Deleting `~/.agent-dealer/.temporal/` is safe — treasure remains in the databa
 ```
 ~/.agent-dealer/
   dealer.db          ← treasure (SQLite)
+  execution/         ← managed clones + worktrees (NOT-149; override with AGENT_DEALER_EXECUTION_ROOT)
+    repos/github.com/<owner>/<repo>
+    worktrees/github.com/<owner>/<repo>/<sessionId>-{developer|reviewer}
   .temporal/
     output/          ← runtime capture scratch
     logs/            ← runner NDJSON logs
 ```
 
-Issue-coordinator role worktrees are **not** under this home directory. They are checked out at `<issue.repo>/.agent-dealer-worktrees/<sessionId>-{developer|reviewer}` so an Agent Deck workspace grant on that repo covers the worker cwd and `bind_workspace` can equip the configured deck.
+Issue-coordinator role worktrees are generated under the managed execution root (NOT-149). Deck authority is launch-selected from the profile's fixed Deck header — workers do not need a repository-local `.agent-deck/use.json`. `bind_workspace` still receives the generated worktree cwd as session context.
 
 ## Agent fields
 
 | Field | Required | Role |
 |-------|----------|------|
-| `workspaceRoot` | Yes (before kick) | CLI working directory — git repo for dev, vault folder for notes |
 | `runtime` | Yes | `claude_code`, `cursor_local`, or `codex_local` |
-| `deckId` / `playbookId` | No | Optional Agent Deck id on the profile — when set, issue workers must `bind_workspace` to their session cwd to equip that deck before other Deck use |
+| `deckId` | Yes (before kick) | Exactly one Agent Deck — workers never start without one |
 | `name` | Yes | Display label |
+| `defaultModel` / `defaultEffort` / `defaultBudget` | No | Session defaults (snapshotted) |
+| `permissionPolicy` | No | Tighten-only capability overrides |
 
-Built-in Claude, Cursor, and Codex agents ship with **no default workspace**. Configure workspace on the Agents page before kicking tasks.
+**Not agent concepts (NOT-149):** workspace root, selected playbooks, or free-form external-memory refs. Playbooks are chosen dynamically inside the pinned Deck. The GitHub repository lives on the **Issue**, not the Agent.
 
-## Task override
+Built-in Claude, Cursor, and Codex agents ship with **no default Deck**. Configure a Deck on the Agents page before kicking tasks.
 
-At Inbox, optional `repo` on a manual task overrides the agent's `workspaceRoot` for that run only. Linear promote uses agent workspace (no per-issue override).
+## Issue repository
 
-## Resolution at kick
+At Issues create, the operator supplies a **GitHub repository URL** or `owner/repo` shorthand. Dealer stores the canonical identity `github.com/<owner>/<repo>`, clones/fetches under the execution root, and starts new workflows from the freshly fetched remote default branch (an explicit base override remains advanced configuration).
 
-When a run is created:
+Legacy issue rows that still hold a local filesystem path remain recoverable when that path still exists — Dealer will not guess a remote when `origin` cannot be resolved.
 
-```
-runs.repo = task.repo ?? agent.workspaceRoot
-```
+## Profile snapshot
 
-The value is **snapshotted** on the run row — later agent edits do not change in-flight runs. Retry runs copy the parent `repo`.
-
-If neither task nor agent provides a workspace, run creation fails with a clear error.
+When a worker session is created, the profile is frozen into `worker_sessions.profile_snapshot_json` without workspace, playbook lists, or external-memory refs. A later agent edit does not change in-flight sessions.
 
 ## CLI cwd vs temporal paths
 
 | Concern | Path |
 |---------|------|
-| CLI `cwd` | `runs.repo` (agent workspace or task override) |
+| CLI `cwd` | Managed worktree under `execution/worktrees/...` (persisted on `worker_sessions.worktree_path`) |
 | Document scratch | `~/.agent-dealer/.temporal/output/{runId}.md` |
 | Runner logs | `~/.agent-dealer/.temporal/logs/` |
-
-The agent executes in the workspace; deliverable capture uses the centralized temporal dir (not repo-relative `.temporal/`).
 
 ## Permissions (headless automation)
 
@@ -85,42 +83,17 @@ Permissions are explicit tools and paths — not category presets like "Artifact
 
 **Codex execute**: `codex exec --sandbox workspace-write`; Agent Deck via Codex marketplace plugin when a deck is bound.
 
-## User stories
-
-### Dev agent (code tasks)
-
-- **Workspace:** `/Users/me/projects/my-app` (git repo)
-- **Runtime:** Claude Code, Cursor local, or Codex local (optional Agent Deck deck)
-- **Kick:** Linear issue or manual task → agent runs in repo cwd, edits source files there
-- **Review:** Plan + diff-style results in Operations; treasure in SQLite
-
-### Notes agent (content in vault)
-
-- **Workspace:** `/Users/me/Obsidian/Main` (vault root)
-- **Runtime:** Claude, Cursor, or Codex
-- **Kick:** Manual content task; agent reads context from vault
-- **Deliverable:** Scratch written to `~/.agent-dealer/.temporal/output/{runId}.md`, captured as `document` artifact; final vault placement is P2 (`deliverable_template`)
-
-### One-off path override
-
-- **Agent workspace:** default dev repo
-- **Task repo:** `/tmp/experiment` for a single kick
-- **Result:** `runs.repo` = `/tmp/experiment`; agent cwd follows override
-
 ## Health checks
 
 | Code | When |
 |------|------|
-| `workspace_missing` | No `workspaceRoot` configured, or path not found on disk |
+| `deck_missing` | No `deckId` configured |
 | `cli_missing` | Claude / Cursor / Codex CLI not installed |
 | `runtime_auth` | Cursor or Codex not logged in / missing auth |
 | `cursor_keychain` | Cursor macOS keychain stuck (`errSecDuplicateItem`) — see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md#cursor-macos-keychain-auth) |
 | `deck_offline` | Agent has deck but Agent Deck API unreachable |
+| `deck_unauthorized` | Bound deck not available from Agent Deck |
 
 ## P2 (documented, not yet implemented)
 
-- `write_roots_json` — additional explicit write paths for headless mode
-- `deliverable_template` — e.g. `{vault}/{title}.md` for Obsidian
-- Budget defaults on agent profile
-
-See also: [DATA_MODEL.md](./DATA_MODEL.md) for artifact shapes. For Linear intake and agent routing on promote, see [LINEAR_INTEGRATION.md](./LINEAR_INTEGRATION.md).
+See prior notes on deliverable templates and vault placement.

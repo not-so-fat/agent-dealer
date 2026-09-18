@@ -41,7 +41,6 @@ export interface DeveloperPromptInput {
   /** The generated worktree the agent is actually running in — binding must target this, not the original repo checkout. */
   worktreePath?: string;
   deckId?: string | null;
-  playbookIds?: string[];
   /** Human guidance markdown added since this issue's previous worker session (design
    * doc "Guidance semantics") — a one-shot CLI process never inherits a running session,
    * so this is how guidance actually reaches the next developer/reviewer input. */
@@ -63,30 +62,26 @@ function guidanceSection(guidance: string[] | undefined): string[] {
  * (NOT-106). `bind_workspace` confirms the equipped deck for this session cwd — it does
  * not pick a different deck. Without an explicit bind-first instruction, models either
  * skip Deck entirely or (cursor_local) invent a bind against the wrong path from ambient
- * habit. Worktrees live under the issue repo (`.agent-dealer-worktrees/`) so the
- * operator's `agent-deck use` grant covers the cwd and bind can succeed.
+ * habit. Worktrees are Dealer-managed checkouts (NOT-149); Deck authority comes from the
+ * profile's fixed Deck header via launch selection — no repository-local `.agent-deck/use.json`.
  *
  * Linear (and other deck MCPs) must go through Agent Deck (`list_service_tools` /
  * `call_service_tool`) — never a raw Linear URL / web fetch. When Task/AC only point at
  * a ticket id, that deck fetch *is* the brief, not optional enrichment.
  *
- * When there is no deckId: forbid bind/Linear — Task/AC are the full brief.
+ * Workers never start without a deckId (fail-closed at admission/effect).
  */
-function agentDeckSection(worktreePath: string | undefined, deckId: string | null | undefined, playbookIds: string[] | undefined): string[] {
+function agentDeckSection(worktreePath: string | undefined, deckId: string | null | undefined): string[] {
   if (!deckId || !worktreePath) {
     return [
-      `This session has no Agent Deck/Linear binding. Do not attempt to bind a workspace, fetch the ticket from Linear, or call any Agent Deck tool — all of that will fail here. The Task and Acceptance criteria above are the complete, authoritative brief; treat them as such.`,
+      `This session is misconfigured: Agent Deck is required but missing. Stop and report the bootstrap failure — do not improvise without the deck.`,
     ];
   }
-  const parts = [
+  return [
     `First equip this agent: bind_workspace({ deckId: "${deckId}", workspaceRoot: "${worktreePath}" }). Do this before any other Agent Deck or Linear call — without that bind you are not running the configured agent.`,
     `This bootstrap is a hard gate. If bind_workspace, get_bound_deck, or any configured get_playbook call fails, stop before inspecting or changing the task and report the bootstrap failure — do not improvise without the deck.`,
     `Then get_bound_deck / list_service_tools / call_service_tool as needed. Ticket detail (Linear, etc.) is only available through Agent Deck service tools — do not web-fetch Linear URLs. If Task/Acceptance criteria only reference a ticket id, fetch that ticket via Agent Deck before implementing; otherwise treat the Task/Acceptance criteria above as authoritative and use Linear only to enrich.`,
   ];
-  for (const playbookId of playbookIds ?? []) {
-    parts.push(`Then get_playbook("${playbookId}") and follow it.`);
-  }
-  return parts;
 }
 
 export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
@@ -136,7 +131,7 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
   }
 
   parts.push(...guidanceSection(input.guidance));
-  parts.push(...agentDeckSection(input.worktreePath, input.deckId, input.playbookIds));
+  parts.push(...agentDeckSection(input.worktreePath, input.deckId));
 
   parts.push(
     `## Required`,
@@ -164,7 +159,6 @@ export interface ReviewerPromptInput {
   /** The generated worktree the agent is actually running in — binding must target this, not the original repo checkout. */
   worktreePath?: string;
   deckId?: string | null;
-  playbookIds?: string[];
   /** See DeveloperPromptInput.guidance. */
   guidance?: string[];
 }
@@ -272,7 +266,7 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
   }
 
   parts.push(...guidanceSection(input.guidance));
-  parts.push(...agentDeckSection(input.worktreePath, input.deckId, input.playbookIds));
+  parts.push(...agentDeckSection(input.worktreePath, input.deckId));
   parts.push(``, ...reviewerContractSection(input.baseSha, input.headSha));
 
   return parts.join("\n");

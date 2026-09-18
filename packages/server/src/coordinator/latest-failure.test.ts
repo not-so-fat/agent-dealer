@@ -29,11 +29,10 @@ function makeIssue() {
   return createIssue({
     title: "Latest failure strip",
     acceptanceCriteria: "Strip works",
-    repo: "/repo",
+    repo: "acme/app",
     baseBranch: "main",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
-    reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
-  });
+    reviewerAgentId: BUILTIN_AGENT_CURSOR_ID});
 }
 
 test("session-fallback strip clears when worker.completed shares the same ms timestamp (rowid > ts)", () => {
@@ -44,8 +43,7 @@ test("session-fallback strip clears when worker.completed shares the same ms tim
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: "cursor_local",
-  });
+    runtime: "cursor_local"});
   startSession(session.id);
   appendWorkflowEvent({
     issueId: issue.id,
@@ -55,8 +53,7 @@ test("session-fallback strip clears when worker.completed shares the same ms tim
     actorType: "developer",
     stage: "developing",
     round: 1,
-    payload: {},
-  });
+    payload: {}});
 
   // Force identical wall-clock stamps across session completion and a later handoff event —
   // the exact collision that made `e.ts > when` leave a stale strip.
@@ -64,8 +61,7 @@ test("session-fallback strip clears when worker.completed shares the same ms tim
   completeSession(session.id, {
     status: "failed",
     errorJson: JSON.stringify({ reason: PRESUMED_DEAD_REASON }),
-    logPath: "/tmp/stale-strip.log",
-  });
+    logPath: "/tmp/stale-strip.log"});
   getDb()
     .prepare("UPDATE worker_sessions SET completed_at = ?, updated_at = ? WHERE id = ?")
     .run(stamped, stamped, session.id);
@@ -79,8 +75,7 @@ test("session-fallback strip clears when worker.completed shares the same ms tim
     actorType: "developer",
     stage: "reviewing",
     round: 1,
-    payload: { outcome: "clean_handoff" },
-  });
+    payload: { outcome: "clean_handoff" }});
   getDb().prepare("UPDATE workflow_events SET ts = ? WHERE id = ?").run(stamped, completed.id);
 
   const fresh = getIssue(issue.id)!;
@@ -96,8 +91,7 @@ test("worker.failed strip clears via rowid when a later completed shares the sam
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: "cursor_local",
-  });
+    runtime: "cursor_local"});
   startSession(session.id);
   const stamped = "2026-09-15T12:00:00.000Z";
 
@@ -112,9 +106,7 @@ test("worker.failed strip clears via rowid when a later completed shares the sam
     payload: {
       sessionId: session.id,
       outcome: "session_failed",
-      reason: PRESUMED_DEAD_REASON,
-    },
-  });
+      reason: PRESUMED_DEAD_REASON}});
   const completed = appendWorkflowEvent({
     issueId: issue.id,
     workflowInstanceId: instance.id,
@@ -123,15 +115,13 @@ test("worker.failed strip clears via rowid when a later completed shares the sam
     actorType: "developer",
     stage: "reviewing",
     round: 1,
-    payload: { outcome: "clean_handoff" },
-  });
+    payload: { outcome: "clean_handoff" }});
   getDb().prepare("UPDATE workflow_events SET ts = ? WHERE id IN (?, ?)").run(stamped, failed.id, completed.id);
 
   completeSession(session.id, {
     status: "failed",
     errorJson: JSON.stringify({ reason: PRESUMED_DEAD_REASON }),
-    logPath: "/tmp/stale-strip.log",
-  });
+    logPath: "/tmp/stale-strip.log"});
 
   assert.equal(latestSessionFailureForIssue(getIssue(issue.id)!), null);
 });

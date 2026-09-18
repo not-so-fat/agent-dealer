@@ -40,6 +40,10 @@ import {
   fetchRef,
   diffShas,
 } from "../adapters/git-worktree.js";
+import {
+  ensureIssueRepoCheckout,
+  roleWorktreePathForResolution,
+} from "../adapters/managed-repo.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adapters/github.js";
 import { getWorkerSession, patchRunningSession, recordSessionProcess } from "../repository/worker-sessions.js";
@@ -250,13 +254,17 @@ export async function runReviewerEffect(
   let worktreePath: string;
   let result: ReviewerResult;
   let workerAuthority: { mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
+  let repoPath: string;
   try {
    try {
+    const checkout = await ensureIssueRepoCheckout(issue.repo);
+    repoPath = checkout.repoPath;
     const worktree = await createRoleWorktree({
-      repo: issue.repo,
+      repo: repoPath,
       role: "reviewer",
       sessionId,
       ref: headSha,
+      worktreePath: roleWorktreePathForResolution(checkout, sessionId, "reviewer"),
     });
     worktreePath = worktree.path;
     patchRunningSession(sessionId, { worktreePath });
@@ -270,17 +278,23 @@ export async function runReviewerEffect(
     // agree by inspection — the exact shape this stack exists to remove (NOT-134 review).
     const policy = snapshot?.permissionPolicy ?? roleCeiling("reviewer");
 
-    if (snapshot?.deckId) {
+    if (!snapshot?.deckId) {
+      await bestEffortRemove(repoPath, worktreePath);
+      return {
+        kind: "deck_failure",
+        reason: "Agent profile has no Agent Deck — workers never start without one",
+      };
+    }
+    {
       const prepared = await prepareWorkerDeckConnection({
         deckId: snapshot.deckId,
         worktreePath,
         runtime,
-        playbookIds: snapshot.playbookIds,
         policy,
         verifyCallTool: deps.deckCallTool,
       });
       if (!prepared.ok) {
-        await bestEffortRemove(issue.repo, worktreePath);
+        await bestEffortRemove(repoPath, worktreePath);
         // NOT-136: see developer-effect — unreachable deck defers, deck errors still fail.
         return prepared.kind === "deck_unavailable"
           ? { kind: "deck_unavailable", reason: prepared.reason }
@@ -299,13 +313,9 @@ export async function runReviewerEffect(
       milestone("brief.resolved", `Reviewer · brief ready (Task/AC complete)`, {
         resolution: "task_complete",
       });
-    } else if (snapshot?.deckId) {
+    } else {
       milestone("brief.resolved", `Reviewer · brief via Agent Deck`, {
         resolution: "deferred_to_agent",
-      });
-    } else {
-      milestone("brief.resolved", `Reviewer · brief from Task fields`, {
-        resolution: "task_fields_only",
       });
     }
 
@@ -332,7 +342,6 @@ export async function runReviewerEffect(
       findings: openFindings.length ? openFindings : undefined,
       worktreePath,
       deckId: snapshot?.deckId ?? null,
-      playbookIds: snapshot?.playbookIds,
       guidance: guidance.length ? guidance : undefined,
     });
 
@@ -404,7 +413,7 @@ export async function runReviewerEffect(
     if (usageCap) {
       const clean = await isWorktreeClean(worktreePath).catch(() => false);
       if (!clean) return { kind: "session_failed" };
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return {
         kind: "usage_capped",
         until: usageCap.unavailableUntil,
@@ -414,7 +423,7 @@ export async function runReviewerEffect(
     }
 
     if (spawned.timedOut || spawned.exitCode !== 0) {
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       // NOT-133: a reviewer that died on runtime auth reads as "Worker session failed or
       // crashed" without this. Null when nothing classifies, which keeps that fallback.
       return {
@@ -435,7 +444,7 @@ export async function runReviewerEffect(
 
     const parsed = parseReviewerResult(spawned.transcript);
     if (!parsed) {
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return { kind: "session_failed" };
     }
     // The reviewer is told to echo these exact values (prompts.ts's reviewer contract);
@@ -444,7 +453,7 @@ export async function runReviewerEffect(
     // issue (design's exact-SHA protocol applies to the reviewer's output too, not just
     // the developer's handoff).
     if (parsed.baseSha !== baseSha || parsed.headSha !== headSha) {
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return { kind: "session_failed" };
     }
     result = parsed;
@@ -471,14 +480,14 @@ export async function runReviewerEffect(
   if (issue.prNumber == null) {
     // Can't identify which PR to re-verify/publish against — the detached worktree has
     // no branch for `gh` to fall back to resolving this from.
-    await bestEffortRemove(issue.repo, worktreePath);
+    await bestEffortRemove(repoPath, worktreePath);
     return { kind: "publish_failed" };
   }
 
   try {
     const prView = await deps.github.viewPr({ cwd: worktreePath, number: issue.prNumber });
     if (!prView) {
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return { kind: "publish_failed" };
     }
     if (prView.headRefOid !== headSha) {
@@ -490,7 +499,7 @@ export async function runReviewerEffect(
         author: "agent",
         content: { review: result, staleAtSha: headSha, currentHeadSha: prView.headRefOid },
       });
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return { kind: "stale", currentHeadSha: prView.headRefOid };
     }
 
@@ -498,7 +507,7 @@ export async function runReviewerEffect(
 
     const claim = await acquireOrAwaitPublication(workItem.id, leaseToken);
     if (!claim.owns) {
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       // The winner's *actual* published result is authoritative here — never this
       // attempt's own independently-parsed `result`, which a review round found could
       // genuinely disagree with the winner's (two separate reviewer sessions are two
@@ -525,7 +534,7 @@ export async function runReviewerEffect(
     fs.rmSync(bodyDir, { recursive: true, force: true });
     if (!published.ok) {
       recordReviewPublishFailed(workItem.id);
-      await bestEffortRemove(issue.repo, worktreePath);
+      await bestEffortRemove(repoPath, worktreePath);
       return { kind: "publish_failed" };
     }
 
@@ -542,10 +551,10 @@ export async function runReviewerEffect(
       content: { event: published.event, usedCommentFallback: published.usedCommentFallback, verdict: result.verdict },
     });
 
-    await bestEffortRemove(issue.repo, worktreePath);
+    await bestEffortRemove(repoPath, worktreePath);
     return { kind: "verdict", result };
   } catch {
-    await bestEffortRemove(issue.repo, worktreePath);
+    await bestEffortRemove(repoPath, worktreePath);
     return { kind: "publish_failed" };
   }
   } finally {

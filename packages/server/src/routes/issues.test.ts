@@ -58,8 +58,7 @@ test("POST /api/issues creates an issue, GET lists it", async () => {
   const createRes = await app.inject({
     method: "POST",
     url: "/api/issues",
-    payload: { title: "Fix login bug", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID },
-  });
+    payload: { title: "Fix login bug", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID }});
   assert.equal(createRes.statusCode, 200);
   const created = createRes.json() as { id: string; status: string };
   assert.equal(created.status, "ready");
@@ -72,6 +71,23 @@ test("POST /api/issues creates an issue, GET lists it", async () => {
   await app.close();
 });
 
+test("POST /api/issues rejects a local filesystem path as repo (NOT-149)", async () => {
+  const app = await buildApp();
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/issues",
+    payload: {
+      title: "Local path",
+      repo: "/repo",
+      baseBranch: "main",
+      developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+      reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    },
+  });
+  assert.equal(res.statusCode, 400);
+  await app.close();
+});
+
 test("NOT-118: POST /api/issues with enqueue:false creates a draft that is not queued", async () => {
   const app = await buildApp();
   const created = (
@@ -80,14 +96,12 @@ test("NOT-118: POST /api/issues with enqueue:false creates a draft that is not q
       url: "/api/issues",
       payload: {
         title: "Draft only",
-        repo: "/repo",
+        repo: "acme/app",
         baseBranch: "main",
         developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
         reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
         acceptanceCriteria: "It works",
-        enqueue: false,
-      },
-    })
+        enqueue: false}})
   ).json() as { id: string; status: string };
   assert.equal(created.status, "ready");
   assert.equal(getQueuedEntryForIssue(created.id), null);
@@ -97,7 +111,7 @@ test("NOT-118: POST /api/issues with enqueue:false creates a draft that is not q
 
 test("POST /api/issues matches a live (source, externalId) instead of duplicating it, and reports the queue it did not change", async () => {
   const app = await buildApp();
-  const payload = { title: "Linear task", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, source: "linear", externalId: "LIN-1" };
+  const payload = { title: "Linear task", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, source: "linear", externalId: "LIN-1" };
   const first = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as { id: string; created: boolean; queue: string };
   assert.equal(first.created, true);
   assert.equal(first.queue, "enqueued");
@@ -118,7 +132,7 @@ test("POST /api/issues matches a live (source, externalId) instead of duplicatin
 
 test("NOT-141: re-importing a ticket whose only issue is terminal creates a new, queued issue", async () => {
   const app = await buildApp();
-  const payload = { title: "Second pass", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, source: "linear", externalId: "LIN-CLOSED" };
+  const payload = { title: "Second pass", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, source: "linear", externalId: "LIN-CLOSED" };
   const first = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as { id: string };
   transitionIssue(first.id, "closed");
 
@@ -139,7 +153,7 @@ test("NOT-141: re-importing a ticket whose only issue is terminal creates a new,
 
 test("NOT-141: re-importing a ticket that is mid-flight answers 409 with the issue that holds it", async () => {
   const app = await buildApp();
-  const payload = { title: "In flight", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, source: "linear", externalId: "LIN-LIVE" };
+  const payload = { title: "In flight", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, source: "linear", externalId: "LIN-LIVE" };
   const first = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as { id: string };
   transitionIssue(first.id, "developing");
   const queuedBefore = listQueuedEntries().map((e) => e.issueId);
@@ -159,7 +173,7 @@ test("NOT-141: re-importing a ticket that is mid-flight answers 409 with the iss
 test("GET /api/issues/:id returns header, timeline, actions, findings, usage, readiness, metrics", async () => {
   const app = await buildApp();
   const created = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Detail issue", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Detail issue", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
   const res = await app.inject({ method: "GET", url: `/api/issues/${created.id}` });
   assert.equal(res.statusCode, 200);
@@ -191,14 +205,13 @@ test("GET /api/issues/:id returns header, timeline, actions, findings, usage, re
 test("PATCH /api/issues/:id updates editable fields and satisfies the readiness gate", async () => {
   const app = await buildApp();
   const created = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Underspecified", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Underspecified", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
 
   const patchRes = await app.inject({
     method: "PATCH",
     url: `/api/issues/${created.id}`,
-    payload: { acceptanceCriteria: "It compiles and tests pass" },
-  });
+    payload: { acceptanceCriteria: "It compiles and tests pass" }});
   assert.equal(patchRes.statusCode, 200);
   const patched = patchRes.json() as { acceptanceCriteria: string | null };
   assert.equal(patched.acceptanceCriteria, "It compiles and tests pass");
@@ -218,13 +231,11 @@ test("PATCH /api/issues/:id rejects an edit while a workflow is active", async (
       url: "/api/issues",
       payload: {
         title: "Active workflow",
-        repo: "/repo",
+        repo: "acme/app",
         baseBranch: "main",
         developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
         reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
-        acceptanceCriteria: "Ready to go",
-      },
-    })
+        acceptanceCriteria: "Ready to go"}})
   ).json() as { id: string };
   const startRes = await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` });
   assert.equal(startRes.statusCode, 200);
@@ -242,13 +253,11 @@ test("PATCH /api/issues/:id rejects an edit to a terminal (done) issue even thou
       url: "/api/issues",
       payload: {
         title: "Completed issue",
-        repo: "/repo",
+        repo: "acme/app",
         baseBranch: "main",
         developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
         reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
-        acceptanceCriteria: "Ready to go",
-      },
-    })
+        acceptanceCriteria: "Ready to go"}})
   ).json() as { id: string };
   // Drive it to a terminal status directly — a `done` issue has no active workflow
   // instance either, which is exactly the gap: "no active instance" alone must not be
@@ -271,13 +280,11 @@ test("POST /api/issues/:id/start with acceptance criteria starts the workflow", 
       url: "/api/issues",
       payload: {
         title: "Startable",
-        repo: "/repo",
+        repo: "acme/app",
         baseBranch: "main",
         developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
         reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
-        acceptanceCriteria: "It works",
-      },
-    })
+        acceptanceCriteria: "It works"}})
   ).json() as { id: string };
 
   const res = await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` });
@@ -297,7 +304,7 @@ test("POST /api/issues/:id/start with acceptance criteria starts the workflow", 
 test("NOT-118: POST /api/issues/:id/start without acceptance criteria queues it with a wait reason, no product_scope_decision", async () => {
   const app = await buildApp();
   const created = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Underspecified start", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Underspecified start", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
 
   const res = await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` });
@@ -338,7 +345,7 @@ test("GET /api/issues/:id 404s for an unknown id", async () => {
 test("GET /api/issues/:id/artifacts/:artifactId/trace serves the artifact's raw log file", async () => {
   const app = await buildApp();
   const created = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Traceable", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Traceable", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
   const logPath = tmpTraceFile('{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}\n');
   const artifact = createIssueArtifact({ issueId: created.id, kind: "developer_transcript", author: "system", blobPath: logPath });
@@ -355,7 +362,7 @@ test("GET /api/issues/:id/artifacts/:artifactId/trace serves the artifact's raw 
 test("GET /api/issues/:id/artifacts/:artifactId/trace ignores a non-numeric max instead of returning the whole file", async () => {
   const app = await buildApp();
   const created = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Huge trace", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Huge trace", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
   // Reproduces the exact repro from review: a file well over the 200,000-char hard cap.
   const logPath = tmpTraceFile("x".repeat(250_001));
@@ -372,7 +379,7 @@ test("GET /api/issues/:id/artifacts/:artifactId/trace ignores a non-numeric max 
 test("GET /api/issues/:id/artifacts/:artifactId/trace clamps a negative max to the default and an oversized max to the hard cap", async () => {
   const app = await buildApp();
   const created = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Bounds", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Bounds", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
   const logPath = tmpTraceFile("y".repeat(250_001));
   const artifact = createIssueArtifact({ issueId: created.id, kind: "developer_transcript", author: "system", blobPath: logPath });
@@ -388,7 +395,7 @@ test("GET /api/issues/:id/artifacts/:artifactId/trace clamps a negative max to t
 test("GET /api/issues/:id/artifacts/:artifactId/trace returns the actual tail, not zeroed/garbage bytes, for a large file", async () => {
   const app = await buildApp();
   const created = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Tail correctness", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Tail correctness", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
   const logPath = tmpTraceFile(`${"z".repeat(300_000)}END-OF-TRACE`);
   const artifact = createIssueArtifact({ issueId: created.id, kind: "developer_transcript", author: "system", blobPath: logPath });
@@ -402,7 +409,7 @@ test("GET /api/issues/:id/artifacts/:artifactId/trace returns the actual tail, n
 test("GET /api/issues/:id/artifacts/:artifactId/trace 404s for an artifact with no raw trace", async () => {
   const app = await buildApp();
   const created = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "No trace", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "No trace", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
   const artifact = createIssueArtifact({ issueId: created.id, kind: "implementation_conclusion", author: "agent", content: { text: "done" } });
 
@@ -414,10 +421,10 @@ test("GET /api/issues/:id/artifacts/:artifactId/trace 404s for an artifact with 
 test("GET /api/issues/:id/artifacts/:artifactId/trace 404s when the artifact belongs to a different issue", async () => {
   const app = await buildApp();
   const issueA = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "A", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "A", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
   const issueB = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "B", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "B", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
   const logPath = tmpTraceFile("secret");
   const artifact = createIssueArtifact({ issueId: issueA.id, kind: "developer_transcript", author: "system", blobPath: logPath });
@@ -430,7 +437,7 @@ test("GET /api/issues/:id/artifacts/:artifactId/trace 404s when the artifact bel
 test("POST /api/issues/:id/guidance appends a guidance.added event", async () => {
   const app = await buildApp();
   const created = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Guide me", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Guide me", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
   const res = await app.inject({ method: "POST", url: `/api/issues/${created.id}/guidance`, payload: { markdown: "please prioritize this" } });
   assert.equal(res.statusCode, 200);
@@ -449,7 +456,7 @@ test("POST /api/issues/:id/abort 404s for an unknown issue", async () => {
 test("POST /api/issues/:id/abort closes a fresh issue and is idempotent on repeat", async () => {
   const app = await buildApp();
   const created = (
-    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Abort me", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
+    await app.inject({ method: "POST", url: "/api/issues", payload: { title: "Abort me", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID } })
   ).json() as { id: string };
 
   const first = await app.inject({ method: "POST", url: `/api/issues/${created.id}/abort`, payload: { resolvedBy: "yusuke" } });
@@ -481,12 +488,10 @@ test("GET /api/issues/:id surfaces latestSessionFailure from worker.failed reaso
       url: "/api/issues",
       payload: {
         title: "Failure strip",
-        repo: "/repo",
+        repo: "acme/app",
         baseBranch: "main",
         developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
-        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
-      },
-    })
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID}})
   ).json() as { id: string };
 
   const { startWorkflowInstance, appendWorkflowEvent } = await import("../repository/workflow-events.js");
@@ -497,14 +502,12 @@ test("GET /api/issues/:id surfaces latestSessionFailure from worker.failed reaso
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: "cursor_local",
-  });
+    runtime: "cursor_local"});
   startSession(session.id);
   completeSession(session.id, {
     status: "failed",
     errorJson: JSON.stringify({ reason: "recovered — worker process presumed dead" }),
-    logPath: "/tmp/dealer-session.log",
-  });
+    logPath: "/tmp/dealer-session.log"});
   appendWorkflowEvent({
     issueId: created.id,
     workflowInstanceId: instance.id,
@@ -518,9 +521,7 @@ test("GET /api/issues/:id surfaces latestSessionFailure from worker.failed reaso
       model: null,
       sessionId: session.id,
       outcome: "session_failed",
-      reason: "recovered — worker process presumed dead",
-    },
-  });
+      reason: "recovered — worker process presumed dead"}});
 
   const res = await app.inject({ method: "GET", url: `/api/issues/${created.id}` });
   assert.equal(res.statusCode, 200);
@@ -546,8 +547,7 @@ test("GET /api/issues/:id surfaces latestSessionFailure from worker.failed reaso
     actorType: "developer",
     stage: "reviewing",
     round: 1,
-    payload: { outcome: "clean_handoff" },
-  });
+    payload: { outcome: "clean_handoff" }});
   const afterOk = await app.inject({ method: "GET", url: `/api/issues/${created.id}` });
   assert.equal(afterOk.statusCode, 200);
   assert.equal((afterOk.json() as { latestSessionFailure: unknown }).latestSessionFailure, null);

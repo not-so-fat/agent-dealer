@@ -19,21 +19,19 @@ before(() => {
 test("records events and sums them per issue", () => {
   const issue = createIssue({
     title: "Usage issue",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  });
+    source: "manual"});
   const session = createWorkerSession({
     issueId: issue.id,
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: "claude_code",
-  });
+    runtime: "claude_code"});
   recordUsageEvent({
     issueId: issue.id,
     workerSessionId: session.id,
@@ -41,8 +39,7 @@ test("records events and sums them per issue", () => {
     costUsd: 1.5,
     durationMs: 1000,
     tokensIn: 100,
-    tokensOut: 50,
-  });
+    tokensOut: 50});
   recordUsageEvent({
     issueId: issue.id,
     workerSessionId: session.id,
@@ -50,8 +47,7 @@ test("records events and sums them per issue", () => {
     costUsd: 2.25,
     durationMs: 2000,
     tokensIn: 200,
-    tokensOut: 75,
-  });
+    tokensOut: 75});
   const summary = summarizeIssueUsage(issue.id);
   assert.ok(Math.abs(summary.totalCostUsd - 3.75) < 0.001);
   assert.equal(summary.totalDurationMs, 3000);

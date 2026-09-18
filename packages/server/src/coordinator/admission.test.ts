@@ -25,8 +25,7 @@ const {
   enqueueIssueWithOutcome,
   dequeueIssue,
   listQueuedEntries,
-  getQueuedEntryForIssue,
-} = await import("../repository/queue-entries.js");
+  getQueuedEntryForIssue} = await import("../repository/queue-entries.js");
 const { startWorkflow } = await import("./commands.js");
 const {
   sequentialCapacityPolicy,
@@ -36,8 +35,7 @@ const {
   setAdmissionHealthCheckerForTests,
   setCapacityPolicyForTests,
   resetCapacityPolicyForTests,
-  resetEligibilityRulesForTests,
-} = await import("./admission.js");
+  resetEligibilityRulesForTests} = await import("./admission.js");
 
 before(() => migrate());
 
@@ -76,8 +74,8 @@ function seedAgents(
   } = { dev: "claude_code", rev: "claude_code" }
 ) {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), `dealer-admit-repo-${suffix}-`));
-  const dev = createAgent({ name: `dev-${suffix}`, runtime: runtimes.dev, workspaceRoot: repo });
-  const rev = createAgent({ name: `rev-${suffix}`, runtime: runtimes.rev, workspaceRoot: repo });
+  const dev = createAgent({ name: `dev-${suffix}`, runtime: runtimes.dev, deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: `rev-${suffix}`, runtime: runtimes.rev, deckId: "00000000-0000-4000-a000-000000000099"});
   return { repo, dev, rev };
 }
 
@@ -103,8 +101,7 @@ function readyIssue(
     reviewerAgentId: rev.id,
     maxReviewRounds: 2,
     maxInfraAttempts: 2,
-    source: "manual",
-  });
+    source: "manual"});
   if (opts.acceptanceCriteria === null) {
     updateIssue(issue.id, { acceptanceCriteria: null });
   }
@@ -227,8 +224,7 @@ test("skip-ahead: capped/unhealthy entry records wait_reason; later eligible ent
   recordRuntimeAvailability({
     runtime: "claude_code",
     unavailableUntil: new Date(Date.now() + 3600_000).toISOString(),
-    reason: "claude_code usage capped",
-  });
+    reason: "claude_code usage capped"});
 
   const result = await admitNext();
   assert.equal(result?.issueId, ok.id);
@@ -328,8 +324,7 @@ test("product_scope_decision resolve force-admits a queued issue (start-path-que
     actionType: "product_scope_decision",
     reason: "no AC",
     question: "Add AC",
-    responseOptions: [{ choice: "resume", label: "Start" }],
-  });
+    responseOptions: [{ choice: "resume", label: "Start" }]});
   updateIssue(issue.id, { acceptanceCriteria: "now has AC" });
 
   const resolved = resolveHumanActionAndAdvance(action.id, "test", "resume");
@@ -353,8 +348,7 @@ test("admitNext closes a stale product_scope_decision when AC was added after th
     actionType: "product_scope_decision",
     reason: "no acceptance criteria",
     question: "Add acceptance criteria",
-    responseOptions: [{ choice: "resume", label: "Added — start" }],
-  }).id;
+    responseOptions: [{ choice: "resume", label: "Added — start" }]}).id;
 
   updateIssue(issue.id, { acceptanceCriteria: "AC added via PATCH" });
   const admitted = await admitNext();
@@ -408,8 +402,7 @@ test("NOT-133: a logged-out Cursor runtime is not admitted; it waits with an aut
   clearAgentHealthCaches();
   try {
     const issue = readyIssue("cursor-logged-out", {
-      runtimes: { dev: "cursor_local", rev: "cursor_local" },
-    });
+      runtimes: { dev: "cursor_local", rev: "cursor_local" }});
     enqueueIssue(issue.id);
 
     assert.equal(await admitNext(), null);

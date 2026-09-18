@@ -18,14 +18,13 @@ before(() => {
 function seedIssue(title: string): string {
   return createIssue({
     title,
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 test("creates a new finding as open", () => {
@@ -36,8 +35,7 @@ test("creates a new finding as open", () => {
     severity: "blocking",
     title: "Missing null check",
     rationale: "user can be undefined",
-    round: 1,
-  });
+    round: 1});
   assert.equal(finding.status, "open");
   assert.equal(finding.firstRound, 1);
   assert.equal(finding.lastRound, 1);
@@ -52,8 +50,7 @@ test("marks a repeated fingerprint as recurring and bumps last_round", () => {
     severity: "blocking",
     title: "T",
     rationale: "R",
-    round: 2,
-  });
+    round: 2});
   assert.equal(again.status, "recurring");
   assert.equal(again.firstRound, 1);
   assert.equal(again.lastRound, 2);
@@ -67,8 +64,7 @@ test("resolves a finding", () => {
     severity: "blocking",
     title: "T",
     rationale: "R",
-    round: 1,
-  });
+    round: 1});
   const resolved = resolveFinding(finding.id);
   assert.equal(resolved.status, "resolved");
   assert.equal(listFindingsForIssue(issueId).find((f) => f.id === finding.id)?.status, "resolved");

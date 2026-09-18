@@ -27,8 +27,7 @@ const {
   getTaskSnapshot,
   TASK_SNAPSHOT_ARTIFACT_KIND,
   checkIssueReadiness,
-  abortIssue,
-} = await import("./commands.js");
+  abortIssue} = await import("./commands.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./auto-merge.js");
@@ -50,14 +49,13 @@ function newIssue(opts: Opts = {}): string {
     title: "Coordinate me",
     description: "d",
     acceptanceCriteria: opts.acceptanceCriteria === undefined ? "It works" : opts.acceptanceCriteria ?? undefined,
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: opts.maxReviewRounds ?? 3,
     maxInfraAttempts: opts.maxInfraAttempts ?? 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 /** Claim the issue's single queued work item (what the effect worker does) and return it. */
@@ -81,8 +79,7 @@ const okReview = (verdict: "approved" | "changes_requested" | "escalated") =>
     acceptanceCriteriaAssessment: "ok",
     evidenceAssessment: "ok",
     findings: [],
-    risks: [],
-  });
+    risks: []});
 const cleanHandoff = { kind: "clean_handoff", branch: "issue-1", headSha: "abc123", baseSha: "base1", prNumber: 42, prUrl: "https://gh/pr/42" } as const;
 
 test("startWorkflow writes instance + workflow.started + a queued developer work item in one shot", () => {
@@ -158,8 +155,7 @@ test("starting after criteria are added closes out a stale product_scope_decisio
     actionType: "product_scope_decision",
     reason: "no acceptance criteria",
     question: "Add acceptance criteria",
-    responseOptions: [{ choice: "resume", label: "Added — start" }],
-  });
+    responseOptions: [{ choice: "resume", label: "Added — start" }]});
 
   updateIssue(issueId, { acceptanceCriteria: "It works now" });
   const started = startWorkflow(issueId);
@@ -273,9 +269,7 @@ test("reviewer changes_requested with rounds left → repair round with a fresh 
     kind: "verdict",
     result: {
       ...okReview("changes_requested"),
-      findings: [{ fingerprint: "f1", severity: "blocking", title: "Bug", rationale: "why" }],
-    },
-  });
+      findings: [{ fingerprint: "f1", severity: "blocking", title: "Bug", rationale: "why" }]}});
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "repairing");
@@ -384,8 +378,7 @@ test("resolving policy_escalation:resume after a reviewer-side infra exhaustion 
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
   assert.deepEqual(JSON.parse(action.continuationPreviewJson!), {
     resumeRole: "reviewer",
-    resumeHeadSha: cleanHandoff.headSha,
-  });
+    resumeHeadSha: cleanHandoff.headSha});
 
   const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
   assert.equal(resolved.ok, true);
@@ -533,8 +526,7 @@ test("a stale review re-queues a reviewer at the new head without consuming a ro
 test("applyCompletion on an unknown / never-leased work item is a no-op", async () => {
   assert.deepEqual(await applyCompletion("missing", "tok", { kind: "no_pr" }), {
     applied: false,
-    reason: "not_found",
-  });
+    reason: "not_found"});
 
   const issueId = newIssue();
   startWorkflow(issueId);
@@ -552,8 +544,7 @@ test("pre-start product_scope_decision: resolving without criteria leaves the ac
     actionType: "product_scope_decision",
     reason: "no acceptance criteria",
     question: "Add acceptance criteria",
-    responseOptions: [{ choice: "resume", label: "Added — start" }],
-  }).id;
+    responseOptions: [{ choice: "resume", label: "Added — start" }]}).id;
 
   const bad = resolveHumanActionAndAdvance(actionId, "yusuke", "resume");
   assert.equal(bad.ok, false);
@@ -602,8 +593,7 @@ test("abortIssue resolves an open human action and drops it out of the open set"
     actionType: "product_scope_decision",
     reason: "no acceptance criteria",
     question: "Add acceptance criteria",
-    responseOptions: [{ choice: "resume", label: "Added — start" }],
-  });
+    responseOptions: [{ choice: "resume", label: "Added — start" }]});
   assert.equal(action.status, "open");
 
   const result = abortIssue(issueId, "yusuke");
@@ -645,8 +635,7 @@ test("abortIssue cancels a running worker session and terminates its registered 
     role: "developer",
     round: 1,
     agentId: null,
-    runtime: "claude_code",
-  });
+    runtime: "claude_code"});
   startSession(session.id);
 
   const killed: string[] = [];
