@@ -1,9 +1,11 @@
 // NOT-102 acceptance: auto-merge on/off, merge failure escalation, recent repos.
+// NOT-151: portable github.com/… issue.repo must resolve to managed clone cwd, not the identity.
 import { test, before, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not102-"));
 
@@ -18,8 +20,26 @@ const { claimWorkItem, listWorkItemsForIssue } = await import("../repository/wor
 const { startWorkflow, applyCompletion } = await import("./commands.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
 const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./auto-merge.js");
+const { managedRepoPath } = await import("../adapters/managed-repo.js");
 
-before(() => migrate());
+/** Real local checkout so resolveAutoMergeCwd accepts the default legacy repo. */
+let fixtureRepo = "";
+
+function initFixtureRepo(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not102-repo-"));
+  execFileSync("git", ["init", "-b", "main"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
+  fs.writeFileSync(path.join(dir, "README.md"), "hi\n");
+  execFileSync("git", ["add", "."], { cwd: dir });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: dir });
+  return dir;
+}
+
+before(() => {
+  migrate();
+  fixtureRepo = initFixtureRepo();
+});
 beforeEach(() => {
   getDb().exec(`
     DELETE FROM work_items;
@@ -46,7 +66,7 @@ function newIssue(opts: { autoMerge?: boolean; repo?: string } = {}): string {
     title: "Coordinate me",
     description: "d",
     acceptanceCriteria: "It works",
-    repo: opts.repo ?? "/repo/a",
+    repo: opts.repo ?? fixtureRepo,
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
@@ -127,7 +147,7 @@ test("autoMerge off: final_review complete undrafts+merges then marks done", asy
     assert.equal(resolved.instanceCompleted, true);
     assert.equal(resolved.triggerReflect, true);
   }
-  assert.deepEqual(calls, [{ cwd: "/repo/a", number: 42 }]);
+  assert.deepEqual(calls, [{ cwd: fixtureRepo, number: 42 }]);
   assert.equal(getIssue(issueId)!.status, "done");
   assert.equal(getActiveWorkflowInstance(issueId), null);
   assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
@@ -179,8 +199,48 @@ test("autoMerge on: reviewer approve merges PR, marks done, skips final_review h
     listHumanActionsForIssue(issueId).filter((a) => a.actionType === "final_review").length,
     0
   );
-  assert.deepEqual(calls, [{ cwd: "/repo/a", number: 42 }]);
+  assert.deepEqual(calls, [{ cwd: fixtureRepo, number: 42 }]);
   assert.ok(listWorkflowEventsForIssue(issueId).some((e) => e.type === "issue.completed"));
+});
+
+test("NOT-151: portable github.com repo merges via managed clone path, not identity string", async () => {
+  const identity = "github.com/not-so-fat/agent-dealer";
+  const managed = managedRepoPath(identity);
+  fs.mkdirSync(path.join(managed, ".git"), { recursive: true });
+
+  const calls: Array<{ cwd: string; number: number }> = [];
+  setMergePrForTests(async (opts) => {
+    calls.push(opts);
+    return { ok: true };
+  });
+
+  const issueId = newIssue({ autoMerge: true, repo: identity });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
+
+  assert.equal(getIssue(issueId)!.status, "done");
+  assert.deepEqual(calls, [{ cwd: managed, number: 42 }]);
+  assert.notEqual(calls[0]?.cwd, identity);
+});
+
+test("NOT-151: missing managed clone escalates clearly without spawn gh ENOENT", async () => {
+  let mergeCalled = false;
+  setMergePrForTests(async () => {
+    mergeCalled = true;
+    return { ok: true };
+  });
+
+  const issueId = newIssue({ autoMerge: true, repo: "github.com/missing/no-clone" });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
+
+  assert.equal(mergeCalled, false);
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.match(issue.currentIntent ?? "", /Managed clone missing/);
+  assert.doesNotMatch(issue.currentIntent ?? "", /ENOENT/);
 });
 
 test("autoMerge on: merge failure escalates to policy_escalation; issue not left half-done as final_review", async () => {

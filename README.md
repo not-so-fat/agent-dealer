@@ -42,7 +42,13 @@ Works without Agent Deck too (no deck = degraded mode; playbooks optional).
 
 ## Quick start
 
-Prerequisites: Node.js 20+ · [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude` on PATH) · [GitHub CLI](https://cli.github.com) (`gh`, authenticated — the developer session opens the PR) · [Agent Deck](https://github.com/not-so-fat/agent_deck) optional · `LINEAR_API_KEY` optional (manual issues work without it)
+Prerequisites: Node.js 20+ · [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude` on PATH) · [GitHub CLI](https://cli.github.com) (`gh`, authenticated — draft PRs + auto-merge) · [Agent Deck](https://github.com/not-so-fat/agent_deck) optional · `LINEAR_API_KEY` optional (manual issues work without it)
+
+**Friend path (required host tools before first issue kick):**
+
+1. Install GitHub CLI and sign in: `brew install gh` then `gh auth login -h github.com`
+2. Prefer the **managed** install (`~/.local/bin/agent-dealer`). Remove leftover `npm i -g agent-dealer` / Homebrew-prefix globals so PATH does not shadow 1.0.0+
+3. Run `agent-dealer doctor` — GitHub must be green before kicking issues (Start refuses bad `gh` auth)
 
 **Recommended (managed install — auto-updates, keeps existing `~/.agent-dealer` data):**
 
@@ -54,7 +60,7 @@ agent-dealer setup
 agent-dealer start --daemon --open
 ```
 
-Compat: `npm install -g agent-dealer` still works; `agent-dealer install` switches only the CLI binary (no data migration).
+Compat: `npm install -g agent-dealer` still works; `agent-dealer install` switches only the CLI binary (no data migration). Prefer managed/`~/.local/bin` when both are present.
 
 Open **http://localhost:2222** — dashboard and API on one port. Day to day: `agent-dealer start --daemon` / `agent-dealer stop` · `agent-dealer status` if something fails. Use plain `agent-dealer start` only when you want a foreground process in an open terminal (logs go to stdout).
 

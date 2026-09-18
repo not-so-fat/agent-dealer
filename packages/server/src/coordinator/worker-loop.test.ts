@@ -34,6 +34,7 @@ const { runCoordinatorTick, drainCoordinator, activeAttemptCount, startCoordinat
 const { recoverCoordinator } = await import("./recovery.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
 const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./auto-merge.js");
+const { stubManagedCloneForTests } = await import("../adapters/managed-repo.js");
 
 before(() => migrate());
 // claimWorkItem / recovery scan the whole table (one loop in production); start each
@@ -42,6 +43,7 @@ beforeEach(() => {
   getDb().exec("DELETE FROM work_items");
   clearFinalizeInflightForTests();
   setMergePrForTests(async () => ({ ok: true }));
+  stubManagedCloneForTests("acme/app");
 });
 afterEach(() => resetEffectHandlers());
 

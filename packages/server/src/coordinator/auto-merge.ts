@@ -15,9 +15,16 @@
 //
 // Concurrency: finalizeAutoMerge is single-flight per issueId (in-process). Success and
 // escalate txns are also defensive if a racer already wrote done / needs_human.
+//
+// NOT-151: issue.repo is a portable GitHub identity after NOT-149 — never pass it to
+// execFile as cwd (Node reports that as misleading `spawn gh ENOENT`). Resolve via
+// classifyIssueRepo → managed/legacy local path first.
 import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { promisify } from "node:util";
 import type { Issue } from "@agent-dealer/shared";
+import { classifyIssueRepo } from "../adapters/managed-repo.js";
 import { getDb } from "../db/index.js";
 import { getIssue, listIssues, transitionIssue } from "../repository/issues.js";
 import {
@@ -45,14 +52,64 @@ export const AUTO_MERGE_INTENT = "Auto-merging approved PR";
 
 const ALREADY_MERGED = /already (been )?merged|pull request is not mergeable:.*merged/i;
 
+/**
+ * Map issue.repo (portable identity or legacy local path) to a real filesystem cwd for
+ * `gh pr merge`. Missing managed clones fail closed with a clear reason — never hand the
+ * identity string to execFile.
+ */
+export function resolveAutoMergeCwd(
+  repoField: string
+): { ok: true; cwd: string } | { ok: false; reason: string } {
+  try {
+    const classified = classifyIssueRepo(repoField);
+    const cwd = classified.repoPath;
+    if (classified.kind === "managed") {
+      const hasGit =
+        fs.existsSync(path.join(cwd, ".git")) || fs.existsSync(path.join(cwd, "HEAD"));
+      if (!hasGit) {
+        return {
+          ok: false,
+          reason: `Managed clone missing for ${classified.identity} (${cwd}). Re-run the developer step so Dealer can clone it, or restore the checkout under execution/repos.`,
+        };
+      }
+    }
+    return { ok: true, cwd };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 /** True when Node killed the child for exceeding `timeout` (promisify(execFile)). */
 export function isGhTimeoutError(err: unknown): boolean {
   const e = err as { killed?: boolean; signal?: string | null };
   return Boolean(e.killed || e.signal === "SIGTERM");
 }
 
+/** True when Node failed to spawn (missing binary *or* missing cwd — both surface ENOENT). */
+export function isGhSpawnEnoent(err: unknown): boolean {
+  const e = err as { code?: string; message?: string };
+  if (e.code === "ENOENT") return true;
+  const msg = (e.message ?? "").toLowerCase();
+  return msg.includes("spawn") && msg.includes("enoent");
+}
+
+/**
+ * Distinguish "cwd is not a real directory" from "gh missing on PATH" — both look like
+ * `spawn gh ENOENT` from Node. Prefer checking the cwd on disk over trusting the message.
+ */
+export function ghSpawnEnoentReason(err: unknown, cwd: string): string | null {
+  if (!isGhSpawnEnoent(err)) return null;
+  if (!fs.existsSync(cwd)) {
+    return `invalid merge cwd (${cwd}) — path does not exist (portable issue.repo must not be used as cwd)`;
+  }
+  return "gh not on PATH — install GitHub CLI (`gh`) and ensure the daemon can see it";
+}
+
 /** Map an execFile failure to a stable reason string (timeout vs stderr/stdout). */
-export function ghErrorReason(err: unknown, fallback: string): string {
+export function ghErrorReason(err: unknown, fallback: string, cwd?: string): string {
   const e = err as {
     stderr?: string;
     stdout?: string;
@@ -60,6 +117,10 @@ export function ghErrorReason(err: unknown, fallback: string): string {
   };
   if (isGhTimeoutError(err)) {
     return `gh timed out after ${GH_MERGE_TIMEOUT_MS}ms`;
+  }
+  if (cwd) {
+    const spawnReason = ghSpawnEnoentReason(err, cwd);
+    if (spawnReason) return spawnReason;
   }
   return (e.stderr || e.stdout || e.message || fallback).trim() || fallback;
 }
@@ -75,7 +136,12 @@ export const realMergePr: MergePr = async ({ cwd, number }) => {
   } catch (err) {
     // Timeout is a hang, not "already ready" — fail closed so we do not burn another 20s on merge.
     if (isGhTimeoutError(err)) {
-      return { ok: false, reason: ghErrorReason(err, "gh pr ready failed") };
+      return { ok: false, reason: ghErrorReason(err, "gh pr ready failed", cwd) };
+    }
+    // Bad cwd / missing gh on the ready step would also fail merge — surface now.
+    const spawnReason = ghSpawnEnoentReason(err, cwd);
+    if (spawnReason) {
+      return { ok: false, reason: spawnReason };
     }
     // Already ready / not a draft — ignore; merge is the authority.
   }
@@ -87,7 +153,7 @@ export const realMergePr: MergePr = async ({ cwd, number }) => {
     });
     return { ok: true };
   } catch (err) {
-    const reason = ghErrorReason(err, "gh pr merge failed");
+    const reason = ghErrorReason(err, "gh pr merge failed", cwd);
     // Crash between a successful merge and the done-transition: retry must not escalate.
     if (ALREADY_MERGED.test(reason)) return { ok: true };
     return { ok: false, reason };
@@ -155,7 +221,12 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
     return escalateMergeFailure(issue, instance.id, "Reviewer approved but the issue has no PR number to merge.");
   }
 
-  const merge = await mergePrImpl({ cwd: issue.repo, number: issue.prNumber });
+  const resolvedCwd = resolveAutoMergeCwd(issue.repo);
+  if (!resolvedCwd.ok) {
+    return escalateMergeFailure(issue, instance.id, `Auto-merge failed: ${resolvedCwd.reason}`);
+  }
+
+  const merge = await mergePrImpl({ cwd: resolvedCwd.cwd, number: issue.prNumber });
   if (!merge.ok) {
     return escalateMergeFailure(issue, instance.id, `Auto-merge failed: ${merge.reason}`);
   }

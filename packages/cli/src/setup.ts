@@ -32,7 +32,11 @@ export async function runSetup(options: SetupOptions = {}): Promise<number> {
   fs.copyFileSync(template, envFile);
   console.log(`Created ${envFile}`);
   console.log(`Data directory: ${home}`);
-  console.log("Next: agent-dealer start --daemon");
+  console.log("Next:");
+  console.log("  1. brew install gh && gh auth login -h github.com");
+  console.log("  2. Prefer ~/.local/bin on PATH (managed install); drop shadowed npm -g binaries");
+  console.log("  3. agent-dealer doctor   # GitHub must be green before kicking issues");
+  console.log("  4. agent-dealer start --daemon");
   return 0;
 }
 

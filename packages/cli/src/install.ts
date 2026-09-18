@@ -77,7 +77,7 @@ export async function runInstall(args: string[], deps: InstallDeps = {}): Promis
   if (migrateCli) {
     console.log("Prefer ~/.local/bin ahead of any npm global agent-dealer on PATH.");
   }
-  console.log("Next: agent-dealer doctor && agent-dealer start --daemon --open");
+  console.log("Next: gh auth login -h github.com (if needed) && agent-dealer doctor && agent-dealer start --daemon --open");
 
   if (purgeGlobal) {
     const code = deps.purgeGlobal
