@@ -858,7 +858,7 @@ function applyEffect(
 function questionFor(actionType: HumanActionType, reason: string, resumeAsReviewer = false): string {
   switch (actionType) {
     case "final_review":
-      return "Accept and merge this work, send it back for another repair round, or close it?";
+      return "Merge this work, send it back for another repair round, or close it?";
     case "attempts_exhausted":
       return "The review-round limit is reached. Retry with a fresh round, or close the issue?";
     case "policy_escalation":
@@ -895,9 +895,9 @@ export function responseOptionsFor(
   switch (actionType) {
     case "final_review":
       return [
-        { choice: "complete", label: "Accept — merge & mark done" },
+        { choice: "merge", label: "Merge" },
         { choice: "repair", label: "Another repair round" },
-        { choice: "close", label: "Close without accepting" },
+        { choice: "close", label: "Close" },
       ];
     case "attempts_exhausted":
       return [
@@ -986,9 +986,13 @@ export function resolveHumanActionAndAdvance(
   if (!issue) return { ok: false, code: 404, error: "Issue not found" };
   const instance = getActiveWorkflowInstance(action.issueId);
 
-  // NOT-102: human accept must undraft+merge (never mark done while leaving a draft PR).
+  // NOT-102 / NOT-150: human Merge (or legacy "complete") must undraft+merge.
   // Park like auto-merge, then the async wrapper runs finalizeAutoMerge outside this txn.
-  if (instance && resolution.actionType === "final_review" && resolution.choice === "complete") {
+  if (
+    instance &&
+    resolution.actionType === "final_review" &&
+    (resolution.choice === "merge" || resolution.choice === "complete")
+  ) {
     return getDb().transaction((): ResolveResult => {
       resolveHumanAction(actionId, resolvedBy, { choice });
       appendWorkflowEvent({
@@ -999,7 +1003,7 @@ export function resolveHumanActionAndAdvance(
         actorRef: resolvedBy,
         stage: "final_review",
         round: issue.currentRound,
-        payload: { actionType: "final_review", choice: "complete", pendingMerge: true },
+        payload: { actionType: "final_review", choice: resolution.choice, pendingMerge: true },
       });
       transitionIssue(issue.id, "final_review", {
         currentOwner: "system",
@@ -1225,7 +1229,10 @@ function resolveLegacyTerminalAction(
   let nextStatus: Issue["status"];
   if (resolution.choice === "close") {
     nextStatus = "closed";
-  } else if (resolution.actionType === "final_review" && resolution.choice === "complete") {
+  } else if (
+    resolution.actionType === "final_review" &&
+    (resolution.choice === "merge" || resolution.choice === "complete")
+  ) {
     nextStatus = "done";
   } else if (resolution.actionType === "final_review" && resolution.choice === "repair") {
     nextStatus = "needs_human";

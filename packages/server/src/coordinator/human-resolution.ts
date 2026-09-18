@@ -1,7 +1,7 @@
 import type { HumanActionType } from "@agent-dealer/shared";
 
 export type HumanResolution =
-  | { actionType: "final_review"; choice: "complete" | "repair" | "close" }
+  | { actionType: "final_review"; choice: "complete" | "merge" | "repair" | "close" }
   | { actionType: "attempts_exhausted"; choice: "retry" | "close" }
   | { actionType: "policy_escalation"; choice: "resume" | "close" }
   | { actionType: "product_scope_decision"; choice: "resume"; note?: string }
@@ -34,7 +34,8 @@ export interface HumanResolutionResult {
  * reopen an issue or enqueue developer/reviewer work).
  */
 const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
-  final_review: ["complete", "repair", "close"],
+  // "complete" kept as a synonym for "merge" so older open actions / CLI callers still resolve.
+  final_review: ["merge", "complete", "repair", "close"],
   attempts_exhausted: ["retry", "close"],
   policy_escalation: ["resume", "close"],
   product_scope_decision: ["resume"],
@@ -78,7 +79,10 @@ export function parseHumanResolution(actionType: string, choice: string): HumanR
 export function resolveHumanActionOutcome(resolution: HumanResolution): HumanResolutionResult {
   switch (resolution.actionType) {
     case "final_review":
-      if (resolution.choice === "complete") return { issueStatus: "done", workflowOutcome: "done", triggerReflect: true };
+      // Merge (and legacy "complete") undraft+merge via commands.ts, then mark done.
+      if (resolution.choice === "merge" || resolution.choice === "complete") {
+        return { issueStatus: "done", workflowOutcome: "done", triggerReflect: true };
+      }
       if (resolution.choice === "repair") return { issueStatus: "repairing", startNewRound: true, roundKind: "review" };
       if (resolution.choice === "close") return { issueStatus: "closed", workflowOutcome: "closed" };
       throw new Error(`Unrecognized final_review choice: ${resolution.choice}`);

@@ -167,6 +167,7 @@ test("a legacy run left in 'review' seeds an open final_review human action", ()
 
 test("a migrated final_review action is resolvable end to end through the real coordinator function, for every choice", () => {
   for (const [choice, expectedStatus] of [
+    ["merge", "done"],
     ["complete", "done"],
     ["repair", "needs_human"],
     ["close", "closed"],

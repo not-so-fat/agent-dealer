@@ -29,11 +29,25 @@ test("resolveHumanActionOutcome throws rather than silently closing on an invali
   assert.throws(() => resolveHumanActionOutcome({ actionType: "final_review", choice: "bogus" } as never), /Unrecognized final_review choice/);
 });
 
-test("final_review complete marks the issue done and triggers reflect", () => {
+test("final_review merge marks the issue done and triggers reflect", () => {
+  const result = resolveHumanActionOutcome({ actionType: "final_review", choice: "merge" });
+  assert.equal(result.issueStatus, "done");
+  assert.equal(result.workflowOutcome, "done");
+  assert.equal(result.triggerReflect, true);
+});
+
+test("final_review complete (legacy synonym) still marks done", () => {
   const result = resolveHumanActionOutcome({ actionType: "final_review", choice: "complete" });
   assert.equal(result.issueStatus, "done");
   assert.equal(result.workflowOutcome, "done");
   assert.equal(result.triggerReflect, true);
+});
+
+test("parseHumanResolution accepts merge for final_review", () => {
+  assert.deepStrictEqual(parseHumanResolution("final_review", "merge"), {
+    actionType: "final_review",
+    choice: "merge",
+  });
 });
 
 test("final_review repair sends the issue back for another round without reflect", () => {
