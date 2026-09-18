@@ -95,18 +95,23 @@ test("NOT-118: POST /api/issues with enqueue:false creates a draft that is not q
   await app.close();
 });
 
-test("POST /api/issues re-enqueues a live (source, externalId) match instead of duplicating it", async () => {
+test("POST /api/issues matches a live (source, externalId) instead of duplicating it, and reports the queue it did not change", async () => {
   const app = await buildApp();
   const payload = { title: "Linear task", repo: "/repo", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, source: "linear", externalId: "LIN-1" };
-  const first = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as { id: string; created: boolean };
+  const first = (await app.inject({ method: "POST", url: "/api/issues", payload })).json() as { id: string; created: boolean; queue: string };
   assert.equal(first.created, true);
+  assert.equal(first.queue, "enqueued");
+  const entryBefore = getQueuedEntryForIssue(first.id)!;
+
   const secondRes = await app.inject({ method: "POST", url: "/api/issues", payload });
   assert.equal(secondRes.statusCode, 200);
-  const second = secondRes.json() as { id: string; created: boolean; enqueued: boolean };
+  const second = secondRes.json() as { id: string; created: boolean; queue: string };
   assert.equal(second.id, first.id);
-  // NOT-141: the caller can tell nothing new was created.
+  // NOT-141: the caller can tell nothing new was created — and, because the issue was
+  // already waiting, that this request did not queue anything either.
   assert.equal(second.created, false);
-  assert.equal(second.enqueued, true);
+  assert.equal(second.queue, "already_queued");
+  assert.deepEqual(getQueuedEntryForIssue(first.id), entryBefore, "the queue entry is untouched");
   assert.equal(listIssuesByExternalId("linear", "LIN-1").length, 1);
   await app.close();
 });
@@ -119,9 +124,10 @@ test("NOT-141: re-importing a ticket whose only issue is terminal creates a new,
 
   const secondRes = await app.inject({ method: "POST", url: "/api/issues", payload });
   assert.equal(secondRes.statusCode, 200);
-  const second = secondRes.json() as { id: string; status: string; created: boolean; enqueued: boolean; priorPasses: number };
+  const second = secondRes.json() as { id: string; status: string; created: boolean; queue: string; priorPasses: number };
   assert.notEqual(second.id, first.id, "a terminal row must not block a second pass");
   assert.equal(second.created, true);
+  assert.equal(second.queue, "enqueued");
   assert.equal(second.priorPasses, 1, "the caller is told this is a second pass, not a first import");
   assert.equal(second.status, "ready");
   assert.equal(getQueuedEntryForIssue(second.id)?.state, "queued");

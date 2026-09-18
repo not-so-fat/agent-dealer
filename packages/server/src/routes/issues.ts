@@ -23,7 +23,7 @@ import { listFindingsForIssue } from "../repository/findings.js";
 import { abortIssue, checkIssueReadiness } from "../coordinator/commands.js";
 import { isStartable, queueStatusForIssue, startIssueViaQueue } from "../coordinator/admission.js";
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
-import { enqueueIssue, getQueuedEntryForIssue } from "../repository/queue-entries.js";
+import { enqueueIssue, enqueueIssueWithOutcome, getQueuedEntryForIssue } from "../repository/queue-entries.js";
 import { latestSessionFailureForIssue } from "../coordinator/latest-failure.js";
 import { deriveLiveProgressFromLog } from "../coordinator/session-progress.js";
 
@@ -162,8 +162,16 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
         // own predicate — enqueueing anything it would reject (a running issue, a
         // `final_review` one awaiting a merge call) parks a row that can never be admitted.
         if (input.enqueue && isStartable(existing)) {
-          enqueueIssue(existing.id);
-          return { ...existing, created: false, enqueued: true, priorPasses } satisfies CreateIssueResult;
+          // `queue` is the mutation, not the request: enqueue is idempotent, so an issue that
+          // was already waiting is reported as `already_queued`. Saying "enqueued" there is
+          // the same lie the CLI used to tell off the request flag.
+          const { created: queued } = enqueueIssueWithOutcome(existing.id);
+          return {
+            ...existing,
+            created: false,
+            queue: queued ? "enqueued" : "already_queued",
+            priorPasses,
+          } satisfies CreateIssueResult;
         }
         // Anything else is a real conflict: say which issue holds the ticket and in what
         // state, the way POST /api/intake/linear/:issueId/promote answers with its run id.
@@ -178,8 +186,15 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     appendWorkflowEvent({ issueId: issue.id, type: "issue.created", actorType: "human", stage: issue.status });
     // NOT-118: create enqueues, it never starts. Server-side so the UI, CLI and agents all
     // behave the same — callers hold no workflow logic. `enqueue: false` creates a draft.
+    // A row this request just wrote cannot already be queued, so the outcome is decided by
+    // the directive alone.
     if (input.enqueue) enqueueIssue(issue.id);
-    return { ...issue, created: true, enqueued: input.enqueue, priorPasses } satisfies CreateIssueResult;
+    return {
+      ...issue,
+      created: true,
+      queue: input.enqueue ? "enqueued" : "not_queued",
+      priorPasses,
+    } satisfies CreateIssueResult;
   });
 
   app.patch("/api/issues/:id", async (req, reply) => {

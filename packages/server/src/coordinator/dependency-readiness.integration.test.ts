@@ -33,6 +33,7 @@ const {
 } = await import("./admission.js");
 const {
   blockersFor,
+  blockerVerdict,
   clearBlockerCacheForTests,
   resetDependenciesForTests,
   setBlockerCacheTtlForTests,
@@ -189,7 +190,7 @@ test("satisfaction (decision 2): unlinked blocker needs completed/canceled; deal
   assert.equal(waitReason(downstream.id), "waiting on NOT-AB (closed)");
 });
 
-test("NOT-141: a blocker with several dealer passes is satisfied by the merged one, not the newest", async () => {
+test("NOT-141: a blocker's live pass decides; a merged pass only answers once none is live", async () => {
   const merged = seedIssue({ source: "linear", externalId: "lin-multi", title: "Blocker pass 1" });
   const dependent = seedIssue({ source: "linear", externalId: "lin-multi-dep" });
   enqueueIssue(dependent.id);
@@ -202,11 +203,25 @@ test("NOT-141: a blocker with several dealer passes is satisfied by the merged o
   assert.equal(await admitNext(), null, "the blocker has not merged yet");
   getDb().prepare("UPDATE issues SET status = 'done' WHERE id = ?").run(merged.id);
 
-  // A follow-up pass on the same ticket that was abandoned must not un-satisfy a blocker
-  // whose code already landed — re-imports after a terminal pass make this shape normal.
+  // Pass 1 merged, then the ticket was re-imported for a regression — the shape a terminal
+  // row no longer blocking a re-import makes normal. The live pass is more work the
+  // dependent has to wait for, so a landed pass 1 must not release it.
   const followUp = seedIssue({ source: "linear", externalId: "lin-multi", title: "Blocker pass 2" });
-  getDb().prepare("UPDATE issues SET status = 'closed' WHERE id = ?").run(followUp.id);
+  assert.equal(await admitNext(), null, "pass 2 is ready — the blocker is live again");
+  assert.equal(waitReason(dependent.id), "waiting on NOT-MULTI (ready)");
 
+  // Asserted on the verdict rather than through admission: a `developing` pass 2 occupies the
+  // only sequential slot, so admission would park the dependent on capacity and the blocker
+  // rule would never be reached. Linear says Done and pass 1 merged — the live pass still wins.
+  getDb().prepare("UPDATE issues SET status = 'developing' WHERE id = ?").run(followUp.id);
+  assert.deepEqual(
+    blockerVerdict(blocker({ id: "lin-multi", identifier: "NOT-MULTI", stateName: "Done", stateType: "completed" })),
+    { satisfied: false, state: "developing" }
+  );
+
+  // Pass 2 abandoned without landing. With no live pass left the merged one answers again —
+  // an abandoned follow-up cannot un-satisfy a blocker whose code is already in.
+  getDb().prepare("UPDATE issues SET status = 'closed' WHERE id = ?").run(followUp.id);
   assert.equal((await admitNext())?.issueId, dependent.id);
 });
 

@@ -135,6 +135,20 @@ export const TERMINAL_ISSUE_STATUSES: readonly IssueStatus[] = (
   Object.keys(ISSUE_STATUS_TRANSITIONS) as IssueStatus[]
 ).filter((status) => ISSUE_STATUS_TRANSITIONS[status].length === 0);
 
+/** Membership test for {@link TERMINAL_ISSUE_STATUSES} — false means the pass can still move. */
+export function isTerminalIssueStatus(status: IssueStatus): boolean {
+  return TERMINAL_ISSUE_STATUSES.includes(status);
+}
+
+/**
+ * What the request did to the admission queue — the *mutation*, not the intent. `enqueue`
+ * is idempotent, so a re-import of an already-queued issue changes nothing; reporting that
+ * as "queued" is how the CLI came to announce a queue action for a request that queued
+ * nothing (NOT-141).
+ */
+export const QueueOutcome = z.enum(["enqueued", "already_queued", "not_queued"]);
+export type QueueOutcome = z.infer<typeof QueueOutcome>;
+
 /**
  * NOT-141: `POST /api/issues` answers with the issue *plus* what the server did with it.
  * `created: false` means the request matched a live issue for the same `(source,
@@ -144,7 +158,7 @@ export const TERMINAL_ISSUE_STATUSES: readonly IssueStatus[] = (
  */
 export const CreateIssueResult = Issue.extend({
   created: z.boolean(),
-  enqueued: z.boolean(),
+  queue: QueueOutcome,
   /**
    * How many issues already existed for this `(source, externalId)` before the request (0
    * for a manual create). With `created: true` they are all terminal, so a non-zero count

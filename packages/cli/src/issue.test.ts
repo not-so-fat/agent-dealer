@@ -109,7 +109,7 @@ async function captureStderr(args: string[]): Promise<{ code: number; err: strin
 const createArgs = ["--title", "T", "--repo", "/r", "--developer-agent", "a1", "--reviewer-agent", "a2"];
 
 test("NOT-141: the create hint reports what the server did, not what was requested", async () => {
-  const matched = stubFetch("/api/issues", "POST", { id: "i1", status: "developing", created: false, enqueued: false });
+  const matched = stubFetch("/api/issues", "POST", { id: "i1", status: "developing", created: false, queue: "not_queued" });
   try {
     const { code, err } = await captureStderr(["create", ...createArgs]);
     assert.equal(code, 0);
@@ -120,16 +120,28 @@ test("NOT-141: the create hint reports what the server did, not what was request
     matched.restore();
   }
 
-  const requeued = stubFetch("/api/issues", "POST", { id: "i2", status: "ready", created: false, enqueued: true });
+  // The issue was already waiting: enqueue changed nothing, so the hint must not report a
+  // queue action of any kind — the bug this ticket is about, one step down the line.
+  const alreadyQueued = stubFetch("/api/issues", "POST", { id: "i2", status: "ready", created: false, queue: "already_queued" });
   try {
     const { err } = await captureStderr(["create", ...createArgs]);
     assert.doesNotMatch(err, /Queued for admission/);
-    assert.match(err, /re-queued for admission/);
+    assert.doesNotMatch(err, /re-queued|was put back/);
+    assert.match(err, /already in the admission queue — nothing was queued/);
+  } finally {
+    alreadyQueued.restore();
+  }
+
+  const requeued = stubFetch("/api/issues", "POST", { id: "i6", status: "ready", created: false, queue: "enqueued" });
+  try {
+    const { err } = await captureStderr(["create", ...createArgs]);
+    assert.doesNotMatch(err, /Queued for admission/);
+    assert.match(err, /it was put back in the admission queue/);
   } finally {
     requeued.restore();
   }
 
-  const fresh = stubFetch("/api/issues", "POST", { id: "i3", status: "ready", created: true, enqueued: true, priorPasses: 0 });
+  const fresh = stubFetch("/api/issues", "POST", { id: "i3", status: "ready", created: true, queue: "enqueued", priorPasses: 0 });
   try {
     const { err } = await captureStderr(["create", ...createArgs]);
     assert.match(err, /Queued for admission/);
@@ -144,7 +156,7 @@ test("NOT-141: a second pass on a ticket is named as such, not printed like a fi
     id: "i5",
     status: "ready",
     created: true,
-    enqueued: true,
+    queue: "enqueued",
     priorPasses: 1,
     externalId: "lin-uuid",
     externalLabel: "NOT-128",
@@ -159,7 +171,7 @@ test("NOT-141: a second pass on a ticket is named as such, not printed like a fi
 });
 
 test("NOT-141: import reports a fresh row, and surfaces the 409 conflict instead of exiting 0", async () => {
-  const created = stubFetch("/api/issues", "POST", { id: "i4", status: "ready", created: true, enqueued: true });
+  const created = stubFetch("/api/issues", "POST", { id: "i4", status: "ready", created: true, queue: "enqueued" });
   try {
     const { code, err } = await captureStderr(["import", "--external-id", "NOT-1", ...createArgs]);
     assert.equal(code, 0);

@@ -305,10 +305,11 @@ test("re-importing a migrated final_review issue conflicts; a still-startable on
   assert.equal(getQueuedEntryForIssue(ready.id), null);
   const reimport = await app.inject({ method: "POST", url: "/api/issues", payload: readyPayload });
   assert.equal(reimport.statusCode, 200);
-  const reimported = reimport.json() as { id: string; created: boolean; enqueued: boolean };
+  const reimported = reimport.json() as { id: string; created: boolean; queue: string };
   assert.equal(reimported.id, ready.id);
   assert.equal(reimported.created, false);
-  assert.equal(reimported.enqueued, true);
+  // This one really did queue something — the entry was gone before the request.
+  assert.equal(reimported.queue, "enqueued");
   assert.equal(getQueuedEntryForIssue(ready.id)?.state, "queued");
   await app.close();
 });

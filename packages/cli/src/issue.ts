@@ -8,15 +8,23 @@ import { apiFetch } from "./http.js";
  */
 function createOutcomeHint(result: CreateIssueResult): string {
   if (!result.created) {
-    return result.enqueued
-      ? `Matched existing issue ${result.id} (${result.status}) — nothing new was created; it was re-queued for admission.`
-      : `Matched existing issue ${result.id} (${result.status}) — nothing new was created and nothing was queued.`;
+    const matched = `Matched existing issue ${result.id} (${result.status}) — nothing new was created`;
+    switch (result.queue) {
+      // Enqueue is idempotent: an issue already waiting is not a queue action, so the hint
+      // must not claim one. `queue list` is the honest next step.
+      case "already_queued":
+        return `${matched}, and it was already in the admission queue — nothing was queued. \`agent-dealer queue list\` shows its position and wait reason.`;
+      case "enqueued":
+        return `${matched}; it was put back in the admission queue.`;
+      case "not_queued":
+        return `${matched} and nothing was queued.`;
+    }
   }
   const pass =
     result.priorPasses > 0
       ? ` This is pass ${result.priorPasses + 1} on ${result.externalLabel ?? result.externalId} — ${result.priorPasses} earlier pass(es) already finished.`
       : "";
-  return result.enqueued
+  return result.queue === "enqueued"
     ? `Queued for admission — \`agent-dealer queue list\` shows position and wait reason.${pass}`
     : `Created as a draft (not queued) — \`agent-dealer queue add <id>\` when it is ready.${pass}`;
 }
