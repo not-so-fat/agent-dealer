@@ -1,18 +1,19 @@
 import type { Run } from "@agent-dealer/shared";
-import { addArtifact, getLatestArtifact, listArtifacts } from "../repository/runs.js";
+import { addArtifact } from "../repository/runs.js";
 import { getLinearIntakeConfig } from "../repository/intake-settings.js";
 import { getLinearIssue } from "./linear-inbox.js";
 
 const LINEAR_API = "https://api.linear.app/graphql";
 
-export type LinearSyncEvent = "planning_started" | "plan_approved" | "review" | "retry" | "done";
+// NOT-71: the plan/execute dispatcher that fired planning_started / plan_approved /
+// review / retry is deleted, and the issue workflow deliberately does not write status
+// back — Linear's own GitHub integration links the PR and drives the issue state from
+// the PR lifecycle, so duplicating that here would fight it. The one surviving caller is
+// queue/approve-deliver.ts on the run-scoped outbound-delivery approval.
+export type LinearSyncEvent = "done";
 
 const STATE_BY_EVENT: Record<LinearSyncEvent, string> = {
   // TODO(P2): configurable per team — see docs/LINEAR_INTEGRATION.md
-  planning_started: "Todo",
-  plan_approved: "In Progress",
-  review: "In Review",
-  retry: "In Progress",
   done: "Done",
 };
 
@@ -76,88 +77,11 @@ async function issueUpdateState(issueId: string, stateId: string): Promise<void>
   );
 }
 
-function planExcerpt(run: Run): string {
-  const plan = getLatestArtifact(run.id, "approved_plan");
-  if (!plan?.contentJson) return "";
-  try {
-    const parsed = JSON.parse(plan.contentJson) as { markdown?: string };
-    const md = parsed.markdown?.trim() ?? "";
-    return md.length > 600 ? `${md.slice(0, 600)}…` : md;
-  } catch {
-    return "";
-  }
-}
 
-function resultExcerpt(run: Run): string {
-  const result = getLatestArtifact(run.id, "execution_result");
-  if (result?.contentJson) {
-    try {
-      const parsed = JSON.parse(result.contentJson) as { resultText?: string };
-      const text = parsed.resultText?.trim() ?? "";
-      if (text) return text.length > 500 ? `${text.slice(0, 500)}…` : text;
-    } catch {
-      /* fall through */
-    }
-  }
-  const doc = listArtifacts(run.id).find((a) => a.kind === "document");
-  if (doc?.contentJson) {
-    try {
-      const parsed = JSON.parse(doc.contentJson) as { markdown?: string };
-      const text = parsed.markdown?.trim() ?? "";
-      if (text) return text.length > 500 ? `${text.slice(0, 500)}…` : text;
-    } catch {
-      /* ignore */
-    }
-  }
-  return "";
-}
 
-function buildComment(run: Run, event: LinearSyncEvent): string {
+function buildComment(run: Run): string {
   const label = run.externalLabel ?? run.externalId ?? run.id;
   const link = `${webBaseUrl()}/?run=${run.id}`;
-
-  if (event === "planning_started") {
-    return [
-      `**agent-dealer** — planning started for ${label}`,
-      ``,
-      `_Agent is drafting a plan._`,
-      ``,
-      `[Open run](${link})`,
-    ].join("\n");
-  }
-
-  if (event === "plan_approved") {
-    const excerpt = planExcerpt(run);
-    return [
-      `**agent-dealer** — plan approved for ${label}`,
-      ``,
-      excerpt ? excerpt : `_Plan approved — see run for details._`,
-      ``,
-      `[Open run](${link})`,
-    ].join("\n");
-  }
-
-  if (event === "review") {
-    const excerpt = resultExcerpt(run);
-    return [
-      `**agent-dealer** — execution complete, awaiting review (${label})`,
-      ``,
-      excerpt ? excerpt : `_Result ready for human review._`,
-      ``,
-      `[Review run](${link})`,
-    ].join("\n");
-  }
-
-  if (event === "retry") {
-    return [
-      `**agent-dealer** — retry requested for ${label}`,
-      ``,
-      `_Re-executing with human feedback._`,
-      ``,
-      `[Open run](${link})`,
-    ].join("\n");
-  }
-
   return [
     `**agent-dealer** — approved and marked done (${label})`,
     ``,
@@ -179,17 +103,6 @@ function recordSyncAttempt(
   );
 }
 
-function hasSuccessfulSync(runId: string, event: LinearSyncEvent): boolean {
-  return listArtifacts(runId).some((a) => {
-    if (a.kind !== "linear_sync" || !a.contentJson) return false;
-    try {
-      const parsed = JSON.parse(a.contentJson) as { event?: string; ok?: boolean };
-      return parsed.event === event && parsed.ok === true;
-    } catch {
-      return false;
-    }
-  });
-}
 
 /** Non-blocking Linear write-back — callers should `.catch()` and never fail the human action. */
 export async function syncLinearForRun(run: Run, event: LinearSyncEvent): Promise<void> {
@@ -198,9 +111,6 @@ export async function syncLinearForRun(run: Run, event: LinearSyncEvent): Promis
     return;
   }
 
-  if (event === "planning_started" && hasSuccessfulSync(run.id, event)) {
-    return;
-  }
 
   const issue = await getLinearIssue(run.externalId);
   if (!issue?.teamId) {
@@ -213,7 +123,7 @@ export async function syncLinearForRun(run: Run, event: LinearSyncEvent): Promis
   const stateId = states.get(targetStateName.toLowerCase());
 
   try {
-    await commentCreate(run.externalId, buildComment(run, event));
+    await commentCreate(run.externalId, buildComment(run));
     if (stateId) {
       await issueUpdateState(run.externalId, stateId);
     } else {

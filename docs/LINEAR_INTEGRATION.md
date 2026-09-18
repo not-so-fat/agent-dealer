@@ -74,23 +74,20 @@ Re-importing a Linear issue that is already present is idempotent: rather than c
 
 ### Status write-back
 
-> **Gap since NOT-71.** The write-back below fires from exactly one place —
-> `queue/approve-deliver.ts`, on the run-scoped outbound-delivery `done` path. **The issue
-> workflow does not write back to Linear at all**, so importing a `NOT-xx`, running it to a
-> merged PR and closing it leaves the Linear issue's status untouched. The other
-> `LinearSyncEvent` values (`planning_started`, `plan_approved`, `review`, `retry`) were
-> fired by the plan/execute dispatcher this ticket deleted and currently have no callers.
-> Restoring issue-scoped write-back is a product decision, tracked separately.
+> **By design since NOT-71.** Dealer does not write issue status back to Linear. Linear's
+> own **GitHub integration** links the PR to the issue (it attaches PR #59 to NOT-71, for
+> example) and drives issue state from the PR lifecycle, so a second writer here would
+> fight it. `LinearSyncEvent` is therefore narrowed to the one event that still fires:
+> `done`, from `queue/approve-deliver.ts` on the run-scoped outbound-delivery approval.
 
 When it does fire (and `syncEnabled`), it posts a non-blocking comment and sets status:
 
-| agent-dealer event | Linear status | Fired today |
-|--------------------|---------------|-------------|
-| `planning_started` | **Todo** | no caller |
-| `plan_approved` | **In Progress** | no caller |
-| `review` | **In Review** | no caller |
-| `retry` | **In Progress** | no caller |
-| `done` | **Done** | yes — outbound delivery approval |
+| agent-dealer event | Linear status | Fired by |
+|--------------------|---------------|----------|
+| `done` | **Done** | `queue/approve-deliver.ts` — outbound delivery approval |
+
+Issue-workflow status (In Progress / In Review / Done as the PR opens, reviews and merges)
+comes from Linear's GitHub integration, not from here.
 
 > **TODO (P2):** Make this event → Linear status mapping **configurable per team** (`linear.statusMap` in intake config). It hardcodes names in `packages/server/src/adapters/linear-sync.ts` (`STATE_BY_EVENT`) and resolves workflow states case-insensitively against the issue's Linear team.
 
