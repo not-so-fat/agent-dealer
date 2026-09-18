@@ -9,7 +9,7 @@ related:
 
 # agent-dealer v0 — Product Requirements Document
 
-> **Supersession (NOT-149 / issue-centric product):** Agent profiles no longer carry workspace roots, selected playbooks, or free-form external-memory refs. Every execution Agent requires exactly one Deck (no degraded no-Deck mode). Issues store a portable GitHub repository identity (`github.com/owner/repo`); Dealer owns managed clones and worktrees under the execution root. Authoritative current docs: [PRD_ISSUE_COORDINATION.md](./PRD_ISSUE_COORDINATION.md), [AGENT_PROFILES.md](./AGENT_PROFILES.md), [DATA_MODEL.md](./DATA_MODEL.md). Sections below that still describe optional Deck, per-run playbook selection, Repo path / artifact workspace on the Agent, or degraded no-Deck runs are **historical planner-era draft** and must not be implemented.
+> **Supersession (NOT-149 / issue-centric product):** Agent profiles no longer carry workspace roots, selected playbooks, or free-form external-memory refs. Every execution Agent requires exactly one Deck (no degraded no-Deck mode). Issues store a portable GitHub repository identity (`github.com/owner/repo`); Dealer owns managed clones and worktrees under the execution root. Authoritative current docs: [PRD_ISSUE_COORDINATION.md](./PRD_ISSUE_COORDINATION.md), [AGENT_PROFILES.md](./AGENT_PROFILES.md), [DATA_MODEL.md](./DATA_MODEL.md). Labeled historical YAML / planner-era diagrams below are not implementable contracts.
 
 **One-liner:** agent-dealer is the **human control plane for agent execution** — feed tasks from ticket systems, approve plans, queue agent runs, gate risky actions, and store the full audit trail; agents execute, humans set goals and approve outcomes.
 
