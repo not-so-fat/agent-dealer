@@ -394,6 +394,38 @@ test("a failing Linear is asked once per backoff window, not once per tick", asy
   assert.equal((await admitNext())?.issueId, issue.id);
 });
 
+test("HTTP 429 backs off until Linear's reset header, not only the short failure window", async () => {
+  // NOT-152: a rate-limit must outlive FAILURE_BACKOFF_MS when X-RateLimit-Requests-Reset says so.
+  const { LinearHttpError } = await import("../adapters/linear-graphql.js");
+  const issue = seedIssue({ source: "linear", externalId: "lin-a" });
+  let fetches = 0;
+  setBlockerFailureBackoffForTests(50);
+  setLinearBlockerFetcherForTests(async () => {
+    fetches++;
+    throw new LinearHttpError({
+      status: 429,
+      operation: "fetchLinearBlockers",
+      rateLimit: {
+        requestsRemaining: "0",
+        requestsReset: String(Date.now() + 60_000),
+      },
+      bodySnippet: "rate limited",
+      retryAfterMs: 60_000,
+    });
+  });
+
+  await assert.rejects(() => blockersFor([issue]), (err: unknown) => {
+    assert.ok(err instanceof LinearHttpError);
+    assert.equal(err.status, 429);
+    return true;
+  });
+  assert.equal(fetches, 1);
+
+  await new Promise((r) => setTimeout(r, 80));
+  await assert.rejects(() => blockersFor([issue]), /backing off/);
+  assert.equal(fetches, 1, "must not re-hit Linear while the rate-limit window is open");
+});
+
 test("overlapping ticks share one fetch: the second parks instead of opening a second call", async () => {
   const issue = seedIssue({ source: "linear", externalId: "lin-a" });
   let release: (v: Map<string, BlockerState[]>) => void = () => {};
@@ -455,7 +487,10 @@ function stubLinearIssues(
     } else {
       data = { issues: { nodes: batch, pageInfo: { hasNextPage: false, endCursor: null } } };
     }
-    return { ok: true, json: async () => ({ data }) };
+    return new Response(JSON.stringify({ data }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
   }) as unknown as typeof globalThis.fetch;
   return {
     requests,

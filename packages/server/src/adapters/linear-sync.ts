@@ -2,8 +2,7 @@ import type { Run } from "@agent-dealer/shared";
 import { addArtifact } from "../repository/runs.js";
 import { getLinearIntakeConfig } from "../repository/intake-settings.js";
 import { getLinearIssue } from "./linear-inbox.js";
-
-const LINEAR_API = "https://api.linear.app/graphql";
+import { linearGraphqlRequest } from "./linear-graphql.js";
 
 // NOT-71: the plan/execute dispatcher that fired planning_started / plan_approved /
 // review / retry is deleted, and the issue workflow deliberately does not write status
@@ -23,19 +22,8 @@ function webBaseUrl(): string {
   return process.env.AGENT_DEALER_WEB_URL ?? "http://localhost:2222";
 }
 
-async function linearMutate(query: string, variables?: Record<string, unknown>): Promise<unknown> {
-  const key = process.env.LINEAR_API_KEY;
-  if (!key) throw new Error("LINEAR_API_KEY not set");
-
-  const res = await fetch(LINEAR_API, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: key },
-    body: JSON.stringify({ query, variables }),
-  });
-  if (!res.ok) throw new Error(`Linear HTTP ${res.status}: ${await res.text()}`);
-  const json = (await res.json()) as { data?: unknown; errors?: unknown[] };
-  if (json.errors?.length) throw new Error(JSON.stringify(json.errors));
-  return json.data;
+async function linearMutate(operation: string, query: string, variables?: Record<string, unknown>): Promise<unknown> {
+  return linearGraphqlRequest({ operation, query, variables });
 }
 
 async function getWorkflowStates(teamId: string): Promise<Map<string, string>> {
@@ -43,6 +31,7 @@ async function getWorkflowStates(teamId: string): Promise<Map<string, string>> {
   if (cached) return cached;
 
   const data = (await linearMutate(
+    "getWorkflowStates",
     `query TeamStates($teamId: String!) {
       team(id: $teamId) {
         states { nodes { id name } }
@@ -61,6 +50,7 @@ async function getWorkflowStates(teamId: string): Promise<Map<string, string>> {
 
 async function commentCreate(issueId: string, body: string): Promise<void> {
   await linearMutate(
+    "commentCreate",
     `mutation Comment($issueId: String!, $body: String!) {
       commentCreate(input: { issueId: $issueId, body: $body }) { success }
     }`,
@@ -70,6 +60,7 @@ async function commentCreate(issueId: string, body: string): Promise<void> {
 
 async function issueUpdateState(issueId: string, stateId: string): Promise<void> {
   await linearMutate(
+    "issueUpdateState",
     `mutation UpdateIssue($issueId: String!, $stateId: String!) {
       issueUpdate(id: $issueId, input: { stateId: $stateId }) { success }
     }`,

@@ -17,6 +17,7 @@
 
 import { isTerminalIssueStatus, type Issue } from "@agent-dealer/shared";
 import { fetchLinearBlockers, type LinearBlockerNode } from "../adapters/linear-inbox.js";
+import { LinearHttpError } from "../adapters/linear-graphql.js";
 import { listIssuesByExternalId } from "../repository/issues.js";
 
 export type BlockerState = LinearBlockerNode;
@@ -157,7 +158,11 @@ export async function blockersFor(issues: Issue[]): Promise<BlockerSnapshot> {
   try {
     fetched = await pending;
   } catch (err) {
-    backoffUntil = Date.now() + failureBackoffMs;
+    // NOT-152: a 429 / exhausted budget must wait for Linear's reset window, not only the
+    // short FAILURE_BACKOFF_MS — otherwise admission re-hammers once that window lapses.
+    const rateLimitMs =
+      err instanceof LinearHttpError && err.retryAfterMs != null ? err.retryAfterMs : 0;
+    backoffUntil = Date.now() + Math.max(failureBackoffMs, rateLimitMs);
     throw err;
   } finally {
     if (inFlight === pending) inFlight = null;

@@ -1,9 +1,8 @@
 import type { LinearCandidate, LinearIntakeConfig } from "@agent-dealer/shared";
 import { DEFAULT_LINEAR_STATE_FILTER, getLinearIntakeConfig } from "../repository/intake-settings.js";
+import { linearGraphqlRequest } from "./linear-graphql.js";
 
 export { DEFAULT_LINEAR_STATE_FILTER };
-
-const LINEAR_API = "https://api.linear.app/graphql";
 
 const PAGE_SIZE = 50;
 
@@ -29,23 +28,17 @@ function hasApiKey(): boolean {
 }
 
 async function linearQuery(
+  operation: string,
   query: string,
   variables?: Record<string, unknown>,
   opts?: { timeoutMs?: number }
 ): Promise<unknown> {
-  const key = process.env.LINEAR_API_KEY;
-  if (!key) throw new Error("LINEAR_API_KEY not set");
-
-  const res = await fetch(LINEAR_API, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: key },
-    body: JSON.stringify({ query, variables }),
-    ...(opts?.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
+  return linearGraphqlRequest({
+    operation,
+    query,
+    variables,
+    timeoutMs: opts?.timeoutMs,
   });
-  if (!res.ok) throw new Error(`Linear HTTP ${res.status}: ${await res.text()}`);
-  const json = (await res.json()) as { data?: unknown; errors?: unknown[] };
-  if (json.errors?.length) throw new Error(JSON.stringify(json.errors));
-  return json.data;
 }
 
 function nodeToCandidate(n: LinearIssueNode): LinearCandidate {
@@ -74,7 +67,10 @@ const ISSUE_FIELDS = `
 
 export async function getLinearViewer(): Promise<LinearViewer | null> {
   if (!hasApiKey()) return null;
-  const data = (await linearQuery(`query { viewer { id name email } }`)) as {
+  const data = (await linearQuery(
+    "getLinearViewer",
+    `query { viewer { id name email } }`
+  )) as {
     viewer: LinearViewer | null;
   };
   return data.viewer;
@@ -133,6 +129,7 @@ export async function listLinearCandidates(): Promise<LinearCandidate[]> {
 
   for (;;) {
     const data = (await linearQuery(
+      "listLinearCandidates",
       `query PollIssues($filter: IssueFilter, $after: String) {
         issues(filter: $filter, first: ${PAGE_SIZE}, after: $after) {
           nodes { ${ISSUE_FIELDS} }
@@ -157,6 +154,7 @@ export async function listLinearCandidates(): Promise<LinearCandidate[]> {
 
 export async function getLinearIssue(issueId: string): Promise<LinearCandidate | null> {
   const data = (await linearQuery(
+    "getLinearIssue",
     `query Issue($id: String!) {
       issue(id: $id) { ${ISSUE_FIELDS} }
     }`,
@@ -253,6 +251,7 @@ export async function fetchLinearBlockers(
   let after: string | undefined;
   for (;;) {
     const data = (await linearQuery(
+      "fetchLinearBlockers",
       `query BlockingRelations($ids: [ID!], $after: String) {
         issues(filter: { id: { in: $ids } }, first: ${PAGE_SIZE}, after: $after, includeArchived: true) {
           nodes {
@@ -367,6 +366,7 @@ async function fetchInverseRelationRound(
   });
 
   const data = (await linearQuery(
+    "fetchLinearBlockersPage",
     `query BlockingRelationsPage(${varDefs.join(", ")}) {\n${selections.join("\n")}\n}`,
     variables,
     { timeoutMs: remaining() }
