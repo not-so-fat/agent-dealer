@@ -187,18 +187,30 @@ State machine per issue, implemented as a new `packages/server/src/coordinator/`
    - Same deck equip rule as the developer when the reviewer profile has a `deckId` (worker `bind_workspace` first; mint/`get_bound_deck` only for `claude_code` / `codex_local`).
    - The reviewer receives read-only repository tools and examines the immutable snapshot, base/head SHAs, diff, acceptance criteria, test/Lens evidence, implementation conclusion, and prior findings. It returns a schema-validated result containing the PRD §6.4 fields: `verdict`, base and head SHA, acceptance-criteria assessment, test/Lens assessment, blocking findings, non-blocking observations, and risks/uncertainties. The reviewer cannot change files, push, alter workflow state, or publish to GitHub.
 5. **Publish and verify review** — after the reviewer returns, the coordinator re-reads `headRefOid`, `number`, and `url`. If the head differs from `input_sha`, it stores the stale output as evidence and starts a fresh reviewer session at the new head without consuming a review round. If unchanged, the coordinator renders the validated result to a temporary body file and publishes it through `packages/server/src/adapters/github.ts`, records the returned external reference, and emits `review.submitted`. If GitHub rejects `APPROVE` or `REQUEST_CHANGES` because the configured identity authored the PR, the adapter publishes the same normalized result as a comment review; the validated internal verdict remains the workflow authority. Publication or reviewer infrastructure failure routes to `policy_escalation` rather than being confused with a code finding.
-6. **Route outcome**:
-   - `approved` → create `final_review` human action.
+6. **Route outcome** (verdict decision table — source of truth with PRD §6.4; NOT-150):
+
+   | Verdict | When | Next owner | Must include |
+   |---|---|---|---|
+   | `approved` | AC met for the reviewed tip; **no** `blocking` findings (`non_blocking` nits allowed) | Human `final_review`, or `auto_merge` when enabled | AC + evidence assessment; optional non_blocking findings |
+   | `changes_requested` | Any `blocking` finding a coding pass can address — including incomplete review because AC-critical files were omitted/truncated from the reviewer diff | Developer (automatic repair while rounds remain); else `attempts_exhausted` | Blocking findings with fingerprints |
+   | `escalated` | Acceptance criteria / product scope are ambiguous, contradictory, or missing a human product call — **not** ordinary code defects, **not** “diff too large” | Human `product_scope_decision` | **Required** non-empty `productScopeQuestion` |
+
+   Routing:
+   - `approved` → create `final_review` (or `auto_merge` when the issue has auto-merge enabled).
    - `changes_requested`, rounds remain → increment round, start a new developer session (step 2) with the findings as context.
    - `changes_requested`, limit reached → create `attempts_exhausted` human action.
-   - `escalated` → create `policy_escalation` (or `product_scope_decision`, if the reviewer's structured output names a missing product decision) human action. **v1 escalation rule** (PRD open decision #2): trust the reviewer's own `escalated` verdict — no separate deterministic detector.
-7. **Final human review** — human resolves `final_review` as complete / another repair round / close. No merge is ever performed by agent-dealer. Resolving it as complete triggers `runReflect` once for the workflow instance, using the developer's deck/playbook and the final implementation conclusion + review history as input — the closest analog to today's "approve" trigger. Automatic per-round repairs, `attempts_exhausted`, and `policy_escalation` outcomes do not trigger reflect; there is no automatic-retry-shaped trigger left once plan/review is retired.
+   - `escalated` with `productScopeQuestion` → create `product_scope_decision`. Bare `escalated` without a question is **illegal** and must be remapped (typically to `changes_requested`) before routing — it must never open Resume\|Close-only `policy_escalation` as a dumping ground for truncated diffs or ordinary defects.
+
+   **Illegal / must remap:** `escalated` without `productScopeQuestion`; `approved` while any finding is `blocking`; using escalate for truncated/incomplete diffs.
+
+   **Truncated / incomplete diff policy:** the coordinator must not map truncation to bare escalate → Resume\|Close. Prefer `changes_requested` with a stable blocking incomplete-review finding (list omitted paths), or keep a shippable `approved` when AC is still certifiable from the visible tip with only `non_blocking` findings — never today's opaque escalate dead-end. Persist `diff_truncated_evidence` with the remapped target.
+7. **Final human review** — when auto-merge is off, the human resolves `final_review` as **Merge** (undraft + merge the PR, mark done) / another repair round / close. Merge and Close are distinct choices. Resolving as Merge triggers `runReflect` once after a successful merge, using the developer's deck/playbook and the final implementation conclusion + review history as input. Automatic per-round repairs, `attempts_exhausted`, and `policy_escalation` outcomes do not trigger reflect.
 
 ### Role permissions and GitHub access
 
 - **Developer:** read/write its worktree, run configured validation, push its issue branch, and create/update the draft PR. It cannot resolve human actions, edit the workflow graph, or merge.
 - **Reviewer:** read-only repository and evidence access. It produces a structured review result but has no GitHub-write or workflow-transition tools.
-- **Coordinator:** owns state transitions, re-validates PR identity/SHA, and is the only component that publishes the review result or requests human action. It never merges.
+- **Coordinator:** owns state transitions, re-validates PR identity/SHA, publishes the review result, requests human action, and performs undraft+merge on `final_review` Merge / `auto_merge` (never the developer or reviewer agents).
 
 No new SDK dependency (no Octokit). Developer sessions and the coordinator use ambient `gh auth` already configured on the host. A thin `packages/server/src/adapters/github.ts` wrapper owns both verification reads and coordinator review publication. Review bodies are passed with `--body-file`, not shell interpolation. This keeps agent output out of command construction and gives all GitHub effects a single auditable boundary.
 

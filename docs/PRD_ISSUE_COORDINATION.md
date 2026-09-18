@@ -197,15 +197,16 @@ If required product intent cannot be normalized without guessing, create a `prod
    - Emit one visible handoff: `Reviewer approved <head SHA>`, `Reviewer requested changes on <head SHA>`, or `Reviewer escalated <head SHA>`.
 
 8. **Route outcome**
-   - `approved` → create the final human-review packet.
+   - `approved` → create the final human-review packet (`final_review`), or undraft+merge when auto-merge is enabled.
    - `changes_requested` and rounds remain → begin the next developer repair round automatically.
    - `changes_requested` and limit reached → create an `attempts_exhausted` human action.
-   - `escalated` → create a `policy_escalation` or `product_scope_decision` human action.
+   - `escalated` with a non-empty `productScopeQuestion` → create a `product_scope_decision` human action.
+   - Bare `escalated` without `productScopeQuestion` is illegal and must be remapped before routing (see §6.4) — it must not open Resume\|Close-only `policy_escalation` for ordinary defects or truncated diffs.
 
 9. **Final human review**
    - Present the task snapshot, PR, final SHA, checks, review history, remaining risks, duration, cost, and unresolved uncertainties.
-   - The human may mark the issue complete, return it for another allowed repair round, or close it without acceptance.
-   - agent-dealer does not merge the pull request.
+   - On a shippable tip the human choices are **Merge** (undraft + merge the PR and mark done), return for another allowed repair round, or **Close** without acceptance — Merge and Close are distinct.
+   - When auto-merge is enabled, an `approved` verdict skips this gate and the coordinator merges.
 
 ### 6.3 Pass-the-ball contract
 
@@ -215,10 +216,10 @@ A role change requires a durable artifact and a structured outcome. A message al
 |---|---|---|---|
 | Intake | Immutable task snapshot | Ready | Developer |
 | Developer | Updated draft PR + head SHA + evidence | Ready for review | Reviewer |
-| Reviewer | Submitted PR review for the same head SHA | Approved | Human |
+| Reviewer | Submitted PR review for the same head SHA | Approved | Human (`final_review` / auto-merge) |
 | Reviewer | Submitted blocking findings for the same head SHA | Changes requested | Developer |
-| Reviewer | Submitted escalation with evidence | Human decision required | Human |
-| Human | Resolved typed action | Continue, repair, complete, or close | Workflow-selected role |
+| Reviewer | Submitted escalation with non-empty `productScopeQuestion` | Product scope decision | Human |
+| Human | Resolved typed action | Merge, repair, resume, or close | Workflow-selected role |
 
 If the pull-request head changes while review is running, the review is stale and cannot advance the issue.
 
@@ -226,13 +227,32 @@ If the pull-request head changes while review is running, the review is stale an
 
 Every review records:
 
-- verdict: `approved`, `changes_requested`, or `escalated`;
+- verdict: `approved`, `changes_requested`, or `escalated` (decision rules below);
 - base SHA and reviewed head SHA;
 - acceptance-criteria assessment;
 - test and Lens evidence assessment;
 - blocking findings;
 - non-blocking observations;
-- risks and uncertainties.
+- risks and uncertainties;
+- `productScopeQuestion` when (and only when) verdict is `escalated`.
+
+#### Verdict decision table (NOT-150 — source of truth for prompts and coordinator)
+
+| Verdict | When | Next owner | Must include |
+|---|---|---|---|
+| `approved` | AC met for the reviewed tip; **no** `blocking` findings. `non_blocking` nits allowed | Human `final_review` (or `auto_merge` when enabled) | AC + evidence assessment; optional non_blocking findings |
+| `changes_requested` | Any `blocking` finding a coding pass can address — including incomplete review because AC-critical files were omitted/truncated from the reviewer diff | Developer (automatic repair while rounds remain); else `attempts_exhausted` | Blocking findings with fingerprints |
+| `escalated` | Acceptance criteria / product scope are ambiguous, contradictory, or missing a human product call — **not** ordinary code defects, **not** “diff too large” | Human `product_scope_decision` | **Required** non-empty `productScopeQuestion` |
+
+**Illegal / must remap:**
+
+- `escalated` without `productScopeQuestion`;
+- `approved` while any finding is `blocking`;
+- using escalate as a dumping ground for truncated or incomplete diffs.
+
+**Truncated / incomplete diff policy:** the coordinator must not map truncation to bare escalate → Resume\|Close. Preferred: `changes_requested` with a stable blocking incomplete-review finding that lists omitted paths when AC cannot be certified; or keep `approved` when the visible tip still certifies AC with only `non_blocking` findings. Never the opaque escalate dead-end.
+
+**Shippable human choices:** when a human gate remains on a shippable tip, choices must include **Merge** (complete/ship via undraft+merge) distinct from Close.
 
 Every finding records a stable fingerprint, severity, title, rationale, evidence link, and optional file and line location. Findings remain linked across rounds as open, resolved, recurring, or superseded.
 
