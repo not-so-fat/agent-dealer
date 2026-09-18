@@ -83,7 +83,7 @@ Architecture and new templates must **not** block operating today’s Dev-review
 2. [NOT-76](https://linear.app/not-so-fat/issue/NOT-76) — complete agent-operated CLI surface, including discovery (`agent`/`issue` list, start, action resolve).
 3. [NOT-79](https://linear.app/not-so-fat/issue/NOT-79) — **concrete end-to-end release gate**: agent-operated Dev-review happy path.
 
-### Architecture landing path (templates / envelope)
+### Architecture landing track (templates / envelope)
 
 1. Architecture docs + ticket map (this design + plan) — [NOT-69](https://linear.app/not-so-fat/issue/NOT-69)
 2. Workflow registry seam — put `dev_reviewer_v1` behind a template interface with **no behavior change** — [NOT-70](https://linear.app/not-so-fat/issue/NOT-70)
