@@ -22,7 +22,8 @@ cleanup() {
   if [[ -n "${HOME_DIR:-}" ]] && command -v agent-dealer >/dev/null 2>&1; then
     AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer stop >/dev/null 2>&1 || true
   fi
-  rm -rf "$PACK_DIR" "$INSTALL_DIR"
+  # Cursor status under a temp HOME can leave half-written agent installs; never fail the gate on cleanup.
+  rm -rf "$PACK_DIR" "$INSTALL_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -40,8 +41,14 @@ npm install "$CLI_TGZ"
 
 export PATH="$INSTALL_DIR/node_modules/.bin:$PATH"
 
+# Fresh HOME has no gh credentials; Cursor auth under temp HOME hangs/pollutes.
+# This gate asserts pack → install → setup → daemon/API — not host auth.
+run_doctor() {
+  CURSOR_CLI="${INSTALL_DIR}/.smoke-no-cursor" agent-dealer doctor "$@" || true
+}
+
 echo "[install-smoke] doctor"
-agent-dealer doctor
+run_doctor
 
 echo "[install-smoke] setup"
 agent-dealer setup --home "$HOME_DIR/.agent-dealer"
@@ -50,7 +57,7 @@ echo "[install-smoke] seed LINEAR_API_KEY in .env (no shell export)"
 echo 'LINEAR_API_KEY=smoke_test_key' >> "$HOME_DIR/.agent-dealer/.env"
 
 echo "[install-smoke] doctor (env file only)"
-DOC_OUT="$(AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer doctor 2>&1)"
+DOC_OUT="$(AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" run_doctor 2>&1)"
 echo "$DOC_OUT"
 echo "$DOC_OUT" | grep -Fq "LINEAR_API_KEY set" || {
   echo "[install-smoke] FAIL doctor did not see LINEAR_API_KEY from .env"
@@ -59,7 +66,7 @@ echo "$DOC_OUT" | grep -Fq "LINEAR_API_KEY set" || {
 
 echo "[install-smoke] legacy PORT=2221 in .env maps to bundled 2222"
 sed -i.bak 's/^PORT=.*/PORT=2221/' "$HOME_DIR/.agent-dealer/.env"
-DOC_OUT="$(AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer doctor 2>&1)"
+DOC_OUT="$(AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" run_doctor 2>&1)"
 echo "$DOC_OUT"
 echo "$DOC_OUT" | grep -Eq "port 2222|agent-dealer running on :2222" || {
   echo "[install-smoke] FAIL doctor did not resolve bundled port 2222"

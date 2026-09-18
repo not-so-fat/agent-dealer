@@ -2,14 +2,39 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
-## Unreleased
+## 1.0.0 — 2026-09-18
 
-### Reduced to the issue queue (NOT-71)
+First major release: **issue queue + Dev→PR→Review** replaces the older run-oriented plan/execute product.
 
-- **Dashboard is Issues + Agents only** — the Operations, Inbox, Done, and standalone Human actions destinations are gone. They were the UI of the older run-oriented plan/execute product, which no longer exists.
-- **Human actions moved onto the Issues home** — a "Needs your attention" panel lists *every* open action, including run-scoped ones with no issue (outbound-draft delivery parks), with the server's own response options. Issue-scoped items open their issue; the rest resolve inline. The Issues nav carries the open count.
-- **Removed with those screens:** the run dispatcher and its plan gate / plan delegation / result QA / execute persistence, the run and intake HTTP routes, the legacy per-run runners and prompt builders (reflect excepted), the plan-triage and result-QA shared schemas, and the run-detail trace/usage rollups.
-- **Kept on purpose:** resolving a persisted, run-scoped `outbound_delivery_interaction_required` action (and the delivery/reflect code it reaches) so no already-open blocker is stranded by the cleanup. No rows or tables were dropped — existing data is untouched.
+### Breaking
+
+- **Dashboard is Issues + Agents only** — Operations, Inbox, Done, and the standalone Human actions screen are gone with the legacy run UI.
+- **No more plan/execute runs** — kick an issue, watch Dev→PR→Review, resolve what needs you. Existing data stays; old outbound-delivery blockers remain resolvable.
+
+### Product
+
+- **Needs your attention on Issues** — open human actions live on the Issues home (count in the nav); open an issue or resolve inline.
+- **Deep links** — shareable URLs for issues, issue detail, and agents.
+- **Linear kick** — freer inbox filters and lookup; pick a recent repo and optional auto-merge per issue.
+- **Re-import is a no-op** — a Linear ticket that already finished as an issue will not mint a duplicate.
+- **Repos by GitHub repo URL** — no Agent workspace/playbook path in the product surface.
+
+### Execution
+
+- **One issue at a time** — new issues enqueue; Start moves one to the front. Survives crash/restart; Abort, guidance, and evidence are first-class.
+- **Agent Deck from the profile** — workers use the profile’s deck; playbooks are checked before spend.
+- **Reasoning effort on profiles** — set once; frozen for the run.
+- **Runs recover instead of dying quietly** — caps, sleep, and timeouts no longer strand work; the issue UI shows live progress and why something failed.
+- **Retries keep what already worked** — verified steps and pushed commits are reused; unpushed work shows how far the branch diverged.
+
+### CLI
+
+- **Issue lifecycle** — create, list, start, guidance, evidence, and actions from the CLI as well as the dashboard.
+
+### Install path (unchanged)
+
+- Managed: `curl …/scripts/install.sh | bash` → `agent-dealer setup` → `agent-dealer start --open` → http://localhost:2222
+- Compat: `npm install -g agent-dealer`
 
 ## 0.3.0 — 2026-09-09
 
