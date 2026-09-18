@@ -300,7 +300,9 @@ export function updateIssue(id: string, patch: UpdateIssuePatch): Issue {
   return updated;
 }
 
-/** Distinct repo identities from prior issues, most recently used first (NOT-102). */
+/** Distinct portable GitHub repo identities from prior issues, most recently used first.
+ * Legacy local filesystem rows are excluded from create/recent surfaces (NOT-149) —
+ * recovery for those issues remains at checkout time only. */
 export function listRecentRepos(limit = 20): string[] {
   const rows = getDb()
     .prepare(
@@ -311,8 +313,14 @@ export function listRecentRepos(limit = 20): string[] {
        ORDER BY last_used DESC
        LIMIT ?`
     )
-    .all(limit) as Array<{ repo: string }>;
-  return rows.map((r) => r.repo);
+    .all(Math.max(limit * 4, 40)) as Array<{ repo: string }>;
+  const out: string[] = [];
+  for (const r of rows) {
+    if (looksLikeLocalRepoPath(r.repo)) continue;
+    out.push(r.repo);
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 export function incrementIssueRound(id: string): Issue {

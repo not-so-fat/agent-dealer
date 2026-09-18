@@ -74,7 +74,7 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     }));
   });
 
-  /** Recent repo identities from prior issues (GitHub refs; legacy rows may still be local paths). */
+  /** Recent portable GitHub repo identities (legacy local paths excluded from create UI). */
   app.get("/api/issues/recent-repos", async () => {
     return { repos: listRecentRepos() };
   });

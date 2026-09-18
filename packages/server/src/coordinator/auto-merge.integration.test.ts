@@ -225,7 +225,7 @@ test("autoMerge on: gh timeout reason escalates (bounded hang must not leave fin
   assert.match(action!.reason, /timed out after/);
 });
 
-test("listRecentRepos returns distinct local paths newest-first", () => {
+test("listRecentRepos returns distinct GitHub identities newest-first and skips legacy local paths", () => {
   const base = {
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
@@ -235,15 +235,17 @@ test("listRecentRepos returns distinct local paths newest-first", () => {
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
   };
-  createIssue({ ...base, title: "old", repo: "/repos/alpha" });
-  const later = createIssue({ ...base, title: "new", repo: "/repos/beta" });
-  createIssue({ ...base, title: "alpha again", repo: "/repos/alpha" });
+  createIssue({ ...base, title: "legacy", repo: "/repos/legacy-local" });
+  createIssue({ ...base, title: "old", repo: "github.com/acme/alpha" });
+  const later = createIssue({ ...base, title: "new", repo: "github.com/acme/beta" });
+  createIssue({ ...base, title: "alpha again", repo: "github.com/acme/alpha" });
   getDb().prepare("UPDATE issues SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), later.id);
 
   const repos = listRecentRepos();
-  assert.equal(repos[0], "/repos/beta");
-  assert.ok(repos.includes("/repos/alpha"));
-  assert.equal(repos.filter((r) => r === "/repos/alpha").length, 1);
+  assert.equal(repos[0], "github.com/acme/beta");
+  assert.ok(repos.includes("github.com/acme/alpha"));
+  assert.equal(repos.filter((r) => r === "github.com/acme/alpha").length, 1);
+  assert.equal(repos.some((r) => r.startsWith("/")), false);
 });
 
 test("recoverStrandedAutoMerges finalizes a parked auto-merge after a simulated crash", async () => {

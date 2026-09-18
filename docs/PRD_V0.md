@@ -18,7 +18,7 @@ related:
 **Architecture reference:** [Task Planner — Architecture.md](file:///Users/not_so_fat/workspace/Obsidian/lexicon-personal/Ideas/personal/Task%20Planner%20%E2%80%94%20Architecture.md)  
 **Sibling product:** Agent Deck MVP (`agent_deck/docs/MVP.md` — separate repo)
 
-> **Doc authoring note:** This file was structured using Agent Deck playbooks `pb_ai_codegen_prd` + `pb_product_principle` — that pairing applies to **writing this PRD**, not to agent-dealer runtime. The product does not ship or require specific decks or playbooks; users connect their own via Agent Deck at kick time (§10).
+> **Doc authoring note:** This file was structured using Agent Deck playbooks `pb_ai_codegen_prd` + `pb_product_principle` — that pairing applies to **writing this PRD**, not to agent-dealer runtime. Runtime Agents pin exactly one Deck on the profile (NOT-149); playbooks are chosen dynamically inside that Deck, not selected on the Agent or at kick.
 
 **Core principle:** Automation value > TAT. Optimize for overnight/unattended throughput with human gates, not sub-minute latency.
 
@@ -34,7 +34,7 @@ Knowledge workers and developers want agents to execute as many tasks as possibl
 
 1. **Human-approved plans** before execution
 2. **Full audit treasure** (task → plan → trace → feedback → knowledge delta)
-3. **Optional Agent Deck** integration (decks, playbooks, MCP proxy for Slack, Linear, etc.)
+3. **Required Agent Deck** on every execution Agent (decks, playbooks, MCP proxy for Slack, Linear, etc. — fail-closed; NOT-149)
 4. **Configurable approval gates** for risky actions (merge, send message, send email, ticket status)
 
 **Example task categories (non-exhaustive):**
@@ -200,8 +200,8 @@ Stories are grouped by the Operations pipeline gates (Intake is a separate scree
 
 **Acceptance:**
 
-- [ ] Select runtime: `claude_code` | `cursor_local`
-- [ ] User selects **deck** and optional **playbook** from their Agent Deck install (`get_decks` / `GET /api/decks` — agent-dealer does not hardcode or recommend specific ids)
+- [ ] Select runtime: `claude_code` | `cursor_local` | `codex_local`
+- [ ] Agent profile already carries exactly one required **deck** (NOT-149 — not selected at kick; playbooks are chosen inside the Deck, not as Agent/kick fields)
 - [ ] Warn if selected deck has missing OAuth/MCP deps for task category (e.g. Slack disconnected for `communication`)
 - [ ] Optional: approval gate template (merge, message, email, ticket status, publish_external)
 - [ ] Run transitions `plan_approved` → `running` when slot available
@@ -559,7 +559,7 @@ Lightweight agent turn for drafting plans only — not full task execution.
 | Tools | Read, search, optional deck MCP for context — **no** Write/Bash/gated send tools |
 | Output | `draft_plan` artifact → run status `plan_pending` |
 
-Optional: user may pass `playbookId` from their deck to shape plan structure (e.g. a team's implementation playbook).
+Playbooks are chosen dynamically inside the Agent's pinned Deck during the worker session — not as a kick-time `playbookId` field on the Agent or run (NOT-149).
 
 ### Parallelism & cost
 
@@ -810,16 +810,16 @@ Planning and execution each use the same `maxConcurrentRuns` slot model (FIFO qu
 
 ---
 
-## 10. Agent Deck integration (optional)
+## 10. Agent Deck integration (required for execution)
 
-agent-dealer does **not** ship decks, playbooks, or MCP credentials. When Agent Deck is available, the user connects **their own** deck and optional playbook per run. agent-dealer passes through `deckId` / `playbookId` and records what was used in the audit trail — it never curates or recommends a fixed set.
+agent-dealer does **not** ship decks, playbooks, or MCP credentials. The operator pins **exactly one Deck** on each Agent profile used for execution (NOT-149). Playbooks are chosen dynamically inside that Deck during the worker session — not as Agent fields or kick-time selectors. agent-dealer records the launch-selected `deckId` in the profile snapshot / audit trail — it never curates or recommends a fixed set.
 
 | Mode | Behavior |
 |------|----------|
-| **With deck** | User picks deck + optional playbook at kick (US-5); runner prompt includes `bind_workspace`; post-run optional `update_playbook` |
-| **Without deck** | Runner uses repo tools only; no MCP proxy; all audit still in agent-dealer |
+| **With deck (required)** | Profile carries `deckId`; runner prompt includes `bind_workspace` to the managed worktree; post-run optional `update_playbook` / reflect when configured |
+| **Without deck** | **Not allowed for execution** — health reports `deck_missing`; workers fail closed (`deck_failure`) |
 
-**Deck picker (US-5):** List decks from Agent Deck (`get_decks` MCP or `GET /api/decks`). Show deck name, MCP/credential/playbook counts, and connection health. Playbook dropdown scoped to playbooks on the selected deck (or full collection — implementation choice). **No default deck** in agent-dealer config beyond optional last-used preference.
+**Deck on Agent profile:** List decks from Agent Deck (`get_decks` MCP or `GET /api/decks`). Show deck name, MCP/credential/playbook counts, and connection health. Built-in agents ship with no default Deck — configure one before kick.
 
 agent-dealer **never** stores MCP secrets or OAuth tokens — that remains Agent Deck's vault.
 
@@ -830,10 +830,10 @@ agent-dealer **never** stores MCP secrets or OAuth tokens — that remains Agent
 | Queue order | yes | no |
 | Human plan approval | yes | no |
 | Transcript / audit DB | yes | no |
-| Deck scope | passes `deckId` | `bind_workspace` |
-| Procedures | passes `playbookId` | `get_playbook` |
+| Deck scope | profile `deckId` → launch bind | `bind_workspace` |
+| Procedures | worker selects inside Deck | `get_playbook` |
 | Secrets / OAuth MCPs | no | yes |
-| Improve knowledge | decides when | `update_playbook` |
+| Improve knowledge | decides when | `update_playbook` / propose patch |
 
 ### Post-run playbook loop (planner-orchestrated)
 
@@ -928,7 +928,7 @@ References:
 
 **AI codegen agents:** Load this file from `docs/PRD_V0.md`. Follow user stories (§3) and state machine (§5). Defer JSON Schema contracts until `packages/shared` exists — v0 PRD is prose-first for this greenfield repo.
 
-**agent-dealer runs:** Do not assume any specific `deckId` or `playbookId`. Read user's selection from kick payload (US-5) or run record.
+**agent-dealer runs:** Do not assume any specific `deckId` or playbook id. Read the Agent profile's required Deck from the frozen profile snapshot; playbooks are chosen inside that Deck during the session (NOT-149).
 
 ---
 
