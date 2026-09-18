@@ -52,6 +52,22 @@ test("dirty worktree always escalates immediately — never retried, regardless 
   assert.equal((result as { actionType: string }).actionType, "policy_escalation");
 });
 
+test("NOT-145: dirty_worktree with path/recovery folds recovery into the escalation reason like worktree_conflict", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "dirty_worktree",
+    reason: "Auto-commit salvage failed: hook rejected.",
+    path: "/data/worktrees/s-dev-developer",
+    recoveryCommands: ["cd /data/worktrees/s-dev-developer", "git status"],
+  };
+  const result = routeDeveloperOutcome(outcome, INFRA_AT_LIMIT);
+  assert.equal(result.next, "human_action");
+  assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+  const reason = (result as { reason: string }).reason;
+  assert.match(reason, /Auto-commit salvage failed/);
+  assert.match(reason, /git status/);
+  assert.match(reason, /s-dev-developer/);
+});
+
 test("unpushed commit always escalates immediately — never retried, regardless of any budget", () => {
   const outcome: DeveloperOutcome = { kind: "unpushed_commit", reason: "non-fast-forward" };
   const result = routeDeveloperOutcome(outcome, REVIEW_ROUNDS_LEFT);
