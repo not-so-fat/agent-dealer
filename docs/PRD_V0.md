@@ -202,7 +202,7 @@ Stories are grouped by the Operations pipeline gates (Intake is a separate scree
 
 - [ ] Select runtime: `claude_code` | `cursor_local` | `codex_local`
 - [ ] Agent profile already carries exactly one required **deck** (NOT-149 — not selected at kick; playbooks are chosen inside the Deck, not as Agent/kick fields)
-- [ ] Warn if selected deck has missing OAuth/MCP deps for task category (e.g. Slack disconnected for `communication`)
+- [ ] Warn if the Agent's pinned Deck has missing OAuth/MCP deps for task category (e.g. Slack disconnected for `communication`)
 - [ ] Optional: approval gate template (merge, message, email, ticket status, publish_external)
 - [ ] Run transitions `plan_approved` → `running` when slot available
 - [ ] Per-run payload passed to runner (see §6)
@@ -815,7 +815,7 @@ Planning and execution each use the same `maxConcurrentRuns` slot model (FIFO qu
 
 ## 10. Agent Deck integration (required for execution)
 
-agent-dealer does **not** ship decks, playbooks, or MCP credentials. The operator pins **exactly one Deck** on each Agent profile used for execution (NOT-149). Playbooks are chosen dynamically inside that Deck during the worker session — not as Agent fields or kick-time selectors. agent-dealer records the launch-selected `deckId` in the profile snapshot / audit trail — it never curates or recommends a fixed set.
+agent-dealer does **not** ship decks, playbooks, or MCP credentials. The operator pins **exactly one Deck** on each Agent profile used for execution (NOT-149). Playbooks are chosen dynamically inside that Deck during the worker session — not as Agent fields or kick-time selectors. agent-dealer records the profile's pinned `deckId` in the frozen session snapshot / audit trail — it never curates or recommends a fixed set.
 
 | Mode | Behavior |
 |------|----------|
