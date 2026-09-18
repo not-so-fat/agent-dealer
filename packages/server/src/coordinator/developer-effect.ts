@@ -249,7 +249,12 @@ async function runPublishOnlyHandoff(
   const taskSnapshot = getTaskSnapshot(issue);
   const round = workItem.round;
   const stage = issue.status;
-  const cwd = (await ensureIssueRepoCheckout(issue.repo)).repoPath;
+  const checkout = await ensureIssueRepoCheckout(issue.repo);
+  const cwd = checkout.repoPath;
+  const baseBranch =
+    checkout.kind === "managed" && checkout.defaultBranch
+      ? checkout.defaultBranch
+      : issue.baseBranch;
 
   const milestone = (
     type: Parameters<typeof emitSessionMilestone>[0]["type"],
@@ -336,7 +341,7 @@ async function runPublishOnlyHandoff(
       fs.writeFileSync(bodyFilePath, body);
       const created = await deps.github.createDraftPr({
         cwd,
-        base: issue.baseBranch,
+        base: baseBranch,
         head: branchName,
         title: taskSnapshot.title,
         bodyFilePath,
@@ -374,7 +379,7 @@ async function runPublishOnlyHandoff(
     }
     const identityOpts = {
       branchName,
-      baseBranch: issue.baseBranch,
+      baseBranch,
       priorPrNumber: issue.prNumber,
       localHead: remoteHead,
     };
@@ -761,7 +766,7 @@ export async function runDeveloperEffect(
       const sessionOk = !spawned.timedOut && spawned.exitCode === 0;
       const ahead = await commitsAhead({
         worktreePath,
-        baseRef: `origin/${issue.baseBranch}`,
+        baseRef: `origin/${baseBranch}`,
       }).catch(() => 0);
 
       // NOT-117: a successful clean tip must continue to push/PR. Cap is already recorded
@@ -877,7 +882,7 @@ export async function runDeveloperEffect(
       };
     }
 
-    const ahead = await commitsAhead({ worktreePath, baseRef: `origin/${issue.baseBranch}` });
+    const ahead = await commitsAhead({ worktreePath, baseRef: `origin/${baseBranch}` });
     if (ahead === 0) {
       await bestEffortRemove(repoPath, worktreePath);
       return { kind: "no_pr" };
@@ -913,7 +918,7 @@ export async function runDeveloperEffect(
       fs.writeFileSync(bodyFilePath, extractConclusion(spawned.transcript) || taskSnapshot.description);
       const created = await deps.github.createDraftPr({
         cwd: worktreePath,
-        base: issue.baseBranch,
+        base: baseBranch,
         head: branchName,
         title: taskSnapshot.title,
         bodyFilePath,
@@ -952,7 +957,7 @@ export async function runDeveloperEffect(
           intervalMs: developerEffectConfig.headReconcileIntervalMs,
         })) ?? prView;
     }
-    const identityOpts = { branchName, baseBranch: issue.baseBranch, priorPrNumber: issue.prNumber, localHead };
+    const identityOpts = { branchName, baseBranch, priorPrNumber: issue.prNumber, localHead };
     const identity = await validatePrIdentity(prView, identityOpts);
     if (!identity.ok) {
       await bestEffortRemove(repoPath, worktreePath);
