@@ -285,6 +285,26 @@ export async function dequeueIssue(issueId: string): Promise<{ id: string; state
   return res.json();
 }
 
+export type QueueMoveTo =
+  | "top"
+  | "bottom"
+  | { before: string }
+  | { after: string };
+
+/** NOT-112: relative reorder — server computes positions. */
+export async function moveQueueEntry(
+  issueId: string,
+  to: QueueMoveTo
+): Promise<QueueEntryRow> {
+  const res = await fetch(`${API}/api/queue/${issueId}/move`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ to }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 export interface QueueEntryRow {
   id: string;
   issueId: string;
