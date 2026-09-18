@@ -103,9 +103,9 @@ Recommended architecture order: **NOT-69 → NOT-70 → NOT-71 → NOT-78 → NO
 **Interfaces:**
 - Produces: approved written contract for architecture Tasks 2–5 **and** the usable-ASAP track map
 
-- [ ] **Step 1:** Ensure design + plan are in repo and linked from Linear parent description.
-- [ ] **Step 2:** Ticket map includes usable-ASAP (NOT-77/76/79), NOT-78 template-neutral boundary, and NOT-74/75 categorization.
-- [ ] **Step 3:** Commit only if the user asks (docs-only PR is fine).
+- [x] **Step 1:** Ensure design + plan are in repo and linked from Linear parent description.
+- [x] **Step 2:** Ticket map includes usable-ASAP (NOT-77/76/79), NOT-78 template-neutral boundary, and NOT-74/75 categorization.
+- [x] **Step 3:** Commit only if the user asks (docs-only PR is fine).
 
 **Acceptance:** Design principles (three modules, independent templates, no in-product chaining, Clarify-created issues at `ready`/no active instance, dual-runtime retirement) are written; plan does **not** imply registry/template work must land before Dev-review can be used; NOT-77/76/79 and NOT-78 roles are explicit.
 
