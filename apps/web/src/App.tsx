@@ -1,24 +1,49 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link, NavLink, Navigate, Route, Routes, useParams } from "react-router-dom";
 import type { AgentWithHealth, HumanAction } from "@agent-dealer/shared";
 import AgentsPage from "./pages/AgentsPage";
 import IssuesListPage from "./pages/IssuesListPage";
 import IssueDetailPage from "./pages/IssueDetailPage";
+import NotFoundPage from "./pages/NotFoundPage";
 import { fetchAgentDeckStatus, fetchAgents, fetchHumanActions } from "./api";
 import AmbientBackground from "./components/ui/AmbientBackground";
 import AlertIcon from "./components/ui/AlertIcon";
 import AgentsNavIcon from "./components/ui/AgentsNavIcon";
 import Logo from "./components/ui/Logo";
 
-// NOT-71: Agent Dealer is an issue queue and execution control plane. The run-oriented
-// plan/execute product (Operations / Inbox / Done) and the standalone Human actions
-// destination are gone — open human actions are part of the issue queue home now.
-type View = "issues" | "agents";
+// NOT-71 / NOT-142: surviving destinations are Issues (list + detail) and Agents.
+// Navigation lives in the URL — no parallel view/selectedIssueId state.
 
 const POLL_MS = 5000;
 
+function navClass({ isActive }: { isActive: boolean }) {
+  return `px-3 py-2 text-base rounded ${
+    isActive ? "bg-cyber-teal/20 text-cyber-teal" : "text-white/60 hover:text-white"
+  }`;
+}
+
+function IssueDetailRoute({
+  agents,
+  onHumanActionsChanged,
+}: {
+  agents: AgentWithHealth[];
+  onHumanActionsChanged: () => void;
+}) {
+  const { issueId } = useParams<{ issueId: string }>();
+  if (!issueId) {
+    return <Navigate to="/issues" replace />;
+  }
+  return (
+    <IssueDetailPage
+      key={issueId}
+      issueId={issueId}
+      agents={agents}
+      onHumanActionsChanged={onHumanActionsChanged}
+    />
+  );
+}
+
 export default function App() {
-  const [view, setView] = useState<View>("issues");
-  const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [agents, setAgents] = useState<AgentWithHealth[]>([]);
   const [agentIssueCount, setAgentIssueCount] = useState(0);
   const [agentDeckOnline, setAgentDeckOnline] = useState(false);
@@ -58,25 +83,15 @@ export default function App() {
   const openHumanActionCount = humanActions.length;
   const agentCount = agents.length;
 
-  const navClass = (v: View) =>
-    `px-3 py-2 text-base rounded ${view === v ? "bg-cyber-teal/20 text-cyber-teal" : "text-white/60 hover:text-white"}`;
-
-  const goIssues = () => {
-    setView("issues");
-    setSelectedIssueId(null);
-  };
-  const goAgents = () => setView("agents");
-
   return (
     <>
       <AmbientBackground />
       <div className="relative z-10 min-h-screen flex flex-col">
         <header className="px-6 py-4 border-b border-white/10 flex flex-wrap gap-4 items-center justify-between glass-header shrink-0">
           <div className="flex items-center gap-6">
-            <button
-              type="button"
-              onClick={goIssues}
-              className="flex items-center gap-3 text-left rounded cursor-pointer hover:opacity-90 transition-opacity focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyber-teal/45"
+            <Link
+              to="/issues"
+              className="flex items-center gap-3 text-left rounded hover:opacity-90 transition-opacity focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyber-teal/45"
               aria-label="AgentDealer — go to Issues"
             >
               <Logo size={40} />
@@ -94,9 +109,9 @@ export default function App() {
                 </h1>
                 <p className="text-sm text-cyber-teal">One issue, one durable coordination record</p>
               </div>
-            </button>
+            </Link>
             <nav className="flex gap-1">
-              <button type="button" onClick={goIssues} className={navClass("issues")}>
+              <NavLink to="/issues" className={navClass}>
                 Issues
                 {openHumanActionCount > 0 && (
                   <span
@@ -107,13 +122,14 @@ export default function App() {
                     {openHumanActionCount}
                   </span>
                 )}
-              </button>
+              </NavLink>
             </nav>
           </div>
-          <button
-            type="button"
-            onClick={goAgents}
-            className={`${navClass("agents")} inline-flex items-center gap-1.5 transition-colors`}
+          <NavLink
+            to="/agents"
+            className={({ isActive }) =>
+              `${navClass({ isActive })} inline-flex items-center gap-1.5 transition-colors`
+            }
             aria-label="Agents"
             title="Agents"
           >
@@ -136,29 +152,36 @@ export default function App() {
                 {agentIssueCount}
               </span>
             )}
-          </button>
+          </NavLink>
         </header>
 
         <main className="flex-1 flex overflow-hidden">
-          {view === "issues" && !selectedIssueId && (
-            <IssuesListPage
-              agents={agents}
-              humanActions={humanActions}
-              onSelectIssue={setSelectedIssueId}
-              onHumanActionsChanged={refreshHumanActions}
+          <Routes>
+            <Route path="/" element={<Navigate to="/issues" replace />} />
+            <Route
+              path="/issues"
+              element={
+                <IssuesListPage
+                  agents={agents}
+                  humanActions={humanActions}
+                  onHumanActionsChanged={refreshHumanActions}
+                />
+              }
             />
-          )}
-          {view === "issues" && selectedIssueId && (
-            <IssueDetailPage
-              issueId={selectedIssueId}
-              agents={agents}
-              onBack={() => setSelectedIssueId(null)}
-              onHumanActionsChanged={refreshHumanActions}
+            <Route
+              path="/issues/:issueId"
+              element={
+                <IssueDetailRoute agents={agents} onHumanActionsChanged={refreshHumanActions} />
+              }
             />
-          )}
-          {view === "agents" && (
-            <AgentsPage agents={agents} agentDeckOnline={agentDeckOnline} onRefresh={refreshAgents} />
-          )}
+            <Route
+              path="/agents"
+              element={
+                <AgentsPage agents={agents} agentDeckOnline={agentDeckOnline} onRefresh={refreshAgents} />
+              }
+            />
+            <Route path="*" element={<NotFoundPage />} />
+          </Routes>
         </main>
       </div>
     </>
