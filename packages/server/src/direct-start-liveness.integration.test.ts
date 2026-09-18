@@ -15,6 +15,10 @@ import path from "node:path";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
 import { resolveTsxBin } from "./resolve-tsx-bin.js";
+import {
+  DirectStartLiveCleanup,
+  sweepAbandonedDirectStartHomes,
+} from "./direct-start-temp-home-cleanup.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
@@ -24,6 +28,11 @@ const tsxBin = resolveTsxBin(repoRoot);
 
 const { isServiceRunning, runMigration } = await import("./db/migrate-to-issues.js");
 const Database = (await import("better-sqlite3")).default;
+
+// One-time sweep of abandoned dealer-direct-start-* homes left by earlier interrupted
+// runs. Live-pid + recent-mtime guards keep this from deleting out from under a run
+// that is still in flight on this machine (NOT-140).
+sweepAbandonedDirectStartHomes(os.tmpdir());
 
 async function getEphemeralPort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -50,37 +59,43 @@ async function waitUntil(check: () => boolean | Promise<boolean>, timeoutMs: num
   }
 }
 
+// Every server spawned by this file that stopServer() has not yet confirmed dead, plus
+// every temp home makeHome() still owns. A detached child sits in its own session, so it
+// no longer receives the terminal's SIGINT along with the test runner — the usual
+// "Ctrl-C reaps the whole foreground group" safety net does not cover these, and an
+// interrupted run would leak exactly what this file was leaking before. This registry is
+// that net, re-implemented explicitly — servers and homes share one reapAll so
+// process.exit(1) cannot clear one and abandon the other (NOT-140).
+const liveCleanup = new DirectStartLiveCleanup();
+
+function reapAllLiveCleanup(): void {
+  liveCleanup.reapAll(signalGroup);
+}
+
+process.on("exit", reapAllLiveCleanup);
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  // Registering a listener suppresses the default terminate, so exit explicitly.
+  process.on(signal, () => {
+    reapAllLiveCleanup();
+    process.exit(1);
+  });
+}
+
 /** A temp AGENT_DEALER_HOME that is deleted when the test ends, however it ends. Registered
  * as a test hook rather than dropped in a `finally` on purpose: teardown here asserts (that
  * the server it stopped is really dead), and an assertion that throws must not be able to
  * skip the cleanup and leave a directory behind — which is precisely how $TMPDIR filled up
  * with hundreds of these. Runs after the body's own `finally`, so servers are stopped by
- * then. */
+ * then. The interrupt path (SIGINT/SIGTERM/SIGHUP → process.exit) skips t.after, so the
+ * home is also tracked on `liveCleanup` and reaped there (NOT-140). */
 function makeHome(t: TestContext, prefix: string): string {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  return home;
-}
-
-// Every server spawned by this file that stopServer() has not yet confirmed dead. A
-// detached child sits in its own session, so it no longer receives the terminal's SIGINT
-// along with the test runner — the usual "Ctrl-C reaps the whole foreground group" safety
-// net does not cover these, and an interrupted run would leak exactly what this file was
-// leaking before. This registry is that net, re-implemented explicitly.
-const liveServers = new Set<ChildProcess>();
-
-function killAllServerGroups(): void {
-  for (const child of liveServers) signalGroup(child, "SIGKILL");
-  liveServers.clear();
-}
-
-process.on("exit", killAllServerGroups);
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-  // Registering a listener suppresses the default terminate, so exit explicitly.
-  process.on(signal, () => {
-    killAllServerGroups();
-    process.exit(1);
+  liveCleanup.trackHome(home);
+  t.after(() => {
+    liveCleanup.untrackHome(home);
+    fs.rmSync(home, { recursive: true, force: true });
   });
+  return home;
 }
 
 function spawnServer(home: string, port: number) {
@@ -100,10 +115,10 @@ function spawnServer(home: string, port: number) {
   // Every test awaits its own teardown, so this handle is never what keeps the run
   // correct — but while it is ref'd it *does* keep the runner's event loop alive, so a
   // teardown that throws before stopping a server wedges the whole file at 100% "waiting
-  // for a child that will never exit" instead of failing. unref() + killAllServerGroups()
+  // for a child that will never exit" instead of failing. unref() + reapAllLiveCleanup()
   // on exit is the pair that makes the failure path terminate and still reap.
   child.unref();
-  liveServers.add(child);
+  liveCleanup.addServer(child);
   return child;
 }
 
@@ -200,7 +215,7 @@ async function stopServer(child: ChildProcess, home: string): Promise<StopResult
       `the server pid recorded in server.pid (${recordedPid}) survived teardown — the tsx launcher (${child.pid}) was reaped but its server child leaked`
     );
   }
-  liveServers.delete(child);
+  liveCleanup.removeServer(child);
   return { exitedOnTerm, recordedPid };
 }
 
@@ -407,6 +422,108 @@ test(
       assert.equal(succeeded.issuesCreated, 1);
     } finally {
       await stopServer(server, home);
+    }
+  }
+);
+
+function listOrphanIndexTsPids(): number[] {
+  try {
+    const out = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" });
+    const orphans: number[] = [];
+    for (const line of out.split("\n")) {
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+      if (!match) continue;
+      const pid = Number(match[1]);
+      const ppid = Number(match[2]);
+      const command = match[3];
+      if (ppid === 1 && command.includes("packages/server/src/index.ts")) orphans.push(pid);
+    }
+    return orphans;
+  } catch {
+    return [];
+  }
+}
+
+test(
+  "SIGINT mid-run leaves zero dealer-direct-start homes from that run and no PPID=1 index.ts orphans",
+  { timeout: 60000 },
+  async () => {
+    // Acceptance for NOT-140: the probe mirrors this file's signal handler (reapAll then
+    // process.exit(1)). process.exit skips t.after, so only the shared liveCleanup registry
+    // can remove the temp home — and it must still reap the detached server group.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-direct-start-sigint-"));
+    const readyFile = path.join(home, "ready.json");
+    const port = await getEphemeralPort();
+    const probe = path.join(__dirname, "direct-start-interrupt-probe.ts");
+
+    const orphansBefore = new Set(listOrphanIndexTsPids());
+
+    const probeChild = spawn(tsxBin, [probe, home, readyFile, serverEntry, String(port)], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+
+    try {
+      const ready = await waitUntil(() => fs.existsSync(readyFile), 15000);
+      assert.ok(ready, "interrupt probe should write its ready file");
+
+      const healthy = await waitForHealth(port, 20000);
+      assert.ok(healthy, "interrupt probe's server should become healthy before SIGINT");
+
+      probeChild.kill("SIGINT");
+      const exited = await waitUntil(
+        () => probeChild.exitCode !== null || probeChild.signalCode !== null,
+        15000
+      );
+      assert.ok(exited, "interrupt probe should exit after SIGINT");
+
+      assert.equal(
+        fs.existsSync(home),
+        false,
+        "SIGINT must rmSync the tracked temp home — t.after never runs after process.exit(1)"
+      );
+
+      const orphansAfter = listOrphanIndexTsPids().filter((pid) => !orphansBefore.has(pid));
+      assert.deepEqual(
+        orphansAfter,
+        [],
+        `SIGINT must not leave packages/server/src/index.ts reparented to init; new orphans: ${orphansAfter.join(",")}`
+      );
+    } finally {
+      // SIGKILL skips the probe's exit handler, so a stuck probe would leave its
+      // detached server group alive (often reparented to init). Prefer SIGINT so
+      // reapAll runs; only then SIGKILL the process group ourselves as a backstop.
+      if (probeChild.exitCode === null && probeChild.signalCode === null) {
+        probeChild.kill("SIGINT");
+        await waitUntil(
+          () => probeChild.exitCode !== null || probeChild.signalCode !== null,
+          5000
+        );
+      }
+      if (probeChild.exitCode === null && probeChild.signalCode === null) {
+        let launcherPid: number | undefined;
+        try {
+          launcherPid = (
+            JSON.parse(fs.readFileSync(readyFile, "utf8")) as { serverLauncherPid?: unknown }
+          ).serverLauncherPid as number | undefined;
+        } catch {
+          // ready file may be missing if the probe died before writing it
+        }
+        if (typeof launcherPid === "number" && Number.isFinite(launcherPid)) {
+          try {
+            process.kill(-launcherPid, "SIGKILL");
+          } catch {
+            // ESRCH — group already gone
+          }
+        }
+        probeChild.kill("SIGKILL");
+      }
+      // If the probe failed before reaping, do not leave debris behind for the suite.
+      try {
+        fs.rmSync(home, { recursive: true, force: true });
+      } catch {
+        // already gone on the success path
+      }
     }
   }
 );
