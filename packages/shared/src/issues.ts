@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { GitHubRepoInput } from "./github-repo.js";
 
 export const IssueStatus = z.enum([
   "ready",
@@ -28,6 +29,11 @@ export const Issue = z.object({
   title: z.string(),
   description: z.string().nullable(),
   acceptanceCriteria: z.string().nullable(),
+  /**
+   * Portable GitHub identity (`github.com/owner/repo`) for new issues (NOT-149).
+   * Legacy rows may still hold a local filesystem path until explicitly migrated —
+   * the coordinator resolves those via an explicit compatibility path, never by guessing.
+   */
   repo: z.string(),
   baseBranch: z.string(),
   status: IssueStatus,
@@ -60,7 +66,8 @@ export const CreateIssueInput = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
   acceptanceCriteria: z.string().optional(),
-  repo: z.string().min(1),
+  /** GitHub URL or `owner/repo` — normalized to `github.com/owner/repo` on parse. */
+  repo: GitHubRepoInput,
   baseBranch: z.string().min(1).default("main"),
   developerAgentId: z.string().uuid(),
   reviewerAgentId: z.string().uuid(),
@@ -88,7 +95,7 @@ export const UpdateIssueInput = z.object({
   title: z.string().min(1).optional(),
   description: z.string().nullable().optional(),
   acceptanceCriteria: z.string().nullable().optional(),
-  repo: z.string().min(1).optional(),
+  repo: GitHubRepoInput.optional(),
   baseBranch: z.string().min(1).optional(),
   developerAgentId: z.string().uuid().optional(),
   reviewerAgentId: z.string().uuid().optional(),

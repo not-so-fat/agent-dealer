@@ -49,10 +49,7 @@ test("parseProfileSnapshot round-trips a valid snapshot and rejects junk", () =>
     effort: "medium",
     budgetJson: null,
     permissionPolicy: resolvePermissionPolicy("reviewer", null),
-    deckId: null,
-    workspaceRoot: "/repo",
-    playbookIds: [],
-    externalMemoryRefs: [],
+    deckId: "00000000-0000-4000-a000-000000000099",
     purpose: null,
     capturedAt: new Date().toISOString(),
   };
@@ -61,7 +58,7 @@ test("parseProfileSnapshot round-trips a valid snapshot and rejects junk", () =>
   assert.equal(parseProfileSnapshot(null), null);
 });
 
-test("parseProfileSnapshot defaults missing effort to null for pre-NOT-81 snapshots", () => {
+test("parseProfileSnapshot strips legacy workspace/playbook/memory fields (NOT-149)", () => {
   const legacy = {
     version: 1 as const,
     agentId: "a1",
@@ -72,12 +69,15 @@ test("parseProfileSnapshot defaults missing effort to null for pre-NOT-81 snapsh
     permissionPolicy: resolvePermissionPolicy("developer", null),
     deckId: null,
     workspaceRoot: "/repo",
-    playbookIds: [],
-    externalMemoryRefs: [],
+    playbookIds: ["pb_x"],
+    externalMemoryRefs: ["vault://x"],
     purpose: null,
     capturedAt: new Date().toISOString(),
   };
   const parsed = parseProfileSnapshot(JSON.stringify(legacy));
   assert.ok(parsed);
   assert.equal(parsed!.effort, null);
+  assert.equal("workspaceRoot" in parsed!, false);
+  assert.equal("playbookIds" in parsed!, false);
+  assert.equal("externalMemoryRefs" in parsed!, false);
 });

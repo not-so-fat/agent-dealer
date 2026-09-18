@@ -11,6 +11,7 @@ export * from "./execution.js";
 export * from "./outbound-draft.js";
 export * from "./playbook-reflect.js";
 export * from "./issues.js";
+export * from "./github-repo.js";
 export * from "./worker-sessions.js";
 export * from "./profile-snapshot.js";
 export * from "./workflow.js";
