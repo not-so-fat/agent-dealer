@@ -16,10 +16,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseProfileSnapshot, roleCeiling, type Issue } from "@agent-dealer/shared";
+import { parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
 import type { EffectContext } from "./effect-registry.js";
 import type { DeveloperOutcome } from "./routing.js";
-import { getTaskSnapshot, TASK_SNAPSHOT_ARTIFACT_KIND } from "./commands.js";
+import { getTaskSnapshot } from "./commands.js";
 import { buildDeveloperPrompt } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn } from "./spawn.js";
@@ -37,6 +37,7 @@ import {
   fetchRef,
   salvageDirtyWorktree,
   dirtyWorktreeRecoveryCommands,
+  withRepoLock,
 } from "../adapters/git-worktree.js";
 import {
   ensureIssueRepoCheckout,
@@ -53,27 +54,9 @@ import { developerSessionTimeoutMs } from "./session-timeouts.js";
 import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
-import { updateIssue } from "../repository/issues.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
-
-/**
- * Keep issue.baseBranch + frozen task_snapshot aligned with resolveCheckoutBaseBranch so
- * prompts, baseRefCandidates, and the Issues UI all see the same base the PR was cut from.
- */
-function syncIssueBaseBranch(issue: Issue, resolved: string): void {
-  if (issue.baseBranch === resolved) return;
-  updateIssue(issue.id, { baseBranch: resolved });
-  issue.baseBranch = resolved;
-  const snap = getTaskSnapshot(issue);
-  if (snap.baseBranch === resolved) return;
-  createIssueArtifact({
-    issueId: issue.id,
-    kind: TASK_SNAPSHOT_ARTIFACT_KIND,
-    author: "system",
-    content: { ...snap, baseBranch: resolved },
-  });
-}
+import { syncIssueBaseBranch } from "./sync-issue-base-branch.js";
 import { recordUsageCapFromLog } from "../runners/usage-cap.js";
 import { reasonForDirtyWorktree, reasonForSessionCrash } from "./failure-reason.js";
 import {
@@ -294,52 +277,66 @@ async function runPublishOnlyHandoff(
   try {
     setLiveIntent(issue.id, `Developer · retrying GitHub publish (round ${round})`);
 
-    // Only a branch strictly ahead of origin is pushed here: the post-push retry path must
-    // keep touching the remote not at all, and a local ref that has somehow fallen BEHIND
-    // origin (someone pushed outside the coordinator) must not be turned into a rejected
-    // push and a spurious escalation — origin is the better artifact in that case.
-    const progress = await inspectBranchProgress({
-      repo: cwd,
-      branch: branchName,
-      baseRefs: baseRefCandidates(issue),
-      fetch: true,
-    });
-    if (progress.state === "unpushed") {
-      setLiveIntent(
-        issue.id,
-        `Developer · pushing ${progress.unpushed} recovered commit${progress.unpushed === 1 ? "" : "s"} (round ${round})`
-      );
-      const recovered = await pushBranchRef({ repo: cwd, branch: branchName });
-      if (!recovered.ok) {
-        // Same policy as a live attempt's push: a clean rejection is a human decision, a
-        // tooling error is a bounded infra retry. Either way the commits stay on the branch.
-        //
-        // The retry must stay publish-only. A transient remote failure (DNS, a dropped
-        // connection) says nothing about whether the work exists — it plainly still does, on
-        // this branch — so dropping the marker here would spend the very ~40-minute agent
-        // rerun this path was built to avoid, on the one failure most likely to be gone by
-        // the next attempt.
-        return recovered.rejected
-          ? {
-              kind: "unpushed_commit",
-              reason: recovered.reason,
-              recoveryCommands: recovered.facts?.recoveryCommands,
-            }
-          : {
-              kind: "adapter_failure",
-              reason: `push of recovered branch ${branchName} failed: ${recovered.reason}`,
-              publishable: { branch: branchName },
-            };
+    // Serialize fetch/push against the shared managed clone (same withRepoLock as
+    // ensureIssueRepoCheckout / createRoleWorktree) so concurrent issues on one repo
+    // cannot race repo-root git metadata.
+    const publishGit = await withRepoLock(cwd, async (): Promise<
+      | { kind: "early"; outcome: DeveloperOutcome }
+      | { kind: "ok"; remoteHead: string }
+    > => {
+      // Only a branch strictly ahead of origin is pushed here: the post-push retry path must
+      // keep touching the remote not at all, and a local ref that has somehow fallen BEHIND
+      // origin (someone pushed outside the coordinator) must not be turned into a rejected
+      // push and a spurious escalation — origin is the better artifact in that case.
+      const progress = await inspectBranchProgress({
+        repo: cwd,
+        branch: branchName,
+        baseRefs: baseRefCandidates(issue),
+        fetch: true,
+      });
+      if (progress.state === "unpushed") {
+        setLiveIntent(
+          issue.id,
+          `Developer · pushing ${progress.unpushed} recovered commit${progress.unpushed === 1 ? "" : "s"} (round ${round})`
+        );
+        const recovered = await pushBranchRef({ repo: cwd, branch: branchName });
+        if (!recovered.ok) {
+          // Same policy as a live attempt's push: a clean rejection is a human decision, a
+          // tooling error is a bounded infra retry. Either way the commits stay on the branch.
+          //
+          // The retry must stay publish-only. A transient remote failure (DNS, a dropped
+          // connection) says nothing about whether the work exists — it plainly still does, on
+          // this branch — so dropping the marker here would spend the very ~40-minute agent
+          // rerun this path was built to avoid, on the one failure most likely to be gone by
+          // the next attempt.
+          return {
+            kind: "early",
+            outcome: recovered.rejected
+              ? {
+                  kind: "unpushed_commit",
+                  reason: recovered.reason,
+                  recoveryCommands: recovered.facts?.recoveryCommands,
+                }
+              : {
+                  kind: "adapter_failure",
+                  reason: `push of recovered branch ${branchName} failed: ${recovered.reason}`,
+                  publishable: { branch: branchName },
+                },
+          };
+        }
+        milestone(
+          "branch.pushed",
+          `Developer · recovered branch pushed (${progress.unpushed} commit${progress.unpushed === 1 ? "" : "s"})`,
+          { branch: branchName, commitsAhead: progress.ahead, recoveredCommits: progress.unpushed }
+        );
       }
-      milestone(
-        "branch.pushed",
-        `Developer · recovered branch pushed (${progress.unpushed} commit${progress.unpushed === 1 ? "" : "s"})`,
-        { branch: branchName, commitsAhead: progress.ahead, recoveredCommits: progress.unpushed }
-      );
-    }
 
-    await fetchRef(cwd, branchName);
-    const remoteHead = await revParseRef(cwd, `origin/${branchName}`);
+      await fetchRef(cwd, branchName);
+      const remoteHead = await revParseRef(cwd, `origin/${branchName}`);
+      return { kind: "ok", remoteHead };
+    });
+    if (publishGit.kind === "early") return publishGit.outcome;
+    const remoteHead = publishGit.remoteHead;
 
     let prView = await deps.github.viewPr({ cwd, branch: branchName });
     if (!prView) {

@@ -17,6 +17,7 @@ import {
   type ParsedGitHubRepo,
 } from "@agent-dealer/shared";
 import { getExecutionRoot } from "../paths.js";
+import { withRepoLock } from "../runners/process-registry.js";
 
 const run = promisify(execFile);
 
@@ -103,24 +104,28 @@ export async function ensureIssueRepoCheckout(
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   const cloneUrl = opts?.cloneUrlOverride ?? classified.parsed.cloneUrl;
 
-  if (!fs.existsSync(path.join(dest, ".git")) && !fs.existsSync(path.join(dest, "HEAD"))) {
-    // Prefer a regular clone (not bare) so existing worktree helpers that expect a
-    // working tree + .git directory keep working; worktrees still hang off this repo.
-    await git(undefined, ["clone", "--filter=blob:none", cloneUrl, dest]);
-  } else {
-    // Refresh remotes; ignore failure when offline — local objects may still suffice.
-    try {
-      await git(dest, ["fetch", "--prune", "origin"]);
-    } catch {
-      /* keep cached clone */
+  // Serialize clone/fetch against the shared managed clone — same lock createRoleWorktree
+  // uses — so two issues on one GitHub repo cannot race the first clone or prune fetch.
+  return withRepoLock(dest, async () => {
+    if (!fs.existsSync(path.join(dest, ".git")) && !fs.existsSync(path.join(dest, "HEAD"))) {
+      // Prefer a regular clone (not bare) so existing worktree helpers that expect a
+      // working tree + .git directory keep working; worktrees still hang off this repo.
+      await git(undefined, ["clone", "--filter=blob:none", cloneUrl, dest]);
+    } else {
+      // Refresh remotes; ignore failure when offline — local objects may still suffice.
+      try {
+        await git(dest, ["fetch", "--prune", "origin"]);
+      } catch {
+        /* keep cached clone */
+      }
     }
-  }
 
-  let defaultBranch: string | undefined;
-  if (opts?.fetchDefaultBranch !== false) {
-    defaultBranch = await resolveRemoteDefaultBranch(dest);
-  }
-  return { ...classified, defaultBranch };
+    let defaultBranch: string | undefined;
+    if (opts?.fetchDefaultBranch !== false) {
+      defaultBranch = await resolveRemoteDefaultBranch(dest);
+    }
+    return { ...classified, defaultBranch };
+  });
 }
 
 /** Read origin/HEAD or fall back to main/master. */
