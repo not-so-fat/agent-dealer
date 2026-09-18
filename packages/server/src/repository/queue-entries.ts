@@ -70,11 +70,25 @@ export function listQueuedEntries(): QueueEntryView[] {
   return rows.map(rowToEntry);
 }
 
+/** `created: false` means the issue was already queued and this call changed nothing. */
+export type EnqueueOutcome = { entry: QueueEntry; created: boolean };
+
 /**
  * Append at the end. Rejects terminal issues, active workflows, and duplicate queued rows.
  * Partial unique index: ON CONFLICT must repeat the WHERE predicate.
  */
 export function enqueueIssue(issueId: string): QueueEntry {
+  return enqueueIssueWithOutcome(issueId).entry;
+}
+
+/**
+ * The same append, reporting whether it actually wrote a row. Enqueue is idempotent, so the
+ * caller cannot infer a mutation from a returned entry — a re-import of an already-queued
+ * issue gets the same `QueueEntry` back with nothing changed. Callers that *report* to a
+ * human (NOT-141: `POST /api/issues`, and the CLI hint it feeds) must use this one, or they
+ * announce a queue action that did not happen.
+ */
+export function enqueueIssueWithOutcome(issueId: string): EnqueueOutcome {
   const issue = getIssue(issueId);
   if (!issue) throw Object.assign(new Error("Issue not found"), { code: 404 });
   if (issue.status === "done" || issue.status === "closed") {
@@ -86,7 +100,7 @@ export function enqueueIssue(issueId: string): QueueEntry {
     });
   }
   const existing = getQueuedEntryForIssue(issueId);
-  if (existing) return existing;
+  if (existing) return { entry: existing, created: false };
 
   const now = new Date().toISOString();
   const maxPos = getDb()
@@ -106,10 +120,10 @@ export function enqueueIssue(issueId: string): QueueEntry {
     .run(id, issueId, position, now);
   if (info.changes === 0) {
     const raced = getQueuedEntryForIssue(issueId);
-    if (raced) return raced;
+    if (raced) return { entry: raced, created: false };
     throw new Error("enqueue failed without creating a row");
   }
-  return getQueueEntry(id)!;
+  return { entry: getQueueEntry(id)!, created: true };
 }
 
 /**

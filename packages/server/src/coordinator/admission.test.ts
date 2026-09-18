@@ -22,6 +22,7 @@ const { recordRuntimeAvailability, clearAllRuntimeAvailability } = await import(
 );
 const {
   enqueueIssue,
+  enqueueIssueWithOutcome,
   dequeueIssue,
   listQueuedEntries,
   getQueuedEntryForIssue,
@@ -156,6 +157,21 @@ test("enqueue / dequeue / list expose order and wait_reason", () => {
 
   dequeueIssue(a.id);
   assert.equal(listQueuedEntries().map((e) => e.issueId).join(","), b.id);
+});
+
+test("NOT-141: enqueue reports whether it actually queued the issue or found it queued already", () => {
+  const issue = readyIssue("q-outcome");
+  const first = enqueueIssueWithOutcome(issue.id);
+  assert.equal(first.created, true);
+
+  // Idempotent: the same entry comes back, and the caller can see nothing changed — the
+  // difference `POST /api/issues` needs so it never reports a queue action that did not happen.
+  const second = enqueueIssueWithOutcome(issue.id);
+  assert.equal(second.created, false);
+  assert.deepEqual(second.entry, first.entry);
+
+  dequeueIssue(issue.id);
+  assert.equal(enqueueIssueWithOutcome(issue.id).created, true, "a gone entry is a real enqueue");
 });
 
 test("admitNext starts the head eligible entry when a slot is free", async () => {

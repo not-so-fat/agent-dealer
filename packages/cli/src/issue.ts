@@ -1,5 +1,33 @@
-import type { StartIssueResponse } from "@agent-dealer/shared";
+import type { CreateIssueResult, StartIssueResponse } from "@agent-dealer/shared";
 import { apiFetch } from "./http.js";
+
+/**
+ * NOT-141: the hint reports what the server *did*, never what was requested. Printing
+ * "Queued for admission" off the request flag told operators a queue happened when a
+ * re-import had matched an existing issue and queued nothing.
+ */
+function createOutcomeHint(result: CreateIssueResult): string {
+  if (!result.created) {
+    const matched = `Matched existing issue ${result.id} (${result.status}) — nothing new was created`;
+    switch (result.queue) {
+      // Enqueue is idempotent: an issue already waiting is not a queue action, so the hint
+      // must not claim one. `queue list` is the honest next step.
+      case "already_queued":
+        return `${matched}, and it was already in the admission queue — nothing was queued. \`agent-dealer queue list\` shows its position and wait reason.`;
+      case "enqueued":
+        return `${matched}; it was put back in the admission queue.`;
+      case "not_queued":
+        return `${matched} and nothing was queued.`;
+    }
+  }
+  const pass =
+    result.priorPasses > 0
+      ? ` This is pass ${result.priorPasses + 1} on ${result.externalLabel ?? result.externalId} — ${result.priorPasses} earlier pass(es) already finished.`
+      : "";
+  return result.queue === "enqueued"
+    ? `Queued for admission — \`agent-dealer queue list\` shows position and wait reason.${pass}`
+    : `Created as a draft (not queued) — \`agent-dealer queue add <id>\` when it is ready.${pass}`;
+}
 
 export type ParsedIssueArgs =
   | { subcommand: "create"; title: string; repo: string; developerAgentId: string; reviewerAgentId: string; description?: string; acceptanceCriteria?: string; baseBranch?: string; enqueue: boolean }
@@ -70,19 +98,18 @@ export async function runIssueCommand(args: string[]): Promise<number> {
   try {
     switch (parsed.subcommand) {
       case "create": {
-        const result = await apiFetch("/api/issues", { method: "POST", body: { title: parsed.title, repo: parsed.repo, developerAgentId: parsed.developerAgentId, reviewerAgentId: parsed.reviewerAgentId, description: parsed.description, acceptanceCriteria: parsed.acceptanceCriteria, baseBranch: parsed.baseBranch, source: "agent", enqueue: parsed.enqueue } });
+        const result = (await apiFetch("/api/issues", { method: "POST", body: { title: parsed.title, repo: parsed.repo, developerAgentId: parsed.developerAgentId, reviewerAgentId: parsed.reviewerAgentId, description: parsed.description, acceptanceCriteria: parsed.acceptanceCriteria, baseBranch: parsed.baseBranch, source: "agent", enqueue: parsed.enqueue } })) as CreateIssueResult;
         console.log(JSON.stringify(result, null, 2));
         // stdout stays pure JSON for agents that pipe it — the hint goes to stderr.
-        console.error(
-          parsed.enqueue
-            ? "Queued for admission — `agent-dealer queue list` shows position and wait reason."
-            : "Created as a draft (not queued) — `agent-dealer queue add <id>` when it is ready."
-        );
+        console.error(createOutcomeHint(result));
         return 0;
       }
       case "import": {
-        const result = await apiFetch("/api/issues", { method: "POST", body: { title: parsed.title, repo: parsed.repo, developerAgentId: parsed.developerAgentId, reviewerAgentId: parsed.reviewerAgentId, source: "linear", externalId: parsed.externalId, externalLabel: parsed.externalLabel } });
+        // A re-import of a ticket already in flight answers 409 (apiFetch throws) — the
+        // operator sees the conflicting issue id instead of a 200 they cannot interpret.
+        const result = (await apiFetch("/api/issues", { method: "POST", body: { title: parsed.title, repo: parsed.repo, developerAgentId: parsed.developerAgentId, reviewerAgentId: parsed.reviewerAgentId, source: "linear", externalId: parsed.externalId, externalLabel: parsed.externalLabel } })) as CreateIssueResult;
         console.log(JSON.stringify(result, null, 2));
+        console.error(createOutcomeHint(result));
         return 0;
       }
       case "list": {
