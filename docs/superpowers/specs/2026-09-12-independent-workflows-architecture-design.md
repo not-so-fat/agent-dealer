@@ -6,9 +6,9 @@
 
 ## Problem
 
-agent-dealer grew a solid issue-centric Task coordinator that already runs the `dev_reviewer_v1` workflow template, while still starting the legacy plan→execute→review queue in the same process. That dual runtime, plus leftover plan/execute agent fields, makes the product harder to change than the mental model requires.
+agent-dealer grew a solid issue-centric Task coordinator that already runs the `dev_reviewer_v1` workflow template. For a time it also started the legacy plan→execute→review queue in the same process; that dual runtime, plus leftover plan/execute agent fields, made the product harder to change than the mental model requires.
 
-We need **flexibility for more workflow shapes** without a second product path and without building cross-workflow orchestration inside agent-dealer.
+**[NOT-71](https://linear.app/not-so-fat/issue/NOT-71) (PR #59) retired the dual runtime:** default server startup is Task-coordinator-only (`recoverCoordinator` + `startCoordinatorLoop`); the plan/execute product, Inbox/Operations UI, and mutating run writers are gone. What remains is **flexibility for more workflow shapes** without a second product path and without building cross-workflow orchestration inside agent-dealer — plus leftover dead code under `queue/` that can be deleted opportunistically.
 
 ## Principles
 
@@ -16,7 +16,7 @@ We need **flexibility for more workflow shapes** without a second product path a
 2. **One Task coordinator implementation:** issues, worker sessions, human actions, evidence — shared by every workflow template (not a second peer module).
 3. **Workflows are independent templates:** an issue runs exactly one template to completion. No Clarify→Dev→Message graph in-product.
 4. **Composition stays outside:** the operator (or Linear, or another tool) decides what runs next.
-5. **Delete dual runtime:** legacy queue/runs are not a long-term peer of the Task coordinator.
+5. **Dual runtime retired:** legacy queue/runs are not a peer of the Task coordinator ([NOT-71](https://linear.app/not-so-fat/issue/NOT-71) done — do not reintroduce).
 6. **Usable before more templates:** a complete, agent-operated Dev-review path is a release gate; architecture alone is not useful.
 
 ## Modules
@@ -52,7 +52,7 @@ Forbidden: auto-starting those issues, or linking them as steps in a product-own
 
 - Generic workflow graph editor / agent-rewritable topology
 - In-product chaining of templates
-- Keeping legacy queue + Task coordinator as two first-class runtimes
+- Reintroducing legacy queue + Task coordinator as two first-class runtimes
 - Research template in this cut
 - Lens on Agent profiles (defer)
 
@@ -87,12 +87,12 @@ Architecture and new templates must **not** block operating today’s Dev-review
 
 1. Architecture docs + ticket map (this design + plan) — [NOT-69](https://linear.app/not-so-fat/issue/NOT-69)
 2. Workflow registry seam — put `dev_reviewer_v1` behind a template interface with **no behavior change** — [NOT-70](https://linear.app/not-so-fat/issue/NOT-70)
-3. Retire dual runtime — stop legacy queue from default server path; remove/gate run-centric UI writers — [NOT-71](https://linear.app/not-so-fat/issue/NOT-71)
+3. ~~Retire dual runtime~~ — **done** in [NOT-71](https://linear.app/not-so-fat/issue/NOT-71) / PR #59 (coordinator-only startup; plan/execute product removed). Do not schedule the old inventory/`startQueue` steps again.
 4. Template-neutral Issue / WorkflowInstance envelope — [NOT-78](https://linear.app/not-so-fat/issue/NOT-78) (**blocks** Clarify/Message so they do not extend a Dev-review-shaped universal Issue model)
 5. Clarify template (including optional creation of unlinked agent-dealer issues at `ready`) — [NOT-73](https://linear.app/not-so-fat/issue/NOT-73)
 6. Message template (draft → approve → send on the issue model) — [NOT-72](https://linear.app/not-so-fat/issue/NOT-72)
 
-Dev-review stays the production coding path while later tickets re-home it behind the registry and add peers. Registry/template work is **not** a prerequisite for using Dev-review today.
+Remaining order after docs: **NOT-70 → NOT-78 → NOT-73 → NOT-72**. Dev-review stays the production coding path while later tickets re-home it behind the registry and add peers. Registry/template work is **not** a prerequisite for using Dev-review today.
 
 ### Related, not basic-usability blockers
 
@@ -105,5 +105,6 @@ Dev-review stays the production coding path while later tickets re-home it behin
 - Starting an issue requires choosing (or defaulting) a **workflow template**, not a second product mode
 - Clarify can mint new agent-dealer issues that appear in the list at status `ready` with no active workflow instance until explicitly started
 - Message can complete draft → approve → send without using the legacy run queue
-- `packages/server/src/index.ts` does not start both `startQueue()` and the Task coordinator as peer products
+- `packages/server/src/index.ts` does not start both `startQueue()` and the Task coordinator as peer products — **already true after NOT-71**
 - Docs and tickets make the usable-ASAP track explicit so registry/template work is not mistaken for the only priority
+- Docs do **not** present [NOT-71](https://linear.app/not-so-fat/issue/NOT-71) as unstarted future work when the dual runtime is already gone

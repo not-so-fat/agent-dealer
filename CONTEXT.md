@@ -12,7 +12,7 @@ agent-dealer is only these three pieces. Everything else is an internal of the T
 
 **Independent templates:** an issue runs exactly one workflow template to completion (e.g. Dev-review today; Clarify and Message planned). The operator composes work outside agent-dealer. Clarify may create new issues at status `ready` with no active workflow instance — it does not auto-start them.
 
-**Dual runtime:** the legacy plan→execute queue is not a peer of the Task coordinator; retire it from the default path rather than maintain two products in one process.
+**Dual runtime:** the legacy plan→execute queue is **not** a peer of the Task coordinator — [NOT-71](https://linear.app/not-so-fat/issue/NOT-71) retired it from the default path (coordinator-only startup; plan/execute product removed). Do not treat dual-runtime retirement as open work.
 
 **Usable-ASAP:** registry and new templates are not a gate on using Dev-review today. Critical path for an agent-operated Dev-review product: [NOT-77](https://linear.app/not-so-fat/issue/NOT-77) (Agent Deck-backed profile setup) → [NOT-76](https://linear.app/not-so-fat/issue/NOT-76) (complete CLI including discovery) → [NOT-79](https://linear.app/not-so-fat/issue/NOT-79) (end-to-end release gate). Template-neutral envelope ([NOT-78](https://linear.app/not-so-fat/issue/NOT-78)) blocks Clarify/Message so they do not extend a Dev-review-shaped universal Issue model.
 

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** One Task coordinator implementation with independent workflow templates (Clarify, Dev-review, Message); remove the dual legacy-run runtime so the product stays easy to extend — while keeping a **usable-ASAP** Dev-review path that does **not** wait on registry or new templates.
+**Goal:** One Task coordinator implementation with independent workflow templates (Clarify, Dev-review, Message); keep the dual legacy-run runtime **retired** (already landed in [NOT-71](https://linear.app/not-so-fat/issue/NOT-71) / PR #59) so the product stays easy to extend — while keeping a **usable-ASAP** Dev-review path that does **not** wait on registry or new templates.
 
 **Architecture:** Shared issue / worker-session / human-action machinery inside the Task coordinator; each workflow is a registered template (stages, transitions, prompts, effects). No in-product chaining between templates. Operator composes work outside agent-dealer. Clarify may create new agent-dealer issues at status `ready` (no active workflow instance) as deliverables.
 
@@ -15,7 +15,7 @@
 - Do **not** build Clarify→Dev→Message (or any) cross-workflow orchestration in the coordinator.
 - Clarify-created issues: create only; **never** auto-start; no pipeline linkage between the Clarify issue and the issues it creates.
 - Keep `dev_reviewer_v1` behavior intact while extracting the registry (Task 2 is a pure refactor + tests).
-- Prefer deleting or hard-gating legacy `queue/` writers over dual-writing forever.
+- Dual runtime is **already retired** (NOT-71): do not reintroduce `startQueue()` / plan→execute writers beside the Task coordinator. Remaining `queue/` files are leftovers or issue-queue helpers — delete dead code over time, do not treat NOT-71 as unstarted work.
 - **Do not treat registry / new-template work as a gate on using today’s Dev-review product.** Usable-ASAP tickets can ship in parallel with (or ahead of) architecture Tasks 2–5.
 - Branch each ticket from latest `main` after prior ticket merges (squash-merge repo).
 - Tests: `npm run build -w @agent-dealer/shared && npx tsx --test <path>`; full unit: `npm run test:unit`. Typecheck + package build before handoff.
@@ -37,17 +37,17 @@ Recommended order: **NOT-77 → NOT-76 → NOT-79** (NOT-79 is blocked by both).
 
 ### Architecture landing track (templates / envelope)
 
-| Task | Linear | One-line deliverable |
-|------|--------|----------------------|
-| 0 | [NOT-68](https://linear.app/not-so-fat/issue/NOT-68) | Parent — track architecture + children |
-| 1 | [NOT-69](https://linear.app/not-so-fat/issue/NOT-69) | Docs landed (this plan + design + usable-ASAP map) |
-| 2 | [NOT-70](https://linear.app/not-so-fat/issue/NOT-70) | Workflow registry; `dev_reviewer_v1` behind it |
-| 3 | [NOT-71](https://linear.app/not-so-fat/issue/NOT-71) | Retire dual runtime (legacy queue / planner UI off default path) |
-| 3b | [NOT-78](https://linear.app/not-so-fat/issue/NOT-78) | **Template-neutral** Issue / WorkflowInstance envelope — **blocks** Clarify/Message so those templates do not extend a Dev-review-shaped universal Issue model |
-| 4 | [NOT-73](https://linear.app/not-so-fat/issue/NOT-73) | Clarify template + optional `ready` (unstarted) issue creation |
-| 5 | [NOT-72](https://linear.app/not-so-fat/issue/NOT-72) | Message template (draft → approve → send) |
+| Task | Linear | One-line deliverable | Status |
+|------|--------|----------------------|--------|
+| 0 | [NOT-68](https://linear.app/not-so-fat/issue/NOT-68) | Parent — track architecture + children | open |
+| 1 | [NOT-69](https://linear.app/not-so-fat/issue/NOT-69) | Docs landed (this plan + design + usable-ASAP map) | in progress |
+| 2 | [NOT-70](https://linear.app/not-so-fat/issue/NOT-70) | Workflow registry; `dev_reviewer_v1` behind it | open |
+| 3 | [NOT-71](https://linear.app/not-so-fat/issue/NOT-71) | Retire dual runtime (legacy queue / planner UI off default path) | **done** (PR #59 / `d105672`) — do not re-run Task 3 steps |
+| 3b | [NOT-78](https://linear.app/not-so-fat/issue/NOT-78) | **Template-neutral** Issue / WorkflowInstance envelope — **blocks** Clarify/Message so those templates do not extend a Dev-review-shaped universal Issue model | open |
+| 4 | [NOT-73](https://linear.app/not-so-fat/issue/NOT-73) | Clarify template + optional `ready` (unstarted) issue creation | open |
+| 5 | [NOT-72](https://linear.app/not-so-fat/issue/NOT-72) | Message template (draft → approve → send) | open |
 
-Recommended architecture order: **NOT-69 → NOT-70 → NOT-71 → NOT-78 → NOT-73 → NOT-72**. Clarify and Message both depend on the registry **and** the template-neutral envelope ([NOT-78](https://linear.app/not-so-fat/issue/NOT-78) blocked by NOT-70; blocks NOT-73/NOT-72). Dual-runtime retirement can progress without waiting for Clarify/Message. **None of Tasks 2–5 are prerequisites for the usable-ASAP track.**
+Recommended remaining architecture order: **NOT-69 → NOT-70 → NOT-78 → NOT-73 → NOT-72**. [NOT-71](https://linear.app/not-so-fat/issue/NOT-71) is **already merged** — skip its inventory/remove-startup steps. Clarify and Message both depend on the registry **and** the template-neutral envelope ([NOT-78](https://linear.app/not-so-fat/issue/NOT-78) blocked by NOT-70; blocks NOT-73/NOT-72). **None of Tasks 2–5 are prerequisites for the usable-ASAP track.**
 
 ### Related follow-ups (not ASAP blockers)
 
@@ -69,11 +69,10 @@ Recommended architecture order: **NOT-69 → NOT-70 → NOT-71 → NOT-78 → NO
 - `packages/server/src/coordinator/routing.ts` / `effect-registry.ts` — dispatch by template id if today hardcoded
 - `packages/shared/src/issues.ts` (or adjacent) — optional `workflowVersion` on create/start if not already present
 
-**Modify (Task 3):**
-- `packages/server/src/index.ts` — stop `startQueue()` / orphan recovery for legacy runs on default path
-- `packages/server/src/routes/index.ts` — gate or remove run writers
-- `apps/web` — stop presenting legacy Operations/runs as the primary path (issue UI remains)
-- Docs: short note in `CONTEXT.md` or README that runs are retired
+**Modify (Task 3 — DONE in NOT-71 / PR #59):**
+- ~~`packages/server/src/index.ts` — stop `startQueue()` / orphan recovery~~ — coordinator-only startup already
+- ~~Run-centric UI / mutating run APIs~~ — Issues + Agents shell; plan/execute product removed
+- Docs already note historical PRD_V0 / NOT-71 retirement (README); leftover `queue/` dead code may still be deleted opportunistically
 
 **Modify (Task 3b / NOT-78):**
 - Shared issue / workflow-instance model — separate generic lifecycle from template stage; persist template version + current stage on the instance
@@ -147,26 +146,27 @@ function listWorkflows(): WorkflowTemplate[];
 
 ---
 
-### Task 3: Retire dual runtime (legacy queue off default path)
+### Task 3: Retire dual runtime (legacy queue off default path) — **DONE**
 
-**Files:**
-- Modify: `packages/server/src/index.ts`
-- Modify: `packages/server/src/routes/index.ts` (and run routes)
-- Modify: `apps/web` nav / pages that still center on legacy runs
-- Optional: feature flag env only if a short escape hatch is required for migration dogfood — default **off**
+> **Landed in [NOT-71](https://linear.app/not-so-fat/issue/NOT-71) / PR #59 (`d105672`).** Do **not** inventory `startQueue` / `recoverOrphanedRuns` or re-remove startup wiring — `packages/server/src/index.ts` already starts only `recoverCoordinator` + `startCoordinatorLoop`. README already calls PRD_V0 historical (“plan/execute product removed in NOT-71”). Remaining work is opportunistic dead-code cleanup under `queue/`, not re-executing this task.
+
+**Files (historical — already applied):**
+- `packages/server/src/index.ts` — coordinator-only loop
+- Legacy plan/execute UI, Inbox/Operations routes, and mutating run APIs removed or reduced to leftovers
+- Issue-centric shell (Issues + Agents)
 
 **Interfaces:**
-- Produces: server process that runs **only** the Task coordinator loop by default
+- Produces: server process that runs **only** the Task coordinator loop by default — **satisfied**
 
-- [ ] **Step 1:** Inventory live writers: `startQueue`, `recoverOrphanedRuns`, POST run routes, UI entry points.
-- [ ] **Step 2:** Add tests or startup assertion that coordinator recovers/starts; legacy queue does not tick by default.
-- [ ] **Step 3:** Remove or hard-gate legacy startup and mutating run APIs.
-- [ ] **Step 4:** Point primary UI at issues; leave read-only legacy audit only if still needed for `legacy_v0_*` data.
-- [ ] **Step 5:** Smoke: `npm run flow:verify` (or issue-centric equivalent) without starting a legacy run.
+- [x] **Step 1:** Inventory live writers: `startQueue`, `recoverOrphanedRuns`, POST run routes, UI entry points.
+- [x] **Step 2:** Add tests or startup assertion that coordinator recovers/starts; legacy queue does not tick by default.
+- [x] **Step 3:** Remove or hard-gate legacy startup and mutating run APIs.
+- [x] **Step 4:** Point primary UI at issues; leave read-only legacy audit only if still needed for `legacy_v0_*` data.
+- [x] **Step 5:** Smoke: issue-centric product path without starting a legacy run.
 
-**Acceptance:** Fresh install / default `agent-dealer` server never enqueues legacy plan→execute runs. Issue Dev-review still works.
+**Acceptance:** Fresh install / default `agent-dealer` server never enqueues legacy plan→execute runs. Issue Dev-review still works. **Met in NOT-71.**
 
-**Non-goals:** Implementing Clarify/Message; deleting every legacy file in one PR (dead code can follow).
+**Non-goals (then and now):** Implementing Clarify/Message; deleting every leftover legacy file in one PR (dead code can follow).
 
 ---
 
@@ -238,7 +238,7 @@ function listWorkflows(): WorkflowTemplate[];
 
 **Non-goals:** Merge gates, ticket-status gates, mid-run pause/resume.
 
-**Depends on:** NOT-70, NOT-78 (prefer after dual-runtime retirement).
+**Depends on:** NOT-70, NOT-78 (dual-runtime retirement already done in NOT-71).
 
 ---
 
