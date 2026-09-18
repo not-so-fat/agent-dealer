@@ -73,7 +73,7 @@ Agent Deck solves **what the agent knows** (decks, vault, playbooks). agent-deal
 │  Work: Claude Code headless / Agent SDK                      │
 │  Personal: Cursor SDK local                                    │
 └───────────────────────────┬─────────────────────────────────┘
-                            │ MCP (optional)
+                            │ MCP (required for execution Agents)
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  AGENT DECK (context hub — required for execution Agents)    │
@@ -124,7 +124,7 @@ dealer.startIssue(issueId)  # repo = github.com/owner/repo on the Issue; Deck fr
 | **Human operator** | Approve plans, monitor queue, approve/retry results | Operations pipeline (§9) + Intake |
 | **Future: team lead** | Audit run history, tune approval templates | Run detail timeline (read-only in v0) |
 
-**Task category** (`code` | `communication` | `email` | `research` | `content` | `other`) is stored on each run. It drives default approval gates — not deck or playbook selection (user picks those per run).
+**Task category** (`code` | `communication` | `email` | `research` | `content` | `other`) is stored on each run. It drives default approval gates — not Deck or playbook selection (Deck is pinned on the Agent profile; playbooks are chosen inside that Deck during the session).
 
 **Voice:** Cold-reader. Distinguish **agent-dealer run** (queue item with state machine) from **Agent Deck bound deck** (MCP session scope for one agent turn/session). Avoid assuming every task has a git repo; non-code tasks use an **artifact workspace** (local folder for outputs).
 
@@ -284,10 +284,10 @@ Stories are grouped by the Operations pipeline gates (Intake is a separate scree
 
 **Acceptance:**
 
-- [x] Post-review reflect when `deckId` + `playbookId` present (retry feedback first, then approve)
+- [x] Post-review reflect when the session's pinned Deck and a concrete playbook id are available (retry feedback first, then approve)
 - [x] Reflect turn uses agent-deck MCP read tools → `playbook_patch` artifact
 - [x] Human applies via review drawer → Agent Deck REST `PUT /api/playbooks/:id`
-- [x] Skipped when Agent Deck not configured or Cursor runtime
+- [x] Skipped when the Agent has no Deck (fail-closed / unhealthy) or Cursor runtime lacks reflect support
 
 *v0 · P3*
 
@@ -462,7 +462,7 @@ Dev monorepo: substitute `http://127.0.0.1:3001/mcp` when using `npm run dev:all
 ```text
 agent-dealer                     TASK AGENT (per run)
 ────────                         ────────────────────
-Linear API (direct)              agent-deck MCP  ← optional
+Linear API (direct)              agent-deck MCP  ← required (profile deckId)
   poll, status                     ├─ bind_workspace / get_playbook
                                    ├─ update_playbook (post-run)
                                    └─ proxied deck MCPs (Linear, Slack, …)
@@ -556,7 +556,7 @@ Lightweight agent turn for drafting plans only — not full task execution.
 | Runtime | Same as execution (`claude_code` or `cursor_local`) |
 | `maxTurns` | **5** |
 | `maxBudgetUsd` | **0.50** |
-| Tools | Read, search, optional deck MCP for context — **no** Write/Bash/gated send tools |
+| Tools | Read, search, Agent Deck MCP for context — **no** Write/Bash/gated send tools |
 | Output | `draft_plan` artifact → run status `plan_pending` |
 
 Playbooks are chosen dynamically inside the Agent's pinned Deck during the worker session — not as a kick-time `playbookId` field on the Agent or run (NOT-149).
@@ -672,8 +672,8 @@ Slack uses deck MCP when connected; same draft → gate → send pattern.
 | **Human-approved plan** | ✗ | ✗ | escalation only | comments | ✓ |
 | Stage logs / transcripts | ✓ | ✓ | ✓ | cursor.com | ✓ |
 | Final feedback | review in DB | review agent | reactions | Linear comments | ✓ |
-| **Playbook / knowledge loop** | ✗ | ✗ | ✗ | ✗ | ✓ (optional) |
-| **deckId / Agent Deck** | ✗ | ✗ | ✗ | ✗ | ✓ (optional) |
+| **Playbook / knowledge loop** | ✗ | ✗ | ✗ | ✗ | ✓ (via required Deck) |
+| **deckId / Agent Deck** | ✗ | ✗ | ✗ | ✗ | ✓ (required on Agent) |
 
 **None cover the full treasure model.** agent-dealer's moat is the audit DB + dashboard, not the poll loop.
 
@@ -777,7 +777,7 @@ Planning and execution each use the same `maxConcurrentRuns` slot model (FIFO qu
 
 - Action badges: Review Plan count + Review Result count only (not planning/in-progress)
 - Cost today (USD estimate)
-- Agent Deck connection status (optional): connected / offline / not configured
+- Agent Deck connection status: connected / offline / missing on Agent (`deck_missing`)
 
 **Intake screen actions** (not on Operations board):
 
@@ -801,7 +801,7 @@ Planning and execution each use the same `maxConcurrentRuns` slot model (FIFO qu
 
 - Approve done
 - Retry with feedback
-- Update playbook (if deck configured)
+- Update playbook (reflect when a playbook was used in the session)
 
 ### Real-time updates
 
@@ -941,7 +941,7 @@ This PRD was drafted in Cursor using Agent Deck playbooks for **document generat
 | `pb_product_principle` | Voice, scope discipline, sourcing |
 | `pb_ai_codegen_prd` | PRD section structure and checklist |
 
-That pairing is **not** part of agent-dealer product requirements. Users of agent-dealer bring their own decks and playbooks.
+That pairing is **not** part of agent-dealer product requirements. Users of agent-dealer pin their own Deck on each Agent profile; playbooks live on that Deck.
 
 ---
 
