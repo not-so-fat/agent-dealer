@@ -2,7 +2,7 @@
 //
 // NOT-103: durable operator-owned issue admission queue (order + wait_reason).
 
-import type { QueueEntry, QueueEntryState } from "@agent-dealer/shared";
+import type { QueueEntry, QueueEntryState, QueueMoveTarget } from "@agent-dealer/shared";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
 import { getActiveWorkflowInstance } from "./workflow-events.js";
@@ -127,22 +127,64 @@ export function enqueueIssueWithOutcome(issueId: string): EnqueueOutcome {
 }
 
 /**
- * NOT-118: move a queued entry to position 1 and renumber the rest 2..N in their current
- * order, so `position` stays a readable 1-based rank instead of drifting into negatives.
- * This is the only reorder primitive in the repo today — NOT-112's general reorder reuses
- * it rather than adding a second way to renumber the queue.
+ * Single position-computation path: write 1-based ranks for the given order.
+ * Callers must already hold a DB transaction when they need atomic reorder + lookup.
  */
-export function moveQueueEntryToTop(issueId: string): QueueEntry | null {
+function applyQueuedOrder(ordered: QueueEntry[]): void {
+  const setPosition = getDb().prepare("UPDATE queue_entries SET position = ? WHERE id = ?");
+  ordered.forEach((entry, index) => setPosition.run(index + 1, entry.id));
+}
+
+function buildOrderAfterMove(
+  entry: QueueEntry,
+  without: QueueEntry[],
+  to: QueueMoveTarget
+): QueueEntry[] {
+  if (to === "top") return [entry, ...without];
+  if (to === "bottom") return [...without, entry];
+  if ("before" in to) {
+    const idx = without.findIndex((e) => e.issueId === to.before);
+    if (idx < 0) {
+      throw Object.assign(new Error("Reference issue is not in the queue"), { code: 409 });
+    }
+    return [...without.slice(0, idx), entry, ...without.slice(idx)];
+  }
+  const idx = without.findIndex((e) => e.issueId === to.after);
+  if (idx < 0) {
+    throw Object.assign(new Error("Reference issue is not in the queue"), { code: 409 });
+  }
+  return [...without.slice(0, idx + 1), entry, ...without.slice(idx + 1)];
+}
+
+/**
+ * NOT-112: move a queued entry relative to the live queue (top / bottom / before / after).
+ * Only `queued` entries are orderable. Throws `{ code: 404 }` when the issue is not queued
+ * (missing or already admitted) and `{ code: 409 }` when a relative reference is gone.
+ */
+export function moveQueueEntry(issueId: string, to: QueueMoveTarget): QueueEntry {
   const db = getDb();
   return db.transaction(() => {
     const entry = getQueuedEntryForIssue(issueId);
-    if (!entry) return null;
-    const rest = listQueuedEntries().filter((e) => e.issueId !== issueId);
-    const setPosition = db.prepare("UPDATE queue_entries SET position = ? WHERE id = ?");
-    setPosition.run(1, entry.id);
-    rest.forEach((e, index) => setPosition.run(index + 2, e.id));
-    return getQueueEntry(entry.id);
+    if (!entry) {
+      throw Object.assign(new Error("Issue is not in the queue"), { code: 404 });
+    }
+    const without = listQueuedEntries().filter((e) => e.issueId !== issueId);
+    applyQueuedOrder(buildOrderAfterMove(entry, without, to));
+    return getQueueEntry(entry.id)!;
   })();
+}
+
+/**
+ * NOT-118 Start: move to front. Thin wrapper over the shared renumber path — returns null
+ * when the issue is not queued (Start's enqueue step normally prevents that).
+ */
+export function moveQueueEntryToTop(issueId: string): QueueEntry | null {
+  try {
+    return moveQueueEntry(issueId, "top");
+  } catch (err) {
+    if ((err as { code?: number }).code === 404) return null;
+    throw err;
+  }
 }
 
 /** Operator dequeue — marks removed (keeps history row). Returns the removed entry or null. */

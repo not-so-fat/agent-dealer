@@ -1,13 +1,15 @@
 // packages/server/src/routes/queue.ts
 //
 // NOT-103: operator enqueue / dequeue / list for the sequential admission queue.
+// NOT-112: relative reorder (top / bottom / before / after).
 
 import type { FastifyInstance } from "fastify";
-import { EnqueueIssueInput } from "@agent-dealer/shared";
+import { EnqueueIssueInput, MoveQueueEntryInput } from "@agent-dealer/shared";
 import {
   dequeueIssue,
   enqueueIssue,
   getQueuedEntryForIssue,
+  moveQueueEntry,
 } from "../repository/queue-entries.js";
 import { listQueuedEntriesForRead } from "../coordinator/admission.js";
 
@@ -24,6 +26,21 @@ export async function registerQueueRoutes(app: FastifyInstance): Promise<void> {
     const { issueId } = parsed.data;
     try {
       return enqueueIssue(issueId);
+    } catch (err) {
+      const code = (err as { code?: number }).code;
+      const message = err instanceof Error ? err.message : String(err);
+      if (code === 404) return reply.status(404).send({ error: message });
+      if (code === 409) return reply.status(409).send({ error: message });
+      throw err;
+    }
+  });
+
+  app.post("/api/queue/:issueId/move", async (req, reply) => {
+    const { issueId } = req.params as { issueId: string };
+    const parsed = MoveQueueEntryInput.safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ error: parsed.error.message });
+    try {
+      return moveQueueEntry(issueId, parsed.data.to);
     } catch (err) {
       const code = (err as { code?: number }).code;
       const message = err instanceof Error ? err.message : String(err);
