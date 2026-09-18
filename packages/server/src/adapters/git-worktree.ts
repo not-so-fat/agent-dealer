@@ -172,9 +172,125 @@ export async function createRoleWorktree(opts: {
   return { path: tryRealpath(worktreePath), role: opts.role, ref: opts.newBranch ?? opts.ref, detached };
 }
 
-export type PushResult = { ok: true } | { ok: false; reason: string; rejected: boolean };
+/**
+ * Divergence facts gathered after a non-fast-forward (or equivalent) push rejection
+ * (NOT-137). Attached so a `unpushed_commit` escalation is actionable — raw git stderr
+ * alone repeats a misleading `git pull` hint for rewritten/diverged histories.
+ */
+export type PushRejectionFacts = {
+  localSha: string;
+  remoteSha: string;
+  /** Commits reachable from local but not remote (`A...B` left count). */
+  ahead: number;
+  /** Commits reachable from remote but not local (`A...B` right count). */
+  behind: number;
+  /** `diverged` when both sides have unique commits; `behind` when only remote does. */
+  relationship: "diverged" | "behind";
+  /** Human-readable diagnosis — never git's `use 'git pull'` hint for diverged. */
+  summary: string;
+  recoveryCommands: string[];
+};
+
+export type PushResult =
+  | { ok: true }
+  | { ok: false; reason: string; rejected: boolean; facts?: PushRejectionFacts };
 
 const PUSH_REJECTION_PATTERNS = /rejected|non-fast-forward|fetch first|stale info/i;
+
+function shortSha(sha: string): string {
+  return sha.length > 12 ? sha.slice(0, 12) : sha;
+}
+
+/**
+ * After a rejected push, fetch the remote tip and classify local vs origin/<branch>.
+ * Best-effort: returns null when the remote tip cannot be resolved (facts stay out of
+ * the escalation rather than inventing them).
+ */
+async function gatherPushRejectionFacts(opts: {
+  cwd: string;
+  branch: string;
+  /** Local tip to compare — `HEAD` in a worktree, or `refs/heads/<branch>` for pushBranchRef. */
+  localRef: string;
+}): Promise<PushRejectionFacts | null> {
+  try {
+    // Refresh origin/<branch> so left/right counts reflect the tip that rejected us, not a
+    // stale remote-tracking ref left over from an earlier fetch.
+    await fetchRef(opts.cwd, opts.branch).catch(() => {});
+    const remoteRef = `origin/${opts.branch}`;
+    if (!(await refExists(opts.cwd, remoteRef))) return null;
+
+    const localSha = await revParseRef(opts.cwd, opts.localRef);
+    const remoteSha = await revParseRef(opts.cwd, remoteRef);
+    const { stdout } = await git(opts.cwd, [
+      "rev-list",
+      "--left-right",
+      "--count",
+      `${localSha}...${remoteSha}`,
+    ]);
+    const parts = stdout.trim().split(/\s+/);
+    const ahead = Number(parts[0]);
+    const behind = Number(parts[1]);
+    if (!Number.isFinite(ahead) || !Number.isFinite(behind)) return null;
+
+    // A non-fast-forward rejection always means remote has commits we lack (behind > 0).
+    // When we also have unique commits, histories diverged — git's pull hint is wrong.
+    const relationship: "diverged" | "behind" = ahead > 0 && behind > 0 ? "diverged" : "behind";
+
+    const localShort = shortSha(localSha);
+    const remoteShort = shortSha(remoteSha);
+
+    let summary: string;
+    let recoveryCommands: string[];
+    if (relationship === "diverged") {
+      summary =
+        `local and origin/${opts.branch} have diverged: local ${localShort} is ${ahead} commit(s) ahead, ` +
+        `remote ${remoteShort} is ${behind} commit(s) ahead. ` +
+        `Do not git pull — that integrates the wrong history for a rewritten branch.`;
+      recoveryCommands = [
+        `# Confirm the remote tip is still ${remoteShort}, then publish local with a lease pin:`,
+        `git push --force-with-lease=refs/heads/${opts.branch}:${remoteSha} origin ${localSha}:refs/heads/${opts.branch}`,
+      ];
+    } else {
+      summary =
+        `local ${localShort} is behind origin/${opts.branch} at ${remoteShort} ` +
+        `(remote is ${behind} commit(s) ahead; local is ${ahead} commit(s) ahead).`;
+      recoveryCommands = [
+        `git fetch origin ${opts.branch}`,
+        `git rebase origin/${opts.branch}`,
+        `git push origin HEAD:refs/heads/${opts.branch}`,
+      ];
+    }
+
+    return {
+      localSha,
+      remoteSha,
+      ahead,
+      behind,
+      relationship,
+      summary,
+      recoveryCommands,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function pushFailureResult(
+  cwd: string,
+  branch: string,
+  localRef: string,
+  message: string
+): Promise<Extract<PushResult, { ok: false }>> {
+  const rejected = PUSH_REJECTION_PATTERNS.test(message);
+  if (!rejected) return { ok: false, reason: message, rejected: false };
+  const facts = await gatherPushRejectionFacts({ cwd, branch, localRef });
+  if (facts) {
+    // Prefer the classified summary over raw git stderr so the escalation never carries
+    // git's misleading `use 'git pull'` hint for a diverged branch (NOT-137).
+    return { ok: false, reason: facts.summary, rejected: true, facts };
+  }
+  return { ok: false, reason: message, rejected: true };
+}
 
 /**
  * The coordinator — never the developer worker — pushes the branch, after the worker's
@@ -189,8 +305,7 @@ export async function pushBranch(opts: { worktreePath: string; branch: string })
     await git(opts.worktreePath, ["push", "-u", "origin", `HEAD:refs/heads/${opts.branch}`]);
     return { ok: true };
   } catch (err) {
-    const message = (err as Error).message;
-    return { ok: false, reason: message, rejected: PUSH_REJECTION_PATTERNS.test(message) };
+    return pushFailureResult(opts.worktreePath, opts.branch, "HEAD", (err as Error).message);
   }
 }
 
@@ -205,8 +320,12 @@ export async function pushBranchRef(opts: { repo: string; branch: string }): Pro
     await git(opts.repo, ["push", "-u", "origin", `refs/heads/${opts.branch}:refs/heads/${opts.branch}`]);
     return { ok: true };
   } catch (err) {
-    const message = (err as Error).message;
-    return { ok: false, reason: message, rejected: PUSH_REJECTION_PATTERNS.test(message) };
+    return pushFailureResult(
+      opts.repo,
+      opts.branch,
+      `refs/heads/${opts.branch}`,
+      (err as Error).message
+    );
   }
 }
 

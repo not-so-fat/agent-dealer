@@ -59,6 +59,34 @@ test("unpushed commit always escalates immediately — never retried, regardless
   assert.equal((result as { actionType: string }).actionType, "policy_escalation");
 });
 
+test("NOT-137: unpushed_commit escalation folds divergence facts and recovery like worktree_conflict", () => {
+  const localSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const remoteSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const outcome: DeveloperOutcome = {
+    kind: "unpushed_commit",
+    reason:
+      `local and origin/issue-1 have diverged: local ${localSha.slice(0, 12)} is 2 commit(s) ahead, ` +
+      `remote ${remoteSha.slice(0, 12)} is 1 commit(s) ahead. ` +
+      `Do not git pull — that integrates the wrong history for a rewritten branch.`,
+    recoveryCommands: [
+      `# Confirm the remote tip is still ${remoteSha.slice(0, 12)}, then publish local with a lease pin:`,
+      `git push --force-with-lease=refs/heads/issue-1:${remoteSha} origin ${localSha}:refs/heads/issue-1`,
+    ],
+  };
+  const result = routeDeveloperOutcome(outcome, INFRA_AT_LIMIT);
+  assert.equal(result.next, "human_action");
+  assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+  const reason = (result as { reason: string }).reason;
+  assert.match(reason, /diverged/);
+  assert.match(reason, new RegExp(localSha.slice(0, 12)));
+  assert.match(reason, new RegExp(remoteSha.slice(0, 12)));
+  assert.match(reason, /2 commit\(s\) ahead/);
+  assert.match(reason, /1 commit\(s\) ahead/);
+  assert.match(reason, /force-with-lease/);
+  assert.match(reason, new RegExp(remoteSha));
+  assert.doesNotMatch(reason, /use 'git pull'/i);
+});
+
 test("worktree conflict always escalates immediately — never retried, regardless of any budget, and carries path/recovery in the reason", () => {
   const outcome: DeveloperOutcome = {
     kind: "worktree_conflict",

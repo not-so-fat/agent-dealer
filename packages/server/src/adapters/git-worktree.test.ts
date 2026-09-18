@@ -197,13 +197,28 @@ test("pushBranch pushes a clean commit and reports a real rejection distinctly f
   git(other, "add", ".");
   git(other, "commit", "-m", "elsewhere");
   git(other, "push", "origin", "issue-push");
+  const remoteSha = git(other, "rev-parse", "HEAD");
 
   fs.writeFileSync(path.join(dev.path, "feature2.txt"), "more\n");
   git(dev.path, "add", ".");
   git(dev.path, "commit", "-m", "feature2");
+  const localSha = git(dev.path, "rev-parse", "HEAD");
   const rejected = await pushBranch({ worktreePath: dev.path, branch: "issue-push" });
   assert.equal(rejected.ok, false);
-  if (!rejected.ok) assert.equal(rejected.rejected, true);
+  if (!rejected.ok) {
+    assert.equal(rejected.rejected, true);
+    // NOT-137: rejection carries divergence facts — not opaque git stderr alone.
+    assert.ok(rejected.facts, "rejected push must attach divergence facts");
+    assert.equal(rejected.facts.localSha, localSha);
+    assert.equal(rejected.facts.remoteSha, remoteSha);
+    assert.equal(rejected.facts.ahead, 1);
+    assert.equal(rejected.facts.behind, 1);
+    assert.equal(rejected.facts.relationship, "diverged");
+    assert.match(rejected.reason, /diverged/i);
+    assert.doesNotMatch(rejected.reason, /use 'git pull'/i);
+    assert.ok(rejected.facts.recoveryCommands.some((c) => c.includes("force-with-lease")));
+    assert.ok(rejected.facts.recoveryCommands.some((c) => c.includes(remoteSha)));
+  }
 
   const infra = await pushBranch({ worktreePath: "/no/such/worktree", branch: "issue-push" });
   assert.equal(infra.ok, false);
@@ -213,6 +228,61 @@ test("pushBranch pushes a clean commit and reports a real rejection distinctly f
   fs.rmSync(other, { recursive: true, force: true });
   await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
   execFileSync("git", ["branch", "-D", "issue-push"], { cwd: repo });
+});
+
+test("NOT-137: pushBranch rejection when local is strictly behind reports behind + rebase recovery, not force-with-lease", async () => {
+  // Local tip equals the last successful push; remote alone advanced. Resetting local to that
+  // tip after a remote-only commit yields ahead=0, behind=1 — the "behind" relationship.
+  const branch = "issue-push-behind";
+  const dev = await createRoleWorktree({
+    repo,
+    role: "developer",
+    sessionId: "s-dev-push-behind",
+    ref: "main",
+    newBranch: branch,
+  });
+  fs.writeFileSync(path.join(dev.path, "feature.txt"), "work\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "feature");
+  assert.deepEqual(await pushBranch({ worktreePath: dev.path, branch }), { ok: true });
+  const pushedSha = git(dev.path, "rev-parse", "HEAD");
+
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-behind-"));
+  execFileSync("git", ["clone", "-q", remote, other]);
+  git(other, "checkout", branch);
+  git(other, "config", "user.email", "test@example.com");
+  git(other, "config", "user.name", "Test");
+  fs.writeFileSync(path.join(other, "remote-only.txt"), "r");
+  git(other, "add", ".");
+  git(other, "commit", "-m", "remote-only");
+  git(other, "push", "origin", branch);
+  const remoteSha = git(other, "rev-parse", "HEAD");
+
+  // Local has no unique commits — reset to the previously pushed tip.
+  git(dev.path, "reset", "--hard", pushedSha);
+  // pushBranch always pushes HEAD; force a rejection by advancing... wait, ahead=0 means
+  // HEAD is an ancestor of remote, so push is a no-op / rejected as non-FF depending on git.
+  // `git push` of an ancestor tip is rejected as non-fast-forward when remote moved.
+  const rejected = await pushBranch({ worktreePath: dev.path, branch });
+  assert.equal(rejected.ok, false);
+  if (!rejected.ok) {
+    assert.equal(rejected.rejected, true);
+    assert.ok(rejected.facts);
+    assert.equal(rejected.facts.relationship, "behind");
+    assert.equal(rejected.facts.ahead, 0);
+    assert.equal(rejected.facts.behind, 1);
+    assert.equal(rejected.facts.localSha, pushedSha);
+    assert.equal(rejected.facts.remoteSha, remoteSha);
+    assert.match(rejected.reason, /behind/i);
+    assert.doesNotMatch(rejected.reason, /diverged/i);
+    assert.ok(rejected.facts.recoveryCommands.some((c) => /rebase/i.test(c)));
+    assert.ok(!rejected.facts.recoveryCommands.some((c) => c.includes("force-with-lease")));
+  }
+
+  fs.rmSync(dev.path, { recursive: true, force: true });
+  fs.rmSync(other, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  execFileSync("git", ["branch", "-D", branch], { cwd: repo });
 });
 
 test("inspectLeftoverWorktree classifies missing / clean / dirty", async () => {
