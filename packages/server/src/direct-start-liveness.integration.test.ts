@@ -490,7 +490,32 @@ test(
         `SIGINT must not leave packages/server/src/index.ts reparented to init; new orphans: ${orphansAfter.join(",")}`
       );
     } finally {
+      // SIGKILL skips the probe's exit handler, so a stuck probe would leave its
+      // detached server group alive (often reparented to init). Prefer SIGINT so
+      // reapAll runs; only then SIGKILL the process group ourselves as a backstop.
       if (probeChild.exitCode === null && probeChild.signalCode === null) {
+        probeChild.kill("SIGINT");
+        await waitUntil(
+          () => probeChild.exitCode !== null || probeChild.signalCode !== null,
+          5000
+        );
+      }
+      if (probeChild.exitCode === null && probeChild.signalCode === null) {
+        let launcherPid: number | undefined;
+        try {
+          launcherPid = (
+            JSON.parse(fs.readFileSync(readyFile, "utf8")) as { serverLauncherPid?: unknown }
+          ).serverLauncherPid as number | undefined;
+        } catch {
+          // ready file may be missing if the probe died before writing it
+        }
+        if (typeof launcherPid === "number" && Number.isFinite(launcherPid)) {
+          try {
+            process.kill(-launcherPid, "SIGKILL");
+          } catch {
+            // ESRCH — group already gone
+          }
+        }
         probeChild.kill("SIGKILL");
       }
       // If the probe failed before reaping, do not leave debris behind for the suite.
