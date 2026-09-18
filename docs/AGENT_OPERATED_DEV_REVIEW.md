@@ -15,9 +15,9 @@ against a running `agent-dealer start` instance.
 agent-dealer agent list
 ```
 
-Each entry includes `id`, `runtime`, `defaultModel`, `workspaceRoot`, `deckId`/`deckName`,
-and `healthy`. Pick (or, via the dashboard/API, create) a developer and a reviewer
-profile — for a real Agent Deck-backed run, both should carry a `deckId`. Cursor
+Each entry includes `id`, `runtime`, `defaultModel`, `deckId`/`deckName`, and `healthy`.
+Pick (or, via the dashboard/API, create) a developer and a reviewer profile — both must
+carry a `deckId` before kick (workers never start without a Deck). Cursor
 (`cursor_local`) currently has no execution-authority isolation mechanism (see
 `agent-deck-bind.ts`), so a deck-bound profile must use `claude_code` or `codex_local`.
 
@@ -26,12 +26,15 @@ profile — for a real Agent Deck-backed run, both should carry a `deckId`. Curs
 ```bash
 agent-dealer issue create \
   --title "Add widget" \
-  --repo /path/to/target/repo \
+  --repo owner/repo \
   --developer-agent <developerAgentId> \
   --reviewer-agent <reviewerAgentId> \
   --acceptance-criteria "Widget renders." \
   --base-branch main
 ```
+
+`--repo` accepts a GitHub URL or `owner/repo` shorthand (stored as `github.com/owner/repo`).
+Dealer clones/fetches under the managed execution root; do not pass a local filesystem path.
 
 Creating **enqueues the issue for admission** — it never starts a workflow directly, so
 creating several in a row is always safe. Pass `--no-enqueue` for a draft that stays out of

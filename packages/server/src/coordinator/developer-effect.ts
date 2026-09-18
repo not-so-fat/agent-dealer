@@ -252,10 +252,23 @@ async function runPublishOnlyHandoff(
   const taskSnapshot = getTaskSnapshot(issue);
   const round = workItem.round;
   const stage = issue.status;
-  const checkout = await ensureIssueRepoCheckout(issue.repo);
-  const cwd = checkout.repoPath;
-  const baseBranch = resolveCheckoutBaseBranch(issue.baseBranch, checkout);
-  syncIssueBaseBranch(issue, baseBranch);
+
+  let cwd: string;
+  let baseBranch: string;
+  try {
+    const checkout = await ensureIssueRepoCheckout(issue.repo);
+    cwd = checkout.repoPath;
+    baseBranch = resolveCheckoutBaseBranch(issue.baseBranch, checkout);
+    syncIssueBaseBranch(issue, baseBranch);
+  } catch (err) {
+    // Same outcome shape as the main developer checkout path — legacy local paths that
+    // no longer exist (or clone failures) must not escape as an uncaught throw.
+    return {
+      kind: "adapter_failure",
+      reason: `repository checkout failed: ${String(err)}`,
+      publishable: { branch: branchName },
+    };
+  }
 
   const milestone = (
     type: Parameters<typeof emitSessionMilestone>[0]["type"],
@@ -679,7 +692,6 @@ export async function runDeveloperEffect(
       priorVerificationReceipt,
       worktreePath,
       deckId: snapshot?.deckId ?? null,
-      
       guidance: guidance.length ? guidance : undefined,
     });
 

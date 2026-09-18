@@ -9,6 +9,8 @@ related:
 
 # agent-dealer v0 — Product Requirements Document
 
+> **Supersession (NOT-149 / issue-centric product):** Agent profiles no longer carry workspace roots, selected playbooks, or free-form external-memory refs. Every execution Agent requires exactly one Deck (no degraded no-Deck mode). Issues store a portable GitHub repository identity (`github.com/owner/repo`); Dealer owns managed clones and worktrees under the execution root. Authoritative current docs: [PRD_ISSUE_COORDINATION.md](./PRD_ISSUE_COORDINATION.md), [AGENT_PROFILES.md](./AGENT_PROFILES.md), [DATA_MODEL.md](./DATA_MODEL.md). Sections below that still describe optional Deck, per-run playbook selection, Repo path / artifact workspace on the Agent, or degraded no-Deck runs are **historical planner-era draft** and must not be implemented.
+
 **One-liner:** agent-dealer is the **human control plane for agent execution** — feed tasks from ticket systems, approve plans, queue agent runs, gate risky actions, and store the full audit trail; agents execute, humans set goals and approve outcomes.
 
 **Status:** v0 draft · **Doc role:** Product / scope spec (PRD) · **Last aligned:** 2026-07-04  
@@ -74,20 +76,19 @@ Agent Deck solves **what the agent knows** (decks, vault, playbooks). agent-deal
                             │ MCP (optional)
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  AGENT DECK (context hub — optional)                         │
+│  AGENT DECK (context hub — required for execution Agents)    │
 │  bind_workspace · deck MCPs · vault · playbooks              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Thin handoff contract:**
+**Thin handoff contract (historical planner shape — superseded by issue workflow + managed GitHub checkouts):**
 
 ```text
-dealer.start(runId, repo?, artifactWorkspace?, deckId?, playbookId?)
-  → agent session with optional agent-deck MCP
-  → artifacts: PR / doc / draft message / research brief + ticket comment
-  → optional: update_playbook from run feedback
-  → dealer.markReview(runId)
-  → human approves → dealer.markDone(runId)
+dealer.startIssue(issueId)  # repo = github.com/owner/repo on the Issue; Deck from Agent profile
+  → managed clone + role worktree under execution root
+  → agent session with Agent Deck MCP (required)
+  → artifacts: PR + evidence + ticket comment
+  → dealer.markReview / human gates → done
 ```
 
 ### Success criteria (v0)
@@ -97,7 +98,7 @@ dealer.start(runId, repo?, artifactWorkspace?, deckId?, playbookId?)
 | SC-1 | Linear issue → enqueue → human approves plan → agent run completes → human approves result | P1 ship |
 | SC-2 | Full artifact chain stored and reviewable in dashboard | P1 ship |
 | SC-3 | Queue shows running + queued tasks with agent, deck, runtime | P1 ship |
-| SC-4 | Works without Agent Deck (degraded: no playbook/deck MCP) | P1 ship |
+| SC-4 | Every execution Agent has a required Agent Deck (fail-closed; no degraded no-Deck mode) | P1 ship (NOT-149) |
 | SC-5 | Configurable approval gates for merge / message / email / ticket status | P2 ship |
 | SC-6 | Non-code task (e.g. research draft, Slack reply) completes full plan → execute → review cycle | P2 ship |
 
@@ -156,7 +157,7 @@ Stories are grouped by the Operations pipeline gates (Intake is a separate scree
 **Acceptance:**
 
 - [ ] Form fields: title, description, task category, acceptance criteria (markdown)
-- [ ] **Repo path** OR **artifact workspace** (required for code vs non-code tasks respectively)
+- [ ] **GitHub repository** URL or `owner/repo` (code issues; NOT-149 — not a local Repo path)
 - [ ] Source recorded as `manual`; no `external_id` required
 - [ ] Task enters `plan_pending` or `queued` per user choice
 - [ ] Category presets default approval gates (e.g. `communication` → gate send_message; `research` → no send gate)
@@ -470,19 +471,21 @@ GitHub API (optional)            repo tools (Read / Edit / Bash)
 
 ### Per-run payload
 
+> Historical planner YAML. **Current contract (NOT-149):** Issue carries `repo: github.com/owner/repo`; Agent profile carries required `deckId` (no `workspaceRoot` / `playbookId` / external-memory list). Dealer derives worktree paths under the execution root.
+
 ```yaml
+# superseded shape — do not implement
 runId: uuid
 taskCategory: code | communication | email | research | content | other
-deckId: optional-uuid
-playbookId: optional-uuid
-workspaceRoot: /path/to/worktree        # code tasks
-artifactWorkspace: /path/to/outputs     # non-code tasks (optional if workspaceRoot set)
-runtime: claude_code | cursor_local
+deckId: required-uuid   # from Agent profile; never optional for execution
+# playbookId / workspaceRoot / artifactWorkspace — removed from Agent (NOT-149)
+runtime: claude_code | cursor_local | codex_local
 issue:
   id: LIN-123
   title: string
   description: string
   url: string
+  repo: github.com/owner/repo
 approvedPlan: |
   # human-approved markdown
 acceptanceCriteria: |
@@ -498,16 +501,15 @@ budget:
   maxBudgetUsd: 5.00
 ```
 
-### Agent Deck wiring per run (optional)
+### Agent Deck wiring per run (required for execution)
 
 | Option | Mechanism |
 |--------|-----------|
 | **HTTP MCP** | `http://127.0.0.1:1110/mcp` — backend must run |
 | **stdio MCP** | `agent-deck mcp` subprocess |
-| **Env defaults** | `AGENT_DECK_DECK_ID` + `AGENT_DECK_WORKSPACE` |
-| **Prompt contract** | `bind_workspace({ deckId, workspaceRoot })` → `get_playbook` |
+| **Prompt contract** | `bind_workspace({ deckId, workspaceRoot: <managed worktree> })` → `get_playbook` as needed |
 
-Health check before spawn: ping Agent Deck MCP; warn in dashboard if down. Run proceeds in degraded mode without deck.
+Health check before spawn: ping Agent Deck MCP; warn in dashboard if down. **Do not** start workers without a Deck (fail-closed — NOT-149).
 
 ### Claude headless example
 
@@ -860,7 +862,7 @@ What to borrow vs reject from similar products.
 | [AgentOS](https://github.com/zzhiyuann/agentos) | Linear as control plane, adapter abstraction | Fully autonomous agent team |
 | [ThreadKeeper](https://github.com/po4erk91/thread-keeper) | Thread lifecycle, `agent_status` health snapshot, append-only events, tiered evidence | Autonomous skill loops; cross-CLI memory as primary product |
 
-**Differentiator:** Human-approved plan + full treasure + optional Agent Deck knowledge loop. Optimizes **controlled improvement over time**, not **ship without human**.
+**Differentiator:** Human-approved plan + full treasure + required Agent Deck knowledge loop. Optimizes **controlled improvement over time**, not **ship without human**.
 
 References:
 

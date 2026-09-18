@@ -57,10 +57,10 @@ An agent is not a growing fictional identity. An agent profile is reusable execu
 
 - role and purpose;
 - coding runtime;
-- workspace;
-- Agent Deck and playbooks;
-- external memory it may access;
-- permissions and limits.
+- exactly one required Agent Deck;
+- permissions and limits (model/effort/budget defaults).
+
+The GitHub repository lives on the **Issue**, not the Agent. Playbooks are chosen dynamically inside the pinned Deck; free-form external-memory refs are not an Agent field. Dealer owns managed clones and session worktrees under the execution root.
 
 Each worker session is temporary. Learning is promoted explicitly to Agent Deck playbooks, Lexicon, or another external memory system—not accumulated implicitly in the agent profile.
 
@@ -169,9 +169,9 @@ If required product intent cannot be normalized without guessing, create a `prod
    - Store the snapshot as immutable input for every review round.
 
 2. **Prepare developer workspace**
-   - Create or reuse the issue branch and developer worktree under `<repo>/.agent-dealer-worktrees/` (grant-covered path).
-   - Attach the developer profile (runtime, playbooks, limits, permissions) and optional Agent Deck id to the session snapshot.
-   - When the profile has a deck, the worker equips it with `bind_workspace` to that worktree cwd before other Deck/Linear use — otherwise the session is not the configured agent.
+   - Resolve the issue's GitHub repository into Dealer's managed clone and create/reuse the developer worktree under the execution root (`execution/worktrees/github.com/<owner>/<repo>/<sessionId>-developer`).
+   - Attach the developer profile (runtime, required Deck, limits, permissions) to the session snapshot — no workspace root or selected playbooks.
+   - The worker equips the launch-selected Deck with `bind_workspace` to that worktree cwd before other Deck/Linear use — otherwise the session is not the configured agent. Workers never start without a Deck.
 
 3. **Develop**
    - Implement against the task snapshot.
@@ -184,8 +184,8 @@ If required product intent cannot be normalized without guessing, create a `prod
    - Emit one visible handoff: `Developer updated PR at <head SHA>`.
 
 5. **Prepare reviewer workspace**
-   - Create a separate read-only reviewer worktree at the recorded head SHA under the same `.agent-dealer-worktrees/` root.
-   - Attach the reviewer profile independently from the developer profile (same worker `bind_workspace` equip rule when a deck is set).
+   - Create a separate read-only reviewer worktree at the recorded head SHA under the managed execution root.
+   - Attach the reviewer profile independently from the developer profile (same required-Deck `bind_workspace` equip rule).
 
 6. **Review**
    - Review the immutable task snapshot, diff, evidence, repository rules, and prior finding history.
@@ -372,14 +372,12 @@ Creating a profile should require one compact form:
 
 - profile name;
 - role or purpose;
-- workspace;
 - coding runtime;
-- Agent Deck and optional playbooks;
-- accessible external memory;
+- exactly one required Agent Deck;
 - permission policy;
-- default limits.
+- default limits (model / effort / budget).
 
-Runtime, model, and advanced provider settings may use defaults and remain inspectable. Do not request personality, biography, avatar, relationships, or persistent personal memory.
+Runtime, model, and advanced provider settings may use defaults and remain inspectable. Do not request workspace root, playbook selection, free-form external memory, personality, biography, avatar, relationships, or persistent personal memory.
 
 ## 8. Programmatic use
 
