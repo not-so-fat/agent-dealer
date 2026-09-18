@@ -71,6 +71,7 @@ test("editing the profile after the work is queued does not change the eventual 
     runtime: "claude_code",
     workspaceRoot: "/repo",
     defaultModel: "model-when-queued",
+    defaultEffort: "low",
   });
   const rev = createAgent({ name: "rev-freeze", runtime: "claude_code", workspaceRoot: "/repo" });
   const issueId = issueWith(dev.id, rev.id);
@@ -89,17 +90,18 @@ test("editing the profile after the work is queued does not change the eventual 
   // reviewer's boundary repro for NOT-60's "later profile edits do not change a
   // queued/running session" criterion.
   startWorkflow(issueId);
-  updateAgent(dev.id, { defaultModel: "model-after-queue" });
+  updateAgent(dev.id, { defaultModel: "model-after-queue", defaultEffort: "high" });
   await pump();
 
   const devSession = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
   const snap = parseProfileSnapshot(devSession.profileSnapshotJson);
   assert.ok(snap, "developer session carries a profile snapshot");
   assert.equal(snap!.model, "model-when-queued", "snapshot frozen when the item was queued");
+  assert.equal(snap!.effort, "low", "effort frozen when the item was queued");
   assert.equal(devSession.model, "model-when-queued", "denormalized session model also frozen");
   assert.equal(updateAgent(dev.id, {})!.defaultModel, "model-after-queue", "the live profile moved on");
+  assert.equal(updateAgent(dev.id, {})!.defaultEffort, "high", "the live profile effort moved on");
 });
-
 test("the reviewer session snapshot yields a read-only permission policy and read-only args", async () => {
   const dev = createAgent({ name: "dev-ro", runtime: "claude_code", workspaceRoot: "/repo" });
   const rev = createAgent({ name: "rev-ro", runtime: "codex_local", workspaceRoot: "/repo" });

@@ -63,6 +63,14 @@ export function roleCeiling(role: z.infer<typeof WorkerSessionRole>): Permission
 }
 
 /**
+ * Tiered reasoning / thinking effort for CLIs that expose it (Codex
+ * `model_reasoning_effort`, Claude Code `--effort`). Cursor has no separate flag —
+ * effort is only expressible inside a parameterized model id.
+ */
+export const ReasoningEffort = z.enum(["low", "medium", "high"]);
+export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
+
+/**
  * The immutable execution contract snapshotted onto every `worker_session` at creation
  * (design §`agents` / §"Immutable execution-profile snapshot"). Transcripts, findings,
  * and usage stay owned by the issue/session — completing work never writes anything back
@@ -75,6 +83,11 @@ export const ProfileSnapshot = z.object({
   role: WorkerSessionRole,
   runtime: Runtime.nullable(),
   model: z.string().nullable(),
+  /**
+   * Reasoning effort frozen with the session (NOT-81). `.default(null)` so snapshots
+   * written before this field still parse instead of invalidating the whole contract.
+   */
+  effort: ReasoningEffort.nullable().default(null),
   /** Serialized PhaseBudget; null = runtime default (no CLI caps). */
   budgetJson: z.string().nullable(),
   permissionPolicy: PermissionPolicy,

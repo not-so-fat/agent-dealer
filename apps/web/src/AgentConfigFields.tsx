@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { PermissionPolicyOverride, Runtime } from "@agent-dealer/shared";
+import type { PermissionPolicyOverride, ReasoningEffort, Runtime } from "@agent-dealer/shared";
 import { CURSOR_DEFAULT_MODEL } from "@agent-dealer/shared";
 import { fetchDeckPlaybooks, fetchDecks } from "./api";
 import ModelSelect from "./components/agents/ModelSelect";
@@ -11,11 +11,13 @@ export type AgentConfigValue = {
   playbookId: string;
   // Issue-centric (developer/reviewer) session defaults — snapshotted per session.
   // NOT-71/NOT-80: the old plan/execute model+budget pair is gone from this form. Issue
-  // workflows only ever read `defaultModel` / `defaultBudget`; profile-snapshot.ts still
-  // falls back to the persisted plan/execute columns for profiles saved before this form
-  // existed, but nothing writes them any more.
+  // workflows read `defaultModel` / `defaultEffort` / `defaultBudget`; profile-snapshot.ts
+  // still falls back to the persisted plan/execute columns for profiles saved before this
+  // form existed, but nothing writes them any more.
   purpose: string;
   defaultModel: string;
+  /** Reasoning effort for Codex/Claude; empty string = runtime default. Ignored for Cursor. */
+  defaultEffort: "" | ReasoningEffort;
   defaultBudget: BudgetFormValue;
   playbookIds: string[];
   externalMemoryRefs: string;
@@ -94,6 +96,7 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
   }, [value.deckId]);
 
   const set = (patch: Partial<AgentConfigValue>) => onChange({ ...value, ...patch });
+  const supportsEffort = value.runtime === "codex_local" || value.runtime === "claude_code";
 
   return (
     <div className="space-y-2">
@@ -105,7 +108,12 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
         value={value.runtime}
         onChange={(e) => {
           const runtime = e.target.value as Runtime;
-          set({ runtime, defaultModel: runtime === "cursor_local" ? CURSOR_DEFAULT_MODEL : "" });
+          set({
+            runtime,
+            defaultModel: runtime === "cursor_local" ? CURSOR_DEFAULT_MODEL : "",
+            // Cursor has no separate effort CLI flag — clear so we don't persist a no-op.
+            defaultEffort: runtime === "cursor_local" ? "" : value.defaultEffort,
+          });
         }}
       >
         <option value="claude_code">Claude Code (claude -p)</option>
@@ -170,18 +178,42 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
             onChange={(e) => set({ purpose: e.target.value })}
           />
         </label>
-        <div className="grid grid-cols-3 gap-2">
-          <div className="col-span-1">
-            <ModelSelect
-              runtime={value.runtime}
-              label="Default model"
-              value={value.defaultModel}
-              onChange={(defaultModel) => set({ defaultModel })}
-              disabled={disabled}
-              compact
-            />
-          </div>
-          <label className="col-span-1 space-y-1">
+        <div className={`grid gap-2 ${supportsEffort ? "grid-cols-2" : "grid-cols-1"}`}>
+          <ModelSelect
+            runtime={value.runtime}
+            label="Default model"
+            value={value.defaultModel}
+            onChange={(defaultModel) => set({ defaultModel })}
+            disabled={disabled}
+            compact
+          />
+          {supportsEffort && (
+            <label className="space-y-1">
+              <span className="text-xs text-[#A8C4C0] uppercase">Reasoning effort</span>
+              <select
+                className="field text-sm"
+                disabled={disabled}
+                value={value.defaultEffort}
+                onChange={(e) =>
+                  set({ defaultEffort: e.target.value as AgentConfigValue["defaultEffort"] })
+                }
+              >
+                <option value="">Runtime default</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+          )}
+        </div>
+        {value.runtime === "cursor_local" && (
+          <p className="text-xs text-white/40">
+            Cursor has no separate effort flag — put effort in the model id if needed (e.g.
+            parameterized `[effort=high]`).
+          </p>
+        )}
+        <div className="grid grid-cols-2 gap-2">
+          <label className="space-y-1">
             <span className="text-xs text-[#A8C4C0] uppercase">Max turns</span>
             <input
               className="field text-sm"
@@ -195,7 +227,7 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
               }
             />
           </label>
-          <label className="col-span-1 space-y-1">
+          <label className="space-y-1">
             <span className="text-xs text-[#A8C4C0] uppercase">Max $ / session</span>
             <input
               className="field text-sm"

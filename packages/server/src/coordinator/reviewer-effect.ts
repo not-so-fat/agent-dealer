@@ -358,6 +358,7 @@ export async function runReviewerEffect(
         runtime,
         policy,
         model: snapshot?.model ?? null,
+        effort: snapshot?.effort ?? null,
         prompt,
         cwd: worktreePath,
         timeoutMs: reviewerEffectConfig.sessionTimeoutMs,

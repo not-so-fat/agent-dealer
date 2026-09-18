@@ -104,3 +104,19 @@ test("switching runtime does not carry the old runtime's legacy model into the n
   assert.equal(snap.runtime, "claude_code");
   assert.equal(snap.model, null);
 });
+
+test("snapshot freezes defaultEffort alongside the model", () => {
+  const agent = createAgent({
+    name: "effort",
+    runtime: "codex_local",
+    workspaceRoot: "/repo",
+    defaultModel: "gpt-5",
+    defaultEffort: "high",
+  });
+  const snap = buildProfileSnapshot(agent, "developer");
+  assert.equal(snap.effort, "high");
+  assert.equal(snap.model, "gpt-5");
+
+  const cleared = updateAgent(agent.id, { defaultEffort: null })!;
+  assert.equal(buildProfileSnapshot(cleared, "developer").effort, null);
+});
