@@ -27,6 +27,7 @@ function printUsage(): void {
   agent-dealer queue add <issueId>
   agent-dealer queue remove <issueId>
   agent-dealer queue list
+  agent-dealer queue move <issueId> --top|--bottom|--before <id>|--after <id>
   agent-dealer action list
   agent-dealer action resolve <id> --choice C --by NAME
   agent-dealer --version
