@@ -287,6 +287,9 @@ test("dirty_worktree: an uncommitted file escalates without consuming a round", 
   assert.equal(issue.currentRound, 1, "dirty worktree never consumes a round");
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation");
   assert.ok(action, "expected a policy_escalation human action");
+  // NOT-145 / NOT-137: exit-0 dirty escalations carry path + recovery like worktree_conflict.
+  assert.match(action!.reason, /Recovery:/);
+  assert.match(action!.reason, /git status/);
 });
 
 test("session_failed: the agent process exits non-zero — retried like no_pr", async () => {
@@ -306,13 +309,11 @@ test("session_failed: the agent process exits non-zero — retried like no_pr", 
   assert.equal(usage[0].workerSessionId, dev.id);
 });
 
-test("a crash that also leaves the worktree dirty escalates as dirty_worktree, not a blind retry that would collide on the next round", async () => {
-  // A review round found: crashingSpawn/timedOutSpawn returned session_failed/timed_out
-  // unconditionally, which routes as a round-consuming retry. But bestEffortRemove
-  // correctly refuses to remove a dirty checkout, so the branch stayed checked out there
-  // — and the very next round's `git worktree add` for that same branch would then fail,
-  // burning a round on a confusing adapter_failure two rounds later instead of the
-  // immediate policy_escalation a dirty handoff is supposed to get.
+test("NOT-145: a crash that leaves the worktree dirty auto-commits a salvage tip and retries — WIP is not deleted", async () => {
+  // Parent NOT-143: prefer the git tip as the durable checkpoint. Pre-NOT-145 this path
+  // escalated dirty_worktree (preserved checkout, human gate). Salvage lands the WIP on
+  // the issue branch, removes the worktree cleanly, and routes timed_out/session_failed
+  // so retry_developer continues from the salvage tip.
   const issueId = await makeIssue();
   const crashingDirtySpawn: SpawnFn = async (input) => {
     fs.writeFileSync(path.join(input.cwd, "half-done.txt"), "oops\n");
@@ -323,12 +324,66 @@ test("a crash that also leaves the worktree dirty escalates as dirty_worktree, n
   await pump(1);
 
   const issue = getIssue(issueId)!;
-  assert.equal(issue.status, "needs_human");
-  assert.equal(issue.currentRound, 1, "a dirty crash never consumes a round");
-  assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
+  assert.equal(issue.status, "developing", "salvaged crash retries on the infra budget, not a human gate");
+  assert.equal(issue.currentRound, 1);
+  const branch = issueBranchName(issueId);
+  assert.ok(await branchExists(repo, branch));
+  assert.equal(git(repo, "log", "-1", "--pretty=%s", branch), "wip: crash salvage");
+  assert.ok(git(repo, "show", `${branch}:half-done.txt`).includes("oops"));
+
+  const round1 = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  assert.equal(round1.status, "failed");
+  assert.ok(!fs.existsSync(roleWorktreePath(repo, round1.id, "developer")), "clean salvage allows worktree remove");
+  assert.match(JSON.parse(round1.errorJson ?? "{}").reason ?? round1.errorJson ?? "", /Salvaged uncommitted work|crash salvage/);
 });
 
-test("NOT-113: keychain stderr on a dirty crash surfaces auth/keychain on worker.failed + detail API", async () => {
+test("NOT-145: dirty worktree + forced timeout salvages a tip then routes timed_out for retry", async () => {
+  const issueId = await makeIssue();
+  const timedOutDirtySpawn: SpawnFn = async (input) => {
+    fs.writeFileSync(path.join(input.cwd, "partial.txt"), "still cooking\n");
+    return { exitCode: 1, transcript: "", logPath: "/dev/null", timedOut: true };
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: timedOutDirtySpawn, github: fakeGithub() }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing");
+  const branch = issueBranchName(issueId);
+  assert.equal(git(repo, "log", "-1", "--pretty=%s", branch), "wip: timeout salvage");
+  assert.ok(git(repo, "show", `${branch}:partial.txt`).includes("still cooking"));
+
+  const dev = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  assert.equal(dev.status, "timed_out");
+  assert.ok(!fs.existsSync(roleWorktreePath(repo, dev.id, "developer")));
+});
+
+test("NOT-145: clean timeout with existing commits still retries without losing the tip", async () => {
+  const issueId = await makeIssue();
+  const timedOutAfterCommitSpawn: SpawnFn = async (input) => {
+    fs.writeFileSync(path.join(input.cwd, "feature.txt"), "implemented\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "implement");
+    return { exitCode: 1, transcript: "", logPath: "/dev/null", timedOut: true };
+  };
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: timedOutAfterCommitSpawn, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing");
+  const branch = issueBranchName(issueId);
+  assert.equal(git(repo, "log", "-1", "--pretty=%s", branch), "implement");
+  assert.ok(await branchExists(repo, branch));
+
+  const dev = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  assert.equal(dev.status, "timed_out");
+  assert.ok(!fs.existsSync(roleWorktreePath(repo, dev.id, "developer")), "clean tip allows worktree remove");
+});
+
+test("NOT-113: keychain stderr on a dirty crash surfaces auth/keychain after salvage on the retry path", async () => {
   const issueId = await makeIssue();
   const keychainLog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-keychain-")), "session.ndjson");
   fs.writeFileSync(
@@ -346,22 +401,64 @@ test("NOT-113: keychain stderr on a dirty crash surfaces auth/keychain on worker
   await pump(1);
 
   const issue = getIssue(issueId)!;
-  assert.equal(issue.status, "needs_human");
-  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation");
-  assert.ok(action);
-  assert.match(action!.reason, /keychain|errSecDuplicateItem/i);
+  // Salvage lands the tip → session_failed → infra retry (still developing), not dirty escalate.
+  assert.equal(issue.status, "developing");
+  const branch = issueBranchName(issueId);
+  assert.equal(git(repo, "log", "-1", "--pretty=%s", branch), "wip: crash salvage");
 
   const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
   const failed = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "worker.failed");
   assert.ok(failed.length >= 1);
   const payload = JSON.parse(failed[failed.length - 1]!.payloadJson!) as { reason?: string; outcome?: string };
-  assert.equal(payload.outcome, "dirty_worktree");
+  assert.equal(payload.outcome, "session_failed");
   assert.match(payload.reason ?? "", /keychain|errSecDuplicateItem/i);
+  assert.match(payload.reason ?? "", /Salvaged uncommitted work|crash salvage/);
 
   const { latestSessionFailureForIssue } = await import("./latest-failure.js");
   const latest = latestSessionFailureForIssue(issue);
   assert.ok(latest);
   assert.match(latest!.reason, /keychain|errSecDuplicateItem/i);
+});
+
+test("NOT-145: when salvage commit fails, dirty checkout is preserved with actionable recovery — never wiped", async () => {
+  const issueId = await makeIssue();
+  const failingSalvageSpawn: SpawnFn = async (input) => {
+    fs.writeFileSync(path.join(input.cwd, "half-done.txt"), "oops\n");
+    // Reject the coordinator's salvage commit so we exercise the escalate-and-preserve path.
+    const hookDir = path.join(input.cwd, ".git", "hooks");
+    // Worktrees share .git/hooks via the common dir — write a commit-msg hook that fails.
+    const common = git(input.cwd, "rev-parse", "--git-common-dir");
+    const hooks = path.isAbsolute(common) ? path.join(common, "hooks") : path.join(input.cwd, common, "hooks");
+    fs.mkdirSync(hooks, { recursive: true });
+    const hookPath = path.join(hooks, "pre-commit");
+    fs.writeFileSync(hookPath, "#!/bin/sh\necho salvage-blocked >&2\nexit 1\n");
+    fs.chmodSync(hookPath, 0o755);
+    return { exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: true };
+  };
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: failingSalvageSpawn, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation");
+  assert.ok(action);
+  assert.match(action!.reason, /Auto-commit salvage failed|salvage-blocked/i);
+  assert.match(action!.reason, /Recovery:/);
+  assert.match(action!.reason, /git status/);
+
+  const round1 = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  const leftover = roleWorktreePath(repo, round1.id, "developer");
+  assert.ok(fs.existsSync(path.join(leftover, "half-done.txt")), "failed salvage must not wipe WIP");
+
+  // Cleanup hook so later tests in this file aren't poisoned.
+  const common = git(repo, "rev-parse", "--git-common-dir");
+  const hooks = path.isAbsolute(common) ? path.join(common, "hooks") : path.join(repo, common, "hooks");
+  fs.rmSync(path.join(hooks, "pre-commit"), { force: true });
+  fs.rmSync(leftover, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
 });
 
 test("timed_out (session): the spawn wall-clock timeout is reported distinctly from a crash", async () => {
@@ -651,20 +748,17 @@ test("NOT-88: a leftover clean worktree from a resolved unpushed_commit escalati
 test("NOT-88: a leftover dirty worktree escalates as an actionable worktree_conflict on every Resume — no infra budget burned, no opaque crash loop", async () => {
   const issueId = await makeIssue();
 
-  // Round 1 crashes AND leaves the worktree dirty — dirty_worktree escalation preserves the
-  // checkout (existing coverage above), which is the setup NOT-88's collision needs: round
-  // 2 must find that SAME dirty leftover still holding the branch.
-  const crashingDirtySpawn: SpawnFn = async (input) => {
-    fs.writeFileSync(path.join(input.cwd, "half-done.txt"), "oops\n");
-    return { exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: false };
-  };
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: crashingDirtySpawn, github: fakeGithub() }));
+  // Round 1 exits 0 but leaves the worktree dirty — dirty_worktree escalation preserves the
+  // checkout (NOT-145 salvage applies only to timeout/crash infra deaths). That leftover is
+  // the setup NOT-88's collision needs: round 2 must find that SAME dirty leftover still
+  // holding the branch.
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: dirtySpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
   const round1Session = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
   const leftoverPath = roleWorktreePath(repo, round1Session.id, "developer");
-  assert.ok(fs.existsSync(path.join(leftoverPath, "half-done.txt")), "the dirty leftover must be preserved");
+  assert.ok(fs.existsSync(path.join(leftoverPath, "scratch.txt")), "the dirty leftover must be preserved");
 
   const firstAction = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation" && a.status === "open")!;
   assert.ok(firstAction);
@@ -679,7 +773,7 @@ test("NOT-88: a leftover dirty worktree escalates as an actionable worktree_conf
   assert.equal(issue.status, "needs_human");
   assert.equal(issue.infraAttempts, 0, "a worktree_conflict never spends the infra-attempt budget it was reset to");
   assert.equal(issue.currentRound, 1);
-  assert.ok(fs.existsSync(path.join(leftoverPath, "half-done.txt")), "still never force-removed");
+  assert.ok(fs.existsSync(path.join(leftoverPath, "scratch.txt")), "still never force-removed");
 
   const secondAction = listHumanActionsForIssue(issueId).find(
     (a) => a.actionType === "policy_escalation" && a.status === "open" && a.id !== firstAction.id

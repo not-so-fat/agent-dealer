@@ -4,8 +4,10 @@ import type { ReviewerResult } from "./reviewer-result.js";
 export type DeveloperOutcome =
   | { kind: "clean_handoff"; branch: string; headSha: string; baseSha: string; prNumber: number; prUrl: string }
   | { kind: "no_pr" }
-  /** Optional `reason` surfaces auth/runtime classifiers (NOT-113) while keeping preservation. */
-  | { kind: "dirty_worktree"; reason?: string }
+  /** Optional `reason` surfaces auth/runtime classifiers (NOT-113) while keeping preservation.
+   * Optional `path` + `recoveryCommands` make the escalation actionable like worktree_conflict
+   * (NOT-137 / NOT-145) when salvage could not land a tip. */
+  | { kind: "dirty_worktree"; reason?: string; path?: string; recoveryCommands?: string[] }
   /** Local commits exist but the coordinator's own push was rejected (e.g. non-fast-forward).
    * `recoveryCommands` (NOT-137) mirrors worktree_conflict: divergence facts live in `reason`,
    * and the concrete recovery steps are folded into the escalation text at route time. */
@@ -105,16 +107,23 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
   switch (outcome.kind) {
     case "clean_handoff":
       return { next: "spawn_reviewer", headSha: outcome.headSha };
-    case "dirty_worktree":
+    case "dirty_worktree": {
       // Never spends any budget — an unclean handoff is preserved for inspection, not retried blindly.
       // Prefer classified reason (e.g. Cursor keychain died mid-run) when the effect attached one.
+      // When path/recovery are present (NOT-145 salvage failure, or any preserved dirt), fold them
+      // in the same shape as worktree_conflict so the UI is actionable (NOT-137).
+      const base =
+        outcome.reason ?? "Developer worktree has uncommitted changes after the session ended.";
+      const reason =
+        outcome.recoveryCommands && outcome.recoveryCommands.length > 0
+          ? `${base} Recovery:\n${outcome.recoveryCommands.join("\n")}`
+          : base;
       return {
         next: "human_action",
         actionType: "policy_escalation",
-        reason:
-          outcome.reason ??
-          "Developer worktree has uncommitted changes after the session ended.",
+        reason,
       };
+    }
     case "unpushed_commit": {
       // Same bucket as dirty_worktree: local work exists that must not be silently discarded
       // or force-retried — a human decides how to resolve the rejected push. When the adapter

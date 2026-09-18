@@ -77,6 +77,44 @@ test("createRoleWorktree gives the developer a branch checkout and the reviewer 
   await safeRemoveWorktree({ repo, path: rev.path, role: "reviewer" });
 });
 
+test("NOT-145: salvageDirtyWorktree auto-commits dirty WIP as a marked tip", async () => {
+  const { salvageDirtyWorktree, SALVAGE_TIMEOUT_MESSAGE, SALVAGE_CRASH_MESSAGE } = await import(
+    "./git-worktree.js"
+  );
+  const dev = await createRoleWorktree({ repo, role: "developer", sessionId: "s-salvage", ref: "issue-1" });
+  fs.writeFileSync(path.join(dev.path, "half-done.txt"), "wip\n");
+  assert.equal(await isWorktreeClean(dev.path), false);
+
+  const before = git(dev.path, "rev-parse", "HEAD");
+  const result = await salvageDirtyWorktree(dev.path, "timeout");
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.message, SALVAGE_TIMEOUT_MESSAGE);
+    assert.notEqual(result.commitSha, before);
+    assert.equal(git(dev.path, "rev-parse", "HEAD"), result.commitSha);
+    assert.equal(git(dev.path, "log", "-1", "--pretty=%s"), SALVAGE_TIMEOUT_MESSAGE);
+  }
+  assert.equal(await isWorktreeClean(dev.path), true);
+
+  fs.writeFileSync(path.join(dev.path, "more.txt"), "again\n");
+  const crash = await salvageDirtyWorktree(dev.path, "crash");
+  assert.equal(crash.ok, true);
+  if (crash.ok) assert.equal(crash.message, SALVAGE_CRASH_MESSAGE);
+
+  await safeRemoveWorktree({ repo, path: dev.path, role: "developer", branchPushed: true });
+});
+
+test("NOT-145: salvageDirtyWorktree reports failure without mutating when there is nothing to commit", async () => {
+  const { salvageDirtyWorktree } = await import("./git-worktree.js");
+  const dev = await createRoleWorktree({ repo, role: "developer", sessionId: "s-salvage-empty", ref: "issue-1" });
+  assert.equal(await isWorktreeClean(dev.path), true);
+  const before = git(dev.path, "rev-parse", "HEAD");
+  const result = await salvageDirtyWorktree(dev.path, "timeout");
+  assert.equal(result.ok, false);
+  assert.equal(git(dev.path, "rev-parse", "HEAD"), before);
+  await safeRemoveWorktree({ repo, path: dev.path, role: "developer", branchPushed: true });
+});
+
 test("safeRemoveWorktree removes a clean reviewer checkout but preserves a dirty developer one", async () => {
   const rev = await createRoleWorktree({ repo, role: "reviewer", sessionId: "s-rev2", ref: "HEAD" });
   const removed = await safeRemoveWorktree({ repo, path: rev.path, role: "reviewer" });

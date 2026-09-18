@@ -57,6 +57,67 @@ export async function isWorktreeClean(worktreePath: string): Promise<boolean> {
   return stdout.trim().length === 0;
 }
 
+/** Commit message for a timeout salvage tip (NOT-145). */
+export const SALVAGE_TIMEOUT_MESSAGE = "wip: timeout salvage";
+/** Commit message for a crash/non-zero exit salvage tip (NOT-145). */
+export const SALVAGE_CRASH_MESSAGE = "wip: crash salvage";
+
+export type SalvageResult =
+  | { ok: true; commitSha: string; message: string }
+  | { ok: false; reason: string };
+
+/**
+ * NOT-145: stage everything and commit a clearly marked salvage tip so a timeout/crash
+ * can remove the worktree for retry without silently discarding uncommitted WIP.
+ * Prefer this over leaving dirt behind — the durable checkpoint is the branch tip
+ * (parent NOT-143), not a preserved dirty checkout the next attempt cannot adopt.
+ */
+export async function salvageDirtyWorktree(
+  worktreePath: string,
+  kind: "timeout" | "crash"
+): Promise<SalvageResult> {
+  const message = kind === "timeout" ? SALVAGE_TIMEOUT_MESSAGE : SALVAGE_CRASH_MESSAGE;
+  try {
+    await git(worktreePath, ["add", "-A"]);
+    // Explicit identity: coordinator-managed worktrees may lack user.name/email, and a
+    // salvage commit must not depend on whatever the agent happened to configure.
+    await git(worktreePath, [
+      "-c",
+      "user.email=agent-dealer@localhost",
+      "-c",
+      "user.name=Agent Dealer",
+      "commit",
+      "-q",
+      "-m",
+      message,
+    ]);
+    // Lens (NOT-145): never report ok while the tree is still dirty — residual dirt would
+    // make bestEffortRemove preserve the checkout and the next retry collide on the branch.
+    const clean = await isWorktreeClean(worktreePath);
+    if (!clean) {
+      return {
+        ok: false,
+        reason: "salvage commit succeeded but the worktree is still dirty",
+      };
+    }
+    const { stdout } = await git(worktreePath, ["rev-parse", "HEAD"]);
+    return { ok: true, commitSha: stdout.trim(), message };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/** Actionable recovery lines for a preserved dirty developer checkout (NOT-137 / NOT-145). */
+export function dirtyWorktreeRecoveryCommands(repo: string, worktreePath: string): string[] {
+  return [
+    `cd ${worktreePath}`,
+    "git status",
+    "git log --oneline -5",
+    "git stash list",
+    `git -C ${repo} worktree remove ${worktreePath}  # only after the work is saved`,
+  ];
+}
+
 export async function mergeBase(opts: { repo: string; base: string; head: string }): Promise<string> {
   const { stdout } = await git(opts.repo, ["merge-base", opts.base, opts.head]);
   return stdout.trim();

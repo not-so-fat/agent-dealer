@@ -35,6 +35,8 @@ import {
   revParseHead,
   revParseRef,
   fetchRef,
+  salvageDirtyWorktree,
+  dirtyWorktreeRecoveryCommands,
 } from "../adapters/git-worktree.js";
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
@@ -716,7 +718,14 @@ export async function runDeveloperEffect(
     const usageCap = recordUsageCapFromLog(spawned.logPath, runtime);
     if (usageCap) {
       const clean = await isWorktreeClean(worktreePath).catch(() => false);
-      if (!clean) return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath, runtime) };
+      if (!clean) {
+        return {
+          kind: "dirty_worktree",
+          reason: reasonForDirtyWorktree(spawned.logPath, runtime),
+          path: worktreePath,
+          recoveryCommands: dirtyWorktreeRecoveryCommands(issue.repo, worktreePath),
+        };
+      }
 
       const sessionOk = !spawned.timedOut && spawned.exitCode === 0;
       const ahead = await commitsAhead({
@@ -747,17 +756,62 @@ export async function runDeveloperEffect(
     }
 
     if (spawned.timedOut || spawned.exitCode !== 0) {
-      // A crash/timeout must not be routed as a blind retry without checking the
-      // worktree first: a review round found that when the agent left it dirty, the
-      // preserved checkout kept the branch checked out, so the *next* round's retry
-      // could never `git worktree add` that same branch — it burned a round and then
-      // failed as a confusing adapter_failure two rounds later. dirty_worktree (which
-      // preserves the checkout and escalates without consuming a round) must win here,
-      // exactly as it does when the agent exits 0 but leaves the worktree dirty below.
-      // NOT-113: when Cursor stderr shows keychain/auth death, keep dirty_worktree but
-      // attach an actionable reason so the UI isn't just "dirty tree".
+      // NOT-145: on infra death, never wipe uncommitted WIP. Prefer a salvage tip on the
+      // issue branch (durable checkpoint — parent NOT-143) so retry_developer can continue;
+      // only when auto-commit fails do we preserve the dirty checkout and escalate with
+      // path + recovery (same actionability as worktree_conflict / NOT-137).
+      //
+      // Pre-NOT-145 this returned dirty_worktree immediately when dirty (preserving the
+      // checkout so the next add wouldn't collide). Salvage is strictly better: the tip is
+      // reusable, and the worktree can be removed cleanly for the retry.
       const clean = await isWorktreeClean(worktreePath).catch(() => false);
-      if (!clean) return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath, runtime) };
+      if (!clean) {
+        const salvageKind = spawned.timedOut ? "timeout" : "crash";
+        const salvaged = await salvageDirtyWorktree(worktreePath, salvageKind);
+        if (salvaged.ok) {
+          // Lens (NOT-145 class post-salvage-remove-unchecked): only route infra retry when
+          // the checkout is actually gone. If remove preserves (or throws), escalate with
+          // path+recovery instead of retrying into a branch still held by a leftover tree.
+          let removed = false;
+          try {
+            const removal = await safeRemoveWorktree({
+              repo: issue.repo,
+              path: worktreePath,
+              role: "developer",
+              branchPushed: true,
+            });
+            removed = removal.removed === true;
+          } catch {
+            removed = false;
+          }
+          if (!removed) {
+            const dirtyReason = reasonForDirtyWorktree(spawned.logPath, runtime);
+            return {
+              kind: "dirty_worktree",
+              reason: `${dirtyReason} Salvage tip ${salvaged.message} (${salvaged.commitSha.slice(0, 7)}) landed but the worktree could not be removed for retry.`,
+              path: worktreePath,
+              recoveryCommands: dirtyWorktreeRecoveryCommands(issue.repo, worktreePath),
+            };
+          }
+          const crashReason = reasonForSessionCrash({
+            timedOut: Boolean(spawned.timedOut),
+            logPath: spawned.logPath,
+            runtime,
+          });
+          const salvageNote = `Salvaged uncommitted work as ${salvaged.message} (${salvaged.commitSha.slice(0, 7)}).`;
+          return spawned.timedOut
+            ? { kind: "timed_out", reason: `${crashReason} ${salvageNote}` }
+            : { kind: "session_failed", reason: `${crashReason} ${salvageNote}` };
+        }
+        // Salvage failed — do not remove. Escalate with actionable recovery.
+        const dirtyReason = reasonForDirtyWorktree(spawned.logPath, runtime);
+        return {
+          kind: "dirty_worktree",
+          reason: `${dirtyReason} Auto-commit salvage failed: ${salvaged.reason}`,
+          path: worktreePath,
+          recoveryCommands: dirtyWorktreeRecoveryCommands(issue.repo, worktreePath),
+        };
+      }
       await bestEffortRemove(issue.repo, worktreePath);
       return spawned.timedOut
         ? { kind: "timed_out", reason: reasonForSessionCrash({ timedOut: true, logPath: spawned.logPath, runtime }) }
@@ -784,7 +838,12 @@ export async function runDeveloperEffect(
     });
 
     if (!(await isWorktreeClean(worktreePath))) {
-      return { kind: "dirty_worktree", reason: reasonForDirtyWorktree(spawned.logPath, runtime) };
+      return {
+        kind: "dirty_worktree",
+        reason: reasonForDirtyWorktree(spawned.logPath, runtime),
+        path: worktreePath,
+        recoveryCommands: dirtyWorktreeRecoveryCommands(issue.repo, worktreePath),
+      };
     }
 
     const ahead = await commitsAhead({ worktreePath, baseRef: `origin/${issue.baseBranch}` });
