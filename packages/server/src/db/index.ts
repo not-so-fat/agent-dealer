@@ -516,6 +516,12 @@ function seedIntakeSettings(db: Database.Database): void {
 }
 
 function seedBuiltinAgents(db: Database.Database): void {
+  // Only seed an empty agents table (fresh install). If the operator deleted the
+  // default Claude/Cursor/Codex rows after creating their own profiles, do not
+  // resurrect them on every migrate — INSERT OR IGNORE would bring the fixed IDs back.
+  const existing = db.prepare("SELECT COUNT(*) AS c FROM agents").get() as { c: number };
+  if (existing.c > 0) return;
+
   const now = new Date().toISOString();
   const insert = db.prepare(`
     INSERT OR IGNORE INTO agents (id, name, runtime, deck_id, deck_name, playbook_id, is_builtin, created_at, updated_at)

@@ -2,6 +2,21 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.0.2 — 2026-09-18
+
+Patch over 1.0.1: queue UX, Linear observability, docs landing, and migrate hygiene.
+
+### Product
+
+- **Queue reorder** — move queued issues in the UI/CLI/API (NOT-112).
+- **Architecture docs** — independent-workflows design + plan + CONTEXT/README (NOT-69).
+
+### Fixes
+
+- **Linear GraphQL failures** — log HTTP status and rate-limit headers; 429-aware backoff for dependency fetches (NOT-152).
+- **Direct-start temp home** — interrupt/`process.exit` no longer abandons the temp `AGENT_DEALER_HOME` (NOT-140).
+- **Builtin agent seed** — migrate only seeds Claude/Cursor/Codex when the agents table is empty (do not resurrect deleted defaults).
+
 ## 1.0.1 — 2026-09-18
 
 Patch over 1.0.0: auto-merge + reviewer contract fixes for the issue Dev→PR→Review path.

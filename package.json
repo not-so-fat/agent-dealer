@@ -1,8 +1,8 @@
 {
   "name": "agent-dealer",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
-  "description": "Issue queue and execution control plane for coding agents \u2014 admission, developer/reviewer workflow, audit treasure",
+  "description": "Issue queue and execution control plane for coding agents — admission, developer/reviewer workflow, audit treasure",
   "workspaces": [
     "packages/*",
     "apps/*"
