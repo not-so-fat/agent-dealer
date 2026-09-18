@@ -153,6 +153,29 @@ test("reviewer prompt embeds the diff, echoes the exact SHAs to report, and forb
   assert.match(prompt, /You cannot edit files, push, or publish anything/);
 });
 
+test("NOT-150: reviewer verdict rules match the design table (blocking ⇒ changes_requested; escalate needs productScopeQuestion)", () => {
+  const prompt = buildReviewerPrompt(reviewerBase);
+  assert.match(prompt, /"approved": AC met/);
+  assert.match(prompt, /no finding is "blocking"/);
+  assert.match(prompt, /"changes_requested": any "blocking" finding/);
+  assert.match(prompt, /"escalated": only when acceptance criteria/);
+  assert.match(prompt, /MUST set non-empty "productScopeQuestion"/);
+  assert.match(prompt, /not ordinary code defects/);
+  assert.match(prompt, /not "diff too large"/);
+});
+
+test("NOT-150: truncated-diff footer does not reject approved/changes_requested; forbids escalate-for-truncation", async () => {
+  const { formatDiffForPrompt, TOTAL_DIFF_LIMIT } = await import("./prompts.js");
+  const big = "x".repeat(TOTAL_DIFF_LIMIT + 1);
+  const diff = `diff --git a/small.ts b/small.ts\n+ok\n\ndiff --git a/huge.ts b/huge.ts\n+${big}\n`;
+  const formatted = formatDiffForPrompt(diff);
+  assert.equal(formatted.truncated, true);
+  assert.ok(formatted.omittedPaths.some((p) => p.includes("huge.ts")));
+  assert.match(formatted.text, /changes_requested/);
+  assert.match(formatted.text, /Do NOT use "escalated" for truncation/);
+  assert.doesNotMatch(formatted.text, /will not accept "approved" or "changes_requested"/);
+});
+
 test("reviewer prompt includes the developer's conclusion, checks summary, and prior findings when given", () => {
   const prompt = buildReviewerPrompt({
     ...reviewerBase,

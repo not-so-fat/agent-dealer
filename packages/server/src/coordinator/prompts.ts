@@ -167,16 +167,18 @@ const REVIEWER_RESULT_SHAPE =
   '{"verdict":"approved"|"changes_requested"|"escalated","baseSha":"...","headSha":"...","acceptanceCriteriaAssessment":"...","evidenceAssessment":"...","findings":[{"fingerprint":"stable-slug","severity":"blocking"|"non_blocking","title":"...","rationale":"...","file":"...","line":0}],"risks":["..."],"productScopeQuestion":"..."}';
 
 function reviewerContractSection(baseSha: string, headSha: string): string[] {
+  // Verdict table matches docs/PRD_ISSUE_COORDINATION.md §6.4 / design NOT-150 — do not drift.
   return [
     `## Required final JSON block`,
     `End your reply with exactly one fenced \`\`\`json block shaped like:`,
     REVIEWER_RESULT_SHAPE,
-    `Rules:`,
+    `Rules (verdict contract):`,
     `- Set "baseSha" to exactly "${baseSha}" and "headSha" to exactly "${headSha}" — these are the coordinator-verified SHAs you were checked out at, not values you compute.`,
     `- "fingerprint" must be a short, stable slug for the finding (e.g. "missing-null-check-args-ts") so the same issue re-found next round is recognized as recurring, not duplicated.`,
     `- "findings" holds every blocking AND non-blocking observation; "risks" is uncertainties that are not findings tied to a location.`,
-    `- Use "changes_requested" whenever any finding is "blocking". Use "approved" only when there are none.`,
-    `- Use "escalated" only when the acceptance criteria themselves are ambiguous, contradictory, or the diff reveals a missing product decision — not for ordinary code problems. Set "productScopeQuestion" to that question; omit it otherwise.`,
+    `- "approved": AC met for this tip and no finding is "blocking" (non_blocking nits allowed).`,
+    `- "changes_requested": any "blocking" finding a coding pass can address — including incomplete review because AC-critical files were omitted/truncated from the diff. List omitted paths in a blocking finding.`,
+    `- "escalated": only when acceptance criteria / product scope are ambiguous, contradictory, or need a human product call — not ordinary code defects, not "diff too large". You MUST set non-empty "productScopeQuestion"; omit the field otherwise.`,
     `- You cannot edit files, push, or publish anything — you only return this JSON. The coordinator publishes it to GitHub on your behalf.`,
   ];
 }
@@ -186,11 +188,8 @@ function reviewerContractSection(baseSha: string, headSha: string): string[] {
  * earlier, much smaller per-file cap still truncated mid-file on a genuinely large PR,
  * cutting off before the code under review). Whole files only — never a mid-hunk cut,
  * which would be actively misleading — so a file either fits completely or is entirely
- * omitted and counted in `truncated`. `runReviewerEffect` treats `truncated: true` as
- * grounds to override whatever verdict the reviewer reports: the reviewer cannot see the
- * full revision, so no verdict against it can be trusted, and this must be enforced in
- * code — a prompt instruction alone is not a structural guarantee (the same reasoning
- * `args.ts`/`permissions.ts` already apply to enforcement in general).
+ * omitted and listed in `omittedPaths`. Truncation policy (PRD §6.4 / NOT-150): coordinator
+ * remaps illegal escalate / approved+blocking; never blind escalate → Resume|Close.
  */
 export const TOTAL_DIFF_LIMIT = 300_000;
 
@@ -198,34 +197,45 @@ export interface FormattedDiff {
   text: string;
   /** True when at least one changed file had to be omitted for total length. */
   truncated: boolean;
+  /** Paths omitted from the prompt body (empty when not truncated). */
+  omittedPaths: string[];
+}
+
+function pathFromDiffGitHeader(headerLine: string): string | null {
+  // `diff --git a/path b/path` — prefer the b/ side; fall back to a/.
+  const m = headerLine.match(/^diff --git a\/(.+?) b\/(.+)$/);
+  if (!m) return null;
+  return m[2] || m[1] || null;
 }
 
 export function formatDiffForPrompt(diff: string): FormattedDiff {
   const trimmed = diff.trim();
-  if (!trimmed) return { text: "(empty diff)", truncated: false };
+  if (!trimmed) return { text: "(empty diff)", truncated: false, omittedPaths: [] };
 
   const blocks = trimmed.split(/(?=^diff --git )/m).filter(Boolean);
   const manifest = blocks.map((b) => b.slice(0, b.indexOf("\n"))).join("\n");
 
   const pieces: string[] = [];
+  const omittedPaths: string[] = [];
   let total = 0;
-  let omittedFiles = 0;
   for (const block of blocks) {
     if (total + block.length > TOTAL_DIFF_LIMIT) {
-      omittedFiles++;
+      const header = block.slice(0, block.indexOf("\n"));
+      omittedPaths.push(pathFromDiffGitHeader(header) ?? (header || "unknown"));
       continue;
     }
     pieces.push(block);
     total += block.length;
   }
 
-  const truncated = omittedFiles > 0;
+  const truncated = omittedPaths.length > 0;
   const footer = truncated
-    ? `\n... [${omittedFiles} changed file(s) omitted — this diff exceeds ${TOTAL_DIFF_LIMIT} characters. You cannot examine the complete revision; the coordinator will not accept "approved" or "changes_requested" from this session regardless of what you report.]`
+    ? `\n... [${omittedPaths.length} changed file(s) omitted — diff exceeds ${TOTAL_DIFF_LIMIT} characters. Omitted: ${omittedPaths.join(", ")}. If any omitted path is AC-critical, verdict MUST be "changes_requested" with a blocking finding listing those paths. If AC is still certifiable from the visible tip with only non_blocking findings, "approved" is allowed. Do NOT use "escalated" for truncation — escalate only with productScopeQuestion for a true product gap.]`
     : "";
   return {
     text: `Changed files (${blocks.length}):\n${manifest}\n\n${pieces.join("\n")}${footer}`,
     truncated,
+    omittedPaths,
   };
 }
 

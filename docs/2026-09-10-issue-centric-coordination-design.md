@@ -60,6 +60,15 @@
 >    responses, evidence, and continuation preview — the `human_actions` schema already
 >    matches this.
 >
+> ### Accepted architecture — reviewer verdict contract (NOT-150)
+>
+> `approved` / `changes_requested` / `escalated` decision rules, truncation policy, and
+> illegal combinations live in design § Session lifecycle step 6 and PRD §6.4. Code and
+> prompts must match that table: blocking or incomplete/truncated AC-critical review ⇒
+> `changes_requested` (automatic repair); shippable tip ⇒ `approved` then Merge /
+> `auto_merge`; `escalated` only with non-empty `productScopeQuestion` →
+> `product_scope_decision`. Never bare escalate → Resume\|Close for truncated diffs.
+>
 > Landing order: kernel (NOT-59) → execution environment (NOT-60) → developer→PR handoff
 > (NOT-61) → reviewer→decision handoff (NOT-62) → repair/failure policy (NOT-63) →
 > human-action contract (NOT-64) → evidence/measurement + product surfaces (NOT-65) →

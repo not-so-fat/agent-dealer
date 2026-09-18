@@ -523,7 +523,7 @@ test("publish claim: a prior claimant that recorded failure is safely reclaimed 
   assert.equal(github.publishCallCount(), 1);
 });
 
-test("diff truncated: an oversized diff forces the verdict to escalate in code, regardless of what the reviewer reports", async () => {
+test("diff truncated: AC-met approved (no blocking) stays on the approve path — never bare escalate", async () => {
   const issueId = await makeIssue();
   const github = fakeGithub();
 
@@ -544,12 +544,80 @@ test("diff truncated: an oversized diff forces the verdict to escalate in code, 
   await pump(1);
 
   const issue = getIssue(issueId)!;
-  assert.equal(issue.status, "needs_human", "an oversized diff must never reach final_review, even though the reviewer reported approved");
-  assert.ok(listArtifactsForIssue(issueId).find((a) => a.kind === "diff_truncated_evidence"));
-  // The override still publishes — as a COMMENT (escalated's mapped event), never as the
-  // reviewer's actually-reported APPROVE.
+  assert.equal(issue.status, "final_review", "Fixture A: truncated + approved + no blocking → final_review, not opaque escalate");
+  const truncateEvidence = listArtifactsForIssue(issueId).find((a) => a.kind === "diff_truncated_evidence");
+  assert.ok(truncateEvidence);
+  const truncateBody = JSON.parse(truncateEvidence!.contentJson!);
+  assert.equal(truncateBody.overriddenTo, "approved");
   const published = listArtifactsForIssue(issueId).find((a) => a.kind === "review_published");
-  assert.equal(JSON.parse(published!.contentJson!).event, "COMMENT");
+  assert.equal(JSON.parse(published!.contentJson!).event, "APPROVE");
+});
+
+test("diff truncated: blocking incomplete-review finding remaps to changes_requested repair, not escalate", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+
+  const bigFileSpawn: SpawnFn = async (input) => {
+    const lines = Array.from({ length: 20_000 }, (_, i) => `line ${i} of a very large generated file`);
+    fs.writeFileSync(path.join(input.cwd, "big.txt"), `${lines.join("\n")}\n`);
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "add a big file");
+    return { exitCode: 0, transcript: "Implementation conclusion: added a big file.", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: bigFileSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const finding = {
+    fingerprint: "diff-omits-shared-schema-files",
+    severity: "blocking" as const,
+    title: "Shared schema omitted",
+    rationale: "AC-critical shared schema files cannot be certified without seeing them.",
+  };
+  // Fixture B: model reported approved despite blocking (footer used to discourage changes_requested).
+  registerEffectHandler("reviewer", (ctx) =>
+    runReviewerEffect(ctx, {
+      deckCallTool: okDeckCallTool,
+      spawn: verdictSpawn({ verdict: "approved", findings: [finding] }),
+      github,
+    })
+  );
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "repairing", "Fixture B: blocking incomplete review → automatic repair");
+  assert.equal(issue.currentRound, 2);
+  const truncateEvidence = listArtifactsForIssue(issueId).find((a) => a.kind === "diff_truncated_evidence");
+  assert.ok(truncateEvidence);
+  assert.equal(JSON.parse(truncateEvidence!.contentJson!).overriddenTo, "changes_requested");
+  assert.ok(!listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
+});
+
+test("diff truncated: bare escalated remaps to changes_requested with incomplete-review finding", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+
+  const bigFileSpawn: SpawnFn = async (input) => {
+    const lines = Array.from({ length: 20_000 }, (_, i) => `line ${i} of a very large generated file`);
+    fs.writeFileSync(path.join(input.cwd, "big.txt"), `${lines.join("\n")}\n`);
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "add a big file");
+    return { exitCode: 0, transcript: "Implementation conclusion: added a big file.", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: bigFileSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  registerEffectHandler("reviewer", (ctx) =>
+    runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "escalated" }), github })
+  );
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "repairing");
+  const truncateEvidence = listArtifactsForIssue(issueId).find((a) => a.kind === "diff_truncated_evidence");
+  assert.equal(JSON.parse(truncateEvidence!.contentJson!).overriddenTo, "changes_requested");
+  assert.ok(!listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
 });
 
 test("changes_requested: findings thread onto the issue and a fresh developer repair round is queued", async () => {
@@ -589,7 +657,7 @@ test("escalated with a product scope question opens product_scope_decision", asy
   assert.equal(action!.reason, "Should this support X?");
 });
 
-test("escalated with no product scope question opens policy_escalation", async () => {
+test("escalated with no product scope question remaps to automatic repair (NOT-150)", async () => {
   const issueId = await makeIssue();
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
@@ -597,8 +665,8 @@ test("escalated with no product scope question opens policy_escalation", async (
   await pump(1);
 
   const issue = getIssue(issueId)!;
-  assert.equal(issue.status, "needs_human");
-  assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
+  assert.equal(issue.status, "repairing");
+  assert.ok(!listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
 });
 
 test("stale: a head that moved since the reviewer was queued is re-reviewed at the new head, not silently published against the old one", async () => {

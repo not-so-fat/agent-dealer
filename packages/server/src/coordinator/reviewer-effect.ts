@@ -31,7 +31,14 @@ import { getTaskSnapshot } from "./commands.js";
 import { buildReviewerPrompt, formatDiffForPrompt, TOTAL_DIFF_LIMIT } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realReviewerSpawn, reviewerSessionLogPath, type ReviewerSpawn } from "./spawn.js";
-import { parseReviewerResult, ReviewerResult as ReviewerResultSchema, type ReviewerResult, type ReviewerVerdict } from "./reviewer-result.js";
+import {
+  parseReviewerResult,
+  normalizeReviewerResult,
+  INCOMPLETE_REVIEW_FINGERPRINT,
+  ReviewerResult as ReviewerResultSchema,
+  type ReviewerResult,
+  type ReviewerVerdict,
+} from "./reviewer-result.js";
 import {
   createRoleWorktree,
   safeRemoveWorktree,
@@ -146,6 +153,55 @@ async function bestEffortRemove(repo: string, worktreePath: string): Promise<voi
   } catch {
     // leave it for crash-recovery inspection — cleanup is a courtesy, not part of the contract
   }
+}
+
+/** Inject a stable blocking incomplete-review finding listing omitted paths (NOT-150). */
+function withIncompleteReviewFinding(result: ReviewerResult, omittedPaths: string[]): ReviewerResult {
+  if (result.findings.some((f) => f.fingerprint === INCOMPLETE_REVIEW_FINGERPRINT)) {
+    const { productScopeQuestion: _drop, ...rest } = result;
+    return { ...rest, verdict: "changes_requested" };
+  }
+  const paths = omittedPaths.length > 0 ? omittedPaths.join(", ") : "(unlisted omitted files)";
+  const { productScopeQuestion: _drop, ...rest } = result;
+  return {
+    ...rest,
+    verdict: "changes_requested",
+    findings: [
+      ...result.findings,
+      {
+        fingerprint: INCOMPLETE_REVIEW_FINGERPRINT,
+        severity: "blocking",
+        title: "Diff truncated — incomplete review",
+        rationale: `Reviewer prompt omitted path(s): ${paths}. Cannot fully certify acceptance criteria without them; shrink the change set or split the PR so the next review sees the full AC-critical surface.`,
+      },
+    ],
+  };
+}
+
+/**
+ * Truncation remap (PRD §6.4 / design NOT-150): never blind escalate → Resume|Close.
+ * Shippable approved (no blocking) stays approved; otherwise ensure changes_requested with
+ * a blocking finding (existing or injected incomplete-review).
+ */
+function applyTruncationVerdictPolicy(result: ReviewerResult, omittedPaths: string[]): ReviewerResult {
+  const normalized = normalizeReviewerResult(result);
+  const hasBlocking = normalized.findings.some((f) => f.severity === "blocking");
+  const hasProductQ = !!normalized.productScopeQuestion?.trim();
+
+  if (normalized.verdict === "escalated" && hasProductQ) {
+    return normalized;
+  }
+
+  if (normalized.verdict === "approved" && !hasBlocking) {
+    return normalized;
+  }
+
+  if (!hasBlocking) {
+    return withIncompleteReviewFinding(normalized, omittedPaths);
+  }
+
+  const { productScopeQuestion: _drop, ...rest } = normalized;
+  return { ...rest, verdict: "changes_requested" };
 }
 
 function readImplementationConclusion(issueId: string): string | null {
@@ -330,7 +386,7 @@ export async function runReviewerEffect(
     await fetchRef(worktreePath, baseBranch);
     const baseSha = await mergeBase({ repo: worktreePath, base: `origin/${baseBranch}`, head: headSha });
     const diff = await diffShas({ worktreePath, baseSha, headSha });
-    const { truncated: diffTruncated } = formatDiffForPrompt(diff);
+    const { truncated: diffTruncated, omittedPaths } = formatDiffForPrompt(diff);
 
     const openFindings = listFindingsForIssue(issue.id).filter(
       (f) => f.status === "open" || f.status === "recurring"
@@ -463,20 +519,23 @@ export async function runReviewerEffect(
     }
     result = parsed;
 
-    // A prompt instruction alone ("don't approve an incomplete diff") is not a structural
-    // guarantee — the same reasoning this codebase already applies to tool permissions
-    // (args.ts/permissions.ts). If the diff had to be truncated, the reviewer's verdict is
-    // overridden to "escalated" in code, regardless of what it actually reported, so a
-    // truncated review can never reach final_review or an automatic repair loop.
-    if (diffTruncated && result.verdict !== "escalated") {
+    // Truncation policy (PRD §6.4 / design NOT-150): never blind-escalate to Resume|Close.
+    // Persist evidence; remap bare escalate / approved+blocking; keep shippable approved.
+    if (diffTruncated) {
+      const reportedVerdict = result.verdict;
+      result = applyTruncationVerdictPolicy(result, omittedPaths);
       createIssueArtifact({
         issueId: issue.id,
         workerSessionId: sessionId,
         kind: "diff_truncated_evidence",
         author: "system",
-        content: { reportedVerdict: result.verdict, overriddenTo: "escalated", diffCharLimit: TOTAL_DIFF_LIMIT },
+        content: {
+          reportedVerdict,
+          overriddenTo: result.verdict,
+          diffCharLimit: TOTAL_DIFF_LIMIT,
+          omittedPaths,
+        },
       });
-      result = { ...result, verdict: "escalated" };
     }
    } catch {
     return { kind: "session_failed" };
@@ -520,7 +579,8 @@ export async function runReviewerEffect(
       // diff). A `row` with no recorded result (still `claimed` after every wait
       // attempt, or the winner itself failed) has nothing safe to report — escalate.
       if (claim.row?.state === "published" && claim.row.resultJson) {
-        const winnerResult = ReviewerResultSchema.parse(JSON.parse(claim.row.resultJson));
+        const winnerParsed = ReviewerResultSchema.parse(JSON.parse(claim.row.resultJson));
+        const winnerResult = normalizeReviewerResult(winnerParsed);
         return { kind: "verdict", result: winnerResult };
       }
       return { kind: "publish_failed" };

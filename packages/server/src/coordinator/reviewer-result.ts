@@ -47,17 +47,19 @@ export function normalizeReviewerResult(raw: ReviewerResult): ReviewerResult {
     return { ...rest, verdict: "changes_requested" };
   }
 
-  if (raw.verdict === "approved" && hasBlocking) {
-    return { ...raw, verdict: "changes_requested" };
-  }
-
   // Drop a stray productScopeQuestion on non-escalate verdicts.
-  if (question && raw.verdict !== "escalated") {
-    const { productScopeQuestion: _drop, ...rest } = raw;
-    return rest;
+  const withoutQuestion = question
+    ? (() => {
+        const { productScopeQuestion: _drop, ...rest } = raw;
+        return rest;
+      })()
+    : raw;
+
+  if (withoutQuestion.verdict === "approved" && hasBlocking) {
+    return { ...withoutQuestion, verdict: "changes_requested" };
   }
 
-  return question ? { ...raw, productScopeQuestion: question } : { ...raw };
+  return withoutQuestion;
 }
 
 /** Mirrors the plan-triage/reflect JSON-fence parsing pattern already used elsewhere. */
