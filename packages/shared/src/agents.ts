@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PhaseBudget } from "./budget.js";
+import { PhaseBudget, parsePhaseBudget, serializePhaseBudget } from "./budget.js";
 import { Runtime } from "./runtime.js";
 import { PermissionPolicyOverride } from "./profile-snapshot.js";
 
@@ -113,3 +113,27 @@ export const AgentsSnapshot = z.object({
   issueCount: z.number(),
 });
 export type AgentsSnapshot = z.infer<typeof AgentsSnapshot>;
+
+// The effective execution defaults for a profile.
+//
+// NOT-71 collapsed the plan/execute pair into one role-neutral column, but profiles
+// persisted before that still carry values only in the legacy columns. This is the
+// narrow read-compatibility path for those rows: it is the single definition of
+// "what this profile actually runs with", shared by the snapshot builder and the
+// agent edit form so the UI can never show blank while a hidden legacy value is in
+// force. updateAgent() normalizes the legacy columns away on the next write, so a
+// profile only takes this fallback until it is next edited.
+
+/** Role-neutral model, falling back through the legacy phase columns (execute → plan). */
+export function resolveProfileModel(agent: AgentProfile): string | null {
+  return agent.defaultModel ?? agent.defaultExecuteModel ?? agent.defaultPlanModel ?? null;
+}
+
+/** Role-neutral budget JSON, same fallback order as the model. */
+export function resolveProfileBudgetJson(agent: AgentProfile): string | null {
+  const budget =
+    parsePhaseBudget(agent.defaultBudgetJson) ??
+    parsePhaseBudget(agent.defaultExecuteBudgetJson) ??
+    parsePhaseBudget(agent.defaultPlanBudgetJson);
+  return serializePhaseBudget(budget);
+}

@@ -63,3 +63,44 @@ test("snapshot captures deck, workspace, purpose and external memory refs", () =
   assert.equal(snap.runtime, "codex_local");
   assert.equal(snap.version, 1);
 });
+
+test("editing a legacy profile collapses the plan/execute columns instead of stranding them", () => {
+  // Reported on PR #59: startEdit read only the role-neutral column, so a legacy profile
+  // showed blank controls while the snapshot kept resolving the hidden legacy value.
+  const created = createAgent({ name: "collapse", runtime: "claude_code", workspaceRoot: "/repo" });
+  getDb()
+    .prepare(
+      "UPDATE agents SET default_execute_model = ?, default_execute_budget_json = ? WHERE id = ?"
+    )
+    .run("claude-sonnet-5", JSON.stringify({ maxTurns: 7 }), created.id);
+
+  // An edit that does not mention the defaults must preserve what actually ran...
+  const renamed = updateAgent(created.id, { name: "collapse-renamed" })!;
+  assert.equal(buildProfileSnapshot(renamed, "developer").model, "claude-sonnet-5");
+
+  // ...by moving it into the role-neutral column, not by leaving the legacy one in place.
+  const row = getDb()
+    .prepare(
+      "SELECT default_model, default_execute_model, default_execute_budget_json FROM agents WHERE id = ?"
+    )
+    .get(created.id) as {
+    default_model: string | null;
+    default_execute_model: string | null;
+    default_execute_budget_json: string | null;
+  };
+  assert.equal(row.default_model, "claude-sonnet-5");
+  assert.equal(row.default_execute_model, null);
+  assert.equal(row.default_execute_budget_json, null);
+});
+
+test("switching runtime does not carry the old runtime's legacy model into the new snapshot", () => {
+  // Reviewer's repro: a legacy Cursor profile on `auto`, switched to Claude with the model
+  // cleared, still produced a Claude snapshot running Cursor's `auto`.
+  const created = createAgent({ name: "switch", runtime: "cursor_local", workspaceRoot: "/repo" });
+  getDb().prepare("UPDATE agents SET default_execute_model = ? WHERE id = ?").run("auto", created.id);
+
+  const switched = updateAgent(created.id, { runtime: "claude_code", defaultModel: null })!;
+  const snap = buildProfileSnapshot(switched, "developer");
+  assert.equal(snap.runtime, "claude_code");
+  assert.equal(snap.model, null);
+});

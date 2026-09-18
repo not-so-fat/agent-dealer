@@ -1,5 +1,7 @@
 import type { AgentProfile, CreateAgentInput, Runtime, UpdateAgentInput } from "@agent-dealer/shared";
 import {
+  resolveProfileBudgetJson,
+  resolveProfileModel,
   serializePermissionPolicyOverride,
   serializePhaseBudget,
   serializeStringList,
@@ -113,11 +115,18 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
     input.workspaceRoot !== undefined ? input.workspaceRoot?.trim() || null : existing.workspaceRoot;
   const deckId = input.deckId !== undefined ? input.deckId : existing.deckId;
   const playbookId = input.playbookId !== undefined ? input.playbookId : existing.playbookId;
-  const defaultModel = input.defaultModel !== undefined ? input.defaultModel : existing.defaultModel;
+  // Collapse the pre-NOT-71 plan/execute columns into the role-neutral one on every write,
+  // and clear them below. Reading them back (resolveProfile*) is deliberate compatibility for
+  // rows written before the migration; continuing to *keep* them is not. Without this, editing
+  // a legacy profile saved a null role-neutral model while the legacy column kept winning the
+  // fallback — so the form showed blank while the session still ran the hidden value, and
+  // switching runtime carried the old runtime's model into the new one's snapshot.
+  const defaultModel =
+    input.defaultModel !== undefined ? input.defaultModel : resolveProfileModel(existing);
   const defaultBudgetJson =
     input.defaultBudget !== undefined
       ? serializePhaseBudget(input.defaultBudget)
-      : existing.defaultBudgetJson;
+      : resolveProfileBudgetJson(existing);
   const purpose =
     input.purpose !== undefined ? input.purpose?.trim() || null : existing.purpose;
   const playbookIdsJson =
@@ -137,6 +146,8 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
     .prepare(`
       UPDATE agents SET name = ?, runtime = ?, deck_id = ?, deck_name = ?, playbook_id = ?, workspace_root = ?,
         default_model = ?, default_budget_json = ?, purpose = ?, playbook_ids_json = ?, external_memory_refs_json = ?, permission_policy_json = ?,
+        default_plan_model = NULL, default_execute_model = NULL,
+        default_plan_budget_json = NULL, default_execute_budget_json = NULL,
         updated_at = ?
       WHERE id = ?
     `)

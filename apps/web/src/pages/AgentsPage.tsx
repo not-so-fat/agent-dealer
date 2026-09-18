@@ -1,6 +1,10 @@
 import { useState } from "react";
 import type { AgentWithHealth, CreateAgentInput, UpdateAgentInput } from "@agent-dealer/shared";
-import { parseStringList } from "@agent-dealer/shared";
+import {
+  parseStringList,
+  resolveProfileBudgetJson,
+  resolveProfileModel,
+} from "@agent-dealer/shared";
 import AgentConfigFields, {
   parseRefList,
   permissionFlagsFromJson,
@@ -83,8 +87,12 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
       deckId: agent.deckId ?? "",
       playbookId: agent.playbookId ?? "",
       purpose: agent.purpose ?? "",
-      defaultModel: agent.defaultModel ?? "",
-      defaultBudget: agentPhaseBudgetFromJson(agent.defaultBudgetJson),
+      // Effective values, not just the role-neutral columns: a profile written before
+      // NOT-71 keeps its defaults in the legacy plan/execute columns, and showing blank
+      // here would hide the values the session actually runs with (and silently discard
+      // them on save).
+      defaultModel: resolveProfileModel(agent) ?? "",
+      defaultBudget: agentPhaseBudgetFromJson(resolveProfileBudgetJson(agent)),
       playbookIds: parseStringList(agent.playbookIdsJson),
       externalMemoryRefs: parseStringList(agent.externalMemoryRefsJson).join("\n"),
       ...permissionFlagsFromJson(agent.permissionPolicyJson),
