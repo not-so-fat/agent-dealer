@@ -78,6 +78,50 @@ import {
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
+/**
+ * NOT-147: attach commits-ahead + worktree/log pointers on timeout/crash so routing can
+ * escalate empty tips instead of burning another full spawn. Prefers counting from the
+ * worktree HEAD while it still exists; falls back to inspecting the issue branch ref.
+ */
+async function crashOrTimeoutOutcome(opts: {
+  timedOut: boolean;
+  reason: string;
+  worktreePath: string;
+  logPath?: string | null;
+  repoPath: string;
+  branchName: string;
+  baseBranch: string;
+  baseSha?: string | null;
+}): Promise<Extract<DeveloperOutcome, { kind: "timed_out" | "session_failed" }>> {
+  let ahead = await commitsAhead({
+    worktreePath: opts.worktreePath,
+    baseRef: `origin/${opts.baseBranch}`,
+  }).catch(() => -1);
+  if (ahead < 0) {
+    const progress = await inspectBranchProgress({
+      repo: opts.repoPath,
+      branch: opts.branchName,
+      baseRefs: baseRefCandidates({
+        baseSha: opts.baseSha ?? null,
+        baseBranch: opts.baseBranch,
+      }),
+    });
+    ahead =
+      progress.state === "empty" || progress.state === "absent"
+        ? 0
+        : "ahead" in progress
+          ? progress.ahead
+          : 0;
+  }
+  return {
+    kind: opts.timedOut ? "timed_out" : "session_failed",
+    reason: opts.reason,
+    commitsAhead: ahead,
+    worktreePath: opts.worktreePath,
+    ...(opts.logPath ? { logPath: opts.logPath } : {}),
+  };
+}
+
 export const developerEffectConfig = {
   get sessionTimeoutMs(): number {
     return developerSessionTimeoutMs();
@@ -859,9 +903,16 @@ export async function runDeveloperEffect(
             runtime,
           });
           const salvageNote = `Salvaged uncommitted work as ${salvaged.message} (${salvaged.commitSha.slice(0, 7)}).`;
-          return spawned.timedOut
-            ? { kind: "timed_out", reason: `${crashReason} ${salvageNote}` }
-            : { kind: "session_failed", reason: `${crashReason} ${salvageNote}` };
+          return crashOrTimeoutOutcome({
+            timedOut: Boolean(spawned.timedOut),
+            reason: `${crashReason} ${salvageNote}`,
+            worktreePath,
+            logPath: spawned.logPath,
+            repoPath,
+            branchName,
+            baseBranch,
+            baseSha: issue.baseSha,
+          });
         }
         // Salvage failed — do not remove. Escalate with actionable recovery.
         const dirtyReason = reasonForDirtyWorktree(spawned.logPath, runtime);
@@ -872,10 +923,22 @@ export async function runDeveloperEffect(
           recoveryCommands: dirtyWorktreeRecoveryCommands(repoPath, worktreePath),
         };
       }
+      const crashOutcome = await crashOrTimeoutOutcome({
+        timedOut: Boolean(spawned.timedOut),
+        reason: reasonForSessionCrash({
+          timedOut: Boolean(spawned.timedOut),
+          logPath: spawned.logPath,
+          runtime,
+        }),
+        worktreePath,
+        logPath: spawned.logPath,
+        repoPath,
+        branchName,
+        baseBranch,
+        baseSha: issue.baseSha,
+      });
       await bestEffortRemove(repoPath, worktreePath);
-      return spawned.timedOut
-        ? { kind: "timed_out", reason: reasonForSessionCrash({ timedOut: true, logPath: spawned.logPath, runtime }) }
-        : { kind: "session_failed", reason: reasonForSessionCrash({ timedOut: false, logPath: spawned.logPath, runtime }) };
+      return crashOutcome;
     }
 
     // Persisted as soon as the session itself completes — a review round found these
