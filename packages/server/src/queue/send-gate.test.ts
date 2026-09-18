@@ -49,7 +49,8 @@ function seedReviewRun(withDraft = true) {
     title: "Send gate test",
     taskCategory: "communication",
     status: "plan_pending",
-    agentId: BUILTIN_AGENT_CLAUDE_ID});
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    repo: "acme/app"});
   updateRunFields(run.id, { deck_id: DECK });
   transitionRun(run.id, "plan_approved");
   transitionRun(run.id, "running");

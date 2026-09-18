@@ -31,6 +31,22 @@ function initFixtureRepo(): string {
   return dir;
 }
 
+test("resolveCheckoutBaseBranch: managed uses remote default; legacy keeps issue base", async () => {
+  const { resolveCheckoutBaseBranch } = await import("./managed-repo.js");
+  assert.equal(
+    resolveCheckoutBaseBranch("develop", { kind: "managed", defaultBranch: "main" }),
+    "main"
+  );
+  assert.equal(
+    resolveCheckoutBaseBranch("develop", { kind: "legacy_local" }),
+    "develop"
+  );
+  assert.equal(
+    resolveCheckoutBaseBranch("main", { kind: "managed" }),
+    "main"
+  );
+});
+
 test("classifyIssueRepo: GitHub identity maps to managed path under execution root", () => {
   const r = classifyIssueRepo("acme/app");
   assert.equal(r.kind, "managed");

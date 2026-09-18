@@ -21,7 +21,8 @@ function makeRun() {
     title: "Prompt test task",
     taskCategory: "other",
     status: "plan_pending",
-    agentId: BUILTIN_AGENT_CLAUDE_ID});
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    repo: "acme/app"});
 }
 
 test("reflect prompt restates the task and the read-only patch contract", () => {

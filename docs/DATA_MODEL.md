@@ -99,7 +99,7 @@ Two separate CLI processes (plan + execute). Context carryover via `approved_pla
 | `source` | `manual` \| `linear` |
 | `external_id` | Linear issue UUID (when `source=linear`) |
 | `external_label` | Human id e.g. `ENG-123` — UI + prompts |
-| `repo` | Snapshot at create: `task.repo ?? agent.workspace_root` |
+| `repo` | Snapshot at create from the task/issue input (agent workspace is no longer used) |
 
 ## intake_settings table
 
@@ -118,7 +118,7 @@ Key/value JSON for Inbox config (not secrets). Keys: `linear.stateFilter`, `line
 | Column | Role |
 |--------|------|
 | `repo` | Portable GitHub identity `github.com/owner/repo` for new issues; legacy rows may still hold a local path until migrated |
-| `base_branch` | Base branch (remote default resolved at workflow start when using managed clones) |
+| `base_branch` | Seed at create; for managed GitHub clones, overwritten from the remote default at first checkout so it matches PR/worktree base |
 
 Worker session checkouts are under `$AGENT_DEALER_HOME/execution/` (or `AGENT_DEALER_EXECUTION_ROOT`); the concrete path is persisted on `worker_sessions.worktree_path`.
 

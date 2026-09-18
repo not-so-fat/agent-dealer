@@ -70,7 +70,8 @@ async function buildApp() {
   return app;
 }
 
-const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not118-repo-"));
+/** Portable GitHub identity — HTTP create rejects local paths (NOT-149). */
+const repo = "acme/not118";
 const dev = createAgent({ name: `not118-dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
 const rev = createAgent({ name: `not118-rev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
 

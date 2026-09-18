@@ -190,3 +190,18 @@ export function roleWorktreePathForResolution(
   }
   return path.join(worktreesRootForResolution(resolution), `${sessionId}-${role}`);
 }
+
+/**
+ * Single base-branch rule for worktree cut, PR create/identity, and review merge-base (NOT-149).
+ * Managed checkouts use the freshly fetched remote default; legacy local paths keep
+ * `issue.baseBranch`. Call sites must not invent a second rule.
+ */
+export function resolveCheckoutBaseBranch(
+  issueBaseBranch: string,
+  checkout: { kind: "managed" | "legacy_local"; defaultBranch?: string }
+): string {
+  if (checkout.kind === "managed" && checkout.defaultBranch) {
+    return checkout.defaultBranch;
+  }
+  return issueBaseBranch;
+}

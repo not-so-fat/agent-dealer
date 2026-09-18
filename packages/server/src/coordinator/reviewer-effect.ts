@@ -27,7 +27,7 @@ import path from "node:path";
 import { parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
 import type { EffectContext } from "./effect-registry.js";
 import type { ReviewerOutcome } from "./routing.js";
-import { getTaskSnapshot } from "./commands.js";
+import { getTaskSnapshot, TASK_SNAPSHOT_ARTIFACT_KIND } from "./commands.js";
 import { buildReviewerPrompt, formatDiffForPrompt, TOTAL_DIFF_LIMIT } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realReviewerSpawn, reviewerSessionLogPath, type ReviewerSpawn } from "./spawn.js";
@@ -43,6 +43,7 @@ import {
 import {
   ensureIssueRepoCheckout,
   roleWorktreePathForResolution,
+  resolveCheckoutBaseBranch,
 } from "../adapters/managed-repo.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adapters/github.js";
@@ -52,6 +53,7 @@ import { reviewerSessionTimeoutMs } from "./session-timeouts.js";
 import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
+import { updateIssue } from "../repository/issues.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
 import { classifyRunnerLogFailure } from "./failure-reason.js";
@@ -255,10 +257,27 @@ export async function runReviewerEffect(
   let result: ReviewerResult;
   let workerAuthority: { mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   let repoPath: string;
+  let baseBranch: string;
   try {
    try {
     const checkout = await ensureIssueRepoCheckout(issue.repo);
     repoPath = checkout.repoPath;
+    baseBranch = resolveCheckoutBaseBranch(issue.baseBranch, checkout);
+    // Align issue row + frozen task_snapshot with the base this session uses (prompts /
+    // baseRefCandidates / UI all read issue.baseBranch).
+    if (baseBranch !== issue.baseBranch) {
+      updateIssue(issue.id, { baseBranch });
+      issue.baseBranch = baseBranch;
+      const snap = getTaskSnapshot(issue);
+      if (snap.baseBranch !== baseBranch) {
+        createIssueArtifact({
+          issueId: issue.id,
+          kind: TASK_SNAPSHOT_ARTIFACT_KIND,
+          author: "system",
+          content: { ...snap, baseBranch },
+        });
+      }
+    }
     const worktree = await createRoleWorktree({
       repo: repoPath,
       role: "reviewer",
@@ -322,8 +341,8 @@ export async function runReviewerEffect(
     // Recomputed here rather than trusted off `issue.baseSha`: a retry_reviewer_at_new_head
     // round only re-patches `headSha` (commands.ts's applyReviewer), so the issue's stored
     // baseSha could describe a different head than the one this session is pinned to.
-    await fetchRef(worktreePath, issue.baseBranch);
-    const baseSha = await mergeBase({ repo: worktreePath, base: `origin/${issue.baseBranch}`, head: headSha });
+    await fetchRef(worktreePath, baseBranch);
+    const baseSha = await mergeBase({ repo: worktreePath, base: `origin/${baseBranch}`, head: headSha });
     const diff = await diffShas({ worktreePath, baseSha, headSha });
     const { truncated: diffTruncated } = formatDiffForPrompt(diff);
 

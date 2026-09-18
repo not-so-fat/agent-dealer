@@ -16,10 +16,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
+import { parseProfileSnapshot, roleCeiling, type Issue } from "@agent-dealer/shared";
 import type { EffectContext } from "./effect-registry.js";
 import type { DeveloperOutcome } from "./routing.js";
-import { getTaskSnapshot } from "./commands.js";
+import { getTaskSnapshot, TASK_SNAPSHOT_ARTIFACT_KIND } from "./commands.js";
 import { buildDeveloperPrompt } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn } from "./spawn.js";
@@ -41,6 +41,7 @@ import {
 import {
   ensureIssueRepoCheckout,
   roleWorktreePathForResolution,
+  resolveCheckoutBaseBranch,
 } from "../adapters/managed-repo.js";
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
@@ -52,8 +53,27 @@ import { developerSessionTimeoutMs } from "./session-timeouts.js";
 import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
+import { updateIssue } from "../repository/issues.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
+
+/**
+ * Keep issue.baseBranch + frozen task_snapshot aligned with resolveCheckoutBaseBranch so
+ * prompts, baseRefCandidates, and the Issues UI all see the same base the PR was cut from.
+ */
+function syncIssueBaseBranch(issue: Issue, resolved: string): void {
+  if (issue.baseBranch === resolved) return;
+  updateIssue(issue.id, { baseBranch: resolved });
+  issue.baseBranch = resolved;
+  const snap = getTaskSnapshot(issue);
+  if (snap.baseBranch === resolved) return;
+  createIssueArtifact({
+    issueId: issue.id,
+    kind: TASK_SNAPSHOT_ARTIFACT_KIND,
+    author: "system",
+    content: { ...snap, baseBranch: resolved },
+  });
+}
 import { recordUsageCapFromLog } from "../runners/usage-cap.js";
 import { reasonForDirtyWorktree, reasonForSessionCrash } from "./failure-reason.js";
 import {
@@ -251,10 +271,8 @@ async function runPublishOnlyHandoff(
   const stage = issue.status;
   const checkout = await ensureIssueRepoCheckout(issue.repo);
   const cwd = checkout.repoPath;
-  const baseBranch =
-    checkout.kind === "managed" && checkout.defaultBranch
-      ? checkout.defaultBranch
-      : issue.baseBranch;
+  const baseBranch = resolveCheckoutBaseBranch(issue.baseBranch, checkout);
+  syncIssueBaseBranch(issue, baseBranch);
 
   const milestone = (
     type: Parameters<typeof emitSessionMilestone>[0]["type"],
@@ -489,7 +507,7 @@ export async function runDeveloperEffect(
 
   const session = getWorkerSession(sessionId);
   const snapshot = parseProfileSnapshot(session?.profileSnapshotJson);
-  const taskSnapshot = getTaskSnapshot(issue);
+  let taskSnapshot = getTaskSnapshot(issue);
   const runtime = snapshot?.runtime ?? "claude_code";
   const round = workItem.round;
   const stage = issue.status;
@@ -526,12 +544,9 @@ export async function runDeveloperEffect(
     const checkout = await ensureIssueRepoCheckout(issue.repo);
     repoPath = checkout.repoPath;
     desiredWorktreePath = roleWorktreePathForResolution(checkout, sessionId, "developer");
-    // Freshly fetched remote default for new work; explicit issue.baseBranch wins when set
-    // to something other than the historical default, or when legacy local checkouts apply.
-    baseBranch =
-      checkout.kind === "managed" && checkout.defaultBranch && !issue.branch
-        ? checkout.defaultBranch
-        : issue.baseBranch;
+    baseBranch = resolveCheckoutBaseBranch(issue.baseBranch, checkout);
+    syncIssueBaseBranch(issue, baseBranch);
+    taskSnapshot = getTaskSnapshot(issue);
     if (checkout.kind === "managed" && checkout.defaultBranch) {
       try {
         await fetchRef(repoPath, checkout.defaultBranch);

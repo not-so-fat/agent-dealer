@@ -20,7 +20,8 @@ test("manual create mints external_id = run.id and leaves external_label null", 
     title: "Manual task",
     taskCategory: "other",
     status: "plan_pending",
-    agentId: BUILTIN_AGENT_CLAUDE_ID});
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    repo: "acme/app"});
   assert.equal(run.externalId, run.id);
   assert.equal(run.externalLabel, null);
   assert.equal(run.source, "manual");
@@ -31,13 +32,15 @@ test("manual retry copies parent external_id", () => {
     title: "Manual task",
     taskCategory: "other",
     status: "plan_pending",
-    agentId: BUILTIN_AGENT_CLAUDE_ID});
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    repo: "acme/app"});
   const child = createRun(
     {
       title: parent.title,
       taskCategory: parent.taskCategory,
       status: "plan_approved",
-      agentId: BUILTIN_AGENT_CLAUDE_ID},
+      agentId: BUILTIN_AGENT_CLAUDE_ID,
+      repo: "acme/app"},
     {
       source: parent.source,
       externalId: parent.externalId ?? undefined,
@@ -57,7 +60,8 @@ test("explicit linear externalId is not replaced by run.id", () => {
       title: "LIN-1: Linear task",
       taskCategory: "code",
       status: "plan_pending",
-      agentId: BUILTIN_AGENT_CLAUDE_ID},
+      agentId: BUILTIN_AGENT_CLAUDE_ID,
+      repo: "acme/app"},
     { source: "linear", externalId: issueId, externalLabel: "LIN-1" }
   );
   assert.equal(run.externalId, issueId);

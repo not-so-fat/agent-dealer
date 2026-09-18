@@ -94,6 +94,8 @@ function git(cwd: string, ...args: string[]): string {
 let repo: string;
 let remote: string;
 
+const { managedRepoPath } = await import("./adapters/managed-repo.js");
+
 before(() => {
   repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not79-repo-"));
   git(repo, "init", "-q", "-b", "main");
@@ -107,7 +109,17 @@ before(() => {
   execFileSync("git", ["init", "-q", "--bare", "-b", "main", remote]);
   git(repo, "remote", "add", "origin", remote);
   git(repo, "push", "-q", "origin", "main");
+
+  // NOT-149: wire create uses a GitHub identity; seed Dealer's managed clone from the
+  // hermetic fixture so ensureIssueRepoCheckout does not hit the network.
+  const managed = managedRepoPath("github.com/dealer-test/not79");
+  fs.mkdirSync(path.dirname(managed), { recursive: true });
+  execFileSync("git", ["clone", "--quiet", repo, managed]);
+  git(managed, "remote", "set-url", "origin", remote);
 });
+
+/** Portable identity passed to `issue create --repo` (NOT-149). */
+const ISSUE_REPO = "dealer-test/not79";
 
 after(() => {
   fs.rmSync(repo, { recursive: true, force: true });
@@ -303,7 +315,7 @@ test(
         "--title",
         "Add widget",
         "--repo",
-        repo,
+        ISSUE_REPO,
         "--developer-agent",
         devFromCli!.id,
         "--reviewer-agent",

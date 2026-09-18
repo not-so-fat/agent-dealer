@@ -207,7 +207,8 @@ function seedRunAwaitingDeliveryDecision() {
     title: "Send gate action-route test",
     taskCategory: "communication",
     status: "plan_pending",
-    agentId: BUILTIN_AGENT_CLAUDE_ID});
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    repo: "acme/app"});
   updateRunFields(run.id, { deck_id: "6e825b59-13de-4ddd-ab7e-55ab5a1c279a" });
   transitionRun(run.id, "plan_approved");
   transitionRun(run.id, "running");

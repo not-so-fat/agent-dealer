@@ -368,7 +368,8 @@ export default function IssuesListPage({
             </div>
             <input
               className="w-32 bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-              placeholder="Base branch"
+              placeholder="Base (seed)"
+              title="Seed only — managed GitHub clones use the remote default at first checkout"
               value={baseBranch}
               onChange={(e) => setBaseBranch(e.target.value)}
             />

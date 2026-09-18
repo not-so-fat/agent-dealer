@@ -49,6 +49,12 @@ before(() => migrate());
 beforeEach(() => getDb().exec("DELETE FROM review_publications; DELETE FROM work_items;"));
 after(() => resetEffectHandlers());
 
+/** NOT-149: agents always carry a deckId; hermetic effect tests stub get_bound_deck. */
+const TEST_DECK_ID = "00000000-0000-4000-a000-000000000099";
+const okDeckCallTool = async (_name: string, _args: Record<string, unknown>) => ({
+  content: [{ type: "text" as const, text: JSON.stringify({ id: TEST_DECK_ID, name: "test-deck" }) }],
+});
+
 let repo: string;
 let remote: string;
 
@@ -201,8 +207,12 @@ test("developer round 1 → reviewer changes_requested → developer round 2 on 
   // handler closure, or every invocation would reset to round 1's behavior.
   const devSpawn = roundAwareDeveloperSpawn();
   const revSpawn = roundAwareReviewerSpawn();
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: devSpawn, github }));
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: revSpawn, github }));
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: devSpawn, github, deckCallTool: okDeckCallTool })
+  );
+  registerEffectHandler("reviewer", (ctx) =>
+    runReviewerEffect(ctx, { spawn: revSpawn, github, deckCallTool: okDeckCallTool })
+  );
 
   startWorkflow(issueId);
   await pump();

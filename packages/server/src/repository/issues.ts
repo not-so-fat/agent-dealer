@@ -8,7 +8,6 @@ import {
   type IssueStatus,
   TERMINAL_ISSUE_STATUSES,
 } from "@agent-dealer/shared";
-import fs from "node:fs";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
 
@@ -80,17 +79,12 @@ function rowToIssue(row: IssueRow): Issue {
 /**
  * Persistable `issues.repo` value (NOT-149):
  * - GitHub URL / owner/repo → canonical `github.com/owner/repo`
- * - Existing local filesystem path → kept as-is for in-flight recovery / tests
- * - Missing local path → hard error (never guess a remote)
+ * - Local filesystem path → kept as-is for in-flight recovery / tests (existence is
+ *   checked at checkout resolve time via classifyIssueRepo — never guess a remote)
  */
 export function normalizeStoredIssueRepo(repoRaw: string): string {
   const trimmed = repoRaw.trim();
   if (looksLikeLocalRepoPath(trimmed)) {
-    if (!fs.existsSync(trimmed)) {
-      throw new Error(
-        `Legacy issue repo path is missing (${trimmed}). Re-create the issue with a GitHub URL, or restore the checkout — Dealer will not guess a remote.`
-      );
-    }
     return trimmed;
   }
   return parseGitHubRepoInput(trimmed).identity;

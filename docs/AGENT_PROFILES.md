@@ -53,7 +53,7 @@ Built-in Claude, Cursor, and Codex agents ship with **no default Deck**. Configu
 
 ## Issue repository
 
-At Issues create, the operator supplies a **GitHub repository URL** or `owner/repo` shorthand. Dealer stores the canonical identity `github.com/<owner>/<repo>`, clones/fetches under the execution root, and starts new workflows from the freshly fetched remote default branch (an explicit base override remains advanced configuration).
+At Issues create, the operator supplies a **GitHub repository URL** or `owner/repo` shorthand. Dealer stores the canonical identity `github.com/<owner>/<repo>`, clones/fetches under the execution root, and starts new workflows from the freshly fetched remote default branch. That resolved base is written back onto `issues.base_branch` (and the frozen task snapshot) so prompts, PR identity checks, and the Issues UI stay aligned. The create form's Base branch field is a seed/fallback for display and legacy local-path issues — managed clones overwrite it from `origin/HEAD` at first checkout.
 
 Legacy issue rows that still hold a local filesystem path remain recoverable when that path still exists — Dealer will not guess a remote when `origin` cannot be resolved.
 
