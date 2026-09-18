@@ -9,6 +9,7 @@ import {
   fetchQueue,
   fetchRecentRepos,
   lookupLinearIssue,
+  moveQueueEntry,
   resolveHumanAction,
   type IssueListRow,
   type QueueEntryRow,
@@ -205,7 +206,7 @@ export default function IssuesListPage({
             <span className="text-xs text-white/40">{queue.length} waiting · sequential</span>
           </div>
           <div className="divide-y divide-white/5">
-            {queue.map((entry) => (
+            {queue.map((entry, index) => (
               <div key={entry.id} className="px-4 py-2 flex items-start gap-3">
                 <span className="text-xs text-white/35 w-5 shrink-0 pt-0.5">{entry.position}</span>
                 <Link
@@ -223,17 +224,75 @@ export default function IssuesListPage({
                     </span>
                   )}
                 </Link>
-                <button
-                  type="button"
-                  className="text-xs text-white/40 hover:text-white shrink-0"
-                  onClick={() => {
-                    dequeueIssue(entry.issueId)
-                      .then(refresh)
-                      .catch((e) => setError(String(e)));
-                  }}
-                >
-                  Remove
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={index === 0}
+                    title="Move to top"
+                    onClick={() => {
+                      moveQueueEntry(entry.issueId, "top")
+                        .then(refresh)
+                        .catch((e) => setError(String(e)));
+                    }}
+                  >
+                    Top
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={index === 0}
+                    title="Move up"
+                    onClick={() => {
+                      const prev = queue[index - 1];
+                      if (!prev) return;
+                      moveQueueEntry(entry.issueId, { before: prev.issueId })
+                        .then(refresh)
+                        .catch((e) => setError(String(e)));
+                    }}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={index === queue.length - 1}
+                    title="Move down"
+                    onClick={() => {
+                      const next = queue[index + 1];
+                      if (!next) return;
+                      moveQueueEntry(entry.issueId, { after: next.issueId })
+                        .then(refresh)
+                        .catch((e) => setError(String(e)));
+                    }}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={index === queue.length - 1}
+                    title="Move to bottom"
+                    onClick={() => {
+                      moveQueueEntry(entry.issueId, "bottom")
+                        .then(refresh)
+                        .catch((e) => setError(String(e)));
+                    }}
+                  >
+                    Bottom
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs text-white/40 hover:text-white"
+                    onClick={() => {
+                      dequeueIssue(entry.issueId)
+                        .then(refresh)
+                        .catch((e) => setError(String(e)));
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
               </div>
             ))}
           </div>

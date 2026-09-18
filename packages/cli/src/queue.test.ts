@@ -46,3 +46,43 @@ test("queue remove calls DELETE /api/queue/:id", async () => {
     stub.restore();
   }
 });
+
+test("parseQueueArgs: move requires exactly one destination flag", () => {
+  assert.deepEqual(parseQueueArgs(["move", "issue-1", "--top"]), {
+    subcommand: "move",
+    issueId: "issue-1",
+    to: "top",
+  });
+  assert.deepEqual(parseQueueArgs(["move", "issue-1", "--bottom"]), {
+    subcommand: "move",
+    issueId: "issue-1",
+    to: "bottom",
+  });
+  assert.deepEqual(parseQueueArgs(["move", "issue-1", "--before", "issue-2"]), {
+    subcommand: "move",
+    issueId: "issue-1",
+    to: { before: "issue-2" },
+  });
+  assert.deepEqual(parseQueueArgs(["move", "issue-1", "--after", "issue-2"]), {
+    subcommand: "move",
+    issueId: "issue-1",
+    to: { after: "issue-2" },
+  });
+  assert.throws(() => parseQueueArgs(["move", "issue-1"]));
+  assert.throws(() => parseQueueArgs(["move", "issue-1", "--top", "--bottom"]));
+  assert.throws(() => parseQueueArgs(["move", "issue-1", "--before"]));
+});
+
+test("queue move calls POST /api/queue/:id/move", async () => {
+  const stub = stubFetch(/\/api\/queue\/issue-1\/move$/, "POST", {
+    issueId: "issue-1",
+    position: 1,
+    state: "queued",
+  });
+  try {
+    assert.equal(await runQueueCommand(["move", "issue-1", "--top"]), 0);
+    assert.deepEqual(stub.assertCalled(), { to: "top" });
+  } finally {
+    stub.restore();
+  }
+});

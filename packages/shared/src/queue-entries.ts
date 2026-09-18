@@ -28,6 +28,24 @@ export const EnqueueIssueInput = z.object({
 export type EnqueueIssueInput = z.infer<typeof EnqueueIssueInput>;
 
 /**
+ * NOT-112: relative reorder only — no arbitrary integer positions. Server computes ranks.
+ * `before` / `after` name another queued issue; a concurrent admission of that reference
+ * yields 409 rather than a corrupted order.
+ */
+export const QueueMoveTarget = z.union([
+  z.literal("top"),
+  z.literal("bottom"),
+  z.object({ before: z.string().uuid() }).strict(),
+  z.object({ after: z.string().uuid() }).strict(),
+]);
+export type QueueMoveTarget = z.infer<typeof QueueMoveTarget>;
+
+export const MoveQueueEntryInput = z.object({
+  to: QueueMoveTarget,
+});
+export type MoveQueueEntryInput = z.infer<typeof MoveQueueEntryInput>;
+
+/**
  * NOT-118 `POST /api/issues/:id/start` response. Start has no queue bypass: it moves the
  * issue to the front and admits it when a slot is free, otherwise it waits at the top with
  * a reason. `workItem` is the round-1 developer item the admitted start enqueued.

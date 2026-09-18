@@ -10,6 +10,7 @@ import type {
   Issue,
   IssueStatus,
   LinearCandidate,
+  QueueMoveTarget,
   RuntimeModelsResponse,
   StartIssueResponse,
   UpdateAgentInput,
@@ -281,6 +282,20 @@ export async function enqueueIssue(issueId: string): Promise<{
 
 export async function dequeueIssue(issueId: string): Promise<{ id: string; state: string }> {
   const res = await fetch(`${API}/api/queue/${issueId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+/** NOT-112: relative reorder — server computes positions. */
+export async function moveQueueEntry(
+  issueId: string,
+  to: QueueMoveTarget
+): Promise<QueueEntryRow> {
+  const res = await fetch(`${API}/api/queue/${issueId}/move`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ to }),
+  });
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
 }
