@@ -291,7 +291,11 @@ async function runPublishOnlyHandoff(
         // rerun this path was built to avoid, on the one failure most likely to be gone by
         // the next attempt.
         return recovered.rejected
-          ? { kind: "unpushed_commit", reason: recovered.reason }
+          ? {
+              kind: "unpushed_commit",
+              reason: recovered.reason,
+              recoveryCommands: recovered.facts?.recoveryCommands,
+            }
           : {
               kind: "adapter_failure",
               reason: `push of recovered branch ${branchName} failed: ${recovered.reason}`,
@@ -793,7 +797,11 @@ export async function runDeveloperEffect(
     if (!pushed.ok) {
       // Local commits preserved either way — never discarded, never force-retried.
       return pushed.rejected
-        ? { kind: "unpushed_commit", reason: pushed.reason }
+        ? {
+            kind: "unpushed_commit",
+            reason: pushed.reason,
+            recoveryCommands: pushed.facts?.recoveryCommands,
+          }
         : { kind: "adapter_failure", reason: pushed.reason };
     }
     milestone("branch.pushed", `Developer · branch pushed (${ahead} commit${ahead === 1 ? "" : "s"})`, {

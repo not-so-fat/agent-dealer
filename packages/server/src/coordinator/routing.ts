@@ -6,8 +6,10 @@ export type DeveloperOutcome =
   | { kind: "no_pr" }
   /** Optional `reason` surfaces auth/runtime classifiers (NOT-113) while keeping preservation. */
   | { kind: "dirty_worktree"; reason?: string }
-  /** Local commits exist but the coordinator's own push was rejected (e.g. non-fast-forward). */
-  | { kind: "unpushed_commit"; reason: string }
+  /** Local commits exist but the coordinator's own push was rejected (e.g. non-fast-forward).
+   * `recoveryCommands` (NOT-137) mirrors worktree_conflict: divergence facts live in `reason`,
+   * and the concrete recovery steps are folded into the escalation text at route time. */
+  | { kind: "unpushed_commit"; reason: string; recoveryCommands?: string[] }
   /** A prior round's worktree still holds the issue branch and can't be safely reused/removed
    * (dirty/unpushed, or not coordinator-managed) — see git-worktree.ts's resolveDeveloperWorktree. */
   | { kind: "worktree_conflict"; path: string; reason: string; recoveryCommands: string[] }
@@ -113,10 +115,17 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
           outcome.reason ??
           "Developer worktree has uncommitted changes after the session ended.",
       };
-    case "unpushed_commit":
+    case "unpushed_commit": {
       // Same bucket as dirty_worktree: local work exists that must not be silently discarded
-      // or force-retried — a human decides how to resolve the rejected push.
-      return { next: "human_action", actionType: "policy_escalation", reason: `Developer's commits could not be pushed: ${outcome.reason}` };
+      // or force-retried — a human decides how to resolve the rejected push. When the adapter
+      // attached recovery commands (NOT-137), fold them the same way worktree_conflict does
+      // so the escalation is actionable instead of raw git stderr.
+      const prefix = `Developer's commits could not be pushed: ${outcome.reason}`;
+      const recovery = outcome.recoveryCommands?.length
+        ? ` Recovery:\n${outcome.recoveryCommands.join("\n")}`
+        : "";
+      return { next: "human_action", actionType: "policy_escalation", reason: `${prefix}${recovery}` };
+    }
     case "worktree_conflict":
       // Never spends infra-attempt budget — the branch is provably still checked out
       // somewhere, so a blind auto-retry would collide identically every time. Preserved

@@ -567,6 +567,7 @@ test("unpushed_commit: the coordinator's own push is rejected by a diverged remo
   git(other, "add", ".");
   git(other, "commit", "-q", "-m", "elsewhere");
   git(other, "push", "-q", "origin", branch);
+  const remoteSha = git(other, "rev-parse", "HEAD");
   fs.rmSync(other, { recursive: true, force: true });
 
   registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github: fakeGithub() }));
@@ -576,7 +577,14 @@ test("unpushed_commit: the coordinator's own push is rejected by a diverged remo
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "needs_human");
   assert.equal(issue.currentRound, 1, "a rejected push never consumes a round");
-  assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation");
+  assert.ok(action);
+  // NOT-137: escalation must name shas / ahead-behind / recovery — not raw git pull hints.
+  assert.match(action.reason, /diverged/i);
+  assert.match(action.reason, new RegExp(remoteSha.slice(0, 12)));
+  assert.match(action.reason, /force-with-lease/);
+  assert.match(action.reason, new RegExp(remoteSha));
+  assert.doesNotMatch(action.reason, /use 'git pull'/i);
 
   execFileSync("git", ["push", "-q", remote, `:${branch}`], { cwd: repo }).toString();
 });
