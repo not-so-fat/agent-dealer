@@ -26,6 +26,40 @@ export const ReviewerResult = z.object({
 });
 export type ReviewerResult = z.infer<typeof ReviewerResult>;
 
+/** Stable fingerprint for coordinator-injected incomplete-review findings (truncated diff). */
+export const INCOMPLETE_REVIEW_FINGERPRINT = "diff-truncated-incomplete-review";
+
+/**
+ * Enforce PRD §6.4 / design NOT-150 invariants:
+ * - `escalated` requires a non-empty `productScopeQuestion` (else remap to `changes_requested`)
+ * - any `blocking` finding forbids `approved` (remap to `changes_requested`)
+ * - bare escalate is never a valid routing input (avoids Resume|Close `policy_escalation`)
+ */
+export function normalizeReviewerResult(raw: ReviewerResult): ReviewerResult {
+  const hasBlocking = raw.findings.some((f) => f.severity === "blocking");
+  const question = raw.productScopeQuestion?.trim() || undefined;
+
+  if (raw.verdict === "escalated") {
+    if (question) {
+      return { ...raw, productScopeQuestion: question };
+    }
+    const { productScopeQuestion: _drop, ...rest } = raw;
+    return { ...rest, verdict: "changes_requested" };
+  }
+
+  if (raw.verdict === "approved" && hasBlocking) {
+    return { ...raw, verdict: "changes_requested" };
+  }
+
+  // Drop a stray productScopeQuestion on non-escalate verdicts.
+  if (question && raw.verdict !== "escalated") {
+    const { productScopeQuestion: _drop, ...rest } = raw;
+    return rest;
+  }
+
+  return question ? { ...raw, productScopeQuestion: question } : { ...raw };
+}
+
 /** Mirrors the plan-triage/reflect JSON-fence parsing pattern already used elsewhere. */
 export function parseReviewerResult(text: string): ReviewerResult | null {
   const trimmed = text.trim();
@@ -34,7 +68,7 @@ export function parseReviewerResult(text: string): ReviewerResult | null {
   for (const candidate of candidates) {
     try {
       const parsed = ReviewerResult.safeParse(JSON.parse(candidate));
-      if (parsed.success) return parsed.data;
+      if (parsed.success) return normalizeReviewerResult(parsed.data);
     } catch {
       // try next candidate
     }

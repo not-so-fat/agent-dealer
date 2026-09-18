@@ -293,13 +293,29 @@ test("escalated with a product scope question routes to product_scope_decision",
   assert.equal((result as { actionType: string }).actionType, "product_scope_decision");
 });
 
-test("escalated without a product scope question routes to policy_escalation", () => {
+test("escalated without a product scope question remaps to automatic repair (NOT-150)", () => {
   const outcome: ReviewerOutcome = {
     kind: "verdict",
     result: { verdict: "escalated", baseSha: "b", headSha: "h", acceptanceCriteriaAssessment: "unclear", evidenceAssessment: "ok", findings: [], risks: [] },
   };
   const result = routeReviewerOutcome(outcome, REVIEW_ROUNDS_LEFT, PINNED_HEAD);
-  assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+  assert.deepStrictEqual(result, { next: "retry_developer_with_findings" });
+});
+
+test("approved with blocking finding remaps to changes_requested repair (NOT-150)", () => {
+  const outcome: ReviewerOutcome = {
+    kind: "verdict",
+    result: {
+      verdict: "approved",
+      baseSha: "b",
+      headSha: "h",
+      acceptanceCriteriaAssessment: "ok",
+      evidenceAssessment: "ok",
+      findings: [{ fingerprint: "f1", severity: "blocking", title: "Bug", rationale: "breaks" }],
+      risks: [],
+    },
+  };
+  assert.deepStrictEqual(routeReviewerOutcome(outcome, REVIEW_ROUNDS_LEFT, PINNED_HEAD), { next: "retry_developer_with_findings" });
 });
 
 test("stale review retries the reviewer at the freshly verified head while infra attempts remain", () => {
