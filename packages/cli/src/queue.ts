@@ -1,22 +1,17 @@
+import type { QueueMoveTarget } from "@agent-dealer/shared";
 import { apiFetch } from "./http.js";
-
-export type QueueMoveTo =
-  | "top"
-  | "bottom"
-  | { before: string }
-  | { after: string };
 
 export type ParsedQueueArgs =
   | { subcommand: "add"; issueId: string }
   | { subcommand: "remove"; issueId: string }
   | { subcommand: "list" }
-  | { subcommand: "move"; issueId: string; to: QueueMoveTo };
+  | { subcommand: "move"; issueId: string; to: QueueMoveTarget };
 
-function parseMoveFlags(flags: string[]): QueueMoveTo {
-  let to: QueueMoveTo | undefined;
+function parseMoveFlags(flags: string[]): QueueMoveTarget {
+  let to: QueueMoveTarget | undefined;
   for (let i = 0; i < flags.length; i++) {
     const flag = flags[i];
-    let next: QueueMoveTo;
+    let next: QueueMoveTarget;
     if (flag === "--top") {
       next = "top";
     } else if (flag === "--bottom") {

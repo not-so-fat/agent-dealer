@@ -270,6 +270,19 @@ export default function IssuesListPage({
                   </button>
                   <button
                     type="button"
+                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={index === queue.length - 1}
+                    title="Move to bottom"
+                    onClick={() => {
+                      moveQueueEntry(entry.issueId, "bottom")
+                        .then(refresh)
+                        .catch((e) => setError(String(e)));
+                    }}
+                  >
+                    Bottom
+                  </button>
+                  <button
+                    type="button"
                     className="text-xs text-white/40 hover:text-white"
                     onClick={() => {
                       dequeueIssue(entry.issueId)

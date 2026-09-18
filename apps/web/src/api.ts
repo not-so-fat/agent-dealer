@@ -10,6 +10,7 @@ import type {
   Issue,
   IssueStatus,
   LinearCandidate,
+  QueueMoveTarget,
   RuntimeModelsResponse,
   StartIssueResponse,
   UpdateAgentInput,
@@ -285,16 +286,10 @@ export async function dequeueIssue(issueId: string): Promise<{ id: string; state
   return res.json();
 }
 
-export type QueueMoveTo =
-  | "top"
-  | "bottom"
-  | { before: string }
-  | { after: string };
-
 /** NOT-112: relative reorder — server computes positions. */
 export async function moveQueueEntry(
   issueId: string,
-  to: QueueMoveTo
+  to: QueueMoveTarget
 ): Promise<QueueEntryRow> {
   const res = await fetch(`${API}/api/queue/${issueId}/move`, {
     method: "POST",
