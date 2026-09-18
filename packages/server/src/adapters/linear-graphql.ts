@@ -76,6 +76,7 @@ export function parseLinearRateLimitHeaders(headers: Headers): LinearRateLimitHe
 /**
  * How long to wait before retrying a rate-limited call.
  * Linear's `X-RateLimit-Requests-Reset` is UTC epoch **milliseconds**.
+ * Prefer that reset header when present (NOT-152); Retry-After / default are fallbacks.
  */
 export function computeRetryAfterMs(
   status: number,
@@ -84,11 +85,6 @@ export function computeRetryAfterMs(
 ): number | null {
   if (status !== 429 && rateLimit.requestsRemaining !== "0") return null;
 
-  if (rateLimit.retryAfter) {
-    const seconds = Number(rateLimit.retryAfter);
-    if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
-  }
-
   if (rateLimit.requestsReset) {
     const resetMs = Number(rateLimit.requestsReset);
     if (Number.isFinite(resetMs) && resetMs > 0) {
@@ -96,6 +92,11 @@ export function computeRetryAfterMs(
       const absolute = resetMs < 1e12 ? resetMs * 1000 : resetMs;
       return Math.max(0, absolute - nowMs);
     }
+  }
+
+  if (rateLimit.retryAfter) {
+    const seconds = Number(rateLimit.retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
   }
 
   if (status === 429) return DEFAULT_RATE_LIMIT_BACKOFF_MS;

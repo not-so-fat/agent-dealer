@@ -43,6 +43,20 @@ test("computeRetryAfterMs uses Linear reset epoch-ms on 429", () => {
   assert.equal(ms, 45_000);
 });
 
+test("computeRetryAfterMs prefers requests-reset over Retry-After when both are set", () => {
+  const now = 1_760_000_000_000;
+  const ms = computeRetryAfterMs(
+    429,
+    {
+      requestsRemaining: "0",
+      requestsReset: String(now + 45_000),
+      retryAfter: "5",
+    },
+    now
+  );
+  assert.equal(ms, 45_000);
+});
+
 test("computeRetryAfterMs falls back to Retry-After seconds when reset missing", () => {
   const ms = computeRetryAfterMs(429, { retryAfter: "30" }, 1_000);
   assert.equal(ms, 30_000);
