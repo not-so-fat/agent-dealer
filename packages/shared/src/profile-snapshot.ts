@@ -91,10 +91,8 @@ export const ProfileSnapshot = z.object({
   /** Serialized PhaseBudget; null = runtime default (no CLI caps). */
   budgetJson: z.string().nullable(),
   permissionPolicy: PermissionPolicy,
+  /** Launch-selected Deck — required for new sessions; null only on legacy in-flight rows. */
   deckId: z.string().nullable(),
-  workspaceRoot: z.string().nullable(),
-  playbookIds: z.array(z.string()),
-  externalMemoryRefs: z.array(z.string()),
   purpose: z.string().nullable(),
   capturedAt: z.string(),
 });

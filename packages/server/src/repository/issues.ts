@@ -1,6 +1,8 @@
 import {
   canTransitionIssue,
   CreateIssueInput,
+  looksLikeLocalRepoPath,
+  parseGitHubRepoInput,
   type Issue,
   type IssueOwner,
   type IssueStatus,
@@ -9,7 +11,8 @@ import {
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
 
-type CreateIssueRaw = import("@agent-dealer/shared").CreateIssueInput;
+/** Wire body or internal create — `repo` may be a GitHub ref or an existing legacy local path. */
+type CreateIssueRaw = Omit<import("@agent-dealer/shared").CreateIssueInput, "repo"> & { repo: string };
 
 interface IssueRow {
   id: string;
@@ -73,8 +76,24 @@ function rowToIssue(row: IssueRow): Issue {
   };
 }
 
+/**
+ * Persistable `issues.repo` value (NOT-149):
+ * - GitHub URL / owner/repo → canonical `github.com/owner/repo`
+ * - Local filesystem path → kept as-is for in-flight recovery / tests (existence is
+ *   checked at checkout resolve time via classifyIssueRepo — never guess a remote)
+ */
+export function normalizeStoredIssueRepo(repoRaw: string): string {
+  const trimmed = repoRaw.trim();
+  if (looksLikeLocalRepoPath(trimmed)) {
+    return trimmed;
+  }
+  return parseGitHubRepoInput(trimmed).identity;
+}
+
 export function createIssue(raw: CreateIssueRaw): Issue {
-  const input = CreateIssueInput.parse(raw);
+  const { repo: repoRaw, ...rest } = raw;
+  const input = CreateIssueInput.omit({ repo: true }).parse(rest);
+  const repo = normalizeStoredIssueRepo(repoRaw);
   const db = getDb();
   const now = new Date().toISOString();
   const id = uuid();
@@ -87,7 +106,7 @@ export function createIssue(raw: CreateIssueRaw): Issue {
     title: input.title,
     description: input.description ?? null,
     acceptance_criteria: input.acceptanceCriteria ?? null,
-    repo: input.repo,
+    repo,
     base_branch: input.baseBranch,
     status: "ready",
     current_owner: "system",
@@ -267,7 +286,7 @@ export function updateIssue(id: string, patch: UpdateIssuePatch): Issue {
       description: patch.description !== undefined ? patch.description : current.description,
       acceptance_criteria:
         patch.acceptanceCriteria !== undefined ? patch.acceptanceCriteria : current.acceptanceCriteria,
-      repo: patch.repo ?? current.repo,
+      repo: patch.repo !== undefined ? normalizeStoredIssueRepo(patch.repo) : current.repo,
       base_branch: patch.baseBranch ?? current.baseBranch,
       developer_agent_id: patch.developerAgentId ?? current.developerAgentId,
       reviewer_agent_id: patch.reviewerAgentId ?? current.reviewerAgentId,
@@ -281,7 +300,9 @@ export function updateIssue(id: string, patch: UpdateIssuePatch): Issue {
   return updated;
 }
 
-/** Distinct local repo paths from prior issues, most recently used first (NOT-102). */
+/** Distinct portable GitHub repo identities from prior issues, most recently used first.
+ * Legacy local filesystem rows are excluded from create/recent surfaces (NOT-149) —
+ * recovery for those issues remains at checkout time only. */
 export function listRecentRepos(limit = 20): string[] {
   const rows = getDb()
     .prepare(
@@ -292,8 +313,14 @@ export function listRecentRepos(limit = 20): string[] {
        ORDER BY last_used DESC
        LIMIT ?`
     )
-    .all(limit) as Array<{ repo: string }>;
-  return rows.map((r) => r.repo);
+    .all(Math.max(limit * 4, 40)) as Array<{ repo: string }>;
+  const out: string[] = [];
+  for (const r of rows) {
+    if (looksLikeLocalRepoPath(r.repo)) continue;
+    out.push(r.repo);
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 export function incrementIssueRound(id: string): Issue {

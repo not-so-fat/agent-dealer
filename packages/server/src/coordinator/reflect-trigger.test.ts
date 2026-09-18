@@ -16,7 +16,7 @@ import type { AuthorizedDeckCallResult } from "../adapters/reflect-authority.js"
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-reflect-"));
 
-const { migrate } = await import("../db/index.js");
+const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue } = await import("../repository/issues.js");
 const { createAgent } = await import("../repository/agents.js");
@@ -35,7 +35,7 @@ before(() => {
 function seedIssue(developerAgentId: string) {
   return createIssue({
     title: "Reflect issue",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
@@ -48,9 +48,14 @@ function seedIssue(developerAgentId: string) {
 function seedFinalDeveloperSession(
   issueId: string,
   agent: ReturnType<typeof createAgent>,
-  overrides: { deckId: string | null; playbookIds: string[] }
+  overrides: { deckId: string | null; playbookIds?: string[] }
 ) {
-  const snapshot = { ...buildProfileSnapshot(agent, "developer"), ...overrides };
+  if (overrides.playbookIds !== undefined) {
+    getDb()
+      .prepare("UPDATE agents SET playbook_ids_json = ? WHERE id = ?")
+      .run(JSON.stringify(overrides.playbookIds), agent.id);
+  }
+  const snapshot = { ...buildProfileSnapshot(agent, "developer"), deckId: overrides.deckId };
   return createWorkerSession({
     issueId,
     role: "developer",
@@ -106,13 +111,7 @@ test("skips when the developer profile has no deck configured and no session sna
 });
 
 test("uses the frozen session snapshot's deck/playbooks, not the live (possibly edited) agent profile", async () => {
-  const dev = createAgent({
-    name: `dev-${Math.random()}`,
-    runtime: "claude_code",
-    workspaceRoot: "/repo",
-    deckId: "22222222-2222-4222-a222-222222222222",
-    playbookIds: ["pb-live-edited-after-the-fact"],
-  });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "22222222-2222-4222-a222-222222222222" });
   const issue = seedIssue(dev.id);
   seedFinalDeveloperSession(issue.id, dev, {
     deckId: "11111111-1111-4111-a111-111111111111",
@@ -142,13 +141,10 @@ test("uses the frozen session snapshot's deck/playbooks, not the live (possibly 
 });
 
 test("falls back to the live agent profile when the developer session has no frozen snapshot (legacy row)", async () => {
-  const dev = createAgent({
-    name: `dev-${Math.random()}`,
-    runtime: "claude_code",
-    workspaceRoot: "/repo",
-    deckId: "33333333-3333-4333-a333-333333333333",
-    playbookIds: ["pb-live"],
-  });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "33333333-3333-4333-a333-333333333333" });
+  getDb()
+    .prepare("UPDATE agents SET playbook_ids_json = ? WHERE id = ?")
+    .run(JSON.stringify(["pb-live"]), dev.id);
   const issue = seedIssue(dev.id);
   createWorkerSession({ issueId: issue.id, role: "developer", round: 1, agentId: dev.id, runtime: "claude_code" });
 
@@ -166,13 +162,8 @@ test("falls back to the live agent profile when the developer session has no fro
 });
 
 test("the legacy-row fallback also honors a profile with only the singular legacy playbookId", async () => {
-  const dev = createAgent({
-    name: `dev-${Math.random()}`,
-    runtime: "claude_code",
-    workspaceRoot: "/repo",
-    deckId: "44444444-4444-4444-a444-444444444444",
-    playbookId: "pb-legacy",
-  });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "44444444-4444-4444-a444-444444444444" });
+  getDb().prepare("UPDATE agents SET playbook_id = ? WHERE id = ?").run("pb-legacy", dev.id);
   const issue = seedIssue(dev.id);
   createWorkerSession({ issueId: issue.id, role: "developer", round: 1, agentId: dev.id, runtime: "claude_code" });
 
@@ -190,13 +181,7 @@ test("the legacy-row fallback also honors a profile with only the singular legac
 });
 
 test("skips when the deck is offline, and records why — never calls Deck tools", async () => {
-  const dev = createAgent({
-    name: `dev-${Math.random()}`,
-    runtime: "claude_code",
-    workspaceRoot: "/repo",
-    deckId: "11111111-1111-4111-a111-111111111111",
-    playbookIds: ["pb-1"],
-  });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "11111111-1111-4111-a111-111111111111" });
   const issue = seedIssue(dev.id);
   seedFinalDeveloperSession(issue.id, dev, {
     deckId: "11111111-1111-4111-a111-111111111111",
@@ -217,7 +202,7 @@ test("skips when the deck is offline, and records why — never calls Deck tools
 });
 
 test("posts one patch per playbook, using the implementation conclusion and review history as rationale", async () => {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: "/repo" });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099" });
   const issue = seedIssue(dev.id);
   seedFinalDeveloperSession(issue.id, dev, {
     deckId: "11111111-1111-4111-a111-111111111111",
@@ -264,7 +249,7 @@ test("posts one patch per playbook, using the implementation conclusion and revi
 });
 
 test("a retry after a mid-loop failure does not re-propose a playbook that already succeeded", async () => {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: "/repo" });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099" });
   const issue = seedIssue(dev.id);
   seedFinalDeveloperSession(issue.id, dev, {
     deckId: "11111111-1111-4111-a111-111111111111",
@@ -354,7 +339,7 @@ test("resolveReflectionInteractionAction rejects an invalid choice and already-r
 });
 
 test("already-proposed playbook ids are skipped even behind a flood of other artifacts", async () => {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: "/repo" });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099" });
   const issue = seedIssue(dev.id);
   seedFinalDeveloperSession(issue.id, dev, {
     deckId: "11111111-1111-4111-a111-111111111111",

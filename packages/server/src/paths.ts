@@ -39,3 +39,19 @@ export function cleanupOrphanedWorkerMcpConfig(): void {
     fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
   }
 }
+
+/**
+ * Root for Dealer-managed repository clones and session worktrees (NOT-149).
+ * Defaults under AGENT_DEALER_HOME; override with AGENT_DEALER_EXECUTION_ROOT for a
+ * mounted disk / cloud volume.
+ */
+export function getExecutionRoot(): string {
+  const override = process.env.AGENT_DEALER_EXECUTION_ROOT?.trim();
+  if (override) {
+    fs.mkdirSync(override, { recursive: true });
+    return override;
+  }
+  const dir = path.join(getDataDir(), "execution");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}

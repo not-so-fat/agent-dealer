@@ -24,25 +24,23 @@ const { enqueueWorkItem, claimWorkItem, listExpiredLeases } = await import("./wo
 const {
   claimReviewPublication,
   recordReviewPublishFailed,
-  reclaimFailedReviewPublication,
-} = await import("./review-publications.js");
+  reclaimFailedReviewPublication} = await import("./review-publications.js");
 
 before(() => migrate());
 beforeEach(() => getDb().exec("DELETE FROM review_publications; DELETE FROM work_items;"));
 
 function freshLeasedWorkItem(): { id: string; leaseToken: string } {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: "/repo" });
-  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: "/repo" });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
   const issue = createIssue({
     title: "T",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: dev.id,
     reviewerAgentId: rev.id,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  });
+    source: "manual"});
   const instance = startWorkflowInstance(issue.id, "dev_reviewer_v1");
   enqueueWorkItem({ issueId: issue.id, workflowInstanceId: instance.id, kind: "reviewer", round: 1 });
   // A very short leaseMs — about to expire on its own, matching the round-6 scenario.

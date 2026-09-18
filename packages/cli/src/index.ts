@@ -18,8 +18,8 @@ function printUsage(): void {
   agent-dealer install [--to VERSION] [--migrate-cli] [--purge-global]
   agent-dealer upgrade [--to VERSION] [--yes] [--check]
   agent-dealer agent list
-  agent-dealer issue create --title T --repo R --developer-agent ID --reviewer-agent ID [--description D] [--acceptance-criteria A] [--base-branch B] [--no-enqueue]
-  agent-dealer issue import --external-id ID --title T --repo R --developer-agent ID --reviewer-agent ID [--external-label L]
+  agent-dealer issue create --title T --repo owner/repo --developer-agent ID --reviewer-agent ID [--description D] [--acceptance-criteria A] [--base-branch B] [--no-enqueue]
+  agent-dealer issue import --external-id ID --title T --repo owner/repo --developer-agent ID --reviewer-agent ID [--external-label L]
   agent-dealer issue list [--status S1,S2]
   agent-dealer issue show <id> [--include evidence]
   agent-dealer issue start <id>

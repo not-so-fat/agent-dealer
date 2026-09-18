@@ -47,6 +47,12 @@ const { realGithubAdapter } = await import("../adapters/github.js");
 type SpawnFn = typeof realDeveloperSpawn;
 type GithubFn = typeof realGithubAdapter;
 
+/** NOT-149: agents always carry a deckId; hermetic effect tests stub get_bound_deck. */
+const TEST_DECK_ID = "00000000-0000-4000-a000-000000000099";
+const okDeckCallTool = async (_name: string, _args: Record<string, unknown>) => ({
+  content: [{ type: "text" as const, text: JSON.stringify({ id: TEST_DECK_ID, name: "test-deck" }) }],
+});
+
 /** A clock well past any lease in this file — recovery must see every lease as expired. */
 const FUTURE = () => Date.now() + 3_600_000;
 
@@ -82,8 +88,8 @@ after(() => {
 });
 
 function makeIssue(): string {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
-  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
   return createIssue({
     title: "Keep card deletes complete when a deck file write fails",
     description: "Recover the stranded commit.",
@@ -94,8 +100,7 @@ function makeIssue(): string {
     reviewerAgentId: rev.id,
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 /**
@@ -135,8 +140,7 @@ function leasedAttempt(issueId: string): { itemId: string; sessionId: string } {
     role: "developer",
     round: 1,
     agentId: getIssue(issueId)!.developerAgentId,
-    runtime: "claude_code",
-  });
+    runtime: "claude_code"});
   startSession(session.id);
   assert.equal(bindWorkItemSession(item.id, session.id, claimed.leaseToken!), true);
   return { itemId: item.id, sessionId: session.id };
@@ -168,8 +172,7 @@ function fakeGithub(opts: { seedPr?: { branch: string; base: string } } = {}): G
         baseRefName: pr.base,
         headRefName: branch,
         headRefOid: remoteHead(branch),
-        isDraft: true,
-      };
+        isDraft: true};
     },
     async createDraftPr({ base, head }) {
       if (!head) throw new Error("createDraftPr requires an explicit --head (NOT-82)");
@@ -183,8 +186,7 @@ function fakeGithub(opts: { seedPr?: { branch: string; base: string } } = {}): G
     },
     async publishReview() {
       throw new Error("publishReview is unused by the developer effect");
-    },
-  };
+    }};
 }
 
 async function pump(max = 20): Promise<void> {
@@ -232,7 +234,7 @@ test("NOT-129: a presumed-dead reclaim with unpushed commits enqueues a publishO
   assert.match(getIssue(issueId)!.currentIntent ?? "", /Republishing 1 recovered commit \(no agent\)/);
 
   registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { spawn: forbiddenSpawn, github: fakeGithub() })
+    runDeveloperEffect(ctx, { spawn: forbiddenSpawn, github: fakeGithub(), deckCallTool: okDeckCallTool })
   );
   await pump(1);
 
@@ -257,7 +259,9 @@ test("NOT-129: a recovered push that fails transiently retries publish-only, the
 
   // One github across both attempts: the retry must reuse whatever the first one left behind.
   const github = fakeGithub();
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: forbiddenSpawn, github }));
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: forbiddenSpawn, github, deckCallTool: okDeckCallTool })
+  );
 
   // The remote is unreachable for this attempt — a dropped connection, not a rejection. It
   // says nothing about the commits, which are still sitting on the branch. `origin` is shared
@@ -319,7 +323,11 @@ test("NOT-129: a presumed-dead reclaim whose branch is already pushed with an op
   assert.match(String(failedPayload.reason), /already on origin, re-verifying the PR/);
 
   registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { spawn: forbiddenSpawn, github: fakeGithub({ seedPr: { branch, base: "main" } }) })
+    runDeveloperEffect(ctx, {
+      spawn: forbiddenSpawn,
+      github: fakeGithub({ seedPr: { branch, base: "main" } }),
+      deckCallTool: okDeckCallTool,
+    })
   );
   await pump(1);
 
@@ -370,6 +378,7 @@ test("NOT-129: a presumed-dead reclaim with an empty branch still enqueues a nor
         return { exitCode: 0, transcript: "conclusion", logPath: "/dev/null", timedOut: false };
       },
       github: fakeGithub(),
+      deckCallTool: okDeckCallTool,
     })
   );
   await pump(1);
@@ -386,36 +395,31 @@ test("NOT-129: a branch whose commits are all on origin reads as published, and 
 
   assert.deepEqual(await inspectBranchProgress({ repo, branch: "no-such-branch", baseRefs }), {
     state: "absent",
-    branch: "no-such-branch",
-  });
+    branch: "no-such-branch"});
 
   // A branch created off main with no commits of its own has nothing to publish.
   git(repo, "branch", "empty-branch", "main");
   assert.deepEqual(await inspectBranchProgress({ repo, branch: "empty-branch", baseRefs }), {
     state: "empty",
-    branch: "empty-branch",
-  });
+    branch: "empty-branch"});
 
   commitOnBranch("half-published", "one.txt");
   assert.deepEqual(await inspectBranchProgress({ repo, branch: "half-published", baseRefs }), {
     state: "unpushed",
     branch: "half-published",
     ahead: 1,
-    unpushed: 1,
-  });
+    unpushed: 1});
 
   git(repo, "push", "-q", "origin", "half-published");
   assert.deepEqual(await inspectBranchProgress({ repo, branch: "half-published", baseRefs }), {
     state: "published",
     branch: "half-published",
-    ahead: 1,
-  });
+    ahead: 1});
 
   // A repo that isn't there at all degrades to "absent" — recovery must never throw.
   assert.deepEqual(await inspectBranchProgress({ repo: "/nope/not/a/repo", branch: "x", baseRefs }), {
     state: "absent",
-    branch: "x",
-  });
+    branch: "x"});
 
   // No base resolves AND origin has never seen the branch: "it carries work" would be a
   // guess, and the wrong guess pushes an empty branch at a PR `gh` will reject. Guess the

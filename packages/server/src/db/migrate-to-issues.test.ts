@@ -254,8 +254,7 @@ test("after a restart, a fresh legacy run can still write an artifact without a 
     taskCategory: "code",
     status: "plan_pending",
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    repo: "/repo",
-  });
+    repo: "acme/app"});
   assert.doesNotThrow(() => addArtifact(freshRun.id, "task_snapshot", { hello: "world" }, "system"));
 });
 
@@ -507,20 +506,18 @@ test("does not touch a pre-existing genuine issue and its artifacts created befo
   freshHome();
   const preexisting = createIssue({
     title: "Already using the new model",
-    repo: "/repo",
+    repo: "acme/app",
     baseBranch: "main",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  });
+    source: "manual"});
   const preexistingArtifact = createIssueArtifact({
     issueId: preexisting.id,
     kind: "task_snapshot",
     content: { hello: "world" },
-    author: "system",
-  });
+    author: "system"});
 
   const db = getDb();
   db.prepare(

@@ -29,8 +29,7 @@ const {
   setAdmissionHealthCheckerForTests,
   setCapacityPolicyForTests,
   resetCapacityPolicyForTests,
-  resetEligibilityRulesForTests,
-} = await import("./admission.js");
+  resetEligibilityRulesForTests} = await import("./admission.js");
 const {
   blockersFor,
   blockerVerdict,
@@ -40,8 +39,7 @@ const {
   setBlockerFailureBackoffForTests,
   setBlockerFetchTimeoutForTests,
   setBlockersProviderForTests,
-  setLinearBlockerFetcherForTests,
-} = await import("./dependencies.js");
+  setLinearBlockerFetcherForTests} = await import("./dependencies.js");
 
 before(() => migrate());
 
@@ -83,8 +81,8 @@ let seq = 0;
 
 function seedIssue(opts: { source: "manual" | "linear"; externalId?: string; title?: string }) {
   const suffix = `${seq++}-${Math.random().toString(36).slice(2, 8)}`;
-  const dev = createAgent({ name: `n104-dev-${suffix}`, runtime: "claude_code", workspaceRoot: repo });
-  const rev = createAgent({ name: `n104-rev-${suffix}`, runtime: "claude_code", workspaceRoot: repo });
+  const dev = createAgent({ name: `n104-dev-${suffix}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: `n104-rev-${suffix}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
   return createIssue({
     title: opts.title ?? `Issue ${suffix}`,
     description: "d",
@@ -96,8 +94,7 @@ function seedIssue(opts: { source: "manual" | "linear"; externalId?: string; tit
     maxReviewRounds: 2,
     maxInfraAttempts: 2,
     source: opts.source,
-    ...(opts.externalId ? { externalId: opts.externalId, externalLabel: opts.externalId } : {}),
-  });
+    ...(opts.externalId ? { externalId: opts.externalId, externalLabel: opts.externalId } : {})});
 }
 
 function blocker(over: Partial<BlockerState> & { identifier: string }): BlockerState {
@@ -105,8 +102,7 @@ function blocker(over: Partial<BlockerState> & { identifier: string }): BlockerS
     id: over.id ?? "",
     identifier: over.identifier,
     stateName: over.stateName ?? "In Progress",
-    stateType: over.stateType ?? "started",
-  };
+    stateType: over.stateType ?? "started"};
 }
 
 /** Provider stub: declared blockers per Linear issue id, everything else reported as clean. */
@@ -160,8 +156,7 @@ test("satisfaction (decision 2): unlinked blocker needs completed/canceled; deal
   const dependent = seedIssue({ source: "linear", externalId: "lin-dep" });
   enqueueIssue(dependent.id);
   provideBlockers({
-    "lin-dep": [blocker({ id: "lin-up", identifier: "NOT-UP", stateName: "Done", stateType: "completed" })],
-  });
+    "lin-dep": [blocker({ id: "lin-up", identifier: "NOT-UP", stateName: "Done", stateType: "completed" })]});
 
   assert.equal(await admitNext(), null, "Linear says Done but the dealer issue has not merged");
   assert.equal(waitReason(dependent.id), "waiting on NOT-UP (ready)");
@@ -179,8 +174,7 @@ test("satisfaction (decision 2): unlinked blocker needs completed/canceled; deal
   provideBlockers({
     "lin-down": [
       blocker({ id: "lin-ab", identifier: "NOT-AB", stateName: "Canceled", stateType: "canceled" }),
-    ],
-  });
+    ]});
 
   assert.equal(await admitNext(), null, "canceled in Linear, still developing in dealer");
   assert.equal(waitReason(downstream.id), "waiting on NOT-AB (ready)");
@@ -197,8 +191,7 @@ test("NOT-141: a blocker's live pass decides; a merged pass only answers once no
   provideBlockers({
     "lin-multi-dep": [
       blocker({ id: "lin-multi", identifier: "NOT-MULTI", stateName: "In Progress", stateType: "started" }),
-    ],
-  });
+    ]});
 
   assert.equal(await admitNext(), null, "the blocker has not merged yet");
   getDb().prepare("UPDATE issues SET status = 'done' WHERE id = ?").run(merged.id);
@@ -232,8 +225,7 @@ test("blocker merges: the entry is admitted on the next tick, with no unblock ev
   provideBlockers({
     "lin-dep": [
       blocker({ id: "lin-up", identifier: "NOT-UP", stateName: "In Progress", stateType: "started" }),
-    ],
-  });
+    ]});
 
   assert.equal(await admitNext(), null);
   assert.equal(await admitNext(), null, "still blocked on a later tick — level-triggered, not edge");
@@ -302,8 +294,7 @@ test("cycle: two issues blocking each other both park, each naming the other", a
   enqueueIssue(b.id);
   provideBlockers({
     "lin-a": [blocker({ id: "lin-b", identifier: "NOT-B", stateName: "Todo", stateType: "unstarted" })],
-    "lin-b": [blocker({ id: "lin-a", identifier: "NOT-A", stateName: "Todo", stateType: "unstarted" })],
-  });
+    "lin-b": [blocker({ id: "lin-a", identifier: "NOT-A", stateName: "Todo", stateType: "unstarted" })]});
 
   assert.equal(await admitNext(), null, "a cycle stalls the pair — it never produces a wrong run");
   assert.equal(waitReason(a.id), "waiting on NOT-B (ready)");
@@ -472,8 +463,7 @@ function stubLinearIssues(
       globalThis.fetch = originalFetch;
       if (originalKey === undefined) delete process.env.LINEAR_API_KEY;
       else process.env.LINEAR_API_KEY = originalKey;
-    },
-  };
+    }};
 }
 
 /** The first page of a relation connection that continues at `endCursor`. */
@@ -494,8 +484,7 @@ function blocksRelation(id: string, identifier: string) {
 function noiseRelations(n: number, type: "related" | "duplicate"): unknown[] {
   return Array.from({ length: n }, (_, i) => ({
     type,
-    issue: { id: `lin-noise-${i}`, identifier: `NOT-N${i}`, state: { name: "Todo", type: "unstarted" } },
-  }));
+    issue: { id: `lin-noise-${i}`, identifier: `NOT-N${i}`, state: { name: "Todo", type: "unstarted" } }}));
 }
 
 test("only `blocks` relations from inverseRelations gate admission", async () => {
@@ -508,8 +497,7 @@ test("only `blocks` relations from inverseRelations gate admission", async () =>
         { type: "duplicate", issue: { id: "lin-d", identifier: "NOT-D", state: { name: "Todo", type: "unstarted" } } },
         // An unreadable blocker (other team / deleted) is still unsatisfied.
         { type: "blocks", issue: null },
-      ]),
-    },
+      ])},
   ]);
 
   try {
@@ -539,8 +527,7 @@ test("a relation list longer than one page is paged through, not treated as a fa
     [{ id: "lin-a", inverseRelations: firstPageOf(noiseRelations(50, "related"), "cursor-1") }],
     [
       {
-        "lin-a": lastPageOf([...noiseRelations(3, "duplicate"), blocksRelation("lin-b", "NOT-B")]),
-      },
+        "lin-a": lastPageOf([...noiseRelations(3, "duplicate"), blocksRelation("lin-b", "NOT-B")])},
     ]
   );
 
@@ -562,8 +549,7 @@ test("nested paging stays batched: many paginated entries cost one request per r
   const { requests, restore } = stubLinearIssues(
     ids.map((id) => ({
       id,
-      inverseRelations: firstPageOf(noiseRelations(50, "related"), `${id}-cursor-1`),
-    })),
+      inverseRelations: firstPageOf(noiseRelations(50, "related"), `${id}-cursor-1`)})),
     [
       Object.fromEntries(
         ids.map((id) => [id, firstPageOf(noiseRelations(50, "duplicate"), `${id}-cursor-2`)])
@@ -582,13 +568,11 @@ test("nested paging stays batched: many paginated entries cost one request per r
     assert.deepEqual(requests[1]?.variables, {
       ids0: ["lin-a"], after0: "lin-a-cursor-1",
       ids1: ["lin-b"], after1: "lin-b-cursor-1",
-      ids2: ["lin-c"], after2: "lin-c-cursor-1",
-    });
+      ids2: ["lin-c"], after2: "lin-c-cursor-1"});
     assert.deepEqual(requests[2]?.variables, {
       ids0: ["lin-a"], after0: "lin-a-cursor-2",
       ids1: ["lin-b"], after1: "lin-b-cursor-2",
-      ids2: ["lin-c"], after2: "lin-c-cursor-2",
-    });
+      ids2: ["lin-c"], after2: "lin-c-cursor-2"});
   } finally {
     restore();
   }

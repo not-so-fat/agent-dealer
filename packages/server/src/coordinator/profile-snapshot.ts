@@ -6,7 +6,6 @@
 // §"Immutable execution-profile snapshot" / NOT-60 acceptance criteria).
 import type { AgentProfile, ProfileSnapshot, WorkerSessionRole } from "@agent-dealer/shared";
 import {
-  parseStringList,
   resolveProfileBudgetJson,
   resolveProfileModel,
 } from "@agent-dealer/shared";
@@ -23,19 +22,9 @@ export function buildProfileSnapshot(agent: AgentProfile, role: WorkerSessionRol
     budgetJson: resolveProfileBudgetJson(agent),
     permissionPolicy: resolveSessionPermissionPolicy(role, agent.permissionPolicyJson),
     deckId: agent.deckId,
-    workspaceRoot: agent.workspaceRoot,
-    playbookIds: profilePlaybookIds(agent),
-    externalMemoryRefs: parseStringList(agent.externalMemoryRefsJson),
     purpose: agent.purpose,
     capturedAt: new Date().toISOString(),
   };
-}
-
-/** The multi-playbook list, falling back to the single legacy playbook_id if unset. */
-function profilePlaybookIds(agent: AgentProfile): string[] {
-  const list = parseStringList(agent.playbookIdsJson);
-  if (list.length) return list;
-  return agent.playbookId ? [agent.playbookId] : [];
 }
 
 export function serializeProfileSnapshot(snapshot: ProfileSnapshot): string {

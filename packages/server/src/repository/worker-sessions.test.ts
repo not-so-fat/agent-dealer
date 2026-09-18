@@ -19,14 +19,13 @@ before(() => {
   migrate();
   issueId = createIssue({
     title: "Session host issue",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 });
 
 test("creates a queued session", () => {
@@ -35,8 +34,7 @@ test("creates a queued session", () => {
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: "claude_code",
-  });
+    runtime: "claude_code"});
   assert.equal(session.status, "queued");
   assert.deepStrictEqual(getWorkerSession(session.id), session);
 });

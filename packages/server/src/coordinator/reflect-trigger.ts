@@ -18,7 +18,7 @@
 // no mint, no Authorization. Resolving a legacy `reflection_interaction_required` action
 // still bypasses `resolveHumanActionAndAdvance` (issue is already `done`).
 import type { Issue } from "@agent-dealer/shared";
-import { parseProfileSnapshot } from "@agent-dealer/shared";
+import { parseProfileSnapshot, parseStringList } from "@agent-dealer/shared";
 import { randomUUID } from "node:crypto";
 import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
 import { callDeckTool } from "../adapters/reflect-authority.js";
@@ -33,31 +33,25 @@ import {
   getHumanAction,
   resolveHumanAction,
 } from "../repository/human-actions.js";
-import { buildProfileSnapshot } from "./profile-snapshot.js";
 
 const REFLECT_TOOL_TIMEOUT_MS = 15_000;
 
 /**
- * The reflect proposal must target the deck/playbooks the developer actually ran with —
- * not whatever the live, possibly-since-edited agent profile says now. The frozen
- * `profileSnapshotJson` on the issue's most recent developer session is the ground truth
- * (design §"Immutable execution-profile snapshot"); only a session with no snapshot
- * recorded (a legacy/pre-NOT-60 row) falls back to a live profile resolve — via
- * `buildProfileSnapshot`, the SAME function that produces the frozen snapshot in the first
- * place, so the singular-legacy-`playbookId` fallback it already implements
- * (`profilePlaybookIds`) applies here too instead of being reimplemented (and getting
- * missed) a second time.
+ * Reflect targets the deck the developer actually ran with (frozen snapshot). Playbook
+ * ids are no longer on the snapshot (NOT-149) — only dead legacy agent columns still
+ * carry them for in-flight profiles. New agents with an empty legacy list skip reflect
+ * until a follow-up discovers playbooks dynamically from the Deck.
  */
 function resolveReflectTargets(issue: Issue): { deckId: string | null; playbookIds: string[] } {
   const developerSessions = listWorkerSessionsForIssue(issue.id).filter((s) => s.role === "developer");
   const finalSession = developerSessions[developerSessions.length - 1] ?? null;
   const snapshot = finalSession ? parseProfileSnapshot(finalSession.profileSnapshotJson) : null;
-  if (snapshot) return { deckId: snapshot.deckId, playbookIds: snapshot.playbookIds };
-
   const developerAgent = issue.developerAgentId ? getAgent(issue.developerAgentId) : null;
-  if (!developerAgent) return { deckId: null, playbookIds: [] };
-  const fallback = buildProfileSnapshot(developerAgent, "developer");
-  return { deckId: fallback.deckId, playbookIds: fallback.playbookIds };
+  const deckId = snapshot?.deckId ?? developerAgent?.deckId ?? null;
+  if (!developerAgent) return { deckId, playbookIds: [] };
+  const fromList = parseStringList(developerAgent.playbookIdsJson);
+  if (fromList.length) return { deckId, playbookIds: fromList };
+  return { deckId, playbookIds: developerAgent.playbookId ? [developerAgent.playbookId] : [] };
 }
 
 export interface ReflectDeps {

@@ -11,15 +11,13 @@ process.env.MAX_CONCURRENT_RUNS = "0";
 
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID } = await import("@agent-dealer/shared");
-const { updateAgent } = await import("../repository/agents.js");
 const {
   addArtifact,
   createRun,
   getLatestArtifact,
   getRun,
   transitionRun,
-  updateRunFields,
-} = await import("../repository/runs.js");
+  updateRunFields} = await import("../repository/runs.js");
 const { approveRunWithDeliver, resolveOutboundDeliveryAction, resolveOpenDeliveryParkForRun } = await import(
   "./approve-deliver.js"
 );
@@ -33,21 +31,17 @@ const DECK = "6e825b59-13de-4ddd-ab7e-55ab5a1c279a";
 const TOOL_CALL: OutboundToolCall = {
   serviceName: "34eb6c24-f151-4da2-8db8-d6996aa296be",
   toolName: "chat_postMessage",
-  arguments: { channel: "C1", text: "Hello gate test" },
-};
+  arguments: { channel: "C1", text: "Hello gate test" }};
 
 const DRAFT_CONTENT = {
   draft: {
     actionType: "slack_message" as const,
     summary: { target: "#test", body: "Hello gate test" },
-    toolCall: TOOL_CALL,
-  },
-  status: "pending" as const,
-};
+    toolCall: TOOL_CALL},
+  status: "pending" as const};
 
 before(() => {
   migrate();
-  updateAgent(BUILTIN_AGENT_CLAUDE_ID, { workspaceRoot: process.env.AGENT_DEALER_HOME! });
 });
 
 function seedReviewRun(withDraft = true) {
@@ -56,7 +50,7 @@ function seedReviewRun(withDraft = true) {
     taskCategory: "communication",
     status: "plan_pending",
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-  });
+    repo: "acme/app"});
   updateRunFields(run.id, { deck_id: DECK });
   transitionRun(run.id, "plan_approved");
   transitionRun(run.id, "running");
@@ -89,8 +83,7 @@ test("approve delivers under the run deckId and records a receipt", async () => 
       capturedDeck = deckId;
       captured = toolCall;
       return { ok: true, toolResult: { ok: true }, permalink: "https://slack.example/msg/1" };
-    },
-  });
+    }});
   assert.equal(res.ok, true);
   assert.equal(res.ok && res.delivered, true);
   assert.equal(capturedDeck, DECK);
@@ -109,13 +102,11 @@ test("approve with human-edited body sends updated payload", async () => {
     deliver: async (_deckId, toolCall) => {
       captured = toolCall;
       return { ok: true, toolResult: { ok: true } };
-    },
-  });
+    }});
   assert.equal(res.ok, true);
   assert.deepEqual(captured, {
     ...TOOL_CALL,
-    arguments: { ...TOOL_CALL.arguments, text: "Human tweak before send" },
-  });
+    arguments: { ...TOOL_CALL.arguments, text: "Human tweak before send" }});
   const draftArt = getLatestArtifact(run.id, "slack_draft");
   assert.match(draftArt!.contentJson!, /Human tweak before send/);
 });
@@ -123,8 +114,7 @@ test("approve with human-edited body sends updated payload", async () => {
 test("deliver infra failure keeps run in review with pending draft, no park", async () => {
   const run = seedReviewRun(true);
   const res = await approveRunWithDeliver(run.id, {
-    deliver: async (): Promise<DeliverOutboundResult> => ({ ok: false, kind: "infra_failure", reason: "deck down" }),
-  });
+    deliver: async (): Promise<DeliverOutboundResult> => ({ ok: false, kind: "infra_failure", reason: "deck down" })});
   assert.equal(res.ok, false);
   assert.equal(!res.ok && res.code, 502);
   assert.equal(!res.ok && res.errorCode, "DELIVERY_FAILED");
@@ -141,9 +131,7 @@ test("off-scope/provider denial surfaces as an ordinary delivery failure, not pa
     deliver: async (): Promise<DeliverOutboundResult> => ({
       ok: false,
       kind: "infra_failure",
-      reason: "RESOURCE_OUT_OF_SCOPE: tool not in authority's allowed set",
-    }),
-  });
+      reason: "RESOURCE_OUT_OF_SCOPE: tool not in authority's allowed set"})});
   assert.equal(res.ok, false);
   assert.equal(getRun(run.id)!.status, "review");
   assert.equal(findOpenHumanActionForRun(run.id, "outbound_delivery_interaction_required"), null);
@@ -156,9 +144,7 @@ test("deliver returning ambiguous parks the run: draft pending, run in review, o
     deliver: async (): Promise<DeliverOutboundResult> => ({
       ok: false,
       kind: "ambiguous",
-      reason: "Outbound deliver timed out after 60000ms — whether the message was actually sent is unknown",
-    }),
-  });
+      reason: "Outbound deliver timed out after 60000ms — whether the message was actually sent is unknown"})});
   assert.equal(res.ok, false);
   assert.equal(!res.ok && res.errorCode, "AMBIGUOUS_RESULT");
   assert.equal(getRun(run.id)!.status, "review");
@@ -178,9 +164,7 @@ test("a repeated ambiguous signal dedupes to one action", async () => {
     deliver: async (): Promise<DeliverOutboundResult> => ({
       ok: false,
       kind: "ambiguous" as const,
-      reason: "timeout — whether the message was actually sent is unknown",
-    }),
-  };
+      reason: "timeout — whether the message was actually sent is unknown"})};
   await approveRunWithDeliver(run.id, deps);
   await approveRunWithDeliver(run.id, deps);
   const actions = listHumanActionsForRun(run.id).filter((a) => a.actionType === "outbound_delivery_interaction_required");
@@ -193,9 +177,7 @@ async function seedParkedRunViaAmbiguous(): Promise<{ run: Awaited<ReturnType<ty
     deliver: async () => ({
       ok: false,
       kind: "ambiguous",
-      reason: "timeout — whether the message was actually sent is unknown",
-    }),
-  });
+      reason: "timeout — whether the message was actually sent is unknown"})});
   const action = findOpenHumanActionForRun(run.id, "outbound_delivery_interaction_required");
   assert.ok(action, "expected the original attempt to have parked the run");
   return { run, actionId: action!.id };
@@ -204,8 +186,7 @@ async function seedParkedRunViaAmbiguous(): Promise<{ run: Awaited<ReturnType<ty
 test("resolveOutboundDeliveryAction:retry_send re-delivers and closes the park on success", async () => {
   const { run, actionId } = await seedParkedRunViaAmbiguous();
   const res = await resolveOutboundDeliveryAction(actionId, "yusuke", "retry_send", {
-    deliver: async () => ({ ok: true, toolResult: { ok: true } }),
-  });
+    deliver: async () => ({ ok: true, toolResult: { ok: true } })});
   assert.equal(res.ok, true);
   assert.equal(res.ok && res.delivered, true);
   assert.equal(getRun(run.id)!.status, "done");
@@ -218,8 +199,7 @@ test("resolveOutboundDeliveryAction:retry_send re-delivers and closes the park o
 test("a plain re-approve (not via retry_send) closes an open delivery park too, with a generic system resolution", async () => {
   const { run, actionId } = await seedParkedRunViaAmbiguous();
   const res = await approveRunWithDeliver(run.id, {
-    deliver: async () => ({ ok: true, toolResult: { ok: true } }),
-  });
+    deliver: async () => ({ ok: true, toolResult: { ok: true } })});
   assert.equal(res.ok, true);
   assert.equal(res.ok && res.delivered, true);
   assert.equal(getRun(run.id)!.status, "done");
@@ -232,8 +212,7 @@ test("a plain re-approve (not via retry_send) closes an open delivery park too, 
 test("resolveOutboundDeliveryAction:retry_send that fails leaves the action open, not resolved", async () => {
   const { run, actionId } = await seedParkedRunViaAmbiguous();
   const res = await resolveOutboundDeliveryAction(actionId, "yusuke", "retry_send", {
-    deliver: async () => ({ ok: false, kind: "infra_failure", reason: "deck down again" }),
-  });
+    deliver: async () => ({ ok: false, kind: "infra_failure", reason: "deck down again" })});
   assert.equal(res.ok, false);
   assert.equal(getRun(run.id)!.status, "review");
   assert.equal(pendingSendCount(run.id), 1);
@@ -243,8 +222,7 @@ test("resolveOutboundDeliveryAction:retry_send that fails leaves the action open
 test("resolveOutboundDeliveryAction:retry_send that hits ambiguous again reuses the same open action, no duplicate", async () => {
   const { run, actionId } = await seedParkedRunViaAmbiguous();
   const res = await resolveOutboundDeliveryAction(actionId, "yusuke", "retry_send", {
-    deliver: async () => ({ ok: false, kind: "ambiguous", reason: "still ambiguous" }),
-  });
+    deliver: async () => ({ ok: false, kind: "ambiguous", reason: "still ambiguous" })});
   assert.equal(res.ok, false);
   assert.equal(getHumanAction(actionId)!.status, "open");
   const actions = listHumanActionsForRun(run.id).filter((a) => a.actionType === "outbound_delivery_interaction_required");
@@ -259,8 +237,7 @@ test("resolveOutboundDeliveryAction:reject makes no deliver call, draft ends rej
     deliver: async () => {
       called = true;
       throw new Error("must not be called");
-    },
-  });
+    }});
   assert.equal(res.ok, true);
   assert.equal(res.ok && res.delivered, false);
   assert.equal(called, false);
@@ -277,8 +254,7 @@ test("mark sent before deliver prevents double-send race", async () => {
     deliver: async () => {
       deliverCalls++;
       return { ok: true, toolResult: { ok: true } };
-    },
-  });
+    }});
   assert.equal(res.ok, true);
   assert.equal(deliverCalls, 1);
   const draftArt = getLatestArtifact(run.id, "slack_draft");

@@ -26,7 +26,10 @@ export const AgentHealthIssue = z.object({
     "usage_capped",
     "deck_offline",
     "deck_unauthorized",
+    /** @deprecated NOT-149 — no longer emitted; workspace is not an Agent concept. */
     "workspace_missing",
+    /** Agent has no Deck — Dealer workers are fail-closed without one (NOT-149). */
+    "deck_missing",
     "mcp_not_registered",
     /** GitHub CLI missing — issue workflows need `gh` to open/update draft PRs. */
     "github_cli_missing",
@@ -41,9 +44,15 @@ export const AgentProfile = z.object({
   id: z.string().uuid(),
   name: z.string(),
   runtime: Runtime,
+  /**
+   * Dead legacy storage (NOT-149). Retained so existing rows migrate safely; never shown
+   * in UI, never required by health/admission, and never copied into new profile snapshots.
+   */
   workspaceRoot: z.string().nullable(),
+  /** Required for any Agent used for execution — Dealer never starts without a Deck. */
   deckId: z.string().uuid().nullable(),
   deckName: z.string().nullable(),
+  /** Dead legacy storage (NOT-149) — playbooks are chosen dynamically inside the Deck. */
   playbookId: z.string().nullable(),
   /**
    * Legacy phase defaults, read-only since NOT-71: nothing writes these any more, but
@@ -65,9 +74,9 @@ export const AgentProfile = z.object({
   defaultBudgetJson: z.string().nullable(),
   /** Free-text description of what this profile is for (shown in the picker, snapshotted). */
   purpose: z.string().nullable(),
-  /** Serialized string[] of Agent Deck playbook ids the worker may load. */
+  /** Dead legacy storage (NOT-149). */
   playbookIdsJson: z.string().nullable(),
-  /** Serialized string[] of external-memory references (vault paths, doc urls). */
+  /** Dead legacy storage (NOT-149). */
   externalMemoryRefsJson: z.string().nullable(),
   /** Serialized PermissionPolicyOverride — may only tighten the role's capabilities. */
   permissionPolicyJson: z.string().nullable(),
@@ -86,15 +95,12 @@ export type AgentWithHealth = z.infer<typeof AgentWithHealth>;
 export const CreateAgentInput = z.object({
   name: z.string().min(1),
   runtime: Runtime,
-  workspaceRoot: z.string().min(1),
-  deckId: z.string().uuid().optional(),
-  playbookId: z.string().optional(),
+  /** Exactly one Agent Deck — required; workers never start in no-Deck/degraded mode. */
+  deckId: z.string().uuid(),
   defaultModel: z.string().nullable().optional(),
   defaultEffort: ReasoningEffort.nullable().optional(),
   defaultBudget: PhaseBudget.nullable().optional(),
   purpose: z.string().nullable().optional(),
-  playbookIds: z.array(z.string()).nullable().optional(),
-  externalMemoryRefs: z.array(z.string()).nullable().optional(),
   permissionPolicy: PermissionPolicyOverride.nullable().optional(),
 });
 export type CreateAgentInput = z.infer<typeof CreateAgentInput>;
@@ -102,15 +108,12 @@ export type CreateAgentInput = z.infer<typeof CreateAgentInput>;
 export const UpdateAgentInput = z.object({
   name: z.string().min(1).optional(),
   runtime: Runtime.optional(),
-  workspaceRoot: z.string().nullable().optional(),
+  /** Null clears the deck (unhealthy until set again); omit leaves unchanged. */
   deckId: z.string().uuid().nullable().optional(),
-  playbookId: z.string().nullable().optional(),
   defaultModel: z.string().nullable().optional(),
   defaultEffort: ReasoningEffort.nullable().optional(),
   defaultBudget: PhaseBudget.nullable().optional(),
   purpose: z.string().nullable().optional(),
-  playbookIds: z.array(z.string()).nullable().optional(),
-  externalMemoryRefs: z.array(z.string()).nullable().optional(),
   permissionPolicy: PermissionPolicyOverride.nullable().optional(),
 });
 export type UpdateAgentInput = z.infer<typeof UpdateAgentInput>;

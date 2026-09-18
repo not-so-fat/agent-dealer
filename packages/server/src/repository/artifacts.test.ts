@@ -18,14 +18,13 @@ before(() => migrate());
 function issue(): string {
   return createIssue({
     title: "T",
-    repo: "/repo",
+    repo: "acme/app",
     baseBranch: "main",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 test("createIssueArtifact writes a row readable via listArtifactsForIssue", () => {

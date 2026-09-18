@@ -1,5 +1,4 @@
 import { spawn, spawnSync } from "node:child_process";
-import fs from "node:fs";
 import type { AgentHealthIssue, AgentProfile, AgentWithHealth, Runtime } from "@agent-dealer/shared";
 import {
   CODEX_AUTH_REMEDIATION,
@@ -286,22 +285,21 @@ function agentSpecificIssues(
   deckAccessResult: DeckAccessResult | null
 ): AgentHealthIssue[] {
   const issues: AgentHealthIssue[] = [];
-  if (!agent.workspaceRoot) {
-    issues.push({ code: "workspace_missing", message: "Set workspace on Agents page" });
-  } else if (!fs.existsSync(agent.workspaceRoot)) {
+  if (!agent.deckId) {
     issues.push({
-      code: "workspace_missing",
-      message: `Workspace path not found: ${agent.workspaceRoot}`,
+      code: "deck_missing",
+      message: "Set an Agent Deck on the Agents page — workers never start without one",
     });
+    return issues;
   }
-  if (agent.deckId && !agentDeckOnline) {
+  if (!agentDeckOnline) {
     issues.push({ code: "deck_offline", message: "Agent Deck offline — deck MCP unavailable" });
   }
   // resolveDeckName silently returns null on this same failure elsewhere (route/index.ts) —
   // surface it here so a bound deck that can no longer be read isn't just a quiet no-op. A
   // *successful* metadata call that simply doesn't include this deck (deleted) is the same
   // user-visible failure as the call itself failing.
-  if (agent.deckId && agentDeckOnline && deckAccessResult) {
+  if (agentDeckOnline && deckAccessResult) {
     if (!deckAccessResult.ok) {
       issues.push({ code: "deck_unauthorized", message: deckAccessResult.message });
     } else if (!deckAccessResult.decks.some((d) => d.id === agent.deckId)) {
@@ -311,7 +309,7 @@ function agentSpecificIssues(
       });
     }
   }
-  if (agent.deckId && agent.runtime === "claude_code" && agentDeckOnline && !mcpRegistered) {
+  if (agent.runtime === "claude_code" && agentDeckOnline && !mcpRegistered) {
     issues.push({
       code: "mcp_not_registered",
       message: "Run agent-deck setup --client claude --start (Claude MCP not registered)",

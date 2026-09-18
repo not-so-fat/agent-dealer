@@ -98,9 +98,9 @@ export function createRun(input: CreateRunInput, opts?: {
     (isCursor ? CURSOR_DEFAULT_MODEL : null);
   const executeModel =
     input.executeModel ?? input.planModel ?? agentProfile?.defaultExecuteModel ?? planModel;
-  const repo = input.repo ?? agent.workspaceRoot ?? null;
+  const repo = input.repo ?? null;
   if (!repo) {
-    throw new Error("Agent workspace not configured — set workspace on Agents page or provide repo override");
+    throw new Error("Repo is required — provide a repository path/URL on the task (agent workspace is no longer used)");
   }
   const source = opts?.source ?? "manual";
   const externalId = opts?.externalId ?? (source === "manual" ? id : null);
@@ -118,7 +118,7 @@ export function createRun(input: CreateRunInput, opts?: {
     agent_name: agent.agentName,
     deck_id: agent.deckId ?? null,
     deck_name: agent.deckName ?? opts?.deckName ?? null,
-    playbook_id: agent.playbookId ?? null,
+    playbook_id: null,
     runtime: agent.runtime,
     plan_model: planModel,
     execute_model: executeModel,

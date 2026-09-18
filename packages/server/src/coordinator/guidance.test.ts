@@ -21,14 +21,13 @@ before(() => {
 function seedIssue(): string {
   return createIssue({
     title: "Guidance host issue",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 /** Mirrors worker-loop.ts's real transaction: create → startSession → the `worker.started`

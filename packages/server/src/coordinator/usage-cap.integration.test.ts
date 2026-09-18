@@ -61,8 +61,8 @@ async function pump(max = 10): Promise<void> {
 
 test("in-flight cap defers work item without incrementing attempt_count or infra_attempts", async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cap-repo-"));
-  const dev = createAgent({ name: "dev-cap", runtime: "claude_code", workspaceRoot: repo });
-  const rev = createAgent({ name: "rev-cap", runtime: "claude_code", workspaceRoot: repo });
+  const dev = createAgent({ name: "dev-cap", runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: "rev-cap", runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
   const issueId = createIssue({
     title: "Cap test",
     description: "d",
@@ -73,8 +73,7 @@ test("in-flight cap defers work item without incrementing attempt_count or infra
     reviewerAgentId: rev.id,
     maxReviewRounds: 2,
     maxInfraAttempts: 1,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 
   registerEffectHandler("developer", async () => {
     const until = new Date(Date.now() + 120_000).toISOString();
@@ -82,13 +81,11 @@ test("in-flight cap defers work item without incrementing attempt_count or infra
       runtime: "claude_code",
       unavailableUntil: until,
       reason: "claude_code usage capped — five_hour limit rejected",
-      evidence: { test: true },
-    });
+      evidence: { test: true }});
     return {
       kind: "usage_capped",
       until,
-      reason: "claude_code usage capped — five_hour limit rejected",
-    } satisfies DeveloperOutcome;
+      reason: "claude_code usage capped — five_hour limit rejected"} satisfies DeveloperOutcome;
   });
 
   const started = startWorkflow(issueId);
@@ -116,14 +113,13 @@ test("in-flight cap defers work item without incrementing attempt_count or infra
 
 test("pending item on capped runtime is not spawned before until (pre-spawn deferral)", async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cap-repo2-"));
-  const dev = createAgent({ name: "dev-cap2", runtime: "claude_code", workspaceRoot: repo });
-  const rev = createAgent({ name: "rev-cap2", runtime: "claude_code", workspaceRoot: repo });
+  const dev = createAgent({ name: "dev-cap2", runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: "rev-cap2", runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
   const until = new Date(Date.now() + 300_000).toISOString();
   recordRuntimeAvailability({
     runtime: "claude_code",
     unavailableUntil: until,
-    reason: "claude_code usage capped — test",
-  });
+    reason: "claude_code usage capped — test"});
 
   let spawnCalls = 0;
   registerEffectHandler("developer", async () => {
@@ -141,8 +137,7 @@ test("pending item on capped runtime is not spawned before until (pre-spawn defe
     reviewerAgentId: rev.id,
     maxReviewRounds: 2,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 
   startWorkflow(issueId);
   await pump(3);
@@ -161,8 +156,8 @@ test("deferral past the ceiling escalates to policy_escalation instead of deferr
   try {
     const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cap-ceiling-"));
-    const dev = createAgent({ name: "dev-ceiling", runtime: "claude_code", workspaceRoot: repo });
-    const rev = createAgent({ name: "rev-ceiling", runtime: "claude_code", workspaceRoot: repo });
+    const dev = createAgent({ name: "dev-ceiling", runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const rev = createAgent({ name: "rev-ceiling", runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
     const issueId = createIssue({
       title: "Ceiling test",
       description: "d",
@@ -173,8 +168,7 @@ test("deferral past the ceiling escalates to policy_escalation instead of deferr
       reviewerAgentId: rev.id,
       maxReviewRounds: 2,
       maxInfraAttempts: 3,
-      source: "manual",
-    }).id;
+      source: "manual"}).id;
 
     // Every attempt reports the same hard cap — availableAt is a few ms out so the next
     // pump tick re-attempts quickly, letting the 50ms ceiling elapse across two deferrals.
@@ -183,8 +177,7 @@ test("deferral past the ceiling escalates to policy_escalation instead of deferr
       return {
         kind: "usage_capped",
         until,
-        reason: "claude_code usage capped — plan limit rejected",
-      } satisfies DeveloperOutcome;
+        reason: "claude_code usage capped — plan limit rejected"} satisfies DeveloperOutcome;
     });
 
     const started = startWorkflow(issueId);

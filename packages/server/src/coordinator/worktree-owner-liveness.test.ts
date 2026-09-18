@@ -18,8 +18,7 @@ const {
   startSession,
   completeSession,
   recordSessionProcess,
-  patchRunningSession,
-} = await import("../repository/worker-sessions.js");
+  patchRunningSession} = await import("../repository/worker-sessions.js");
 const { COORDINATOR_PROCESS_OWNER, readProcessStartTime } = await import("./process-liveness.js");
 const { checkDeveloperWorktreeOwnerLiveness, findWorkerSessionOwningWorktree } = await import(
   "./worktree-owner-liveness.js"
@@ -31,14 +30,13 @@ before(() => {
   migrate();
   issueId = createIssue({
     title: "owner-liveness host",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 });
 
 beforeEach(() => {
@@ -57,8 +55,7 @@ function spawnLiveChild(): { pid: number; kill: () => void; startTime: string } 
       } catch {
         /* already gone */
       }
-    },
-  };
+    }};
 }
 
 test("findWorkerSessionOwningWorktree resolves the session id encoded in the path basename", () => {
@@ -67,8 +64,7 @@ test("findWorkerSessionOwningWorktree resolves the session id encoded in the pat
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: "claude_code",
-  });
+    runtime: "claude_code"});
   startSession(session.id);
   const wt = `/repo/.agent-dealer-worktrees/${session.id}-developer`;
   patchRunningSession(session.id, { worktreePath: wt });
@@ -83,8 +79,7 @@ test("checkDeveloperWorktreeOwnerLiveness: running session with live pid is aliv
       role: "developer",
       round: 1,
       agentId: BUILTIN_AGENT_CLAUDE_ID,
-      runtime: "claude_code",
-    });
+      runtime: "claude_code"});
     startSession(session.id);
     const wt = `/repo/.agent-dealer-worktrees/${session.id}-developer`;
     patchRunningSession(session.id, { worktreePath: wt });
@@ -92,8 +87,7 @@ test("checkDeveloperWorktreeOwnerLiveness: running session with live pid is aliv
 
     assert.deepEqual(checkDeveloperWorktreeOwnerLiveness(wt), {
       state: "alive",
-      sessionId: session.id,
-    });
+      sessionId: session.id});
   } finally {
     child.kill();
   }
@@ -107,8 +101,7 @@ test("checkDeveloperWorktreeOwnerLiveness: terminal session whose pid is still a
       role: "developer",
       round: 1,
       agentId: BUILTIN_AGENT_CLAUDE_ID,
-      runtime: "claude_code",
-    });
+      runtime: "claude_code"});
     startSession(session.id);
     const wt = `/repo/.agent-dealer-worktrees/${session.id}-developer`;
     patchRunningSession(session.id, { worktreePath: wt });
@@ -116,13 +109,11 @@ test("checkDeveloperWorktreeOwnerLiveness: terminal session whose pid is still a
     // Recovery wrongly marked it failed while the CLI kept running.
     completeSession(session.id, {
       status: "failed",
-      errorJson: JSON.stringify({ reason: "recovered — worker process presumed dead" }),
-    });
+      errorJson: JSON.stringify({ reason: "recovered — worker process presumed dead" })});
 
     assert.deepEqual(checkDeveloperWorktreeOwnerLiveness(wt), {
       state: "alive",
-      sessionId: session.id,
-    });
+      sessionId: session.id});
   } finally {
     child.kill();
   }
@@ -147,8 +138,7 @@ test("checkDeveloperWorktreeOwnerLiveness: terminal session with a dead pid is d
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: "claude_code",
-  });
+    runtime: "claude_code"});
   startSession(session.id);
   const wt = `/repo/.agent-dealer-worktrees/${session.id}-developer`;
   patchRunningSession(session.id, { worktreePath: wt });
@@ -171,16 +161,14 @@ test("checkDeveloperWorktreeOwnerLiveness: running session with no pid yet still
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: "claude_code",
-  });
+    runtime: "claude_code"});
   startSession(session.id);
   const wt = `/repo/.agent-dealer-worktrees/${session.id}-developer`;
   patchRunningSession(session.id, { worktreePath: wt });
   // No recordSessionProcess yet — worktree.ready before spawn.
   assert.deepEqual(checkDeveloperWorktreeOwnerLiveness(wt), {
     state: "alive",
-    sessionId: session.id,
-  });
+    sessionId: session.id});
 });
 
 test("checkDeveloperWorktreeOwnerLiveness: after clean reuse, live successor on predecessor's path basename is still detected (Lens stale-basename-owner)", () => {
@@ -191,15 +179,13 @@ test("checkDeveloperWorktreeOwnerLiveness: after clean reuse, live successor on 
       role: "developer",
       round: 1,
       agentId: BUILTIN_AGENT_CLAUDE_ID,
-      runtime: "claude_code",
-    });
+      runtime: "claude_code"});
     startSession(predecessor.id);
     const wt = `/repo/.agent-dealer-worktrees/${predecessor.id}-developer`;
     patchRunningSession(predecessor.id, { worktreePath: wt });
     completeSession(predecessor.id, {
       status: "failed",
-      errorJson: JSON.stringify({ reason: "presumed dead" }),
-    });
+      errorJson: JSON.stringify({ reason: "presumed dead" })});
 
     // Successor reused the leftover path in place — directory still named for predecessor.
     const successor = createWorkerSession({
@@ -207,8 +193,7 @@ test("checkDeveloperWorktreeOwnerLiveness: after clean reuse, live successor on 
       role: "developer",
       round: 1,
       agentId: BUILTIN_AGENT_CLAUDE_ID,
-      runtime: "claude_code",
-    });
+      runtime: "claude_code"});
     startSession(successor.id);
     patchRunningSession(successor.id, { worktreePath: wt });
     recordSessionProcess(successor.id, child.pid, COORDINATOR_PROCESS_OWNER, child.startTime);

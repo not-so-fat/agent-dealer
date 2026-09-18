@@ -44,14 +44,13 @@ function newIssue(maxInfraAttempts: number): string {
   return createIssue({
     title: "Deck membership changes outside the deck",
     acceptanceCriteria: "The route reaches the store",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 /**
@@ -78,8 +77,7 @@ async function presumedDeadReclaim(issueId: string): Promise<Awaited<ReturnType<
     role: "developer",
     round: claimed!.round,
     agentId: getIssue(issueId)!.developerAgentId,
-    runtime: "claude_code",
-  });
+    runtime: "claude_code"});
   startSession(session.id);
   assert.equal(bindWorkItemSession(item.id, session.id, claimed!.leaseToken!), true);
   return recoverCoordinator({ now: FUTURE() });

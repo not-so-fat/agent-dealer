@@ -18,8 +18,7 @@ const {
   emitSessionMilestone,
   shortWorktreePath,
   taskBriefIsComplete,
-  workerSessionPayload,
-} = await import("./session-progress.js");
+  workerSessionPayload} = await import("./session-progress.js");
 
 function writeLog(lines: unknown[]): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-progress-log-"));
@@ -47,14 +46,12 @@ test("workerSessionPayload includes runtime/model/session id", () => {
       runtime: "cursor_local",
       model: "composer",
       sessionId: "11111111-1111-1111-1111-111111111111",
-      worktreePath: "/tmp/wt/issue-1",
-    }),
+      worktreePath: "/tmp/wt/issue-1"}),
     {
       runtime: "cursor_local",
       model: "composer",
       sessionId: "11111111-1111-1111-1111-111111111111",
-      worktreePath: "wt/issue-1",
-    }
+      worktreePath: "wt/issue-1"}
   );
 });
 
@@ -64,8 +61,7 @@ test("deriveActivityFromLog maps recent tool names to operator labels", () => {
     { type: "assistant", message: { content: [{ type: "tool_use", name: "Shell" }] } },
     {
       type: "assistant",
-      message: { content: [{ type: "tool_use", name: "Shell", input: { command: "npm test" } }] },
-    },
+      message: { content: [{ type: "tool_use", name: "Shell", input: { command: "npm test" } }] }},
   ]);
   // Last event is a Shell tool with npm test → concrete test progress
   assert.match(deriveActivityFromLog(logPath)!, /Running tests:/i);
@@ -82,8 +78,7 @@ test("deriveLiveProgressFromLog surfaces Cursor nested tool_call with file path"
       type: "tool_call",
       subtype: "started",
       call_id: "c1",
-      tool_call: { readToolCall: { args: { path: "apps/web/src/pages/IssueDetailPage.tsx" } } },
-    },
+      tool_call: { readToolCall: { args: { path: "apps/web/src/pages/IssueDetailPage.tsx" } } }},
   ]);
   assert.equal(deriveLiveProgressFromLog(logPath), "Reading IssueDetailPage.tsx");
 });
@@ -96,10 +91,7 @@ test("deriveLiveProgressFromLog surfaces Cursor shell / test commands", () => {
       call_id: "c2",
       tool_call: {
         shellToolCall: {
-          args: { command: "npm test -- packages/server/src/coordinator/failure-reason.test.ts" },
-        },
-      },
-    },
+          args: { command: "npm test -- packages/server/src/coordinator/failure-reason.test.ts" }}}},
   ]);
   const progress = deriveLiveProgressFromLog(logPath);
   assert.ok(progress);
@@ -113,8 +105,7 @@ test("deriveLiveProgressFromLog prefers recent tool over tiny assistant token fr
       type: "tool_call",
       subtype: "started",
       call_id: "c1",
-      tool_call: { grepToolCall: { args: { pattern: "liveProgress" } } },
-    },
+      tool_call: { grepToolCall: { args: { pattern: "liveProgress" } } }},
     { type: "assistant", message: { content: [{ type: "text", text: "I'll" }] } },
     { type: "assistant", message: { content: [{ type: "text", text: " fix" }] } },
   ]);
@@ -152,9 +143,7 @@ test("deriveLiveProgressFromLog surfaces Cursor editToolCall path", () => {
       type: "tool_call",
       subtype: "started",
       tool_call: {
-        editToolCall: { args: { path: "apps/web/src/pages/IssueDetailPage.tsx", streamContent: "…" } },
-      },
-    },
+        editToolCall: { args: { path: "apps/web/src/pages/IssueDetailPage.tsx", streamContent: "…" } }}},
   ]);
   assert.equal(deriveLiveProgressFromLog(logPath), "Editing IssueDetailPage.tsx");
 });
@@ -164,8 +153,7 @@ test("deriveLiveProgressFromLog surfaces Cursor globPattern", () => {
     {
       type: "tool_call",
       subtype: "started",
-      tool_call: { globToolCall: { args: { globPattern: "apps/web/src/pages/*.tsx" } } },
-    },
+      tool_call: { globToolCall: { args: { globPattern: "apps/web/src/pages/*.tsx" } } }},
   ]);
   assert.equal(deriveLiveProgressFromLog(logPath), "Finding files: apps/web/src/pages/*.tsx");
 });
@@ -187,24 +175,21 @@ test("emitSessionMilestone appends a role-attributed event and refreshes current
     title: "Progress",
     description: "Ship visibility",
     acceptanceCriteria: "Operators see last progress",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
-    source: "manual",
-  });
+    source: "manual"});
   const instance = startWorkflowInstance(issue.id, "dev_reviewer_v1");
   transitionIssue(issue.id, "developing", {
     currentOwner: "developer",
-    currentIntent: "Developer implementing round 1",
-  });
+    currentIntent: "Developer implementing round 1"});
   const session = createWorkerSession({
     issueId: issue.id,
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: "cursor_local",
-  });
+    runtime: "cursor_local"});
   startSession(session.id);
 
   emitSessionMilestone({
@@ -216,8 +201,7 @@ test("emitSessionMilestone appends a role-attributed event and refreshes current
     round: 1,
     type: "worktree.ready",
     intent: "Developer · worktree ready (round 1)",
-    payload: { worktreePath: "wt/x" },
-  });
+    payload: { worktreePath: "wt/x" }});
 
   const events = listWorkflowEventsForIssue(issue.id);
   const milestone = events.find((e) => e.type === "worktree.ready");

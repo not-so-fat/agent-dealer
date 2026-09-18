@@ -74,7 +74,7 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     }));
   });
 
-  /** Recent local filesystem repo paths from prior issues (NOT-102 kick picker). */
+  /** Recent portable GitHub repo identities (legacy local paths excluded from create UI). */
   app.get("/api/issues/recent-repos", async () => {
     return { repos: listRecentRepos() };
   });

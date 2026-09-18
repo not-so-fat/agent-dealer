@@ -20,8 +20,7 @@ const {
   finishWorkItem,
   requeueWorkItem,
   listExpiredLeases,
-  getWorkItem,
-} = await import("./work-items.js");
+  getWorkItem} = await import("./work-items.js");
 
 before(() => migrate());
 // claimWorkItem / listExpiredLeases scan the whole table (one coordinator loop in
@@ -31,14 +30,13 @@ beforeEach(() => getDb().exec("DELETE FROM work_items"));
 function freshInstance(): { issueId: string; instanceId: string } {
   const issue = createIssue({
     title: "WI host",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  });
+    source: "manual"});
   const instance = startWorkflowInstance(issue.id, "dev_reviewer_v1");
   return { issueId: issue.id, instanceId: instance.id };
 }
@@ -78,8 +76,7 @@ test("bindWorkItemSession is fenced on the lease token", () => {
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: "claude_code",
-  });
+    runtime: "claude_code"});
   assert.equal(bindWorkItemSession(item.id, session.id, "stale-token"), false);
   assert.equal(getWorkItem(item.id)!.workerSessionId, null);
   assert.equal(bindWorkItemSession(item.id, session.id, claimed.leaseToken!), true);
@@ -174,8 +171,7 @@ test("a heartbeat that renews the lease defeats a concurrent reclaim (onlyIfExpi
   assert.equal(
     requeueWorkItem(claimed.id, claimed.leaseToken!, { r: 1 }, {
       backoffMs: 0,
-      onlyIfExpiredBefore: new Date(recoveryClock).toISOString(),
-    }),
+      onlyIfExpiredBefore: new Date(recoveryClock).toISOString()}),
     false
   );
   assert.equal(getWorkItem(item.id)!.status, "leased");

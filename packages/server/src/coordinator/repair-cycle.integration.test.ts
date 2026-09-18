@@ -49,6 +49,12 @@ before(() => migrate());
 beforeEach(() => getDb().exec("DELETE FROM review_publications; DELETE FROM work_items;"));
 after(() => resetEffectHandlers());
 
+/** NOT-149: agents always carry a deckId; hermetic effect tests stub get_bound_deck. */
+const TEST_DECK_ID = "00000000-0000-4000-a000-000000000099";
+const okDeckCallTool = async (_name: string, _args: Record<string, unknown>) => ({
+  content: [{ type: "text" as const, text: JSON.stringify({ id: TEST_DECK_ID, name: "test-deck" }) }],
+});
+
 let repo: string;
 let remote: string;
 
@@ -81,8 +87,8 @@ function issueBranchName(issueId: string): string {
 }
 
 async function makeIssue(): Promise<string> {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
-  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
   return createIssue({
     title: "Add widget",
     description: "Build the widget.",
@@ -93,8 +99,7 @@ async function makeIssue(): Promise<string> {
     reviewerAgentId: rev.id,
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 async function pump(max = 20): Promise<void> {
@@ -140,8 +145,7 @@ function reviewerTranscript(verdict: "changes_requested" | "approved", baseSha: 
     acceptanceCriteriaAssessment: verdict === "approved" ? "Met." : "Not yet — missing test coverage.",
     evidenceAssessment: "Evidence checked.",
     findings: verdict === "changes_requested" ? [ROUND1_FINDING] : [],
-    risks: [],
-  };
+    risks: []};
   return `\`\`\`json\n${JSON.stringify(body)}\n\`\`\`\n`;
 }
 
@@ -192,8 +196,7 @@ function fakeGithub(): GithubFn {
     async publishReview({ event }) {
       const finalEvent: ReviewEvent = event;
       return { ok: true, event: finalEvent, usedCommentFallback: false };
-    },
-  };
+    }};
   return adapter;
 }
 
@@ -204,8 +207,12 @@ test("developer round 1 → reviewer changes_requested → developer round 2 on 
   // handler closure, or every invocation would reset to round 1's behavior.
   const devSpawn = roundAwareDeveloperSpawn();
   const revSpawn = roundAwareReviewerSpawn();
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: devSpawn, github }));
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: revSpawn, github }));
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { spawn: devSpawn, github, deckCallTool: okDeckCallTool })
+  );
+  registerEffectHandler("reviewer", (ctx) =>
+    runReviewerEffect(ctx, { spawn: revSpawn, github, deckCallTool: okDeckCallTool })
+  );
 
   startWorkflow(issueId);
   await pump();

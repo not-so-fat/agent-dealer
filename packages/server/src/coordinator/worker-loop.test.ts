@@ -49,14 +49,13 @@ function newIssue(maxReviewRounds = 3): string {
   return createIssue({
     title: "Loop me",
     acceptanceCriteria: "It works",
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 const cleanHandoff = (headSha = "head1") => ({
@@ -65,8 +64,7 @@ const cleanHandoff = (headSha = "head1") => ({
   headSha,
   baseSha: "base1",
   prNumber: 7,
-  prUrl: "https://gh/pr/7",
-});
+  prUrl: "https://gh/pr/7"});
 const approvedVerdict = {
   kind: "verdict" as const,
   result: ReviewerResult.parse({
@@ -76,9 +74,7 @@ const approvedVerdict = {
     acceptanceCriteriaAssessment: "ok",
     evidenceAssessment: "ok",
     findings: [],
-    risks: [],
-  }),
-};
+    risks: []})};
 
 /** Runs ticks until nothing is claimable and all in-flight work has drained. */
 async function pump(max = 20): Promise<void> {
@@ -125,9 +121,7 @@ test("changes_requested drives an automatic repair round with no human involveme
             acceptanceCriteriaAssessment: "partial",
             evidenceAssessment: "ok",
             findings: [{ fingerprint: "f1", severity: "blocking", title: "T", rationale: "R" }],
-            risks: [],
-          }),
-        }
+            risks: []})}
       : approvedVerdict
   );
   startWorkflow(issueId);
@@ -178,8 +172,7 @@ test("NOT-116: startup too early to reclaim → later poll tick reclaims without
     role: "developer",
     round: 1,
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    runtime: null,
-  });
+    runtime: null});
   startSession(session.id);
   assert.equal(bindWorkItemSession(devItem.id, session.id, claimed.leaseToken!), true);
   assert.equal(getWorkItem(devItem.id)!.status, "leased");

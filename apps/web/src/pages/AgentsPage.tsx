@@ -1,12 +1,7 @@
 import { useState } from "react";
 import type { AgentWithHealth, CreateAgentInput, UpdateAgentInput } from "@agent-dealer/shared";
-import {
-  parseStringList,
-  resolveProfileBudgetJson,
-  resolveProfileModel,
-} from "@agent-dealer/shared";
+import { resolveProfileBudgetJson, resolveProfileModel } from "@agent-dealer/shared";
 import AgentConfigFields, {
-  parseRefList,
   permissionFlagsFromJson,
   permissionOverride,
   type AgentConfigValue,
@@ -27,49 +22,39 @@ type Props = {
 const emptyConfig = (): AgentConfigValue => ({
   runtime: "claude_code",
   deckId: "",
-  playbookId: "",
   purpose: "",
   defaultModel: "",
   defaultEffort: "",
   defaultBudget: budgetFormEmpty(),
-  playbookIds: [],
-  externalMemoryRefs: "",
   allowWorktreeWrite: true,
 });
 
 export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
-  const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [config, setConfig] = useState<AgentConfigValue>(emptyConfig());
   const [busy, setBusy] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
-  const [editWorkspace, setEditWorkspace] = useState("");
   const [editConfig, setEditConfig] = useState<AgentConfigValue>(emptyConfig());
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !workspaceRoot.trim()) return;
+    if (!name.trim() || !config.deckId) return;
     setBusy(true);
     try {
       const body: CreateAgentInput = {
         name: name.trim(),
         runtime: config.runtime,
-        workspaceRoot: workspaceRoot.trim(),
-        deckId: config.deckId || undefined,
-        playbookId: config.playbookId || undefined,
+        deckId: config.deckId,
         defaultModel: config.defaultModel.trim() || null,
         defaultEffort: config.defaultEffort || null,
         defaultBudget: phaseBudgetFromForm(config.defaultBudget),
         purpose: config.purpose.trim() || null,
-        playbookIds: config.playbookIds,
-        externalMemoryRefs: parseRefList(config.externalMemoryRefs),
         permissionPolicy: permissionOverride(config),
       };
       await createAgent(body);
       setName("");
-      setWorkspaceRoot("");
       setConfig(emptyConfig());
       setShowForm(false);
       onRefresh();
@@ -83,11 +68,9 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
   const startEdit = (agent: AgentWithHealth) => {
     setEditingId(agent.id);
     setEditName(agent.name);
-    setEditWorkspace(agent.workspaceRoot ?? "");
     setEditConfig({
       runtime: agent.runtime,
       deckId: agent.deckId ?? "",
-      playbookId: agent.playbookId ?? "",
       purpose: agent.purpose ?? "",
       // Effective values, not just the role-neutral columns: a profile written before
       // NOT-71 keeps its defaults in the legacy plan/execute columns, and showing blank
@@ -96,8 +79,6 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
       defaultModel: resolveProfileModel(agent) ?? "",
       defaultEffort: agent.defaultEffort ?? "",
       defaultBudget: agentPhaseBudgetFromJson(resolveProfileBudgetJson(agent)),
-      playbookIds: parseStringList(agent.playbookIdsJson),
-      externalMemoryRefs: parseStringList(agent.externalMemoryRefsJson).join("\n"),
       ...permissionFlagsFromJson(agent.permissionPolicyJson),
     });
   };
@@ -108,20 +89,17 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
   };
 
   const saveEdit = async (agent: AgentWithHealth) => {
+    if (!editName.trim() || !editConfig.deckId) return;
     setBusy(true);
     try {
       const body: UpdateAgentInput = {
         name: editName.trim(),
-        workspaceRoot: editWorkspace.trim() || null,
         runtime: editConfig.runtime,
-        deckId: editConfig.deckId || null,
-        playbookId: editConfig.playbookId || null,
+        deckId: editConfig.deckId,
         defaultModel: editConfig.defaultModel.trim() || null,
         defaultEffort: editConfig.defaultEffort || null,
         defaultBudget: phaseBudgetFromForm(editConfig.defaultBudget),
         purpose: editConfig.purpose.trim() || null,
-        playbookIds: editConfig.playbookIds,
-        externalMemoryRefs: parseRefList(editConfig.externalMemoryRefs),
         permissionPolicy: permissionOverride(editConfig),
       };
       await updateAgent(agent.id, body);
@@ -198,7 +176,7 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
                     </Badge>
                   )}
                 </div>
-                {editingId === agent.id ? (
+                {editingId === agent.id && (
                   <div className="space-y-3 pt-2 border-t border-white/10">
                     <label className="block space-y-1">
                       <span className="text-xs text-[#A8C4C0] uppercase">Name</span>
@@ -206,15 +184,6 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
                         className="field text-sm"
                         value={editName}
                         onChange={(e) => setEditName(e.target.value)}
-                      />
-                    </label>
-                    <label className="block space-y-1">
-                      <span className="text-xs text-[#A8C4C0] uppercase">Workspace</span>
-                      <input
-                        className="field text-sm font-mono"
-                        placeholder="/Users/me/projects/my-app"
-                        value={editWorkspace}
-                        onChange={(e) => setEditWorkspace(e.target.value)}
                       />
                     </label>
                     <AgentConfigFields
@@ -225,7 +194,7 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
                     <div className="flex gap-2 pt-1">
                       <button
                         type="button"
-                        disabled={busy || !editName.trim() || !editWorkspace.trim()}
+                        disabled={busy || !editName.trim() || !editConfig.deckId}
                         onClick={() => saveEdit(agent)}
                         className="btn-gold text-sm px-3 py-1.5"
                       >
@@ -240,10 +209,6 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
                       </button>
                     </div>
                   </div>
-                ) : (
-                  <p className="text-sm text-white/50 font-mono truncate" title={agent.workspaceRoot ?? undefined}>
-                    {agent.workspaceRoot ? agent.workspaceRoot : "No workspace configured"}
-                  </p>
                 )}
                 {agent.issues.length > 0 && (
                   <ul className="text-sm text-red-300/90 space-y-1">
@@ -290,20 +255,11 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
               onChange={(e) => setName(e.target.value)}
             />
           </label>
-          <label className="block space-y-1">
-            <span className="text-xs text-[#A8C4C0] uppercase">Workspace</span>
-            <input
-              className="field font-mono text-sm"
-              placeholder="/Users/me/projects/my-app"
-              value={workspaceRoot}
-              onChange={(e) => setWorkspaceRoot(e.target.value)}
-            />
-          </label>
           <AgentConfigFields value={config} onChange={setConfig} agentDeckOnline={agentDeckOnline} />
           <div className="flex gap-2">
             <button
               type="submit"
-              disabled={busy || !name.trim() || !workspaceRoot.trim()}
+              disabled={busy || !name.trim() || !config.deckId}
               className="btn-gold px-4 py-2"
             >
               {busy ? "Saving…" : "Create agent"}

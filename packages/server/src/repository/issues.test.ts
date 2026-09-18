@@ -15,8 +15,7 @@ const {
   transitionIssue,
   incrementIssueRound,
   findActiveIssueByExternalId,
-  listIssuesByExternalId,
-} = await import("./issues.js");
+  listIssuesByExternalId} = await import("./issues.js");
 
 before(() => {
   migrate();
@@ -25,14 +24,13 @@ before(() => {
 function makeInput(title: string) {
   return {
     title,
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual" as const,
-  };
+    source: "manual" as const};
 }
 
 test("creates an issue with defaults", () => {

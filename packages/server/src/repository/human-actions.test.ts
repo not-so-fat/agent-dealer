@@ -15,8 +15,7 @@ const {
   resolveHumanAction,
   listOpenHumanActions,
   listHumanActionsForIssue,
-  findOpenHumanActionByRequestId,
-} = await import("./human-actions.js");
+  findOpenHumanActionByRequestId} = await import("./human-actions.js");
 
 before(() => {
   migrate();
@@ -25,14 +24,13 @@ before(() => {
 function seedIssue(title: string): string {
   return createIssue({
     title,
-    repo: "/repo",
+    repo: "acme/app",
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     baseBranch: "main",
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 test("creates an open action and lists it globally and per-issue", () => {
@@ -42,8 +40,7 @@ test("creates an open action and lists it globally and per-issue", () => {
     actionType: "final_review",
     reason: "Reviewer approved",
     question: "Accept?",
-    responseOptions: ["complete", "repair", "close"],
-  });
+    responseOptions: ["complete", "repair", "close"]});
   assert.equal(action.status, "open");
   assert.ok(listOpenHumanActions().some((a) => a.id === action.id));
   assert.deepStrictEqual(listHumanActionsForIssue(issueId).map((a) => a.id), [action.id]);
@@ -56,8 +53,7 @@ test("resolves an action and removes it from the open queue", () => {
     actionType: "final_review",
     reason: "Reviewer approved",
     question: "Accept?",
-    responseOptions: ["complete", "repair", "close"],
-  });
+    responseOptions: ["complete", "repair", "close"]});
   const resolved = resolveHumanAction(action.id, "yusuke", { choice: "complete" });
   assert.equal(resolved.status, "resolved");
   assert.equal(resolved.resolvedBy, "yusuke");
@@ -75,8 +71,7 @@ test("createHumanAction persists Deck's requestId and defaults to null when none
     reason: "Control-plane decision required",
     question: "Resolve it in Agent Deck, then resume?",
     responseOptions: [{ choice: "resume", label: "Resume" }],
-    requestId: "req_abc123",
-  });
+    requestId: "req_abc123"});
   assert.equal(withRequestId.requestId, "req_abc123");
 
   const withoutRequestId = createHumanAction({
@@ -84,8 +79,7 @@ test("createHumanAction persists Deck's requestId and defaults to null when none
     actionType: "policy_escalation",
     reason: "infra hiccup",
     question: "Resume?",
-    responseOptions: [{ choice: "resume", label: "Resume" }],
-  });
+    responseOptions: [{ choice: "resume", label: "Resume" }]});
   assert.equal(withoutRequestId.requestId, null);
 });
 
@@ -97,8 +91,7 @@ test("findOpenHumanActionByRequestId dedupes a repeated Deck signal to the one o
     reason: "Control-plane decision required",
     question: "Resolve it in Agent Deck, then resume?",
     responseOptions: [{ choice: "resume", label: "Resume" }],
-    requestId: "req_dup1",
-  });
+    requestId: "req_dup1"});
 
   // A repeat of the same request id on the same issue/action type finds the existing
   // open action instead of nothing (the caller uses this to skip creating a duplicate).
@@ -125,17 +118,15 @@ test("the open list includes run-scoped actions that have no issue", () => {
   const run = createRun({
     title: "outbound draft",
     agentId: BUILTIN_AGENT_CLAUDE_ID,
-    repo: "/repo",
+    repo: "acme/app",
     taskCategory: "other",
-    status: "plan_pending",
-  });
+    status: "plan_pending"});
   const action = createHumanAction({
     runId: run.id,
     actionType: "outbound_delivery_interaction_required",
     reason: "Delivery needs a human",
     question: "Send the draft?",
-    responseOptions: ["complete", "close"],
-  });
+    responseOptions: ["complete", "close"]});
   assert.equal(action.issueId, null);
 
   const listed = listOpenHumanActions().find((a) => a.id === action.id);

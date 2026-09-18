@@ -86,17 +86,34 @@ function issueBranchName(issueId: string): string {
   return `issue-${issueId}`;
 }
 
+
+/** NOT-149: agents always carry a deckId; effect tests that do not exercise Deck failures
+ * inject a get_bound_deck stub that reports the test deck as bound. */
+const TEST_DECK_ID = "00000000-0000-4000-a000-000000000099";
+const okDeckCallTool = async (name: string, _args: Record<string, unknown>) => ({
+  content: [
+    {
+      type: "text" as const,
+      text: JSON.stringify({ id: TEST_DECK_ID, name: "test-deck" }),
+    },
+  ],
+});
+
 async function makeIssue(opts: {
   maxInfraAttempts?: number;
-  reviewerDeck?: { deckId: string; playbookIds: string[] };
+  reviewerDeck?: { deckId: string; playbookIds?: string[] };
 } = {}): Promise<string> {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099" });
   const rev = createAgent({
     name: `rev-${Math.random()}`,
     runtime: "claude_code",
-    workspaceRoot: repo,
-    ...(opts.reviewerDeck ?? {}),
+    deckId: opts.reviewerDeck?.deckId ?? "00000000-0000-4000-a000-000000000099",
   });
+  if (opts.reviewerDeck?.playbookIds?.length) {
+    getDb()
+      .prepare("UPDATE agents SET playbook_ids_json = ? WHERE id = ?")
+      .run(JSON.stringify(opts.reviewerDeck.playbookIds), rev.id);
+  }
   return createIssue({
     title: "Add widget",
     description: "Build the widget.",
@@ -107,8 +124,7 @@ async function makeIssue(opts: {
     reviewerAgentId: rev.id,
     maxReviewRounds: 3,
     maxInfraAttempts: opts.maxInfraAttempts ?? 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 /**
@@ -157,8 +173,7 @@ function reviewerTranscript(opts: VerdictOpts & { baseSha: string; headSha: stri
     evidenceAssessment: "Evidence checked.",
     findings: opts.findings ?? [],
     risks: [],
-    ...(opts.productScopeQuestion ? { productScopeQuestion: opts.productScopeQuestion } : {}),
-  };
+    ...(opts.productScopeQuestion ? { productScopeQuestion: opts.productScopeQuestion } : {})};
   return `Some preamble.\n\`\`\`json\n${JSON.stringify(body)}\n\`\`\`\n`;
 }
 
@@ -184,8 +199,7 @@ const wrongShaSpawn: ReviewerSpawnFn = async () => ({
   exitCode: 0,
   transcript: reviewerTranscript({ verdict: "approved", baseSha: "0".repeat(40), headSha: "1".repeat(40) }),
   logPath: "/dev/null",
-  timedOut: false,
-});
+  timedOut: false});
 
 const garbageSpawn: ReviewerSpawnFn = async () => ({ exitCode: 0, transcript: "not json at all", logPath: "/dev/null", timedOut: false });
 const crashingReviewerSpawn: ReviewerSpawnFn = async () => ({ exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: false });
@@ -240,14 +254,13 @@ function fakeGithub(opts: FakeGithubOpts = {}): GithubFn & { publishCallCount():
       if (opts.publishFails) return { ok: false, reason: "boom" };
       const finalEvent: ReviewEvent = opts.rejectSelfReview && event !== "COMMENT" ? "COMMENT" : event;
       return { ok: true, event: finalEvent, usedCommentFallback: finalEvent !== event };
-    },
-  };
+    }};
   return Object.assign(adapter, { publishCallCount: () => publishCalls });
 }
 
 /** Advances the issue to "reviewing" with a real coordinator-verified head SHA. */
 async function advanceToReviewing(issueId: string, github: GithubFn): Promise<void> {
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github }));
   startWorkflow(issueId);
   await pump(1);
   assert.equal(getIssue(issueId)!.status, "reviewing", "test setup: developer stage did not reach reviewing");
@@ -272,14 +285,12 @@ function reviewerCtxFactory(issueId: string) {
       round: workItem.round,
       agentId: issue.reviewerAgentId,
       runtime: "claude_code",
-      profileSnapshotJson,
-    });
+      profileSnapshotJson});
     return {
       workItem: { ...workItem, workerSessionId: session.id, leaseToken },
       issue,
       instance,
-      signal: new AbortController().signal,
-    };
+      signal: new AbortController().signal};
   };
 }
 
@@ -287,7 +298,7 @@ test("approved: the coordinator verifies the pinned SHA, publishes the review, a
   const issueId = await makeIssue();
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github }));
   await pump(1);
 
   const issue = getIssue(issueId)!;
@@ -313,7 +324,7 @@ test("same-identity fallback: GitHub rejecting APPROVE as a self-review still re
   const issueId = await makeIssue();
   const github = fakeGithub({ rejectSelfReview: true });
   await advanceToReviewing(issueId, github);
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github }));
   await pump(1);
 
   assert.equal(getIssue(issueId)!.status, "final_review", "the internal verdict is the workflow authority, not the GitHub event");
@@ -326,7 +337,7 @@ test("session_failed: a verdict reporting SHAs that don't match the coordinator-
   const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: wrongShaSpawn, github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: wrongShaSpawn, github }));
   await pump(1);
 
   const issue = getIssue(issueId)!;
@@ -340,7 +351,7 @@ test("session_failed: bounded infra retry re-queues a fresh reviewer session at 
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
   const before = getIssue(issueId)!;
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: garbageSpawn, github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: garbageSpawn, github }));
   await pump(1);
 
   const issue = getIssue(issueId)!;
@@ -358,10 +369,10 @@ test("session_failed: bounded infra retry re-queues a fresh reviewer session at 
   assert.equal(listUsageEventsForIssue(issueId).filter((u) => u.role === "reviewer").length, 1);
 });
 
-test("deck_failure: reviewer preflight preserves and routes the failing playbook reason", async () => {
+test("deck_failure: reviewer preflight preserves and routes the failing deck bind reason", async () => {
   const deckId = "11111111-1111-4111-a111-111111111111";
   const issueId = await makeIssue({
-    reviewerDeck: { deckId, playbookIds: ["pb-required"] },
+    reviewerDeck: { deckId },
   });
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
@@ -376,16 +387,16 @@ test("deck_failure: reviewer preflight preserves and routes the failing playbook
       return verdictSpawn({ verdict: "approved" })(input);
     },
     github,
-    deckCallTool: async (name) =>
-      name === "get_bound_deck"
-        ? { content: [{ type: "text", text: JSON.stringify({ id: deckId }) }] }
-        : { isError: true, content: [{ type: "text", text: "playbook missing" }] },
+    deckCallTool: async () => ({
+      isError: true,
+      content: [{ type: "text", text: "deck bind refused" }],
+    }),
   });
 
   assert.equal(spawnCalled, false, "failed deck preflight must stop before reviewer spawn");
   assert.equal(outcome.kind, "deck_failure");
   if (outcome.kind === "deck_failure") {
-    assert.match(outcome.reason ?? "", /get_playbook\(pb-required\) returned an error: playbook missing/);
+    assert.match(outcome.reason ?? "", /deck bind refused|get_bound_deck/);
     const routed = routeReviewerOutcome(
       outcome,
       { currentRound: 1, maxReviewRounds: 3, infraAttempts: 0, maxInfraAttempts: 3 },
@@ -395,7 +406,7 @@ test("deck_failure: reviewer preflight preserves and routes the failing playbook
     if (routed.next === "retry_reviewer") {
       assert.equal(
         routed.reason,
-        "Agent Deck preflight failed: get_playbook(pb-required) returned an error: playbook missing"
+        "Agent Deck preflight failed: get_bound_deck returned an error: deck bind refused"
       );
     }
   }
@@ -412,19 +423,17 @@ test("publish is idempotent: re-running the effect for the same PR/head (simulat
   // Realistic: the first attempt holds "token-1" while it actually runs; recovery only
   // reclaims to "token-2" for the retry afterward (simulating the crash-and-recover).
   setWorkItemLease(workItem.id, "token-1");
-  const first = await runReviewerEffect(ctxWithLease("token-1"), { spawn: verdictSpawn({ verdict: "approved" }), github });
+  const first = await runReviewerEffect(ctxWithLease("token-1"), { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github });
 
   setWorkItemLease(workItem.id, "token-2");
   // Two genuinely independent reviewer sessions can disagree (they're two separate model
   // calls over the same diff) — this is exactly what round 3 found unhandled: the loser
   // must report what the winner actually published, not its own different verdict.
-  const second = await runReviewerEffect(ctxWithLease("token-2"), {
+  const second = await runReviewerEffect(ctxWithLease("token-2"), { deckCallTool: okDeckCallTool,
     spawn: verdictSpawn({
       verdict: "changes_requested",
-      findings: [{ fingerprint: "disagreement", severity: "blocking", title: "Second session found this", rationale: "..." }],
-    }),
-    github,
-  });
+      findings: [{ fingerprint: "disagreement", severity: "blocking", title: "Second session found this", rationale: "..." }]}),
+    github});
 
   assert.equal(first.kind, "verdict");
   assert.equal(second.kind, "verdict");
@@ -449,11 +458,11 @@ test("publish claim: a zombie holding a stale lease token can never win the publ
   const zombieCtx = ctxWithLease("old-token");
   setWorkItemLease(workItem.id, "new-token");
 
-  const zombieOutcome = await runReviewerEffect(zombieCtx, { spawn: verdictSpawn({ verdict: "approved" }), github });
+  const zombieOutcome = await runReviewerEffect(zombieCtx, { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github });
   assert.equal(zombieOutcome.kind, "publish_failed", "a zombie whose lease was already reclaimed must never win the claim");
   assert.equal(github.publishCallCount(), 0, "the zombie must never actually call gh, no matter how the wall-clock timing falls");
 
-  const currentOutcome = await runReviewerEffect(ctxWithLease("new-token"), { spawn: verdictSpawn({ verdict: "approved" }), github });
+  const currentOutcome = await runReviewerEffect(ctxWithLease("new-token"), { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github });
   assert.equal(currentOutcome.kind, "verdict", "the current lease holder — not the zombie — is the one that actually publishes");
   assert.equal(github.publishCallCount(), 1);
 });
@@ -469,7 +478,7 @@ test("publish claim: a lease that has expired but recovery hasn't swept yet is n
   // Recovery's sweep hasn't run yet, so nothing has moved this row off 'leased', but the
   // lease itself is no longer actually held by anyone.
   setWorkItemLease(workItem.id, "expired-token", -60_000);
-  const outcome = await runReviewerEffect(ctxWithLease("expired-token"), { spawn: verdictSpawn({ verdict: "approved" }), github });
+  const outcome = await runReviewerEffect(ctxWithLease("expired-token"), { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github });
 
   assert.equal(outcome.kind, "publish_failed", "an expired lease must never be treated as live, even with a matching token and status");
   assert.equal(github.publishCallCount(), 0, "an attempt resuming on an expired lease must never actually call gh");
@@ -489,7 +498,7 @@ test("publish claim: a stuck in-flight claim (prior holder never settles) is wai
   assert.equal(claimReviewPublication(workItem.id, "old-token"), true);
   setWorkItemLease(workItem.id, "new-token");
 
-  const outcome = await runReviewerEffect(ctxWithLease("new-token"), { spawn: verdictSpawn({ verdict: "approved" }), github });
+  const outcome = await runReviewerEffect(ctxWithLease("new-token"), { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github });
   assert.equal(outcome.kind, "publish_failed", "a claim that never settles must escalate, never silently approve");
   assert.equal(github.publishCallCount(), 0, "this attempt must never call gh while the claim is held elsewhere");
 });
@@ -509,7 +518,7 @@ test("publish claim: a prior claimant that recorded failure is safely reclaimed 
   recordReviewPublishFailed(workItem.id);
   setWorkItemLease(workItem.id, "new-token");
 
-  const outcome = await runReviewerEffect(ctxWithLease("new-token"), { spawn: verdictSpawn({ verdict: "approved" }), github });
+  const outcome = await runReviewerEffect(ctxWithLease("new-token"), { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github });
   assert.equal(outcome.kind, "verdict", "reclaiming a failed prior claim must let publication proceed normally");
   assert.equal(github.publishCallCount(), 1);
 });
@@ -526,12 +535,12 @@ test("diff truncated: an oversized diff forces the verdict to escalate in code, 
     git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "add a big file");
     return { exitCode: 0, transcript: "Implementation conclusion: added a big file.", logPath: "/dev/null", timedOut: false };
   };
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: bigFileSpawn, github }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: bigFileSpawn, github }));
   startWorkflow(issueId);
   await pump(1);
   assert.equal(getIssue(issueId)!.status, "reviewing", "test setup: developer stage did not reach reviewing");
 
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github }));
   await pump(1);
 
   const issue = getIssue(issueId)!;
@@ -549,7 +558,7 @@ test("changes_requested: findings thread onto the issue and a fresh developer re
   await advanceToReviewing(issueId, github);
   const finding = { fingerprint: "missing-test", severity: "blocking" as const, title: "No test", rationale: "Add one." };
   registerEffectHandler("reviewer", (ctx) =>
-    runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "changes_requested", findings: [finding] }), github })
+    runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "changes_requested", findings: [finding] }), github })
   );
   await pump(1);
 
@@ -569,7 +578,7 @@ test("escalated with a product scope question opens product_scope_decision", asy
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
   registerEffectHandler("reviewer", (ctx) =>
-    runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "escalated", productScopeQuestion: "Should this support X?" }), github })
+    runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "escalated", productScopeQuestion: "Should this support X?" }), github })
   );
   await pump(1);
 
@@ -584,7 +593,7 @@ test("escalated with no product scope question opens policy_escalation", async (
   const issueId = await makeIssue();
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "escalated" }), github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "escalated" }), github }));
   await pump(1);
 
   const issue = getIssue(issueId)!;
@@ -612,7 +621,7 @@ test("stale: a head that moved since the reviewer was queued is re-reviewed at t
   const newHead = git(other, "rev-parse", "HEAD");
   fs.rmSync(other, { recursive: true, force: true });
 
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github }));
   await pump(1);
 
   const issue = getIssue(issueId)!;
@@ -627,7 +636,7 @@ test("session_failed: an unparseable transcript escalates without consuming a ro
   const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: garbageSpawn, github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: garbageSpawn, github }));
   await pump(1);
 
   const issue = getIssue(issueId)!;
@@ -642,7 +651,7 @@ test("session_failed: the reviewer process exits non-zero", async () => {
   const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: crashingReviewerSpawn, github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: crashingReviewerSpawn, github }));
   await pump(1);
 
   assert.equal(getIssue(issueId)!.status, "needs_human");
@@ -652,7 +661,7 @@ test("session_failed: the reviewer's own wall-clock timeout is folded into sessi
   const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: timedOutReviewerSpawn, github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: timedOutReviewerSpawn, github }));
   await pump(1);
 
   const rev = listWorkerSessionsForIssue(issueId).find((s) => s.role === "reviewer")!;
@@ -664,7 +673,7 @@ test("publish_failed: gh pr review itself fails — escalates as infrastructure,
   const issueId = await makeIssue({ maxInfraAttempts: 0 });
   const github = fakeGithub({ publishFails: true });
   await advanceToReviewing(issueId, github);
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github }));
   await pump(1);
 
   const issue = getIssue(issueId)!;
@@ -678,7 +687,7 @@ test("publish_failed: the PR cannot be re-verified after the reviewer session en
   const github = fakeGithub();
   await advanceToReviewing(issueId, github);
   github.viewPr = async () => null;
-  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { spawn: verdictSpawn({ verdict: "approved" }), github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: verdictSpawn({ verdict: "approved" }), github }));
   await pump(1);
 
   assert.equal(getIssue(issueId)!.status, "needs_human");
@@ -705,7 +714,7 @@ test("NOT-83 review: a reviewer item cancelled during worktree/deck-bind setup (
     return verdictSpawn({ verdict: "approved" })(input);
   };
 
-  const outcome = await runReviewerEffect(ctxWithLease("token-1"), { spawn: spySpawn, github });
+  const outcome = await runReviewerEffect(ctxWithLease("token-1"), { deckCallTool: okDeckCallTool, spawn: spySpawn, github });
   assert.equal(spawnCalled, false, "a cancelled item must never reach the real spawn");
   assert.deepEqual(outcome, { kind: "session_failed" });
 });

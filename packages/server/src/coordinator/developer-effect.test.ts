@@ -79,9 +79,22 @@ function issueBranchName(issueId: string): string {
   return `issue-${issueId}`;
 }
 
+
+/** NOT-149: agents always carry a deckId; effect tests that do not exercise Deck failures
+ * inject a get_bound_deck stub that reports the test deck as bound. */
+const TEST_DECK_ID = "00000000-0000-4000-a000-000000000099";
+const okDeckCallTool = async (name: string, _args: Record<string, unknown>) => ({
+  content: [
+    {
+      type: "text" as const,
+      text: JSON.stringify({ id: TEST_DECK_ID, name: "test-deck" }),
+    },
+  ],
+});
+
 async function makeIssue(opts: { maxInfraAttempts?: number } = {}): Promise<string> {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
-  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
   return createIssue({
     title: "Add widget",
     description: "Build the widget.",
@@ -92,8 +105,7 @@ async function makeIssue(opts: { maxInfraAttempts?: number } = {}): Promise<stri
     reviewerAgentId: rev.id,
     maxReviewRounds: 3,
     maxInfraAttempts: opts.maxInfraAttempts ?? 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 }
 
 async function pump(max = 20): Promise<void> {
@@ -167,14 +179,13 @@ function fakeGithub(opts: {
     },
     async publishReview() {
       throw new Error("publishReview is unused by the developer effect");
-    },
-  };
+    }};
   return adapter;
 }
 
 test("clean handoff: real worktree, real push, fake GitHub — issue moves to reviewing with a reviewer work item queued", async () => {
   const issueId = await makeIssue();
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github: fakeGithub() }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   // Only pump the developer item — the reviewer effect handler is still NOT-62's
   // placeholder (always session_failed), which would otherwise immediately escalate the
@@ -227,7 +238,7 @@ test("clean handoff: real worktree, real push, fake GitHub — issue moves to re
 
 test("no_pr: the agent makes no commits — retried, no reviewer work item", async () => {
   const issueId = await makeIssue();
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: noopSpawn, github: fakeGithub() }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: noopSpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -252,7 +263,7 @@ test("the branch created on a retried round is reused, not re-created — no 'br
     if (call === 1) return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false }; // round 1: no_pr
     return commitingSpawn(input); // round 2: implements for real
   };
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: flakyThenCommittingSpawn, github: fakeGithub() }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: flakyThenCommittingSpawn, github: fakeGithub() }));
   startWorkflow(issueId);
 
   await pump(1); // round 1: no_pr, removes the worktree but leaves the branch ref behind
@@ -278,7 +289,7 @@ test("the branch created on a retried round is reused, not re-created — no 'br
 
 test("dirty_worktree: an uncommitted file escalates without consuming a round", async () => {
   const issueId = await makeIssue();
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: dirtySpawn, github: fakeGithub() }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: dirtySpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -294,7 +305,7 @@ test("dirty_worktree: an uncommitted file escalates without consuming a round", 
 
 test("session_failed: the agent process exits non-zero — retried like no_pr", async () => {
   const issueId = await makeIssue();
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: crashingSpawn, github: fakeGithub() }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: crashingSpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -319,7 +330,7 @@ test("NOT-145: a crash that leaves the worktree dirty auto-commits a salvage tip
     fs.writeFileSync(path.join(input.cwd, "half-done.txt"), "oops\n");
     return { exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: false };
   };
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: crashingDirtySpawn, github: fakeGithub() }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: crashingDirtySpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -343,7 +354,7 @@ test("NOT-145: dirty worktree + forced timeout salvages a tip then routes timed_
     fs.writeFileSync(path.join(input.cwd, "partial.txt"), "still cooking\n");
     return { exitCode: 1, transcript: "", logPath: "/dev/null", timedOut: true };
   };
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: timedOutDirtySpawn, github: fakeGithub() }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: timedOutDirtySpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -367,7 +378,7 @@ test("NOT-145: clean timeout with existing commits still retries without losing 
     return { exitCode: 1, transcript: "", logPath: "/dev/null", timedOut: true };
   };
   registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { spawn: timedOutAfterCommitSpawn, github: fakeGithub() })
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: timedOutAfterCommitSpawn, github: fakeGithub() })
   );
   startWorkflow(issueId);
   await pump(1);
@@ -395,7 +406,7 @@ test("NOT-113: keychain stderr on a dirty crash surfaces auth/keychain after sal
     return { exitCode: 1, transcript: "boom", logPath: keychainLog, timedOut: false };
   };
   registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { spawn: crashingDirtyKeychainSpawn, github: fakeGithub() })
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: crashingDirtyKeychainSpawn, github: fakeGithub() })
   );
   startWorkflow(issueId);
   await pump(1);
@@ -436,7 +447,7 @@ test("NOT-145: when salvage commit fails, dirty checkout is preserved with actio
     return { exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: true };
   };
   registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { spawn: failingSalvageSpawn, github: fakeGithub() })
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: failingSalvageSpawn, github: fakeGithub() })
   );
   startWorkflow(issueId);
   await pump(1);
@@ -463,7 +474,7 @@ test("NOT-145: when salvage commit fails, dirty checkout is preserved with actio
 
 test("timed_out (session): the spawn wall-clock timeout is reported distinctly from a crash", async () => {
   const issueId = await makeIssue();
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: timedOutSpawn, github: fakeGithub() }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: timedOutSpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -473,7 +484,7 @@ test("timed_out (session): the spawn wall-clock timeout is reported distinctly f
 
 test("checks_failed: CI failure after a clean push/PR retries without a human action", async () => {
   const issueId = await makeIssue();
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github: fakeGithub({ checks: "failure" }) }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub({ checks: "failure" }) }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -492,7 +503,7 @@ test("checks_failed: CI failure after a clean push/PR retries without a human ac
 
 test("timed_out (checks poll): checks stay pending past the poll deadline", async () => {
   const issueId = await makeIssue();
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github: fakeGithub({ checks: "pending" }) }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub({ checks: "pending" }) }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -507,7 +518,7 @@ test("adapter_failure: a non-draft PR is rejected rather than accepted as a clea
     const view = await realViewPr(opts);
     return view ? { ...view, isDraft: false } : view;
   };
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -525,7 +536,7 @@ test("adapter_failure: a PR based against the wrong branch is rejected rather th
     const view = await realViewPr(opts);
     return view ? { ...view, baseRefName: "some-other-branch" } : view;
   };
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -548,7 +559,7 @@ test("clean handoff: a briefly stale headRefOid (gh's view lags the push) catche
     }
     return view;
   };
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -565,7 +576,7 @@ test("adapter_failure: a headRefOid that never catches up is rejected after the 
     const view = await realViewPr(opts);
     return view ? { ...view, headRefOid: "0000000000000000000000000000000000dead" } : view;
   };
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -601,7 +612,7 @@ test("adapter_failure: the PR head changing while checks were being polled is re
     }
     return "success"; // now resolves, but the head has moved underneath it
   };
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -618,7 +629,7 @@ test("adapter_failure: gh pr create itself fails — never silently treated as a
   // reused worktree, so this end-to-end case pins maxInfraAttempts to 0 to exercise the
   // immediate-exhaustion edge of the same policy.
   const issueId = await makeIssue({ maxInfraAttempts: 0 });
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github: fakeGithub({ createFails: true }) }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub({ createFails: true }) }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -637,7 +648,7 @@ test("publish-only retry: post-push gh create failure reopens the PR without res
     spawnCalls++;
     return commitingSpawn(input);
   };
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: countingSpawn, github }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: countingSpawn, github }));
   startWorkflow(issueId);
   await pump(4);
 
@@ -667,7 +678,7 @@ test("unpushed_commit: the coordinator's own push is rejected by a diverged remo
   const remoteSha = git(other, "rev-parse", "HEAD");
   fs.rmSync(other, { recursive: true, force: true });
 
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitingSpawn, github: fakeGithub() }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -711,7 +722,7 @@ test("NOT-88: a leftover clean worktree from a resolved unpushed_commit escalati
   // itself fail with "nothing to commit", which would test the fake, not the fix).
   let call = 0;
   const commitOnceThenNoop: SpawnFn = async (input) => (++call === 1 ? commitingSpawn(input) : noopSpawn(input));
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: commitOnceThenNoop, github: fakeGithub() }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitOnceThenNoop, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -752,7 +763,7 @@ test("NOT-88: a leftover dirty worktree escalates as an actionable worktree_conf
   // checkout (NOT-145 salvage applies only to timeout/crash infra deaths). That leftover is
   // the setup NOT-88's collision needs: round 2 must find that SAME dirty leftover still
   // holding the branch.
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: dirtySpawn, github: fakeGithub() }));
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: dirtySpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -819,8 +830,8 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
     fs.rmSync(other, { recursive: true, force: true });
     assert.notEqual(git(isoRepo, "rev-parse", "main"), currentOriginMainSha, "isoRepo's local main must stay stale for this test to mean anything");
 
-    const dev = createAgent({ name: `dev-iso-${Math.random()}`, runtime: "claude_code", workspaceRoot: isoRepo });
-    const rev = createAgent({ name: `rev-iso-${Math.random()}`, runtime: "claude_code", workspaceRoot: isoRepo });
+    const dev = createAgent({ name: `dev-iso-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const rev = createAgent({ name: `rev-iso-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
     const issueId = createIssue({
       title: "Iso base sha",
       acceptanceCriteria: "works",
@@ -830,8 +841,7 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
       reviewerAgentId: rev.id,
       maxReviewRounds: 3,
       maxInfraAttempts: 3,
-      source: "manual",
-    }).id;
+      source: "manual"}).id;
 
     const isoCommittingSpawn: SpawnFn = async (input) => {
       // Build the feature commit ON TOP of the advanced origin/main (B), not the stale
@@ -870,10 +880,9 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
       },
       async publishReview() {
         throw new Error("publishReview is unused by the developer effect");
-      },
-    };
+      }};
 
-    registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { spawn: isoCommittingSpawn, github: isoGithub }));
+    registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: isoCommittingSpawn, github: isoGithub }));
     startWorkflow(issueId);
     await pump(1);
 
@@ -896,6 +905,7 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
 });
 
 test("NOT-83 review: an item cancelled during worktree/deck-bind setup (before spawn) is never spawned", async () => {
+  const { buildProfileSnapshot, serializeProfileSnapshot } = await import("./profile-snapshot.js");
   const issueId = await makeIssue();
   startWorkflow(issueId);
 
@@ -904,12 +914,18 @@ test("NOT-83 review: an item cancelled during worktree/deck-bind setup (before s
   // the session was marked running, but before this handler reaches spawn" window
   // deterministic instead of racing real git subprocess timing.
   const claimed = claimWorkItem(`test-${issueId}`, { leaseMs: 60_000 })!;
+  const agent = getIssue(issueId)!.developerAgentId
+    ? (await import("../repository/agents.js")).getAgent(getIssue(issueId)!.developerAgentId!)!
+    : null;
   const session = createWorkerSession({
     issueId,
     role: "developer",
     round: claimed.round,
-    agentId: null,
+    agentId: agent?.id ?? null,
     runtime: "claude_code",
+    profileSnapshotJson: agent
+      ? serializeProfileSnapshot(buildProfileSnapshot(agent, "developer"))
+      : undefined,
   });
   assert.ok(bindWorkItemSession(claimed.id, session.id, claimed.leaseToken!));
   startSession(session.id);
@@ -932,7 +948,7 @@ test("NOT-83 review: an item cancelled during worktree/deck-bind setup (before s
       instance: getActiveWorkflowInstance(issueId)!,
       signal: new AbortController().signal,
     },
-    { spawn: spySpawn, github: fakeGithub() }
+    { deckCallTool: okDeckCallTool, spawn: spySpawn, github: fakeGithub() }
   );
 
   assert.equal(spawnCalled, false, "a cancelled item must never reach the real spawn");
@@ -947,11 +963,9 @@ test("cursor_local + deckId: prepares worker deck connection and passes mcpConfi
   const dev = createAgent({
     name: `cursor-dev-${Math.random()}`,
     runtime: "cursor_local",
-    workspaceRoot: repo,
     deckId,
-    playbookIds: ["pb-required"],
   });
-  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo });
+  const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099" });
   const issueId = createIssue({
     title: "Cursor deck launch",
     description: "Use launch-fixed deck MCP.",
@@ -962,8 +976,7 @@ test("cursor_local + deckId: prepares worker deck connection and passes mcpConfi
     reviewerAgentId: rev.id,
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
-    source: "manual",
-  }).id;
+    source: "manual"}).id;
 
   startWorkflow(issueId);
   const claimed = claimWorkItem(`test-cursor-deck-${issueId}`, { leaseMs: 60_000 })!;
@@ -974,8 +987,7 @@ test("cursor_local + deckId: prepares worker deck connection and passes mcpConfi
     round: claimed.round,
     agentId: dev.id,
     runtime: "cursor_local",
-    profileSnapshotJson: JSON.stringify(snapshot),
-  });
+    profileSnapshotJson: JSON.stringify(snapshot)});
   assert.ok(bindWorkItemSession(claimed.id, session.id, claimed.leaseToken!));
   startSession(session.id);
 
@@ -991,8 +1003,7 @@ test("cursor_local + deckId: prepares worker deck connection and passes mcpConfi
       workItem: { ...claimed, workerSessionId: session.id },
       issue: getIssue(issueId)!,
       instance: getActiveWorkflowInstance(issueId)!,
-      signal: new AbortController().signal,
-    },
+      signal: new AbortController().signal},
     {
       spawn: spySpawn,
       github: fakeGithub(),
@@ -1006,17 +1017,14 @@ test("cursor_local + deckId: prepares worker deck connection and passes mcpConfi
                 name === "get_bound_deck"
                   ? { id: deckId, name: "dev" }
                   : { id: args.playbook_id }
-              ),
-            },
-          ],
-        };
-      },
-    }
+              )},
+          ]};
+      }}
   );
 
   assert.ok(spawnSawMcpConfig, "cursor_local + deckId must materialize a worktree mcp.json");
   assert.match(spawnSawMcpConfig!, /\.cursor\/mcp\.json$/);
-  assert.deepEqual(deckCalls, ["get_bound_deck", "get_playbook"]);
+  assert.deepEqual(deckCalls, ["get_bound_deck"]);
   assert.equal(outcome.kind, "clean_handoff");
 });
 
@@ -1041,12 +1049,11 @@ test("NOT-117: mid-success usage cap continues publish instead of deferring the 
       exitCode: 0,
       transcript: "Implementation conclusion: added the widget.",
       logPath: capLog,
-      timedOut: false,
-    };
+      timedOut: false};
   };
 
   registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { spawn: midSuccessCapSpawn, github: fakeGithub() })
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: midSuccessCapSpawn, github: fakeGithub() })
   );
   startWorkflow(issueId);
   await pump(1);
@@ -1093,7 +1100,7 @@ test("NOT-117: usage_capped after commits resumes with retryReason — no fresh-
   };
 
   registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { spawn: commitThenCapCrash, github: fakeGithub() })
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitThenCapCrash, github: fakeGithub() })
   );
   startWorkflow(issueId);
   await pump(1);
@@ -1131,9 +1138,7 @@ function writeVerificationLog(opts: { command: string; output: string; isError?:
       message: {
         content: [
           { type: "tool_use", id: "t1", name: "Bash", input: { command: opts.command } },
-        ],
-      },
-    },
+        ]}},
     {
       type: "user",
       message: {
@@ -1142,11 +1147,8 @@ function writeVerificationLog(opts: { command: string; output: string; isError?:
             type: "tool_result",
             tool_use_id: "t1",
             is_error: opts.isError ?? false,
-            content: opts.output,
-          },
-        ],
-      },
-    },
+            content: opts.output},
+        ]}},
   ];
   fs.writeFileSync(logPath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
   return logPath;
@@ -1157,8 +1159,7 @@ test("NOT-130: interrupted-but-verified attempt persists receipt and retry promp
   const branch = issueBranchName(issueId);
   const logPath = writeVerificationLog({
     command: "npm run test:unit",
-    output: "711/711 tests passed\n",
-  });
+    output: "711/711 tests passed\n"});
 
   let call = 0;
   const prompts: string[] = [];
@@ -1176,7 +1177,7 @@ test("NOT-130: interrupted-but-verified attempt persists receipt and retry promp
   };
 
   registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { spawn: commitVerifyThenCrash, github: fakeGithub() })
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitVerifyThenCrash, github: fakeGithub() })
   );
   startWorkflow(issueId);
   await pump(1);
@@ -1201,8 +1202,7 @@ test("NOT-130: receipt is dropped from the retry prompt when HEAD moved after it
   const issueId = await makeIssue();
   const logPath = writeVerificationLog({
     command: "npm run test:unit",
-    output: "711/711 tests passed\n",
-  });
+    output: "711/711 tests passed\n"});
 
   let call = 0;
   const prompts: string[] = [];
@@ -1221,7 +1221,7 @@ test("NOT-130: receipt is dropped from the retry prompt when HEAD moved after it
   };
 
   registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { spawn: verifyCrashThenMoveHead, github: fakeGithub() })
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: verifyCrashThenMoveHead, github: fakeGithub() })
   );
   startWorkflow(issueId);
   await pump(1);
@@ -1252,8 +1252,7 @@ test("NOT-130: a green suite on a dirty worktree is not persisted as tip evidenc
   const issueId = await makeIssue();
   const logPath = writeVerificationLog({
     command: "npm run test:unit",
-    output: "711/711 tests passed\n",
-  });
+    output: "711/711 tests passed\n"});
 
   const dirtyAfterVerify: SpawnFn = async (input) => {
     await commitingSpawn(input);
@@ -1262,7 +1261,7 @@ test("NOT-130: a green suite on a dirty worktree is not persisted as tip evidenc
   };
 
   registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { spawn: dirtyAfterVerify, github: fakeGithub() })
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: dirtyAfterVerify, github: fakeGithub() })
   );
   startWorkflow(issueId);
   await pump(1);
@@ -1279,8 +1278,7 @@ test("NOT-130: checks_failed retry does not carry a prior green receipt into the
   const issueId = await makeIssue();
   const logPath = writeVerificationLog({
     command: "npm run test:unit",
-    output: "711/711 tests passed\n",
-  });
+    output: "711/711 tests passed\n"});
 
   let call = 0;
   const prompts: string[] = [];
@@ -1303,7 +1301,7 @@ test("NOT-130: checks_failed retry does not carry a prior green receipt into the
   github.checksSnapshot = async () => (checkPass ? "success" : "failure");
 
   registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { spawn: commitVerifyThenCiFail, github })
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitVerifyThenCiFail, github })
   );
   startWorkflow(issueId);
   await pump(1);

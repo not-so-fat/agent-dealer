@@ -99,7 +99,7 @@ Two separate CLI processes (plan + execute). Context carryover via `approved_pla
 | `source` | `manual` \| `linear` |
 | `external_id` | Linear issue UUID (when `source=linear`) |
 | `external_label` | Human id e.g. `ENG-123` — UI + prompts |
-| `repo` | Snapshot at create: `task.repo ?? agent.workspace_root` |
+| `repo` | Snapshot at create from the task/issue input (agent workspace is no longer used) |
 
 ## intake_settings table
 
@@ -109,10 +109,18 @@ Key/value JSON for Inbox config (not secrets). Keys: `linear.stateFilter`, `line
 
 | Column | Role |
 |--------|------|
-| `workspace_root` | CLI cwd default; required before kick (see `docs/AGENT_PROFILES.md`) |
-| `runtime`, `deck_id`, `playbook_id` | Execution profile |
+| `deck_id` | Required Agent Deck for execution (NOT-149) |
+| `runtime`, `default_model`, `default_effort`, `default_budget_json` | Operating profile |
+| `workspace_root`, `playbook_id`, `playbook_ids_json`, `external_memory_refs_json` | Dead legacy storage only — not shown in UI, not copied into new snapshots, not inspected by health |
 
-`runs.repo` is a **snapshot** at create time: `task.repo ?? agent.workspace_root`. Not re-read from agent on each phase.
+## Issues table
+
+| Column | Role |
+|--------|------|
+| `repo` | Portable GitHub identity `github.com/owner/repo` for new issues; legacy rows may still hold a local path until migrated |
+| `base_branch` | Seed at create; for managed GitHub clones, overwritten from the remote default at first checkout so it matches PR/worktree base |
+
+Worker session checkouts are under `$AGENT_DEALER_HOME/execution/` (or `AGENT_DEALER_EXECUTION_ROOT`); the concrete path is persisted on `worker_sessions.worktree_path`.
 
 ## Content task convention
 

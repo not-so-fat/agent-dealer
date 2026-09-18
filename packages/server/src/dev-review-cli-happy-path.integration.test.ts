@@ -94,6 +94,8 @@ function git(cwd: string, ...args: string[]): string {
 let repo: string;
 let remote: string;
 
+const { managedRepoPath } = await import("./adapters/managed-repo.js");
+
 before(() => {
   repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not79-repo-"));
   git(repo, "init", "-q", "-b", "main");
@@ -107,7 +109,17 @@ before(() => {
   execFileSync("git", ["init", "-q", "--bare", "-b", "main", remote]);
   git(repo, "remote", "add", "origin", remote);
   git(repo, "push", "-q", "origin", "main");
+
+  // NOT-149: wire create uses a GitHub identity; seed Dealer's managed clone from the
+  // hermetic fixture so ensureIssueRepoCheckout does not hit the network.
+  const managed = managedRepoPath("github.com/dealer-test/not79");
+  fs.mkdirSync(path.dirname(managed), { recursive: true });
+  execFileSync("git", ["clone", "--quiet", repo, managed]);
+  git(managed, "remote", "set-url", "origin", remote);
 });
+
+/** Portable identity passed to `issue create --repo` (NOT-149). */
+const ISSUE_REPO = "dealer-test/not79";
 
 after(() => {
   fs.rmSync(repo, { recursive: true, force: true });
@@ -139,8 +151,7 @@ function reviewerTranscript(baseSha: string, headSha: string): string {
     acceptanceCriteriaAssessment: "Met.",
     evidenceAssessment: "Evidence checked.",
     findings: [],
-    risks: [],
-  };
+    risks: []};
   return `\`\`\`json\n${JSON.stringify(body)}\n\`\`\`\n`;
 }
 
@@ -179,8 +190,7 @@ function fakeGithub(): GithubFn {
     async publishReview({ event }) {
       const finalEvent: ReviewEvent = event;
       return { ok: true, event: finalEvent, usedCommentFallback: false };
-    },
-  };
+    }};
   return adapter;
 }
 
@@ -231,8 +241,7 @@ function runCli(args: string[]): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(tsxBin, [cliEntry, ...args], {
       cwd: repoRoot,
-      env: { ...process.env, AGENT_DEALER_HOME: home, NO_COLOR: "1" },
-    });
+      env: { ...process.env, AGENT_DEALER_HOME: home, NO_COLOR: "1" }});
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += String(d)));
@@ -254,8 +263,8 @@ test(
     // Two fixture-registered agent profiles, each bound to the same test deck — proves
     // "Verify the selected Agent Deck ID reaches the worker profile snapshot and bind
     // evidence" (NOT-79 acceptance criteria), not just that the workflow completes.
-    const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo, deckId: DECK_ID }, "test-deck");
-    const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", workspaceRoot: repo, deckId: DECK_ID }, "test-deck");
+    const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: DECK_ID }, "test-deck");
+    const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", deckId: DECK_ID }, "test-deck");
 
     // One shared in-memory PR store — the developer opens the PR, and the reviewer must
     // see the SAME one via its own `viewPr` lookup (two independent fakes would each see
@@ -306,7 +315,7 @@ test(
         "--title",
         "Add widget",
         "--repo",
-        repo,
+        ISSUE_REPO,
         "--developer-agent",
         devFromCli!.id,
         "--reviewer-agent",
