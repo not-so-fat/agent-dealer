@@ -231,7 +231,7 @@ Stories are grouped by the Operations pipeline gates (Intake is a separate scree
 **Acceptance:**
 
 - [ ] Dashboard shows: N running, M queued, next up (title + source + runtime)
-- [ ] Per running task: agent runtime, deck name (if bound), issue link, started-at
+- [ ] Per running task: agent runtime, deck name (from Agent profile), issue link, started-at
 - [ ] Real-time or near-real-time updates (SSE or WebSocket; poll fallback acceptable in P1)
 
 *v0 · P1*
@@ -287,7 +287,7 @@ Stories are grouped by the Operations pipeline gates (Intake is a separate scree
 - [x] Post-review reflect when the session's pinned Deck and a concrete playbook id are available (retry feedback first, then approve)
 - [x] Reflect turn uses agent-deck MCP read tools → `playbook_patch` artifact
 - [x] Human applies via review drawer → Agent Deck REST `PUT /api/playbooks/:id`
-- [x] Skipped when the Agent has no Deck (fail-closed / unhealthy) or Cursor runtime lacks reflect support
+- [x] Reflect is only offered for healthy Agents with a pinned Deck; Cursor runtime may lack reflect support
 
 *v0 · P3*
 
@@ -358,10 +358,13 @@ queued → plan_pending → plan_approved → running → review → done
 
 ### Event-sourced SQLite schema (core asset)
 
+> Historical planner-era sketch. **Current model (NOT-149 / issue-centric):** `issues.repo` = portable `github.com/owner/repo`; Agent `deck_id` required for execution; no Agent `playbook_id` / workspace columns in active use. See [DATA_MODEL.md](./DATA_MODEL.md).
+
 ```sql
--- runs
-id, source, external_id, task_category, repo?, artifact_workspace?,
-deck_id?, playbook_id?, runtime, status, lineage_id?, created_at, updated_at
+-- runs (superseded by issues + worker_sessions)
+id, source, external_id, task_category, repo, -- github.com/owner/repo
+runtime, status, lineage_id?, created_at, updated_at
+-- deck lives on agent profile (required), not as optional run kick fields
 
 -- artifacts
 id, run_id, kind, content_json, blob_path?, author, created_at
@@ -599,10 +602,10 @@ Playbooks are chosen dynamically inside the Agent's pinned Deck during the worke
 ### Unattended overnight checklist
 
 - Machine on (local agents)
-- `agent-deck start` running (if using deck)
-- Claude / Cursor auth valid
+- `agent-deck start` running (required — every execution Agent has a pinned Deck)
+- Claude / Cursor / Codex auth valid
 - Pre-set permissions (`--allowedTools`, permission mode)
-- Git worktree per code ticket OR isolated artifact workspace per non-code task
+- Managed GitHub clone + role worktrees under the execution root (NOT-149)
 - Queue budget configured; `maxConcurrentRuns` set (default **2**)
 
 ---
