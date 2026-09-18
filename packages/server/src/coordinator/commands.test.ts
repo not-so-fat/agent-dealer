@@ -31,12 +31,14 @@ const {
 const { ReviewerResult } = await import("./reviewer-result.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./auto-merge.js");
+const { stubManagedCloneForTests } = await import("../adapters/managed-repo.js");
 
 before(() => migrate());
 beforeEach(() => {
   getDb().exec("DELETE FROM work_items");
   clearFinalizeInflightForTests();
   setMergePrForTests(async () => ({ ok: true }));
+  stubManagedCloneForTests("acme/app");
 });
 
 interface Opts {

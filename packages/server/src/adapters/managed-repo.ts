@@ -35,6 +35,18 @@ export function managedRepoPath(identity: GitHubRepoIdentity): string {
   return path.join(getExecutionRoot(), "repos", identity);
 }
 
+/**
+ * Test helper: mark a managed identity as having a local clone so merge cwd resolution
+ * (and similar) does not fail closed. Does not create a real git repo.
+ */
+export function stubManagedCloneForTests(repoInput: string): string {
+  const classified = classifyIssueRepo(repoInput);
+  if (classified.kind === "managed") {
+    fs.mkdirSync(path.join(classified.repoPath, ".git"), { recursive: true });
+  }
+  return classified.repoPath;
+}
+
 export function managedWorktreePath(
   identity: GitHubRepoIdentity,
   sessionId: string,

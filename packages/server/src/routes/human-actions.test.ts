@@ -19,6 +19,7 @@ const { listArtifactsForIssue } = await import("../repository/artifacts-for-issu
 const { createRun, getRun, transitionRun, addArtifact, updateRunFields } = await import("../repository/runs.js");
 const { pendingSendCount, getPendingOutboundDraft } = await import("../repository/outbound-drafts.js");
 const { setMergePrForTests, clearFinalizeInflightForTests } = await import("../coordinator/auto-merge.js");
+const { stubManagedCloneForTests } = await import("../adapters/managed-repo.js");
 
 before(() => {
   migrate();
@@ -30,6 +31,7 @@ beforeEach(() => {
   clearFinalizeInflightForTests();
   // final_review:complete now undrafts+merges — never hit real `gh` from route tests.
   setMergePrForTests(async () => ({ ok: true }));
+  stubManagedCloneForTests("acme/app");
 });
 
 async function buildApp() {
