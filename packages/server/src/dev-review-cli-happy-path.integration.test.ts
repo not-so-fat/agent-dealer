@@ -364,12 +364,13 @@ test(
     const finalReviewAction = actions.find((a) => a.issueId === issueId && a.actionType === "final_review" && a.status === "open");
     assert.ok(finalReviewAction, "the open final_review human action must be listable via `action list`");
     assert.ok(
-      finalReviewAction!.choices.some((c) => c.choice === "complete"),
-      "the CLI must expose the action's valid choices, including `complete`"
+      finalReviewAction!.choices.some((c) => c.choice === "merge" || c.choice === "complete"),
+      "the CLI must expose the action's valid choices, including Merge"
     );
 
+    const mergeChoice = finalReviewAction!.choices.find((c) => c.choice === "merge")?.choice ?? "complete";
     const resolved = cliJson(
-      await runCli(["action", "resolve", finalReviewAction!.id, "--choice", "complete", "--by", "cli-agent"])
+      await runCli(["action", "resolve", finalReviewAction!.id, "--choice", mergeChoice, "--by", "cli-agent"])
     ) as { issueStatus: string };
     assert.equal(resolved.issueStatus, "done");
 

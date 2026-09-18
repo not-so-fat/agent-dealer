@@ -489,14 +489,17 @@ test("fail → retry → exhaust → resume → fail again does not collide with
   assert.notEqual(pending[0].id, firstRetryItem.id, "must be a NEW work item, not the pre-escalation retry's now-terminal row");
 });
 
-test("resolving policy_escalation:resume after a reviewer's escalated verdict (a real code-level question) still resumes as the developer", async () => {
+test("resolving product_scope_decision:resume after a reviewer's escalated+question resumes as the developer", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   await complete(issueId, cleanHandoff);
-  await complete(issueId, { kind: "verdict", result: okReview("escalated") });
+  await complete(issueId, {
+    kind: "verdict",
+    result: { ...okReview("escalated"), productScopeQuestion: "Should deleted users retain sessions?" },
+  });
 
-  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
-  assert.equal(action.continuationPreviewJson, null, "an escalated-verdict policy_escalation carries no reviewer-resume continuation");
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "product_scope_decision")!;
+  assert.ok(action, "true product escalate opens product_scope_decision, not policy_escalation");
 
   const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
   assert.equal(resolved.ok, true);
@@ -504,6 +507,23 @@ test("resolving policy_escalation:resume after a reviewer's escalated verdict (a
   assert.equal(issue.status, "developing");
   const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
   assert.deepEqual(pending.map((i) => i.kind), ["developer"]);
+});
+
+test("NOT-150: bare escalated verdict remaps to automatic repair, not policy_escalation", async () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("escalated") });
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "repairing");
+  assert.ok(!listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "developer" && i.status === "pending").length, 1);
+  const findings = listFindingsForIssue(issueId);
+  assert.ok(
+    findings.some((f) => f.severity === "blocking"),
+    "bare escalate remap must thread a blocking finding into repair"
+  );
 });
 
 test("a stale review re-queues a reviewer at the new head without consuming a round", async () => {

@@ -1,5 +1,5 @@
 // packages/server/src/coordinator/routing.ts
-import type { ReviewerResult } from "./reviewer-result.js";
+import { normalizeReviewerResult, type ReviewerResult } from "./reviewer-result.js";
 
 export type DeveloperOutcome =
   | { kind: "clean_handoff"; branch: string; headSha: string; baseSha: string; prNumber: number; prUrl: string }
@@ -268,7 +268,9 @@ export function routeReviewerOutcome(
 }
 
 function routeVerdict(result: ReviewerResult, limits: RouteLimits & { autoMerge?: boolean }): ReviewerRouteResult {
-  switch (result.verdict) {
+  // Defense in depth: same invariants as parseReviewerResult / PRD §6.4 (NOT-150).
+  const normalized = normalizeReviewerResult(result);
+  switch (normalized.verdict) {
     case "approved":
       return limits.autoMerge ? { next: "auto_merge" } : { next: "final_review" };
     case "changes_requested":
@@ -276,8 +278,15 @@ function routeVerdict(result: ReviewerResult, limits: RouteLimits & { autoMerge?
         ? { next: "retry_developer_with_findings" }
         : { next: "human_action", actionType: "attempts_exhausted", reason: "Reviewer requested changes and the review-round limit is reached." };
     case "escalated":
-      return result.productScopeQuestion
-        ? { next: "human_action", actionType: "product_scope_decision", reason: result.productScopeQuestion }
-        : { next: "human_action", actionType: "policy_escalation", reason: "Reviewer escalated without a resolvable code change." };
+      return normalized.productScopeQuestion
+        ? { next: "human_action", actionType: "product_scope_decision", reason: normalized.productScopeQuestion }
+        : // Illegal bare escalate — treat as changes_requested so repair can run (NOT-150).
+          roundsRemain(limits)
+          ? { next: "retry_developer_with_findings" }
+          : {
+              next: "human_action",
+              actionType: "attempts_exhausted",
+              reason: "Reviewer escalated without a product scope question and the review-round limit is reached.",
+            };
   }
 }
