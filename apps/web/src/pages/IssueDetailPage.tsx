@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import type { AgentWithHealth } from "@agent-dealer/shared";
 import {
   abortIssue,
@@ -22,7 +23,6 @@ import { parseResponseOptions } from "../lib/humanActions";
 type Props = {
   issueId: string;
   agents: AgentWithHealth[];
-  onBack: () => void;
   /** Lets the shell's open-action badge/list catch up after a resolution here. */
   onHumanActionsChanged: () => void;
 };
@@ -88,12 +88,13 @@ function nextActionLabel(detail: IssueDetail): string {
   }
 }
 
-export default function IssueDetailPage({ issueId, agents, onBack, onHumanActionsChanged }: Props) {
+export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged }: Props) {
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [evidence, setEvidence] = useState<IssueEvidence | null>(null);
   const [traces, setTraces] = useState<Record<string, { content: string; loading: boolean; error?: string }>>({});
   const [guidance, setGuidance] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editDescription, setEditDescription] = useState("");
@@ -102,15 +103,71 @@ export default function IssueDetailPage({ issueId, agents, onBack, onHumanAction
   /** Outcome of the last Start — admitted, or queued at a position with a reason. */
   const [startNotice, setStartNotice] = useState<string | null>(null);
 
-  const refresh = () => fetchIssueDetail(issueId).then(setDetail).catch((e) => setError(String(e)));
+  const refresh = () =>
+    fetchIssueDetail(issueId)
+      .then((d) => {
+        setDetail(d);
+        setError(null);
+        setNotFound(false);
+      })
+      .catch((e) => {
+        const msg = String(e).replace(/^Error:\s*/i, "").trim();
+        if (/^not found$/i.test(msg)) {
+          setNotFound(true);
+          setError(null);
+          setDetail(null);
+        } else {
+          setError(msg);
+          setNotFound(false);
+        }
+      });
 
   useEffect(() => {
+    // Route reuse no longer unmounts this page when only :issueId changes — clear every
+    // local draft so issue A's edit/guidance state cannot overlay issue B.
+    setDetail(null);
+    setEvidence(null);
+    setTraces({});
+    setGuidance("");
+    setError(null);
+    setNotFound(false);
+    setEditing(false);
+    setEditTitle("");
+    setEditDescription("");
+    setEditAcceptance("");
+    setBusy(false);
+    setStartNotice(null);
     refresh();
     const poll = setInterval(refresh, 4000);
     return () => clearInterval(poll);
   }, [issueId]);
 
-  if (error) return <div className="p-6 text-red-300 text-sm">{error}</div>;
+  if (notFound) {
+    return (
+      <div className="flex-1 min-h-0 overflow-y-auto px-6 py-10">
+        <div className="max-w-md space-y-3">
+          <h2 className="text-lg font-semibold text-white/90">Issue not found</h2>
+          <p className="text-sm text-white/55">
+            No issue exists for this ID — it may have been deleted, or the link is wrong.
+          </p>
+          <Link to="/issues" className="inline-block text-sm text-cyber-teal hover:underline">
+            ← Back to Issues
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex-1 min-h-0 overflow-y-auto px-6 py-6 space-y-3">
+        <p className="text-red-300 text-sm">{error}</p>
+        <Link to="/issues" className="inline-block text-sm text-cyber-teal hover:underline">
+          ← Back to Issues
+        </Link>
+      </div>
+    );
+  }
   if (!detail) return <div className="p-6 text-white/50 text-sm">Loading…</div>;
 
   const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, liveProgress, latestSessionFailure, queued, queueEntry } = detail;
@@ -253,9 +310,9 @@ export default function IssueDetailPage({ issueId, agents, onBack, onHumanAction
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
       <div className="max-w-3xl">
-        <button type="button" onClick={onBack} className="text-sm text-white/50 hover:text-white mb-3">
+        <Link to="/issues" className="inline-block text-sm text-white/50 hover:text-white mb-3">
           ← Issues
-        </button>
+        </Link>
 
         <div className="flex items-start justify-between gap-4 mb-4">
           <div>

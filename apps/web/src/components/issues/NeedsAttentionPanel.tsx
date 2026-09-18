@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import type { HumanAction } from "@agent-dealer/shared";
 import AlertIcon from "../ui/AlertIcon";
 import HumanActionChoices from "./HumanActionChoices";
@@ -6,7 +7,6 @@ import { actionContextLines, actionLabel, parseResponseOptions } from "../../lib
 type Props = {
   actions: HumanAction[];
   busyActionId: string | null;
-  onOpenIssue: (issueId: string) => void;
   onResolve: (actionId: string, choice: string) => void;
 };
 
@@ -19,7 +19,7 @@ type Props = {
  *
  * Renders nothing when no action is open: the home screen needs no action-center chrome then.
  */
-export default function NeedsAttentionPanel({ actions, busyActionId, onOpenIssue, onResolve }: Props) {
+export default function NeedsAttentionPanel({ actions, busyActionId, onResolve }: Props) {
   if (actions.length === 0) return null;
 
   return (
@@ -37,15 +37,14 @@ export default function NeedsAttentionPanel({ actions, busyActionId, onOpenIssue
 
           if (action.issueId) {
             return (
-              <button
+              <Link
                 key={action.id}
-                type="button"
-                onClick={() => onOpenIssue(action.issueId!)}
-                className="w-full text-left px-4 py-2 hover:bg-white/5 transition-colors"
+                to={`/issues/${action.issueId}`}
+                className="block w-full text-left px-4 py-2 hover:bg-white/5 transition-colors"
               >
                 <span className="text-xs uppercase tracking-wide text-red-300/80">{label}</span>
                 <span className="text-sm text-white/80 ml-2">{action.question}</span>
-              </button>
+              </Link>
             );
           }
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import type { AgentWithHealth, HumanAction, LinearCandidate } from "@agent-dealer/shared";
 import {
   createIssue,
@@ -20,7 +21,6 @@ type Props = {
   agents: AgentWithHealth[];
   /** Every open human action, issue-scoped and run-scoped — polled by the shell. */
   humanActions: HumanAction[];
-  onSelectIssue: (id: string) => void;
   onHumanActionsChanged: () => void;
 };
 
@@ -47,7 +47,6 @@ function extractAcceptanceFromLinear(description: string | undefined): string | 
 export default function IssuesListPage({
   agents,
   humanActions,
-  onSelectIssue,
   onHumanActionsChanged,
 }: Props) {
   const [issues, setIssues] = useState<IssueListRow[] | null>(null);
@@ -209,10 +208,9 @@ export default function IssuesListPage({
             {queue.map((entry) => (
               <div key={entry.id} className="px-4 py-2 flex items-start gap-3">
                 <span className="text-xs text-white/35 w-5 shrink-0 pt-0.5">{entry.position}</span>
-                <button
-                  type="button"
+                <Link
+                  to={`/issues/${entry.issueId}`}
                   className="flex-1 min-w-0 text-left hover:text-cyber-teal"
-                  onClick={() => onSelectIssue(entry.issueId)}
                 >
                   <span className="text-sm text-white/85 truncate block">
                     {entry.title ?? entry.issueId.slice(0, 8)}
@@ -224,7 +222,7 @@ export default function IssuesListPage({
                       {entry.issueStatus ?? "queued"} · next up
                     </span>
                   )}
-                </button>
+                </Link>
                 <button
                   type="button"
                   className="text-xs text-white/40 hover:text-white shrink-0"
@@ -245,7 +243,6 @@ export default function IssuesListPage({
       <NeedsAttentionPanel
         actions={humanActions}
         busyActionId={busyActionId}
-        onOpenIssue={onSelectIssue}
         onResolve={(actionId, choice) => void resolveAction(actionId, choice)}
       />
 
@@ -438,10 +435,9 @@ export default function IssuesListPage({
             // position and what it is waiting for, right on the row.
             const entry = queue.find((e) => e.issueId === issue.id);
             return (
-              <button
+              <Link
                 key={issue.id}
-                type="button"
-                onClick={() => onSelectIssue(issue.id)}
+                to={`/issues/${issue.id}`}
                 className="w-full text-left flex items-center gap-3 px-4 py-3 rounded border border-white/10 bg-panel-elevated/40 hover:bg-panel-elevated/70 transition-colors"
               >
                 {issue.hasOpenHumanAction && <AlertIcon className="w-4 h-4 shrink-0 text-red-400" />}
@@ -464,7 +460,7 @@ export default function IssuesListPage({
                 )}
                 <IssueStatusBadge status={issue.status} />
                 <span className="text-xs text-white/35 shrink-0 w-16 text-right">{timeAgo(issue.updatedAt)}</span>
-              </button>
+              </Link>
             );
           })}
         </div>
