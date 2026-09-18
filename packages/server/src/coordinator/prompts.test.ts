@@ -18,6 +18,17 @@ test("round 1 prompt instructs a fresh branch off base and never mentions push/P
   assert.doesNotMatch(prompt, /gh pr create/);
 });
 
+// NOT-115: soft mitigation for dirty_worktree blast radius — commit at slice
+// boundaries, while still requiring a final commit + implementation conclusion.
+test("developer prompt asks for incremental commits at slice boundaries and keeps final commit + conclusion required", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1 });
+  assert.match(prompt, /incremental commits?/i);
+  assert.match(prompt, /slice/i);
+  assert.match(prompt, /final commit/i);
+  assert.match(prompt, /implementation conclusion/i);
+  assert.match(prompt, /do NOT push and do NOT open a pull request/);
+});
+
 test("repair round includes findings and references the round number", () => {
   const prompt = buildDeveloperPrompt({
     taskSnapshot,
