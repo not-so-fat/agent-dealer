@@ -14,24 +14,13 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
+import { resolveTsxBin } from "./resolve-tsx-bin.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
 const serverEntry = path.join(repoRoot, "packages", "server", "src", "index.ts");
 
-/** `node_modules/.bin/tsx`, found the way Node resolves modules: by walking up from the
- * repo root. A git worktree has no node_modules of its own and resolves everything from the
- * main checkout above it, so hardcoding `<repoRoot>/node_modules` makes every spawn in this
- * file fail with ENOENT when it runs from one. */
-function resolveTsxBin(): string {
-  for (let dir = repoRoot; ; dir = path.dirname(dir)) {
-    const candidate = path.join(dir, "node_modules", ".bin", "tsx");
-    if (fs.existsSync(candidate)) return candidate;
-    if (path.dirname(dir) === dir) throw new Error(`could not find node_modules/.bin/tsx at or above ${repoRoot}`);
-  }
-}
-
-const tsxBin = resolveTsxBin();
+const tsxBin = resolveTsxBin(repoRoot);
 
 const { isServiceRunning, runMigration } = await import("./db/migrate-to-issues.js");
 const Database = (await import("better-sqlite3")).default;

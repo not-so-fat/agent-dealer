@@ -11,7 +11,6 @@ import { registerRoutes } from "./routes/index.js";
 import { registerIssueRoutes } from "./routes/issues.js";
 import { registerQueueRoutes } from "./routes/queue.js";
 import { registerHumanActionRoutes } from "./routes/human-actions.js";
-import { startQueue, recoverOrphanedRuns } from "./queue/dispatcher.js";
 import { recoverCoordinator } from "./coordinator/recovery.js";
 import { startCoordinatorLoop } from "./coordinator/worker-loop.js";
 import { registerEffectHandler } from "./coordinator/effect-registry.js";
@@ -74,11 +73,6 @@ async function main(): Promise<void> {
   await registerHumanActionRoutes(app);
 
   const uiDist = await registerStaticUi(app);
-  const orphans = recoverOrphanedRuns();
-  if (orphans > 0) {
-    console.warn(`[startup] recovered ${orphans} orphaned running run(s) → failed`);
-  }
-  startQueue();
 
   // Without this, getEffectHandler() falls back to the always-session_failed placeholders
   // (effect-registry.ts) and every started issue would burn its infra retries and

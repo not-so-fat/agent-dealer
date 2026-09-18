@@ -23,9 +23,7 @@ test("buildIssueFilter omits assignee when assigneeMe is false", () => {
       stateFilter: ["Backlog", "Todo", "In Progress", "In Review"],
       teamId: "team-1",
       assigneeMe: false,
-      defaultAgentId: null,
       syncEnabled: true,
-      routingRules: [],
     },
     "viewer-1"
   );
@@ -41,9 +39,7 @@ test("buildIssueFilter includes assignee when assigneeMe is true", () => {
       stateFilter: ["Todo"],
       teamId: null,
       assigneeMe: true,
-      defaultAgentId: null,
       syncEnabled: true,
-      routingRules: [],
     },
     "viewer-1"
   );

@@ -1,6 +1,10 @@
 import { useState } from "react";
 import type { AgentWithHealth, CreateAgentInput, UpdateAgentInput } from "@agent-dealer/shared";
-import { parseStringList } from "@agent-dealer/shared";
+import {
+  parseStringList,
+  resolveProfileBudgetJson,
+  resolveProfileModel,
+} from "@agent-dealer/shared";
 import AgentConfigFields, {
   parseRefList,
   permissionFlagsFromJson,
@@ -24,10 +28,6 @@ const emptyConfig = (): AgentConfigValue => ({
   runtime: "claude_code",
   deckId: "",
   playbookId: "",
-  defaultPlanModel: "",
-  defaultExecuteModel: "",
-  defaultPlanBudget: budgetFormEmpty(),
-  defaultExecuteBudget: budgetFormEmpty(),
   purpose: "",
   defaultModel: "",
   defaultBudget: budgetFormEmpty(),
@@ -58,10 +58,6 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         workspaceRoot: workspaceRoot.trim(),
         deckId: config.deckId || undefined,
         playbookId: config.playbookId || undefined,
-        defaultPlanModel: config.defaultPlanModel || null,
-        defaultExecuteModel: config.defaultExecuteModel || null,
-        defaultPlanBudget: phaseBudgetFromForm(config.defaultPlanBudget),
-        defaultExecuteBudget: phaseBudgetFromForm(config.defaultExecuteBudget),
         defaultModel: config.defaultModel.trim() || null,
         defaultBudget: phaseBudgetFromForm(config.defaultBudget),
         purpose: config.purpose.trim() || null,
@@ -90,13 +86,13 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
       runtime: agent.runtime,
       deckId: agent.deckId ?? "",
       playbookId: agent.playbookId ?? "",
-      defaultPlanModel: agent.defaultPlanModel ?? "",
-      defaultExecuteModel: agent.defaultExecuteModel ?? "",
-      defaultPlanBudget: agentPhaseBudgetFromJson(agent.defaultPlanBudgetJson),
-      defaultExecuteBudget: agentPhaseBudgetFromJson(agent.defaultExecuteBudgetJson),
       purpose: agent.purpose ?? "",
-      defaultModel: agent.defaultModel ?? "",
-      defaultBudget: agentPhaseBudgetFromJson(agent.defaultBudgetJson),
+      // Effective values, not just the role-neutral columns: a profile written before
+      // NOT-71 keeps its defaults in the legacy plan/execute columns, and showing blank
+      // here would hide the values the session actually runs with (and silently discard
+      // them on save).
+      defaultModel: resolveProfileModel(agent) ?? "",
+      defaultBudget: agentPhaseBudgetFromJson(resolveProfileBudgetJson(agent)),
       playbookIds: parseStringList(agent.playbookIdsJson),
       externalMemoryRefs: parseStringList(agent.externalMemoryRefsJson).join("\n"),
       ...permissionFlagsFromJson(agent.permissionPolicyJson),
@@ -117,10 +113,6 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         runtime: editConfig.runtime,
         deckId: editConfig.deckId || null,
         playbookId: editConfig.playbookId || null,
-        defaultPlanModel: editConfig.defaultPlanModel || null,
-        defaultExecuteModel: editConfig.defaultExecuteModel || null,
-        defaultPlanBudget: phaseBudgetFromForm(editConfig.defaultPlanBudget),
-        defaultExecuteBudget: phaseBudgetFromForm(editConfig.defaultExecuteBudget),
         defaultModel: editConfig.defaultModel.trim() || null,
         defaultBudget: phaseBudgetFromForm(editConfig.defaultBudget),
         purpose: editConfig.purpose.trim() || null,
@@ -196,14 +188,9 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
                   ) : (
                     <Badge className="bg-white/5 text-white/40 border-white/10 normal-case">No deck</Badge>
                   )}
-                  {agent.defaultPlanModel && (
-                    <Badge className="bg-white/5 text-white/50 border-white/10 normal-case truncate max-w-[10rem]" title={agent.defaultPlanModel}>
-                      plan: {agent.defaultPlanModel}
-                    </Badge>
-                  )}
-                  {agent.defaultExecuteModel && (
-                    <Badge className="bg-white/5 text-white/50 border-white/10 normal-case truncate max-w-[10rem]" title={agent.defaultExecuteModel}>
-                      exec: {agent.defaultExecuteModel}
+                  {agent.defaultModel && (
+                    <Badge className="bg-white/5 text-white/50 border-white/10 normal-case truncate max-w-[10rem]" title={agent.defaultModel}>
+                      {agent.defaultModel}
                     </Badge>
                   )}
                 </div>

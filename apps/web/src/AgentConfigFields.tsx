@@ -2,18 +2,18 @@ import { useEffect, useState } from "react";
 import type { PermissionPolicyOverride, Runtime } from "@agent-dealer/shared";
 import { CURSOR_DEFAULT_MODEL } from "@agent-dealer/shared";
 import { fetchDeckPlaybooks, fetchDecks } from "./api";
-import PhaseConfigRow from "./components/agents/PhaseConfigRow";
-import { budgetFormEmpty, type BudgetFormValue } from "./lib/budgetForm";
+import ModelSelect from "./components/agents/ModelSelect";
+import { type BudgetFormValue } from "./lib/budgetForm";
 
 export type AgentConfigValue = {
   runtime: Runtime;
   deckId: string;
   playbookId: string;
-  defaultPlanModel: string;
-  defaultExecuteModel: string;
-  defaultPlanBudget: BudgetFormValue;
-  defaultExecuteBudget: BudgetFormValue;
   // Issue-centric (developer/reviewer) session defaults — snapshotted per session.
+  // NOT-71/NOT-80: the old plan/execute model+budget pair is gone from this form. Issue
+  // workflows only ever read `defaultModel` / `defaultBudget`; profile-snapshot.ts still
+  // falls back to the persisted plan/execute columns for profiles saved before this form
+  // existed, but nothing writes them any more.
   purpose: string;
   defaultModel: string;
   defaultBudget: BudgetFormValue;
@@ -105,36 +105,13 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
         value={value.runtime}
         onChange={(e) => {
           const runtime = e.target.value as Runtime;
-          const cursorDefaults =
-            runtime === "cursor_local"
-              ? { defaultPlanModel: CURSOR_DEFAULT_MODEL, defaultExecuteModel: CURSOR_DEFAULT_MODEL }
-              : { defaultPlanModel: "", defaultExecuteModel: "" };
-          set({ runtime, ...cursorDefaults });
+          set({ runtime, defaultModel: runtime === "cursor_local" ? CURSOR_DEFAULT_MODEL : "" });
         }}
       >
         <option value="claude_code">Claude Code (claude -p)</option>
         <option value="cursor_local">Cursor local (cursor-agent -p)</option>
         <option value="codex_local">Codex local (codex exec)</option>
       </select>
-      <PhaseConfigRow
-        phase="Plan"
-        runtime={value.runtime}
-        model={value.defaultPlanModel}
-        onModelChange={(defaultPlanModel) => set({ defaultPlanModel })}
-        budget={value.defaultPlanBudget}
-        onBudgetChange={(defaultPlanBudget) => set({ defaultPlanBudget })}
-        disabled={disabled}
-        showHint={false}
-      />
-      <PhaseConfigRow
-        phase="Execution"
-        runtime={value.runtime}
-        model={value.defaultExecuteModel}
-        onModelChange={(defaultExecuteModel) => set({ defaultExecuteModel })}
-        budget={value.defaultExecuteBudget}
-        onBudgetChange={(defaultExecuteBudget) => set({ defaultExecuteBudget })}
-        disabled={disabled}
-      />
       <label className="text-xs text-[#A8C4C0] uppercase">Agent Deck (optional)</label>
       <select
         className="field"
@@ -194,16 +171,16 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
           />
         </label>
         <div className="grid grid-cols-3 gap-2">
-          <label className="col-span-1 space-y-1">
-            <span className="text-xs text-[#A8C4C0] uppercase">Default model</span>
-            <input
-              className="field text-sm"
-              placeholder="runtime default"
-              disabled={disabled}
+          <div className="col-span-1">
+            <ModelSelect
+              runtime={value.runtime}
+              label="Default model"
               value={value.defaultModel}
-              onChange={(e) => set({ defaultModel: e.target.value })}
+              onChange={(defaultModel) => set({ defaultModel })}
+              disabled={disabled}
+              compact
             />
-          </label>
+          </div>
           <label className="col-span-1 space-y-1">
             <span className="text-xs text-[#A8C4C0] uppercase">Max turns</span>
             <input
@@ -301,32 +278,4 @@ export function parseRefList(raw: string): string[] {
     .split(/[\n,]/)
     .map((s) => s.trim())
     .filter(Boolean);
-}
-
-export function agentConfigured(run: { runtime: string | null }): boolean {
-  return !!run.runtime;
-}
-
-export function agentSummary(run: {
-  agentName?: string | null;
-  runtime: string | null;
-  deckName: string | null;
-  deckId: string | null;
-  playbookId: string | null;
-  planModel?: string | null;
-  executeModel?: string | null;
-}): string {
-  if (run.agentName) {
-    const parts = [run.agentName];
-    if (run.deckName || run.deckId) parts.push(`◆ ${run.deckName ?? run.deckId}`);
-    if (run.planModel) parts.push(`plan:${run.planModel}`);
-    if (run.executeModel) parts.push(`exec:${run.executeModel}`);
-    return parts.join(" · ");
-  }
-  const parts = [run.runtime ?? "no runtime"];
-  if (run.deckName || run.deckId) parts.push(`◆ ${run.deckName ?? run.deckId}`);
-  if (run.playbookId) parts.push(`pb:${run.playbookId.slice(0, 8)}…`);
-  if (run.planModel) parts.push(`plan:${run.planModel}`);
-  if (run.executeModel) parts.push(`exec:${run.executeModel}`);
-  return parts.join(" · ");
 }

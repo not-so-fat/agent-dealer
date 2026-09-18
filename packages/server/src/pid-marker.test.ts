@@ -7,11 +7,12 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { claimPidMarker, releasePidMarker, readPidMarkerOwner } from "./pid-marker.js";
+import { resolveTsxBin } from "./resolve-tsx-bin.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const childScript = path.join(__dirname, "pid-marker-claim-child.ts");
 const holdArbiterScript = path.join(__dirname, "pid-marker-hold-arbiter-child.ts");
-const tsxBin = path.join(__dirname, "..", "..", "..", "node_modules", ".bin", "tsx");
+const tsxBin = resolveTsxBin(path.resolve(__dirname, "..", "..", ".."));
 
 /** Resolves once the child has actually exited — killing it alone isn't enough to keep
  * the test process from hanging afterward: an unresolved 'exit' event leaves the child's

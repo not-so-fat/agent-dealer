@@ -36,7 +36,9 @@ jobs:
       - name: Unit tests
         run: npm run test:unit
 
-      - name: Start server for flow verify
+      # NOT-71: flow:verify drove the deleted plan/execute product. The boot + /health
+      # check it depended on is kept on its own — it still catches a server that cannot start.
+      - name: Start server (boot gate)
         env:
           AGENT_DEALER_ENV: development
           AGENT_DEALER_HOME: ${{ runner.temp }}/agent-dealer-home
@@ -53,12 +55,6 @@ jobs:
           echo "Server failed to start"
           tail -n 100 server.log || true
           exit 1
-
-      - name: Flow verify (API gates)
-        env:
-          AGENT_DEALER_ENV: development
-          AGENT_DEALER_HOME: ${{ runner.temp }}/agent-dealer-home
-        run: npm run flow:verify
 
       - name: Stop server
         if: always()

@@ -27,11 +27,12 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
+import { resolveTsxBin } from "./resolve-tsx-bin.js";
 import type { GithubAdapter, ReviewEvent } from "./adapters/github.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
-const tsxBin = path.join(repoRoot, "node_modules", ".bin", "tsx");
+const tsxBin = resolveTsxBin(repoRoot);
 const cliEntry = path.join(repoRoot, "packages", "cli", "src", "bin.ts");
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not79-home-"));

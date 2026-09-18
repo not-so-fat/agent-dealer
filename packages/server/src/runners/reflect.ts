@@ -1,12 +1,12 @@
-import { PlaybookPatchContent, ReflectProposalSchema, type PlaybookPatchTrigger, type Run } from "@agent-dealer/shared";
-import { addArtifact, getLatestArtifact } from "../repository/runs.js";
+import { ReflectProposalSchema, type PlaybookPatchContent, type PlaybookPatchTrigger, type Run } from "@agent-dealer/shared";
+import { addArtifact } from "../repository/runs.js";
 import {
   agentDeckPatchesUrl,
   checkAgentDeckHealth,
   fetchPlaybook,
   proposePlaybookPatch,
 } from "../adapters/agent-deck.js";
-import { runClaude } from "./claude.js";
+import { runClaudeReflect } from "./claude.js";
 import { buildReflectPrompt } from "./prompts.js";
 import { extractResultText, parseNdjson } from "./stream-json.js";
 
@@ -58,7 +58,7 @@ export async function runReflect(run: Run, opts: ReflectOpts): Promise<void> {
 
     const playbook = await fetchPlaybook(run.playbookId);
 
-    const result = await runClaude(run, "reflect", undefined, { promptOverride: buildReflectPrompt(run, opts) });
+    const result = await runClaudeReflect(run, { promptOverride: buildReflectPrompt(run, opts) });
     const events = parseNdjson(result.transcript);
     const resultText = extractResultText(events) ?? result.transcript;
     const proposal = parseReflectProposal(resultText);
@@ -112,16 +112,5 @@ export async function runReflect(run: Run, opts: ReflectOpts): Promise<void> {
       { status: "failed", trigger: opts.trigger, error: String(err) },
       "system"
     );
-  }
-}
-
-export function latestProposedPatch(runId: string): PlaybookPatchContent | null {
-  const art = getLatestArtifact(runId, "playbook_patch");
-  if (!art?.contentJson) return null;
-  try {
-    const parsed = PlaybookPatchContent.parse(JSON.parse(art.contentJson));
-    return parsed.status === "proposed" ? parsed : null;
-  } catch {
-    return null;
   }
 }

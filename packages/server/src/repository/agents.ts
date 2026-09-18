@@ -1,5 +1,7 @@
 import type { AgentProfile, CreateAgentInput, Runtime, UpdateAgentInput } from "@agent-dealer/shared";
 import {
+  resolveProfileBudgetJson,
+  resolveProfileModel,
   serializePermissionPolicyOverride,
   serializePhaseBudget,
   serializeStringList,
@@ -39,6 +41,10 @@ function rowToAgent(row: AgentRow): AgentProfile {
     deckId: row.deck_id,
     deckName: row.deck_name,
     playbookId: row.playbook_id,
+    // Read-only legacy compatibility (NOT-71): no write path sets these any more, but
+    // profile-snapshot.ts falls back to them for profiles saved before default_model /
+    // default_budget_json existed, so dropping them here would silently change the model
+    // and caps those sessions run under.
     defaultPlanModel: row.default_plan_model,
     defaultExecuteModel: row.default_execute_model,
     defaultPlanBudgetJson: row.default_plan_budget_json,
@@ -74,11 +80,10 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
   db.prepare(`
     INSERT INTO agents (
       id, name, runtime, deck_id, deck_name, playbook_id, workspace_root,
-      default_plan_model, default_execute_model, default_plan_budget_json, default_execute_budget_json,
       default_model, default_budget_json, purpose, playbook_ids_json, external_memory_refs_json, permission_policy_json,
       is_builtin, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
   `).run(
     id,
     input.name.trim(),
@@ -87,10 +92,6 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
     deckName ?? null,
     input.playbookId ?? null,
     input.workspaceRoot.trim(),
-    input.defaultPlanModel ?? null,
-    input.defaultExecuteModel ?? null,
-    serializePhaseBudget(input.defaultPlanBudget),
-    serializePhaseBudget(input.defaultExecuteBudget),
     input.defaultModel ?? null,
     serializePhaseBudget(input.defaultBudget),
     input.purpose?.trim() || null,
@@ -114,23 +115,18 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
     input.workspaceRoot !== undefined ? input.workspaceRoot?.trim() || null : existing.workspaceRoot;
   const deckId = input.deckId !== undefined ? input.deckId : existing.deckId;
   const playbookId = input.playbookId !== undefined ? input.playbookId : existing.playbookId;
-  const defaultPlanModel =
-    input.defaultPlanModel !== undefined ? input.defaultPlanModel : existing.defaultPlanModel;
-  const defaultExecuteModel =
-    input.defaultExecuteModel !== undefined ? input.defaultExecuteModel : existing.defaultExecuteModel;
-  const defaultPlanBudgetJson =
-    input.defaultPlanBudget !== undefined
-      ? serializePhaseBudget(input.defaultPlanBudget)
-      : existing.defaultPlanBudgetJson;
-  const defaultExecuteBudgetJson =
-    input.defaultExecuteBudget !== undefined
-      ? serializePhaseBudget(input.defaultExecuteBudget)
-      : existing.defaultExecuteBudgetJson;
-  const defaultModel = input.defaultModel !== undefined ? input.defaultModel : existing.defaultModel;
+  // Collapse the pre-NOT-71 plan/execute columns into the role-neutral one on every write,
+  // and clear them below. Reading them back (resolveProfile*) is deliberate compatibility for
+  // rows written before the migration; continuing to *keep* them is not. Without this, editing
+  // a legacy profile saved a null role-neutral model while the legacy column kept winning the
+  // fallback — so the form showed blank while the session still ran the hidden value, and
+  // switching runtime carried the old runtime's model into the new one's snapshot.
+  const defaultModel =
+    input.defaultModel !== undefined ? input.defaultModel : resolveProfileModel(existing);
   const defaultBudgetJson =
     input.defaultBudget !== undefined
       ? serializePhaseBudget(input.defaultBudget)
-      : existing.defaultBudgetJson;
+      : resolveProfileBudgetJson(existing);
   const purpose =
     input.purpose !== undefined ? input.purpose?.trim() || null : existing.purpose;
   const playbookIdsJson =
@@ -149,8 +145,9 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
   getDb()
     .prepare(`
       UPDATE agents SET name = ?, runtime = ?, deck_id = ?, deck_name = ?, playbook_id = ?, workspace_root = ?,
-        default_plan_model = ?, default_execute_model = ?, default_plan_budget_json = ?, default_execute_budget_json = ?,
         default_model = ?, default_budget_json = ?, purpose = ?, playbook_ids_json = ?, external_memory_refs_json = ?, permission_policy_json = ?,
+        default_plan_model = NULL, default_execute_model = NULL,
+        default_plan_budget_json = NULL, default_execute_budget_json = NULL,
         updated_at = ?
       WHERE id = ?
     `)
@@ -161,10 +158,6 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
       resolvedDeckName,
       playbookId,
       workspaceRoot,
-      defaultPlanModel,
-      defaultExecuteModel,
-      defaultPlanBudgetJson,
-      defaultExecuteBudgetJson,
       defaultModel,
       defaultBudgetJson,
       purpose,

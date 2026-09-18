@@ -1,6 +1,10 @@
 import fs from "node:fs";
-import { OutboundDraftBlock, outboundMessageMatchesSummary, PlanTriageBlock } from "@agent-dealer/shared";
-import type { OutboundDraftBlock as OutboundDraftBlockType, PlanQuestion, RunPhase, Runtime, StreamTraceEntry, UsageContent } from "@agent-dealer/shared";
+import type { RunPhase, Runtime, UsageContent } from "@agent-dealer/shared";
+
+// NDJSON stream parsing shared by the coordinator's session readers (usage, live progress,
+// verification receipts, usage caps) and the legacy reflect runner. NOT-71 removed the
+// plan-triage and outbound-draft block extractors along with the plan/execute product that
+// produced those blocks, and the stream-trace builder with the run detail view that showed it.
 
 type StreamEvent = Record<string, unknown>;
 
@@ -23,24 +27,11 @@ export function parseNdjsonFile(logPath: string): StreamEvent[] {
   return parseNdjson(fs.readFileSync(logPath, "utf8"));
 }
 
-function stripMarkdownFences(text: string): string {
-  const m = text.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/);
-  return m ? m[1].trim() : text.trim();
-}
-
 export function extractSessionId(events: StreamEvent[]): string | undefined {
   for (const e of events) {
     if (e.type === "system" && typeof e.session_id === "string") return e.session_id;
   }
   return undefined;
-}
-
-export function extractResultIsError(events: StreamEvent[]): boolean {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (e.type === "result") return Boolean(e.is_error);
-  }
-  return false;
 }
 
 export function extractResultText(events: StreamEvent[]): string | undefined {
@@ -60,85 +51,6 @@ export function extractResultText(events: StreamEvent[]): string | undefined {
     if (text.length > 20) return text;
   }
   return undefined;
-}
-
-export function extractPlanMarkdown(events: StreamEvent[]): string {
-  const raw = extractResultText(events) ?? "";
-  return stripMarkdownFences(raw);
-}
-
-export interface PlanTriageExtraction {
-  markdown: string;
-  verdict: "trivial" | "needs_review";
-  rationale: string;
-  questions: PlanQuestion[];
-  parseFallback: boolean;
-}
-
-const TRIAGE_FALLBACK = {
-  verdict: "needs_review" as const,
-  rationale: "Agent did not return a valid triage block",
-  questions: [] as PlanQuestion[],
-  parseFallback: true,
-};
-
-/** Parse the trailing fenced json triage block from plan markdown (PRD F1.2). */
-export function extractPlanTriage(planMarkdown: string): PlanTriageExtraction {
-  const blocks = [...planMarkdown.matchAll(/```json\s*\n([\s\S]*?)\n```/g)];
-  const last = blocks[blocks.length - 1];
-  if (!last) return { markdown: planMarkdown.trim(), ...TRIAGE_FALLBACK };
-  const strippedMarkdown = (
-    planMarkdown.slice(0, last.index) + planMarkdown.slice(last.index! + last[0].length)
-  ).trim();
-  try {
-    const parsed = PlanTriageBlock.parse(JSON.parse(last[1]));
-    return {
-      markdown: strippedMarkdown,
-      verdict: parsed.verdict,
-      rationale: parsed.rationale,
-      questions: parsed.questions,
-      parseFallback: false,
-    };
-  } catch {
-    return { markdown: strippedMarkdown, ...TRIAGE_FALLBACK };
-  }
-}
-
-export interface OutboundDraftExtraction {
-  markdown: string;
-  draft?: OutboundDraftBlockType;
-  hadJsonBlock: boolean;
-  invalid: boolean;
-  mismatch: boolean;
-}
-
-/** Parse the trailing fenced json outbound draft block from execute result (PRD F2.2). */
-export function extractOutboundDraft(resultMarkdown: string): OutboundDraftExtraction {
-  const blocks = [...resultMarkdown.matchAll(/```json\s*\n([\s\S]*?)\n```/g)];
-  const last = blocks[blocks.length - 1];
-  if (!last) {
-    return { markdown: resultMarkdown.trim(), hadJsonBlock: false, invalid: false, mismatch: false };
-  }
-  const strippedMarkdown = (
-    resultMarkdown.slice(0, last.index) + resultMarkdown.slice(last.index! + last[0].length)
-  ).trim();
-  try {
-    const parsed = OutboundDraftBlock.parse(JSON.parse(last[1]));
-    const mismatch = !outboundMessageMatchesSummary(
-      parsed.toolCall,
-      parsed.summary.body,
-      parsed.actionType
-    );
-    return {
-      markdown: strippedMarkdown,
-      draft: parsed,
-      hadJsonBlock: true,
-      invalid: false,
-      mismatch,
-    };
-  } catch {
-    return { markdown: strippedMarkdown, hadJsonBlock: true, invalid: true, mismatch: false };
-  }
 }
 
 export function extractUsage(
@@ -164,90 +76,4 @@ export function extractUsage(
     model: (init?.model as string | undefined) ?? primaryModel,
     numTurns: typeof result?.num_turns === "number" ? result.num_turns : undefined,
   };
-}
-
-function appendAssistantText(entries: StreamTraceEntry[], text: string): void {
-  const trimmed = text.trim();
-  if (!trimmed) return;
-  const last = entries[entries.length - 1];
-  if (last?.type === "assistant") {
-    last.text = `${last.text}${text}`.slice(-4000);
-  } else {
-    entries.push({ type: "assistant", text: trimmed.slice(0, 4000) });
-  }
-}
-
-export function buildStreamTrace(events: StreamEvent[], maxEntries = 80): StreamTraceEntry[] {
-  const entries: StreamTraceEntry[] = [];
-
-  for (const e of events) {
-    const t = String(e.type ?? "");
-
-    if (t === "system" && e.subtype === "init") {
-      entries.push({
-        type: "system",
-        text: `session ${String(e.session_id ?? "?").slice(0, 8)} · model ${String(e.model ?? "?")}`,
-      });
-    }
-
-    if (t === "thinking") {
-      const delta = typeof e.text === "string" ? e.text : "";
-      if (e.subtype === "completed") {
-        entries.push({ type: "thinking", text: "(reasoning complete)" });
-      } else if (delta) {
-        const last = entries[entries.length - 1];
-        if (last?.type === "thinking" && last.text !== "(reasoning complete)") {
-          last.text = `${last.text}${delta}`.slice(-2000);
-        } else {
-          entries.push({ type: "thinking", text: delta.slice(0, 2000) });
-        }
-      }
-    }
-
-    if (t === "assistant") {
-      const msg = e.message as { content?: Array<{ type?: string; text?: string; thinking?: string; name?: string }> } | undefined;
-      if (msg?.content) {
-        for (const block of msg.content) {
-          if (block.type === "thinking" && block.thinking) {
-            entries.push({ type: "thinking", text: block.thinking.slice(0, 2000) });
-          } else if (block.type === "text" && block.text) {
-            appendAssistantText(entries, block.text);
-          } else if (block.type === "tool_use" && block.name) {
-            entries.push({ type: "tool", text: `invoke ${block.name}`, toolName: block.name });
-          }
-        }
-      }
-    }
-
-    if (t === "tool_call") {
-      const name = String((e as { name?: string }).name ?? (e as { tool_name?: string }).tool_name ?? "tool");
-      entries.push({ type: "tool", text: `invoke ${name}`, toolName: name });
-    }
-
-    if (t === "rate_limit_event") {
-      const info = e.rate_limit_info as {
-        status?: string;
-        rateLimitType?: string;
-        resetsAt?: number;
-      } | undefined;
-      const reset =
-        typeof info?.resetsAt === "number"
-          ? new Date(info.resetsAt > 1e12 ? info.resetsAt : info.resetsAt * 1000).toISOString()
-          : null;
-      entries.push({
-        type: "rate_limit",
-        text: `rate limit ${info?.status ?? "?"} (${info?.rateLimitType ?? "?"})${reset ? ` until ${reset}` : ""}`,
-      });
-    }
-
-    if (t === "result") {
-      const preview = typeof e.result === "string" ? e.result.slice(0, 500) : "";
-      entries.push({
-        type: "result",
-        text: preview || (e.is_error ? "error" : "done"),
-      });
-    }
-  }
-
-  return entries.slice(-maxEntries);
 }

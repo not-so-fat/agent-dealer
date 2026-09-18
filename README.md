@@ -1,50 +1,48 @@
 # agent-dealer
 
-**Queue it between meetings. Review it over coffee.**
+**Queue the issue. Check back when it needs you.**
 
-agent-dealer is a human control plane for agent execution: a task queue where you approve the **plan** before anything runs, hard **turn/dollar caps** that halt instead of overrun, a **gate on every outbound send**, and an audit trail of all of it. Pair it with [Agent Deck](https://github.com/not-so-fat/agent_deck) and every run starts with the right tools, keys, and playbooks — and teaches the playbook something for the next run.
+agent-dealer is an issue queue and execution control plane for coding agents: you file an issue against a repository, it is admitted from a queue, a developer agent implements it in its own git worktree and opens a pull request, a reviewer agent reviews the diff, and the loop repeats until the work merges or something genuinely needs a human. Every session, finding, cost, and decision lands on one durable issue record in SQLite. Pair it with [Agent Deck](https://github.com/not-so-fat/agent_deck) and every session starts with the right tools, keys, and playbooks.
 
 <!-- DEMO VIDEO — drop the 2-min demo here.
      On github.com, drag the .mp4 into the README editor to get a user-attachments URL,
      then paste it on its own line. GIF fallback:
-<img src="docs/assets/demo.gif" alt="Queue five tasks between meetings, review them when you're back" width="80%" />
+<img src="docs/assets/demo.gif" alt="Queue an issue, check back when it needs you" width="80%" />
 -->
 
 ## Why
 
-Your calendar is full; your task list doesn't care. Tasks pile up from everywhere — a bug fix, a Slack thread that needs a real answer, a follow-up email from this morning's meeting, a docs pass — worth doing, never worth *watching* get done. Running them through agents used to mean ten terminal tabs and whatever context you could hold between meetings, with permission prompts landing exactly when you weren't there.
+Your calendar is full; your backlog does not care. Small, well-specified issues — a bug fix, a flaky test, a missing guard — are worth doing and never worth *watching* get done. Running them through agents used to mean ten terminal tabs, hand-copied context, and permission prompts landing exactly when you were not there.
 
-**Queue it in the gap.** Five minutes between meetings: you open the feed — a bug pulled from Linear, the rest typed in from wherever they came: Slack, a meeting, your inbox. Each task is bound to a deck, so the agent already has the right MCP tools, the credentials, and the playbook for that kind of work — "run the full suite, never touch migrations" for the bug; "draft the reply, never send it yourself" for the Slack thread.
+**File it, do not babysit it.** An issue carries what the work needs: repository and base branch, problem statement, acceptance criteria, a developer agent and a reviewer agent. New issues join the admission queue and start when a slot frees, one at a time, so five issues filed between meetings do not fight over your machine.
 
-**Approve the plan, not every keystroke.** For each task the agent drafts a plan. You skim all five in one pass and approve — one cheap, high-leverage gate before the next meeting starts, not per-action nagging mid-run. Plans the agent triages as trivial auto-approve; if something is genuinely ambiguous, the plan comes back with structured questions instead of a guess.
+**Agents hand off through artifacts, not chat.** The developer works in an isolated worktree, commits, pushes a branch, and opens a draft PR. The reviewer gets read-only tools and the diff, and returns a verdict with concrete findings. Repair rounds go back to the developer automatically. Nothing about that loop needs you.
 
-**Runs halt, they don't overrun.** Set optional per-task turn and dollar caps at plan approval (or on an agent profile). A run that hits its cap stops with its partial trace and waits for you. Leave caps blank and Claude uses its own runtime limits.
+**You are asked only for real decisions.** Missing acceptance criteria, a policy escalation, an exhausted retry budget, a final review when auto-merge is off — these become human actions, surfaced at the top of the Issues home with the exact choices the server will accept.
 
-**Nothing leaves without you.** When a task wants to post to Slack, send an email, or update a ticket, the exact outbound payload is held for your approval. You read the literal message, fix the one wrong line, approve *that* send — or reject it, and it never existed.
-
-**Review it when you're back.** After the meeting — before bed, or over coffee tomorrow; the queue doesn't care when you return. Three tasks done with results ready for review, one halted at its cap, one flagged for feedback. You approve two, send one back with a one-line correction, raise the cap on the halted one and retry. Every plan, trace, payload, and decision is already stored in SQLite you can grep next week — and after review, a reflect step proposes what the playbook should learn from your feedback.
+**The record outlives the agents.** Worker sessions are temporary; the issue is not. Status, live progress, timeline, evidence, findings, usage, and every human decision stay queryable in SQLite you can grep next week.
 
 ## What makes it different
 
-- **Plan approval before execution** — one gate up front instead of permission prompts mid-run. Gates are few and heavy on purpose.
-- **A separate gate on the send** — outbound Slack/email/ticket payloads are held verbatim for your approve/edit/reject. Competitors gate the PR or a workflow node; nothing here leaves without you seeing exactly what leaves.
-- **Caps that halt** — optional per-task turn and dollar ceilings enforced via Claude Code flags when you set them.
-- **Audit treasure** — task → plan → trace → proposed payloads → your decisions, queryable in SQLite. "Who approved this and why" has a literal answer.
-- **Playbooks that learn** — post-review reflection files playbook improvement proposals back to your [Agent Deck](https://github.com/not-so-fat/agent_deck), so the Nth similar task is cheaper than the first.
+- **One durable issue, many temporary workers** — agent sessions are implementation details of the issue, not identities to babysit.
+- **A real developer→reviewer loop** — the reviewer is spawned read-only and its verdict drives repair rounds; approval either auto-merges or parks for your final review.
+- **Sequential admission** — a queue with visible position and wait reason, not N agents racing on one laptop.
+- **Human attention as a queue item** — every open blocker appears on the Issues home with the server's own response options; resolving one resumes the workflow.
+- **Audit treasure** — issue → sessions → PR → reviews → findings → your decisions, queryable in SQLite. "Who approved this and why" has a literal answer.
 
 ## How it works
 
-1. **Feed** — pick a runtime (+ optional deck/playbook) → add tasks, from Linear or by hand
-2. **Plan approval** — agent drafts a plan (or answer its structured questions) → **Approve plan**; trivial plans auto-approve
-3. **Execution** — headless run; halts at any cap you set instead of overrunning
-4. **Review** — approve done, or retry with feedback; outbound sends are approved separately, payload-by-payload
-5. **Reflect** — after your review, the agent proposes playbook updates to Agent Deck's proposal queue
+1. **File** — new issue from Linear (lookup or inbox) or by hand: repo, base branch, acceptance criteria, developer + reviewer agents, auto-merge on/off
+2. **Admission** — the issue queues; the coordinator admits the head entry when a slot is free and shows the wait reason when it cannot
+3. **Develop** — a worker session runs the coding CLI in a dedicated worktree, pushes a branch, and opens a draft PR
+4. **Review** — a read-only reviewer session assesses the diff against the acceptance criteria and returns findings; changes route back to the developer
+5. **Finish** — approve → auto-merge, or park a final-review human action for you; blockers become human actions on the Issues home
 
 Works without Agent Deck too (no deck = degraded mode; playbooks optional).
 
 ## Quick start
 
-Prerequisites: Node.js 20+ · [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude` on PATH) · [Agent Deck](https://github.com/not-so-fat/agent_deck) optional · `LINEAR_API_KEY` optional (manual tasks work without it)
+Prerequisites: Node.js 20+ · [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude` on PATH) · [GitHub CLI](https://cli.github.com) (`gh`, authenticated — the developer session opens the PR) · [Agent Deck](https://github.com/not-so-fat/agent_deck) optional · `LINEAR_API_KEY` optional (manual issues work without it)
 
 **Recommended (managed install — auto-updates, keeps existing `~/.agent-dealer` data):**
 
@@ -66,24 +64,23 @@ Run `agent-dealer doctor` to verify Node, Claude CLI, GitHub CLI auth, Cursor au
 
 Host and runtime recovery (Cursor macOS keychain, etc.): [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
-**Linear (optional):** edit `~/.agent-dealer/.env` — set `LINEAR_API_KEY` and `LINEAR_TEAM_ID`. See [LINEAR_INTEGRATION.md](docs/LINEAR_INTEGRATION.md) for Inbox config, write-back sync, and REST automation.
+**Linear (optional):** edit `~/.agent-dealer/.env` — set `LINEAR_API_KEY` and `LINEAR_TEAM_ID`. See [LINEAR_INTEGRATION.md](docs/LINEAR_INTEGRATION.md) for candidate lookup, write-back sync, and REST automation.
 
 ## Trust & execution scope
 
-When you **approve execution**, agent-dealer spawns **Claude Code** (`claude -p`) in the task's bound **workspace directory**. During a run the agent may use:
+When an issue is admitted, agent-dealer spawns the agent profile's coding CLI (`claude -p`, `cursor-agent`, or `codex exec`) in a **git worktree created off the issue's base branch** — never directly in your checkout. Role decides what the session may do:
 
-| Phase | Tools (allowlisted) | Budget caps |
-|-------|---------------------|-------------|
-| **Plan** | Read, Glob, Grep, Skill + Agent Deck MCP (playbook/deck, list tools) | Optional — set per run or agent |
-| **Execute** | Read, Write, Edit, Glob, Grep, Skill + Agent Deck MCP (playbook/deck, list tools, **call_service_tool**); **Bash** only for code/research/content tasks | Optional — set per run or agent |
-| **Reflect** (post-review) | Read, Glob, Grep, Skill + Agent Deck MCP | Optional — set per run |
-| **Q&A** | Read, Glob, Grep, Skill | — |
+| Role | Tools (hard availability list) | Scope |
+|------|-------------------------------|-------|
+| **Developer** | Read, Write, Edit, Glob, Grep, Bash, Skill + Agent Deck MCP (bind workspace, playbook/deck, list tools) | Its own worktree; commits, pushes its branch, opens/updates the draft PR |
+| **Reviewer** | Read, Glob, Grep, Skill + Agent Deck MCP (read-only) | Cannot write files, run shell, push, or publish — asserted on the generated argv before every real spawn |
+| **Reflect** (post-run playbook learning) | Read, Glob, Grep, Skill + Agent Deck MCP (read-only) | Proposes a playbook patch to Agent Deck; never applies one |
 
-`call_service_tool` is **allowed in execute** (soft gate) so Linear/GitHub/Docmost writes can finish mid-run. Plan / reflect / qa still deny it. Prefer the outbound **draft → Approve & send** path for Slack/email (and any write you want human eyes on); the server still delivers stored drafts verbatim via Agent Deck MCP. Interactive Agent Deck sessions outside dealer are unchanged — the tool is always registered on the deck MCP.
+`mcp__agent-deck__call_service_tool` — the outbound write tool — is denied unless the profile's permission policy grants outbound mutation, and can never be granted to a reviewer. An agent profile may only *tighten* its role's ceiling, never loosen it.
 
-When set, caps are enforced via Claude Code flags (`--max-turns`, `--max-budget-usd`). Leave turns or USD blank for no cap on that dimension. Deliverable scratch files go under `~/.agent-dealer/.temporal/output/`; audit artifacts stay in SQLite.
+Per-attempt Agent Deck MCP configuration is minted per session and scrubbed afterwards, so a spawned worker's only route to your deck is that short-lived, scoped server. Session logs go to `~/.agent-dealer/.temporal/logs/`; the issue record, evidence, and usage stay in SQLite.
 
-**You gate every run:** plan approval before execution, result review before done. Nothing executes without your explicit approve (or retry with feedback).
+**You gate what matters:** acceptance criteria before a workflow starts, a final review before done when auto-merge is off, and every human action the workflow raises.
 
 ---
 
@@ -105,7 +102,7 @@ Open **http://localhost:3222** (dev dashboard). API: **http://127.0.0.1:3221**
 
 Production (git): see [docs/PROD_SETUP.md](docs/PROD_SETUP.md) — API **2221**, dashboard **2222** when running split; npm CLI bundles both on **2222**.
 
-**Spec:** [docs/PRD_V0.md](docs/PRD_V0.md) · **Direction (cross-product):** [agent_deck/docs/DIRECTION.md](https://github.com/not-so-fat/agent_deck/blob/main/docs/DIRECTION.md)
+**Spec:** [docs/PRD_ISSUE_COORDINATION.md](docs/PRD_ISSUE_COORDINATION.md) (current) · [docs/PRD_V0.md](docs/PRD_V0.md) (historical — the plan/execute product removed in NOT-71) · **Direction (cross-product):** [agent_deck/docs/DIRECTION.md](https://github.com/not-so-fat/agent_deck/blob/main/docs/DIRECTION.md)
 
 **Agent-operated CLI:** see [docs/AGENT_OPERATED_DEV_REVIEW.md](docs/AGENT_OPERATED_DEV_REVIEW.md) for the exact minimal commands to drive one Dev-review issue end to end without the dashboard.
 
@@ -149,8 +146,8 @@ Override with `AGENT_DEALER_HOME` in the env file for that mode.
 | `npm run db:migrate` | Apply schema to dev DB |
 | `npm run db:migrate:prod` | Apply schema to prod DB |
 | `npm run p0` | P0 Linear batch — `scripts/p0-linear-batch.ts` |
-| `npm run flow:verify` | API lifecycle gates — `scripts/flow-verify.ts` (server must be running) |
-| `npm run flow:doc` | End-to-end API smoke with agent execution |
+| `npm run test:unit` | Full unit + integration test suite |
+| `npm run typecheck` | Typecheck shared, server, and web |
 | `npm run poc:integration` | Linear / Agent Deck / Claude PoCs — `scripts/poc/` |
 | `npm run build:release` | Release build + UI bundle |
 | `npm run install:smoke` | Fresh npm pack install test |

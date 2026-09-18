@@ -79,7 +79,7 @@ done
 
 curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "[install-smoke] FAIL health"; exit 1; }
 curl -sf "http://127.0.0.1:$PORT/" | head -c 200 | grep -qi html || { echo "[install-smoke] FAIL dashboard HTML"; exit 1; }
-curl -sf "http://127.0.0.1:$PORT/api/snapshot" >/dev/null || { echo "[install-smoke] FAIL /api/snapshot"; exit 1; }
+curl -sf "http://127.0.0.1:$PORT/api/issues" >/dev/null || { echo "[install-smoke] FAIL /api/issues"; exit 1; }
 
 echo "[install-smoke] status"
 AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer status || { echo "[install-smoke] FAIL status"; exit 1; }

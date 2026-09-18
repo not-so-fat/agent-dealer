@@ -9,6 +9,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ac
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue } = await import("./issues.js");
+const { createRun } = await import("./runs.js");
 const {
   createHumanAction,
   resolveHumanAction,
@@ -114,4 +115,32 @@ test("findOpenHumanActionByRequestId dedupes a repeated Deck signal to the one o
   // must not resurrect or match the resolved row.
   resolveHumanAction(action.id, "yusuke", { choice: "resume" });
   assert.equal(findOpenHumanActionByRequestId(issueId, "deck_interaction_required", "req_dup1"), null);
+});
+
+test("the open list includes run-scoped actions that have no issue", () => {
+  // NOT-71 acceptance: deleting the standalone Human actions page was only safe because the
+  // Issues home lists *every* open action. A run-scoped action (outbound-draft delivery
+  // parking, NOT-95) has no issue to open, so if it were missing from this list it would be
+  // unreachable in the UI entirely — the gap the ticket called out by name.
+  const run = createRun({
+    title: "outbound draft",
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    repo: "/repo",
+    taskCategory: "other",
+    status: "plan_pending",
+  });
+  const action = createHumanAction({
+    runId: run.id,
+    actionType: "outbound_delivery_interaction_required",
+    reason: "Delivery needs a human",
+    question: "Send the draft?",
+    responseOptions: ["complete", "close"],
+  });
+  assert.equal(action.issueId, null);
+
+  const listed = listOpenHumanActions().find((a) => a.id === action.id);
+  assert.ok(listed, "run-scoped action must appear in the global open list");
+  // ...and it must carry the choices the home screen resolves it with, since there is no
+  // issue page to fall back to.
+  assert.ok((listed.responseOptionsJson ?? "").includes("complete"));
 });

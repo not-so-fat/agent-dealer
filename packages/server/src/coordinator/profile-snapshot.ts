@@ -5,22 +5,12 @@
 // A later edit to the profile never changes a queued or running session (design
 // §"Immutable execution-profile snapshot" / NOT-60 acceptance criteria).
 import type { AgentProfile, ProfileSnapshot, WorkerSessionRole } from "@agent-dealer/shared";
-import { parsePhaseBudget, parseStringList, serializePhaseBudget } from "@agent-dealer/shared";
+import {
+  parseStringList,
+  resolveProfileBudgetJson,
+  resolveProfileModel,
+} from "@agent-dealer/shared";
 import { resolveSessionPermissionPolicy } from "./permissions.js";
-
-/** Role-neutral model, falling back through the legacy phase columns (execute → plan). */
-export function resolveProfileModel(agent: AgentProfile): string | null {
-  return agent.defaultModel ?? agent.defaultExecuteModel ?? agent.defaultPlanModel ?? null;
-}
-
-/** Role-neutral budget JSON, same fallback order as the model. */
-export function resolveProfileBudgetJson(agent: AgentProfile): string | null {
-  const budget =
-    parsePhaseBudget(agent.defaultBudgetJson) ??
-    parsePhaseBudget(agent.defaultExecuteBudgetJson) ??
-    parsePhaseBudget(agent.defaultPlanBudgetJson);
-  return serializePhaseBudget(budget);
-}
 
 export function buildProfileSnapshot(agent: AgentProfile, role: WorkerSessionRole): ProfileSnapshot {
   return {

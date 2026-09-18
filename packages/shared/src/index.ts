@@ -8,9 +8,7 @@ export * from "./agents.js";
 export * from "./runtime-auth-health.js";
 export * from "./budget.js";
 export * from "./execution.js";
-export * from "./plan-triage.js";
 export * from "./outbound-draft.js";
-export * from "./result-qa.js";
 export * from "./playbook-reflect.js";
 export * from "./issues.js";
 export * from "./worker-sessions.js";
@@ -316,53 +314,17 @@ export const LinearCandidate = z.object({
 });
 export type LinearCandidate = z.infer<typeof LinearCandidate>;
 
-export const LinearRoutingRule = z.object({
-  label: z.string().min(1),
-  agentId: z.string().uuid(),
-});
-export type LinearRoutingRule = z.infer<typeof LinearRoutingRule>;
-
+// NOT-71: defaultAgentId and routingRules (label -> agent `autoAgent` routing) are gone
+// with intake/agent-routing.ts and the promote endpoint that consumed them. The persisted
+// `linear.defaultAgentId` / `linear.routingRules` rows are left in intake_settings — this
+// ticket removes no user data — but nothing reads them into the config any more.
 export const LinearIntakeConfig = z.object({
   stateFilter: z.array(z.string()),
   teamId: z.string().nullable(),
   assigneeMe: z.boolean(),
-  defaultAgentId: z.string().uuid().nullable(),
   syncEnabled: z.boolean(),
-  routingRules: z.array(LinearRoutingRule),
 });
 export type LinearIntakeConfig = z.infer<typeof LinearIntakeConfig>;
-
-/** GET /api/intake/linear/config — effective config plus persistence hints for the UI */
-export const LinearIntakeConfigView = LinearIntakeConfig.extend({
-  persisted: LinearIntakeConfig,
-  envOverrides: z.object({
-    stateFilter: z.boolean(),
-    teamId: z.boolean(),
-  }),
-});
-export type LinearIntakeConfigView = z.infer<typeof LinearIntakeConfigView>;
-
-export const LinearIntakeConfigPatch = LinearIntakeConfig.partial();
-export type LinearIntakeConfigPatch = z.infer<typeof LinearIntakeConfigPatch>;
-
-export const LinearConnectionStatus = z.object({
-  connected: z.boolean(),
-  viewer: z
-    .object({
-      id: z.string(),
-      name: z.string(),
-      email: z.string().optional(),
-    })
-    .optional(),
-  error: z.string().optional(),
-});
-export type LinearConnectionStatus = z.infer<typeof LinearConnectionStatus>;
-
-export const ResolveAgentResult = z.object({
-  agentId: z.string().uuid(),
-  reason: z.string(),
-});
-export type ResolveAgentResult = z.infer<typeof ResolveAgentResult>;
 
 export const AgentDeckConfig = z.object({
   host: z.string(),
@@ -370,12 +332,6 @@ export const AgentDeckConfig = z.object({
   envOverride: z.boolean(),
 });
 export type AgentDeckConfig = z.infer<typeof AgentDeckConfig>;
-
-export const AgentDeckConfigPatch = z.object({
-  host: z.string().min(1).optional(),
-  port: z.number().int().min(1).max(65535).optional(),
-});
-export type AgentDeckConfigPatch = z.infer<typeof AgentDeckConfigPatch>;
 
 /** Typed outcomes for deck-metadata discovery — never collapse to an empty list. */
 export const DeckAccessErrorCode = z.enum([
