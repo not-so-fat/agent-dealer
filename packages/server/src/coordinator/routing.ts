@@ -18,8 +18,16 @@ export type DeveloperOutcome =
   /** NOT-127: leftover worktree still has a live owning process — do not adopt or treat as conflict. */
   | { kind: "live_owner"; path: string; ownerSessionId: string; reason: string }
   | { kind: "checks_failed"; details?: string }
-  /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll. */
-  | { kind: "timed_out"; reason?: string }
+  /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll.
+   * NOT-147: `commitsAhead` (when known) feeds the empty-tip no-progress gate; optional
+   * worktree/log pointers make the human escalation actionable. */
+  | {
+      kind: "timed_out";
+      reason?: string;
+      commitsAhead?: number;
+      worktreePath?: string;
+      logPath?: string;
+    }
   /** git/gh tooling itself errored during verification — not the agent's fault.
    * `publishable` names a branch whose commits the coordinator can still publish on its own:
    * already on the remote, or recovered from a dead attempt and merely waiting on a push
@@ -33,7 +41,14 @@ export type DeveloperOutcome =
    * Deferred like a usage cap (no infra attempt, exponential backoff), never routed as a
    * worker failure. `until` is computed by the deferral, not by the effect. */
   | { kind: "deck_unavailable"; reason: string }
-  | { kind: "session_failed"; reason?: string }
+  /** Optional progress fields — see `timed_out` (NOT-147). */
+  | {
+      kind: "session_failed";
+      reason?: string;
+      commitsAhead?: number;
+      worktreePath?: string;
+      logPath?: string;
+    }
   /** Runtime account usage cap — defer until unavailable_until, not an infra failure (NOT-111).
    * Optional `resume.retryReason` frames the next developer prompt when commits remain (NOT-117).
    * Branch identity stays `issue.branch ?? issue-${id}` — do not dual-write a payload.branch. */
@@ -55,12 +70,21 @@ export type ReviewerOutcome =
   | { kind: "publish_failed"; reason?: string }
   | { kind: "usage_capped"; until: string; reason: string; evidence?: unknown };
 
+/** Default N for NOT-147: escalate empty-tip timeout/crash after this many failures (one auto-retry). */
+export const DEFAULT_NO_PROGRESS_INFRA_ATTEMPTS = 2;
+
 export interface RouteLimits {
   currentRound: number;
   maxReviewRounds: number;
   /** Session/git/gh/Agent Deck/publish failures spend this budget, never the review-round one. */
   infraAttempts: number;
   maxInfraAttempts: number;
+  /**
+   * NOT-147: after this many timeout/crash failures with still-zero commits ahead of base,
+   * escalate instead of another full spawn. Counts the failure being routed
+   * (`infraAttempts` already spent + 1). Default {@link DEFAULT_NO_PROGRESS_INFRA_ATTEMPTS}.
+   */
+  noProgressInfraAttempts?: number;
 }
 
 function roundsRemain(limits: RouteLimits): boolean {
@@ -171,8 +195,6 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
         : { next: "human_action", actionType: "policy_escalation", reason: `${reason} (infra-attempt limit reached).` };
     }
     case "no_pr":
-    case "session_failed":
-    case "timed_out":
     case "checks_failed":
     case "deck_failure": {
       // Unified infra-failure policy: the session/environment failed to produce a
@@ -182,6 +204,22 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
       return infraAttemptsRemain(limits)
         ? { next: "retry_developer", reason }
         : { next: "human_action", actionType: "policy_escalation", reason: `${reason} (infra-attempt limit reached).` };
+    }
+    case "session_failed":
+    case "timed_out": {
+      // Same infra budget as above, plus NOT-147: empty tip after N timeout/crashes → human
+      // gate so we do not burn attempts 3–4 on a branch that never moved.
+      const reason = infraFailureReason(outcome);
+      if (!infraAttemptsRemain(limits)) {
+        return {
+          next: "human_action",
+          actionType: "policy_escalation",
+          reason: `${reason} (infra-attempt limit reached).`,
+        };
+      }
+      const noProgressGate = emptyTipNoProgressGate(outcome, limits, reason);
+      if (noProgressGate) return noProgressGate;
+      return { next: "retry_developer", reason };
     }
     case "usage_capped":
       return { next: "defer_work", until: outcome.until, reason: outcome.reason };
@@ -207,6 +245,33 @@ function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "sessi
     case "deck_failure":
       return `Agent Deck ${outcome.reason}`;
   }
+}
+
+/**
+ * NOT-147: when a timeout/crash left the branch with zero commits ahead of base, stop
+ * burning full agent spawns after N failures (default 2 = one auto-retry). Only trips when
+ * `commitsAhead` is explicitly known to be 0 — missing progress keeps the budget-only path.
+ */
+function emptyTipNoProgressGate(
+  outcome: DeveloperOutcome & { kind: "timed_out" | "session_failed" },
+  limits: RouteLimits,
+  lastFailureReason: string
+): Extract<DeveloperRouteResult, { next: "human_action" }> | null {
+  if (outcome.commitsAhead !== 0) return null;
+  const n = limits.noProgressInfraAttempts ?? DEFAULT_NO_PROGRESS_INFRA_ATTEMPTS;
+  // infraAttempts = retries already spent; +1 includes the failure being routed.
+  const failuresIncludingCurrent = limits.infraAttempts + 1;
+  if (failuresIncludingCurrent < n) return null;
+  const pointers = [
+    outcome.worktreePath ? `worktree: ${outcome.worktreePath}` : null,
+    outcome.logPath ? `log: ${outcome.logPath}` : null,
+  ].filter((p): p is string => p != null);
+  const pointerSuffix = pointers.length > 0 ? ` ${pointers.join("; ")}.` : "";
+  return {
+    next: "human_action",
+    actionType: "policy_escalation",
+    reason: `stuck: no commits after ${n} timeouts/crashes. Last failure: ${lastFailureReason}.${pointerSuffix}`,
+  };
 }
 
 export type ReviewerRouteResult =

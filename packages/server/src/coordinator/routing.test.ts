@@ -400,3 +400,59 @@ test("a reviewer infra-class failure never spends the review-round budget, even 
     reason: "Reviewer session failed, timed out, its worktree checkout failed, or its output was unparseable.",
   });
 });
+
+// --- NOT-147: empty-tip no-progress gate (timeout/crash only) ---
+
+test("NOT-147: empty tip + first timeout/crash still auto-retries once", () => {
+  // infraAttempts=0 → this is failure #1; N=2 allows one retry.
+  for (const outcome of [
+    { kind: "timed_out" as const, commitsAhead: 0, reason: "wall clock" },
+    { kind: "session_failed" as const, commitsAhead: 0, reason: "process died" },
+  ]) {
+    const result = routeDeveloperOutcome(outcome, REVIEW_ROUNDS_LEFT);
+    assert.equal(result.next, "retry_developer", outcome.kind);
+  }
+});
+
+test("NOT-147: empty tip + 2 timeout/crash failures escalates — no silent 3rd spawn", () => {
+  // infraAttempts=1 means one infra retry was already spent → this is failure #2.
+  for (const kind of ["timed_out", "session_failed"] as const) {
+    const outcome: DeveloperOutcome = {
+      kind,
+      commitsAhead: 0,
+      reason: kind === "timed_out" ? "Developer session timed out." : "Developer session failed or crashed.",
+      worktreePath: "/data/worktrees/s-dev-developer",
+      logPath: "/data/logs/s-dev.log",
+    };
+    const result = routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT);
+    assert.equal(result.next, "human_action", kind);
+    assert.equal((result as { actionType: string }).actionType, "policy_escalation", kind);
+    const reason = (result as { reason: string }).reason;
+    assert.match(reason, /stuck: no commits after 2 timeouts\/crashes/i, kind);
+    assert.match(reason, /s-dev-developer|s-dev\.log/, kind);
+  }
+});
+
+test("NOT-147: tip with commits ahead still auto-retries under existing infra budget", () => {
+  for (const kind of ["timed_out", "session_failed"] as const) {
+    const outcome: DeveloperOutcome = { kind, commitsAhead: 2, reason: "transient crash after commits" };
+    assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+      next: "retry_developer",
+      reason: outcome.reason ?? (kind === "timed_out" ? "Developer session timed out." : "Developer session failed or crashed."),
+    });
+  }
+});
+
+test("NOT-147: no_pr / checks_failed are unaffected by the empty-tip gate (timeout/crash only)", () => {
+  // Even with infraAttempts already spent and zero progress implied, non-crash infra
+  // failures keep the pre-NOT-147 budget-only policy.
+  assert.equal(routeDeveloperOutcome({ kind: "no_pr" }, INFRA_ATTEMPTS_LEFT).next, "retry_developer");
+  assert.equal(routeDeveloperOutcome({ kind: "checks_failed" }, INFRA_ATTEMPTS_LEFT).next, "retry_developer");
+});
+
+test("NOT-147: noProgressInfraAttempts is tunable (N=1 escalates on first empty-tip crash)", () => {
+  const limits: RouteLimits = { ...REVIEW_ROUNDS_LEFT, noProgressInfraAttempts: 1 };
+  const result = routeDeveloperOutcome({ kind: "timed_out", commitsAhead: 0 }, limits);
+  assert.equal(result.next, "human_action");
+  assert.match((result as { reason: string }).reason, /stuck: no commits after 1 timeouts\/crashes/i);
+});
