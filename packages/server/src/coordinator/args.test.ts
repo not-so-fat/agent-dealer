@@ -122,3 +122,33 @@ test("buildDeveloperArgs for cursor_local always passes --force (headless MCP to
   const reviewer = buildReviewerArgs("cursor_local", "review", undefined, undefined, "/tmp/wt/.cursor/mcp.json");
   assert.ok(reviewer.includes("--force"));
 });
+
+test("buildDeveloperArgs for codex_local passes -c model_reasoning_effort when effort is set", () => {
+  // Verified against installed Codex CLI (v0.150): `codex exec --strict-config -c
+  // model_reasoning_effort=high …` prints `reasoning effort: high` in the session
+  // banner; an unrecognized -c key fails under --strict-config.
+  const args = buildDeveloperArgs("codex_local", "do the task", "gpt-5", undefined, undefined, "high");
+  const cIdx = args.indexOf("-c");
+  assert.ok(cIdx >= 0, "expected -c config override");
+  assert.equal(args[cIdx + 1], "model_reasoning_effort=high");
+  assert.ok(args.includes("-m"));
+  assert.ok(args.includes("gpt-5"));
+});
+
+test("buildDeveloperArgs for codex_local omits reasoning-effort override when effort is unset", () => {
+  const args = buildDeveloperArgs("codex_local", "do the task", "gpt-5");
+  assert.ok(!args.includes("-c"));
+});
+
+test("buildDeveloperArgs for claude_code passes --effort when effort is set", () => {
+  // Flag name taken from `claude --help` (`--effort <level>`: low|medium|high|xhigh|max).
+  const args = buildDeveloperArgs("claude_code", "prompt", "claude-opus-5", undefined, undefined, "medium");
+  assert.equal(args[args.indexOf("--effort") + 1], "medium");
+});
+
+test("buildDeveloperArgs for cursor_local has no separate effort flag (effort lives in model id)", () => {
+  const args = buildDeveloperArgs("cursor_local", "prompt", "auto", undefined, undefined, "high");
+  assert.ok(!args.includes("--effort"));
+  assert.ok(!args.some((a) => a.includes("model_reasoning_effort")));
+  assert.ok(!args.includes("-c"));
+});

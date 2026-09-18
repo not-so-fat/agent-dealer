@@ -124,6 +124,12 @@ export function migrate(): void {
     `);
   }
 
+  // NOT-81: reasoning effort on the agent profile (frozen into the session snapshot).
+  const agentCols5 = db.prepare("PRAGMA table_info(agents)").all() as Array<{ name: string }>;
+  if (!agentCols5.some((c) => c.name === "default_effort")) {
+    db.exec("ALTER TABLE agents ADD COLUMN default_effort TEXT");
+  }
+
   const workerSessionCols = db.prepare("PRAGMA table_info(worker_sessions)").all() as Array<{
     name: string;
   }>;

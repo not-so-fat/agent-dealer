@@ -19,6 +19,7 @@ export function buildProfileSnapshot(agent: AgentProfile, role: WorkerSessionRol
     role,
     runtime: agent.runtime,
     model: resolveProfileModel(agent),
+    effort: agent.defaultEffort,
     budgetJson: resolveProfileBudgetJson(agent),
     permissionPolicy: resolveSessionPermissionPolicy(role, agent.permissionPolicyJson),
     deckId: agent.deckId,

@@ -30,6 +30,7 @@ const emptyConfig = (): AgentConfigValue => ({
   playbookId: "",
   purpose: "",
   defaultModel: "",
+  defaultEffort: "",
   defaultBudget: budgetFormEmpty(),
   playbookIds: [],
   externalMemoryRefs: "",
@@ -59,6 +60,7 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         deckId: config.deckId || undefined,
         playbookId: config.playbookId || undefined,
         defaultModel: config.defaultModel.trim() || null,
+        defaultEffort: config.defaultEffort || null,
         defaultBudget: phaseBudgetFromForm(config.defaultBudget),
         purpose: config.purpose.trim() || null,
         playbookIds: config.playbookIds,
@@ -92,6 +94,7 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
       // here would hide the values the session actually runs with (and silently discard
       // them on save).
       defaultModel: resolveProfileModel(agent) ?? "",
+      defaultEffort: agent.defaultEffort ?? "",
       defaultBudget: agentPhaseBudgetFromJson(resolveProfileBudgetJson(agent)),
       playbookIds: parseStringList(agent.playbookIdsJson),
       externalMemoryRefs: parseStringList(agent.externalMemoryRefsJson).join("\n"),
@@ -114,6 +117,7 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         deckId: editConfig.deckId || null,
         playbookId: editConfig.playbookId || null,
         defaultModel: editConfig.defaultModel.trim() || null,
+        defaultEffort: editConfig.defaultEffort || null,
         defaultBudget: phaseBudgetFromForm(editConfig.defaultBudget),
         purpose: editConfig.purpose.trim() || null,
         playbookIds: editConfig.playbookIds,

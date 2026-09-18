@@ -658,6 +658,7 @@ export async function runDeveloperEffect(
         runtime,
         policy,
         model: snapshot?.model ?? null,
+        effort: snapshot?.effort ?? null,
         prompt,
         cwd: worktreePath,
         timeoutMs: developerEffectConfig.sessionTimeoutMs,

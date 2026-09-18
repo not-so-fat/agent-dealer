@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS agents (
   default_plan_budget_json TEXT,
   default_execute_budget_json TEXT,
   default_model TEXT,
+  default_effort TEXT,
   default_budget_json TEXT,
   purpose TEXT,
   playbook_ids_json TEXT,

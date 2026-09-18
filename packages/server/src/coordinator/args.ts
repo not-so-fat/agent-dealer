@@ -4,7 +4,7 @@
 // worker sessions. Lifted from archive/not-57-full-p0-slice and extended to take a
 // resolved PermissionPolicy so a profile can *tighten* a role (never loosen it).
 // Pure string building — no spawning — so it is fully unit-testable without a paid CLI.
-import type { PermissionPolicy, Runtime, WorkerSessionRole } from "@agent-dealer/shared";
+import type { PermissionPolicy, ReasoningEffort, Runtime, WorkerSessionRole } from "@agent-dealer/shared";
 import { roleCeiling } from "@agent-dealer/shared";
 
 // `bind_workspace` is required when a profile carries a deckId — equipping the deck for
@@ -49,7 +49,8 @@ function buildArgs(
   policy: PermissionPolicy,
   prompt: string,
   model?: string,
-  mcpConfigPath?: string
+  mcpConfigPath?: string,
+  effort?: ReasoningEffort | null
 ): string[] {
   if (runtime === "codex_local") {
     const args = ["exec", "--json", "-s", policy.worktreeWrite ? "workspace-write" : "read-only"];
@@ -66,6 +67,10 @@ function buildArgs(
     // scoped file too, so it is never passed once a deck config exists, for either role.
     if (!policy.worktreeWrite && !mcpConfigPath) args.push("--ignore-user-config");
     if (model) args.push("-m", model);
+    // NOT-81: verified against installed Codex — `-c model_reasoning_effort=<tier>` is
+    // accepted under `--strict-config` and surfaces as `reasoning effort: <tier>` in the
+    // exec session banner. Cursor has no equivalent separate flag.
+    if (effort) args.push("-c", `model_reasoning_effort=${effort}`);
     args.push(prompt);
     return args;
   }
@@ -77,6 +82,9 @@ function buildArgs(
     // deck→Linear path (`list_service_tools` / `call_service_tool`). Prefer `--force`
     // over `--yolo` (identical alias) for the clearer flag name. Approving ambient
     // servers under the same name is acceptable — assigned deck, not MCP isolation.
+    // Effort: no separate CLI flag; cursor-agent only accepts effort inside a
+    // parameterized `--model` id (e.g. `…[effort=high]`). Profile `defaultEffort` is
+    // ignored here on purpose.
     return [
       "-p",
       "--force",
@@ -91,8 +99,11 @@ function buildArgs(
     ];
   }
   const { builtins, allowed } = claudeToolSets(policy);
+  // `--effort` confirmed via `claude --help` (low|medium|high|xhigh|max). Profile stores
+  // the shared low|medium|high subset that also matches Codex.
   const args = [
     ...(model ? ["--model", model] : []),
+    ...(effort ? ["--effort", effort] : []),
     "-p",
     prompt,
     "--output-format",
@@ -128,10 +139,18 @@ export function buildWorkerArgs(opts: {
   role: WorkerSessionRole;
   prompt: string;
   model?: string;
+  effort?: ReasoningEffort | null;
   policy?: PermissionPolicy;
   mcpConfigPath?: string;
 }): string[] {
-  return buildArgs(opts.runtime, opts.policy ?? roleCeiling(opts.role), opts.prompt, opts.model, opts.mcpConfigPath);
+  return buildArgs(
+    opts.runtime,
+    opts.policy ?? roleCeiling(opts.role),
+    opts.prompt,
+    opts.model,
+    opts.mcpConfigPath,
+    opts.effort
+  );
 }
 
 export function buildDeveloperArgs(
@@ -139,9 +158,10 @@ export function buildDeveloperArgs(
   prompt: string,
   model?: string,
   policy?: PermissionPolicy,
-  mcpConfigPath?: string
+  mcpConfigPath?: string,
+  effort?: ReasoningEffort | null
 ): string[] {
-  return buildArgs(runtime, policy ?? roleCeiling("developer"), prompt, model, mcpConfigPath);
+  return buildArgs(runtime, policy ?? roleCeiling("developer"), prompt, model, mcpConfigPath, effort);
 }
 
 export function buildReviewerArgs(
@@ -149,7 +169,8 @@ export function buildReviewerArgs(
   prompt: string,
   model?: string,
   policy?: PermissionPolicy,
-  mcpConfigPath?: string
+  mcpConfigPath?: string,
+  effort?: ReasoningEffort | null
 ): string[] {
-  return buildArgs(runtime, policy ?? roleCeiling("reviewer"), prompt, model, mcpConfigPath);
+  return buildArgs(runtime, policy ?? roleCeiling("reviewer"), prompt, model, mcpConfigPath, effort);
 }

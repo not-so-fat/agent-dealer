@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { PhaseBudget, parsePhaseBudget, serializePhaseBudget } from "./budget.js";
 import { Runtime } from "./runtime.js";
-import { PermissionPolicyOverride } from "./profile-snapshot.js";
+import { PermissionPolicyOverride, ReasoningEffort } from "./profile-snapshot.js";
 
 /** Built-in agent IDs — stable across installs. */
 export const BUILTIN_AGENT_CLAUDE_ID = "00000000-0000-4000-a000-000000000001";
@@ -56,6 +56,11 @@ export const AgentProfile = z.object({
   defaultExecuteBudgetJson: z.string().nullable(),
   /** Role-neutral CLI model id for issue-centric developer/reviewer sessions; null = runtime default. */
   defaultModel: z.string().nullable(),
+  /**
+   * Default reasoning effort (NOT-81). Null = runtime default. Applied only for runtimes
+   * that expose a CLI-level effort control (Codex / Claude Code); Cursor ignores it.
+   */
+  defaultEffort: ReasoningEffort.nullable(),
   /** Serialized PhaseBudget for issue-centric sessions; null = runtime default. */
   defaultBudgetJson: z.string().nullable(),
   /** Free-text description of what this profile is for (shown in the picker, snapshotted). */
@@ -85,6 +90,7 @@ export const CreateAgentInput = z.object({
   deckId: z.string().uuid().optional(),
   playbookId: z.string().optional(),
   defaultModel: z.string().nullable().optional(),
+  defaultEffort: ReasoningEffort.nullable().optional(),
   defaultBudget: PhaseBudget.nullable().optional(),
   purpose: z.string().nullable().optional(),
   playbookIds: z.array(z.string()).nullable().optional(),
@@ -100,6 +106,7 @@ export const UpdateAgentInput = z.object({
   deckId: z.string().uuid().nullable().optional(),
   playbookId: z.string().nullable().optional(),
   defaultModel: z.string().nullable().optional(),
+  defaultEffort: ReasoningEffort.nullable().optional(),
   defaultBudget: PhaseBudget.nullable().optional(),
   purpose: z.string().nullable().optional(),
   playbookIds: z.array(z.string()).nullable().optional(),

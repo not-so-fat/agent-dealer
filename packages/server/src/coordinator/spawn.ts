@@ -12,7 +12,7 @@
 // spawned in CI (the confirmed NOT-61/62 scope call: fake the agent session, keep
 // worktree/push/PR/review verification real).
 import path from "node:path";
-import type { PermissionPolicy, Runtime } from "@agent-dealer/shared";
+import type { PermissionPolicy, ReasoningEffort, Runtime } from "@agent-dealer/shared";
 import { getTemporalLogsDir } from "../paths.js";
 import { resolveClaudeBin, resolveCodexBin, resolveCursorBin } from "../cli-env.js";
 import { spawnCli } from "../runners/spawn-cli.js";
@@ -32,6 +32,8 @@ export interface DeveloperSpawnInput {
   runtime: Runtime;
   policy: PermissionPolicy;
   model: string | null;
+  /** Frozen profile reasoning effort (NOT-81); null = runtime default. */
+  effort?: ReasoningEffort | null;
   prompt: string;
   cwd: string;
   timeoutMs: number;
@@ -86,7 +88,14 @@ const BIN_FOR: Record<Runtime, () => string> = {
 };
 
 export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
-  const args = buildDeveloperArgs(input.runtime, input.prompt, input.model ?? undefined, input.policy, input.mcpConfigPath);
+  const args = buildDeveloperArgs(
+    input.runtime,
+    input.prompt,
+    input.model ?? undefined,
+    input.policy,
+    input.mcpConfigPath,
+    input.effort
+  );
   const logPath = input.logPath ?? developerSessionLogPath(input.sessionId);
   const { exitCode, transcript, timedOut } = await spawnCli(
     input.sessionId,
@@ -104,7 +113,14 @@ export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
  * loosens a reviewer's tools can never silently reach a live spawn.
  */
 export const realReviewerSpawn: ReviewerSpawn = async (input) => {
-  const args = buildReviewerArgs(input.runtime, input.prompt, input.model ?? undefined, input.policy, input.mcpConfigPath);
+  const args = buildReviewerArgs(
+    input.runtime,
+    input.prompt,
+    input.model ?? undefined,
+    input.policy,
+    input.mcpConfigPath,
+    input.effort
+  );
   assertReviewerReadOnly(args, { mcpConfigPath: input.mcpConfigPath, mcpEnv: input.mcpEnv });
   const logPath = input.logPath ?? reviewerSessionLogPath(input.sessionId);
   const { exitCode, transcript, timedOut } = await spawnCli(

@@ -46,6 +46,7 @@ test("parseProfileSnapshot round-trips a valid snapshot and rejects junk", () =>
     role: "reviewer",
     runtime: "claude_code",
     model: null,
+    effort: "medium",
     budgetJson: null,
     permissionPolicy: resolvePermissionPolicy("reviewer", null),
     deckId: null,
@@ -58,4 +59,25 @@ test("parseProfileSnapshot round-trips a valid snapshot and rejects junk", () =>
   assert.deepEqual(parseProfileSnapshot(JSON.stringify(snap)), snap);
   assert.equal(parseProfileSnapshot("{}"), null);
   assert.equal(parseProfileSnapshot(null), null);
+});
+
+test("parseProfileSnapshot defaults missing effort to null for pre-NOT-81 snapshots", () => {
+  const legacy = {
+    version: 1 as const,
+    agentId: "a1",
+    role: "developer" as const,
+    runtime: "codex_local" as const,
+    model: "gpt-5",
+    budgetJson: null,
+    permissionPolicy: resolvePermissionPolicy("developer", null),
+    deckId: null,
+    workspaceRoot: "/repo",
+    playbookIds: [],
+    externalMemoryRefs: [],
+    purpose: null,
+    capturedAt: new Date().toISOString(),
+  };
+  const parsed = parseProfileSnapshot(JSON.stringify(legacy));
+  assert.ok(parsed);
+  assert.equal(parsed!.effort, null);
 });

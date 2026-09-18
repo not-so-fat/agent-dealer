@@ -1,5 +1,6 @@
-import type { AgentProfile, CreateAgentInput, Runtime, UpdateAgentInput } from "@agent-dealer/shared";
+import type { AgentProfile, CreateAgentInput, ReasoningEffort, Runtime, UpdateAgentInput } from "@agent-dealer/shared";
 import {
+  ReasoningEffort as ReasoningEffortSchema,
   resolveProfileBudgetJson,
   resolveProfileModel,
   serializePermissionPolicyOverride,
@@ -22,6 +23,7 @@ interface AgentRow {
   default_plan_budget_json: string | null;
   default_execute_budget_json: string | null;
   default_model: string | null;
+  default_effort: string | null;
   default_budget_json: string | null;
   purpose: string | null;
   playbook_ids_json: string | null;
@@ -30,6 +32,12 @@ interface AgentRow {
   is_builtin: number;
   created_at: string;
   updated_at: string;
+}
+
+function parseStoredEffort(raw: string | null | undefined): ReasoningEffort | null {
+  if (!raw) return null;
+  const parsed = ReasoningEffortSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
 }
 
 function rowToAgent(row: AgentRow): AgentProfile {
@@ -50,6 +58,7 @@ function rowToAgent(row: AgentRow): AgentProfile {
     defaultPlanBudgetJson: row.default_plan_budget_json,
     defaultExecuteBudgetJson: row.default_execute_budget_json,
     defaultModel: row.default_model,
+    defaultEffort: parseStoredEffort(row.default_effort),
     defaultBudgetJson: row.default_budget_json,
     purpose: row.purpose,
     playbookIdsJson: row.playbook_ids_json,
@@ -80,10 +89,10 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
   db.prepare(`
     INSERT INTO agents (
       id, name, runtime, deck_id, deck_name, playbook_id, workspace_root,
-      default_model, default_budget_json, purpose, playbook_ids_json, external_memory_refs_json, permission_policy_json,
+      default_model, default_effort, default_budget_json, purpose, playbook_ids_json, external_memory_refs_json, permission_policy_json,
       is_builtin, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
   `).run(
     id,
     input.name.trim(),
@@ -93,6 +102,7 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
     input.playbookId ?? null,
     input.workspaceRoot.trim(),
     input.defaultModel ?? null,
+    input.defaultEffort ?? null,
     serializePhaseBudget(input.defaultBudget),
     input.purpose?.trim() || null,
     serializeStringList(input.playbookIds),
@@ -123,6 +133,8 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
   // switching runtime carried the old runtime's model into the new one's snapshot.
   const defaultModel =
     input.defaultModel !== undefined ? input.defaultModel : resolveProfileModel(existing);
+  const defaultEffort =
+    input.defaultEffort !== undefined ? input.defaultEffort : existing.defaultEffort;
   const defaultBudgetJson =
     input.defaultBudget !== undefined
       ? serializePhaseBudget(input.defaultBudget)
@@ -145,7 +157,7 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
   getDb()
     .prepare(`
       UPDATE agents SET name = ?, runtime = ?, deck_id = ?, deck_name = ?, playbook_id = ?, workspace_root = ?,
-        default_model = ?, default_budget_json = ?, purpose = ?, playbook_ids_json = ?, external_memory_refs_json = ?, permission_policy_json = ?,
+        default_model = ?, default_effort = ?, default_budget_json = ?, purpose = ?, playbook_ids_json = ?, external_memory_refs_json = ?, permission_policy_json = ?,
         default_plan_model = NULL, default_execute_model = NULL,
         default_plan_budget_json = NULL, default_execute_budget_json = NULL,
         updated_at = ?
@@ -159,6 +171,7 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
       playbookId,
       workspaceRoot,
       defaultModel,
+      defaultEffort,
       defaultBudgetJson,
       purpose,
       playbookIdsJson,
