@@ -7,6 +7,7 @@ import type {
   DeckAccessErrorCode,
   CreateAgentInput,
   CreateIssueInput,
+  CreateIssueResult,
   DocumentContent,
   ExecutionResultContent,
   Finding,
@@ -566,7 +567,13 @@ export async function fetchIssueArtifactTrace(
   return res.json();
 }
 
-export async function createIssue(input: CreateIssueInput): Promise<Issue> {
+/**
+ * NOT-141: the result carries `created` plus the `queue` outcome — a re-import that matched a
+ * live issue re-queues it (`created: false`) instead of writing a second row, and reports
+ * `already_queued` when the issue was waiting already and nothing changed. A match admission
+ * cannot re-queue answers 409 naming the issue that holds the ticket, so `createIssue` throws.
+ */
+export async function createIssue(input: CreateIssueInput): Promise<CreateIssueResult> {
   const res = await fetch(`${API}/api/issues`, {
     method: "POST",
     headers: { "content-type": "application/json" },

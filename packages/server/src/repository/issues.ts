@@ -4,6 +4,7 @@ import {
   type Issue,
   type IssueOwner,
   type IssueStatus,
+  TERMINAL_ISSUE_STATUSES,
 } from "@agent-dealer/shared";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
@@ -143,10 +144,36 @@ export function listIssues(status?: IssueStatus | IssueStatus[]): Issue[] {
   return rows.map(rowToIssue);
 }
 
-export function findIssueByExternalId(source: string, externalId: string): Issue | null {
+/**
+ * Every issue ever imported for this external id, newest first. `(source, external_id)` is
+ * deliberately non-unique (`idx_issues_external` is a plain index): one ticket may need a
+ * second pass after the first ended terminally (NOT-141).
+ */
+export function listIssuesByExternalId(source: string, externalId: string): Issue[] {
+  const rows = getDb()
+    .prepare(
+      "SELECT * FROM issues WHERE source = ? AND external_id = ? ORDER BY created_at DESC, rowid DESC"
+    )
+    .all(source, externalId) as IssueRow[];
+  return rows.map(rowToIssue);
+}
+
+/**
+ * NOT-141: the import guard — the issues-model analog of runs' `findActiveByExternalId`.
+ * It exists to stop two live workflows racing on one ticket, not to make a ticket
+ * single-use: a `done`/`closed` row no longer matches, so a re-import after a terminal pass
+ * creates a new issue instead of silently returning the old one.
+ */
+export function findActiveIssueByExternalId(source: string, externalId: string): Issue | null {
+  const placeholders = TERMINAL_ISSUE_STATUSES.map(() => "?").join(",");
   const row = getDb()
-    .prepare("SELECT * FROM issues WHERE source = ? AND external_id = ?")
-    .get(source, externalId) as IssueRow | undefined;
+    .prepare(
+      `SELECT * FROM issues
+       WHERE source = ? AND external_id = ? AND status NOT IN (${placeholders})
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT 1`
+    )
+    .get(source, externalId, ...TERMINAL_ISSUE_STATUSES) as IssueRow | undefined;
   return row ? rowToIssue(row) : null;
 }
 
