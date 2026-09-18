@@ -2,13 +2,36 @@
 
 **Queue the issue. Check back when it needs you.**
 
-agent-dealer is an issue queue and execution control plane for coding agents: you file an issue against a repository, it is admitted from a queue, a developer agent implements it in its own git worktree and opens a pull request, a reviewer agent reviews the diff, and the loop repeats until the work merges or something genuinely needs a human. Every session, finding, cost, and decision lands on one durable issue record in SQLite. Pair it with [Agent Deck](https://github.com/not-so-fat/agent_deck) and every session starts with the right tools, keys, and playbooks.
+agent-dealer is an issue queue and execution control plane for coding agents: bind an **Agent profile**, run an **issue** through one **workflow template** on the **Task coordinator**, and monitor or approve via the **GUI / API** (or CLI). Today the shipping coding path is Dev-review — a developer agent implements in its own git worktree and opens a pull request, a reviewer agent reviews the diff, and the loop repeats until the work merges or something genuinely needs a human. Every session, finding, cost, and decision lands on one durable issue record in SQLite. Pair it with [Agent Deck](https://github.com/not-so-fat/agent_deck) and every session starts with the right tools, keys, and playbooks.
 
 <!-- DEMO VIDEO — drop the 2-min demo here.
      On github.com, drag the .mp4 into the README editor to get a user-attachments URL,
      then paste it on its own line. GIF fallback:
 <img src="docs/assets/demo.gif" alt="Queue an issue, check back when it needs you" width="80%" />
 -->
+
+## Architecture (three modules)
+
+| Module | Role |
+|--------|------|
+| **Agent profile** | Runtime (Claude / Codex / Cursor), model, workspace, optional Agent Deck — reusable config, not a durable persona |
+| **Task coordinator** | One issue → one workflow template → worker sessions, human gates, audit trail. Same HTTP API for GUI, CLI, and agents |
+| **GUI / API** | Create, start, monitor, resolve — thin clients over the Task coordinator |
+
+Workflow templates are **independent** (no in-product Clarify → Dev → Message pipeline). Compose outside agent-dealer. Vocabulary: [`CONTEXT.md`](CONTEXT.md). Design / plan: [independent workflows](docs/superpowers/specs/2026-09-12-independent-workflows-architecture-design.md) · [implementation plan](docs/superpowers/plans/2026-09-12-independent-workflows.md).
+
+```text
+Agent profiles
+      │
+      ▼
+Task coordinator
+  ├── clarify_v1      (planned)
+  ├── dev_reviewer_v1 (shipping)
+  └── message_v1     (planned)
+      │
+      ▼
+GUI / CLI / HTTP API
+```
 
 ## Why
 
@@ -25,6 +48,7 @@ Your calendar is full; your backlog does not care. Small, well-specified issues 
 ## What makes it different
 
 - **One durable issue, many temporary workers** — agent sessions are implementation details of the issue, not identities to babysit.
+- **Independent workflow templates** — Dev-review ships today; Clarify and Message add shapes on the same Task coordinator without a second product path or a generic workflow editor.
 - **A real developer→reviewer loop** — the reviewer is spawned read-only and its verdict drives repair rounds; approval either auto-merges or parks for your final review.
 - **Sequential admission** — a queue with visible position and wait reason, not N agents racing on one laptop.
 - **Human attention as a queue item** — every open blocker appears on the Issues home with the server's own response options; resolving one resumes the workflow.
@@ -108,7 +132,7 @@ Open **http://localhost:3222** (dev dashboard). API: **http://127.0.0.1:3221**
 
 Production (git): see [docs/PROD_SETUP.md](docs/PROD_SETUP.md) — API **2221**, dashboard **2222** when running split; npm CLI bundles both on **2222**.
 
-**Spec:** [docs/PRD_ISSUE_COORDINATION.md](docs/PRD_ISSUE_COORDINATION.md) (current) · [docs/PRD_V0.md](docs/PRD_V0.md) (historical — the plan/execute product removed in NOT-71) · **Direction (cross-product):** [agent_deck/docs/DIRECTION.md](https://github.com/not-so-fat/agent_deck/blob/main/docs/DIRECTION.md)
+**Spec:** [docs/PRD_ISSUE_COORDINATION.md](docs/PRD_ISSUE_COORDINATION.md) (current) · [docs/PRD_V0.md](docs/PRD_V0.md) (historical — the plan/execute product removed in NOT-71) · [independent workflows design](docs/superpowers/specs/2026-09-12-independent-workflows-architecture-design.md) · vocabulary [`CONTEXT.md`](CONTEXT.md) · **Direction (cross-product):** [agent_deck/docs/DIRECTION.md](https://github.com/not-so-fat/agent_deck/blob/main/docs/DIRECTION.md)
 
 **Agent-operated CLI:** see [docs/AGENT_OPERATED_DEV_REVIEW.md](docs/AGENT_OPERATED_DEV_REVIEW.md) for the exact minimal commands to drive one Dev-review issue end to end without the dashboard.
 
