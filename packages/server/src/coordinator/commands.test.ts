@@ -519,6 +519,11 @@ test("NOT-150: bare escalated verdict remaps to automatic repair, not policy_esc
   assert.equal(issue.status, "repairing");
   assert.ok(!listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "developer" && i.status === "pending").length, 1);
+  const findings = listFindingsForIssue(issueId);
+  assert.ok(
+    findings.some((f) => f.severity === "blocking"),
+    "bare escalate remap must thread a blocking finding into repair"
+  );
 });
 
 test("a stale review re-queues a reviewer at the new head without consuming a round", async () => {

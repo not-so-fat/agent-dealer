@@ -39,6 +39,7 @@ import {
   resolveHumanAction,
 } from "../repository/human-actions.js";
 import { reconcileFinding } from "../repository/findings.js";
+import { normalizeReviewerResult } from "./reviewer-result.js";
 import { getAgent } from "../repository/agents.js";
 import { githubIssuesSync } from "../adapters/agent-health.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
@@ -684,14 +685,17 @@ function applyReviewer(
     issue.headSha!
   );
   const hasVerdict = outcome.kind === "verdict";
+  // Normalize before emit/finding reconcile so remapped blocking findings (NOT-150) persist.
+  const verdictResult =
+    outcome.kind === "verdict" ? normalizeReviewerResult(outcome.result) : null;
   const { projection, effect, advance } = projectReviewerRoute(route, issue.currentRound, hasVerdict);
 
   const ev = eventEmitter(issue, instance, item.workerSessionId, projection.issueStatus, issue.currentRound);
 
   const patch: TransitionIssuePatch = {};
   for (const type of projection.events) {
-    if (type === "review.submitted" && outcome.kind === "verdict") {
-      ev.emit("review.submitted", { actorType: "reviewer", payload: outcome.result });
+    if (type === "review.submitted" && verdictResult) {
+      ev.emit("review.submitted", { actorType: "reviewer", payload: verdictResult });
     } else if (type === "worker.completed" || type === "worker.failed") {
       const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
       const payload: Record<string, unknown> = {
@@ -730,8 +734,8 @@ function applyReviewer(
   }
 
   // Thread reviewer findings across rounds (PRD §6.4) — every blocking/non-blocking finding.
-  if (outcome.kind === "verdict") {
-    for (const f of outcome.result.findings) {
+  if (verdictResult) {
+    for (const f of verdictResult.findings) {
       reconcileFinding({
         issueId: issue.id,
         fingerprint: f.fingerprint,

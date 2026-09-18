@@ -48,6 +48,20 @@ test("NOT-150: escalated without productScopeQuestion remaps to changes_requeste
   const result = parseReviewerResult(`\`\`\`json\n${JSON.stringify(bare)}\n\`\`\``);
   assert.equal(result?.verdict, "changes_requested");
   assert.equal(result?.productScopeQuestion, undefined);
+  assert.ok(result?.findings.some((f) => f.severity === "blocking"));
+  assert.ok(result?.findings.some((f) => f.fingerprint === "escalated-without-product-scope-question"));
+});
+
+test("NOT-150: bare escalate with existing blocking findings keeps those findings", () => {
+  const bare = {
+    ...valid,
+    verdict: "escalated",
+    findings: [{ fingerprint: "real-bug", severity: "blocking", title: "Bug", rationale: "breaks" }],
+  };
+  const result = parseReviewerResult(`\`\`\`json\n${JSON.stringify(bare)}\n\`\`\``);
+  assert.equal(result?.verdict, "changes_requested");
+  assert.equal(result?.findings.length, 1);
+  assert.equal(result?.findings[0]?.fingerprint, "real-bug");
 });
 
 test("NOT-150: approved with a blocking finding remaps to changes_requested", () => {

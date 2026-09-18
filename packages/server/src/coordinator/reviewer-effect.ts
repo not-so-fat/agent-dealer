@@ -181,12 +181,12 @@ function withIncompleteReviewFinding(result: ReviewerResult, omittedPaths: strin
 /**
  * Truncation remap (PRD §6.4 / design NOT-150): never blind escalate → Resume|Close.
  * Shippable approved (no blocking) stays approved; otherwise ensure changes_requested with
- * a blocking finding (existing or injected incomplete-review).
+ * the incomplete-review finding listing omitted paths (in addition to any other blocking).
  */
 function applyTruncationVerdictPolicy(result: ReviewerResult, omittedPaths: string[]): ReviewerResult {
   const normalized = normalizeReviewerResult(result);
-  const hasBlocking = normalized.findings.some((f) => f.severity === "blocking");
   const hasProductQ = !!normalized.productScopeQuestion?.trim();
+  const hasBlocking = normalized.findings.some((f) => f.severity === "blocking");
 
   if (normalized.verdict === "escalated" && hasProductQ) {
     return normalized;
@@ -196,12 +196,9 @@ function applyTruncationVerdictPolicy(result: ReviewerResult, omittedPaths: stri
     return normalized;
   }
 
-  if (!hasBlocking) {
-    return withIncompleteReviewFinding(normalized, omittedPaths);
-  }
-
+  // Truncated + not shippable-approved → changes_requested with incomplete-review (omitted paths).
   const { productScopeQuestion: _drop, ...rest } = normalized;
-  return { ...rest, verdict: "changes_requested" };
+  return withIncompleteReviewFinding({ ...rest, verdict: "changes_requested" }, omittedPaths);
 }
 
 function readImplementationConclusion(issueId: string): string | null {

@@ -618,6 +618,11 @@ test("diff truncated: bare escalated remaps to changes_requested with incomplete
   const truncateEvidence = listArtifactsForIssue(issueId).find((a) => a.kind === "diff_truncated_evidence");
   assert.equal(JSON.parse(truncateEvidence!.contentJson!).overriddenTo, "changes_requested");
   assert.ok(!listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
+  const findings = listFindingsForIssue(issueId);
+  assert.ok(
+    findings.some((f) => f.fingerprint === "diff-truncated-incomplete-review"),
+    "truncated bare escalate must keep incomplete-review with omitted paths"
+  );
 });
 
 test("changes_requested: findings thread onto the issue and a fresh developer repair round is queued", async () => {
