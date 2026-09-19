@@ -113,3 +113,16 @@ test("worker_sessions.completed_at alone is not treated as agent.completed", () 
   assert.match(doc, /`worker_sessions\.completed_at` alone[^|]*`unavailable`/);
   assert.ok(doc.includes("no_defensible_boundary"));
 });
+
+test("usage_events timing is documented as a spawn envelope, not CLI lifetime", () => {
+  const doc = read(CANONICAL);
+  assert.match(doc, /### 6\.1 Usage-event timing/);
+  assert.ok(doc.includes("spawn_envelope"));
+  assert.ok(doc.includes("acquireSpawnSlot"));
+  assert.ok(doc.includes("persistVerificationReceiptIfAny"));
+  assert.ok(doc.includes("includes_spawn_slot_wait"));
+  assert.ok(doc.includes("includes_post_exit_work"));
+  assert.doesNotMatch(doc, /spawn wall time/);
+  assert.doesNotMatch(doc, /`duration_ms` is measured from just before spawn/);
+  assert.match(doc, /`usage_events\.ts − usage_events\.duration_ms` is not a proxy/);
+});

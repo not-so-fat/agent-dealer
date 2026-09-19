@@ -67,7 +67,7 @@ Quality is defined for two kinds of metric.
 **Interval metrics** (durations between two boundaries):
 
 - `exact` — both boundaries come from recorded events of the kinds named in [§2](#2-top-level-wall-clock-phases).
-- `inferred` — both boundaries are defensible but at least one is a proxy (e.g. `usage_events.ts` standing in for `agent.completed`, or `now` closing an open interval). Always carries at least one reason code, e.g. `proxy_boundary`, `open_interval`, `backfill`.
+- `inferred` — both boundaries are defensible but at least one is a proxy (e.g. `usage_events.ts` standing in for `agent.completed` as an `upper_bound`, or `now` closing an open interval). Always carries at least one reason code, e.g. `proxy_boundary`, `open_interval`, `backfill`, `upper_bound`, `includes_spawn_slot_wait`, `includes_post_exit_work`.
 - `unavailable` — a required boundary is missing, contradictory, or only available from a source that cannot defensibly stand in for it. Carries reason codes such as `missing_queue_terminal`, `missing_activity_history`, `missing_log`, `negative_duration`, `unordered_tie`, `no_defensible_boundary`.
 
 **Value metrics** (tokens, cost, and other numbers read directly from a record, not derived from two boundaries):
@@ -116,16 +116,33 @@ State as of this contract. "Derivable today" means computable from existing rows
 | `admission_dependency_wait` | wait-reason history | Only the *latest* `wait_reason` + `wait_reason_at`; overwritten, no history | **Needs new event/schema** |
 | `runtime_health_preflight` | queue-reason + Deck-connect evidence | Latest wait reason only; no Deck-connect timing event | **Needs new event/schema** |
 | `coordinator_setup` start | `worker.started` | `workflow_events` type `worker.started`, recorded before worktree setup | Derivable today |
-| `coordinator_setup` end / `agent_process` start | `agent.started` | Not emitted. Possible proxies: `worker_sessions.process_started_at` (OS process start time, recorded via `onSpawn`, when non-null), or `usage_events.ts − usage_events.duration_ms` (`duration_ms` is measured from just before spawn). `worker_sessions.started_at` is coordinator session bookkeeping and is **not** a defensible proxy on its own | **Needs new event** (proxy → `inferred`; no proxy → `unavailable`) |
-| `agent_process` end | `agent.completed` | Not emitted. Possible proxy: `usage_events.ts`, written immediately after the CLI exits and before validation/push (`usage_events` is written once per spawn, so this is per spawn); or spawn start + `usage_events.duration_ms`. **`worker_sessions.completed_at` alone is `unavailable` for this boundary**: it is written only after the effect returns and outcome routing has run (`worker.completed`/`worker.failed` emitted), so it includes validation, salvage, push, and PR work and can fall after the terminal event | **Needs new event** (usage proxy → `inferred`; only `completed_at` → `unavailable`, reason `no_defensible_boundary`) |
+| `coordinator_setup` end / `agent_process` start | `agent.started` | Not emitted. Possible proxy: `worker_sessions.process_started_at` (OS start time of the spawned child, read in `onSpawn` after the child exists; when non-null). **`usage_events.ts − usage_events.duration_ms` is not a proxy**: its start is the coordinator clock just before `deps.spawn`, which precedes `acquireSpawnSlot()` and so includes spawn-slot waiting (see [§6.1](#61-usage-event-timing)). `worker_sessions.started_at` is coordinator session bookkeeping and is also not a defensible proxy | **Needs new event** (`process_started_at` proxy → `inferred`, reason `proxy_boundary`; otherwise `unavailable`, reason `no_defensible_boundary`) |
+| `agent_process` end | `agent.completed` | Not emitted. Possible proxy: `usage_events.ts` as an **upper bound** only — it is stamped after the child exits *and* after post-exit coordinator work (developer: worktree-clean check, `git rev-parse`, verification-receipt mining; both roles: usage extraction from the log), so the true CLI exit precedes it by an unrecorded amount ([§6.1](#61-usage-event-timing)). **`worker_sessions.completed_at` alone is `unavailable` for this boundary**: it is written only after the effect returns and outcome routing has run (`worker.completed`/`worker.failed` emitted), so it includes validation, salvage, push, and PR work and can fall after the terminal event | **Needs new event** (`usage_events.ts` → `inferred`, reasons `proxy_boundary`, `upper_bound`, `includes_post_exit_work`; only `completed_at` → `unavailable`, reason `no_defensible_boundary`). An `agent_process` interval built from these proxies is `inferred` with the same `upper_bound` reason, never `exact` |
 | `coordinator_validation_publish` end | `worker.completed` / `worker.failed` | `workflow_events` | Derivable today |
 | `human_wait` | `human_actions.requested_at` / `resolved_at` | Columns exist; `human_action.requested` / `.resolved` events | Derivable today (`exact`) |
 | Issue elapsed | `workflow_instances.started_at` → `completed_at` | Columns exist | Derivable today |
-| Attempt runtime (resource) | `usage_events.duration_ms` (spawn wall time) | Column exists; nullable, one row per spawn | Derivable today (`inferred`; null → `unavailable`). `worker_sessions.started_at → completed_at` is session bookkeeping span including coordinator work, not CLI runtime |
+| Spawn envelope (coordinator-measured) | `usage_events.duration_ms` | Column exists; nullable, one row per spawn. Measures `[usage_events.ts − duration_ms, usage_events.ts)` — **not** the CLI lifetime ([§6.1](#61-usage-event-timing)) | Derivable today, as `spawn_envelope` (`inferred`, reasons `includes_spawn_slot_wait`, `includes_post_exit_work`; null → `unavailable`) |
+| Attempt runtime (resource) | CLI lifetime = `agent.completed − agent.started` | Only bounded from above: `usage_events.ts − worker_sessions.process_started_at` when both are non-null. `duration_ms` and `worker_sessions.started_at → completed_at` (session bookkeeping span including coordinator work) are **not** CLI runtime | **Needs new event** for `exact`. Today: `inferred` upper bound (reasons `upper_bound`, `includes_post_exit_work`) when both proxies exist, else `unavailable` (`no_defensible_boundary`) |
 | Tokens / cost | `usage_events.tokens_in/out/cost_usd` | Nullable columns; provider dependent | Derivable where recorded; Cursor cost `unavailable` |
 | `unexplained_silence` | Structured activity timestamps in the runner stream | NDJSON log exists at `log_path`, but no activity-timestamp history is persisted in a queryable form | **Needs new event/schema** |
 | Failure classification | `worker.failed` payload, `error_json`, `exit_code`, runner stderr, `failure-reason` | Free-text reason + runtime auth classification only | **Needs new event/schema** for structured code/domain; partial inference possible |
 | Event ordering | `workflow_events` rowid | Available | Derivable today |
+
+### 6.1 Usage-event timing
+
+`usage_events` rows (developer and reviewer effects) are written once per spawn, and `duration_ms` is measured by the coordinator, not by the CLI. What it actually spans:
+
+1. **Start** — `Date.now()` immediately *before* `deps.spawn(...)`. Production `spawnCli` then awaits `acquireSpawnSlot()`, which blocks while `MAX_CONCURRENT_RUNS` children are already running, *before* creating the child. Slot wait is admission-like queueing, not agent work, and is included in `duration_ms`.
+2. **Middle** — the CLI child's lifetime, including its timeout/abort kill escalation.
+3. **End** — `Date.now()` after `deps.spawn` resolves, after (developer only) `persistVerificationReceiptIfAny` (git status/rev-parse, log parsing, artifact write) and after `extractSpawnUsage` (log parsing) — all coordinator work following the child's exit. `usage_events.ts` is stamped at the same point.
+
+Consequences for this contract:
+
+- `duration_ms` is an **upper bound** on CLI lifetime with two unrecorded, unbounded inflations (slot wait at the front, post-exit work at the back). It is `inferred` at best and is never `exact`.
+- It is reported only as `spawn_envelope`, a coordinator-measured span that must not be labeled, summed, or compared as CLI runtime or agent-process resource time. Without both `process_started_at` (start) and an `agent.completed` proxy, CLI runtime is `unavailable`, not `duration_ms`.
+- The tightest available bound today is `usage_events.ts − worker_sessions.process_started_at`, which removes the slot-wait inflation but keeps the post-exit inflation; it carries `upper_bound` and `includes_post_exit_work`.
+- Percentiles and totals over these values are comparable only among observations with the same reason set ([§3](#3-overlap-and-aggregation) item 6); they are not mixed with `exact` observations from a future `agent.started`/`agent.completed` event pair.
+- A future emitter must record `agent.started` when the child exists (after the slot is acquired) and `agent.completed` at child exit, before any receipt mining, usage extraction, or validation; only then is CLI runtime `exact`.
 
 ## 7. Failure taxonomy
 
@@ -159,7 +176,7 @@ confidence:  "high" | "medium" | "low"
 ## 8. Backfill and missing data
 
 - Rows written before instrumentation are derived from **existing timestamps/events only when both boundaries are defensible**, and are labeled `quality: inferred` (reason `backfill`).
-- **`unavailable`** results, per observation, for: missing queue terminal timestamps, missing activity history, missing provider metadata, absent logs, and a boundary whose only source is one that cannot defensibly stand in for it (e.g. `worker_sessions.completed_at` alone for `agent.completed`, see [§6](#6-source-matrix)). Aggregates over such observations follow [§4](#4-evidence-quality): the unavailable ones are excluded and counted in `known / total`, and an aggregate with no known observations is itself `unavailable`.
+- **`unavailable`** results, per observation, for: missing queue terminal timestamps, missing activity history, missing provider metadata, absent logs, and a boundary whose only source is one that cannot defensibly stand in for it (e.g. `worker_sessions.completed_at` alone for `agent.completed`, or `usage_events.duration_ms` alone as CLI runtime, see [§6](#6-source-matrix) and [§6.1](#61-usage-event-timing)). Aggregates over such observations follow [§4](#4-evidence-quality): the unavailable ones are excluded and counted in `known / total`, and an aggregate with no known observations is itself `unavailable`.
 - Migrations **do not invent timestamps** and **do not rewrite evidence**, whether immutable (`workflow_events`, `usage_events`, logs) or mutable source records (`queue_entries`, `human_actions`, `worker_sessions`) — overwritten history, such as cleared queue wait reasons, stays lost. Backfill produces derived rows/views only.
 - A backfilled metric never upgrades to `exact`; only newly recorded events can be `exact`.
 
@@ -176,7 +193,7 @@ Actions A `[10:00:00, 10:10:00)` and B `[10:05:00, 10:20:00)`; issue elapsed `[1
 
 Attempt 1 `agent_process` `[10:00, 10:20)` (crashed); reclaim starts attempt 2 `[10:15, 10:40)` (overlaps because the lease-expired process was still running).
 - Phase chart: union `[10:00, 10:40)` = **40 min** of `agent_process`.
-- Resource consumption: 20 + 25 = **45 min** of attempt runtime.
+- Resource consumption: 20 + 25 = **45 min** of attempt runtime (when both attempts have `agent.started`/`agent.completed`; from `usage_events.duration_ms` alone it would be a `spawn_envelope` sum, not CLI runtime — [§6.1](#61-usage-event-timing)).
 - Issue elapsed: workflow start to completion, e.g. `[09:50, 10:45)` = 55 min — not 45.
 
 ### 9.3 Same-millisecond events
