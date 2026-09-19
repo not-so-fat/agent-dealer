@@ -13,6 +13,7 @@ import { registerQueueRoutes } from "./routes/queue.js";
 import { registerHumanActionRoutes } from "./routes/human-actions.js";
 import { recoverCoordinator } from "./coordinator/recovery.js";
 import { startCoordinatorLoop } from "./coordinator/worker-loop.js";
+import { startLinearUsageSummary } from "./adapters/linear-graphql.js";
 import { registerEffectHandler } from "./coordinator/effect-registry.js";
 import { runDeveloperEffect } from "./coordinator/developer-effect.js";
 import { runReviewerEffect } from "./coordinator/reviewer-effect.js";
@@ -93,6 +94,7 @@ async function main(): Promise<void> {
     );
   }
   startCoordinatorLoop();
+  startLinearUsageSummary();
 
   await app.listen({ port, host: "127.0.0.1" });
   const base = `http://127.0.0.1:${port}`;
