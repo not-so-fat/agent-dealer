@@ -126,3 +126,13 @@ test("usage_events timing is documented as a spawn envelope, not CLI lifetime", 
   assert.doesNotMatch(doc, /`duration_ms` is measured from just before spawn/);
   assert.match(doc, /`usage_events\.ts − usage_events\.duration_ms` is not a proxy/);
 });
+
+test("process_started_at is process-identity evidence, not a runtime boundary", () => {
+  const doc = read(CANONICAL);
+  assert.match(doc, /process-identity evidence only/);
+  assert.match(doc, /timezone-free `ps -o lstart=` string/);
+  assert.doesNotMatch(doc, /`usage_events\.ts − worker_sessions\.process_started_at`/);
+  assert.doesNotMatch(doc, /Possible proxy: `worker_sessions\.process_started_at`/);
+  // Attempt runtime and agent_process are unavailable today.
+  assert.match(doc, /Today `unavailable`, reason `no_defensible_boundary`, for `agent\.started`/);
+});
