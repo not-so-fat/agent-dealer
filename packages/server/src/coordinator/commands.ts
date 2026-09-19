@@ -78,8 +78,11 @@ import {
   type UsageCappedOutcome,
 } from "./usage-cap-defer.js";
 import { markQueueEntryAdmitted } from "../repository/queue-entries.js";
+import { getWorkflow } from "./workflows/registry.js";
+import { DEV_REVIEWER_V1_VERSION } from "./workflows/dev-reviewer-v1.js";
 
-export const WORKFLOW_VERSION = "dev_reviewer_v1";
+/** Default start template — resolved through the workflow registry (NOT-70). */
+export const WORKFLOW_VERSION = getWorkflow(DEV_REVIEWER_V1_VERSION).version;
 
 /** NOT-103 queue admission reads the same cap state as the coordinator deferral path. */
 export { runtimeAvailability } from "../repository/runtime-availability.js";
@@ -254,7 +257,8 @@ export function startWorkflowCore(issueId: string): { instance: WorkflowInstance
   // Criteria were added since a pre-start gate opened — close it in the same txn as start.
   clearStaleProductScopeDecision(issue);
 
-  const instance = startWorkflowInstance(issueId, WORKFLOW_VERSION);
+  const template = getWorkflow(WORKFLOW_VERSION);
+  const instance = startWorkflowInstance(issueId, template.version);
   freezeTaskSnapshot(issue);
   appendWorkflowEvent({
     issueId,
