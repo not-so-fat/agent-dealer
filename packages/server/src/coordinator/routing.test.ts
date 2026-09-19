@@ -435,10 +435,11 @@ test("NOT-147: empty tip + 2 timeout/crash failures escalates — no silent 3rd 
 
 test("NOT-147: tip with commits ahead still auto-retries under existing infra budget", () => {
   for (const kind of ["timed_out", "session_failed"] as const) {
-    const outcome: DeveloperOutcome = { kind, commitsAhead: 2, reason: "transient crash after commits" };
+    const reason = "transient crash after commits";
+    const outcome: DeveloperOutcome = { kind, commitsAhead: 2, reason };
     assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
       next: "retry_developer",
-      reason: outcome.reason ?? (kind === "timed_out" ? "Developer session timed out." : "Developer session failed or crashed."),
+      reason,
     });
   }
 });
