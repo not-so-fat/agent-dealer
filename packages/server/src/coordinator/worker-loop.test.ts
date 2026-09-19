@@ -21,7 +21,7 @@ const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import(
   "../repository/workflow-events.js"
 );
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
-const { listWorkerSessionsForIssue, createWorkerSession, startSession } = await import(
+const { listWorkerSessionsForIssue, createWorkerSession, startSession, getWorkerSession } = await import(
   "../repository/worker-sessions.js"
 );
 const { listWorkItemsForIssue, claimWorkItem, getWorkItem, bindWorkItemSession } = await import(
@@ -425,6 +425,10 @@ test("NOT-156: reviewer unhealthy at review start parks with reviewer wait reaso
     assert.equal(reviewerItem.status, "pending");
     assert.equal(reviewerItem.attemptCount, 0, "health park must not spend attempt budget");
     assert.ok(Date.parse(reviewerItem.availableAt) > Date.now());
+    // Session is bound before the health await (abort fence), then cancelled on park —
+    // never left running, and the effect must not have run.
+    assert.ok(reviewerItem.workerSessionId, "park after bind still records the session");
+    assert.equal(getWorkerSession(reviewerItem.workerSessionId!)!.status, "cancelled");
     assert.ok(
       listWorkflowEventsForIssue(issueId).some((e) => e.type === "worker.deferred"),
       "timeline must record the park"
