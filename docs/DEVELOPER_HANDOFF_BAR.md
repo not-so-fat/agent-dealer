@@ -16,10 +16,10 @@ Full suite and Lens self-review stay product quality gates, but they live on a *
 
 | Stage | Budget | Gate |
 |-------|--------|------|
-| Developer timed spawn | Implement + targeted tests | Commits + clean tip + publish |
-| Lens / full-suite verify | Separate work item or reviewer path (NOT-74) | Recorded Lens / suite evidence |
+| Developer timed spawn | Implement + targeted tests | Commits + clean tip + publish → `clean_handoff` |
+| Lens / full-suite verify | Separate work item or reviewer path (NOT-74) | Recorded Lens / suite evidence before or during review |
 
-NOT-74 remains the ticket that hard-gates handoff on Lens evidence; until it lands, prompt + docs make the implement vs verify split explicit so agents do not burn the 60m coding budget on full suite + Lens.
+NOT-74 hard-gates **verify/review evidence** (Lens recorded before the reviewer trusts the tip), not the developer `clean_handoff` itself. Until NOT-74 lands, prompt + docs make the implement vs verify split explicit so agents do not burn the 60m coding budget on full suite + Lens.
 
 ## Regression
 

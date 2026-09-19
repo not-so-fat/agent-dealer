@@ -35,6 +35,18 @@ test("NOT-148: tip with commits ahead is not restart risk even after failures", 
   assert.equal(status.restartRisk, false);
 });
 
+test("NOT-148: published tip with ahead=0 (unresolved base) is not treated as empty tip", () => {
+  // inspectBranchProgress can report published with ahead ?? 0 when base is unresolved.
+  const status = classifyBranchTipStatus({
+    branch: "issue-x",
+    progress: { state: "published", branch: "issue-x", ahead: 0 },
+    hadFailedAttempt: true,
+  });
+  assert.equal(status.state, "published");
+  assert.equal(status.tipLabel, "0 ahead");
+  assert.equal(status.restartRisk, false);
+});
+
 test("NOT-148: unknown progress after failure still flags restart risk conservatively", () => {
   const status = classifyBranchTipStatus({
     branch: "issue-x",

@@ -59,7 +59,10 @@ export function classifyBranchTipStatus(opts: {
     };
   }
   const { commitsAhead, tipLabel } = tipLabelFor(opts.progress);
-  const emptyTip = opts.progress.state === "absent" || opts.progress.state === "empty" || commitsAhead === 0;
+  // Empty tip = no publishable work on the branch. Do NOT treat `ahead === 0` on a
+  // `published`/`unpushed` progress object as empty — `inspectBranchProgress` can report
+  // `ahead ?? 0` when the base ref is unresolved while the branch is still publishable.
+  const emptyTip = opts.progress.state === "absent" || opts.progress.state === "empty";
   return {
     branch: opts.branch,
     state: opts.progress.state,
