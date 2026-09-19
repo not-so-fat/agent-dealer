@@ -2,6 +2,15 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.0.3 — 2026-09-19
+
+Patch over 1.0.2: diagnose Linear API-key burns, and stop sleep/wake Cursor probes from parking the queue.
+
+### Fixes
+
+- **Linear API-key usage observability** — always-on per-operation GraphQL counters, `GET /api/debug/linear-usage`, and durable JSONL at `$AGENT_DEALER_HOME/logs/linear-usage.jsonl` (no env flag required; `AGENT_DEALER_LINEAR_TRACE=1` is stderr-only) (NOT-159).
+- **Cursor probe timeouts** — soft-fail so host sleep/wake does not park the queue as unhealthy (NOT-157).
+
 ## 1.0.2 — 2026-09-18
 
 Patch over 1.0.1: queue UX, Linear observability, docs landing, and migrate hygiene.
