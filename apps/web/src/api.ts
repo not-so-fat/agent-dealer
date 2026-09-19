@@ -157,6 +157,14 @@ export interface IssueDetail {
     infraAttempts: number;
     maxInfraAttempts: number;
   } | null;
+  /** NOT-148: commits-ahead / restart-risk while developing or retrying. */
+  branchTipStatus?: {
+    branch: string;
+    state: string;
+    commitsAhead: number | null;
+    tipLabel: string;
+    restartRisk: boolean;
+  } | null;
   /** NOT-103: whether this issue is in the admission queue. */
   queued?: boolean;
   /** NOT-118: queue position (1-based) and current wait reason while it is queued. */

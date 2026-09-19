@@ -170,7 +170,7 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
   }
   if (!detail) return <div className="p-6 text-white/50 text-sm">Loading…</div>;
 
-  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, liveProgress, latestSessionFailure, queued, queueEntry } = detail;
+  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, liveProgress, latestSessionFailure, branchTipStatus, queued, queueEntry } = detail;
   const developerAgent = agents.find((a) => a.id === issue.developerAgentId);
   const developerBlocked = developerAgent && !developerAgent.healthy;
   const developerBlockReason = developerAgent?.issues[0]?.message ?? "Developer agent is unhealthy";
@@ -376,6 +376,15 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
             <p className="text-sm text-[#C4B643] truncate" title={liveProgress ?? issue.currentIntent ?? "session started"}>
               Last progress: {liveProgress ?? issue.currentIntent ?? "session started"}
             </p>
+            {branchTipStatus && (
+              <p
+                className={`text-xs ${branchTipStatus.restartRisk ? "text-amber-300" : "text-white/55"}`}
+                title={`${branchTipStatus.branch} · ${branchTipStatus.state}`}
+              >
+                Branch tip: {branchTipStatus.tipLabel}
+                {branchTipStatus.restartRisk ? " · restart risk (no commits ahead after failure)" : ""}
+              </p>
+            )}
             {liveProgress &&
               issue.currentIntent &&
               !/session running/i.test(issue.currentIntent) &&
@@ -406,11 +415,34 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
               {` · ${new Date(latestSessionFailure.when).toLocaleString()}`}
               {` · infra ${latestSessionFailure.infraAttempts}/${latestSessionFailure.maxInfraAttempts}`}
             </p>
+            {branchTipStatus && (
+              <p
+                className={`text-xs ${branchTipStatus.restartRisk ? "text-amber-300" : "text-white/55"}`}
+                title={`${branchTipStatus.branch} · ${branchTipStatus.state}`}
+              >
+                Branch tip: {branchTipStatus.tipLabel}
+                {branchTipStatus.restartRisk ? " · restart risk (no commits ahead after failure)" : ""}
+              </p>
+            )}
             {latestSessionFailure.logPath && (
               <p className="text-xs text-white/40 font-mono break-all" title={latestSessionFailure.logPath}>
                 Log: {shortPath(latestSessionFailure.logPath) ?? latestSessionFailure.logPath}
               </p>
             )}
+          </div>
+        )}
+
+        {/* NOT-148: tip / restart-risk when developing or reviewing without a live/failure strip. */}
+        {branchTipStatus && !sessionLive && !showLatestFailure && (
+          <div className="mb-4 p-3 rounded border border-white/10 bg-white/[0.03] space-y-1">
+            <p className="text-xs text-white/45 uppercase tracking-wide">Branch tip</p>
+            <p
+              className={`text-sm ${branchTipStatus.restartRisk ? "text-amber-300" : "text-white/80"}`}
+              title={`${branchTipStatus.branch} · ${branchTipStatus.state}`}
+            >
+              {branchTipStatus.tipLabel}
+              {branchTipStatus.restartRisk ? " · restart risk (no commits ahead after failure)" : ""}
+            </p>
           </div>
         )}
 

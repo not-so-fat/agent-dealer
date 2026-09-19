@@ -26,6 +26,7 @@ import { computeHumanWaitMs } from "../coordinator/metrics.js";
 import { enqueueIssue, enqueueIssueWithOutcome, getQueuedEntryForIssue } from "../repository/queue-entries.js";
 import { latestSessionFailureForIssue } from "../coordinator/latest-failure.js";
 import { deriveLiveProgressFromLog } from "../coordinator/session-progress.js";
+import { branchTipStatusForIssue } from "../coordinator/branch-tip-status.js";
 
 const TRACE_DEFAULT_MAX_CHARS = 50_000;
 const TRACE_HARD_MAX_CHARS = 200_000;
@@ -86,6 +87,11 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     const humanActions = listHumanActionsForIssue(id);
     const instances = listWorkflowInstancesForIssue(id);
     const activeWorkerSession = getActiveWorkerSessionForIssue(id);
+    const latestSessionFailure = latestSessionFailureForIssue(issue);
+    // NOT-148: commits-ahead / restart-risk next to live progress while developing/retrying.
+    const branchTipStatus = await branchTipStatusForIssue(issue, {
+      hadFailedAttempt: issue.infraAttempts > 0 || latestSessionFailure != null,
+    });
     return {
       issue,
       timeline: listWorkflowEventsForIssue(id),
@@ -106,7 +112,9 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
           ? deriveLiveProgressFromLog(activeWorkerSession.logPath)
           : null,
       // NOT-113: latest session failure reason without opening evidence JSON.
-      latestSessionFailure: latestSessionFailureForIssue(issue),
+      latestSessionFailure,
+      // NOT-148: tip progress + restart risk for the live / failure strip.
+      branchTipStatus,
       // NOT-103: whether this issue is in the admission queue.
       queued: getQueuedEntryForIssue(id) != null,
       // NOT-118: position + current wait reason so a queued `ready` issue never reads as idle.
