@@ -5,7 +5,7 @@
 // (deleted) — must surface a distinct issue. resolveDeckName silently swallows both of
 // the same failures to null elsewhere, so this is the one place an operator can see why
 // deck resolution is broken.
-import { test } from "node:test";
+import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,8 +19,14 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-ag
 
 const { migrate, getDb } = await import("../db/index.js");
 const { createAgent, getAgent } = await import("../repository/agents.js");
-const { healthForAgent, runtimeIssuesUncached, githubIssuesUncached, clearAgentHealthCaches } =
-  await import("./agent-health.js");
+const {
+  healthForAgent,
+  runtimeIssuesUncached,
+  githubIssuesUncached,
+  clearAgentHealthCaches,
+  setCursorProbeTimingForTests,
+  setRunCommandForTests,
+} = await import("./agent-health.js");
 
 migrate();
 
@@ -28,6 +34,9 @@ const FAILURE: DeckAccessResult = { ok: false, code: "DECK_UNAVAILABLE", message
 
 /** Tests inject an empty github list so host `gh auth` does not pollute assertions. */
 const NO_GITHUB: AgentHealthIssue[] = [];
+
+// Shared inject/cache hooks — must not run concurrently with sibling cases in this file.
+describe("agent-health", { concurrency: false }, () => {
 
 test("missing deckId: reports deck_missing", async () => {
   const created = createAgent({
@@ -246,13 +255,25 @@ test("logged-in `cursor-agent status` capture leaves the cursor runtime healthy"
 test("a cursor status probe that fails without a classifiable reason blocks rather than admits", async () => {
   // NOT-133: silence used to be read as health, so an agent that could not be checked was
   // admitted anyway. Unknown auth must wait, not spend infra attempts on ~1s dead sessions.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cli-stub-"));
-  const bin = path.join(dir, "cursor-agent");
-  fs.writeFileSync(bin, "#!/bin/sh\necho 'panic: runtime broke' >&2\nexit 7\n");
-  fs.chmodSync(bin, 0o755);
-  const issues = await withEnv("CURSOR_CLI", bin, () => runtimeIssuesUncached("cursor_local"));
-  assert.deepEqual(issues.map((i) => i.code), ["runtime_auth"]);
-  assert.match(issues[0]!.message, /Could not confirm Cursor auth/);
+  // NOT-157: messaging says "probe failed" (soft) rather than asserting logged-out; still blocks.
+  setCursorProbeTimingForTests({ timeoutMs: 2000, retryBackoffsMs: [10] });
+  setRunCommandForTests(async () => ({
+    ok: false,
+    output: "panic: runtime broke\n",
+    timedOut: false,
+  }));
+  clearAgentHealthCaches();
+  try {
+    const issues = await runtimeIssuesUncached("cursor_local");
+    assert.deepEqual(issues.map((i) => i.code), ["runtime_auth"]);
+    assert.match(issues[0]!.message, /Could not confirm Cursor auth/);
+    assert.match(issues[0]!.message, /probe failed/i);
+    assert.doesNotMatch(issues[0]!.message, /not authenticated/i);
+  } finally {
+    setRunCommandForTests(null);
+    setCursorProbeTimingForTests(null);
+    clearAgentHealthCaches();
+  }
 });
 
 test("logged-out `codex login status` capture blocks the codex runtime", async () => {
@@ -314,3 +335,106 @@ test("an older claude CLI without `auth status` is not a false block", async () 
   const issues = await withEnv("CLAUDE_CLI", bin, () => runtimeIssuesUncached("claude_code"));
   assert.deepEqual(issues, []);
 });
+
+// ---------------------------------------------------------------------------
+// NOT-157: sleep/wake probe timeout is a soft fail — retry + grace — not a
+// sticky "not authenticated" park of the queue.
+// ---------------------------------------------------------------------------
+
+test("NOT-157: timeout then success within the soft window leaves the cursor runtime healthy", async () => {
+  // First status times out; the in-probe retry returns the logged-in capture.
+  const loggedIn = fs.readFileSync(
+    path.join(FIXTURES, "cursor-agent-status-logged-in.txt"),
+    "utf8"
+  );
+  let calls = 0;
+  setCursorProbeTimingForTests({ timeoutMs: 200, retryBackoffsMs: [10] });
+  setRunCommandForTests(async () => {
+    calls += 1;
+    if (calls === 1) return { ok: false, output: "timeout", timedOut: true };
+    return { ok: true, output: loggedIn, timedOut: false };
+  });
+  clearAgentHealthCaches();
+  try {
+    const issues = await runtimeIssuesUncached("cursor_local");
+    assert.deepEqual(issues, []);
+    assert.equal(calls, 2);
+  } finally {
+    setRunCommandForTests(null);
+    setCursorProbeTimingForTests(null);
+    clearAgentHealthCaches();
+  }
+});
+
+test("NOT-157: soft probe timeout message names probe timeout, not 'not authenticated'", async () => {
+  // Always time out → soft fail after retries. No prior healthy → fail closed, but the
+  // wait_reason / Ops copy must say the probe timed out (not that Cursor is logged out).
+  setCursorProbeTimingForTests({ timeoutMs: 150, retryBackoffsMs: [10] });
+  setRunCommandForTests(async () => ({ ok: false, output: "timeout", timedOut: true }));
+  clearAgentHealthCaches();
+  try {
+    const issues = await runtimeIssuesUncached("cursor_local");
+    assert.deepEqual(issues.map((i) => i.code), ["runtime_auth"]);
+    assert.match(issues[0]!.message, /probe timed out/i);
+    assert.doesNotMatch(issues[0]!.message, /not authenticated/i);
+  } finally {
+    setRunCommandForTests(null);
+    setCursorProbeTimingForTests(null);
+    clearAgentHealthCaches();
+  }
+});
+
+test("NOT-157: a single soft timeout after a recent healthy probe does not flip unhealthy", async () => {
+  const loggedIn = fs.readFileSync(
+    path.join(FIXTURES, "cursor-agent-status-logged-in.txt"),
+    "utf8"
+  );
+  let phase: "healthy" | "hang" = "healthy";
+  setCursorProbeTimingForTests({ timeoutMs: 150, retryBackoffsMs: [10] });
+  setRunCommandForTests(async () => {
+    if (phase === "healthy") return { ok: true, output: loggedIn, timedOut: false };
+    return { ok: false, output: "timeout", timedOut: true };
+  });
+  clearAgentHealthCaches();
+  try {
+    const healthy = await runtimeIssuesUncached("cursor_local");
+    assert.deepEqual(healthy, []);
+    phase = "hang";
+    // One soft-fail streak (timeouts on every attempt in this call) while still inside
+    // the healthy grace window must not publish runtime_auth.
+    const afterSoft = await runtimeIssuesUncached("cursor_local");
+    assert.deepEqual(afterSoft, []);
+  } finally {
+    setRunCommandForTests(null);
+    setCursorProbeTimingForTests(null);
+    clearAgentHealthCaches();
+  }
+});
+
+test("NOT-157: verbatim logged-out capture still blocks immediately (hard fail)", async () => {
+  // Hard classification must not wait for soft retries — NOT-133 preserved.
+  const loggedOut = fs.readFileSync(
+    path.join(FIXTURES, "cursor-agent-status-logged-out.txt"),
+    "utf8"
+  );
+  let calls = 0;
+  setCursorProbeTimingForTests({ timeoutMs: 8000, retryBackoffsMs: [500, 500] });
+  setRunCommandForTests(async () => {
+    calls += 1;
+    return { ok: true, output: loggedOut, timedOut: false };
+  });
+  clearAgentHealthCaches();
+  try {
+    const issues = await runtimeIssuesUncached("cursor_local");
+    assert.deepEqual(issues.map((i) => i.code), ["runtime_auth"]);
+    assert.match(issues[0]!.message, /not authenticated/i);
+    assert.match(issues[0]!.message, /cursor-agent login/);
+    assert.equal(calls, 1);
+  } finally {
+    setRunCommandForTests(null);
+    setCursorProbeTimingForTests(null);
+    clearAgentHealthCaches();
+  }
+});
+
+}); // describe agent-health (serial)

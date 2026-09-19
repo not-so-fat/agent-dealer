@@ -421,3 +421,43 @@ test("NOT-133: a logged-out Cursor runtime is not admitted; it waits with an aut
     setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
   }
 });
+
+// NOT-157: soft probe failure wait_reason must name the probe, not "not authenticated".
+test("NOT-157: soft Cursor probe timeout waits with probe-timeout reason, not logged-out copy", async () => {
+  const {
+    clearAgentHealthCaches,
+    setCursorProbeTimingForTests,
+  } = await import("../adapters/agent-health.js");
+
+  // Real hang stub (same style as NOT-133) so this file does not share runCommand inject
+  // state with agent-health.test.ts when the suite runs files in parallel.
+  const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cursor-timeout-"));
+  const stub = path.join(stubDir, "cursor-agent");
+  fs.writeFileSync(stub, "#!/bin/sh\nsleep 30\n");
+  fs.chmodSync(stub, 0o755);
+
+  const prev = process.env.CURSOR_CLI;
+  process.env.CURSOR_CLI = stub;
+  setCursorProbeTimingForTests({ timeoutMs: 150, retryBackoffsMs: [20] });
+  setAdmissionHealthCheckerForTests(null);
+  clearAgentHealthCaches();
+  try {
+    const issue = readyIssue("cursor-probe-timeout", {
+      runtimes: { dev: "cursor_local", rev: "cursor_local" },
+    });
+    enqueueIssue(issue.id);
+
+    assert.equal(await admitNext(), null);
+    const entry = getQueuedEntryForIssue(issue.id);
+    assert.equal(entry?.state, "queued");
+    assert.match(entry!.waitReason!, /agent unhealthy/);
+    assert.match(entry!.waitReason!, /probe timed out/i);
+    assert.doesNotMatch(entry!.waitReason!, /not authenticated/i);
+  } finally {
+    if (prev === undefined) delete process.env.CURSOR_CLI;
+    else process.env.CURSOR_CLI = prev;
+    setCursorProbeTimingForTests(null);
+    clearAgentHealthCaches();
+    setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
+  }
+});
