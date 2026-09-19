@@ -2,6 +2,15 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.0.4 — 2026-09-19
+
+Patch over 1.0.3: stop false agent-health failures from parking the queue (Claude MCP + reviewer-vs-developer admit).
+
+### Fixes
+
+- **Claude mcp-launch stdio** — dealer health no longer treats Claude’s MCP launch stdio as “MCP not registered”, which stuck the queue forever (NOT-155).
+- **Admission role health** — only the developer must be healthy to admit; reviewer health is checked when review is due, so one unhealthy reviewer no longer parks the whole queue before development starts (NOT-156).
+
 ## 1.0.3 — 2026-09-19
 
 Patch over 1.0.2: diagnose Linear API-key burns, and stop sleep/wake Cursor probes from parking the queue.
