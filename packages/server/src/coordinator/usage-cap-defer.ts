@@ -35,7 +35,14 @@ export interface DeckUnavailableOutcome {
   evidence?: unknown;
 }
 
-export type DeferralOutcome = UsageCappedOutcome | DeckUnavailableOutcome;
+/** NOT-156: active-role health failed before spawn — wait and retry, do not burn infra. */
+export interface AgentUnhealthyOutcome {
+  kind: "agent_unhealthy";
+  reason: string;
+  evidence?: unknown;
+}
+
+export type DeferralOutcome = UsageCappedOutcome | DeckUnavailableOutcome | AgentUnhealthyOutcome;
 
 const roleFor: Record<WorkItemKind, "developer" | "reviewer"> = {
   developer: "developer",
@@ -240,6 +247,54 @@ export function deferLeasedWorkItemForDeckOutage(
       }),
       intent: (_role, untilLabel) =>
         `Waiting for Agent Deck — ${outage.reason}${waitLabel ? ` (${waitLabel})` : ""} (retrying ${untilLabel})`,
+    });
+  })();
+}
+
+export function agentUnhealthyDeferralStartedAt(payload: Record<string, unknown>): string | null {
+  const v = payload.agentUnhealthySince;
+  return typeof v === "string" && v ? v : null;
+}
+
+export function agentUnhealthyDeferralCount(payload: Record<string, unknown>): number {
+  const v = payload.agentUnhealthyDeferrals;
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+}
+
+/**
+ * NOT-156: the active role failed health before spawn. Same shape as a deck outage — no
+ * infra burn, exponential backoff, never escalate (a false `mcp_not_registered` must not
+ * open a human gate; the role recovers when health does).
+ */
+export function deferLeasedWorkItemForAgentUnhealthy(
+  item: WorkItem,
+  leaseToken: string,
+  unhealthy: AgentUnhealthyOutcome,
+  issue: Issue,
+  instance: WorkflowInstance,
+  nowMs = Date.now()
+): DeferWorkItemResult {
+  return getDb().transaction(() => {
+    const live = liveLeasedItem(item.id, leaseToken);
+    if (!live) return { deferred: false, escalated: false, reason: "lease_lost" as const };
+
+    const payload = parsePayload(live.payloadJson);
+    const firstDeferredAt = agentUnhealthyDeferralStartedAt(payload) ?? new Date(nowMs).toISOString();
+    const priorDeferrals = agentUnhealthyDeferralCount(payload);
+    const until = new Date(nowMs + deckOutageBackoffMs(priorDeferrals)).toISOString();
+
+    return applyDeferral(live, leaseToken, issue, instance, {
+      until,
+      reason: unhealthy.reason,
+      outcome: "agent_unhealthy",
+      error: { kind: "agent_unhealthy", until, reason: unhealthy.reason, evidence: unhealthy.evidence },
+      payloadJson: JSON.stringify({
+        ...payload,
+        agentUnhealthySince: firstDeferredAt,
+        agentUnhealthyDeferrals: priorDeferrals + 1,
+      }),
+      // Reason is already role-prefixed (`reviewer unhealthy: …`).
+      intent: (_role, untilLabel) => `${unhealthy.reason} (retrying ${untilLabel})`,
     });
   })();
 }

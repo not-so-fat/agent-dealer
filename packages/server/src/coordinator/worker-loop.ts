@@ -41,11 +41,16 @@ import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapsh
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 import { recoverCoordinator } from "./recovery.js";
 import { observeClockJump } from "./clock-jump.js";
-import { admitNext } from "./admission.js";
+import { admitNext, checkRoleAgentHealthy } from "./admission.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
-import { deferLeasedWorkItemForUsageCap, type UsageCappedOutcome } from "./usage-cap-defer.js";
+import {
+  deferLeasedWorkItemForUsageCap,
+  deferLeasedWorkItemForAgentUnhealthy,
+  type UsageCappedOutcome,
+} from "./usage-cap-defer.js";
 import { outcomeShouldRecordError, reasonForWorkerFailedEvent } from "./failure-reason.js";
+import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -198,6 +203,9 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
   // leaves a running session that recovery (which keys off work_items) cannot locate. The
   // bind is fenced on the lease token: if this attempt lost its lease between claim and
   // here, the transaction rolls back (session creation undone) and the attempt is dropped.
+  //
+  // Session setup stays synchronous until the first await below so `runCoordinatorTick`
+  // callers (and abort fences) still see a bound running session when started ≥ 1.
   let session;
   try {
     session = getDb().transaction(() => {
@@ -239,6 +247,27 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
   } catch (err) {
     console.error("[coordinator] session setup", claimed.id, err);
     return; // lost the lease — recovery will reprocess the item when the lease expires
+  }
+
+  // NOT-156: fail-closed for the role about to spawn only. Reviewer health must not have
+  // blocked developer admit; once a reviewer item is leased, park here (after bind, before
+  // the effect) instead of crashing into a deck/CLI failure loop. Checked after session
+  // bind so an await does not leave a leased item with no session for abort to fence.
+  {
+    const deckOnline = await checkAgentDeckHealth();
+    const health = await checkRoleAgentHealthy(issue, role, { deckOnline });
+    if (!health.ok) {
+      const live = getWorkItem(claimed.id) ?? claimed;
+      deferLeasedWorkItemForAgentUnhealthy(
+        live,
+        leaseToken,
+        { kind: "agent_unhealthy", reason: health.reason },
+        issue,
+        instance
+      );
+      safeCompleteSession(session.id, "cancelled", { reason: health.reason });
+      return;
+    }
   }
 
   const controller = new AbortController();
