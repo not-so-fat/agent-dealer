@@ -110,21 +110,72 @@ so an open epic does not block its own children).
 Cycles are not detected: two issues blocking each other both park naming the other, and the
 operator fixes the relation in Linear.
 
+## API-key budget & observability (NOT-152 / NOT-159)
+
+Linear's **personal API key** limit is **2,500 requests / user / hour** (all keys for that
+user share one bucket). An **OAuth app** (e.g. Agent Deck's Linear MCP) has a **separate**
+5,000 req / user / app / hour bucket — do not blame MCP traffic for dealer `LINEAR_API_KEY`
+exhaustion without evidence. See [Linear rate limiting](https://linear.app/developers/rate-limiting).
+
+Response headers of interest (on every GraphQL POST):
+
+| Header | Meaning |
+|--------|---------|
+| `X-RateLimit-Requests-Limit` | Usually `2500` for API keys |
+| `X-RateLimit-Requests-Remaining` | Requests left in the current hour window |
+| `X-RateLimit-Requests-Reset` | UTC epoch **milliseconds** when the window resets |
+| `X-RateLimit-Complexity-*` | Separate complexity budget (rarely the binding limit) |
+
+### Steady-state cost (dealer)
+
+| Path | Operation name(s) | Expected rate |
+|------|-------------------|---------------|
+| Admission blockers (NOT-104) | `fetchLinearBlockers`, `fetchLinearBlockersPage` | ≤ ~1 req / 60s when a free slot exists and Linear-sourced issues are queued (TTL cache). **Zero** when capacity is full or the queue has no Linear issues |
+| Inbox "From Linear" | `getLinearViewer`, `listLinearCandidates` (+ pages of 50) | Burst on each open of the candidate list — **uncached** |
+| Kick lookup | `getLinearIssue` | One per lookup |
+| Delivery sync | `getLinearIssue`, `getWorkflowStates`, `commentCreate`, `issueUpdateState` | Few per approved delivery |
+
+A healthy overnight run with a non-empty Linear queue should be on the order of **tens to low hundreds** of API-key requests per hour from dealer alone — not thousands. If `remaining` hits 0, something else on the same key (another dealer home, scripts, tools) or a bug is amplifying calls.
+
+### Reading live counters
+
+Process-lifetime counters (no env flag required). Examples below use the **bundled**
+production port (`agent-dealer start --daemon` → API + UI on **2222**). Split API-only
+listen ports are prod **2221** / dev **3221** — see [PROD_SETUP.md](PROD_SETUP.md).
+
+```bash
+curl -s http://127.0.0.1:2222/api/debug/linear-usage | jq
+```
+
+Fields: `totalOk` / `totalError`, `byOperation` (`ok`/`error` per GraphQL operation name),
+`lastRateLimit` (last observed headers), `since` / `lastAt`. Counters reset on process restart.
+
+Server also emits a `[linear-usage]` summary line about once per minute when traffic > 0
+since the previous line. For every call (verbose): `AGENT_DEALER_LINEAR_TRACE=1`.
+
 ## REST API (orchestrator agents)
 
-Base URL: `http://127.0.0.1:3221` (development) or `http://127.0.0.1:2221` (production). See [PROD_SETUP.md](PROD_SETUP.md).
+**Base URL** (same port rule as above):
+
+| How you run dealer | API base |
+|--------------------|----------|
+| Bundled install (`agent-dealer start --daemon`) | `http://127.0.0.1:2222` |
+| Git prod (`npm run start`) | `http://127.0.0.1:2221` |
+| Dev (`npm run dev`) | `http://127.0.0.1:3221` |
+
+Curl examples in this section use **2222** (bundled). Substitute `2221` / `3221` when you run a split API. See [PROD_SETUP.md](PROD_SETUP.md).
 
 ### Connection & config
 
 ```bash
 # Connection test (viewer from API key)
-curl -s http://127.0.0.1:2221/api/intake/linear/status | jq
+curl -s http://127.0.0.1:2222/api/intake/linear/status | jq
 
 # Read config (non-secret)
-curl -s http://127.0.0.1:2221/api/intake/linear/config | jq
+curl -s http://127.0.0.1:2222/api/intake/linear/config | jq
 
 # Update filters (open-state default; assigneeMe optional)
-curl -s -X PATCH http://127.0.0.1:2221/api/intake/linear/config \
+curl -s -X PATCH http://127.0.0.1:2222/api/intake/linear/config \
   -H 'Content-Type: application/json' \
   -d '{"stateFilter":["Backlog","Todo","In Progress","In Review"],"assigneeMe":false,"syncEnabled":true}' | jq
 ```
@@ -132,7 +183,7 @@ curl -s -X PATCH http://127.0.0.1:2221/api/intake/linear/config \
 ### List candidates
 
 ```bash
-curl -s http://127.0.0.1:2221/api/intake/linear | jq '.candidates[] | {id, identifier, title}'
+curl -s http://127.0.0.1:2222/api/intake/linear | jq '.candidates[] | {id, identifier, title}'
 ```
 
 ### Free-form lookup (kick)
@@ -140,7 +191,7 @@ curl -s http://127.0.0.1:2221/api/intake/linear | jq '.candidates[] | {id, ident
 Resolve a Linear identifier or issue URL without relying on the inbox list (also used by Issues → From Linear → Lookup):
 
 ```bash
-curl -s 'http://127.0.0.1:2221/api/intake/linear/lookup?q=NOT-103' | jq '.candidate | {id, identifier, title}'
+curl -s 'http://127.0.0.1:2222/api/intake/linear/lookup?q=NOT-103' | jq '.candidate | {id, identifier, title}'
 # q also accepts a Linear issue URL or UUID
 ```
 
