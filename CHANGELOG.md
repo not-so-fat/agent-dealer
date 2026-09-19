@@ -4,11 +4,15 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## 1.0.5 — 2026-09-19
 
-Patch over 1.0.4: Agents page shows only fields issue workflows actually read.
+Patch over 1.0.4: Agents list shows the effective model for profiles saved before NOT-71.
 
 ### Fixes
 
-- **Agent profile form** — role-neutral model/budget fields only; legacy plan/execute phase fields no longer clutter Create/Edit, and the Agents list shows the effective model so pre-NOT-71 profiles are not blank (NOT-80).
+- **Agents list model badge** — shows the effective model (`defaultModel`, falling back to the legacy execute/plan model), so older profiles no longer show a blank model badge (NOT-80).
+
+### Internal
+
+- Regression tests lock the agent form's model/budget field set (NOT-80).
 
 ## 1.0.4 — 2026-09-19
 
