@@ -165,20 +165,9 @@ since the previous line. For every call (verbose): `AGENT_DEALER_LINEAR_TRACE=1`
 
 Curl examples in this section use **2222** (bundled). Substitute `2221` / `3221` when you run a split API. See [PROD_SETUP.md](PROD_SETUP.md).
 
-### Connection & config
-
-```bash
-# Connection test (viewer from API key)
-curl -s http://127.0.0.1:2222/api/intake/linear/status | jq
-
-# Read config (non-secret)
-curl -s http://127.0.0.1:2222/api/intake/linear/config | jq
-
-# Update filters (open-state default; assigneeMe optional)
-curl -s -X PATCH http://127.0.0.1:2222/api/intake/linear/config \
-  -H 'Content-Type: application/json' \
-  -d '{"stateFilter":["Backlog","Todo","In Progress","In Review"],"assigneeMe":false,"syncEnabled":true}' | jq
-```
+Live Linear intake routes: list candidates, free-form lookup, and (NOT-159) usage counters.
+There is no `/api/intake/linear/status` or `/config` (including PATCH) — filters are env /
+`intake_settings` only (see Configuration above).
 
 ### List candidates
 
@@ -195,7 +184,14 @@ curl -s 'http://127.0.0.1:2222/api/intake/linear/lookup?q=NOT-103' | jq '.candid
 # q also accepts a Linear issue URL or UUID
 ```
 
-> **Removed in NOT-71.** `POST /api/intake/linear/:issueId/promote` and
+### Usage counters (NOT-159)
+
+```bash
+curl -s http://127.0.0.1:2222/api/debug/linear-usage | jq
+```
+
+> **Removed in NOT-71.** `GET/PATCH /api/intake/linear/config`, `GET /api/intake/linear/status`,
+> `POST /api/intake/linear/:issueId/promote`, and
 > `POST /api/intake/linear/:issueId/resolve-agent` are gone, along with the label-based
 > `autoAgent` routing behind them (`intake/agent-routing.ts`). They promoted a Linear issue
 > into a plan/execute run, which no longer exists. Import a Linear issue from the Issues
