@@ -10,9 +10,33 @@ import path from "node:path";
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-agentdeck-"));
 
 const { migrate } = await import("../db/index.js");
-const { fetchDecks, fetchAuthorizedDecks } = await import("./agent-deck.js");
+const {
+  fetchDecks,
+  fetchAuthorizedDecks,
+  isAgentDeckMcpRegistered,
+  checkAgentDeckMcpRegistration,
+} = await import("./agent-deck.js");
 
 migrate();
+
+function writeClaudeMcpFixture(mcpServers: Record<string, unknown>): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-mcp-"));
+  const configPath = path.join(dir, ".claude.json");
+  fs.writeFileSync(configPath, JSON.stringify({ mcpServers }, null, 2));
+  return configPath;
+}
+
+function withClaudeMcpConfig<T>(configPath: string | null, fn: () => T): T {
+  const prev = process.env.CLAUDE_MCP_CONFIG;
+  if (configPath === null) delete process.env.CLAUDE_MCP_CONFIG;
+  else process.env.CLAUDE_MCP_CONFIG = configPath;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_MCP_CONFIG;
+    else process.env.CLAUDE_MCP_CONFIG = prev;
+  }
+}
 
 test("fetchDecks returns decks on success from /api/launch/decks", async () => {
   let capturedUrl = "";
@@ -65,4 +89,78 @@ test("fetchDecks reports DECK_UNAVAILABLE on a network error, never an empty lis
 
 test("fetchAuthorizedDecks is an alias of fetchDecks", () => {
   assert.equal(fetchAuthorizedDecks, fetchDecks);
+});
+
+// Default Agent Deck MCP endpoint under a fresh AGENT_DEALER_HOME is 127.0.0.1:1110
+// (API port 1111 − 1). Fixtures below match that unless noted.
+
+test("isAgentDeckMcpRegistered: stdio mcp-launch with matching env is registered (no url)", () => {
+  const configPath = writeClaudeMcpFixture({
+    "agent-deck": {
+      type: "stdio",
+      command: "agent-deck",
+      args: ["mcp-launch"],
+      env: { AGENT_DECK_MCP_PORT: "1110", AGENT_DECK_HOST: "127.0.0.1" },
+    },
+  });
+  withClaudeMcpConfig(configPath, () => {
+    assert.equal(isAgentDeckMcpRegistered(), true);
+    assert.equal(checkAgentDeckMcpRegistration().status, "registered");
+  });
+});
+
+test("isAgentDeckMcpRegistered: legacy HTTP url with matching host/port is registered", () => {
+  const configPath = writeClaudeMcpFixture({
+    "agent-deck": { url: "http://127.0.0.1:1110/mcp" },
+  });
+  withClaudeMcpConfig(configPath, () => {
+    assert.equal(isAgentDeckMcpRegistered(), true);
+  });
+});
+
+test("isAgentDeckMcpRegistered: missing entry returns false / missing", () => {
+  const configPath = writeClaudeMcpFixture({
+    other: { url: "http://127.0.0.1:9999/mcp" },
+  });
+  withClaudeMcpConfig(configPath, () => {
+    assert.equal(isAgentDeckMcpRegistered(), false);
+    assert.equal(checkAgentDeckMcpRegistration().status, "missing");
+  });
+});
+
+test("checkAgentDeckMcpRegistration: wrong stdio port is endpoint_mismatch, not registered", () => {
+  const configPath = writeClaudeMcpFixture({
+    "agent-deck": {
+      type: "stdio",
+      command: "agent-deck",
+      args: ["mcp-launch"],
+      env: { AGENT_DECK_MCP_PORT: "9999", AGENT_DECK_HOST: "127.0.0.1" },
+    },
+  });
+  withClaudeMcpConfig(configPath, () => {
+    assert.equal(isAgentDeckMcpRegistered(), false);
+    const result = checkAgentDeckMcpRegistration();
+    assert.equal(result.status, "endpoint_mismatch");
+    if (result.status === "endpoint_mismatch") {
+      assert.equal(result.expectedPort, "1110");
+      assert.equal(result.foundPort, "9999");
+      assert.equal(result.expectedHost, "127.0.0.1");
+      assert.equal(result.foundHost, "127.0.0.1");
+    }
+  });
+});
+
+test("isAgentDeckMcpRegistered: stdio without mcp-launch args is not registered", () => {
+  const configPath = writeClaudeMcpFixture({
+    "agent-deck": {
+      type: "stdio",
+      command: "agent-deck",
+      args: ["mcp"],
+      env: { AGENT_DECK_MCP_PORT: "1110", AGENT_DECK_HOST: "127.0.0.1" },
+    },
+  });
+  withClaudeMcpConfig(configPath, () => {
+    assert.equal(isAgentDeckMcpRegistered(), false);
+    assert.equal(checkAgentDeckMcpRegistration().status, "missing");
+  });
 });

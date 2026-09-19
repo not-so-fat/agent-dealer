@@ -185,29 +185,111 @@ export function readClaudeMcpConfigPath(): string {
   return process.env.CLAUDE_MCP_CONFIG ?? path.join(process.env.HOME ?? "", ".claude.json");
 }
 
-export function isAgentDeckMcpRegistered(): boolean {
+type ClaudeMcpServerEntry = {
+  url?: string;
+  type?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+};
+
+/** Outcome of probing Claude's Agent Deck MCP registration (HTTP url or stdio mcp-launch). */
+export type AgentDeckMcpRegistration =
+  | { status: "registered" }
+  | { status: "missing" }
+  | {
+      status: "endpoint_mismatch";
+      expectedHost: string;
+      expectedPort: string;
+      foundHost: string;
+      foundPort: string;
+    };
+
+function expectedAgentDeckMcpEndpoint(): { hostname: string; port: string } {
+  const expected = new URL(getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "") + "/mcp");
+  const port = expected.port || (expected.protocol === "https:" ? "443" : "80");
+  return { hostname: expected.hostname, port };
+}
+
+function isAgentDeckMcpServerName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower.includes("agent-deck") || name === "agent-deck";
+}
+
+/** Basename of `agent-deck` (PATH lookup or absolute install path). */
+function commandInvokesAgentDeck(command: string | undefined): boolean {
+  if (!command?.trim()) return false;
+  const base = path.basename(command.trim()).replace(/\.(cmd|exe|bat)$/i, "");
+  return base === "agent-deck";
+}
+
+function argsIncludeMcpLaunch(args: unknown): boolean {
+  return Array.isArray(args) && args.some((a) => a === "mcp-launch");
+}
+
+/**
+ * Classify Claude MCP config for Agent Deck.
+ * Accepts legacy HTTP `url` entries and current `agent-deck mcp-launch` stdio + env ports
+ * from `agent-deck setup --client claude`.
+ */
+export function checkAgentDeckMcpRegistration(): AgentDeckMcpRegistration {
   try {
     const configPath = readClaudeMcpConfigPath();
-    if (!fs.existsSync(configPath)) return false;
+    if (!fs.existsSync(configPath)) return { status: "missing" };
     const raw = fs.readFileSync(configPath, "utf8");
-    const config = JSON.parse(raw) as {
-      mcpServers?: Record<string, { url?: string }>;
-    };
-    const expected = new URL(getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "") + "/mcp");
+    const config = JSON.parse(raw) as { mcpServers?: Record<string, ClaudeMcpServerEntry> };
+    const expected = expectedAgentDeckMcpEndpoint();
+    let mismatch: Extract<AgentDeckMcpRegistration, { status: "endpoint_mismatch" }> | null = null;
+
     for (const [name, server] of Object.entries(config.mcpServers ?? {})) {
-      if (!name.toLowerCase().includes("agent-deck") && name !== "agent-deck") continue;
-      if (!server.url) continue;
-      try {
-        const u = new URL(server.url);
-        if (u.hostname === expected.hostname && u.port === expected.port) return true;
-      } catch {
-        // skip invalid url
+      if (!isAgentDeckMcpServerName(name)) continue;
+
+      if (server.url) {
+        try {
+          const u = new URL(server.url);
+          const foundPort = u.port || (u.protocol === "https:" ? "443" : "80");
+          if (u.hostname === expected.hostname && foundPort === expected.port) {
+            return { status: "registered" };
+          }
+          mismatch = {
+            status: "endpoint_mismatch",
+            expectedHost: expected.hostname,
+            expectedPort: expected.port,
+            foundHost: u.hostname,
+            foundPort,
+          };
+        } catch {
+          // skip invalid url
+        }
+        continue;
+      }
+
+      // Current Claude setup: stdio `agent-deck mcp-launch` with AGENT_DECK_* env.
+      if (commandInvokesAgentDeck(server.command) && argsIncludeMcpLaunch(server.args)) {
+        const foundHost = server.env?.AGENT_DECK_HOST?.trim() || "127.0.0.1";
+        const foundPort = server.env?.AGENT_DECK_MCP_PORT?.trim() ?? "";
+        if (foundHost === expected.hostname && foundPort === expected.port) {
+          return { status: "registered" };
+        }
+        mismatch = {
+          status: "endpoint_mismatch",
+          expectedHost: expected.hostname,
+          expectedPort: expected.port,
+          foundHost,
+          foundPort: foundPort || "(missing)",
+        };
       }
     }
-    return false;
+
+    if (mismatch) return mismatch;
+    return { status: "missing" };
   } catch {
-    return false;
+    return { status: "missing" };
   }
+}
+
+export function isAgentDeckMcpRegistered(): boolean {
+  return checkAgentDeckMcpRegistration().status === "registered";
 }
 
 export type CallServiceToolPayload = {
