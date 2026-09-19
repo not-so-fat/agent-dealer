@@ -22,6 +22,7 @@ test("data-model, PRD, and README link to the canonical contract", () => {
   for (const [file, link] of [
     ["docs/DATA_MODEL.md", "](EXECUTION_ANALYSIS.md)"],
     ["docs/PRD_ISSUE_COORDINATION.md", "](EXECUTION_ANALYSIS.md)"],
+    ["docs/2026-09-10-issue-centric-coordination-design.md", "](EXECUTION_ANALYSIS.md)"],
     ["README.md", "](docs/EXECUTION_ANALYSIS.md)"],
   ] as const) {
     assert.ok(read(file).includes(link), `${file} must link to ${CANONICAL}`);
@@ -135,4 +136,17 @@ test("process_started_at is process-identity evidence, not a runtime boundary", 
   assert.doesNotMatch(doc, /Possible proxy: `worker_sessions\.process_started_at`/);
   // Attempt runtime and agent_process are unavailable today.
   assert.match(doc, /Today `unavailable`, reason `no_defensible_boundary`, for `agent\.started`/);
+});
+
+test("the accepted architecture doc defers execution metrics to the contract", () => {
+  const doc = read("docs/2026-09-10-issue-centric-coordination-design.md");
+  assert.doesNotMatch(doc, /session duration and cost are computed from `usage_events`/i);
+  assert.doesNotMatch(doc, /Stage duration is reconstructed from transition-event timestamps/);
+  assert.doesNotMatch(doc, /Human wait is the union of intervals/);
+});
+
+test("the contract distinguishes the queue removal paths for wait_reason clearing", () => {
+  const doc = read(CANONICAL);
+  assert.ok(doc.includes("markQueueEntryRemoved"));
+  assert.ok(doc.includes("dequeueIssue"));
 });
