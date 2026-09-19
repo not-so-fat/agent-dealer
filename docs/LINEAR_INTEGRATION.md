@@ -160,7 +160,7 @@ $AGENT_DEALER_HOME/logs/linear-usage.jsonl
 (e.g. `~/.agent-dealer/logs/linear-usage.jsonl` in production). Review later with:
 
 ```bash
-jq -s 'group_by(.op) | map({op: .[0].op, n: length})' ~/.agent-dealer/logs/linear-usage.jsonl
+jq -s 'map(select(.kind=="call")) | group_by(.op) | map({op: .[0].op, n: length})' ~/.agent-dealer/logs/linear-usage.jsonl
 # remaining over time:
 jq -r 'select(.kind=="call") | [.ts, .op, .requestsRemaining] | @tsv' ~/.agent-dealer/logs/linear-usage.jsonl
 ```
