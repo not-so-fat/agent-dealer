@@ -36,29 +36,86 @@ function capHealthIssues(runtime: Runtime): AgentHealthIssue[] {
 }
 
 const RUNTIME_CACHE_MS = 60_000;
-const runtimeIssueCache = new Map<Runtime, { at: number; issues: AgentHealthIssue[] }>();
+/** Soft probe failures must not stick for the full health TTL — sleep/wake flakes recover on the next tick. */
+const SOFT_PROBE_CACHE_MS = 15_000;
+const DEFAULT_PROBE_TIMEOUT_MS = 8000;
+/** After the first soft fail, retry with these delays before publishing unconfirmed auth. */
+const DEFAULT_SOFT_RETRY_BACKOFFS_MS = [250, 750];
+/** Require this many consecutive soft-fail rounds (each round already retried) before flipping healthy→unhealthy. */
+const SOFT_FAIL_STREAK_TO_UNHEALTHY = 2;
+/** Hold a recent healthy result across a single soft-fail streak after host sleep. */
+const HEALTHY_GRACE_MS = 5 * 60_000;
+
+type CommandResult = { ok: boolean; output: string; timedOut: boolean };
+
+type CachedRuntimeIssues = {
+  at: number;
+  issues: AgentHealthIssue[];
+  softProbeFailure: boolean;
+};
+
+const runtimeIssueCache = new Map<Runtime, CachedRuntimeIssues>();
 let githubIssueCache: { at: number; issues: AgentHealthIssue[] } | null = null;
 
-/** Exported for tests — clears the shared github + runtime health caches. */
-export function clearAgentHealthCaches(): void {
-  runtimeIssueCache.clear();
-  githubIssueCache = null;
+/** Cursor soft-fail streak across health ticks (NOT-157). Reset on hard auth or success. */
+let cursorSoftFailStreak = 0;
+let cursorLastHealthyAt: number | null = null;
+
+let probeTimeoutMsForTests: number | null = null;
+let softRetryBackoffsMsForTests: number[] | null = null;
+
+/**
+ * Shorten probe timeout / retry backoff in unit tests so sleep-stub scenarios stay fast.
+ * Pass `null` to restore production defaults.
+ */
+export function setCursorProbeTimingForTests(
+  opts: { timeoutMs?: number | null; retryBackoffsMs?: number[] | null } | null
+): void {
+  if (opts == null) {
+    probeTimeoutMsForTests = null;
+    softRetryBackoffsMsForTests = null;
+    return;
+  }
+  probeTimeoutMsForTests = opts.timeoutMs === undefined ? probeTimeoutMsForTests : opts.timeoutMs;
+  softRetryBackoffsMsForTests =
+    opts.retryBackoffsMs === undefined ? softRetryBackoffsMsForTests : opts.retryBackoffsMs;
 }
 
-function runCommand(
+function probeTimeoutMs(): number {
+  return probeTimeoutMsForTests ?? DEFAULT_PROBE_TIMEOUT_MS;
+}
+
+function softRetryBackoffsMs(): number[] {
+  return softRetryBackoffsMsForTests ?? DEFAULT_SOFT_RETRY_BACKOFFS_MS;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type RunCommandFn = (cmd: string, args: string[], timeoutMs?: number) => Promise<CommandResult>;
+
+function defaultRunCommand(
   cmd: string,
   args: string[],
-  timeoutMs = 8000
-): Promise<{ ok: boolean; output: string }> {
+  timeoutMs = DEFAULT_PROBE_TIMEOUT_MS
+): Promise<CommandResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       stdio: ["ignore", "pipe", "pipe"],
       env: process.env,
     });
     let output = "";
+    let settled = false;
+    const finish = (result: CommandResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      resolve({ ok: false, output: output || "timeout" });
+      finish({ ok: false, output: output || "timeout", timedOut: true });
     }, timeoutMs);
 
     child.stdout?.on("data", (d) => {
@@ -68,14 +125,127 @@ function runCommand(
       output += d.toString();
     });
     child.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({ ok: false, output: err.message });
+      finish({ ok: false, output: err.message, timedOut: false });
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ ok: code === 0, output });
+      finish({ ok: code === 0, output, timedOut: false });
     });
   });
+}
+
+let runCommandImpl: RunCommandFn = defaultRunCommand;
+
+/**
+ * Replace the process spawner in unit tests (sequence injection for soft-fail / timeout).
+ * Pass `null` to restore the real spawner.
+ */
+export function setRunCommandForTests(fn: RunCommandFn | null): void {
+  runCommandImpl = fn ?? defaultRunCommand;
+}
+
+function runCommand(
+  cmd: string,
+  args: string[],
+  timeoutMs = DEFAULT_PROBE_TIMEOUT_MS
+): Promise<CommandResult> {
+  return runCommandImpl(cmd, args, timeoutMs);
+}
+
+/** Exported for tests — clears the shared github + runtime health caches and soft-fail streak. */
+export function clearAgentHealthCaches(): void {
+  runtimeIssueCache.clear();
+  githubIssueCache = null;
+  cursorSoftFailStreak = 0;
+  cursorLastHealthyAt = null;
+}
+
+function isSoftCursorProbeIssue(issue: AgentHealthIssue): boolean {
+  return (
+    issue.code === "runtime_auth" &&
+    (/probe timed out/i.test(issue.message) || /probe failed/i.test(issue.message))
+  );
+}
+
+function softCursorProbeIssue(result: CommandResult): AgentHealthIssue {
+  if (result.timedOut || result.output.trim() === "timeout") {
+    return {
+      code: "runtime_auth",
+      message: "Could not confirm Cursor auth — `cursor-agent status` probe timed out",
+    };
+  }
+  const detail = result.output.trim().split("\n").slice(-1)[0] ?? "no output";
+  return {
+    code: "runtime_auth",
+    message: `Could not confirm Cursor auth — \`cursor-agent status\` probe failed (${detail})`,
+  };
+}
+
+/**
+ * NOT-157: classified logged-out / keychain is a hard fail (immediate). Probe timeout /
+ * unclassified non-zero exit is soft — retry with backoff, and do not flip a recent healthy
+ * result on a single soft-fail streak after host sleep.
+ */
+async function cursorRuntimeIssues(): Promise<AgentHealthIssue[]> {
+  const backoffs = softRetryBackoffsMs();
+  const attempts = 1 + backoffs.length;
+  let last: CommandResult = { ok: false, output: "no probe", timedOut: false };
+
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await sleep(backoffs[i - 1]!);
+    last = await runCommand(resolveCursorBin(), cursorInvokeArgs(["status"]), probeTimeoutMs());
+
+    // A failed *spawn* resolves with the error message as its output (`spawn cursor-agent
+    // ENOENT`), not with empty output — so an absent binary must be recognised here or it
+    // falls through to the unconfirmed-auth branch below and names the wrong remedy.
+    if (!last.ok && (/\bENOENT\b/.test(last.output) || (!last.output.trim() && !cursorBinExists()))) {
+      cursorSoftFailStreak = 0;
+      cursorLastHealthyAt = null;
+      return [
+        {
+          code: "cli_missing",
+          message: "cursor-agent not found — run: curl https://cursor.com/install -fsS | bash",
+        },
+      ];
+    }
+
+    const authIssue = cursorAuthIssueFromOutput(last.output);
+    if (authIssue) {
+      cursorSoftFailStreak = 0;
+      cursorLastHealthyAt = null;
+      console.warn(
+        `[agent-health] cursor-agent status: classified auth failure (${authIssue.code})`
+      );
+      return [authIssue];
+    }
+
+    if (last.ok) {
+      cursorSoftFailStreak = 0;
+      cursorLastHealthyAt = Date.now();
+      return [];
+    }
+
+    // Soft fail this attempt — try again before publishing.
+    const kind = last.timedOut || last.output.trim() === "timeout" ? "timed out" : "failed";
+    console.warn(
+      `[agent-health] cursor-agent status probe ${kind} (attempt ${i + 1}/${attempts})`
+    );
+  }
+
+  // Retries exhausted with only soft failures.
+  cursorSoftFailStreak += 1;
+  const softIssue = softCursorProbeIssue(last);
+  const kind = last.timedOut || last.output.trim() === "timeout" ? "timed out" : "failed";
+  console.warn(
+    `[agent-health] cursor-agent status probe ${kind} after retries (streak=${cursorSoftFailStreak})`
+  );
+
+  const withinGrace =
+    cursorLastHealthyAt != null && Date.now() - cursorLastHealthyAt < HEALTHY_GRACE_MS;
+  if (withinGrace && cursorSoftFailStreak < SOFT_FAIL_STREAK_TO_UNHEALTHY) {
+    // Hold the recent healthy result — one post-sleep timeout must not park the queue.
+    return [];
+  }
+  return [softIssue];
 }
 
 /** Exported for direct testing — bypasses the 60s cache in runtimeIssues(). */
@@ -133,34 +303,10 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
     return issues;
   }
 
-  const status = await runCommand(resolveCursorBin(), cursorInvokeArgs(["status"]));
-  // A failed *spawn* resolves with the error message as its output (`spawn cursor-agent
-  // ENOENT`), not with empty output — so an absent binary must be recognised here or it
-  // falls through to the unconfirmed-auth branch below and names the wrong remedy.
-  if (!status.ok && (/\bENOENT\b/.test(status.output) || (!status.output.trim() && !cursorBinExists()))) {
-    issues.push({ code: "cli_missing", message: "cursor-agent not found — run: curl https://cursor.com/install -fsS | bash" });
-    return issues;
-  }
-  const authIssue = cursorAuthIssueFromOutput(status.output);
-  if (authIssue) {
-    issues.push(authIssue);
-    return issues;
-  }
-  // NOT-133: an unclassified *failure* of the probe itself (non-zero exit, timeout) used to
-  // be read as "healthy" and admitted the agent. Silence is not evidence of auth, so this
-  // fails closed: the agent stays unhealthy — and its issues stay queued — until the probe
-  // succeeds. That is a deliberate trade against the incident, where admitting on a guess
-  // cost 12 dead sessions and parked three issues on a human. Reported as runtime_auth so
-  // the existing agents-page CLI status renders it, with a message that says plainly the
-  // state is unconfirmed rather than asserting the agent is logged out.
-  if (!status.ok) {
-    const detail = status.output.trim().split("\n").slice(-1)[0] ?? "no output";
-    issues.push({
-      code: "runtime_auth",
-      message: `Could not confirm Cursor auth — \`cursor-agent status\` failed (${detail})`,
-    });
-  }
-  return issues;
+  // NOT-157: Cursor auth probe distinguishes hard (classified logged-out / keychain) from
+  // soft (timeout / unclassified probe flake). Soft path retries with backoff and holds a
+  // recent healthy result across a single post-sleep streak.
+  return cursorRuntimeIssues();
 }
 
 /**
@@ -269,12 +415,18 @@ async function githubIssues(): Promise<AgentHealthIssue[]> {
 async function runtimeIssues(runtime: Runtime): Promise<AgentHealthIssue[]> {
   const capIssues = capHealthIssues(runtime);
   const cached = runtimeIssueCache.get(runtime);
-  if (cached && Date.now() - cached.at < RUNTIME_CACHE_MS) {
+  const ttl = cached?.softProbeFailure ? SOFT_PROBE_CACHE_MS : RUNTIME_CACHE_MS;
+  if (cached && Date.now() - cached.at < ttl) {
     return [...capIssues, ...cached.issues];
   }
   const issues = await runtimeIssuesUncached(runtime);
   const nonCap = issues.filter((i) => i.code !== "usage_capped");
-  runtimeIssueCache.set(runtime, { at: Date.now(), issues: nonCap });
+  // Soft fail (published or grace-held) uses a short TTL so a wake retry can clear quickly;
+  // a sticky 60s cache of "Could not confirm" is what parked the queue after sleep (NOT-157).
+  const softProbeFailure =
+    nonCap.some(isSoftCursorProbeIssue) ||
+    (runtime === "cursor_local" && cursorSoftFailStreak > 0);
+  runtimeIssueCache.set(runtime, { at: Date.now(), issues: nonCap, softProbeFailure });
   return [...capIssues, ...nonCap];
 }
 
