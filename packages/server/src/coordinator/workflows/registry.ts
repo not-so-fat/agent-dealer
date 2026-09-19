@@ -22,9 +22,3 @@ export function getWorkflow(version: string): WorkflowTemplate {
 export function listWorkflows(): WorkflowTemplate[] {
   return [...registry.values()];
 }
-
-/** Test hook — clears registered templates. Callers that share the process with
- * coordinator start-path tests must re-register builtins afterward. */
-export function resetWorkflows(): void {
-  registry.clear();
-}
