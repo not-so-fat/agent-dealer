@@ -2,6 +2,9 @@
 //
 // Shared Linear GraphQL POST helper (NOT-152): log HTTP failures with rate-limit
 // headers, and surface a structured error so NOT-104 can back off until reset.
+//
+// NOT-159: always-on per-operation success/error counters + last rate-limit headers,
+// so a burn to requests-remaining=0 is diagnosable without enabling per-call trace.
 
 export const LINEAR_API = "https://api.linear.app/graphql";
 
@@ -9,6 +12,9 @@ const BODY_SNIPPET_MAX = 300;
 
 /** Bounded default when Linear returns 429 without a usable reset / Retry-After. */
 export const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60_000;
+
+/** How often to emit a `[linear-usage]` summary when traffic > 0 since the last line. */
+export const LINEAR_USAGE_SUMMARY_INTERVAL_MS = 60_000;
 
 export type LinearRateLimitHeaders = {
   requestsLimit?: string;
@@ -140,6 +146,154 @@ export type LinearGraphqlRequestOpts = {
   timeoutMs?: number;
 };
 
+// --- NOT-159: process-lifetime usage accounting ---------------------------------
+
+export type LinearOpCounts = { ok: number; error: number };
+
+export type LinearUsageSnapshot = {
+  /** ISO time when counters started (process boot / last test reset). */
+  since: string;
+  totalOk: number;
+  totalError: number;
+  byOperation: Record<string, LinearOpCounts>;
+  /** Last observed rate-limit headers from any response (success or failure). */
+  lastRateLimit: LinearRateLimitHeaders | null;
+  lastOperation: string | null;
+  lastAt: string | null;
+};
+
+type OpBucket = { ok: number; error: number };
+
+let usageSinceMs = Date.now();
+const usageByOp = new Map<string, OpBucket>();
+let lastRateLimit: LinearRateLimitHeaders | null = null;
+let lastOperation: string | null = null;
+let lastAtMs: number | null = null;
+let usageSummaryTimer: ReturnType<typeof setInterval> | null = null;
+let loggedTotalAtLastSummary = 0;
+
+function bumpUsage(operation: string, kind: "ok" | "error", rateLimit?: LinearRateLimitHeaders): void {
+  let bucket = usageByOp.get(operation);
+  if (!bucket) {
+    bucket = { ok: 0, error: 0 };
+    usageByOp.set(operation, bucket);
+  }
+  bucket[kind] += 1;
+  lastOperation = operation;
+  lastAtMs = Date.now();
+  if (rateLimit) lastRateLimit = { ...rateLimit };
+  ensureUsageSummaryTimer();
+}
+
+function usageTotals(): { ok: number; error: number } {
+  let ok = 0;
+  let error = 0;
+  for (const b of usageByOp.values()) {
+    ok += b.ok;
+    error += b.error;
+  }
+  return { ok, error };
+}
+
+/** Process-lifetime counters for every GraphQL op that went through {@link linearGraphqlRequest}. */
+export function getLinearUsageSnapshot(): LinearUsageSnapshot {
+  const byOperation: Record<string, LinearOpCounts> = {};
+  for (const [op, b] of [...usageByOp.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    byOperation[op] = { ok: b.ok, error: b.error };
+  }
+  const totals = usageTotals();
+  return {
+    since: new Date(usageSinceMs).toISOString(),
+    totalOk: totals.ok,
+    totalError: totals.error,
+    byOperation,
+    lastRateLimit: lastRateLimit ? { ...lastRateLimit } : null,
+    lastOperation,
+    lastAt: lastAtMs != null ? new Date(lastAtMs).toISOString() : null,
+  };
+}
+
+export function resetLinearUsageForTests(): void {
+  usageByOp.clear();
+  lastRateLimit = null;
+  lastOperation = null;
+  lastAtMs = null;
+  usageSinceMs = Date.now();
+  loggedTotalAtLastSummary = 0;
+  stopLinearUsageSummary();
+}
+
+function formatUsageSummaryLine(): string {
+  const snap = getLinearUsageSnapshot();
+  const parts = Object.entries(snap.byOperation).map(
+    ([op, c]) => `${op}:${c.ok}/${c.error}`
+  );
+  const rl = snap.lastRateLimit;
+  const bits = [
+    "[linear-usage]",
+    `ok=${snap.totalOk}`,
+    `error=${snap.totalError}`,
+    parts.length ? `ops=${parts.join(",")}` : null,
+    rl?.requestsRemaining != null ? `requests-remaining=${rl.requestsRemaining}` : null,
+    rl?.requestsLimit != null ? `requests-limit=${rl.requestsLimit}` : null,
+    rl?.requestsReset != null ? `requests-reset=${rl.requestsReset}` : null,
+    snap.lastOperation ? `last=${snap.lastOperation}` : null,
+  ].filter(Boolean);
+  return bits.join(" ");
+}
+
+function maybeLogUsageSummary(): void {
+  const totals = usageTotals();
+  const total = totals.ok + totals.error;
+  if (total <= loggedTotalAtLastSummary) return;
+  loggedTotalAtLastSummary = total;
+  console.error(formatUsageSummaryLine());
+}
+
+function ensureUsageSummaryTimer(): void {
+  if (usageSummaryTimer) return;
+  usageSummaryTimer = setInterval(maybeLogUsageSummary, LINEAR_USAGE_SUMMARY_INTERVAL_MS);
+  // Do not keep the process alive solely for the summary ticker.
+  if (typeof usageSummaryTimer === "object" && "unref" in usageSummaryTimer) {
+    usageSummaryTimer.unref();
+  }
+}
+
+/** Start the once-per-minute summary logger (idempotent). Called from server boot. */
+export function startLinearUsageSummary(): void {
+  ensureUsageSummaryTimer();
+}
+
+export function stopLinearUsageSummary(): void {
+  if (!usageSummaryTimer) return;
+  clearInterval(usageSummaryTimer);
+  usageSummaryTimer = null;
+}
+
+/** Set `AGENT_DEALER_LINEAR_TRACE=1` to log every GraphQL call (success + failure). */
+function linearTraceEnabled(): boolean {
+  const v = process.env.AGENT_DEALER_LINEAR_TRACE?.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
+let linearTraceSeq = 0;
+
+function logLinearTrace(operation: string, status: number, rateLimit: LinearRateLimitHeaders): void {
+  if (!linearTraceEnabled()) return;
+  linearTraceSeq += 1;
+  const bits = [
+    `[linear-trace] #${linearTraceSeq}`,
+    `operation=${operation}`,
+    `status=${status}`,
+    rateLimit.requestsRemaining != null ? `requests-remaining=${rateLimit.requestsRemaining}` : null,
+    rateLimit.requestsLimit != null ? `requests-limit=${rateLimit.requestsLimit}` : null,
+    rateLimit.complexityRemaining != null
+      ? `complexity-remaining=${rateLimit.complexityRemaining}`
+      : null,
+  ].filter(Boolean);
+  console.error(bits.join(" "));
+}
+
 /**
  * POST to Linear GraphQL. On non-OK HTTP (and GraphQL RATELIMITED), logs once and throws
  * {@link LinearHttpError}. Callers keep their own catch for user-facing 502s.
@@ -148,16 +302,23 @@ export async function linearGraphqlRequest(opts: LinearGraphqlRequestOpts): Prom
   const key = process.env.LINEAR_API_KEY;
   if (!key) throw new Error("LINEAR_API_KEY not set");
 
-  const res = await fetch(LINEAR_API, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: key },
-    body: JSON.stringify({ query: opts.query, variables: opts.variables }),
-    ...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
-  });
+  let res: Response;
+  try {
+    res = await fetch(LINEAR_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: key },
+      body: JSON.stringify({ query: opts.query, variables: opts.variables }),
+      ...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
+    });
+  } catch (err) {
+    bumpUsage(opts.operation, "error");
+    throw err;
+  }
 
   const rateLimit = parseLinearRateLimitHeaders(
     res.headers instanceof Headers ? res.headers : new Headers()
   );
+  logLinearTrace(opts.operation, res.status, rateLimit);
   const rawBody =
     typeof res.text === "function"
       ? await res.text()
@@ -165,6 +326,7 @@ export async function linearGraphqlRequest(opts: LinearGraphqlRequestOpts): Prom
   const bodySnippet = truncateBody(rawBody);
 
   if (!res.ok) {
+    bumpUsage(opts.operation, "error", rateLimit);
     const err = new LinearHttpError({
       status: res.status,
       operation: opts.operation,
@@ -180,6 +342,7 @@ export async function linearGraphqlRequest(opts: LinearGraphqlRequestOpts): Prom
   try {
     json = JSON.parse(rawBody) as { data?: unknown; errors?: unknown[] };
   } catch {
+    bumpUsage(opts.operation, "error", rateLimit);
     const err = new LinearHttpError({
       status: res.status,
       operation: opts.operation,
@@ -193,6 +356,7 @@ export async function linearGraphqlRequest(opts: LinearGraphqlRequestOpts): Prom
 
   if (json.errors?.length) {
     if (isGraphqlRateLimited(json.errors) || rateLimit.requestsRemaining === "0") {
+      bumpUsage(opts.operation, "error", rateLimit);
       const err = new LinearHttpError({
         status: 429,
         operation: opts.operation,
@@ -203,8 +367,10 @@ export async function linearGraphqlRequest(opts: LinearGraphqlRequestOpts): Prom
       console.error(formatLinearFailureLog(err));
       throw err;
     }
+    bumpUsage(opts.operation, "error", rateLimit);
     throw new Error(JSON.stringify(json.errors));
   }
 
+  bumpUsage(opts.operation, "ok", rateLimit);
   return json.data;
 }
