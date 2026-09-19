@@ -92,3 +92,24 @@ test("the contract states silence cannot drive control-plane behavior", () => {
     assert.ok(doc.includes(word), `silence rule must mention ${word}`);
   }
 });
+
+test("the contract separates immutable evidence from mutable source records", () => {
+  const doc = read(CANONICAL);
+  assert.match(doc, /\*\*Immutable evidence\*\*/);
+  assert.match(doc, /\*\*Mutable source records\*\*/);
+  assert.doesNotMatch(doc, /Raw evidence is append-only/);
+});
+
+test("the contract defines partial-sample quality without a conflicting weakest-input rule", () => {
+  const doc = read(CANONICAL);
+  assert.ok(doc.includes("partial_sample"));
+  assert.match(doc, /Value metrics/);
+  assert.doesNotMatch(doc, /takes the \*\*weakest\*\* input quality/);
+  assert.doesNotMatch(doc, /`quality: inferred`, reason `missing_provider_metadata` \(partial\)/);
+});
+
+test("worker_sessions.completed_at alone is not treated as agent.completed", () => {
+  const doc = read(CANONICAL);
+  assert.match(doc, /`worker_sessions\.completed_at` alone[^|]*`unavailable`/);
+  assert.ok(doc.includes("no_defensible_boundary"));
+});

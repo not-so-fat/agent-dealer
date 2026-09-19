@@ -12,7 +12,11 @@ This document is a contract, not an implementation. Nothing here is emitted toda
 
 ## 1. Principles
 
-- **Raw evidence vs derived views.** Raw evidence is append-only: `workflow_events`, `human_actions`, `queue_entries`, `worker_sessions`, `usage_events`, and the NDJSON logs at `worker_sessions.log_path`. A derived view (phase durations, silence, failure classification, percentiles) is computed from raw evidence, may be recomputed at any time, and never rewrites it. Migrations and backfills do not invent timestamps or mutate evidence rows.
+- **Raw evidence vs derived views.** Raw evidence comes in two kinds, and the difference matters for what history can be recovered:
+  - **Immutable evidence** is written once and never updated: `workflow_events` rows (ordered by `rowid`), `usage_events` rows, and the NDJSON logs at `worker_sessions.log_path`. Boundaries taken from these are stable.
+  - **Mutable source records** are updated in place as state advances: `human_actions` (`resolved_at`, status), `queue_entries` (`state`, and `wait_reason`/`wait_reason_at`, which are overwritten and cleared on admit/remove), and `worker_sessions` (`heartbeat_at`, `completed_at`, process columns). They hold only their *latest* state, so a value read from them is a snapshot: history that was overwritten is not recoverable from them, and a boundary taken from one is a proxy unless the [source matrix](#6-source-matrix) says otherwise.
+
+  A derived view (phase durations, silence, failure classification, percentiles) is computed from raw evidence of either kind, may be recomputed at any time, and never rewrites it. Analysis backfills and migrations do not invent timestamps, and do not mutate or rewrite either kind of evidence; they only produce derived rows/views.
 - **Intervals are half-open `[start, end)` UTC ranges**, in milliseconds since epoch. `end` is exclusive: adjacent intervals `[a, b)` and `[b, c)` do not overlap and their durations sum to `c - a`. A zero-length interval `[t, t)` is empty and contributes 0. An interval whose `end` is not yet known is **open**; a live view may close it at `now`, and must mark it `quality: inferred` with reason `open_interval`. A finished-issue view never closes an open interval at `now`.
 - **Timestamps are ISO-8601 UTC strings** in storage (`ts`, `started_at`, …); parse to epoch ms before any arithmetic. A negative duration (`end < start`, e.g. clock jump) is `unavailable` with reason `negative_duration`, never clamped to 0.
 - **Ordering.** Timestamps have millisecond resolution and collide. Events with equal `ts` are ordered by durable insertion cursor — SQLite `rowid` of `workflow_events` (the same cursor `guidance` windows and `latest-failure` already use) — never by timestamp alone, and never by `id` (a random uuid). Cross-table ordering falls back to `ts`, then to a documented per-table tie-break; where two different tables must be ordered at the same millisecond and no shared cursor exists, the order is `unavailable` reason `unordered_tie`, not guessed.
@@ -58,16 +62,32 @@ quality: "exact" | "inferred" | "unavailable"
 reasons: string[]   // zero or more reason codes
 ```
 
+Quality is defined for two kinds of metric.
+
+**Interval metrics** (durations between two boundaries):
+
 - `exact` — both boundaries come from recorded events of the kinds named in [§2](#2-top-level-wall-clock-phases).
-- `inferred` — derived from existing timestamps/events where both boundaries are defensible but at least one is a proxy (e.g. `worker_sessions.started_at` standing in for `agent.started`, or `now` closing an open interval). Always carries at least one reason code, e.g. `proxy_boundary`, `open_interval`, `backfill`.
-- `unavailable` — a required boundary or input is missing or contradictory. Carries reason codes such as `missing_queue_terminal`, `missing_activity_history`, `missing_provider_metadata`, `missing_log`, `negative_duration`, `unordered_tie`.
+- `inferred` — both boundaries are defensible but at least one is a proxy (e.g. `usage_events.ts` standing in for `agent.completed`, or `now` closing an open interval). Always carries at least one reason code, e.g. `proxy_boundary`, `open_interval`, `backfill`.
+- `unavailable` — a required boundary is missing, contradictory, or only available from a source that cannot defensibly stand in for it. Carries reason codes such as `missing_queue_terminal`, `missing_activity_history`, `missing_log`, `negative_duration`, `unordered_tie`, `no_defensible_boundary`.
+
+**Value metrics** (tokens, cost, and other numbers read directly from a record, not derived from two boundaries):
+
+- `exact` — the value was recorded by the provider/runner for that observation (e.g. `usage_events.cost_usd` non-null from provider evidence).
+- `inferred` — the value was computed from other recorded values by a documented rule (never a price guess; see below). Carries a reason code.
+- `unavailable` — the value is null/absent for that observation. Carries e.g. `missing_provider_metadata`.
+
+**Aggregates over many observations** (totals, and percentiles per [§3](#3-overlap-and-aggregation)). Quality is determined **only by the known inputs that were included**, and completeness is reported separately as counts, never folded into the quality label:
+
+- Sum/percentile over the known observations takes the **weakest quality among those known observations** (`exact` if all included are `exact`, `inferred` if any is `inferred`), with their reason codes unioned. Unknown (`unavailable`) observations are excluded and do not downgrade it.
+- Every aggregate also carries `known` and `total` sample counts. When `known < total`, it adds the reason code `partial_sample`. `partial_sample` is a completeness flag, not a quality tier: `$4.20 over 3 of 5` is `exact` with `partial_sample` if the three known costs are `exact`.
+- `known = 0` → the aggregate is `unavailable` (never `0`), reason `missing_provider_metadata` (or the reason of the missing inputs).
+- Consumers must not present a `partial_sample` aggregate as a complete total or compare it against a complete one without showing `known / total`.
 
 Rules for missing data:
 
 - **Never coerce missing cost, tokens, or duration to zero** for a comparison, ranking, or percentile. A missing value is absent from the sample, not `0`.
-- **Totals are over known values only**, displayed together with `known / total` sample counts (e.g. `$4.20 over 3 of 5 sessions`). A total with `known = 0` is `unavailable`, not `$0`.
+- **Totals are over known values only**, displayed together with `known / total` sample counts (e.g. `$4.20 over 3 of 5 sessions`).
 - **Cursor cost remains `unavailable`** unless the provider supplied cost evidence. There is no price inference from tokens, model, or duration.
-- A metric aggregating mixed-quality inputs takes the **weakest** input quality, and unions their reason codes.
 
 ## 5. Silence taxonomy
 
@@ -96,12 +116,12 @@ State as of this contract. "Derivable today" means computable from existing rows
 | `admission_dependency_wait` | wait-reason history | Only the *latest* `wait_reason` + `wait_reason_at`; overwritten, no history | **Needs new event/schema** |
 | `runtime_health_preflight` | queue-reason + Deck-connect evidence | Latest wait reason only; no Deck-connect timing event | **Needs new event/schema** |
 | `coordinator_setup` start | `worker.started` | `workflow_events` type `worker.started`, recorded before worktree setup | Derivable today |
-| `coordinator_setup` end / `agent_process` start | `agent.started` | Not emitted; `worker_sessions.started_at` and `process_started_at` are proxies | **Needs new event** (proxy → `inferred`) |
-| `agent_process` end | `agent.completed` | Not emitted; `worker_sessions.completed_at` / `usage_events.duration_ms` are proxies | **Needs new event** (proxy → `inferred`) |
+| `coordinator_setup` end / `agent_process` start | `agent.started` | Not emitted. Possible proxies: `worker_sessions.process_started_at` (OS process start time, recorded via `onSpawn`, when non-null), or `usage_events.ts − usage_events.duration_ms` (`duration_ms` is measured from just before spawn). `worker_sessions.started_at` is coordinator session bookkeeping and is **not** a defensible proxy on its own | **Needs new event** (proxy → `inferred`; no proxy → `unavailable`) |
+| `agent_process` end | `agent.completed` | Not emitted. Possible proxy: `usage_events.ts`, written immediately after the CLI exits and before validation/push (`usage_events` is written once per spawn, so this is per spawn); or spawn start + `usage_events.duration_ms`. **`worker_sessions.completed_at` alone is `unavailable` for this boundary**: it is written only after the effect returns and outcome routing has run (`worker.completed`/`worker.failed` emitted), so it includes validation, salvage, push, and PR work and can fall after the terminal event | **Needs new event** (usage proxy → `inferred`; only `completed_at` → `unavailable`, reason `no_defensible_boundary`) |
 | `coordinator_validation_publish` end | `worker.completed` / `worker.failed` | `workflow_events` | Derivable today |
 | `human_wait` | `human_actions.requested_at` / `resolved_at` | Columns exist; `human_action.requested` / `.resolved` events | Derivable today (`exact`) |
 | Issue elapsed | `workflow_instances.started_at` → `completed_at` | Columns exist | Derivable today |
-| Attempt runtime (resource) | `worker_sessions` `started_at`/`completed_at`, `usage_events.duration_ms` | Columns exist; nullable | Derivable today (`inferred`; nulls → `unavailable`) |
+| Attempt runtime (resource) | `usage_events.duration_ms` (spawn wall time) | Column exists; nullable, one row per spawn | Derivable today (`inferred`; null → `unavailable`). `worker_sessions.started_at → completed_at` is session bookkeeping span including coordinator work, not CLI runtime |
 | Tokens / cost | `usage_events.tokens_in/out/cost_usd` | Nullable columns; provider dependent | Derivable where recorded; Cursor cost `unavailable` |
 | `unexplained_silence` | Structured activity timestamps in the runner stream | NDJSON log exists at `log_path`, but no activity-timestamp history is persisted in a queryable form | **Needs new event/schema** |
 | Failure classification | `worker.failed` payload, `error_json`, `exit_code`, runner stderr, `failure-reason` | Free-text reason + runtime auth classification only | **Needs new event/schema** for structured code/domain; partial inference possible |
@@ -139,8 +159,8 @@ confidence:  "high" | "medium" | "low"
 ## 8. Backfill and missing data
 
 - Rows written before instrumentation are derived from **existing timestamps/events only when both boundaries are defensible**, and are labeled `quality: inferred` (reason `backfill`).
-- **`unavailable`** results for: missing queue terminal timestamps, missing activity history, missing provider metadata, absent logs.
-- Migrations **do not invent timestamps** and **do not rewrite append-only evidence**. Backfill produces derived rows/views only.
+- **`unavailable`** results, per observation, for: missing queue terminal timestamps, missing activity history, missing provider metadata, absent logs, and a boundary whose only source is one that cannot defensibly stand in for it (e.g. `worker_sessions.completed_at` alone for `agent.completed`, see [§6](#6-source-matrix)). Aggregates over such observations follow [§4](#4-evidence-quality): the unavailable ones are excluded and counted in `known / total`, and an aggregate with no known observations is itself `unavailable`.
+- Migrations **do not invent timestamps** and **do not rewrite evidence**, whether immutable (`workflow_events`, `usage_events`, logs) or mutable source records (`queue_entries`, `human_actions`, `worker_sessions`) — overwritten history, such as cleared queue wait reasons, stays lost. Backfill produces derived rows/views only.
 - A backfilled metric never upgrades to `exact`; only newly recorded events can be `exact`.
 
 ## 9. Examples
@@ -174,7 +194,8 @@ Structured activity last seen at 10:00:00; next at 10:45:00; the host suspended 
 ### 9.6 Incomplete provider metadata
 
 Five developer sessions; `usage_events` cost known for 3 (`$1.10`, `$0.90`, `$2.20`), tokens known for 4, and 2 Cursor sessions with no cost evidence.
-- Cost total: **$4.20 over 3 of 5 sessions**, `quality: inferred`, reason `missing_provider_metadata` (partial). Not `$4.20 / 5`, and not `$0` for the missing two.
+- Cost total: **$4.20 over 3 of 5 sessions** (`known = 3`, `total = 5`), `quality: exact` (all three known values are provider-recorded), reason `partial_sample`. Not `$4.20 / 5`, and not `$0` for the missing two, which are individually `unavailable` (`missing_provider_metadata`) and simply excluded.
+- Token total: `known = 4`, `total = 5`, same rule.
 - Cost P50 over the 3 known values `[0.90, 1.10, 2.20]`: `rank = ceil(0.5·3) = 2` → `$1.10`, `n = 3`.
 - Cursor cost per session: `unavailable`. No price is inferred from tokens.
 
