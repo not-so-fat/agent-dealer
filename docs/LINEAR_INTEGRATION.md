@@ -148,10 +148,25 @@ curl -s http://127.0.0.1:2222/api/debug/linear-usage | jq
 ```
 
 Fields: `totalOk` / `totalError`, `byOperation` (`ok`/`error` per GraphQL operation name),
-`lastRateLimit` (last observed headers), `since` / `lastAt`. Counters reset on process restart.
+`lastRateLimit` (last observed headers), `since` / `lastAt`, `logPath`. In-memory counters
+reset on process restart; the durable log does not.
+
+Every GraphQL call (and each minute summary / boot) is appended as JSONL to:
+
+```text
+$AGENT_DEALER_HOME/logs/linear-usage.jsonl
+```
+
+(e.g. `~/.agent-dealer/logs/linear-usage.jsonl` in production). Review later with:
+
+```bash
+jq -s 'group_by(.op) | map({op: .[0].op, n: length})' ~/.agent-dealer/logs/linear-usage.jsonl
+# remaining over time:
+jq -r 'select(.kind=="call") | [.ts, .op, .requestsRemaining] | @tsv' ~/.agent-dealer/logs/linear-usage.jsonl
+```
 
 Server also emits a `[linear-usage]` summary line about once per minute when traffic > 0
-since the previous line. For every call (verbose): `AGENT_DEALER_LINEAR_TRACE=1`.
+since the previous line. For every call on stderr (verbose): `AGENT_DEALER_LINEAR_TRACE=1`.
 
 ## REST API (orchestrator agents)
 

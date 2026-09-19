@@ -6,6 +6,10 @@
 // NOT-159: always-on per-operation success/error counters + last rate-limit headers,
 // so a burn to requests-remaining=0 is diagnosable without enabling per-call trace.
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 export const LINEAR_API = "https://api.linear.app/graphql";
 
 const BODY_SNIPPET_MAX = 300;
@@ -160,6 +164,8 @@ export type LinearUsageSnapshot = {
   lastRateLimit: LinearRateLimitHeaders | null;
   lastOperation: string | null;
   lastAt: string | null;
+  /** Append-only JSONL path under AGENT_DEALER_HOME (survives restarts). */
+  logPath: string;
 };
 
 type OpBucket = { ok: number; error: number };
@@ -171,6 +177,30 @@ let lastOperation: string | null = null;
 let lastAtMs: number | null = null;
 let usageSummaryTimer: ReturnType<typeof setInterval> | null = null;
 let loggedTotalAtLastSummary = 0;
+/** Tests redirect the durable log; null = default under AGENT_DEALER_HOME/logs. */
+let usageLogPathOverride: string | null = null;
+
+/** `$AGENT_DEALER_HOME/logs/linear-usage.jsonl` — one line per call + minute summaries. */
+export function getLinearUsageLogPath(): string {
+  if (usageLogPathOverride) return usageLogPathOverride;
+  const home = process.env.AGENT_DEALER_HOME ?? path.join(os.homedir(), ".agent-dealer");
+  return path.join(home, "logs", "linear-usage.jsonl");
+}
+
+export function setLinearUsageLogPathForTests(p: string | null): void {
+  usageLogPathOverride = p;
+}
+
+function appendUsageLog(record: Record<string, unknown>): void {
+  try {
+    const logPath = getLinearUsageLogPath();
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.appendFileSync(logPath, `${JSON.stringify(record)}\n`);
+  } catch (err) {
+    // Observability must never break Linear calls.
+    console.error("[linear-usage] failed to append log", err);
+  }
+}
 
 function bumpUsage(operation: string, kind: "ok" | "error", rateLimit?: LinearRateLimitHeaders): void {
   let bucket = usageByOp.get(operation);
@@ -182,6 +212,16 @@ function bumpUsage(operation: string, kind: "ok" | "error", rateLimit?: LinearRa
   lastOperation = operation;
   lastAtMs = Date.now();
   if (rateLimit) lastRateLimit = { ...rateLimit };
+  appendUsageLog({
+    ts: new Date(lastAtMs).toISOString(),
+    kind: "call",
+    op: operation,
+    ok: kind === "ok",
+    pid: process.pid,
+    requestsRemaining: rateLimit?.requestsRemaining ?? null,
+    requestsReset: rateLimit?.requestsReset ?? null,
+    requestsLimit: rateLimit?.requestsLimit ?? null,
+  });
   ensureUsageSummaryTimer();
 }
 
@@ -210,6 +250,7 @@ export function getLinearUsageSnapshot(): LinearUsageSnapshot {
     lastRateLimit: lastRateLimit ? { ...lastRateLimit } : null,
     lastOperation,
     lastAt: lastAtMs != null ? new Date(lastAtMs).toISOString() : null,
+    logPath: getLinearUsageLogPath(),
   };
 }
 
@@ -220,6 +261,7 @@ export function resetLinearUsageForTests(): void {
   lastAtMs = null;
   usageSinceMs = Date.now();
   loggedTotalAtLastSummary = 0;
+  usageLogPathOverride = null;
   stopLinearUsageSummary();
 }
 
@@ -248,6 +290,17 @@ function maybeLogUsageSummary(): void {
   if (total <= loggedTotalAtLastSummary) return;
   loggedTotalAtLastSummary = total;
   console.error(formatUsageSummaryLine());
+  const snap = getLinearUsageSnapshot();
+  appendUsageLog({
+    ts: new Date().toISOString(),
+    kind: "summary",
+    pid: process.pid,
+    totalOk: snap.totalOk,
+    totalError: snap.totalError,
+    byOperation: snap.byOperation,
+    requestsRemaining: snap.lastRateLimit?.requestsRemaining ?? null,
+    requestsReset: snap.lastRateLimit?.requestsReset ?? null,
+  });
 }
 
 function ensureUsageSummaryTimer(): void {
@@ -262,6 +315,13 @@ function ensureUsageSummaryTimer(): void {
 /** Start the once-per-minute summary logger (idempotent). Called from server boot. */
 export function startLinearUsageSummary(): void {
   ensureUsageSummaryTimer();
+  appendUsageLog({
+    ts: new Date().toISOString(),
+    kind: "boot",
+    pid: process.pid,
+    since: new Date(usageSinceMs).toISOString(),
+    logPath: getLinearUsageLogPath(),
+  });
 }
 
 export function stopLinearUsageSummary(): void {

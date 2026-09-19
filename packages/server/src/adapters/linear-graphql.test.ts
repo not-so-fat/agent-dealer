@@ -8,10 +8,12 @@ import assert from "node:assert/strict";
 const {
   LinearHttpError,
   computeRetryAfterMs,
+  getLinearUsageLogPath,
   getLinearUsageSnapshot,
   linearGraphqlRequest,
   parseLinearRateLimitHeaders,
   resetLinearUsageForTests,
+  setLinearUsageLogPathForTests,
 } = await import("./linear-graphql.js");
 
 test("parseLinearRateLimitHeaders reads requests + complexity headers", () => {
@@ -118,6 +120,11 @@ test("linearGraphqlRequest logs HTTP status and rate-limit headers on non-OK", a
 test("NOT-159: successful GraphQL increments ok counter and last requests-remaining", async () => {
   process.env.LINEAR_API_KEY = "lin_test";
   resetLinearUsageForTests();
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "lin-usage-")), "linear-usage.jsonl");
+  setLinearUsageLogPathForTests(logPath);
   const fetchMock = mock.method(globalThis, "fetch", async () => {
     return new Response(JSON.stringify({ data: { viewer: { id: "u1" } } }), {
       status: 200,
@@ -142,6 +149,15 @@ test("NOT-159: successful GraphQL increments ok counter and last requests-remain
     assert.equal(usage.lastOperation, "getLinearViewer");
     assert.equal(usage.lastRateLimit?.requestsRemaining, "2497");
     assert.equal(usage.lastRateLimit?.requestsLimit, "2500");
+    assert.equal(usage.logPath, logPath);
+    assert.equal(getLinearUsageLogPath(), logPath);
+    const lines = fs.readFileSync(logPath, "utf8").trim().split("\n");
+    assert.equal(lines.length, 1);
+    const row = JSON.parse(lines[0]!) as { kind: string; op: string; ok: boolean; requestsRemaining: string };
+    assert.equal(row.kind, "call");
+    assert.equal(row.op, "getLinearViewer");
+    assert.equal(row.ok, true);
+    assert.equal(row.requestsRemaining, "2497");
   } finally {
     fetchMock.mock.restore();
     resetLinearUsageForTests();
