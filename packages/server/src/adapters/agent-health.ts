@@ -14,7 +14,13 @@ import {
   resolveCodexBin,
   codexBinExists,
 } from "../cli-env.js";
-import { checkAgentDeckHealth, fetchDecks, isAgentDeckMcpRegistered, type DeckAccessResult } from "./agent-deck.js";
+import {
+  checkAgentDeckHealth,
+  checkAgentDeckMcpRegistration,
+  fetchDecks,
+  type AgentDeckMcpRegistration,
+  type DeckAccessResult,
+} from "./agent-deck.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
 
 const RUNTIME_LABEL: Record<Runtime, string> = {
@@ -430,10 +436,20 @@ async function runtimeIssues(runtime: Runtime): Promise<AgentHealthIssue[]> {
   return [...capIssues, ...nonCap];
 }
 
+function resolveMcpRegistration(
+  mcpRegistered?: boolean | AgentDeckMcpRegistration
+): AgentDeckMcpRegistration {
+  if (mcpRegistered === undefined) return checkAgentDeckMcpRegistration();
+  if (typeof mcpRegistered === "boolean") {
+    return mcpRegistered ? { status: "registered" } : { status: "missing" };
+  }
+  return mcpRegistered;
+}
+
 function agentSpecificIssues(
   agent: AgentProfile,
   agentDeckOnline: boolean,
-  mcpRegistered: boolean,
+  mcpRegistration: AgentDeckMcpRegistration,
   deckAccessResult: DeckAccessResult | null
 ): AgentHealthIssue[] {
   const issues: AgentHealthIssue[] = [];
@@ -461,11 +477,18 @@ function agentSpecificIssues(
       });
     }
   }
-  if (agent.runtime === "claude_code" && agentDeckOnline && !mcpRegistered) {
-    issues.push({
-      code: "mcp_not_registered",
-      message: "Run agent-deck setup --client claude --start (Claude MCP not registered)",
-    });
+  if (agent.runtime === "claude_code" && agentDeckOnline) {
+    if (mcpRegistration.status === "endpoint_mismatch") {
+      issues.push({
+        code: "mcp_not_registered",
+        message: `Claude MCP points at ${mcpRegistration.foundHost}:${mcpRegistration.foundPort}, expected ${mcpRegistration.expectedHost}:${mcpRegistration.expectedPort} — update AGENT_DECK_HOST/AGENT_DECK_MCP_PORT (or the HTTP url) in Claude MCP config`,
+      });
+    } else if (mcpRegistration.status === "missing") {
+      issues.push({
+        code: "mcp_not_registered",
+        message: "Run agent-deck setup --client claude --start (Claude MCP not registered)",
+      });
+    }
   }
   return issues;
 }
@@ -474,7 +497,7 @@ export async function healthForAgent(
   agent: AgentProfile,
   agentDeckOnline: boolean,
   runtimeIssuesByRuntime?: Map<Runtime, AgentHealthIssue[]>,
-  mcpRegistered?: boolean,
+  mcpRegistered?: boolean | AgentDeckMcpRegistration,
   deckAccessResult: DeckAccessResult | null = null,
   githubIssuesList?: AgentHealthIssue[]
 ): Promise<AgentWithHealth> {
@@ -482,12 +505,12 @@ export async function healthForAgent(
     runtimeIssuesByRuntime !== undefined
       ? (runtimeIssuesByRuntime.get(agent.runtime) ?? [])
       : await runtimeIssues(agent.runtime);
-  const deckMcpOk = mcpRegistered ?? isAgentDeckMcpRegistered();
+  const mcpRegistration = resolveMcpRegistration(mcpRegistered);
   const github = githubIssuesList ?? (await githubIssues());
   const issues: AgentHealthIssue[] = [
     ...runtime,
     ...github,
-    ...agentSpecificIssues(agent, agentDeckOnline, deckMcpOk, deckAccessResult),
+    ...agentSpecificIssues(agent, agentDeckOnline, mcpRegistration, deckAccessResult),
   ];
   return {
     ...agent,
@@ -498,7 +521,7 @@ export async function healthForAgent(
 
 export async function listAgentsWithHealth(agents: AgentProfile[]): Promise<AgentWithHealth[]> {
   const agentDeckOnline = await checkAgentDeckHealth();
-  const mcpRegistered = isAgentDeckMcpRegistered();
+  const mcpRegistration = checkAgentDeckMcpRegistration();
   const needsDeckAccess = agents.some((a) => a.deckId);
   const deckAccessResult = agentDeckOnline && needsDeckAccess ? await fetchDecks() : null;
   const runtimes = [...new Set(agents.map((a) => a.runtime))];
@@ -517,7 +540,7 @@ export async function listAgentsWithHealth(agents: AgentProfile[]): Promise<Agen
         a,
         agentDeckOnline,
         runtimeIssuesByRuntime,
-        mcpRegistered,
+        mcpRegistration,
         deckAccessResult,
         githubIssuesList
       )

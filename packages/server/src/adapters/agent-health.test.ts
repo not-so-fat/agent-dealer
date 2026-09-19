@@ -437,4 +437,31 @@ test("NOT-157: verbatim logged-out capture still blocks immediately (hard fail)"
   }
 });
 
+test("claude MCP endpoint mismatch surfaces a distinct message, not the generic setup hint", async () => {
+  const agent = createAgent({
+    name: "claude-mcp-mismatch",
+    runtime: "claude_code",
+    deckId: randomUUID(),
+  });
+  const result = await healthForAgent(
+    agent,
+    true,
+    new Map(),
+    {
+      status: "endpoint_mismatch",
+      expectedHost: "127.0.0.1",
+      expectedPort: "1110",
+      foundHost: "127.0.0.1",
+      foundPort: "9999",
+    },
+    null,
+    NO_GITHUB
+  );
+  const issue = result.issues.find((i) => i.code === "mcp_not_registered");
+  assert.ok(issue, "expected mcp_not_registered");
+  assert.match(issue!.message, /points at 127\.0\.0\.1:9999/);
+  assert.match(issue!.message, /expected 127\.0\.0\.1:1110/);
+  assert.equal(issue!.message.includes("Run agent-deck setup"), false);
+});
+
 }); // describe agent-health (serial)
