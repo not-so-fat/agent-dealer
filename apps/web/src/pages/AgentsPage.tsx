@@ -148,7 +148,10 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
       </div>
 
       <div className="space-y-3 mb-6">
-        {agents.map((agent) => (
+        {agents.map((agent) => {
+          // Show the effective model (incl. pre-NOT-71 legacy columns), same as the edit form.
+          const effectiveModel = resolveProfileModel(agent);
+          return (
           <div key={agent.id} className="panel flex flex-col sm:flex-row sm:items-start gap-3 justify-between">
             <div className="flex gap-3 min-w-0 flex-1">
               <AgentRuntimeIcon runtime={agent.runtime} />
@@ -170,9 +173,12 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
                   ) : (
                     <Badge className="bg-white/5 text-white/40 border-white/10 normal-case">No deck</Badge>
                   )}
-                  {agent.defaultModel && (
-                    <Badge className="bg-white/5 text-white/50 border-white/10 normal-case truncate max-w-[10rem]" title={agent.defaultModel}>
-                      {agent.defaultModel}
+                  {effectiveModel && (
+                    <Badge
+                      className="bg-white/5 text-white/50 border-white/10 normal-case truncate max-w-[10rem]"
+                      title={effectiveModel}
+                    >
+                      {effectiveModel}
                     </Badge>
                   )}
                 </div>
@@ -240,7 +246,8 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
               </button>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {showForm ? (
