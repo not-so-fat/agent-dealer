@@ -397,7 +397,10 @@ test("NOT-133: a logged-out Cursor runtime is not admitted; it waits with an aut
   fs.chmodSync(stub, 0o755);
 
   const prev = process.env.CURSOR_CLI;
+  const prevSkipHealth = process.env.AGENT_DEALER_SKIP_AGENT_HEALTH;
   process.env.CURSOR_CLI = stub;
+  // Real classifier path — must not short-circuit via the unit-test skip.
+  delete process.env.AGENT_DEALER_SKIP_AGENT_HEALTH;
   setAdmissionHealthCheckerForTests(null);
   clearAgentHealthCaches();
   try {
@@ -411,15 +414,63 @@ test("NOT-133: a logged-out Cursor runtime is not admitted; it waits with an aut
 
     const entry = getQueuedEntryForIssue(issue.id);
     assert.equal(entry?.state, "queued");
-    assert.match(entry!.waitReason!, /agent unhealthy/);
+    assert.match(entry!.waitReason!, /developer unhealthy/);
     assert.match(entry!.waitReason!, /not authenticated/i);
     assert.match(entry!.waitReason!, /cursor-agent login/);
   } finally {
     if (prev === undefined) delete process.env.CURSOR_CLI;
     else process.env.CURSOR_CLI = prev;
+    if (prevSkipHealth === undefined) delete process.env.AGENT_DEALER_SKIP_AGENT_HEALTH;
+    else process.env.AGENT_DEALER_SKIP_AGENT_HEALTH = prevSkipHealth;
     clearAgentHealthCaches();
     setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
   }
+});
+
+// NOT-156: reviewer health must not block developer admit; developer health still fails closed.
+test("NOT-156: developer healthy + reviewer unhealthy still admits and leases developer work", async () => {
+  const { listWorkItemsForIssue } = await import("../repository/work-items.js");
+  const issue = readyIssue("rev-unhealthy");
+  setAdmissionHealthCheckerForTests(async (_agent, role) => {
+    if (role === "reviewer") {
+      return {
+        ok: false,
+        reason: `reviewer unhealthy: ${_agent.name} — Run agent-deck setup --client claude --start (Claude MCP not registered)`,
+      };
+    }
+    return { ok: true };
+  });
+  enqueueIssue(issue.id);
+
+  const result = await admitNext();
+  assert.equal(result?.issueId, issue.id);
+  assert.equal(getIssue(issue.id)!.status, "developing");
+  assert.ok(getActiveWorkflowInstance(issue.id));
+  const developerItems = listWorkItemsForIssue(issue.id).filter((w) => w.kind === "developer");
+  assert.equal(developerItems.length, 1);
+  assert.equal(developerItems[0]!.status, "pending");
+});
+
+test("NOT-156: developer unhealthy + reviewer healthy parks with a developer-named wait_reason", async () => {
+  const issue = readyIssue("dev-unhealthy");
+  setAdmissionHealthCheckerForTests(async (_agent, role) => {
+    if (role === "developer") {
+      return {
+        ok: false,
+        reason: `developer unhealthy: ${_agent.name} — not authenticated — run cursor-agent login`,
+      };
+    }
+    return { ok: true };
+  });
+  enqueueIssue(issue.id);
+
+  assert.equal(await admitNext(), null);
+  assert.equal(getIssue(issue.id)!.status, "ready");
+  assert.equal(getActiveWorkflowInstance(issue.id), null);
+  const entry = getQueuedEntryForIssue(issue.id)!;
+  assert.equal(entry.state, "queued");
+  assert.match(entry.waitReason ?? "", /developer unhealthy/);
+  assert.doesNotMatch(entry.waitReason ?? "", /reviewer unhealthy/);
 });
 
 // NOT-157: soft probe failure wait_reason must name the probe, not "not authenticated".
@@ -437,7 +488,9 @@ test("NOT-157: soft Cursor probe timeout waits with probe-timeout reason, not lo
   fs.chmodSync(stub, 0o755);
 
   const prev = process.env.CURSOR_CLI;
+  const prevSkipHealth = process.env.AGENT_DEALER_SKIP_AGENT_HEALTH;
   process.env.CURSOR_CLI = stub;
+  delete process.env.AGENT_DEALER_SKIP_AGENT_HEALTH;
   setCursorProbeTimingForTests({ timeoutMs: 150, retryBackoffsMs: [20] });
   setAdmissionHealthCheckerForTests(null);
   clearAgentHealthCaches();
@@ -450,12 +503,14 @@ test("NOT-157: soft Cursor probe timeout waits with probe-timeout reason, not lo
     assert.equal(await admitNext(), null);
     const entry = getQueuedEntryForIssue(issue.id);
     assert.equal(entry?.state, "queued");
-    assert.match(entry!.waitReason!, /agent unhealthy/);
+    assert.match(entry!.waitReason!, /developer unhealthy/);
     assert.match(entry!.waitReason!, /probe timed out/i);
     assert.doesNotMatch(entry!.waitReason!, /not authenticated/i);
   } finally {
     if (prev === undefined) delete process.env.CURSOR_CLI;
     else process.env.CURSOR_CLI = prev;
+    if (prevSkipHealth === undefined) delete process.env.AGENT_DEALER_SKIP_AGENT_HEALTH;
+    else process.env.AGENT_DEALER_SKIP_AGENT_HEALTH = prevSkipHealth;
     setCursorProbeTimingForTests(null);
     clearAgentHealthCaches();
     setAdmissionHealthCheckerForTests(async () => ({ ok: true }));

@@ -107,39 +107,66 @@ export type EligibilityRule = (
   ctx: EligibilityContext
 ) => EligibilityResult | Promise<EligibilityResult>;
 
-export type AgentHealthCheck = (agent: AgentProfile) => Promise<EligibilityResult>;
+export type AgentRole = "developer" | "reviewer";
+
+export type AgentHealthCheck = (
+  agent: AgentProfile,
+  role: AgentRole
+) => Promise<EligibilityResult>;
 
 let healthChecker: AgentHealthCheck | null = null;
 
-/** Tests inject a pure checker so admission does not hit real CLIs. */
+/** Tests inject a pure checker so admission / pre-spawn health do not hit real CLIs. */
 export function setAdmissionHealthCheckerForTests(checker: AgentHealthCheck | null): void {
   healthChecker = checker;
 }
 
-async function defaultAgentHealth(agent: AgentProfile, deckOnline: boolean): Promise<EligibilityResult> {
+async function defaultAgentHealth(
+  agent: AgentProfile,
+  role: AgentRole,
+  deckOnline: boolean
+): Promise<EligibilityResult> {
+  // Unit/CI tests must not call real CLIs / Agent Deck — runners usually have no deck MCP.
+  // Production leaves this unset. NOT-133 clears it so the real auth classifier still runs.
+  if (process.env.AGENT_DEALER_SKIP_AGENT_HEALTH === "1") {
+    return { ok: true };
+  }
   const health = await healthForAgent(agent, deckOnline);
   // usage_capped is owned by runtimeAvailable — keep agentsHealthy for CLI/workspace/deck.
   const nonCap = health.issues.filter((i) => i.code !== "usage_capped");
   if (nonCap.length > 0) {
     return {
       ok: false,
-      reason: `agent unhealthy: ${agent.name} — ${nonCap.map((i) => i.message).join("; ")}`,
+      // NOT-156: name the role so a parked review is not read as a blocked developer admit.
+      reason: `${role} unhealthy: ${agent.name} — ${nonCap.map((i) => i.message).join("; ")}`,
     };
   }
   return { ok: true };
 }
 
+/**
+ * Fail-closed health for one role (NOT-156). Admission checks the role about to start
+ * (developer for `startWorkflowCore`); the worker loop re-checks the leased item's role
+ * before spawn so a later reviewer round parks without burning infra when only the
+ * reviewer is unhealthy.
+ */
+export async function checkRoleAgentHealthy(
+  issue: Issue,
+  role: AgentRole,
+  ctx: Pick<EligibilityContext, "deckOnline">
+): Promise<EligibilityResult> {
+  const agentId = role === "developer" ? issue.developerAgentId : issue.reviewerAgentId;
+  if (!agentId) return { ok: false, reason: `missing ${role} agent` };
+  const agent = getAgent(agentId);
+  if (!agent) return { ok: false, reason: `${role} agent not found` };
+  const check =
+    healthChecker ?? ((a: AgentProfile, r: AgentRole) => defaultAgentHealth(a, r, ctx.deckOnline));
+  return check(agent, role);
+}
+
 async function checkAgentsHealthy(issue: Issue, ctx: EligibilityContext): Promise<EligibilityResult> {
-  const check = healthChecker ?? ((agent: AgentProfile) => defaultAgentHealth(agent, ctx.deckOnline));
-  for (const role of ["developer", "reviewer"] as const) {
-    const agentId = role === "developer" ? issue.developerAgentId : issue.reviewerAgentId;
-    if (!agentId) return { ok: false, reason: `missing ${role} agent` };
-    const agent = getAgent(agentId);
-    if (!agent) return { ok: false, reason: `${role} agent not found` };
-    const result = await check(agent);
-    if (!result.ok) return result;
-  }
-  return { ok: true };
+  // Admit always starts a developer round — do not require reviewer health yet (NOT-156).
+  return checkRoleAgentHealthy(issue, "developer", ctx);
 }
 
 /**
@@ -164,18 +191,18 @@ function issueReadinessRule(issue: Issue): EligibilityResult {
 }
 
 function runtimeAvailableRule(issue: Issue): EligibilityResult {
-  for (const role of ["developer", "reviewer"] as const) {
-    const agentId = role === "developer" ? issue.developerAgentId : issue.reviewerAgentId;
-    if (!agentId) continue;
-    const agent = getAgent(agentId);
-    if (!agent) continue;
-    const avail = runtimeAvailability(agent.runtime);
-    if (!avail.available) {
-      return {
-        ok: false,
-        reason: `runtime capped: ${agent.runtime} until ${avail.until} (${avail.reason})`,
-      };
-    }
+  // NOT-156: only the developer runtime gates admit; reviewer caps are enforced at lease
+  // time in the worker loop (same place as role health for the active work item).
+  const agentId = issue.developerAgentId;
+  if (!agentId) return { ok: true };
+  const agent = getAgent(agentId);
+  if (!agent) return { ok: true };
+  const avail = runtimeAvailability(agent.runtime);
+  if (!avail.available) {
+    return {
+      ok: false,
+      reason: `runtime capped: ${agent.runtime} until ${avail.until} (${avail.reason})`,
+    };
   }
   return { ok: true };
 }
