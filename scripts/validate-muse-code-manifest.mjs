@@ -2,11 +2,16 @@
 // Validates docs/evaluations/muse-code/tasks.json (NOT-176): shape, coverage minimums, and that
 // every pinned commit is real and consistent. Read-only; needs the full commit history.
 //
-//   node scripts/validate-muse-code-manifest.mjs [path/to/tasks.json]
+//   node scripts/validate-muse-code-manifest.mjs [--ready] [path/to/tasks.json]
+//
+// --ready is the pre-run gate: it additionally fails until the operator has confirmed the frozen
+// candidate model against the contributor tier (candidate.confirmation.confirmedAt/confirmedBy).
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 
-const file = process.argv[2] ?? "docs/evaluations/muse-code/tasks.json";
+const args = process.argv.slice(2);
+const ready = args.includes("--ready");
+const file = args.find((a) => !a.startsWith("--")) ?? "docs/evaluations/muse-code/tasks.json";
 const errors = [];
 const fail = (msg) => errors.push(msg);
 
@@ -39,18 +44,38 @@ const str = (v) => typeof v === "string" && v.trim().length > 0;
 for (const side of ["baseline", "candidate"]) {
   if (typeof manifest[side] !== "object" || manifest[side] === null) fail(`missing ${side}`);
 }
-for (const role of ["developer", "reviewer"]) {
-  const b = manifest.baseline?.[role];
-  if (!b || !str(b.runtime) || !("model" in b) || !("effort" in b) || !str(b.pricingBasis)) {
-    fail(`baseline.${role} must name runtime, model, effort and pricingBasis`);
+// Every compared subject is frozen: an explicit runtime, model id, effort, CLI version and invocation.
+// null or a generic description ("current model", CLI default) is a failure, not a valid value.
+const subjects = {
+  "baseline.developer": manifest.baseline?.developer,
+  "baseline.reviewer": manifest.baseline?.reviewer,
+  candidate: manifest.candidate,
+};
+for (const [name, s] of Object.entries(subjects)) {
+  if (!s || !str(s.runtime) || !str(s.model) || !str(s.effort) || !str(s.cliVersion) || !str(s.frozenInvocation) || !str(s.pricingBasis)) {
+    fail(`${name} must freeze non-null runtime, model, effort, cliVersion, frozenInvocation and pricingBasis`);
+    continue;
+  }
+  if (/\b(current|default|latest)\b/i.test(`${s.model} ${s.effort}`) || /\s/.test(s.model)) {
+    fail(`${name}: model/effort must be explicit identifiers, not descriptions (${s.model} / ${s.effort})`);
+  }
+  if (!s.frozenInvocation.includes(s.model) || !s.frozenInvocation.includes(s.effort)) {
+    fail(`${name}: frozenInvocation must pass the frozen model (${s.model}) and effort (${s.effort}) explicitly`);
   }
 }
 const c = manifest.candidate;
-if (!c || c.runtime !== "muse_code" || !str(c.model) || !("effort" in c) || !str(c.pricingBasis)) {
-  fail("candidate must be runtime muse_code with model, effort and pricingBasis");
-}
+if (c?.runtime !== "muse_code") fail("candidate must be runtime muse_code");
 if (c?.privacy?.allowedTaskClassification !== "non_sensitive") {
   fail("candidate.privacy.allowedTaskClassification must be non_sensitive");
+}
+if (ready && (!str(c?.confirmation?.confirmedAt) || !str(c?.confirmation?.confirmedBy))) {
+  fail("--ready: candidate.confirmation.confirmedAt/confirmedBy not set; confirm the frozen model against the contributor tier first");
+}
+
+const loop = manifest.controls?.reviewLoop;
+if (!loop || !Number.isInteger(loop.maxReviewerRounds) || loop.maxReviewerRounds < 2 || !str(loop.protocol) ||
+    !Array.isArray(loop.countedVerdicts) || !loop.countedVerdicts.includes("changes_requested")) {
+  fail("controls.reviewLoop must define maxReviewerRounds (>= 2), countedVerdicts (incl. changes_requested) and protocol");
 }
 
 const tasks = manifest.tasks;
@@ -85,6 +110,35 @@ for (const t of Array.isArray(tasks) ? tasks : []) {
     }
   }
 
+  // Deterministic graders: exploration answers are checked against a structured answerKey and review
+  // results against knownDefects with file + evidence patterns, never against keyword presence.
+  const graderCmds = (cmds ?? []).filter((cmd) => str(cmd.run) && cmd.run.includes("$EVAL_ROOT/scripts/grade-muse-code.mjs"));
+  if (t.category === "repository_exploration") {
+    if (!t.verification?.answerKey || typeof t.verification.answerKey !== "object") fail(`${where}: exploration task needs verification.answerKey`);
+    if (!graderCmds.some((cmd) => cmd.run.includes(` answer ${t.id} `))) fail(`${where}: no structured 'answer' grader command`);
+    if (!t.workerSpec?.description?.includes("exactly one fenced")) fail(`${where}: workerSpec must require the structured JSON answer block`);
+  }
+  if (t.role === "reviewer") {
+    const kd = t.verification?.knownDefects;
+    if (!Array.isArray(kd) || kd.length === 0) fail(`${where}: reviewer task needs structured knownDefects`);
+    for (const d of Array.isArray(kd) ? kd : []) {
+      if (!str(d?.id) || !Array.isArray(d.files) || d.files.length === 0 || !Array.isArray(d.evidence) || d.evidence.length < 2) {
+        fail(`${where}: knownDefect ${d?.id ?? "?"} needs id, files[] and at least two evidence groups`);
+        continue;
+      }
+      for (const f of d.files) if (!gitOk("cat-file", "-e", `${t.startingSha}:${f}`)) fail(`${where}: defect ${d.id} file ${f} does not exist at startingSha`);
+      for (const src of d.evidence.flat()) {
+        try {
+          new RegExp(src, "i");
+        } catch {
+          fail(`${where}: defect ${d.id} has an invalid pattern ${src}`);
+        }
+      }
+    }
+    if (!graderCmds.some((cmd) => cmd.run.includes(` review ${t.id} `))) fail(`${where}: no structured 'review' grader command`);
+    if (t.verification?.expectedShas?.headSha !== t.startingSha) fail(`${where}: expectedShas.headSha must equal startingSha`);
+  }
+
   // Pinned commits are real, and the reference (if any) descends from the starting SHA.
   if (!SHA.test(t.startingSha ?? "")) {
     fail(`${where}: startingSha must be a full 40-hex SHA`);
@@ -107,6 +161,8 @@ for (const t of Array.isArray(tasks) ? tasks : []) {
     fail(`${where}: heldOutPaths requires a referenceSha`);
   }
 }
+
+if (!fs.existsSync("scripts/grade-muse-code.mjs")) fail("scripts/grade-muse-code.mjs is missing");
 
 // Coverage minimums from the NOT-176 contract.
 const list = Array.isArray(tasks) ? tasks : [];

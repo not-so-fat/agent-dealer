@@ -10,17 +10,21 @@
       "agentName": "Claude Dev",
       "agentId": "d353f7bd-654f-4bc8-a567-5cfb81f527aa",
       "runtime": "claude_code",
-      "model": null,
-      "modelResolution": "Profile leaves model unset, so the Claude Code CLI default applies. The exact model id is not fixed by the profile; it MUST be read from the run's stream `system`/init event and recorded per run.",
-      "effort": null,
-      "effortResolution": "Profile leaves effort unset (no --effort flag); Claude Code default applies.",
-      "pricingBasis": "cost_usd = result.total_cost_usd reported by Claude Code (API-equivalent estimate at list rates); tokens from result.usage.input_tokens/output_tokens. If the operator is on a subscription plan this is not the marginal cash cost; see the allocation rules in README.md.",
+      "model": "claude-sonnet-5",
+      "modelResolution": "The production profile leaves model unset, so the CLI default applies; on 2026-09-19 that default resolves to claude-sonnet-5 (operator ~/.claude/settings.json sets model alias 'sonnet'; the Claude Dev session that authored this contract reports claude-sonnet-5). The evaluation does NOT rely on the default: the frozen invocation passes --model claude-sonnet-5 explicitly, and a run whose stream init event reports a different model id is infrastructure-invalid.",
+      "effort": "high",
+      "effortResolution": "The production profile leaves effort unset; the operator's ~/.claude/settings.json sets effortLevel 'high'. The frozen invocation passes --effort high explicitly.",
+      "pricingBasis": "Token list rate, identical method for both arms: cost_usd = Σ tokens_kind × published_rate_kind over input, output, cache-read and cache-write tokens, using the vendor's published per-token rate for the frozen model (source URL and retrieval date recorded in the run plan before run 1). Tokens come from the raw result/usage event of the session log, including cache tokens; if any token kind is not reported the run's cost is null, never 0. Claude Code's reported result.total_cost_usd is recorded as a metered cross-check only.",
       "permissionPolicy": {
         "worktreeWrite": true,
         "publishReview": false,
         "outboundMutation": false,
         "resolveHumanAction": false
-      }
+      },
+      "profileModel": null,
+      "profileEffort": null,
+      "cliVersion": "2.1.278 (Claude Code)",
+      "frozenInvocation": "claude <Dealer buildDeveloperArgs> --model claude-sonnet-5 --effort high, via a dedicated eval copy of the Claude Dev profile with model=claude-sonnet-5 and defaultEffort=high; cliVersion, model and effort are identical for every baseline developer run."
     },
     "reviewer": {
       "agentName": "Codex Dev",
@@ -28,30 +32,41 @@
       "runtime": "codex_local",
       "model": "gpt-5.6-sol",
       "effort": "medium",
-      "pricingBasis": "The Codex JSONL result carries token usage but no cost, so extractSpawnUsage yields cost_usd = null. Cost is computed only from a rate card or plan allocation recorded in the run plan; otherwise it stays null.",
+      "pricingBasis": "Reviewer sessions are the fixed measurement instrument for change-request rounds, not a compared subject; their cost is excluded from both arms. The muse-12 task (reviewer role) compares the candidate against this profile on the token list rate basis above; the Codex JSONL reports tokens but no cost, so a missing token kind makes that arm's cost null.",
       "permissionPolicy": {
         "worktreeWrite": false,
         "publishReview": false,
         "outboundMutation": false,
         "resolveHumanAction": false
-      }
+      },
+      "cliVersion": "codex-cli 0.150.0-alpha.12.2",
+      "frozenInvocation": "codex <Dealer buildReviewerArgs> with model gpt-5.6-sol and -c model_reasoning_effort=medium, unchanged for every review and re-review round."
     }
   },
   "candidate": {
     "runtime": "muse_code",
     "cli": "native Muse Code (not Muse Spark through Codex)",
     "tier": "Muse contributor tier",
-    "model": "current Muse contributor-tier model available to the operator",
-    "modelResolution": "The exact model identifier cannot be known before the adapter exists. It MUST be read from the Muse Code session banner/init output, written to the run plan, and frozen before the first candidate run; a change mid-evaluation invalidates the affected runs.",
-    "effort": null,
-    "effortResolution": "No effort control is assumed. Run with the tier default and record any effort/thinking setting the CLI reports; it must be identical for all candidate runs.",
-    "pricingBasis": "To be recorded in the run plan before the first run (metered cash, list-price-per-token, or subscription allocation; see README.md). A contributor-tier $0 cash price is reported but cannot by itself satisfy the cost gate.",
+    "model": "muse-spark-1.3",
+    "modelResolution": "Identifier taken from the model ids embedded in the installed Muse Code 1.3.0 (1.3.0-R3401.1) binary (muse-spark-1.3 is the highest version; muse-spark-1.2 is also present). It was NOT confirmed against the contributor tier, because doing so sends a prompt to Meta before privacy acceptance is recorded. The operator confirms it before run 1 (see confirmation); if the tier serves a different current model, this contract is amended and re-validated before run 1, never mid-evaluation.",
+    "effort": "high",
+    "effortResolution": "Explicit --reasoning-effort high (also the CLI default), identical for every candidate run.",
+    "pricingBasis": "Token list rate, identical method for both arms: cost_usd = Σ tokens_kind × published_rate_kind over input, output, cache-read and cache-write tokens, using the vendor's published per-token rate for the frozen model (source URL and retrieval date recorded in the run plan before run 1). Tokens come from the raw result/usage event of the session log, including cache tokens; if any token kind is not reported the run's cost is null, never 0. The contributor-tier cash price ($0, paid in data-use rights) is reported but is not a cost and cannot satisfy G6. If Meta publishes no per-token rate for the frozen model, or Muse Code reports no token counts, the candidate's cost is null and G6 is incomparable.",
     "permissionPolicy": "identical to the baseline policy of the task's role",
     "privacy": {
       "dataUse": "Prompts and completions may be used to improve Meta products.",
       "requiresOperatorAcceptance": true,
       "allowedTaskClassification": "non_sensitive"
-    }
+    },
+    "cliVersion": "Muse Code 1.3.0 (1.3.0-R3401.1)",
+    "frozenInvocation": "MUSE_NO_AUTO_UPDATE=1 muse exec --provider meta --model muse-spark-1.3 --reasoning-effort high --json (adapter adds workspace/permission flags per role); CLI version, model and effort are identical for every candidate run and MUSE_NO_AUTO_UPDATE=1 keeps the launcher from changing the binary mid-evaluation.",
+    "confirmation": {
+      "required": true,
+      "confirmedAt": null,
+      "confirmedBy": null,
+      "note": "Operator sets these after checking that the contributor tier serves the frozen model. `validate-muse-code-manifest.mjs --ready` fails until they are set."
+    },
+    "pricingBasisFrozenNow": true
   },
   "controls": {
     "pairing": "One valid paired sample per task: identical workerSpec, startingSha, Agent Deck, role permission policy, timeoutSeconds and verification commands for both arms.",
@@ -62,7 +77,18 @@
       "long": 3600
     },
     "verificationTimeoutSeconds": 600,
-    "rerunPolicy": "Rerun only infrastructure-invalid attempts; retain them in the evidence."
+    "rerunPolicy": "Rerun only infrastructure-invalid attempts; retain them in the evidence.",
+    "evalRoot": "$EVAL_ROOT is the Dealer checkout at the commit recorded in the run plan; it holds scripts/grade-muse-code.mjs and the answer keys. Graders run from $EVAL_ROOT, never from the worker's worktree.",
+    "reviewLoop": {
+      "appliesTo": "tasks whose expectedArtifact.type is git_commits",
+      "reviewer": "Codex Dev (frozen as baseline.reviewer)",
+      "maxReviewerRounds": 3,
+      "countedVerdicts": [
+        "changes_requested",
+        "escalated"
+      ],
+      "protocol": "After the developer session, the fixed reviewer reviews the diff (round 1). On a counted verdict the same arm's developer profile gets a remediation session in the same worktree (Dealer's rework prompt carrying the reviewer's findings; timeout = the task's timeoutSeconds) and the reviewer re-reviews (round 2, 3). The loop stops on 'approved', after maxReviewerRounds reviewer rounds, on 'escalated', or when a remediation session fails or times out. R_i = the number of reviewer rounds with a counted verdict. The reviewer sees the diff and worker spec only, never held-out tests."
+    }
   },
   "tasks": [
     {
@@ -523,11 +549,11 @@
       "referenceSha": null,
       "workerSpec": {
         "title": "Explore: how a worker session's token and cost usage is captured and stored",
-        "description": "Read-only exploration of the repository at the pinned commit; change no files and make no commits. Answer in markdown, citing file paths and function names:\n1. Which function parses a finished developer/reviewer session's log into token/cost usage, in which file, and which field of the log's result event does each value come from (input tokens, output tokens, cost)?\n2. How is a missing value represented at that step?\n3. Which functions in which coordinator files call it and persist the result, which repository function inserts the row, and into which table and columns?\n4. Which repository aggregate helper sums usage per issue, and what does it do with missing values — is that safe for a cost comparison that must not treat unknown cost as zero?\nEnd with a one-paragraph summary. Your final message is the deliverable.",
+        "description": "Read-only exploration of the repository at the pinned commit; change no files and make no commits. Answer in markdown, citing file paths and function names:\n1. Which function parses a finished developer/reviewer session's log into token/cost usage, in which file, and which field of the log's result event does each value come from (input tokens, output tokens, cost)?\n2. How is a missing value represented at that step?\n3. Which functions in which coordinator files call it and persist the result, which repository function inserts the row, and into which table and columns?\n4. Which repository aggregate helper sums usage per issue, and what does it do with missing values — is that safe for a cost comparison that must not treat unknown cost as zero?\nEnd with a one-paragraph summary. Your final message is the deliverable.\n\nAnswer format: the final message may contain prose, but it MUST contain exactly one fenced ```json block (and no other fenced json block) with this shape, using repo-relative file paths and bare function names:\n{\n  \"extractor\": { \"function\": \"...\", \"file\": \"...\" },\n  \"sources\": { \"tokensIn\": \"<result-event field>\", \"tokensOut\": \"<result-event field>\", \"costUsd\": \"<result-event field>\" },\n  \"missingValue\": \"<how a missing value is represented>\",\n  \"recordedBy\": { \"developer\": \"<coordinator file>\", \"reviewer\": \"<coordinator file>\" },\n  \"insert\": { \"function\": \"...\", \"file\": \"...\", \"table\": \"...\", \"columns\": [\"...\"] },\n  \"aggregate\": { \"function\": \"...\", \"file\": \"...\", \"coalescesMissingToZero\": true|false, \"safeForUnknownCostComparison\": true|false }\n}",
         "acceptanceCriteria": [
-          "Names the extractor function and its file, and the result-event fields for tokens and cost.",
-          "States how missing values are represented (null) and names both effect files that record usage plus the repository insert function and table columns.",
-          "Names the per-issue aggregate helper and states that it coalesces missing values to zero.",
+          "The JSON block names the extractor function and its file, and the result-event field each of tokensIn, tokensOut and costUsd is read from.",
+          "It states that a missing value is represented as null, names the file that records usage for each of the developer and reviewer roles, and the repository insert function, file, table and all columns.",
+          "It names the per-issue aggregate helper and its file, and correctly states whether it coalesces missing values to zero and whether it is safe for a cost comparison.",
           "No repository file is modified."
         ]
       },
@@ -552,11 +578,94 @@
           },
           {
             "id": "answer-facts",
-            "run": "for p in 'extractSpawnUsage' 'packages/server/src/coordinator/usage.ts' 'recordUsageEvent' 'usage_events' 'developer-effect.ts' 'reviewer-effect.ts' 'tokens_in' 'cost_usd' 'total_cost_usd' 'summarizeIssueUsage' 'COALESCE'; do grep -Fq -- \"$p\" \"$ARTIFACT\" || { echo \"missing: $p\"; exit 1; }; done; grep -Eqi 'null' \"$ARTIFACT\" || { echo \"missing: null handling\"; exit 1; }",
+            "run": "node \"$EVAL_ROOT/scripts/grade-muse-code.mjs\" answer muse-10-explore-usage-capture \"$ARTIFACT\"",
             "expectedExitCode": 0,
-            "expectedResult": "No output; every required fact appears in the answer artifact at $ARTIFACT."
+            "expectedResult": "Prints 'ok': the single fenced JSON block matches every field of the task's answerKey (function/file pairs, field sources, missing-value representation, booleans); any wrong relationship prints 'FAIL: ...' and exits 1."
           }
-        ]
+        ],
+        "answerKey": {
+          "extractor": {
+            "function": {
+              "$equals": "extractSpawnUsage"
+            },
+            "file": {
+              "$equals": "packages/server/src/coordinator/usage.ts"
+            }
+          },
+          "sources": {
+            "tokensIn": {
+              "$matches": [
+                "input_?tokens"
+              ],
+              "$notMatches": [
+                "output"
+              ]
+            },
+            "tokensOut": {
+              "$matches": [
+                "output_?tokens"
+              ],
+              "$notMatches": [
+                "input"
+              ]
+            },
+            "costUsd": {
+              "$matches": [
+                "total_cost_usd"
+              ]
+            }
+          },
+          "missingValue": {
+            "$equals": "null"
+          },
+          "recordedBy": {
+            "developer": {
+              "$equals": "packages/server/src/coordinator/developer-effect.ts"
+            },
+            "reviewer": {
+              "$equals": "packages/server/src/coordinator/reviewer-effect.ts"
+            }
+          },
+          "insert": {
+            "function": {
+              "$equals": "recordUsageEvent"
+            },
+            "file": {
+              "$equals": "packages/server/src/repository/usage-events.ts"
+            },
+            "table": {
+              "$equals": "usage_events"
+            },
+            "columns": {
+              "$setEquals": [
+                "id",
+                "issue_id",
+                "worker_session_id",
+                "role",
+                "runtime",
+                "tokens_in",
+                "tokens_out",
+                "cost_usd",
+                "duration_ms",
+                "ts"
+              ]
+            }
+          },
+          "aggregate": {
+            "function": {
+              "$equals": "summarizeIssueUsage"
+            },
+            "file": {
+              "$equals": "packages/server/src/repository/usage-events.ts"
+            },
+            "coalescesMissingToZero": {
+              "$equals": true
+            },
+            "safeForUnknownCostComparison": {
+              "$equals": false
+            }
+          }
+        }
       },
       "expectedArtifact": {
         "type": "markdown_answer",
@@ -573,12 +682,12 @@
       "referenceSha": null,
       "workerSpec": {
         "title": "Explore: how a reviewer session is kept read-only and away from outbound mutation",
-        "description": "Read-only exploration of the repository at the pinned commit; change no files and make no commits. Answer in markdown, citing file paths, function names and constants:\n1. Which function asserts the reviewer read-only invariant, in which file, and where in the spawn path is it invoked relative to launching the CLI?\n2. For a Claude reviewer: which CLI flags/modes make it read-only (name at least --restricted, the permission mode, and the outbound-mutation deny flag), and which constant in args.ts names the denied tool?\n3. For a Codex reviewer with a deck attached: how is the send gate (call_service_tool) denied, which config key expresses it, and which function verifies it before spawn?\n4. Is Cursor covered equally? State the known gap and why.\nEnd with a one-paragraph summary. Your final message is the deliverable.",
+        "description": "Read-only exploration of the repository at the pinned commit; change no files and make no commits. Answer in markdown, citing file paths, function names and constants:\n1. Which function asserts the reviewer read-only invariant, in which file, and where in the spawn path is it invoked relative to launching the CLI?\n2. For a Claude reviewer: which CLI flags/modes make it read-only (name at least --restricted, the permission mode, and the outbound-mutation deny flag), and which constant in args.ts names the denied tool?\n3. For a Codex reviewer with a deck attached: how is the send gate (call_service_tool) denied, which config key expresses it, and which function verifies it before spawn?\n4. Is Cursor covered equally? State the known gap and why.\nEnd with a one-paragraph summary. Your final message is the deliverable.\n\nAnswer format: the final message may contain prose, but it MUST contain exactly one fenced ```json block (and no other fenced json block) with this shape, using repo-relative file paths and bare function names:\n{\n  \"assertion\": { \"function\": \"...\", \"file\": \"...\", \"calledFrom\": { \"function\": \"...\", \"file\": \"...\" }, \"calledBeforeSpawnCli\": true|false },\n  \"claude\": { \"restrictedFlag\": \"...\", \"permissionMode\": \"...\", \"denyFlag\": \"...\", \"deniedTool\": \"...\", \"deniedToolConstant\": \"...\", \"constantFile\": \"...\" },\n  \"codex\": { \"deniedTool\": \"...\", \"configKey\": \"...\", \"verifier\": \"...\", \"verifierFile\": \"...\", \"verifiedIn\": \"<function that calls the verifier>\" },\n  \"cursor\": { \"deniesOutboundMutation\": true|false, \"gapReason\": \"<one or two sentences>\" }\n}",
         "acceptanceCriteria": [
-          "Names assertReviewerReadOnly (permissions.ts) and its invocation in realReviewerSpawn (spawn.ts).",
-          "Names the Claude flags (--restricted, dontAsk, --disallowedTools) and DENY_SEND_TOOL in args.ts.",
-          "Names the Codex disabled_tools key and codexScopedConfigDeniesSendGate.",
-          "Identifies the Cursor gap. No repository file is modified."
+          "The JSON block names the assertion function and file, the function that calls it and that the call precedes spawnCli.",
+          "It names the Claude flags, the denied tool and the constant (with its file) that holds it.",
+          "It names the Codex denied tool, config key, the verifier function, its file and the function that invokes it.",
+          "It states that Cursor does not deny outbound mutation and gives the reason. No repository file is modified."
         ]
       },
       "role": "developer",
@@ -602,11 +711,80 @@
           },
           {
             "id": "answer-facts",
-            "run": "for p in 'assertReviewerReadOnly' 'packages/server/src/coordinator/permissions.ts' 'realReviewerSpawn' 'spawn.ts' 'codexScopedConfigDeniesSendGate' 'disabled_tools' 'DENY_SEND_TOOL' '--disallowedTools' 'dontAsk' '--restricted'; do grep -Fq -- \"$p\" \"$ARTIFACT\" || { echo \"missing: $p\"; exit 1; }; done; grep -Eqi 'cursor' \"$ARTIFACT\" && grep -Eqi 'gap' \"$ARTIFACT\" || { echo \"missing: cursor known gap\"; exit 1; }",
+            "run": "node \"$EVAL_ROOT/scripts/grade-muse-code.mjs\" answer muse-11-explore-reviewer-read-only \"$ARTIFACT\"",
             "expectedExitCode": 0,
-            "expectedResult": "No output; every required fact appears in the answer artifact at $ARTIFACT."
+            "expectedResult": "Prints 'ok': the single fenced JSON block matches every field of the task's answerKey (function/file pairs, field sources, missing-value representation, booleans); any wrong relationship prints 'FAIL: ...' and exits 1."
           }
-        ]
+        ],
+        "answerKey": {
+          "assertion": {
+            "function": {
+              "$equals": "assertReviewerReadOnly"
+            },
+            "file": {
+              "$equals": "packages/server/src/coordinator/permissions.ts"
+            },
+            "calledFrom": {
+              "function": {
+                "$equals": "realReviewerSpawn"
+              },
+              "file": {
+                "$equals": "packages/server/src/coordinator/spawn.ts"
+              }
+            },
+            "calledBeforeSpawnCli": {
+              "$equals": true
+            }
+          },
+          "claude": {
+            "restrictedFlag": {
+              "$equals": "--restricted"
+            },
+            "permissionMode": {
+              "$equals": "dontAsk"
+            },
+            "denyFlag": {
+              "$equals": "--disallowedTools"
+            },
+            "deniedTool": {
+              "$equals": "mcp__agent-deck__call_service_tool"
+            },
+            "deniedToolConstant": {
+              "$equals": "DENY_SEND_TOOL"
+            },
+            "constantFile": {
+              "$equals": "packages/server/src/coordinator/args.ts"
+            }
+          },
+          "codex": {
+            "deniedTool": {
+              "$equals": "call_service_tool"
+            },
+            "configKey": {
+              "$equals": "disabled_tools"
+            },
+            "verifier": {
+              "$equals": "codexScopedConfigDeniesSendGate"
+            },
+            "verifierFile": {
+              "$equals": "packages/server/src/adapters/codex-scoped-config.ts"
+            },
+            "verifiedIn": {
+              "$equals": "assertReviewerReadOnly"
+            }
+          },
+          "cursor": {
+            "deniesOutboundMutation": {
+              "$equals": false
+            },
+            "gapReason": {
+              "$matches": [
+                "--force",
+                "cli-config|global|per-invocation|per-attempt"
+              ]
+            }
+          }
+        }
       },
       "expectedArtifact": {
         "type": "markdown_answer",
@@ -622,11 +800,11 @@
       "referenceSha": "65a01344ac6b4bfa6f8ee16dd1748c1015acd5ed",
       "workerSpec": {
         "title": "Review: defer work on runtime usage caps instead of failing (NOT-111)",
-        "description": "Review the change introduced by commit 9dda237c316f22d2b2c112048be7a1d1fe9c99f1 against its parent 86d9cc644d53830f0457b6b3e8437be13c9cd30a (base SHA). Intent: when a runtime account hits a usage cap, the coordinator should defer the work item until the cap lifts instead of failing it or burning infra attempts; a 24 h per-item deferral ceiling escalates to a human. The diff is embedded in the reviewer prompt; you may read the checked-out tree read-only. Judge correctness, crash/lease recovery paths, health-preflight behavior and test coverage. Return the reviewer result JSON block required by the reviewer prompt (verdict, baseSha, headSha, acceptanceCriteriaAssessment, evidenceAssessment, findings with fingerprint/severity/title/rationale/file/line, risks) with baseSha and headSha set to the two SHAs above.",
+        "description": "Review the change introduced by commit 9dda237c316f22d2b2c112048be7a1d1fe9c99f1 against its parent 86d9cc644d53830f0457b6b3e8437be13c9cd30a (base SHA). Intent: when a runtime account hits a usage cap, the coordinator should defer the work item until the cap lifts instead of failing it or burning infra attempts; a 24 h per-item deferral ceiling escalates to a human. The diff is embedded in the reviewer prompt; you may read the checked-out tree read-only. Judge correctness, crash/lease recovery paths, health-preflight behavior and test coverage. Return exactly one fenced reviewer result JSON block required by the reviewer prompt (verdict, baseSha, headSha, acceptanceCriteriaAssessment, evidenceAssessment, findings with fingerprint/severity/title/rationale/file/line, risks) with baseSha and headSha set to the two SHAs above.",
         "acceptanceCriteria": [
-          "Final message contains one JSON block that satisfies the ReviewerResult schema (packages/server/src/coordinator/reviewer-result.ts).",
+          "Final message contains exactly one fenced JSON block that satisfies the ReviewerResult schema (packages/server/src/coordinator/reviewer-result.ts).",
           "baseSha and headSha equal the two SHAs named in the spec.",
-          "At least one finding concerns a defect in the change's health preflight (duplicate cli_missing), lease-expiry recovery ignoring runtime availability, or the untested deferral ceiling.",
+          "At least one finding names the file of, and specifically describes, one of: the duplicated cli_missing health issue for a missing Codex CLI (agent-health.ts), lease-expiry recovery ignoring runtime availability (recovery.ts), or the untested 24 h deferral ceiling.",
           "The reviewer modifies no files."
         ]
       },
@@ -639,22 +817,68 @@
         "rationale": "Review of a historical commit in the public repository github.com/not-so-fat/agent-dealer; no credentials, customer data, or personal data."
       },
       "verification": {
-        "setup": [
-          "npm ci"
-        ],
+        "setup": [],
         "heldOutPaths": [],
         "heldOutSource": null,
         "knownDefects": [
-          "packages/server/src/adapters/agent-health.ts: runtimeIssuesUncached reports cli_missing twice for a codex_local runtime with a missing CLI (fixed in 65a0134).",
-          "packages/server/src/coordinator/recovery.ts: lease-expiry recovery never consults runtime_availability, so a coordinator crash during a cap observation can dead-letter instead of defer (fixed in 65a0134).",
-          "packages/server/src/coordinator/usage-cap.integration.test.ts: the 24 h deferral-ceiling escalation had no test coverage (added in 65a0134)."
+          {
+            "id": "duplicate-cli-missing",
+            "description": "runtimeIssuesUncached reports cli_missing twice for a codex_local runtime with a missing CLI (fixed in 65a0134).",
+            "files": [
+              "packages/server/src/adapters/agent-health.ts"
+            ],
+            "evidence": [
+              [
+                "cli_missing",
+                "missing (codex )?cli|cli not found|not found"
+              ],
+              [
+                "twice|duplicate|double|redundant|second (\\w+ )?(check|version|push)|again|repeat"
+              ]
+            ]
+          },
+          {
+            "id": "recovery-ignores-runtime-availability",
+            "description": "Lease-expiry recovery never consults runtime_availability, so a crash during a cap observation can dead-letter instead of defer (fixed in 65a0134).",
+            "files": [
+              "packages/server/src/coordinator/recovery.ts"
+            ],
+            "evidence": [
+              [
+                "lease|expir|crash|recover"
+              ],
+              [
+                "runtime[_ -]?availab|usage[_ -]?cap|capped|cap observation"
+              ],
+              [
+                "dead[- ]?letter|escalat|spend|burn|consum|attempt|infra|instead of defer|not defer|never defer|ignor|never consult|does not consult|doesn't consult|not consult"
+              ]
+            ]
+          },
+          {
+            "id": "untested-deferral-ceiling",
+            "description": "The 24 h deferral-ceiling escalation had no test coverage (fixed in 65a0134).",
+            "files": [
+              "packages/server/src/coordinator/usage-cap-defer.ts",
+              "packages/server/src/coordinator/usage-cap-config.ts",
+              "packages/server/src/coordinator/usage-cap.integration.test.ts"
+            ],
+            "evidence": [
+              [
+                "24 ?h|24-hour|ceiling|deferralCeilingExceeded|USAGE_CAP_DEFERRAL_CEILING_MS"
+              ],
+              [
+                "untested|not tested|no test|without (a )?test|no (test )?coverage|not covered|uncovered|lacks? (a )?(test|coverage)|missing (a )?test|never exercised|no .{0,40}test"
+              ]
+            ]
+          }
         ],
         "commands": [
           {
-            "id": "reviewer-result-recall",
-            "run": "npx tsx -e 'import fs from \"node:fs\"; import { parseReviewerResult } from \"./packages/server/src/coordinator/reviewer-result.ts\"; const r = parseReviewerResult(fs.readFileSync(process.env.ARTIFACT, \"utf8\")); if (!r) { console.error(\"unparseable reviewer result\"); process.exit(1); } if (r.baseSha !== \"86d9cc644d53830f0457b6b3e8437be13c9cd30a\" || r.headSha !== \"9dda237c316f22d2b2c112048be7a1d1fe9c99f1\") { console.error(\"wrong shas\"); process.exit(1); } const known = /agent-health|recovery|work-items|cli_missing|lease|ceiling|dead-letter/i; if (!r.findings.some((f) => known.test(`${f.file ?? \"\"} ${f.title} ${f.rationale}`))) { console.error(\"no known-defect finding\"); process.exit(1); } console.log(\"ok\");'",
+            "id": "reviewer-result-defects",
+            "run": "node \"$EVAL_ROOT/scripts/grade-muse-code.mjs\" review muse-12-review-usage-cap-deferral \"$ARTIFACT\"",
             "expectedExitCode": 0,
-            "expectedResult": "Prints 'ok': the artifact parses as a ReviewerResult, has the pinned base/head SHAs, and at least one finding matches a known follow-up defect."
+            "expectedResult": "Prints 'ok (matched <defect ids>; n/3)': the artifact parses as a ReviewerResult with the pinned base/head SHAs and at least one finding names a known defect's file and matches all of that defect's specific evidence patterns. Approved or unrelated findings, or broad vocabulary alone, print 'FAIL: ...' and exit 1."
           },
           {
             "id": "worktree-unchanged",
@@ -662,7 +886,11 @@
             "expectedExitCode": 0,
             "expectedResult": "No output; the read-only reviewer left the worktree clean."
           }
-        ]
+        ],
+        "expectedShas": {
+          "baseSha": "86d9cc644d53830f0457b6b3e8437be13c9cd30a",
+          "headSha": "9dda237c316f22d2b2c112048be7a1d1fe9c99f1"
+        }
       },
       "expectedArtifact": {
         "type": "reviewer_result_json",
