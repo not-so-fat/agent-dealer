@@ -137,7 +137,10 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
     `## Required`,
     // NOT-115: encourage incremental commits so a mid-session death leaves less
     // uncommitted work for dirty_worktree escalation — soft mitigation only.
-    `Run tests and Lens checks. Make incremental commits with \`git\` at coherent slice boundaries (for example after the tests for that slice pass) — do not leave all work uncommitted until the very end. A final commit of any remaining changes and the **implementation conclusion** remain required before you exit.`,
+    // NOT-146: timed-spawn handoff bar is commits + targeted tests for the change.
+    // Full suite / Lens are a separate budget (NOT-74), not required inside this spawn —
+    // the coordinator does not block clean_handoff on full-suite alone.
+    `Run targeted tests for the change. A clean handoff is valid with commits plus those targeted tests — full suite / Lens checks are not required inside this timed developer spawn (they run on a separate review/verify budget). Make incremental commits with \`git\` at coherent slice boundaries (for example after the tests for that slice pass) — do not leave all work uncommitted until the very end. A final commit of any remaining changes and the **implementation conclusion** remain required before you exit.`,
     `Commit any remaining changes with \`git\` — do NOT push and do NOT open a pull request; the coordinator pushes your branch and opens/updates the draft PR after this session ends.`,
     `End your reply with a short **implementation conclusion**: what changed, why, any deviations from the acceptance criteria, and known follow-ups. This is distinct from the PR description and is required every round.`
   );
