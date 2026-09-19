@@ -64,6 +64,32 @@ function shortPath(p: string | null | undefined): string | null {
   return parts.slice(-2).join("/");
 }
 
+/** Hover text for the NOT-148 tip strip — tip vocabulary only, no engine state enums. */
+function branchTipTitle(
+  tip: NonNullable<IssueDetail["branchTipStatus"]>
+): string {
+  return [tip.branch, tip.tipLabel, tip.worktree?.path ? shortPath(tip.worktree.path) : null]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** Operator suffixes after tipLabel (restart risk / dirty preserve). */
+function branchTipSuffixes(
+  tip: NonNullable<IssueDetail["branchTipStatus"]>
+): string {
+  return [
+    tip.restartRisk ? "restart risk" : null,
+    tip.worktree?.preserved ? "dirty worktree preserved" : null,
+  ]
+    .filter(Boolean)
+    .map((s) => ` · ${s}`)
+    .join("");
+}
+
+function branchTipWarnClass(tip: NonNullable<IssueDetail["branchTipStatus"]>): boolean {
+  return Boolean(tip.restartRisk || tip.worktree?.preserved);
+}
+
 /** Sampler writes `Role · {liveProgress} (round N)` into currentIntent — don't echo that under the gold line. */
 function intentDuplicatesLiveProgress(intent: string | null | undefined, progress: string | null | undefined): boolean {
   if (!intent || !progress) return false;
@@ -378,11 +404,11 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
             </p>
             {branchTipStatus && (
               <p
-                className={`text-xs ${branchTipStatus.restartRisk ? "text-amber-300" : "text-white/55"}`}
-                title={`${branchTipStatus.branch} · ${branchTipStatus.state}`}
+                className={`text-xs ${branchTipWarnClass(branchTipStatus) ? "text-amber-300" : "text-white/55"}`}
+                title={branchTipTitle(branchTipStatus)}
               >
                 Branch tip: {branchTipStatus.tipLabel}
-                {branchTipStatus.restartRisk ? " · restart risk (no commits ahead after failure)" : ""}
+                {branchTipSuffixes(branchTipStatus)}
               </p>
             )}
             {liveProgress &&
@@ -417,11 +443,11 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
             </p>
             {branchTipStatus && (
               <p
-                className={`text-xs ${branchTipStatus.restartRisk ? "text-amber-300" : "text-white/55"}`}
-                title={`${branchTipStatus.branch} · ${branchTipStatus.state}`}
+                className={`text-xs ${branchTipWarnClass(branchTipStatus) ? "text-amber-300" : "text-white/55"}`}
+                title={branchTipTitle(branchTipStatus)}
               >
                 Branch tip: {branchTipStatus.tipLabel}
-                {branchTipStatus.restartRisk ? " · restart risk (no commits ahead after failure)" : ""}
+                {branchTipSuffixes(branchTipStatus)}
               </p>
             )}
             {latestSessionFailure.logPath && (
@@ -437,11 +463,11 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
           <div className="mb-4 p-3 rounded border border-white/10 bg-white/[0.03] space-y-1">
             <p className="text-xs text-white/45 uppercase tracking-wide">Branch tip</p>
             <p
-              className={`text-sm ${branchTipStatus.restartRisk ? "text-amber-300" : "text-white/80"}`}
-              title={`${branchTipStatus.branch} · ${branchTipStatus.state}`}
+              className={`text-sm ${branchTipWarnClass(branchTipStatus) ? "text-amber-300" : "text-white/80"}`}
+              title={branchTipTitle(branchTipStatus)}
             >
               {branchTipStatus.tipLabel}
-              {branchTipStatus.restartRisk ? " · restart risk (no commits ahead after failure)" : ""}
+              {branchTipSuffixes(branchTipStatus)}
             </p>
           </div>
         )}
