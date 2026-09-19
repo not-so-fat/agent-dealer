@@ -378,11 +378,12 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
             </p>
             {branchTipStatus && (
               <p
-                className={`text-xs ${branchTipStatus.restartRisk ? "text-amber-300" : "text-white/55"}`}
-                title={`${branchTipStatus.branch} · ${branchTipStatus.state}`}
+                className={`text-xs ${branchTipStatus.restartRisk || branchTipStatus.worktree?.preserved ? "text-amber-300" : "text-white/55"}`}
+                title={`${branchTipStatus.branch} · ${branchTipStatus.state}${branchTipStatus.worktree?.path ? ` · ${branchTipStatus.worktree.path}` : ""}`}
               >
                 Branch tip: {branchTipStatus.tipLabel}
                 {branchTipStatus.restartRisk ? " · restart risk (no commits ahead after failure)" : ""}
+                {branchTipStatus.worktree?.preserved ? " · dirty worktree preserved" : ""}
               </p>
             )}
             {liveProgress &&
@@ -417,11 +418,12 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
             </p>
             {branchTipStatus && (
               <p
-                className={`text-xs ${branchTipStatus.restartRisk ? "text-amber-300" : "text-white/55"}`}
-                title={`${branchTipStatus.branch} · ${branchTipStatus.state}`}
+                className={`text-xs ${branchTipStatus.restartRisk || branchTipStatus.worktree?.preserved ? "text-amber-300" : "text-white/55"}`}
+                title={`${branchTipStatus.branch} · ${branchTipStatus.state}${branchTipStatus.worktree?.path ? ` · ${branchTipStatus.worktree.path}` : ""}`}
               >
                 Branch tip: {branchTipStatus.tipLabel}
                 {branchTipStatus.restartRisk ? " · restart risk (no commits ahead after failure)" : ""}
+                {branchTipStatus.worktree?.preserved ? " · dirty worktree preserved" : ""}
               </p>
             )}
             {latestSessionFailure.logPath && (
@@ -437,11 +439,12 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
           <div className="mb-4 p-3 rounded border border-white/10 bg-white/[0.03] space-y-1">
             <p className="text-xs text-white/45 uppercase tracking-wide">Branch tip</p>
             <p
-              className={`text-sm ${branchTipStatus.restartRisk ? "text-amber-300" : "text-white/80"}`}
-              title={`${branchTipStatus.branch} · ${branchTipStatus.state}`}
+              className={`text-sm ${branchTipStatus.restartRisk || branchTipStatus.worktree?.preserved ? "text-amber-300" : "text-white/80"}`}
+              title={`${branchTipStatus.branch} · ${branchTipStatus.state}${branchTipStatus.worktree?.path ? ` · ${branchTipStatus.worktree.path}` : ""}`}
             >
               {branchTipStatus.tipLabel}
               {branchTipStatus.restartRisk ? " · restart risk (no commits ahead after failure)" : ""}
+              {branchTipStatus.worktree?.preserved ? " · dirty worktree preserved" : ""}
             </p>
           </div>
         )}

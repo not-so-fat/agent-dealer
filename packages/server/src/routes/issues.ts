@@ -88,9 +88,11 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     const instances = listWorkflowInstancesForIssue(id);
     const activeWorkerSession = getActiveWorkerSessionForIssue(id);
     const latestSessionFailure = latestSessionFailureForIssue(issue);
-    // NOT-148: commits-ahead / restart-risk next to live progress while developing/retrying.
+    // NOT-148: commits-ahead / restart-risk / dirty-preserve next to live progress while developing/retrying.
     const branchTipStatus = await branchTipStatusForIssue(issue, {
       hadFailedAttempt: issue.infraAttempts > 0 || latestSessionFailure != null,
+      activeWorktreePath:
+        activeWorkerSession?.status === "running" ? activeWorkerSession.worktreePath : null,
     });
     return {
       issue,

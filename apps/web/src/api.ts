@@ -157,13 +157,23 @@ export interface IssueDetail {
     infraAttempts: number;
     maxInfraAttempts: number;
   } | null;
-  /** NOT-148: commits-ahead / restart-risk while developing or retrying. */
+  /**
+   * NOT-148: tip progress for Issue Detail live / failure strips.
+   * - `tipLabel` / `commitsAhead`: commits past base, or "no tip yet" when empty/absent.
+   * - `restartRisk`: true when a prior failure left an empty tip (cold-start retry).
+   * - `worktree`: dirty/preserved leftover checkout when present (not live-session WIP).
+   */
   branchTipStatus?: {
     branch: string;
     state: string;
     commitsAhead: number | null;
     tipLabel: string;
     restartRisk: boolean;
+    worktree?: {
+      path: string;
+      dirty: boolean;
+      preserved: boolean;
+    } | null;
   } | null;
   /** NOT-103: whether this issue is in the admission queue. */
   queued?: boolean;
