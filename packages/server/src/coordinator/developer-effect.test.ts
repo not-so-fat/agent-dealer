@@ -482,6 +482,36 @@ test("timed_out (session): the spawn wall-clock timeout is reported distinctly f
   assert.equal(dev.status, "timed_out");
 });
 
+test("NOT-147: empty tip + 2 session timeouts escalates to human — no third spawn", async () => {
+  const issueId = await makeIssue();
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: timedOutSpawn, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+
+  await pump(1); // failure #1 → auto-retry
+  assert.equal(getIssue(issueId)!.status, "developing");
+  assert.equal(getIssue(issueId)!.infraAttempts, 1);
+  assert.equal(
+    listWorkItemsForIssue(issueId).filter((i) => i.kind === "developer" && i.status === "pending").length,
+    1
+  );
+
+  await pump(1); // failure #2 with still-empty tip → policy_escalation
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(
+    listWorkItemsForIssue(issueId).filter((i) => i.kind === "developer" && i.status === "pending").length,
+    0,
+    "must not enqueue a third hour-long spawn"
+  );
+  const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
+  const action = listHumanActionsForIssue(issueId).find((a) => a.status === "open");
+  assert.ok(action);
+  assert.equal(action!.actionType, "policy_escalation");
+  assert.match(action!.reason, /stuck: no commits after 2 timeouts\/crashes/i);
+});
+
 test("checks_failed: CI failure after a clean push/PR retries without a human action", async () => {
   const issueId = await makeIssue();
   registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub({ checks: "failure" }) }));

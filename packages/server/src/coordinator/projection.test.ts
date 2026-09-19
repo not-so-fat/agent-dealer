@@ -169,3 +169,33 @@ test("infra-class retries — including a stale re-review — spend the infra bu
   );
   assert.equal(stale.advance, "infra");
 });
+
+test("NOT-147: empty-tip no-progress escalation projects to needs_human without spending infra budget", () => {
+  const INFRA_ATTEMPTS_LEFT: RouteLimits = {
+    currentRound: 1,
+    maxReviewRounds: 3,
+    infraAttempts: 1,
+    maxInfraAttempts: 3,
+  };
+  const route = routeDeveloperOutcome(
+    {
+      kind: "timed_out",
+      commitsAhead: 0,
+      reason: "Developer session timed out.",
+      worktreePath: "/data/worktrees/s-dev-developer",
+      logPath: "/data/logs/s-dev.log",
+    },
+    INFRA_ATTEMPTS_LEFT
+  );
+  assert.equal(route.next, "human_action");
+  const { projection, effect, advance } = projectDeveloperRoute(route, "developing", 1);
+  assert.equal(projection.issueStatus, "needs_human");
+  assert.equal(projection.currentOwner, "human");
+  assert.equal(advance, "none", "escalation must not burn another infra attempt");
+  assert.equal(effect.kind, "human_action");
+  if (effect.kind === "human_action") {
+    assert.equal(effect.actionType, "policy_escalation");
+    assert.match(effect.reason, /stuck: no commits after 2 timeouts\/crashes/i);
+  }
+  assertLegal("developing", projection.issueStatus);
+});

@@ -78,6 +78,58 @@ import {
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
+/**
+ * NOT-147: attach commits-ahead + worktree/log pointers on timeout/crash so routing can
+ * escalate empty tips instead of burning another full spawn. Prefers counting from the
+ * worktree HEAD while it still exists; falls back to inspecting the issue branch ref.
+ * Only sets `commitsAhead` when progress is known (`empty` → 0, or a positive ahead count).
+ * `absent` / unresolvable git stays omitted so routing keeps the budget-only path.
+ */
+async function crashOrTimeoutOutcome(opts: {
+  timedOut: boolean;
+  reason: string;
+  worktreePath: string;
+  logPath?: string | null;
+  repoPath: string;
+  branchName: string;
+  baseBranch: string;
+  baseSha?: string | null;
+  /** When known already (e.g. just salvaged), skip re-measurement. */
+  commitsAhead?: number;
+}): Promise<Extract<DeveloperOutcome, { kind: "timed_out" | "session_failed" }>> {
+  let commitsAheadKnown: number | undefined = opts.commitsAhead;
+  if (commitsAheadKnown === undefined) {
+    const fromWorktree = await commitsAhead({
+      worktreePath: opts.worktreePath,
+      baseRef: `origin/${opts.baseBranch}`,
+    }).catch(() => null);
+    if (fromWorktree !== null) {
+      commitsAheadKnown = fromWorktree;
+    } else {
+      const progress = await inspectBranchProgress({
+        repo: opts.repoPath,
+        branch: opts.branchName,
+        baseRefs: baseRefCandidates({
+          baseSha: opts.baseSha ?? null,
+          baseBranch: opts.baseBranch,
+        }),
+      });
+      if (progress.state === "empty") commitsAheadKnown = 0;
+      else if (progress.state === "unpushed" || progress.state === "published") {
+        commitsAheadKnown = progress.ahead;
+      }
+      // absent → leave undefined (unknown)
+    }
+  }
+  return {
+    kind: opts.timedOut ? "timed_out" : "session_failed",
+    reason: opts.reason,
+    ...(commitsAheadKnown !== undefined ? { commitsAhead: commitsAheadKnown } : {}),
+    worktreePath: opts.worktreePath,
+    ...(opts.logPath ? { logPath: opts.logPath } : {}),
+  };
+}
+
 export const developerEffectConfig = {
   get sessionTimeoutMs(): number {
     return developerSessionTimeoutMs();
@@ -829,6 +881,24 @@ export async function runDeveloperEffect(
         const salvageKind = spawned.timedOut ? "timeout" : "crash";
         const salvaged = await salvageDirtyWorktree(worktreePath, salvageKind);
         if (salvaged.ok) {
+          // Measure progress while the worktree still exists (same rule as the clean
+          // timeout/crash path below), then remove. Salvage always lands ≥1 tip commit.
+          const crashReason = reasonForSessionCrash({
+            timedOut: Boolean(spawned.timedOut),
+            logPath: spawned.logPath,
+            runtime,
+          });
+          const salvageNote = `Salvaged uncommitted work as ${salvaged.message} (${salvaged.commitSha.slice(0, 7)}).`;
+          const crashOutcome = await crashOrTimeoutOutcome({
+            timedOut: Boolean(spawned.timedOut),
+            reason: `${crashReason} ${salvageNote}`,
+            worktreePath,
+            logPath: spawned.logPath,
+            repoPath,
+            branchName,
+            baseBranch,
+            baseSha: issue.baseSha,
+          });
           // Lens (NOT-145 class post-salvage-remove-unchecked): only route infra retry when
           // the checkout is actually gone. If remove preserves (or throws), escalate with
           // path+recovery instead of retrying into a branch still held by a leftover tree.
@@ -853,15 +923,7 @@ export async function runDeveloperEffect(
               recoveryCommands: dirtyWorktreeRecoveryCommands(repoPath, worktreePath),
             };
           }
-          const crashReason = reasonForSessionCrash({
-            timedOut: Boolean(spawned.timedOut),
-            logPath: spawned.logPath,
-            runtime,
-          });
-          const salvageNote = `Salvaged uncommitted work as ${salvaged.message} (${salvaged.commitSha.slice(0, 7)}).`;
-          return spawned.timedOut
-            ? { kind: "timed_out", reason: `${crashReason} ${salvageNote}` }
-            : { kind: "session_failed", reason: `${crashReason} ${salvageNote}` };
+          return crashOutcome;
         }
         // Salvage failed — do not remove. Escalate with actionable recovery.
         const dirtyReason = reasonForDirtyWorktree(spawned.logPath, runtime);
@@ -872,10 +934,22 @@ export async function runDeveloperEffect(
           recoveryCommands: dirtyWorktreeRecoveryCommands(repoPath, worktreePath),
         };
       }
+      const crashOutcome = await crashOrTimeoutOutcome({
+        timedOut: Boolean(spawned.timedOut),
+        reason: reasonForSessionCrash({
+          timedOut: Boolean(spawned.timedOut),
+          logPath: spawned.logPath,
+          runtime,
+        }),
+        worktreePath,
+        logPath: spawned.logPath,
+        repoPath,
+        branchName,
+        baseBranch,
+        baseSha: issue.baseSha,
+      });
       await bestEffortRemove(repoPath, worktreePath);
-      return spawned.timedOut
-        ? { kind: "timed_out", reason: reasonForSessionCrash({ timedOut: true, logPath: spawned.logPath, runtime }) }
-        : { kind: "session_failed", reason: reasonForSessionCrash({ timedOut: false, logPath: spawned.logPath, runtime }) };
+      return crashOutcome;
     }
 
     // Persisted as soon as the session itself completes — a review round found these
