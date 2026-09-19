@@ -554,3 +554,55 @@ test("GET /api/issues/:id surfaces latestSessionFailure from worker.failed reaso
 
   await app.close();
 });
+
+test("NOT-148: GET /api/issues/:id surfaces branchTipStatus with restart risk after empty-tip infra failure", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Restart risk strip",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID}})
+  ).json() as { id: string };
+
+  const { incrementIssueInfraAttempts } = await import("../repository/issues.js");
+  transitionIssue(created.id, "developing");
+  incrementIssueInfraAttempts(created.id);
+
+  const res = await app.inject({ method: "GET", url: `/api/issues/${created.id}` });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as {
+    branchTipStatus: {
+      tipLabel: string;
+      commitsAhead: number | null;
+      restartRisk: boolean;
+      branch: string;
+    } | null;
+  };
+  assert.ok(body.branchTipStatus);
+  assert.equal(body.branchTipStatus!.tipLabel, "no tip yet");
+  assert.equal(body.branchTipStatus!.commitsAhead, 0);
+  assert.equal(body.branchTipStatus!.restartRisk, true);
+  assert.match(body.branchTipStatus!.branch, new RegExp(`issue-${created.id}`));
+
+  // A fresh ready issue omits the tip strip payload.
+  const readyCreated = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Idle tip omit",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID}})
+  ).json() as { id: string };
+  const idle = await app.inject({ method: "GET", url: `/api/issues/${readyCreated.id}` });
+  assert.equal((idle.json() as { branchTipStatus: unknown }).branchTipStatus, null);
+
+  await app.close();
+});

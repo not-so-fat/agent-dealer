@@ -28,6 +28,19 @@ test("developer prompt asks for incremental commits at slice boundaries and keep
   assert.match(prompt, /do NOT push and do NOT open a pull request/);
 });
 
+// NOT-146: timed developer spawn covers implement + targeted tests; full suite / Lens
+// live on a separate budget (NOT-74), not inside the same wall clock.
+test("NOT-146: developer prompt handoff bar is commits + targeted tests, not full suite/Lens in-spawn", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1 });
+  assert.match(prompt, /targeted tests?/i);
+  assert.match(prompt, /handoff/i);
+  assert.match(prompt, /full suite/i);
+  assert.match(prompt, /[Ll]ens/);
+  // Must not still demand Lens inside the timed spawn as a hard Required step.
+  assert.doesNotMatch(prompt, /^Run tests and Lens checks\./m);
+  assert.match(prompt, /do NOT push and do NOT open a pull request/);
+});
+
 test("repair round includes findings and references the round number", () => {
   const prompt = buildDeveloperPrompt({
     taskSnapshot,

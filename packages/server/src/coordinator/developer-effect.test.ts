@@ -207,6 +207,11 @@ test("clean handoff: real worktree, real push, fake GitHub — issue moves to re
   assert.ok(kinds.includes("implementation_conclusion"));
   assert.ok(kinds.includes("developer_transcript"));
   assert.ok(kinds.includes("checks_evidence"));
+  // NOT-146: clean handoff is commits + publish — not gated on a full-suite / Lens receipt.
+  assert.ok(
+    !kinds.includes("verification_receipt"),
+    "NOT-146: handoff must succeed without a full-suite verification receipt"
+  );
 
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer" && i.status === "pending").length, 1);
 
