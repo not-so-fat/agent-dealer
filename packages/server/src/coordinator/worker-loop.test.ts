@@ -35,6 +35,7 @@ const { recoverCoordinator } = await import("./recovery.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
 const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./auto-merge.js");
 const { stubManagedCloneForTests } = await import("../adapters/managed-repo.js");
+const { setAdmissionHealthCheckerForTests } = await import("./admission.js");
 
 before(() => migrate());
 // claimWorkItem / recovery scan the whole table (one loop in production); start each
@@ -44,8 +45,12 @@ beforeEach(() => {
   clearFinalizeInflightForTests();
   setMergePrForTests(async () => ({ ok: true }));
   stubManagedCloneForTests("acme/app");
+  setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
 });
-afterEach(() => resetEffectHandlers());
+afterEach(() => {
+  resetEffectHandlers();
+  setAdmissionHealthCheckerForTests(null);
+});
 
 function newIssue(maxReviewRounds = 3): string {
   return createIssue({
@@ -380,4 +385,57 @@ test("placeholder handlers escalate rather than fabricating a PR", async () => {
     listHumanActionsForIssue(issueId).find((a) => a.status === "open")!.actionType,
     "policy_escalation"
   );
+});
+
+// NOT-156: after developer handoff, an unhealthy reviewer parks (explicit reason) instead of
+// spawning into a crash loop. Infra / attempt budgets stay untouched.
+test("NOT-156: reviewer unhealthy at review start parks with reviewer wait reason", async () => {
+  const prevBackoff = process.env.DECK_OUTAGE_BACKOFF_BASE_MS;
+  process.env.DECK_OUTAGE_BACKOFF_BASE_MS = "60000";
+  try {
+    const issueId = newIssue();
+    let reviewerSpawns = 0;
+    registerEffectHandler("developer", async () => cleanHandoff());
+    registerEffectHandler("reviewer", async () => {
+      reviewerSpawns++;
+      return approvedVerdict;
+    });
+
+    // Developer round is healthy; only the reviewer role fails health when lease time comes.
+    setAdmissionHealthCheckerForTests(async (_agent, role) => {
+      if (role === "reviewer") {
+        return {
+          ok: false,
+          reason: `reviewer unhealthy: ${_agent.name} — Run agent-deck setup --client claude --start (Claude MCP not registered)`,
+        };
+      }
+      return { ok: true };
+    });
+
+    startWorkflow(issueId);
+    await pump(5);
+
+    assert.equal(getIssue(issueId)!.status, "reviewing");
+    assert.equal(reviewerSpawns, 0, "unhealthy reviewer must not spawn");
+    assert.match(getIssue(issueId)!.currentIntent ?? "", /reviewer unhealthy/);
+    assert.match(getIssue(issueId)!.currentIntent ?? "", /MCP not registered/);
+
+    const reviewerItem = listWorkItemsForIssue(issueId).find((w) => w.kind === "reviewer")!;
+    assert.ok(reviewerItem);
+    assert.equal(reviewerItem.status, "pending");
+    assert.equal(reviewerItem.attemptCount, 0, "health park must not spend attempt budget");
+    assert.ok(Date.parse(reviewerItem.availableAt) > Date.now());
+    assert.ok(
+      listWorkflowEventsForIssue(issueId).some((e) => e.type === "worker.deferred"),
+      "timeline must record the park"
+    );
+    assert.equal(
+      listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+      0,
+      "must not open a human gate for a recoverable health wait"
+    );
+  } finally {
+    if (prevBackoff === undefined) delete process.env.DECK_OUTAGE_BACKOFF_BASE_MS;
+    else process.env.DECK_OUTAGE_BACKOFF_BASE_MS = prevBackoff;
+  }
 });

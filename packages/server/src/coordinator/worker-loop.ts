@@ -41,11 +41,16 @@ import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapsh
 import type { DeveloperOutcome, ReviewerOutcome } from "./routing.js";
 import { recoverCoordinator } from "./recovery.js";
 import { observeClockJump } from "./clock-jump.js";
-import { admitNext } from "./admission.js";
+import { admitNext, checkRoleAgentHealthy } from "./admission.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
-import { deferLeasedWorkItemForUsageCap, type UsageCappedOutcome } from "./usage-cap-defer.js";
+import {
+  deferLeasedWorkItemForUsageCap,
+  deferLeasedWorkItemForAgentUnhealthy,
+  type UsageCappedOutcome,
+} from "./usage-cap-defer.js";
 import { outcomeShouldRecordError, reasonForWorkerFailedEvent } from "./failure-reason.js";
+import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
 
 const num = (name: string, dflt: number): number => Number(process.env[name] ?? dflt);
 
@@ -190,6 +195,24 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
           if (finished) routeCapEscalation(issue, instance, finished, cap);
         })();
       }
+      return;
+    }
+  }
+
+  // NOT-156: fail-closed for the role about to spawn only. Reviewer health must not have
+  // blocked developer admit; once a reviewer item is leased, park here instead of crashing
+  // into a deck/CLI failure loop.
+  {
+    const deckOnline = await checkAgentDeckHealth();
+    const health = await checkRoleAgentHealthy(issue, role, { deckOnline });
+    if (!health.ok) {
+      deferLeasedWorkItemForAgentUnhealthy(
+        claimed,
+        leaseToken,
+        { kind: "agent_unhealthy", reason: health.reason },
+        issue,
+        instance
+      );
       return;
     }
   }
