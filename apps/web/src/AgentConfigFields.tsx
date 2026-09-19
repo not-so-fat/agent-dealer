@@ -9,10 +9,9 @@ export type AgentConfigValue = {
   runtime: Runtime;
   deckId: string;
   // Issue-centric (developer/reviewer) session defaults — snapshotted per session.
-  // NOT-71/NOT-80: the old plan/execute model+budget pair is gone from this form. Issue
-  // workflows read `defaultModel` / `defaultEffort` / `defaultBudget`; profile-snapshot.ts
-  // still falls back to the persisted plan/execute columns for profiles saved before this
-  // form existed, but nothing writes them any more.
+  // NOT-80: only these role-neutral fields appear on the form. NOT-71 retired the legacy
+  // plan→execute queue, so there is no collapsed "Legacy queue settings" section — the
+  // plan/execute columns remain DB read-compat only (profile-snapshot / resolveProfile*).
   purpose: string;
   defaultModel: string;
   /** Reasoning effort for Codex/Claude; empty string = runtime default. Ignored for Cursor. */
