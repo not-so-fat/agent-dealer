@@ -278,7 +278,7 @@ test("fetch failure: Linear-sourced parks with `dependency state unavailable` wh
   assert.equal((await admitNext())?.issueId, manual.id, "a Linear outage must not pause manual work");
   const parked = getQueuedEntryForIssue(linear.id);
   assert.equal(parked?.state, "queued", "parked, never dequeued/failed/canceled");
-  assert.equal(parked?.waitReason, "dependency state unavailable");
+  assert.equal(parked?.waitReason, "Linear fetch failed — dependency state unavailable (Linear HTTP 503)");
   assert.equal(getIssue(linear.id)!.status, "ready");
 
   // Linear comes back. No operator action, no re-enqueue — the next tick admits it.
@@ -314,7 +314,7 @@ test("a hanging Linear API cannot stall the coordinator tick", async () => {
   const startedAt = Date.now();
   assert.equal(await admitNext(), null);
   assert.ok(Date.now() - startedAt < 2_000, "admitNext must return on the timeout, not on the fetch");
-  assert.equal(waitReason(issue.id), "dependency state unavailable");
+  assert.match(waitReason(issue.id) ?? "", /^Linear timed out — dependency state unavailable/);
   assert.equal(getQueuedEntryForIssue(issue.id)?.state, "queued");
 });
 
@@ -369,7 +369,7 @@ test("the TTL cache is never served past its TTL when the refresh fails", async 
   });
   enqueueIssue(issue.id);
   assert.equal(await admitNext(), null);
-  assert.equal(waitReason(issue.id), "dependency state unavailable");
+  assert.match(waitReason(issue.id) ?? "", /^Linear fetch failed — dependency state unavailable/);
 });
 
 test("a failing Linear is asked once per backoff window, not once per tick", async () => {
@@ -383,7 +383,11 @@ test("a failing Linear is asked once per backoff window, not once per tick", asy
 
   for (let tick = 0; tick < 5; tick++) assert.equal(await admitNext(), null);
   assert.equal(fetches, 1, "an outage must not become one query per 3s tick");
-  assert.equal(waitReason(issue.id), "dependency state unavailable");
+  assert.match(
+    waitReason(issue.id) ?? "",
+    /^Linear fetch failed — dependency state unavailable \(Linear HTTP 503\)$/,
+    "ticks that only wait out the backoff keep the real cause"
+  );
 
   // The window is short, and nothing else has to happen: once it lapses the next tick asks
   // again and admits on the first success.
@@ -671,4 +675,110 @@ test("a relation list Linear will not finish is unknown, not `no blockers`", asy
   setLinearBlockerFetcherForTests(async () => new Map());
   assert.equal(await admitNext(), null);
   assert.equal(waitReason(issue.id), "dependency state unavailable");
+});
+
+// --- NOT-158: the park reason names the cause (and the reset time) instead of staying opaque ---
+
+async function rateLimitedFetcher(resetInMs: number, counter: { fetches: number }) {
+  const { LinearHttpError } = await import("../adapters/linear-graphql.js");
+  return async () => {
+    counter.fetches++;
+    throw new LinearHttpError({
+      status: 200,
+      operation: "fetchLinearBlockers",
+      rateLimit: { requestsRemaining: "0", requestsReset: String(Date.now() + resetInMs) },
+      bodySnippet: "RATELIMITED",
+      retryAfterMs: resetInMs,
+    });
+  };
+}
+
+test("rate limit: /api/queue names it with a parseable reset time, holds through backoff, and Start does not bypass", async () => {
+  const Fastify = (await import("fastify")).default;
+  const { registerIssueRoutes } = await import("../routes/issues.js");
+  const { registerQueueRoutes } = await import("../routes/queue.js");
+  const app = Fastify();
+  await registerIssueRoutes(app);
+  await registerQueueRoutes(app);
+
+  const issue = seedIssue({ source: "linear", externalId: "lin-a" });
+  enqueueIssue(issue.id);
+  const counter = { fetches: 0 };
+  const resetInMs = 20 * 60_000;
+  const before = Date.now();
+  setLinearBlockerFetcherForTests(await rateLimitedFetcher(resetInMs, counter));
+
+  assert.equal(await admitNext(), null);
+  // Further ticks are inside the backoff window: no new fetch, and the cause must survive.
+  for (let tick = 0; tick < 3; tick++) assert.equal(await admitNext(), null);
+  assert.equal(counter.fetches, 1, "rate limit backs off instead of re-hitting Linear");
+
+  const queue = (await app.inject({ method: "GET", url: "/api/queue" })).json() as Array<{
+    issueId: string;
+    waitReason: string | null;
+  }>;
+  const reason = queue.find((e) => e.issueId === issue.id)?.waitReason ?? "";
+  assert.match(reason, /^Linear rate limited — retry ~\d{2}:\d{2} local \(requests-remaining=0, resets /);
+  const iso = reason.match(/resets (\d{4}-\d{2}-\d{2}T[\d:.]+Z)/)?.[1];
+  assert.ok(iso, "reset time must be machine-parseable");
+  const resetAt = Date.parse(iso!);
+  assert.ok(resetAt >= before + resetInMs - 1_000 && resetAt <= Date.now() + resetInMs + 1_000);
+
+  // NOT-118: Start goes to the front but stays parked, with the same specific reason.
+  const start = await app.inject({ method: "POST", url: `/api/issues/${issue.id}/start` });
+  assert.equal(start.statusCode, 200);
+  const body = start.json() as { state: string; waitReason?: string | null };
+  assert.equal(body.state, "queued");
+  assert.match(body.waitReason ?? "", /^Linear rate limited — retry ~/);
+  assert.equal(getActiveWorkflowInstance(issue.id), null, "no bypass of dependency readiness");
+  assert.equal(getIssue(issue.id)!.status, "ready");
+  assert.equal(counter.fetches, 1, "Start must not open a fetch inside the rate-limit window");
+  await app.close();
+});
+
+test("a later successful fetch clears the rate-limit reason and admits", async () => {
+  const issue = seedIssue({ source: "linear", externalId: "lin-a" });
+  enqueueIssue(issue.id);
+  const counter = { fetches: 0 };
+  setBlockerFailureBackoffForTests(0);
+  setLinearBlockerFetcherForTests(await rateLimitedFetcher(0, counter));
+  assert.equal(await admitNext(), null);
+  assert.match(waitReason(issue.id) ?? "", /^Linear rate limited/);
+
+  setLinearBlockerFetcherForTests(async (ids) => new Map(ids.map((id) => [id, []])));
+  assert.equal((await admitNext())?.issueId, issue.id);
+});
+
+test("a missing LINEAR_API_KEY parks with its own reason", async () => {
+  const issue = seedIssue({ source: "linear", externalId: "lin-a" });
+  enqueueIssue(issue.id);
+  const originalKey = process.env.LINEAR_API_KEY;
+  delete process.env.LINEAR_API_KEY;
+  try {
+    assert.equal(await admitNext(), null);
+  } finally {
+    if (originalKey !== undefined) process.env.LINEAR_API_KEY = originalKey;
+  }
+  assert.equal(waitReason(issue.id), "LINEAR_API_KEY not set — dependency state unavailable");
+  assert.equal(getQueuedEntryForIssue(issue.id)?.state, "queued");
+});
+
+test("a non-rate-limit HTTP error is named by status, not as a rate limit", async () => {
+  const { LinearHttpError } = await import("../adapters/linear-graphql.js");
+  const issue = seedIssue({ source: "linear", externalId: "lin-a" });
+  enqueueIssue(issue.id);
+  setLinearBlockerFetcherForTests(async () => {
+    throw new LinearHttpError({
+      status: 500,
+      operation: "fetchLinearBlockers",
+      rateLimit: {},
+      bodySnippet: "boom",
+      retryAfterMs: null,
+    });
+  });
+  assert.equal(await admitNext(), null);
+  assert.equal(
+    waitReason(issue.id),
+    "Linear HTTP 500 — dependency state unavailable, retrying automatically"
+  );
 });

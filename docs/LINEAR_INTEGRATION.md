@@ -102,7 +102,7 @@ so an open epic does not block its own children).
 | Topic | Behavior |
 |-------|----------|
 | **Satisfied** | Blocker also kicked into dealer → dealer `done` (the PR actually merged). Not in dealer → Linear state type `completed` or `canceled` |
-| **Reason** | The queue entry shows `waiting on NOT-123 (In Progress)`, or `dependency state unavailable` when Linear can't be read |
+| **Reason** | The queue entry shows `waiting on NOT-123 (In Progress)`, or, when Linear can't be read, the cause: `Linear rate limited — retry ~21:57 local (requests-remaining=0, resets <ISO time>)`, `Linear timed out …`, `LINEAR_API_KEY not set …`, `Linear HTTP <status> …`, `Linear fetch failed …` (bare `dependency state unavailable` when Linear answered but omitted the issue). Start never bypasses it |
 | **Fetch** | One batched, timeout-bounded GraphQL query per admission tick that has a free slot, cached ~60s; a busy system makes no Linear calls |
 | **Outage** | No `LINEAR_API_KEY` / Linear down → Linear-sourced issues **park** (stay `queued`, never dropped) and resume on the next successful fetch. Manual issues keep running |
 | **Escape hatch** | Edit Linear: remove the relation, or mark an abandoned blocker that dealer never picked up `canceled`. A blocker already in dealer releases only at dealer `done`, so drop its relation. There is no per-issue bypass flag |

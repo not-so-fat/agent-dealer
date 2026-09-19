@@ -17,7 +17,7 @@
 
 import { isTerminalIssueStatus, type Issue } from "@agent-dealer/shared";
 import { fetchLinearBlockers, type LinearBlockerNode } from "../adapters/linear-inbox.js";
-import { LinearHttpError } from "../adapters/linear-graphql.js";
+import { LinearApiKeyMissingError, LinearHttpError } from "../adapters/linear-graphql.js";
 import { listIssuesByExternalId } from "../repository/issues.js";
 
 export type BlockerState = LinearBlockerNode;
@@ -72,6 +72,16 @@ const cache = new Map<string, { at: number; blockers: BlockerState[] }>();
 let backoffUntil = 0;
 let inFlight: Promise<Map<string, BlockerState[]>> | null = null;
 let lastLoggedError: string | null = null;
+let lastUnavailableReason: string | null = null;
+
+/** No Linear call was made this tick; the cause of the earlier failure still stands. */
+class BlockerFetchSkippedError extends Error {}
+
+class BlockerFetchTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`blocker fetch timed out after ${ms}ms`);
+  }
+}
 
 /** Tests inject a pure provider so admission never reaches the network. */
 export function setBlockersProviderForTests(provider: BlockersProvider | null): void {
@@ -102,6 +112,7 @@ export function clearBlockerCacheForTests(): void {
   backoffUntil = 0;
   inFlight = null;
   lastLoggedError = null;
+  lastUnavailableReason = null;
 }
 
 export function resetDependenciesForTests(): void {
@@ -142,10 +153,12 @@ export async function blockersFor(issues: Issue[]): Promise<BlockerSnapshot> {
     else stale.push(id);
   }
   if (stale.length === 0) return snapshot;
-  if (now < backoffUntil) throw new Error("blocker fetch backing off after a recent failure");
+  if (now < backoffUntil) {
+    throw new BlockerFetchSkippedError("blocker fetch backing off after a recent failure");
+  }
   // Ticks overlap (the 3s loop plus a Manual Start): the second one parks rather than opening
   // a second connection to an API that is, by definition, slower than a tick right now.
-  if (inFlight) throw new Error("blocker fetch already in flight");
+  if (inFlight) throw new BlockerFetchSkippedError("blocker fetch already in flight");
 
   // Throwing (rather than falling back to the expired rows) is what makes the TTL a hard
   // edge: the caller turns a throw into "unavailable", never into "no blockers".
@@ -163,6 +176,7 @@ export async function blockersFor(issues: Issue[]): Promise<BlockerSnapshot> {
     const rateLimitMs =
       err instanceof LinearHttpError && err.retryAfterMs != null ? err.retryAfterMs : 0;
     backoffUntil = Date.now() + Math.max(failureBackoffMs, rateLimitMs);
+    lastUnavailableReason = describeBlockerFailure(err, Date.now());
     throw err;
   } finally {
     if (inFlight === pending) inFlight = null;
@@ -190,7 +204,7 @@ function defaultLinearFetcher(issueIds: string[]): Promise<Map<string, BlockerSt
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`blocker fetch timed out after ${ms}ms`)), ms);
+    const timer = setTimeout(() => reject(new BlockerFetchTimeoutError(ms)), ms);
     promise.then(
       (value) => {
         clearTimeout(timer);
@@ -214,11 +228,18 @@ export async function blockerSnapshotFor(issues: Issue[]): Promise<BlockerSnapsh
   if (tracked.length === 0) return EMPTY_SNAPSHOT;
   try {
     // Backstop over the batch's own bound, so an injected provider cannot stall the tick either.
-    return await withTimeout(
+    const snapshot = await withTimeout(
       (blockersProvider ?? blockersFor)(tracked),
       fetchTimeoutMs + 2 * TIMEOUT_GRACE_MS
     );
+    lastUnavailableReason = null;
+    return snapshot;
   } catch (err) {
+    // A skipped tick (backoff / in flight) has no new cause: keep the reason the real failure
+    // wrote, so a rate-limit ETA survives the ticks that wait it out.
+    if (!(err instanceof BlockerFetchSkippedError)) {
+      lastUnavailableReason = describeBlockerFailure(err, Date.now());
+    }
     // The operator only ever sees the one constant reason, so the *cause* — missing API key,
     // an id Linear does not know, HTTP 500, timeout — has to reach the log or a permanent
     // misconfiguration is indistinguishable from a passing blip. Logged on change only, the
@@ -233,6 +254,51 @@ export async function blockerSnapshotFor(issues: Issue[]): Promise<BlockerSnapsh
     // or canceled, and the next successful fetch admits it with no operator action.
     return EMPTY_SNAPSHOT;
   }
+}
+
+/**
+ * NOT-158: why the queue is parked on a missing snapshot. Still fail-closed — this only names
+ * the cause (and, for a rate limit, the reset time) so an operator is not left guessing.
+ * Falls back to the bare constant when the snapshot is merely missing an id Linear did not return.
+ */
+export function blockerUnavailableReason(): string {
+  return lastUnavailableReason ?? DEPENDENCY_STATE_UNAVAILABLE;
+}
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** `HH:MM` local, rounded up to the minute so "retry ~" is never earlier than the reset. */
+function formatLocalMinute(ms: number): string {
+  const d = new Date(Math.ceil(ms / 60_000) * 60_000);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+function describeBlockerFailure(err: unknown, nowMs: number): string {
+  if (err instanceof LinearHttpError) {
+    if (err.retryAfterMs != null) {
+      const resetAtMs = nowMs + err.retryAfterMs;
+      const detail = [
+        err.rateLimit.requestsRemaining != null
+          ? `requests-remaining=${err.rateLimit.requestsRemaining}`
+          : null,
+        `resets ${new Date(resetAtMs).toISOString()}`,
+      ].filter(Boolean);
+      return `Linear rate limited — retry ~${formatLocalMinute(resetAtMs)} local (${detail.join(", ")})`;
+    }
+    return `Linear HTTP ${err.status} — ${DEPENDENCY_STATE_UNAVAILABLE}, retrying automatically`;
+  }
+  if (err instanceof LinearApiKeyMissingError) {
+    return `LINEAR_API_KEY not set — ${DEPENDENCY_STATE_UNAVAILABLE}`;
+  }
+  if (
+    err instanceof BlockerFetchTimeoutError ||
+    (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError"))
+  ) {
+    return `Linear timed out — ${DEPENDENCY_STATE_UNAVAILABLE}, retrying automatically`;
+  }
+  const message = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").trim();
+  const short = message.length > 120 ? `${message.slice(0, 120)}…` : message;
+  return `Linear fetch failed — ${DEPENDENCY_STATE_UNAVAILABLE}${short ? ` (${short})` : ""}`;
 }
 
 /** Linear state types that mean "this work will never land in a form we must wait for". */
