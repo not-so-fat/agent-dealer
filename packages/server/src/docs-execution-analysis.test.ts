@@ -1,0 +1,94 @@
+// packages/server/src/docs-execution-analysis.test.ts
+//
+// NOT-167: docs/EXECUTION_ANALYSIS.md is the canonical execution-analysis contract. Guards
+// that the architecture/data-model docs keep linking to it (instead of restating it) and
+// that the contract keeps its required vocabulary and the silence-is-observational rule.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const read = (rel: string) => fs.readFileSync(path.join(repoRoot, rel), "utf8");
+
+const CANONICAL = "docs/EXECUTION_ANALYSIS.md";
+
+test("the execution-analysis contract exists", () => {
+  assert.ok(fs.existsSync(path.join(repoRoot, CANONICAL)));
+});
+
+test("data-model, PRD, and README link to the canonical contract", () => {
+  for (const [file, link] of [
+    ["docs/DATA_MODEL.md", "](EXECUTION_ANALYSIS.md)"],
+    ["docs/PRD_ISSUE_COORDINATION.md", "](EXECUTION_ANALYSIS.md)"],
+    ["README.md", "](docs/EXECUTION_ANALYSIS.md)"],
+  ] as const) {
+    assert.ok(read(file).includes(link), `${file} must link to ${CANONICAL}`);
+  }
+});
+
+test("relative markdown links in the contract resolve to real files", () => {
+  const doc = read(CANONICAL);
+  const targets = [...doc.matchAll(/\]\(([^)#\s]+\.md)(?:#[^)]*)?\)/g)].map((m) => m[1]!);
+  assert.ok(targets.length > 0);
+  for (const t of targets) {
+    assert.ok(fs.existsSync(path.join(repoRoot, "docs", t)), `broken link: ${t}`);
+  }
+});
+
+test("in-document anchors in the contract resolve to headings", () => {
+  const doc = read(CANONICAL);
+  const slug = (h: string) =>
+    h.toLowerCase().replace(/[^a-z0-9 -]/g, "").trim().replace(/ /g, "-");
+  const anchors = new Set(
+    [...doc.matchAll(/^#{1,6} (.+)$/gm)].map((m) => slug(m[1]!))
+  );
+  for (const m of doc.matchAll(/\]\(#([^)]+)\)/g)) {
+    assert.ok(anchors.has(m[1]!), `unresolved anchor #${m[1]}`);
+  }
+});
+
+test("the contract defines every phase, taxonomy code, and quality label", () => {
+  const doc = read(CANONICAL);
+  const required = [
+    "queue_wait",
+    "coordinator_setup",
+    "agent_process",
+    "coordinator_validation_publish",
+    "human_wait",
+    "admission_dependency_wait",
+    "runtime_health_preflight",
+    "unexplained_silence",
+    "[start, end)",
+    "nearest-rank",
+    "rowid",
+    "exact",
+    "inferred",
+    "unavailable",
+    // silence taxonomy
+    "model_provider_wait",
+    "tool_or_subprocess_in_flight",
+    "host_suspended",
+    "no_structured_output",
+    // failure taxonomy
+    "authentication_configuration",
+    "provider_capacity_rate_limit",
+    "agent_cli_crash",
+    "tool_test_timeout",
+    "coordinator_crash",
+    "validation_failure",
+    "publish_git_failure",
+    "agent_deck_unavailable",
+    "host_sleep_liveness",
+  ];
+  for (const term of required) assert.ok(doc.includes(term), `missing: ${term}`);
+});
+
+test("the contract states silence cannot drive control-plane behavior", () => {
+  const doc = read(CANONICAL);
+  assert.match(doc, /Silence must not drive control-plane behavior/);
+  for (const word of ["retry", "termination", "scheduling", "leases", "admission"]) {
+    assert.ok(doc.includes(word), `silence rule must mention ${word}`);
+  }
+});

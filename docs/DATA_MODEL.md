@@ -138,4 +138,8 @@ After execute, server reads that file and stores `document` artifact. The file i
 - Latest by phase: `latestByPhase(artifacts, kind, "plan" | "execute")`
 - Raw log: `GET /api/runs/:id/log-tail?kind=stream_trace`
 
+## Execution analysis
+
+Phase boundaries, overlap/aggregation rules, evidence quality, silence and failure vocabularies, and the source matrix for execution-time metrics are defined in [EXECUTION_ANALYSIS.md](EXECUTION_ANALYSIS.md). That contract is authoritative; this document does not restate it.
+
 See also: `docs/AGENT_PROFILES.md`, `docs/LINEAR_INTEGRATION.md`.
