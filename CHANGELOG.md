@@ -2,6 +2,14 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.0.5 — 2026-09-19
+
+Patch over 1.0.4: Agents page shows only fields issue workflows actually read.
+
+### Fixes
+
+- **Agent profile form** — role-neutral model/budget fields only; legacy plan/execute phase fields no longer clutter Create/Edit, and the Agents list shows the effective model so pre-NOT-71 profiles are not blank (NOT-80).
+
 ## 1.0.4 — 2026-09-19
 
 Patch over 1.0.3: stop false agent-health failures from parking the queue (Claude MCP + reviewer-vs-developer admit).
