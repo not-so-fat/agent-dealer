@@ -585,8 +585,9 @@ test("NOT-148: GET /api/issues/:id surfaces branchTipStatus with restart risk af
     } | null;
   };
   assert.ok(body.branchTipStatus);
-  assert.equal(body.branchTipStatus!.tipLabel, "no tip yet");
-  assert.equal(body.branchTipStatus!.commitsAhead, 0);
+  // No managed clone for the synthetic repo → unknown tip (not a false "no tip yet").
+  assert.equal(body.branchTipStatus!.tipLabel, "unknown");
+  assert.equal(body.branchTipStatus!.commitsAhead, null);
   assert.equal(body.branchTipStatus!.restartRisk, true);
   assert.equal(body.branchTipStatus!.worktree, null);
   assert.match(body.branchTipStatus!.branch, new RegExp(`issue-${created.id}`));
