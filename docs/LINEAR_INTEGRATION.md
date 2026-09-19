@@ -47,8 +47,8 @@ flowchart TB
 | Variable | Role |
 |----------|------|
 | `LINEAR_API_KEY` | Required for Linear API (Personal API key) |
-| `LINEAR_STATE_FILTER` | **Live override** when set — inbox uses this instead of saved filter |
-| `LINEAR_TEAM_ID` | **Live override** when set — inbox uses this instead of saved team |
+| `LINEAR_STATE_FILTER` | **Live override** when set — candidate list uses this instead of saved filter |
+| `LINEAR_TEAM_ID` | **Live override** when set — candidate list uses this instead of saved team |
 | `AGENT_DEALER_WEB_URL` | Optional — links in Linear comments (dev default `http://localhost:3222`, prod `http://localhost:2222`) |
 
 ### Persisted settings (`intake_settings`)
@@ -131,7 +131,7 @@ Response headers of interest (on every GraphQL POST):
 | Path | Operation name(s) | Expected rate |
 |------|-------------------|---------------|
 | Admission blockers (NOT-104) | `fetchLinearBlockers`, `fetchLinearBlockersPage` | ≤ ~1 req / 60s when a free slot exists and Linear-sourced issues are queued (TTL cache). **Zero** when capacity is full or the queue has no Linear issues |
-| Inbox "From Linear" | `getLinearViewer`, `listLinearCandidates` (+ pages of 50) | Burst on each open of the candidate list — **uncached** |
+| From Linear (candidate list) | `listLinearCandidates` (+ pages of 50); `getLinearViewer` only when `linear.assigneeMe` is true | Burst on each open — **uncached** |
 | Kick lookup | `getLinearIssue` | One per lookup |
 | Delivery sync | `getLinearIssue`, `getWorkflowStates`, `commentCreate`, `issueUpdateState` | Few per approved delivery |
 
@@ -192,7 +192,7 @@ curl -s http://127.0.0.1:2222/api/intake/linear | jq '.candidates[] | {id, ident
 
 ### Free-form lookup (kick)
 
-Resolve a Linear identifier or issue URL without relying on the inbox list (also used by Issues → From Linear → Lookup):
+Resolve a Linear identifier or issue URL without relying on the candidate list (also used by Issues → From Linear → Lookup):
 
 ```bash
 curl -s 'http://127.0.0.1:2222/api/intake/linear/lookup?q=NOT-103' | jq '.candidate | {id, identifier, title}'
