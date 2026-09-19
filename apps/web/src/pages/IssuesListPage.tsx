@@ -504,7 +504,9 @@ export default function IssuesListPage({
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-white/90 truncate">{issue.title}</p>
                   {entry?.waitReason ? (
-                    <p className="text-xs text-amber-200/80 truncate">{entry.waitReason}</p>
+                    <p className="text-xs text-amber-200/80 truncate" title={entry.waitReason}>
+                      {entry.waitReason}
+                    </p>
                   ) : (
                     issue.currentIntent && <p className="text-xs text-white/50 truncate">{issue.currentIntent}</p>
                   )}

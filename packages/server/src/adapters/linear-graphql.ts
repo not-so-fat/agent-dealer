@@ -66,6 +66,14 @@ export class LinearHttpError extends Error {
   }
 }
 
+/** Thrown before any request is made; lets callers tell a missing key from an API failure. */
+export class LinearApiKeyMissingError extends Error {
+  constructor() {
+    super("LINEAR_API_KEY not set");
+    this.name = "LinearApiKeyMissingError";
+  }
+}
+
 export function parseLinearRateLimitHeaders(headers: Headers): LinearRateLimitHeaders {
   const out: LinearRateLimitHeaders = {};
   const set = (key: keyof LinearRateLimitHeaders, name: string) => {
@@ -360,7 +368,7 @@ function logLinearTrace(operation: string, status: number, rateLimit: LinearRate
  */
 export async function linearGraphqlRequest(opts: LinearGraphqlRequestOpts): Promise<unknown> {
   const key = process.env.LINEAR_API_KEY;
-  if (!key) throw new Error("LINEAR_API_KEY not set");
+  if (!key) throw new LinearApiKeyMissingError();
 
   let res: Response;
   try {

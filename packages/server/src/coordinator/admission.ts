@@ -35,6 +35,7 @@ import {
 } from "./commands.js";
 import {
   blockerSnapshotFor,
+  blockerUnavailableReason,
   DEPENDENCY_STATE_UNAVAILABLE,
   isDependencyTracked,
   unsatisfiedBlockerReason,
@@ -100,7 +101,12 @@ export type EligibilityResult = { ok: true } | { ok: false; reason: string };
  * Shared per-`admitNext()` context — see `defaultAgentHealth` for why deckOnline lives here,
  * and NOT-104 for why the blocker snapshot is fetched once per tick rather than per entry.
  */
-export type EligibilityContext = { deckOnline: boolean; blockers: BlockerSnapshot };
+export type EligibilityContext = {
+  deckOnline: boolean;
+  blockers: BlockerSnapshot;
+  /** NOT-158: operator-facing cause when a Linear-sourced issue has no blocker snapshot. */
+  blockersUnavailableReason?: string;
+};
 
 export type EligibilityRule = (
   issue: Issue,
@@ -224,7 +230,7 @@ function blockedByDependency(issue: Issue, ctx: EligibilityContext): Eligibility
   if (!isDependencyTracked(issue)) return { ok: true };
   const blockers = ctx.blockers.get(issue.externalId);
   // Absent means unknown, not unblocked (see BlockerSnapshot) — park until the next fetch.
-  if (!blockers) return { ok: false, reason: DEPENDENCY_STATE_UNAVAILABLE };
+  if (!blockers) return { ok: false, reason: ctx.blockersUnavailableReason ?? DEPENDENCY_STATE_UNAVAILABLE };
   const reason = unsatisfiedBlockerReason(blockers);
   return reason ? { ok: false, reason } : { ok: true };
 }
@@ -302,7 +308,11 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
     checkAgentDeckHealth(),
     blockerSnapshotFor(queuedIssues),
   ]);
-  const ctx: EligibilityContext = { deckOnline, blockers };
+  const ctx: EligibilityContext = {
+    deckOnline,
+    blockers,
+    blockersUnavailableReason: blockerUnavailableReason(),
+  };
 
   for (const entry of remaining) {
     const issue = getIssue(entry.issueId);
