@@ -20,7 +20,7 @@ import {
 } from "../repository/workflow-events.js";
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
-import { abortIssue, checkIssueReadiness } from "../coordinator/commands.js";
+import { abortIssueAsync, checkIssueReadiness } from "../coordinator/commands.js";
 import { isStartable, queueStatusForIssue, startIssueViaQueue } from "../coordinator/admission.js";
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
 import { enqueueIssue, enqueueIssueWithOutcome, getQueuedEntryForIssue } from "../repository/queue-entries.js";
@@ -243,7 +243,7 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/issues/:id/abort", async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = req.body as { resolvedBy?: string } | undefined;
-    const result = abortIssue(id, body?.resolvedBy?.trim() || "human");
+    const result = await abortIssueAsync(id, body?.resolvedBy?.trim() || "human");
     if (!result.ok) return reply.status(result.code).send({ error: result.error });
     return { issueStatus: result.issueStatus, alreadyClosed: result.alreadyClosed };
   });
