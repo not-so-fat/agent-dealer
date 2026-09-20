@@ -161,6 +161,62 @@ test("a second run inside the process is counted, and the first run's text wins"
   );
 });
 
+// ── run correlation ─────────────────────────────────────────────────────────────────────────
+
+function runLine(runId: string, payloadType: string, payload: Record<string, unknown>): string {
+  return JSON.stringify({
+    stream: { kind: "session", id: SESSION },
+    payload_type: payloadType,
+    payload: { run_stream: { kind: "run", id: runId }, ...payload },
+  });
+}
+
+const interleavedStdout = [
+  runLine("primary", "session.run.linked", {}),
+  runLine("cron", "session.run.linked", {}),
+  runLine("cron", "run.terminal.completed", { terminal: "completed", text: "cron text", reason: null }),
+  runLine("primary", "run.terminal.completed", { terminal: "completed", text: "primary text", reason: null }),
+].join("\n");
+
+test("terminals are selected by the primary run id, not by arrival order", () => {
+  const log = [
+    modelCompletedLine("cron", { usage: { input_tokens: 1 }, duration_ms: 1 }),
+    modelCompletedLine("primary", { usage: { input_tokens: 7 }, duration_ms: 3 }),
+  ].join("\n");
+  const r = parseMuseRun({ stdout: interleavedStdout, exitCode: 0, sessionLog: log, expectedModel: MODEL });
+  assert.equal(r.finalText, "primary text");
+  assert.equal(r.runCount, 2);
+  assert.equal(r.usage.inputTokens, 7);
+  assert.equal(r.usage.modelDurationMs, 3);
+  assert.equal(r.failure, null);
+});
+
+test("a cron run's model_completed cannot confirm the primary run's model", () => {
+  const log = modelCompletedLine("cron", { usage: { input_tokens: 1 } });
+  const r = parseMuseRun({ stdout: interleavedStdout, exitCode: 0, sessionLog: log, expectedModel: MODEL });
+  assert.equal(r.confirmedModel, null);
+  assert.equal(r.failure?.kind, "model_mismatch");
+  assert.equal(r.usage.inputTokens, null);
+});
+
+test("a cron run on a different model does not fail the primary run", () => {
+  const log = [
+    modelCompletedLine("cron", { model: "other-model" }),
+    modelCompletedLine("primary", { usage: { input_tokens: 7 } }),
+  ].join("\n");
+  const r = parseMuseRun({ stdout: interleavedStdout, exitCode: 0, sessionLog: log, expectedModel: MODEL });
+  assert.equal(r.failure, null);
+  assert.equal(r.confirmedModel, MODEL);
+});
+
+test("a cron terminal alone does not stand in for a primary run that never terminated", () => {
+  const stdout = interleavedStdout.split("\n").slice(0, 3).join("\n");
+  const r = parseMuseRun({ stdout, exitCode: 0, sessionLog: modelCompletedLine("cron", {}), expectedModel: MODEL });
+  assert.equal(r.terminal, null);
+  assert.equal(r.finalText, null);
+  assert.equal(r.failure?.kind, "malformed_stream");
+});
+
 test("session id comes from stream.id of the session stream", () => {
   const line = JSON.stringify({
     stream: { kind: "session", id: SESSION },
@@ -206,11 +262,15 @@ test("without a session log tokens and cost are null, not derived from the exit 
   assert.equal("usage" in (result ?? {}), false);
 });
 
-test("usage fields missing from a model_completed event stay null individually", () => {
-  const log = JSON.stringify({
+function modelCompletedLine(runId: string, event: Record<string, unknown>): string {
+  return JSON.stringify({
     payload_type: "runtime.session",
-    payload: { event: { kind: "model_completed", usage: { input_tokens: 10 }, model: MODEL } },
+    payload: { kind: "run", run_id: runId, event: { kind: "model_completed", model: MODEL, ...event } },
   });
+}
+
+test("usage fields missing from a model_completed event stay null individually", () => {
+  const log = modelCompletedLine("<id-3>", { usage: { input_tokens: 10 } });
   const r = parseMuseRun({
     stdout: readFileSync(join(DIR, "02-tool-success.jsonl"), "utf8"),
     exitCode: 0,
@@ -223,6 +283,22 @@ test("usage fields missing from a model_completed event stay null individually",
   assert.equal(r.usage.cacheReadTokens, null);
   assert.equal(r.usage.modelDurationMs, null);
   assert.equal(r.usage.costUsd, null);
+});
+
+test("an aggregate stays null when any contributing model call omits the field", () => {
+  const log = [
+    modelCompletedLine("<id-3>", { usage: { input_tokens: 10, output_tokens: 5 }, duration_ms: 100 }),
+    modelCompletedLine("<id-3>", { usage: { input_tokens: 20 } }),
+  ].join("\n");
+  const r = parseMuseRun({
+    stdout: readFileSync(join(DIR, "02-tool-success.jsonl"), "utf8"),
+    exitCode: 0,
+    sessionLog: log,
+    expectedModel: MODEL,
+  });
+  assert.equal(r.usage.inputTokens, 30);
+  assert.equal(r.usage.outputTokens, null);
+  assert.equal(r.usage.modelDurationMs, null);
 });
 
 // ── model confirmation ──────────────────────────────────────────────────────────────────────

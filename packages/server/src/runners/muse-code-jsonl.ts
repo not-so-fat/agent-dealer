@@ -59,9 +59,9 @@ export interface MuseRunInput {
 
 export interface MuseRunResult {
   sessionId: string | null;
-  /** Terminal of the first run in the stream; null when the stream never reached one. */
+  /** Terminal of the primary (first) run in the stream; null when the stream never reached one. */
   terminal: "completed" | "failed" | null;
-  /** `run.terminal.completed.text` of the first run: model prose, not a verified result. */
+  /** `run.terminal.completed.text` of the primary run: model prose, not a verified result. */
   finalText: string | null;
   /** More than one means something else (e.g. a cron job) started a run inside this process. */
   runCount: number;
@@ -140,6 +140,7 @@ function readEnvelopes(raw: string): { envelopes: Envelope[]; malformed: number 
 }
 
 interface ModelCompleted {
+  runId: string | null;
   model: string | null;
   usage: Record<string, unknown> | undefined;
   durationMs: number | null;
@@ -154,6 +155,7 @@ function readModelCompleted(sessionLog: string | undefined): ModelCompleted[] {
     const event = asRecord(env.payload.event);
     if (event?.kind !== "model_completed") continue;
     out.push({
+      runId: str(env.payload.run_id) ?? null,
       model: str(event.model) ?? null,
       usage: asRecord(event.usage),
       durationMs: num(event.duration_ms),
@@ -162,9 +164,10 @@ function readModelCompleted(sessionLog: string | undefined): ModelCompleted[] {
   return out;
 }
 
+/** An aggregate is unknown when any contributing call omitted the field: never under-report. */
 function sumField(values: Array<number | null>): number | null {
-  const present = values.filter((v): v is number => v !== null);
-  return present.length > 0 ? present.reduce((a, b) => a + b, 0) : null;
+  if (values.length === 0 || values.some((v) => v === null)) return null;
+  return (values as number[]).reduce((a, b) => a + b, 0);
 }
 
 function usageFrom(calls: ModelCompleted[]): MuseUsage {
@@ -178,6 +181,12 @@ function usageFrom(calls: ModelCompleted[]): MuseUsage {
     modelDurationMs: sumField(calls.map((c) => c.durationMs)),
     costUsd: null,
   };
+}
+
+/** The run a stdout envelope belongs to (`payload.run_stream.id`), when it names one. */
+function runIdOf(payload: Record<string, unknown>): string | undefined {
+  const rs = asRecord(payload.run_stream);
+  return rs?.kind === "run" ? str(rs.id) : undefined;
 }
 
 function hasRateLimitFacet(payload: Record<string, unknown>): boolean {
@@ -205,15 +214,21 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
   let sessionId: string | null = null;
   const tools = new Map<string, MuseToolActivity>();
   const toolByTask = new Map<string, string>();
-  const terminals: Array<{ terminal: "completed" | "failed"; text: string; reason: string }> = [];
+  const terminals: Array<{ runId: string | undefined; terminal: "completed" | "failed"; text: string; reason: string }> =
+    [];
   let rateLimited = false;
+  // The first run seen is the primary one; a cron job may start further runs in the same process.
+  let primaryRunId: string | null = null;
 
   for (const env of envelopes) {
     const p = env.payload;
     if (sessionId === null && env.streamKind === "session" && env.streamId) sessionId = env.streamId;
 
+    if (primaryRunId === null) primaryRunId = runIdOf(p) ?? null;
+
     if (env.payloadType === "run.terminal.completed" || env.payloadType === "run.terminal.failed") {
       terminals.push({
+        runId: runIdOf(p),
         terminal: env.payloadType === "run.terminal.completed" ? "completed" : "failed",
         text: str(p.text) ?? "",
         reason: str(p.reason) ?? "",
@@ -251,10 +266,14 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
     }
   }
 
-  const calls = readModelCompleted(input.sessionLog);
+  // Terminals, model confirmation and usage are scoped to the primary run. With no run id on stdout
+  // there is nothing to correlate against, so everything is accepted.
+  const calls = readModelCompleted(input.sessionLog).filter(
+    (c) => primaryRunId === null || c.runId === primaryRunId
+  );
   const usage = usageFrom(calls);
   const confirmedModel = calls.find((c) => c.model !== null)?.model ?? null;
-  const first = terminals[0];
+  const first = terminals.find((t) => primaryRunId === null || t.runId === primaryRunId);
 
   const failure = classify();
 
