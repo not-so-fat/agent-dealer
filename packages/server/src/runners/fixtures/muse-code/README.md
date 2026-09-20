@@ -24,9 +24,9 @@ line counts.
     `bash harness/probe10.sh sigterm`.
   - `mock-provider.py`: the synthetic provider for the 401/429 cases
     (`python3 harness/mock-provider.py <port> <status> [retry-after]`).
-  - `specs.json`, `conventions.json`, `build-fixtures.py`: per-probe metadata (round-1 commands were
-    typed inline before the harness existed; they are recorded verbatim here), and the sanitizer /
-    compactor / manifest writer. `python3 harness/build-fixtures.py --round1 <raw dir> --harness <OUT_DIR>`
+  - `build-fixtures.py`: the sanitizer / compactor / manifest writer. Per-probe metadata (round-1 commands
+    were typed inline before the harness existed; they are recorded verbatim in `manifest.json`) and the
+    sanitization conventions are read from `manifest.json` itself. `python3 harness/build-fixtures.py --round1 <raw dir> --harness <OUT_DIR>`
     regenerates every fixture and every count in `manifest.json` from raw captures.
 - `../muse-code-fixtures.test.ts` re-checks the committed files: manifest counts vs. files, JSONL
   envelope and preserved field names (`call_id`, ...), tool intent/result id agreement, no credentials

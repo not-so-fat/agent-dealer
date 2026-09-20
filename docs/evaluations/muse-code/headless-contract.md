@@ -22,6 +22,15 @@ Four named capabilities block integration. None was found to be enforceable, and
 Everything else worked, so this is a set of narrow, named blocks and not `do_not_integrate`:
 probes 1–6 and 8 pass, and probe 10 passes for authentication failure, cancellation (SIGTERM, SIGINT, process-group
 SIGTERM, resume after cancel), and signal exit codes; the real usage-cap half of probe 10 is blocked.
+**Evidence limitation (version provenance).** The round-one captures (probes 1-7, the reachable-MCP and tool-filter runs,
+the workflow-control runs and both recommended postures) were typed inline against the bare `muse` launcher, without
+`MUSE_NO_AUTO_UPDATE=1` and without a per-run version event, so nothing in the repo proves they ran on `1.3.0-R3401.1`
+rather than a version the launcher auto-updated to mid-session. Probes 8-10 and the harness cases used the update guard
+and the versioned binary. This does not change the conclusion: it affects how strongly the round-one observations are
+pinned, not which capabilities are blocked. NOT-183 runs through the guarded, versioned binary and re-observes the
+developer path on the pinned version; the adapter tickets must re-verify against fixtures captured with the guard. It is
+not re-run here because it would spend contributor-tier quota to strengthen evidence the PoC does not depend on.
+
 Unblock paths (none probed):
 
 1. Muse enforces `enabled_tools`/`disabled_tools` for `mcpServers` entries, or offers a per-run switch for `cron_*` (then re-run probes 8 and 9).
