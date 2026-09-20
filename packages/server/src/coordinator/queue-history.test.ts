@@ -64,8 +64,16 @@ afterEach(() => {
 async function queuedIssue(suffix: string) {
   const { createAgent } = await import("../repository/agents.js");
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), `dealer-qhist-repo-${suffix}-`));
-  const dev = createAgent({ name: `dev-${suffix}`, runtime: "claude_code" });
-  const rev = createAgent({ name: `rev-${suffix}`, runtime: "claude_code" });
+  const dev = createAgent({
+    name: `dev-${suffix}`,
+    runtime: "claude_code",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
+  const rev = createAgent({
+    name: `rev-${suffix}`,
+    runtime: "claude_code",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
   return createIssue({
     title: `Issue ${suffix}`,
     description: "d",
