@@ -2,6 +2,27 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.1.0 — 2026-09-20
+
+Minor over 1.0.5: native Muse Code can run as the developer agent, plus tighter review-loop and retry behavior.
+
+### Features
+
+- **Muse Code developer runtime** — select Muse Code for the developer role (reviewer stays on Claude/Cursor). Includes the runtime + profile with a pinned model, health checks that tell a missing CLI from missing credentials, and the Agents form/list/connections bar (NOT-178).
+- **Native Muse runner** — `muse exec --json` argv builder and JSONL/session-log parser that requires the server-confirmed model to match the configured one and classifies auth, usage-cap, max-step and malformed-stream failures (NOT-179).
+- **Muse through the coordinator** — per-attempt config under the worktree, deckless developer path, usage-cap and cron-guard outcomes, session-log usage, and a `usage_events.model` column (added by an automatic migration) (NOT-181).
+
+### Improvements
+
+- **Early escalation on repeated blockers** — a file with a blocking review finding in each of the last 3 rounds raises a policy escalation naming the file(s) instead of queuing another developer round (NOT-184).
+- **Retry after an edit** — retrying an issue parked at `attempts_exhausted` re-freezes the task snapshot when its title, description or acceptance criteria changed (NOT-185).
+- **Findings resolve themselves** — a later completed review that no longer reports a finding marks it resolved (NOT-186).
+- **Clearer Linear blocker errors** — names the cause, and the rate-limit reset ETA, when blocker state is unavailable (NOT-158).
+
+### Internal
+
+- Muse Code evaluation contract, headless/orchestration spike, PoC results and the committed PoC harness (`scripts/muse-poc/`); execution-analysis contract (NOT-176, NOT-177, NOT-183, NOT-187, NOT-167).
+
 ## 1.0.5 — 2026-09-19
 
 Patch over 1.0.4: Agents list shows the effective model for profiles saved before NOT-71.
