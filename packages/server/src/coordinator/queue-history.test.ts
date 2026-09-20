@@ -275,6 +275,73 @@ test("row written before instrumentation, reason recorded after: backfilled star
   assert.deepEqual(wait.reasons, ["backfill"]);
 });
 
+test("legacy terminal row survives alongside a post-upgrade enqueue episode", async () => {
+  const issue = await queuedIssue("legacy-plus-fresh");
+  getDb()
+    .prepare(
+      `INSERT INTO queue_entries (id, issue_id, position, enqueued_at, state, wait_reason, wait_reason_at)
+       VALUES (?, ?, 1, ?, 'removed', 'missing acceptance criteria', ?)`
+    )
+    .run(`legacy-old-${issue.id}`, issue.id, "2024-01-01T00:00:00.000Z", "2024-01-01T00:00:00.000Z");
+
+  const { entry, created } = enqueueIssueWithOutcome(issue.id);
+  assert.equal(created, true);
+  assert.equal(setQueueWaitReason(entry.id, "missing acceptance criteria"), true);
+  assert.notEqual(markQueueEntryAdmitted(issue.id), null);
+
+  const history = getQueueHistoryForIssue(issue.id);
+  assert.equal(history.queueWaits.length, 2);
+
+  // Chronological: the legacy row first, with no fabricated end.
+  const [legacy, fresh] = history.queueWaits;
+  assert.equal(legacy!.start, "2024-01-01T00:00:00.000Z");
+  assert.equal(legacy!.end, null);
+  assert.equal(legacy!.quality, "unavailable");
+  assert.deepEqual(legacy!.reasons, ["backfill", "missing_queue_terminal"]);
+
+  // The fresh episode starts at its own enqueue evidence, not the older row.
+  assert.ok(fresh!.start > legacy!.start);
+  assert.notEqual(fresh!.start, legacy!.start);
+  assert.ok(fresh!.end);
+  assert.equal(fresh!.quality, "exact");
+  assert.deepEqual(fresh!.reasons, []);
+  assert.ok(fresh!.startCursor !== null);
+});
+
+test("mid-upgrade re-enqueue after a legacy terminal row keeps its own start", async () => {
+  const issue = await queuedIssue("legacy-reenqueue");
+  getDb()
+    .prepare(
+      `INSERT INTO queue_entries (id, issue_id, position, enqueued_at, state, wait_reason, wait_reason_at)
+       VALUES (?, ?, 1, ?, 'removed', 'missing acceptance criteria', ?)`
+    )
+    .run(`legacy-old-${issue.id}`, issue.id, "2024-01-01T00:00:00.000Z", "2024-01-01T00:00:00.000Z");
+  getDb()
+    .prepare(
+      `INSERT INTO queue_entries (id, issue_id, position, enqueued_at, state, wait_reason, wait_reason_at)
+       VALUES (?, ?, 2, ?, 'queued', NULL, NULL)`
+    )
+    .run(`legacy-live-${issue.id}`, issue.id, "2024-06-01T00:00:00.000Z");
+
+  const entry = getQueuedEntryForIssue(issue.id)!;
+  assert.equal(setQueueWaitReason(entry.id, "waiting on NOT-1 (In Progress)"), true);
+  assert.notEqual(markQueueEntryAdmitted(issue.id), null);
+
+  const history = getQueueHistoryForIssue(issue.id);
+  assert.equal(history.queueWaits.length, 2);
+
+  const [legacy, episode] = history.queueWaits;
+  assert.equal(legacy!.start, "2024-01-01T00:00:00.000Z");
+  assert.equal(legacy!.quality, "unavailable");
+  assert.deepEqual(legacy!.reasons, ["backfill", "missing_queue_terminal"]);
+
+  // Must not inherit the older terminal row's enqueued_at.
+  assert.equal(episode!.start, "2024-06-01T00:00:00.000Z");
+  assert.ok(episode!.end);
+  assert.equal(episode!.quality, "inferred");
+  assert.deepEqual(episode!.reasons, ["backfill"]);
+});
+
 test("wait-reason categories are stable codes across the admission vocabulary", async () => {
   const cases: Array<[string | null, string]> = [
     ["waiting for slot — running: Big Work", "capacity"],

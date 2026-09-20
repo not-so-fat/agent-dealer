@@ -57,6 +57,7 @@ export interface QueueHistoryEvent {
   ts: string;
   type: string;
   payload: {
+    queueEntryId?: string | null;
     from?: string | null;
     to?: string | null;
     category?: string | null;
@@ -65,6 +66,8 @@ export interface QueueHistoryEvent {
 }
 
 export interface QueueHistoryRow {
+  /** `queue_entries.id` when loaded from the DB; absent in direct pure-function calls. */
+  id?: string;
   enqueuedAt: string;
   state: string;
 }
@@ -122,6 +125,11 @@ function negativeDuration(start: string, end: string): boolean {
  * without a terminal event stay open-ended, and pre-instrumentation rows
  * without any events yield an inferred open interval (still queued) or an
  * unavailable one (terminal state, end unknown).
+ *
+ * Episodes are matched to rows via `payload.queueEntryId`. Every row whose id
+ * is not referenced by any event gets its own backfilled interval, so legacy
+ * rows are never dropped and a re-enqueued row never inherits an older row's
+ * `enqueued_at` once any event exists.
  */
 export function deriveQueueHistory(
   events: QueueHistoryEvent[],
@@ -162,8 +170,8 @@ export function deriveQueueHistory(
   }
 
   // Split into enqueue episodes. A leading run of non-enqueued events (row
-  // written before this instrumentation, reasons recorded after) attaches to a
-  // backfilled episode starting at the earliest known enqueued_at.
+  // written before this instrumentation, reasons recorded after) attaches to
+  // the row its events reference — never to an older row's enqueued_at.
   const episodes: QueueHistoryEvent[][] = [];
   for (const event of ordered) {
     // A second `queue.enqueued` starts a new episode; the previous one stays
@@ -174,10 +182,73 @@ export function deriveQueueHistory(
     episodes[episodes.length - 1]!.push(event);
   }
 
-  const earliestEnqueuedAt =
-    queueRows.length > 0
-      ? [...queueRows].sort((a, b) => (a.enqueuedAt < b.enqueuedAt ? -1 : 1))[0]!.enqueuedAt
+  const rowsById = new Map<string, QueueHistoryRow>();
+  for (const row of queueRows) {
+    if (row.id) rowsById.set(row.id, row);
+  }
+  const referencedIds = new Set<string>();
+  for (const event of ordered) {
+    const qid: unknown = event.payload?.queueEntryId;
+    if (typeof qid === "string" && qid.length > 0) referencedIds.add(qid);
+  }
+  const idLessRows = queueRows.filter((row) => !row.id);
+  const earliestIdLessEnqueuedAt =
+    idLessRows.length > 0
+      ? [...idLessRows].sort((a, b) => (a.enqueuedAt < b.enqueuedAt ? -1 : 1))[0]!.enqueuedAt
       : null;
+  // Rows with ids that no event references — including every legacy row that
+  // predates instrumentation. Emitted as their own backfilled intervals below.
+  // A row consumed as a fallback start for an id-less event run is removed
+  // here so it is not emitted twice.
+  const unmatchedById = new Map<string, QueueHistoryRow>();
+  for (const row of queueRows) {
+    if (row.id && !referencedIds.has(row.id)) unmatchedById.set(row.id, row);
+  }
+
+  function backfillForRow(row: QueueHistoryRow): QueueWaitInterval {
+    return row.state === "queued"
+      ? {
+          start: row.enqueuedAt,
+          startCursor: null,
+          end: null,
+          endCursor: null,
+          quality: "inferred" as const,
+          reasons: ["backfill", "open_interval"],
+        }
+      : {
+          start: row.enqueuedAt,
+          startCursor: null,
+          end: null,
+          endCursor: null,
+          quality: "unavailable" as const,
+          reasons: ["backfill", "missing_queue_terminal"],
+        };
+  }
+
+  /** Resolve the backfilled start row for a leading run without `queue.enqueued`. */
+  function resolveBackfillRow(episode: QueueHistoryEvent[]): QueueHistoryRow | null {
+    for (const event of episode) {
+      const qid: unknown = event.payload?.queueEntryId;
+      if (typeof qid === "string" && qid.length > 0) {
+        const matched = rowsById.get(qid);
+        if (matched) return matched;
+      }
+    }
+    // Pre-id payloads (direct pure-function callers): earliest id-less row.
+    if (earliestIdLessEnqueuedAt !== null) {
+      return [...idLessRows].sort((a, b) => (a.enqueuedAt < b.enqueuedAt ? -1 : 1))[0]!;
+    }
+    // Id-bearing events without a resolvable reference (row deleted or payload
+    // omitted): consume the latest live queued row so the interval still has a
+    // defensible start, and so it is not also emitted as unmatched.
+    const unmatched = [...unmatchedById.values()].sort((a, b) =>
+      a.enqueuedAt < b.enqueuedAt ? -1 : 1
+    );
+    const queued = unmatched.filter((row) => row.state === "queued");
+    const fallback = (queued.length > 0 ? queued[queued.length - 1] : unmatched[unmatched.length - 1]) ?? null;
+    if (fallback?.id) unmatchedById.delete(fallback.id);
+    return fallback;
+  }
 
   const queueWaits: QueueWaitInterval[] = [];
   const admissionWaits: AdmissionWaitInterval[] = [];
@@ -187,8 +258,9 @@ export function deriveQueueHistory(
     const terminal = [...episode]
       .reverse()
       .find((e) => e.type === "queue.admitted" || e.type === "queue.removed");
-    const backfilledStart = !enqueued && earliestEnqueuedAt !== null;
-    const start = enqueued ? enqueued.ts : (earliestEnqueuedAt ?? episode[0]!.ts);
+    const backfillRow = !enqueued ? resolveBackfillRow(episode) : null;
+    const backfilledStart = !enqueued && backfillRow !== null;
+    const start = enqueued ? enqueued.ts : (backfillRow?.enqueuedAt ?? episode[0]!.ts);
     const startCursor = enqueued ? enqueued.cursor : null;
     const end = terminal ? terminal.ts : null;
     const endCursor = terminal ? terminal.cursor : null;
@@ -273,6 +345,24 @@ export function deriveQueueHistory(
     closeSegment(end, endCursor);
   }
 
+  // Every legacy row without events stands on its own enqueued_at — never
+  // dropped, never folded into another episode's start. No fabricated end:
+  // still-queued rows stay open (inferred), terminal rows stay end-less
+  // (unavailable) per the contract.
+  for (const row of [...unmatchedById.values()].sort((a, b) =>
+    a.enqueuedAt < b.enqueuedAt ? -1 : 1
+  )) {
+    queueWaits.push(backfillForRow(row));
+  }
+  queueWaits.sort((a, b) => {
+    const ta = parseTs(a.start) ?? 0;
+    const tb = parseTs(b.start) ?? 0;
+    if (ta !== tb) return ta - tb;
+    if (a.start < b.start) return -1;
+    if (a.start > b.start) return 1;
+    return (a.startCursor ?? 0) - (b.startCursor ?? 0);
+  });
+
   return { queueWaits, admissionWaits };
 }
 
@@ -294,7 +384,7 @@ export function getQueueHistoryForIssue(issueId: string): QueueHistory {
     )
     .all(issueId) as QueueEventRow[];
   const rows = db
-    .prepare("SELECT enqueued_at AS enqueuedAt, state FROM queue_entries WHERE issue_id = ? ORDER BY enqueued_at ASC")
+    .prepare("SELECT id, enqueued_at AS enqueuedAt, state FROM queue_entries WHERE issue_id = ? ORDER BY enqueued_at ASC")
     .all(issueId) as QueueHistoryRow[];
   return deriveQueueHistory(
     eventRows.map((row) => {
