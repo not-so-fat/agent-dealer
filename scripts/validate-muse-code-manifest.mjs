@@ -6,7 +6,8 @@
 //
 // --ready is the pre-run gate: it additionally fails until the operator has confirmed the frozen
 // candidate model against the contributor tier (candidate.confirmation.confirmedAt/confirmedBy) and
-// recorded the Muse Code token mapping (attestation flag, cached-input semantics and exact raw field paths).
+// recorded the Muse Code token mapping (attestation flag, cached-input semantics, and per raw field an exact
+// path or an explicit `none` / `unreported` sentinel).
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 
@@ -91,18 +92,32 @@ if (ready) {
   // The Muse Code adapter does not exist yet, so its token mapping is recorded by the operator from a real
   // usage event before run 1: exact raw field paths, whether input includes cached tokens, and the attestation.
   const tmc = c?.tokenMapping;
-  if (typeof tmc?.inputIncludesCached !== "boolean") {
-    fail("--ready: candidate.tokenMapping.inputIncludesCached not set; record how Muse Code reports cached input first");
-  }
   if (tmc?.mappingRecordedInRunPlan !== true) {
     fail("--ready: candidate.tokenMapping.mappingRecordedInRunPlan must be true (operator attests the mapping is in the run plan)");
   }
+  // Each raw field is an exact dotted path, or a sentinel that keeps the null-cost branch reachable:
+  //   "none"       the vendor has no billing tier for it -> quantity is 0 by definition (cache_read, cache_write only)
+  //   "unreported" the tier applies but Muse Code does not report it -> quantity, and so cost, is null
   const FIELD_PATH = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+  const NONE_ALLOWED = new Set(["cache_read", "cache_write"]);
+  const raw = {};
   for (const k of ["input", "cache_read", "cache_write", "output"]) {
     const v = tmc?.rawFields?.[k];
-    if (typeof v !== "string" || !(FIELD_PATH.test(v) || (k === "cache_write" && v === "none"))) {
-      fail(`--ready: candidate.tokenMapping.rawFields.${k} must be an exact raw field path such as usage.input_tokens${k === "cache_write" ? ' (or "none")' : ""}, got ${JSON.stringify(v)}`);
+    raw[k] = v;
+    const ok = typeof v === "string" && (v === "unreported" || (v === "none" ? NONE_ALLOWED.has(k) : FIELD_PATH.test(v)));
+    if (!ok) {
+      fail(`--ready: candidate.tokenMapping.rawFields.${k} must be an exact raw field path such as usage.input_tokens, "unreported" (tier applies, not reported: cost null)${NONE_ALLOWED.has(k) ? ', or "none" (no such billing tier: 0)' : ""}, got ${JSON.stringify(v)}`);
     }
+  }
+  // Whether raw input includes cached tokens only matters when both are reported as field paths.
+  const paths = (k) => typeof raw[k] === "string" && FIELD_PATH.test(raw[k]) && raw[k] !== "unreported" && raw[k] !== "none";
+  const inclusion = tmc?.inputIncludesCached;
+  if (paths("input") && paths("cache_read")) {
+    if (typeof inclusion !== "boolean") {
+      fail("--ready: candidate.tokenMapping.inputIncludesCached must be true or false when input and cache_read are both reported fields");
+    }
+  } else if (typeof inclusion !== "boolean" && inclusion !== "not_applicable") {
+    fail('--ready: candidate.tokenMapping.inputIncludesCached must be true, false or "not_applicable" (input or cache_read is none/unreported)');
   }
 }
 if (c?.runtime !== "muse_code") fail("candidate must be runtime muse_code");

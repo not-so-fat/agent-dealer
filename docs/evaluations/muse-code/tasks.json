@@ -97,7 +97,7 @@
         "cache_write": null,
         "output": null
       },
-      "rawFieldsNote": "Operator fills these before run 1 with the exact dotted field paths from a real `muse exec --json` usage event (for example `usage.input_tokens`); cache_write is a field path, or the literal \"none\" when Meta's rate card has no cache-write tier. Set inputIncludesCached (true/false) and mappingRecordedInRunPlan (true) at the same time. `validate-muse-code-manifest.mjs --ready` fails until all of it is present."
+      "rawFieldsNote": "Operator fills these before run 1. Each value is the exact dotted field path from a real `muse exec --json` usage event (for example `usage.input_tokens`), or a sentinel: \"none\" = Meta has no billing tier for it, so the quantity is 0 by definition (allowed for cache_read and cache_write only); \"unreported\" = the tier applies but Muse Code does not report it, so the quantity and every cost that needs it is null (allowed for all four). Set inputIncludesCached to true/false (or \"not_applicable\" when input or cache_read is none/unreported) and mappingRecordedInRunPlan to true at the same time. `validate-muse-code-manifest.mjs --ready` fails until all of it is present."
     },
     "pricingBasisFrozenNow": true
   },
