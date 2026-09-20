@@ -2,6 +2,20 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.1.1 — 2026-09-20
+
+Patch over 1.1.0: a stop/start safety fix for isolated homes and a false usage-cap deferral fix.
+
+### Fixes
+
+- **`agent-dealer stop` with an isolated home** — with an explicit `AGENT_DEALER_HOME` and no `run.json`, `stop` no longer falls back to the default port and terminates whatever listens there (previously it could stop your real install). It now only stops the pids recorded in that home's own `run.json`.
+- **`start --force` with an isolated home** — exits with an error if the port is still held after the forced stop, instead of launching a second server onto an occupied port.
+- **False Claude usage-cap deferral** — only a rejected plan-window status now defers an issue for a usage cap. A rejected overage-only status (orgs with pay-as-you-go disabled) is ignored.
+
+### Internal
+
+- `install:smoke` only runs its cleanup `stop` while its temp `run.json` still exists, so a release smoke can no longer take down the developer's running instance.
+
 ## 1.1.0 — 2026-09-20
 
 Minor over 1.0.5: an opt-in trial of native Muse Code as the developer agent, plus review-loop, retry and Linear-error refinements.
