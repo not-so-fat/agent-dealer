@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
@@ -40,6 +41,52 @@ test("effort selector is shown for codex/claude with low/medium/high and a clear
 test("the selector reflects the current value, including cleared", () => {
   assert.match(effortSelect(render({ defaultEffort: "high" }))!, /<option value="high" selected/);
   assert.match(effortSelect(render({ defaultEffort: "" }))!, /<option value="" selected/);
+});
+
+// AgentConfigFields uses hooks, so it cannot be called outside a render. Give it a stub dispatcher (state
+// returns its initial value, effects never run) and read the returned element tree: this reaches the real
+// onChange handler of the effort <select> without a DOM.
+type El = { type: unknown; props: { children?: unknown; [k: string]: unknown } };
+function selectsIn(node: unknown, out: El[] = []): El[] {
+  if (Array.isArray(node)) node.forEach((n) => selectsIn(n, out));
+  else if (node && typeof node === "object" && "props" in node) {
+    const el = node as El;
+    if (el.type === "select") out.push(el);
+    selectsIn(el.props.children, out);
+  }
+  return out;
+}
+
+function effortOnChange(patch: Record<string, unknown>) {
+  const internals = (React as unknown as Record<string, { H: unknown }>).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  const emitted: Array<Record<string, unknown>> = [];
+  const value = { ...base, ...patch };
+  const previous = internals.H;
+  internals.H = { useState: (init: unknown) => [typeof init === "function" ? (init as () => unknown)() : init, () => {}], useEffect: () => {} };
+  let tree: unknown;
+  try {
+    tree = (AgentConfigFields as unknown as (p: unknown) => unknown)({ value, onChange: (v: Record<string, unknown>) => emitted.push(v), agentDeckOnline: false, disabled: false });
+  } finally {
+    internals.H = previous;
+  }
+  const effort = selectsIn(tree).filter((s) => JSON.stringify(s.props.children).includes('"low"'));
+  return { value, emitted, select: effort.length === 1 ? effort[0] : null };
+}
+
+test("choosing each effort in the selector emits the updated config, including the empty clearing value", () => {
+  for (const runtime of ["claude_code", "codex_local"]) {
+    for (const chosen of ["low", "medium", "high", ""]) {
+      // Start from a different value so the assertion cannot pass by echoing the current one.
+      const start = chosen === "high" ? "low" : "high";
+      const { value, emitted, select } = effortOnChange({ runtime, defaultEffort: start });
+      assert.ok(select, `${runtime}: exactly one effort select in the element tree`);
+      const handler = select!.props.onChange as ((e: unknown) => void) | undefined;
+      assert.equal(typeof handler, "function", `${runtime}: effort select has an onChange handler`);
+      handler!({ target: { value: chosen } });
+      assert.equal(emitted.length, 1, `${runtime}/${JSON.stringify(chosen)}: onChange called once`);
+      assert.deepEqual(emitted[0], { ...value, defaultEffort: chosen }, `${runtime}/${JSON.stringify(chosen)}: emits the full config with the chosen effort`);
+    }
+  }
 });
 
 test("cursor has no effort selector", () => {

@@ -436,15 +436,15 @@
             "id": "web-effort-form",
             "run": "cp $EVAL_ROOT/scripts/eval-checks/muse-06-effort-form.test.tsx apps/web/src/eval-muse-06-effort-form.test.tsx && npx tsx --tsconfig apps/web/tsconfig.json --test --test-timeout=60000 apps/web/src/eval-muse-06-effort-form.test.tsx",
             "expectedExitCode": 0,
-            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 4'.",
-            "startingShaResult": "exit code 1 (3 failing tests: no effort selector, no defaultEffort in AgentsPage)."
+            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 5': the selector, its options, value reflection, the onChange handler for each effort (including the clearing value), the cursor exclusion and the AgentsPage request fields.",
+            "startingShaResult": "exit code 1 (4 of 5 fail: no effort selector, no onChange handler, no defaultEffort in AgentsPage; only the cursor exclusion passes)."
           }
         ],
         "evalChecks": [
           "scripts/eval-checks/muse-06-effort-forwarding.test.ts",
           "scripts/eval-checks/muse-06-effort-form.test.tsx"
         ],
-        "evalChecksNote": "Eval-owned checks live in $EVAL_ROOT and are copied into the worker tree only at verification time (never visible to the worker). They cover the required surfaces the held-out server/shared tests do not: effort forwarding from developer-effect.ts / reviewer-effect.ts into the spawn input (behavioral, real coordinator run with fake spawn/GitHub), and the web Agents form (renders the real AgentConfigFields to static markup; inspects AgentsPage with the TypeScript compiler API). The web app has no test runner, so the form check cannot click; it verifies the rendered selector, its options (including the clearing 'Runtime default' option), value reflection, the cursor exclusion and that AgentsPage seeds, loads and submits defaultEffort in both requests."
+        "evalChecksNote": "Eval-owned checks live in $EVAL_ROOT and are copied into the worker tree only at verification time (never visible to the worker). They cover the required surfaces the held-out server/shared tests do not: effort forwarding from developer-effect.ts / reviewer-effect.ts into the spawn input (behavioral, real coordinator run with fake spawn/GitHub), and the web Agents form (renders the real AgentConfigFields to static markup; inspects AgentsPage with the TypeScript compiler API). The web app has no test runner, so the form check does not use a DOM: it verifies the rendered selector, its options (including the clearing 'Runtime default' option), value reflection and the cursor exclusion, and it invokes the selector's real onChange handler (calling AgentConfigFields against a stub hook dispatcher and reading the returned element tree) for every effort in low/medium/high/'' on both runtimes, asserting AgentConfigFields.onChange receives the full config with the chosen defaultEffort. It also inspects AgentsPage to confirm it seeds, loads and submits defaultEffort in both requests."
       },
       "expectedArtifact": {
         "type": "git_commits",
