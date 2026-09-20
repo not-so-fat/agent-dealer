@@ -13,6 +13,7 @@ import type {
   WorkflowInstance,
   WorkflowEventType,
 } from "@agent-dealer/shared";
+import { canTransitionIssue } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 import {
   getIssue,
@@ -74,6 +75,7 @@ import {
   type HumanResolution,
 } from "./human-resolution.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
+import { externalMergeStateForIssue, type ExternalMergeState } from "./external-merge.js";
 import {
   detectNonConvergence,
   formatNonConvergenceReason,
@@ -1100,11 +1102,18 @@ export type ResolveResult =
  * `final_review:complete` parks for undraft+merge (same finalize as auto-merge) and
  * returns `pendingMerge: true` — callers that need the merge to finish must use
  * `resolveHumanActionAndAdvanceAsync` (HTTP/CLI) rather than this sync entry point alone.
+ *
+ * NOT-196: a `close` choice finishes as `done` instead of `closed` when
+ * `opts.externalMergeState` is "merged" — the PR landed outside Dealer, so the work is
+ * landed and dependents must be released. Any other state (or no pre-read at all)
+ * keeps today's `closed`. The `gh` read itself lives in the async wrapper
+ * (`resolveHumanActionAndAdvanceAsync`), never inside this transaction.
  */
 export function resolveHumanActionAndAdvance(
   actionId: string,
   resolvedBy: string,
-  choice: string
+  choice: string,
+  opts?: { externalMergeState?: ExternalMergeState }
 ): ResolveResult {
   const action = getHumanAction(actionId);
   if (!action) return { ok: false, code: 404, error: "Human action not found" };
@@ -1249,25 +1258,55 @@ export function resolveHumanActionAndAdvance(
       : issue.currentRound;
   const resumeStatus = resumeAsReviewer ? "reviewing" : outcome.issueStatus;
 
+  // NOT-196: a close on an issue whose PR is MERGED on GitHub lands as done — the
+  // code is on the base branch, so dependents must be released. Only a confirmed merge
+  // upgrades; open / closed-unmerged / unreadable ("unknown") / no pre-read all stay
+  // closed. The PR number gates the upgrade so a merged state can never apply to an
+  // issue that never had a PR, and the status-machine gate keeps it to statuses with
+  // a →done edge (close actions park at needs_human/final_review, both of which have
+  // one) so the upgrade can never throw inside the transaction.
+  const prMerged =
+    outcome.workflowOutcome === "closed" && opts?.externalMergeState === "merged" && issue.prNumber != null;
+  const externallyMerged = prMerged && canTransitionIssue(issue.status, "done");
+  const closeHasPr = outcome.workflowOutcome === "closed" && issue.prNumber != null;
+  // Extra audit keys on the close resolution only — every other outcome keeps today's
+  // exact payload.
+  const closeResolutionExtra: Record<string, unknown> = !closeHasPr
+    ? {}
+    : externallyMerged
+      ? { prNumber: issue.prNumber, prState: "MERGED", externalMerge: true }
+      : opts?.externalMergeState === "unknown"
+        ? { prNumber: issue.prNumber, prMergeStateUnknown: true }
+        : prMerged
+          ? {
+              prNumber: issue.prNumber,
+              prState: "MERGED",
+              doneTransitionBlocked: `no ${issue.status} → done edge`,
+            }
+          : {};
+
   return getDb().transaction((): ResolveResult => {
     resolveHumanAction(actionId, resolvedBy, { choice });
-    // stage must be the status this resolution actually lands on (resumeStatus), not the
+    // stage must be the status this resolution actually lands on (finalStatus), not the
     // generic developer-resume outcome.issueStatus — otherwise a reviewer resume's own
     // human_action.resolved/repair.started events would be recorded under "developing"
     // even though the issue transitions to "reviewing".
-    const ev = eventEmitter(issue, instance, null, resumeStatus, issue.currentRound);
+    const finalStatus = externallyMerged ? "done" : resumeStatus;
+    const ev = eventEmitter(issue, instance, null, finalStatus, issue.currentRound);
     ev.emit("human_action.resolved", {
       actorType: "human",
-      payload: { actionType: action.actionType, choice },
+      payload: { actionType: action.actionType, choice, ...closeResolutionExtra },
     });
 
-    transitionIssue(issue.id, resumeStatus, {
+    transitionIssue(issue.id, finalStatus, {
       currentOwner:
-        resumeStatus === "done" || resumeStatus === "closed" ? "system" : resumeAsReviewer ? "reviewer" : "developer",
+        finalStatus === "done" || finalStatus === "closed" ? "system" : resumeAsReviewer ? "reviewer" : "developer",
       currentIntent:
-        resumeStatus === "done"
-          ? "Complete"
-          : resumeStatus === "closed"
+        finalStatus === "done"
+          ? externallyMerged
+            ? "Merged outside Dealer"
+            : "Complete"
+          : finalStatus === "closed"
             ? "Closed"
             : resumeAsReviewer
               ? `Reviewer re-evaluating at ${continuation!.resumeHeadSha!.slice(0, 8)}`
@@ -1275,15 +1314,36 @@ export function resolveHumanActionAndAdvance(
     });
 
     if (outcome.workflowOutcome) {
-      completeWorkflowInstance(instance.id, outcome.workflowOutcome);
-      ev.emit(outcome.workflowOutcome === "done" ? "issue.completed" : "issue.closed");
+      const finalOutcome = externallyMerged ? "done" : outcome.workflowOutcome;
+      completeWorkflowInstance(instance.id, finalOutcome);
+      if (externallyMerged) {
+        ev.emit("issue.completed", {
+          payload: { externalMerge: true, prNumber: issue.prNumber, prState: "MERGED" },
+        });
+      } else if (finalOutcome === "done") {
+        ev.emit("issue.completed");
+      } else if (opts?.externalMergeState === "unknown" && issue.prNumber != null) {
+        ev.emit("issue.closed", {
+          payload: { prNumber: issue.prNumber, prMergeStateUnknown: true },
+        });
+      } else if (prMerged) {
+        ev.emit("issue.closed", {
+          payload: {
+            prNumber: issue.prNumber,
+            prState: "MERGED",
+            doneTransitionBlocked: `no ${issue.status} → done edge`,
+          },
+        });
+      } else {
+        ev.emit("issue.closed");
+      }
       return {
         ok: true,
         issueStatus: getIssue(issue.id)!.status,
         nextWorkItemId: null,
         instanceCompleted: true,
         restarted: false,
-        triggerReflect: outcome.triggerReflect === true,
+        triggerReflect: outcome.triggerReflect === true || externallyMerged,
       };
     }
 
@@ -1357,7 +1417,12 @@ export async function resolveHumanActionAndAdvanceAsync(
   resolvedBy: string,
   choice: string
 ): Promise<ResolveResult> {
-  const result = resolveHumanActionAndAdvance(actionId, resolvedBy, choice);
+  // NOT-196: the `gh` PR-state read runs here, outside any DB transaction — the sync
+  // core below only consumes the pre-read state. Only close choices on issues with a
+  // PR number pay for the call; anything unreadable resolves to "unknown" (or
+  // undefined when there is nothing to check), both of which keep today's `closed`.
+  const externalMergeState = await preReadExternalMergeState(actionId, choice);
+  const result = resolveHumanActionAndAdvance(actionId, resolvedBy, choice, { externalMergeState });
   if (!result.ok || !result.pendingMerge) return result;
 
   const action = getHumanAction(actionId);
@@ -1487,7 +1552,12 @@ interface AbortTxResult {
  * own lease-token-fenced finishWorkItem CAS simply stops matching when it eventually calls
  * applyCompletion.
  */
-export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssueDeps = defaultAbortDeps): AbortResult {
+export function abortIssue(
+  issueId: string,
+  resolvedBy: string,
+  deps: AbortIssueDeps = defaultAbortDeps,
+  opts?: { externalMergeState?: ExternalMergeState }
+): AbortResult {
   if (!getIssue(issueId)) return { ok: false, code: 404, error: "Issue not found" };
 
   const tx = getDb().transaction((): AbortTxResult => {
@@ -1521,19 +1591,44 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
       }
     }
 
-    transitionIssue(issueId, "closed", { currentOwner: "system", currentIntent: "Aborted by operator" });
-    if (instance) completeWorkflowInstance(instance.id, "closed");
+    // NOT-196: aborting an issue whose PR already merged outside Dealer lands it as
+    // done so dependents are released. Only a confirmed merge upgrades — an unreadable
+    // state ("unknown") or no PR keeps today's `closed`, with the unknown case noted
+    // in the event. The PR number gates the upgrade, as in the resolve path, and the
+    // status-machine gate keeps it to statuses with a →done edge (abort, unlike the
+    // resolve path, can fire from any status — e.g. developing — where no such edge
+    // exists; there the abort stays closed but the event still names the merged PR so
+    // the operator can see why, and a follow-up could add the edge).
+    const prMerged = opts?.externalMergeState === "merged" && issue.prNumber != null;
+    const externallyMerged = prMerged && canTransitionIssue(issue.status, "done");
+    const finalStatus = externallyMerged ? "done" : "closed";
+    transitionIssue(issueId, finalStatus, {
+      currentOwner: "system",
+      currentIntent: externallyMerged ? "Merged outside Dealer" : "Aborted by operator",
+    });
+    if (instance) completeWorkflowInstance(instance.id, externallyMerged ? "done" : "closed");
     appendWorkflowEvent({
       issueId,
       workflowInstanceId: instance?.id ?? null,
-      type: "issue.closed",
+      type: externallyMerged ? "issue.completed" : "issue.closed",
       actorType: "human",
       actorRef: resolvedBy,
-      stage: "closed",
-      payload: { reason: "aborted_by_user" },
+      stage: finalStatus,
+      payload: externallyMerged
+        ? { reason: "aborted_by_user", externalMerge: true, prNumber: issue.prNumber, prState: "MERGED" }
+        : prMerged
+          ? {
+              reason: "aborted_by_user",
+              prNumber: issue.prNumber,
+              prState: "MERGED",
+              doneTransitionBlocked: `no ${issue.status} → done edge`,
+            }
+          : opts?.externalMergeState === "unknown" && issue.prNumber != null
+            ? { reason: "aborted_by_user", prNumber: issue.prNumber, prMergeStateUnknown: true }
+            : { reason: "aborted_by_user" },
     });
 
-    return { alreadyClosed: false, issueStatus: "closed", runningSessionIds: running };
+    return { alreadyClosed: false, issueStatus: finalStatus, runningSessionIds: running };
   })();
 
   // Outside the transaction, per the ticket contract: terminating a child process is not
@@ -1541,4 +1636,49 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
   for (const sessionId of tx.runningSessionIds) deps.killProcess(sessionId);
 
   return { ok: true, issueStatus: tx.issueStatus, alreadyClosed: tx.alreadyClosed };
+}
+
+/**
+ * NOT-196 HTTP/CLI entry for abort: same as `abortIssue`, but pre-reads the PR merge
+ * state outside the transaction first so an externally-merged PR lands the issue as
+ * `done`. Issues without a PR number skip the `gh` call entirely.
+ */
+export async function abortIssueAsync(
+  issueId: string,
+  resolvedBy: string,
+  deps: AbortIssueDeps = defaultAbortDeps
+): Promise<AbortResult> {
+  let externalMergeState: ExternalMergeState | undefined;
+  try {
+    const issue = getIssue(issueId);
+    if (issue && issue.prNumber != null) {
+      externalMergeState = await externalMergeStateForIssue(issue);
+    }
+  } catch {
+    externalMergeState = undefined;
+  }
+  return abortIssue(issueId, resolvedBy, deps, { externalMergeState });
+}
+
+/**
+ * NOT-196 pre-read for the async close entry: returns a PR merge state only when this
+ * resolution is a `close` choice on an issue that actually has a PR number — otherwise
+ * undefined, which keeps the sync core on today's behavior with no `gh` call. Never
+ * throws: lookup failures mean "nothing to check".
+ */
+async function preReadExternalMergeState(
+  actionId: string,
+  choice: string
+): Promise<ExternalMergeState | undefined> {
+  try {
+    const action = getHumanAction(actionId);
+    if (!action || action.status !== "open" || !action.issueId) return undefined;
+    const resolution = parseHumanResolution(action.actionType, choice);
+    if (!resolution || resolution.choice !== "close") return undefined;
+    const issue = getIssue(action.issueId);
+    if (!issue || issue.prNumber == null) return undefined;
+    return await externalMergeStateForIssue(issue);
+  } catch {
+    return undefined;
+  }
 }
