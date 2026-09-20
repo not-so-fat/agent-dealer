@@ -241,6 +241,8 @@ function fallbackReasonForKind(outcome: DeveloperOutcome | ReviewerOutcome): str
       return "Agent Deck preflight failed.";
     case "deck_unavailable":
       return "Agent Deck is unreachable.";
+    case "base_fetch_failed":
+      return "Could not fetch the base branch before creating the issue branch.";
     case "stale":
       return "PR head moved before the reviewer could evaluate it.";
     case "usage_capped":

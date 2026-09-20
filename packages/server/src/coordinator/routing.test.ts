@@ -170,6 +170,21 @@ test("an unreachable deck defers instead of spending an infra attempt (NOT-136)"
   }
 });
 
+test("a failed base fetch defers instead of spending an infra attempt (NOT-197)", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "base_fetch_failed",
+    reason: "git fetch origin main timed out after 60000ms — network or VPN may be down",
+  };
+  // Even with the infra budget already exhausted it waits — no branch was created and
+  // nothing spawned, so there is nothing to escalate and no stale base to fall back to.
+  for (const limits of [INFRA_ATTEMPTS_LEFT, INFRA_AT_LIMIT]) {
+    assert.deepStrictEqual(routeDeveloperOutcome(outcome, limits), {
+      next: "defer_work",
+      reason: "git fetch origin main timed out after 60000ms — network or VPN may be down",
+    });
+  }
+});
+
 test("adapter failure after push retries publish only (no full developer session)", () => {
   const outcome: DeveloperOutcome = {
     kind: "adapter_failure",

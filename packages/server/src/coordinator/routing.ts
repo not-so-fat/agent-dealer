@@ -41,6 +41,11 @@ export type DeveloperOutcome =
    * Deferred like a usage cap (no infra attempt, exponential backoff), never routed as a
    * worker failure. `until` is computed by the deferral, not by the effect. */
   | { kind: "deck_unavailable"; reason: string }
+  /** NOT-197: the pre-branch `git fetch origin <base>` failed or timed out — nothing
+   * spawned, nothing attempted, no branch created. Deferred like an unreachable deck
+   * (no infra attempt, exponential backoff), never routed as a worker failure and never
+   * retried against the stale local base. `until` is computed by the deferral. */
+  | { kind: "base_fetch_failed"; reason: string }
   /** Optional progress fields — see `timed_out` (NOT-147). */
   | {
       kind: "session_failed";
@@ -226,6 +231,10 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
     case "deck_unavailable":
       // NOT-136: a hard-down dependency is not retryable on the infra-attempt timescale, and
       // nothing was spawned, so there is no attempt to charge. Wait for the deck instead.
+      return { next: "defer_work", reason: outcome.reason };
+    case "base_fetch_failed":
+      // NOT-197: a hard-down network is not retryable on the infra-attempt timescale, and
+      // nothing was spawned, so there is no attempt to charge. Wait for the network instead.
       return { next: "defer_work", reason: outcome.reason };
   }
 }
