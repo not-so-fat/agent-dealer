@@ -18,8 +18,12 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-is
 const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { registerIssueRoutes } = await import("./issues.js");
-const { transitionIssue, listIssuesByExternalId } = await import("../repository/issues.js");
+const { transitionIssue, listIssuesByExternalId, getIssue } = await import("../repository/issues.js");
 const { createIssueArtifact } = await import("../repository/artifacts.js");
+const { claimWorkItem } = await import("../repository/work-items.js");
+const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
+const { applyCompletion, resolveHumanActionAndAdvance, getTaskSnapshot } = await import("../coordinator/commands.js");
+const { ReviewerResult } = await import("../coordinator/reviewer-result.js");
 const { getQueuedEntryForIssue, listQueuedEntries } = await import("../repository/queue-entries.js");
 const { setAdmissionHealthCheckerForTests } = await import("../coordinator/admission.js");
 
@@ -269,6 +273,62 @@ test("PATCH /api/issues/:id rejects an edit to a terminal (done) issue even thou
 
   const patchRes = await app.inject({ method: "PATCH", url: `/api/issues/${created.id}`, payload: { title: "Renamed" } });
   assert.equal(patchRes.statusCode, 409);
+  await app.close();
+});
+
+test("NOT-185: PATCH /api/issues/:id succeeds while parked at attempts_exhausted, and retry re-freezes the snapshot", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Parked",
+        description: "old",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        maxReviewRounds: 1,
+        acceptanceCriteria: "Old criteria"}})
+  ).json() as { id: string };
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` })).statusCode, 200);
+
+  const complete = async (outcome: Parameters<typeof applyCompletion>[2]) => {
+    const item = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+    await applyCompletion(item.id, item.leaseToken!, outcome);
+  };
+  const patch = (payload: object) => app.inject({ method: "PATCH", url: `/api/issues/${created.id}`, payload });
+
+  // Developer work item pending → still 409.
+  assert.equal((await patch({ title: "Nope" })).statusCode, 409);
+
+  await complete({ kind: "clean_handoff", branch: "b", headSha: "abc", baseSha: "base", prNumber: 1, prUrl: "https://gh/pr/1" });
+  // Reviewer work item pending → still 409.
+  assert.equal((await patch({ title: "Nope" })).statusCode, 409);
+  await complete({
+    kind: "verdict",
+    result: ReviewerResult.parse({
+      verdict: "changes_requested",
+      baseSha: "b",
+      headSha: "h",
+      acceptanceCriteriaAssessment: "ok",
+      evidenceAssessment: "ok",
+      findings: [],
+      risks: []})});
+
+  const parked = await patch({ description: "new", acceptanceCriteria: "New criteria" });
+  assert.equal(parked.statusCode, 200);
+  assert.equal((parked.json() as { acceptanceCriteria: string }).acceptanceCriteria, "New criteria");
+
+  const action = listHumanActionsForIssue(created.id).find((a) => a.actionType === "attempts_exhausted")!;
+  assert.equal(resolveHumanActionAndAdvance(action.id, "yusuke", "retry").ok, true);
+  const frozen = getTaskSnapshot(getIssue(created.id)!);
+  assert.equal(frozen.acceptanceCriteria, "New criteria");
+  assert.equal(frozen.description, "new");
+
+  // The retry round is queued → running again → 409 again.
+  assert.equal((await patch({ title: "Nope" })).statusCode, 409);
   await app.close();
 });
 

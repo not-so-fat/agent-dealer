@@ -42,7 +42,7 @@ export function createIssueArtifact(input: CreateIssueArtifactInput): IssueArtif
 /** Most recent artifact of `kind` for the issue — used to read the frozen task snapshot. */
 export function latestIssueArtifact(issueId: string, kind: string): IssueArtifact | null {
   const row = getDb()
-    .prepare("SELECT * FROM artifacts WHERE issue_id = ? AND kind = ? ORDER BY created_at DESC LIMIT 1")
+    .prepare("SELECT * FROM artifacts WHERE issue_id = ? AND kind = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
     .get(issueId, kind) as
     | {
         id: string;

@@ -15,7 +15,7 @@ const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
 );
 const { createHumanAction, listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue, reconcileFinding } = await import("../repository/findings.js");
-const { claimWorkItem, listWorkItemsForIssue, getWorkItem } = await import("../repository/work-items.js");
+const { claimWorkItem, listWorkItemsForIssue, getWorkItem, enqueueWorkItem, cancelWorkItem } = await import("../repository/work-items.js");
 const { createWorkerSession, startSession, listWorkerSessionsForIssue } = await import(
   "../repository/worker-sessions.js"
 );
@@ -25,6 +25,7 @@ const {
   resolveHumanActionAndAdvance,
   resolveHumanActionAndAdvanceAsync,
   getTaskSnapshot,
+  canEditParkedIssue,
   TASK_SNAPSHOT_ARTIFACT_KIND,
   checkIssueReadiness,
   abortIssue} = await import("./commands.js");
@@ -381,6 +382,88 @@ test("resolving attempts_exhausted:retry grants one more round instead of instan
   assert.deepEqual(pending.map((i) => [i.kind, i.round]), [["developer", 2]]);
   // currentIntent's round number must match the round the queued item actually carries.
   assert.equal(issue.currentIntent, "Developer implementing round 2");
+});
+
+/** Park an issue at attempts_exhausted (round budget 1, changes requested once). */
+async function parkAtAttemptsExhausted(): Promise<{ issueId: string; actionId: string }> {
+  const issueId = newIssue({ maxReviewRounds: 1 });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("changes_requested") });
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "attempts_exhausted")!;
+  return { issueId, actionId: action.id };
+}
+
+const snapshotArtifacts = (issueId: string) =>
+  listArtifactsForIssue(issueId).filter((a) => a.kind === TASK_SNAPSHOT_ARTIFACT_KIND);
+
+test("NOT-185: canEditParkedIssue is true only at an open attempts_exhausted with nothing pending or leased", async () => {
+  const { issueId } = await parkAtAttemptsExhausted();
+  assert.equal(canEditParkedIssue(getIssue(issueId)!), true);
+
+  const instance = getActiveWorkflowInstance(issueId)!;
+  const item = enqueueWorkItem({
+    issueId,
+    workflowInstanceId: instance.id,
+    kind: "developer",
+    round: 1,
+    payload: {},
+    idempotencyKey: `${instance.id}:test:pending`,
+  });
+  assert.equal(canEditParkedIssue(getIssue(issueId)!), false, "a pending work item blocks the edit");
+  const leased = claim(issueId);
+  assert.equal(leased.id, item.id);
+  assert.equal(canEditParkedIssue(getIssue(issueId)!), false, "a leased work item blocks the edit");
+  cancelWorkItem(item.id);
+  assert.equal(canEditParkedIssue(getIssue(issueId)!), true);
+
+  const other = newIssue();
+  startWorkflow(other);
+  assert.equal(canEditParkedIssue(getIssue(other)!), false, "a running issue is not editable");
+});
+
+test("NOT-185: retry after an edit freezes a new snapshot, records a refresh event, and both roles read it", async () => {
+  const { issueId, actionId } = await parkAtAttemptsExhausted();
+  assert.equal(snapshotArtifacts(issueId).length, 1);
+  updateIssue(issueId, { description: "d2", acceptanceCriteria: "It works, and also does Y" });
+
+  const resolved = resolveHumanActionAndAdvance(actionId, "yusuke", "retry");
+  assert.equal(resolved.ok, true);
+
+  assert.equal(snapshotArtifacts(issueId).length, 2);
+  const snap = getTaskSnapshot(getIssue(issueId)!);
+  assert.equal(snap.description, "d2");
+  assert.equal(snap.acceptanceCriteria, "It works, and also does Y");
+  assert.equal(snap.title, "Coordinate me");
+
+  const events = listWorkflowEventsForIssue(issueId);
+  const refreshed = events.filter((e) => e.type === "task_snapshot.refreshed");
+  assert.equal(refreshed.length, 1);
+  assert.deepEqual(JSON.parse(refreshed[0].payloadJson!).changedFields, ["description", "acceptanceCriteria"]);
+  assert.equal(refreshed[0].actorType, "human");
+  // The refresh lands before the next developer round is announced.
+  const types = events.map((e) => e.type);
+  assert.ok(types.indexOf("task_snapshot.refreshed") < types.lastIndexOf("repair.started"));
+  assert.deepEqual(
+    listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").map((i) => [i.kind, i.round]),
+    [["developer", 2]]
+  );
+});
+
+test("NOT-185: retry with no edit creates no new snapshot artifact or refresh event", async () => {
+  const { issueId, actionId } = await parkAtAttemptsExhausted();
+  const resolved = resolveHumanActionAndAdvance(actionId, "yusuke", "retry");
+  assert.equal(resolved.ok, true);
+  assert.equal(snapshotArtifacts(issueId).length, 1);
+  assert.equal(listWorkflowEventsForIssue(issueId).filter((e) => e.type === "task_snapshot.refreshed").length, 0);
+});
+
+test("NOT-185: closing an edited attempts_exhausted issue does not re-freeze the snapshot", async () => {
+  const { issueId, actionId } = await parkAtAttemptsExhausted();
+  updateIssue(issueId, { title: "Renamed" });
+  const resolved = resolveHumanActionAndAdvance(actionId, "yusuke", "close");
+  assert.equal(resolved.ok, true);
+  assert.equal(snapshotArtifacts(issueId).length, 1);
 });
 
 test("resolving policy_escalation:resume resets the infra-attempt budget without spending a review round", async () => {

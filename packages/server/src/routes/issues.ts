@@ -20,7 +20,7 @@ import {
 } from "../repository/workflow-events.js";
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
-import { abortIssue, checkIssueReadiness } from "../coordinator/commands.js";
+import { abortIssue, canEditParkedIssue, checkIssueReadiness } from "../coordinator/commands.js";
 import { isStartable, queueStatusForIssue, startIssueViaQueue } from "../coordinator/admission.js";
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
 import { enqueueIssue, enqueueIssueWithOutcome, getQueuedEntryForIssue } from "../repository/queue-entries.js";
@@ -222,7 +222,9 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     if (issue.status !== "ready" && issue.status !== "needs_human") {
       return reply.status(409).send({ error: `Cannot edit an issue that is ${issue.status}` });
     }
-    if (getActiveWorkflowInstance(id)) {
+    // NOT-185: the one active-workflow exception — parked at an open attempts_exhausted
+    // action with nothing pending/leased. Retry re-freezes the snapshot from these fields.
+    if (getActiveWorkflowInstance(id) && !canEditParkedIssue(issue)) {
       return reply.status(409).send({ error: "Cannot edit an issue with an active workflow" });
     }
     return updateIssue(id, parsed.data);
