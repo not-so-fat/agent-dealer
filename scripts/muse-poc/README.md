@@ -36,3 +36,13 @@ scripts/muse-poc/chain.sh                                            # every tas
 - Writes `runs/<task>/<arm>/result.json`: wall time, exit code, verification, contamination hits, token usage and cost. A Muse run counts only if every `model_completed.model` is `muse-spark-1.3-contributor` (`model_ok`).
 
 Not automated: reading transcripts, assembling the results table, and the go/no-go decision. Those go in a new results file.
+
+## Trying Muse on a real task by hand
+
+`muse-task.py` runs one prompt in a fresh git worktree, in the same safe posture (sandbox on, approvals off, no MCP, workflows, subagents and reminders off, contributor model pinned):
+
+```bash
+python3 scripts/muse-poc/muse-task.py "<task prompt>" [--repo DIR] [--base REF] [--timeout SECONDS] [--max-steps N]
+```
+
+It leaves the worktree on a new `muse/<timestamp>` branch and prints the exit code, wall time, the models the session log confirms (anything other than `muse-spark-1.3-contributor` means do not trust the run), token usage, whether any `cron_` tool was used, and the changed files. It never commits, pushes or merges. **It starts a paid contributor-tier session and sends the prompt to Meta: use it on non-sensitive work only**, and read the diff and transcript before trusting the result. It does not run `npm ci`; install dependencies in the worktree if the task needs to run tests. `MUSE_TASK_DIR` sets where runs are written (default `$TMPDIR/muse-task`).
