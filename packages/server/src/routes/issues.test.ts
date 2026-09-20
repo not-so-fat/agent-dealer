@@ -317,6 +317,23 @@ test("NOT-185: PATCH /api/issues/:id succeeds while parked at attempts_exhausted
       findings: [],
       risks: []})});
 
+  // Non-task fields stay frozen at the park — notably the review budget (a non-goal).
+  for (const payload of [
+    { maxReviewRounds: 5 },
+    { maxInfraAttempts: 3 },
+    { repo: "acme/other" },
+    { baseBranch: "develop" },
+    { developerAgentId: BUILTIN_AGENT_CURSOR_ID },
+    { reviewerAgentId: BUILTIN_AGENT_CLAUDE_ID },
+    { autoMerge: true },
+    { title: "Mixed", maxReviewRounds: 5 },
+  ]) {
+    assert.equal((await patch(payload)).statusCode, 409, JSON.stringify(payload));
+  }
+  const untouched = getIssue(created.id)!;
+  assert.equal(untouched.maxReviewRounds, 1);
+  assert.equal(untouched.title, "Parked");
+
   const parked = await patch({ description: "new", acceptanceCriteria: "New criteria" });
   assert.equal(parked.statusCode, 200);
   assert.equal((parked.json() as { acceptanceCriteria: string }).acceptanceCriteria, "New criteria");
