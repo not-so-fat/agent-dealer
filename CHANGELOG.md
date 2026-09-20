@@ -4,13 +4,13 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## 1.1.1 — 2026-09-20
 
-Patch over 1.1.0: a stop/start safety fix for isolated homes and a false usage-cap deferral fix.
+Patch over 1.1.0: stop/start safety fixes (`stop` for isolated homes, `start --force` port check) and a false usage-cap deferral fix.
 
 ### Fixes
 
 - **`agent-dealer stop` with an isolated home** — with an explicit `AGENT_DEALER_HOME` and no `run.json`, `stop` no longer falls back to the default port and terminates whatever listens there (previously it could stop your real install). It now only stops the pids recorded in that home's own `run.json`.
-- **`start --force` with an isolated home** — exits with an error if the port is still held after the forced stop, instead of launching a second server onto an occupied port.
-- **False Claude usage-cap deferral** — only a rejected plan-window status now defers an issue for a usage cap. A rejected overage-only status (orgs with pay-as-you-go disabled) is ignored.
+- **`start --force` port check** — exits with an error whenever an agent-dealer is still listening on the port after the forced stop (for example one owned by a different home), instead of launching a second server onto an occupied port.
+- **False Claude usage-cap deferral** — for Claude rate-limit events, only a rejected plan-window `status` now defers an issue; a rejected `overageStatus` alone (orgs with pay-as-you-go disabled, `status` still allowed) is ignored. Other usage-cap signals (billing errors, cap error text) are unchanged.
 
 ### Internal
 
