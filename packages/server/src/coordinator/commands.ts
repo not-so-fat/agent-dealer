@@ -28,6 +28,7 @@ import {
   completeWorkflowInstance,
   getActiveWorkflowInstance,
   getWorkflowInstance,
+  listWorkflowEventsForIssue,
   startWorkflowInstance,
   WorkflowAlreadyActiveError,
 } from "../repository/workflow-events.js";
@@ -63,9 +64,16 @@ import {
   type DeveloperOutcome,
   type ReviewerOutcome,
 } from "./routing.js";
+import type { ReviewerResult } from "./reviewer-result.js";
 import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } from "./projection.js";
 import { parseHumanResolution, resolveHumanActionOutcome, type HumanResolution } from "./human-resolution.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
+import {
+  detectNonConvergence,
+  formatNonConvergenceReason,
+  reviewHistoryFromEvents,
+  type NonConvergence,
+} from "./non-convergence.js";
 import {
   capEscalationEvents,
   deferLeasedWorkItemForDeckOutage,
@@ -677,7 +685,7 @@ function applyReviewer(
   item: WorkItem,
   outcome: ReviewerOutcome
 ): ApplyResult {
-  const route = routeReviewerOutcome(
+  let route: ReturnType<typeof routeReviewerOutcome> = routeReviewerOutcome(
     outcome,
     {
       currentRound: issue.currentRound,
@@ -688,6 +696,19 @@ function applyReviewer(
     },
     issue.headSha!
   );
+  // NOT-184: a repair loop that keeps finding new blocking issues on the same file is not
+  // converging — hand it to a human instead of queuing another developer round.
+  let nonConvergence: NonConvergence | null = null;
+  if (outcome.kind === "verdict" && route.next === "retry_developer_with_findings") {
+    nonConvergence = findNonConvergence(issue, instance, outcome.result);
+    if (nonConvergence) {
+      route = {
+        next: "human_action",
+        actionType: "policy_escalation",
+        reason: formatNonConvergenceReason(nonConvergence),
+      };
+    }
+  }
   const hasVerdict = outcome.kind === "verdict";
   // Normalize before emit/finding reconcile so remapped blocking findings (NOT-150) persist.
   const verdictResult =
@@ -765,7 +786,26 @@ function applyReviewer(
   else if (advance === "infra") incrementIssueInfraAttempts(issue.id);
   const issueNow = getIssue(issue.id)!;
 
-  return applyEffect(issue, instance, effect, route, issueNow, ev, item.id, outcome);
+  return applyEffect(issue, instance, effect, route, issueNow, ev, item.id, outcome, nonConvergence);
+}
+
+/** Rounds at or before the latest non-convergence escalation are spent — a human already saw them. */
+function findNonConvergence(issue: Issue, instance: WorkflowInstance, result: ReviewerResult): NonConvergence | null {
+  let floorRound = 0;
+  for (const action of listHumanActionsForIssue(issue.id)) {
+    if (action.workflowInstanceId !== instance.id || !action.evidenceJson) continue;
+    try {
+      const evidence = JSON.parse(action.evidenceJson) as { nonConvergence?: { throughRound?: number } };
+      floorRound = Math.max(floorRound, evidence.nonConvergence?.throughRound ?? 0);
+    } catch {
+      // unreadable evidence cannot name a floor
+    }
+  }
+  const history = reviewHistoryFromEvents(listWorkflowEventsForIssue(issue.id), instance.id, {
+    round: issue.currentRound,
+    result,
+  });
+  return detectNonConvergence(history, issue.currentRound, floorRound);
 }
 
 type AnyRoute =
@@ -795,7 +835,8 @@ function applyEffect(
   issueNow: Issue,
   ev: EventEmitter,
   causativeItemId: string,
-  reviewerOutcome?: ReviewerOutcome
+  reviewerOutcome?: ReviewerOutcome,
+  nonConvergence?: NonConvergence | null
 ): ApplyResult {
   const base = {
     applied: true as const,
@@ -851,11 +892,18 @@ function applyEffect(
       actionType,
       reason: effect.reason,
       question: questionFor(actionType, effect.reason, resumeAsReviewer),
-      evidence: reviewerOutcome?.kind === "verdict" ? { review: reviewerOutcome.result } : undefined,
+      evidence:
+        reviewerOutcome?.kind === "verdict"
+          ? { review: reviewerOutcome.result, ...(nonConvergence ? { nonConvergence } : {}) }
+          : undefined,
       // issueNow.headSha, not issue.headSha: a stale outcome that itself exhausted the
       // infra budget already patched the newly observed head onto the issue above — the
       // pre-transition issue param would still carry the stale SHA a "resume" must not reuse.
-      continuationPreview: resumeAsReviewer ? { resumeRole: "reviewer", resumeHeadSha: issueNow.headSha } : undefined,
+      continuationPreview: resumeAsReviewer
+        ? { resumeRole: "reviewer", resumeHeadSha: issueNow.headSha }
+        : nonConvergence
+          ? { resumeRole: "developer", advanceRound: true }
+          : undefined,
       responseOptions: responseOptionsFor(actionType, resumeAsReviewer),
     });
     if (actionType === "final_review") ev.emit("final_review.requested");
@@ -943,6 +991,8 @@ export function responseOptionsFor(
 interface ResumeContinuation {
   resumeRole?: "developer" | "reviewer";
   resumeHeadSha?: string | null;
+  /** NOT-184: the escalation left the round un-advanced; resuming spends it like a repair round. */
+  advanceRound?: boolean;
 }
 
 function parseContinuationPreview(json: string | null): ResumeContinuation | null {
@@ -1100,8 +1150,14 @@ export function resolveHumanActionAndAdvance(
   // "infra"/"none" queue at the round current_round is already at. Computed up front so
   // currentIntent's round number matches the round the queued work item actually carries
   // (previously this always said currentRound + 1, which was wrong for infra/none).
+  // NOT-184: a non-convergence escalation stopped before the repair round it would have
+  // queued, so resuming spends that round too (the floor in findNonConvergence then needs
+  // three fresh rounds before it can fire again).
+  const advancesRound = resolution.choice === "resume" && continuation?.advanceRound === true;
   const nextRound =
-    outcome.roundKind === "review" || outcome.roundKind === "review_grant" ? issue.currentRound + 1 : issue.currentRound;
+    outcome.roundKind === "review" || outcome.roundKind === "review_grant" || advancesRound
+      ? issue.currentRound + 1
+      : issue.currentRound;
   const resumeStatus = resumeAsReviewer ? "reviewing" : outcome.issueStatus;
 
   return getDb().transaction((): ResolveResult => {
@@ -1154,6 +1210,7 @@ export function resolveHumanActionAndAdvance(
         break;
       case "infra":
         resetIssueInfraAttempts(issue.id);
+        if (advancesRound) incrementIssueRound(issue.id);
         break;
       case "none":
       case undefined:

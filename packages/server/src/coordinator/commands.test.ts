@@ -722,3 +722,118 @@ test("a late completion after abort is fenced — applyCompletion is a no-op", a
 function events(issueId: string) {
   return listWorkflowEventsForIssue(issueId);
 }
+
+// NOT-184: non-convergence — blocking findings on the same file in 3 consecutive rounds.
+type TestFinding = { severity: "blocking" | "non_blocking"; file?: string; title: string };
+let findingSeq = 0;
+
+/** One developer handoff + one reviewer changes_requested verdict carrying `findings`. */
+async function reviewRound(issueId: string, findings: TestFinding[]) {
+  await complete(issueId, cleanHandoff);
+  return complete(issueId, {
+    kind: "verdict",
+    result: {
+      ...okReview("changes_requested"),
+      // Fresh fingerprints every round, like the real loop — `recurring` must not be what fires.
+      findings: findings.map((f) => ({ ...f, fingerprint: `fp-${findingSeq++}`, rationale: "why" })),
+    },
+  });
+}
+
+const blocking = (file: string | undefined, title: string): TestFinding => ({ severity: "blocking", file, title });
+
+function openNonConvergence(issueId: string) {
+  return listHumanActionsForIssue(issueId).find(
+    (a) => a.status === "open" && a.actionType === "policy_escalation" && a.evidenceJson?.includes("nonConvergence")
+  );
+}
+
+test("NOT-184: blocking findings on the same file in 3 consecutive rounds raise policy_escalation instead of round 4", async () => {
+  const issueId = newIssue({ maxReviewRounds: 10 });
+  startWorkflow(issueId);
+  await reviewRound(issueId, [blocking("a.mjs", "first bypass")]);
+  await reviewRound(issueId, [blocking("a.mjs", "second bypass"), blocking("b.md", "doc gap")]);
+  assert.equal(getIssue(issueId)!.status, "repairing");
+  await reviewRound(issueId, [blocking("a.mjs", "third bypass"), blocking("c.md", "other")]);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.currentRound, 3, "no repair round is spent while escalating");
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0);
+
+  const action = openNonConvergence(issueId)!;
+  assert.ok(action);
+  assert.match(action.reason, /a\.mjs/);
+  assert.match(action.reason, /rounds 1, 2, 3/);
+  assert.doesNotMatch(action.reason, /b\.md|c\.md/);
+  const evidence = JSON.parse(action.evidenceJson!);
+  assert.deepEqual(evidence.nonConvergence.files, [
+    {
+      file: "a.mjs",
+      rounds: [
+        { round: 1, titles: ["first bypass"] },
+        { round: 2, titles: ["second bypass"] },
+        { round: 3, titles: ["third bypass"] },
+      ],
+    },
+  ]);
+  assert.deepEqual(JSON.parse(action.responseOptionsJson!).map((o: { choice: string }) => o.choice), ["resume", "close"]);
+});
+
+async function assertNoNonConvergence(rounds: TestFinding[][]) {
+  const issueId = newIssue({ maxReviewRounds: 10 });
+  startWorkflow(issueId);
+  for (const findings of rounds) await reviewRound(issueId, findings);
+  assert.equal(getIssue(issueId)!.status, "repairing");
+  assert.equal(openNonConvergence(issueId), undefined);
+}
+
+test("NOT-184: only two consecutive rounds on a file does not trigger it", () =>
+  assertNoNonConvergence([[blocking("a.mjs", "x")], [blocking("a.mjs", "y")]]));
+
+test("NOT-184: a gap round breaks the streak", () =>
+  assertNoNonConvergence([[blocking("a.mjs", "x")], [blocking("b.mjs", "y")], [blocking("a.mjs", "z")]]));
+
+test("NOT-184: a different file each round does not trigger it", () =>
+  assertNoNonConvergence([[blocking("a.mjs", "x")], [blocking("b.mjs", "y")], [blocking("c.mjs", "z")]]));
+
+test("NOT-184: non-blocking findings and findings without a file do not count", async () => {
+  const issueId = newIssue({ maxReviewRounds: 10 });
+  startWorkflow(issueId);
+  // Round 2 has only a non-blocking finding on a.mjs; round 3 has a blocking one with no file.
+  await reviewRound(issueId, [blocking("a.mjs", "x"), blocking(undefined, "no file")]);
+  await reviewRound(issueId, [{ severity: "non_blocking", file: "a.mjs", title: "nit" }, blocking(undefined, "no file")]);
+  await reviewRound(issueId, [blocking("a.mjs", "z"), blocking(undefined, "no file")]);
+  await reviewRound(issueId, [blocking(undefined, "no file")]);
+  assert.equal(getIssue(issueId)!.status, "repairing");
+  assert.equal(openNonConvergence(issueId), undefined);
+});
+
+test("NOT-184: resolving the escalation with resume continues without re-triggering on the same rounds", async () => {
+  const issueId = newIssue({ maxReviewRounds: 10 });
+  startWorkflow(issueId);
+  for (const t of ["x", "y", "z"]) await reviewRound(issueId, [blocking("a.mjs", t)]);
+  const action = openNonConvergence(issueId)!;
+
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing");
+  assert.equal(issue.currentRound, 4, "resuming spends the repair round the escalation stopped short of");
+  assert.deepEqual(
+    listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").map((i) => [i.kind, i.round]),
+    [["developer", 4]]
+  );
+
+  // Rounds 4 and 5 still blocking on a.mjs: rounds 2–4 / 3–5 overlap the escalated rounds, so no trigger.
+  await reviewRound(issueId, [blocking("a.mjs", "r4")]);
+  assert.equal(getIssue(issueId)!.status, "repairing");
+  await reviewRound(issueId, [blocking("a.mjs", "r5")]);
+  assert.equal(getIssue(issueId)!.status, "repairing");
+  assert.equal(openNonConvergence(issueId), undefined);
+
+  // Three fresh rounds (4, 5, 6) trigger again.
+  await reviewRound(issueId, [blocking("a.mjs", "r6")]);
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  assert.match(openNonConvergence(issueId)!.reason, /rounds 4, 5, 6/);
+});
