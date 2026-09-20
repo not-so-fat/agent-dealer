@@ -63,7 +63,32 @@ for (const [name, s] of Object.entries(subjects)) {
     fail(`${name}: frozenInvocation must pass the frozen model (${s.model}) and effort (${s.effort}) explicitly`);
   }
 }
+// One frozen cost basis for both arms, with disjoint token quantities and a per-runtime mapping from raw
+// log fields, so cached input is never charged at two rates and no plan/list-rate choice is left open.
+const cm = manifest.costModel;
+if (cm?.basis !== "list_rate_shadow_cost" || cm.frozenNow !== true || !str(cm.formula) || !str(cm.actualPlanSpendReport) ||
+    !str(cm.nullRule) || !cm.disjointQuantities) {
+  fail("costModel must freeze basis list_rate_shadow_cost with formula, disjointQuantities, nullRule and actualPlanSpendReport");
+} else {
+  for (const k of ["uncached_input", "cache_read", "cache_write", "output"]) {
+    if (!str(cm.disjointQuantities[k])) fail(`costModel.disjointQuantities.${k} missing`);
+  }
+}
+for (const [name, s] of Object.entries(subjects)) {
+  const tm = s?.tokenMapping;
+  if (!tm || !str(tm.source) || !["uncached_input", "cache_read", "cache_write", "output"].every((k) => str(tm[k]))) {
+    fail(`${name}.tokenMapping must map raw fields to uncached_input, cache_read, cache_write and output`);
+  } else if (name !== "candidate" && typeof tm.inputIncludesCached !== "boolean") {
+    fail(`${name}.tokenMapping.inputIncludesCached must be true or false (cached tokens inside or outside raw input)`);
+  }
+  if (/subscription|quota/i.test(s?.pricingBasis ?? "") && !/list-rate shadow/i.test(s.pricingBasis)) {
+    fail(`${name}.pricingBasis must use the frozen list-rate shadow basis, not a plan allocation`);
+  }
+}
 const c = manifest.candidate;
+if (ready && typeof c?.tokenMapping?.inputIncludesCached !== "boolean") {
+  fail("--ready: candidate.tokenMapping.inputIncludesCached not set; record how Muse Code reports cached input first");
+}
 if (c?.runtime !== "muse_code") fail("candidate must be runtime muse_code");
 if (c?.privacy?.allowedTaskClassification !== "non_sensitive") {
   fail("candidate.privacy.allowedTaskClassification must be non_sensitive");

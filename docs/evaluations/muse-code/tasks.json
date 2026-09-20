@@ -14,7 +14,7 @@
       "modelResolution": "The production profile leaves model unset, so the CLI default applies; on 2026-09-19 that default resolves to claude-sonnet-5 (operator ~/.claude/settings.json sets model alias 'sonnet'; the Claude Dev session that authored this contract reports claude-sonnet-5). The evaluation does NOT rely on the default: the frozen invocation passes --model claude-sonnet-5 explicitly, and a run whose stream init event reports a different model id is infrastructure-invalid.",
       "effort": "high",
       "effortResolution": "The production profile leaves effort unset; the operator's ~/.claude/settings.json sets effortLevel 'high'. The frozen invocation passes --effort high explicitly.",
-      "pricingBasis": "Token list rate, identical method for both arms: cost_usd = Σ tokens_kind × published_rate_kind over input, output, cache-read and cache-write tokens, using the vendor's published per-token rate for the frozen model (source URL and retrieval date recorded in the run plan before run 1). Tokens come from the raw result/usage event of the session log, including cache tokens; if any token kind is not reported the run's cost is null, never 0. Claude Code's reported result.total_cost_usd is recorded as a metered cross-check only.",
+      "pricingBasis": "List-rate shadow cost, one frozen method for both arms (see costModel): cost_usd = uncached_input × r_input + cache_read × r_cache_read + cache_write × r_cache_write + output × r_output, over the disjoint token quantities defined in costModel and the raw-field mapping in this subject's tokenMapping; r_* are the vendor's published per-token rates for the frozen model (source URL and retrieval date recorded in the run plan before run 1). If any applicable quantity is not reported, or the mapping cannot be applied because the log does not say whether cached tokens are inside input, the run's cost is null, never 0. Claude Code's reported result.total_cost_usd is recorded as a cross-check only.",
       "permissionPolicy": {
         "worktreeWrite": true,
         "publishReview": false,
@@ -24,7 +24,15 @@
       "profileModel": null,
       "profileEffort": null,
       "cliVersion": "2.1.278 (Claude Code)",
-      "frozenInvocation": "claude <Dealer buildDeveloperArgs> --model claude-sonnet-5 --effort high, via a dedicated eval copy of the Claude Dev profile with model=claude-sonnet-5 and defaultEffort=high; cliVersion, model and effort are identical for every baseline developer run."
+      "frozenInvocation": "claude <Dealer buildDeveloperArgs> --model claude-sonnet-5 --effort high, via a dedicated eval copy of the Claude Dev profile with model=claude-sonnet-5 and defaultEffort=high; cliVersion, model and effort are identical for every baseline developer run.",
+      "tokenMapping": {
+        "source": "raw `result.usage` of the stream-json session log (not usage_events, which lacks cache tokens and reads cache-write from a field Claude Code does not emit)",
+        "uncached_input": "usage.input_tokens (Anthropic reports it excluding cache tokens)",
+        "cache_read": "usage.cache_read_input_tokens",
+        "cache_write": "usage.cache_creation_input_tokens",
+        "output": "usage.output_tokens",
+        "inputIncludesCached": false
+      }
     },
     "reviewer": {
       "agentName": "Codex Dev",
@@ -32,7 +40,7 @@
       "runtime": "codex_local",
       "model": "gpt-5.6-sol",
       "effort": "medium",
-      "pricingBasis": "Two roles for this profile. (1) In the review loop of tasks muse-01..09 it is fixed instrumentation, identical for both arms, and those reviewer passes are excluded from w_i, c_i and K. (2) On muse-12 (reviewer role) it is the baseline subject session: it IS included in w_i, c_i and K for the baseline arm, priced on the token list rate basis above for the frozen model gpt-5.6-sol; the Codex JSONL reports tokens but no cost, so a missing token kind (including cache tokens) makes that run's cost null, never 0.",
+      "pricingBasis": "Two roles for this profile. (1) In the review loop of tasks muse-01..09 it is fixed instrumentation, identical for both arms, and those reviewer passes are excluded from w_i, c_i and K. (2) On muse-12 (reviewer role) it is the baseline subject session: it IS included in w_i, c_i and K for the baseline arm, priced on the list-rate shadow basis in costModel for the frozen model gpt-5.6-sol. The Codex JSONL reports tokens but no cost.",
       "permissionPolicy": {
         "worktreeWrite": false,
         "publishReview": false,
@@ -40,7 +48,15 @@
         "resolveHumanAction": false
       },
       "cliVersion": "codex-cli 0.150.0-alpha.12.2",
-      "frozenInvocation": "codex <Dealer buildReviewerArgs> with model gpt-5.6-sol and -c model_reasoning_effort=medium, unchanged for every review and re-review round."
+      "frozenInvocation": "codex <Dealer buildReviewerArgs> with model gpt-5.6-sol and -c model_reasoning_effort=medium, unchanged for every review and re-review round.",
+      "tokenMapping": {
+        "source": "raw `turn.completed.usage` of the Codex JSONL log, summed over the session's turn.completed events",
+        "uncached_input": "usage.input_tokens − usage.cached_input_tokens (Codex reports cached_input_tokens as a subset of input_tokens, e.g. input_tokens=24763, cached_input_tokens=24448 gives 315 uncached)",
+        "cache_read": "usage.cached_input_tokens",
+        "cache_write": "0 by definition: the OpenAI rate card has no cache-write tier",
+        "output": "usage.output_tokens; usage.reasoning_output_tokens is a subset of output_tokens and is NOT added again (Dealer's usage_events adds it, one more reason costing reads the raw log)",
+        "inputIncludesCached": true
+      }
     }
   },
   "candidate": {
@@ -51,7 +67,7 @@
     "modelResolution": "Identifier taken from the model ids embedded in the installed Muse Code 1.3.0 (1.3.0-R3401.1) binary (muse-spark-1.3 is the highest version; muse-spark-1.2 is also present). It was NOT confirmed against the contributor tier, because doing so sends a prompt to Meta before privacy acceptance is recorded. The operator confirms it before run 1 (see confirmation); if the tier serves a different current model, this contract is amended and re-validated before run 1, never mid-evaluation.",
     "effort": "high",
     "effortResolution": "Explicit --reasoning-effort high (also the CLI default), identical for every candidate run.",
-    "pricingBasis": "Token list rate, identical method for both arms: cost_usd = Σ tokens_kind × published_rate_kind over input, output, cache-read and cache-write tokens, using the vendor's published per-token rate for the frozen model (source URL and retrieval date recorded in the run plan before run 1). Tokens come from the raw result/usage event of the session log, including cache tokens; if any token kind is not reported the run's cost is null, never 0. The contributor-tier cash price ($0, paid in data-use rights) is reported but is not a cost and cannot satisfy G6. If Meta publishes no per-token rate for the frozen model, or Muse Code reports no token counts, the candidate's cost is null and G6 is incomparable.",
+    "pricingBasis": "List-rate shadow cost, one frozen method for both arms (see costModel): cost_usd = uncached_input × r_input + cache_read × r_cache_read + cache_write × r_cache_write + output × r_output, over the disjoint token quantities defined in costModel and the raw-field mapping in this subject's tokenMapping; r_* are the vendor's published per-token rates for the frozen model (source URL and retrieval date recorded in the run plan before run 1). If any applicable quantity is not reported, or the mapping cannot be applied because the log does not say whether cached tokens are inside input, the run's cost is null, never 0. The contributor-tier cash price ($0, paid in data-use rights) is reported but is not a cost and cannot satisfy G6. If Meta publishes no per-token rate for the frozen model, or Muse Code reports no token counts, the candidate's cost is null and G6 is incomparable.",
     "permissionPolicy": "identical to the baseline policy of the task's role",
     "privacy": {
       "dataUse": "Prompts and completions may be used to improve Meta products.",
@@ -65,6 +81,16 @@
       "confirmedAt": null,
       "confirmedBy": null,
       "note": "Operator sets these after checking that the contributor tier serves the frozen model. `validate-muse-code-manifest.mjs --ready` fails until they are set."
+    },
+    "tokenMapping": {
+      "source": "raw usage object of the `muse exec --json` event stream; the adapter does not exist yet, so field names are fixed here by rule and by the run plan",
+      "rule": "Before run 1 the operator records in the run plan the raw Muse Code field for each quantity and whether its reported input total includes cached tokens (subtracting cached from input when it does). If the log or Meta documentation does not establish that, the candidate's cost is null and G6 is incomparable; nothing is guessed.",
+      "uncached_input": "raw input tokens, minus raw cached tokens when the runtime reports input inclusive of cache",
+      "cache_read": "raw cached/cache-read input tokens",
+      "cache_write": "raw cache-write tokens if the Meta rate card has a cache-write tier, otherwise 0 by definition",
+      "output": "raw output tokens with reasoning tokens counted once",
+      "inputIncludesCached": null,
+      "mappingRecordedInRunPlan": false
     },
     "pricingBasisFrozenNow": true
   },
@@ -907,5 +933,21 @@
         "description": "The reviewer's final message saved verbatim to $ARTIFACT (<runDir>/artifact.md), containing a fenced JSON ReviewerResult."
       }
     }
-  ]
+  ],
+  "costModel": {
+    "basis": "list_rate_shadow_cost",
+    "frozenNow": true,
+    "appliesTo": "both arms and every subject session; it is the only cost that enters G6. Actual plan/quota spend is reported separately (actualPlanSpendReport) and is never substituted for, mixed into or averaged with the shadow cost.",
+    "disjointQuantities": {
+      "uncached_input": "input tokens billed at the normal input rate; excludes every cached token",
+      "cache_read": "input tokens served from cache, billed at the cache-read rate",
+      "cache_write": "input tokens written to cache, billed at the cache-write rate (only where the vendor has such a tier)",
+      "output": "all generated tokens including reasoning tokens, each counted once"
+    },
+    "formula": "cost_usd = uncached_input × r_input + cache_read × r_cache_read + cache_write × r_cache_write + output × r_output. The four quantities are disjoint by construction; no token is charged at two rates.",
+    "notApplicable": "A quantity the runtime's vendor has no tier for (Codex cache_write) is defined as 0 by that runtime's tokenMapping, not by absence of data. A quantity that has a tier but is not reported is null.",
+    "nullRule": "Any applicable quantity that is missing, or a mapping whose subset/disjoint semantics cannot be established from the raw log, makes the attempt cost null, never 0 and never a saving.",
+    "actualPlanSpendReport": "Reported alongside G6, not gated: for each arm the plan, price, billing period, number of runs, and provider-reported consumption. The candidate's contributor-tier cash price ($0, paid in data-use rights) is reported but is not a cost and cannot satisfy G6. No time-based or quota-share allocation is used; the shadow list-rate cost is the documented conversion of plan usage to dollars.",
+    "noPublishedRate": "If a vendor publishes no per-token rate for its frozen model (possible for muse-spark-1.3), or a runtime reports no token counts, that arm's cost is null and G6 is incomparable; both arms' actual plan spend is then reported separately."
+  }
 }
