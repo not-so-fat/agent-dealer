@@ -28,6 +28,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def log_message(self, *args):
+        pass
+
     do_GET = do_POST = do_PUT = do_DELETE = _respond
 
 

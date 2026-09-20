@@ -1,1 +1,1 @@
-[{"cron_expr":"* * * * *","prompt":"echo hi","recurring":1,"fire_when_active_run":1,"kind":"user","permanent":0,"ttl_days":7.0,"fire_count":0,"status":"active"}]
+[{"cron_expr":"* * * * *","prompt":"echo hi","recurring":1,"fire_when_active_run":1,"kind":"user","permanent":0,"ttl_days":7.0,"fire_count":1,"status":"active"}]

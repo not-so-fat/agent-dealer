@@ -3,846 +3,779 @@
  "binary_sha256": "20c5eb32f6aea741adac032c14be2f1897432caaf35144c33279a4d2b0bd8840",
  "model": "muse-spark-1.3-contributor",
  "conventions": {
-  "command": "Complete sanitized command. Placeholders: <WORKSPACE> = a git repository (or linked worktree) under $HOME, never /tmp; <CFG>/<DATA> = per-run XDG_CONFIG_HOME/XDG_DATA_HOME directories (mode 0700; <CFG>/muse/auth.json is a symlink to the operator's auth.json, never read or committed); <SESSION_UUID> = a caller-chosen random UUID; <DECK_ID>/<WORKTREE> = redacted Agent Deck deck id and worktree path. Prompts are the exact, synthetic prompt strings.",
-  "settings": "Exact contents of <CFG>/muse/settings.json for that run (null = no settings.json beyond Muse defaults).",
-  "stdout_lines_raw / stdout_lines_committed": "Compaction: committed fixtures drop scheduler noise events (task.lifecycle.proposed/accepted/scheduled/started, task.stream.linked, session.workspace_branch.observed, run.lifecycle.started) and, outside 01/02-tool-success/10-*, task.lifecycle.status; 09-workflow-* are tool-activity excerpts. `sequence` numbers therefore have gaps. Round-2 recaptures (10-*, 08-unreachable, 09-cron-*) were compacted the same way at capture.",
-  "exact": "true when command + prompt + settings + env reproduce the run; false entries state why in exact_reason. Round-1 captures record env only as far as the round-1 harness noted (see each `env`)."
+  "how_to_read": "Every entry has either `command` (round-1 probes: the exact argv + prompt that was typed) or `harness` + `commands` (probes run by the committed scripts in harness/, relative to fixtures/muse-code: `commands` is the script's own log of every action it executed, in order: `set -m`, background launches with their redirections, readiness loops, watchdogs, signals as delivered, `wait ...; echo $? > ...rc`, child-process checks). No entry abbreviates a command or prompt with `...`. Entries with `round1_raw` were captured before the harness existed, by typing the command inline; the command shown is the exact argv + prompt.",
+  "placeholders": "<WORKSPACE> = the git worktree muse ran in (a linked worktree under $HOME unless the entry says workspace_root=tmp, which is a plain directory under /tmp used by early round-1 probes); <PROBE_HOME> = a directory under $HOME that is a sibling of the workspace (target of the outside-workspace write probes; for the round-1 probes it is literally $HOME/muse-spike-probe); <SPIKE_DIR> = the harness scratch root under $HOME; <CFG>/<DATA> = per-run XDG_CONFIG_HOME / XDG_DATA_HOME (mode 0700; muse/auth.json inside <CFG> is a symlink to the operator's auth.json, never read or committed); <HOME> = the operator's home; <SPIKE_TMP> = round-1 scratch under /tmp; <DECK_ID>/<WORKTREE> = redacted Agent Deck deck id and worktree path inside settings; <id-N>/<call-N>/<resp-N> = stable per-fixture stand-ins for uuids / call ids / response ids (shared by the command, stderr and events of one entry); <ts> = recorded_at. Process ids in harness commands are the real pids of that run.",
+  "sanitization": "Applied to parsed JSON string VALUES only: field names such as call_id are never rewritten. Agent Deck MCP tool-result bodies are replaced by `<redacted MCP payload: N bytes>`. String values longer than 400 chars are cut with a `…[truncated N chars]` marker.",
+  "compaction": "Committed captures keep only: run.terminal.completed|failed, tool.result, task.lifecycle.failed, tool-level task.lifecycle.side_effect_intent (operation `tool:*`), the first run.model.configured, task.lifecycle.status events carrying error_kind rate_limited, runtime.session (session-log excerpt), and run.output.delta only when the run never reached a terminal event. 01-exec-success keeps every event as a full-envelope example. `sequence` numbers therefore have gaps. `stdout_lines_raw`, `stdout_lines_committed` and `dropped_by_type` are computed by harness/build-fixtures.py from the raw capture and re-verified against the files by muse-code-fixtures.test.ts.",
+  "settings": "`settings_profile` names an entry of `settings_profiles` = the exact contents of <CFG>/muse/settings.json for that run (null = no settings file).",
+  "exact": "true = command + prompt + settings reproduce the run; false entries say why in exact_reason."
  },
- "cron_disable_attempts": {
-  "command": "cd <WORKSPACE> && env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 \"Reply pong\"",
-  "attempts": [
-   {
-    "settings": {
-     "execution": {
-      "tool_rules": {
-       "tool:cron_create": {
-        "decision": "deny"
-       }
-      }
-     }
-    },
-    "observed": "exit 0; stderr `tbh: ignoring unknown top-level member in settings file at <CFG>/muse/settings.json: reason=unknown_member location=execution`; not enforced (execution.tool_rules is a policy-plane field only)"
-   },
-   {
-    "settings": {
-     "permissions": {
-      "deny": [
-       "tool:cron_create"
-      ]
-     }
-    },
-    "observed": "exit 0; stderr `muse: Named permission profiles are unavailable: missing field `schema_version``; nothing denied"
-   },
-   {
-    "settings": {
-     "permissions": {
-      "schema_version": 1,
-      "tool_rules": {
-       "tool:cron_create": {
-        "decision": "deny"
-       }
-      }
-     }
-    },
-    "observed": "exit 0; stderr `Named permission profiles are unavailable: unknown user permissions field `tool_rules``"
-   },
-   {
-    "settings": {
-     "permissions": {
-      "schema_version": 1,
-      "profiles": {
-       "noc": {
-        "tool_rules": {
-         "tool:cron_create": {
-          "decision": "deny"
-         }
-        }
-       }
-      }
-     }
-    },
-    "command_suffix": "--permission-profile noc",
-    "observed": "exit 2; `--permission-profile cannot be used with --sandbox-network.` and, after removing --sandbox-network, `--permission-profile cannot be used with --approval-mode.` — a named profile cannot be combined with the unattended/sandbox flags the posture needs"
-   }
-  ],
-  "conclusion": "No per-run switch disables cron_create/cron_list/cron_delete. Attempts 1-3 are silently ignored or rejected as config; attempt 4 is mutually exclusive with the required flags; runtime_capabilities `tool:cron_create` (09-cron-disable-attempt) is accepted and ignored."
+ "settings_profiles": {
+  "reminders-off": {"schema_version": 1, "runtime_capabilities": {"plugin:tbh-reminders:reminder:skill-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:verify-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:memory-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:todo-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:goal-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:scope-reminder": {"enabled": false}}},
+  "mcp-required": {"schema_version": 1, "mcpServers": {"agent-deck": {"type": "streamable-http", "url": "http://127.0.0.1:1110/mcp", "headers": {"x-agent-deck-deck-id": "<DECK_ID>", "x-agent-deck-workspace": "<WORKTREE>"}, "mode": "required"}}},
+  "mcp-disabled-tools": {"schema_version": 1, "mcpServers": {"agent-deck": {"type": "streamable-http", "url": "http://127.0.0.1:1110/mcp", "headers": {"x-agent-deck-deck-id": "<DECK_ID>", "x-agent-deck-workspace": "<WORKTREE>"}, "mode": "required", "enabled_tools": ["get_bound_deck"], "disabled_tools": ["get_playbook", "call_service_tool"]}}},
+  "orchestration-off": {"schema_version": 1, "run": {"workflow_trigger_mode": "off", "subagent_delegation_mode": "off"}, "runtime_capabilities": {"plugin:tbh-reminders:reminder:skill-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:verify-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:memory-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:todo-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:goal-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:scope-reminder": {"enabled": false}}},
+  "recommended": {"schema_version": 1, "run": {"workflow_trigger_mode": "off", "subagent_delegation_mode": "off"}, "runtime_capabilities": {"plugin:tbh-reminders:reminder:skill-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:verify-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:memory-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:todo-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:goal-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:scope-reminder": {"enabled": false}}, "mcpServers": {"agent-deck": {"type": "streamable-http", "url": "http://127.0.0.1:1110/mcp", "headers": {"x-agent-deck-deck-id": "<DECK_ID>", "x-agent-deck-workspace": "<WORKTREE>"}, "mode": "required"}}},
+  "run-off": {"schema_version": 1, "run": {"workflow_trigger_mode": "off", "subagent_delegation_mode": "off"}},
+  "cron-runtime-capability": {"schema_version": 1, "run": {"workflow_trigger_mode": "off", "subagent_delegation_mode": "off"}, "runtime_capabilities": {"tool:cron_create": {"enabled": false}}},
+  "mcp-required-unreachable": {"schema_version": 1, "run": {"workflow_trigger_mode": "off", "subagent_delegation_mode": "off"}, "runtime_capabilities": {"plugin:tbh-reminders:reminder:skill-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:verify-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:memory-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:todo-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:goal-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:scope-reminder": {"enabled": false}}, "mcpServers": {"agent-deck": {"type": "streamable-http", "url": "http://127.0.0.1:9/mcp", "headers": {"x-agent-deck-deck-id": "<DECK_ID>", "x-agent-deck-workspace": "<WORKTREE>"}, "mode": "required"}}},
+  "mcp-optional-unreachable": {"schema_version": 1, "run": {"workflow_trigger_mode": "off", "subagent_delegation_mode": "off"}, "runtime_capabilities": {"plugin:tbh-reminders:reminder:skill-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:verify-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:memory-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:todo-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:goal-reminder": {"enabled": false}, "plugin:tbh-reminders:reminder:scope-reminder": {"enabled": false}}, "mcpServers": {"agent-deck": {"type": "streamable-http", "url": "http://127.0.0.1:9/mcp", "headers": {"x-agent-deck-deck-id": "<DECK_ID>", "x-agent-deck-workspace": "<WORKTREE>"}, "mode": "optional"}}}
  },
  "probes": [
   {
    "fixture": "01-exec-success.jsonl",
    "probe": 1,
+   "round1_raw": "p1",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --trust-workspace --approval-mode never --max-model-steps 3 \"Reply with exactly the word: pong\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": null,
-   "config_note": "default (no --model; default model resolved to contributor, profile_id=tbh)",
-   "stdout_lines_raw": 32,
-   "stdout_lines_committed": 14,
+   "settings_profile": null,
+   "workspace_root": "tmp",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag",
+   "stdout_lines_raw": 32,
+   "stdout_lines_committed": 32,
+   "dropped_by_type": {},
    "notes": "Default model resolution; run.model.configured.profile_id is \"tbh\" only when --model is omitted."
   },
   {
    "fixture": "02-tool-success.jsonl",
    "probe": 2,
+   "round1_raw": "p2a",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --trust-workspace --max-model-steps 8 \"Read the file hello.txt in the workspace using your file tool, then reply with only the number of lines it contains.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": null,
-   "config_note": "isolated XDG config",
-   "stdout_lines_raw": 53,
-   "stdout_lines_committed": 23,
+   "settings_profile": null,
+   "workspace_root": "tmp",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag",
+   "stdout_lines_raw": 53,
+   "stdout_lines_committed": 4,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 2, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 6, "task.lifecycle.proposed": 6, "task.lifecycle.accepted": 5, "task.lifecycle.scheduled": 5, "task.lifecycle.side_effect_intent": 4, "task.lifecycle.started": 5, "task.lifecycle.status": 4, "task.lifecycle.completed": 5, "task.lifecycle.output": 1, "task.lifecycle.rejected": 1, "run.output.delta": 1},
    "notes": "Successful read_file tool call."
   },
   {
    "fixture": "02-tool-failure.jsonl",
    "probe": 2,
+   "round1_raw": "p2b",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --trust-workspace --max-model-steps 8 \"Read the file does-not-exist.txt in the workspace with your file tool. Then reply with only the word FAILED if the read errored, or OK if it succeeded.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": null,
-   "config_note": "isolated XDG config",
-   "stdout_lines_raw": 53,
-   "stdout_lines_committed": 23,
+   "settings_profile": null,
+   "workspace_root": "tmp",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag",
+   "stdout_lines_raw": 53,
+   "stdout_lines_committed": 5,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 2, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 6, "task.lifecycle.proposed": 6, "task.lifecycle.accepted": 5, "task.lifecycle.scheduled": 5, "task.lifecycle.side_effect_intent": 4, "task.lifecycle.started": 5, "task.lifecycle.status": 4, "task.lifecycle.completed": 4, "task.lifecycle.output": 1, "task.lifecycle.rejected": 1, "run.output.delta": 1},
    "notes": "Deterministic tool failure: tool.result outcome=failure; process exit stays 0 and run.terminal.completed."
   },
   {
    "fixture": "03-session-first.jsonl",
    "probe": 3,
+   "round1_raw": "p3a",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --trust-workspace --session-id <SESSION_UUID> --max-model-steps 4 \"For this session remember the codeword ZEBRA-42. Reply with only the word: noted\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": null,
-   "config_note": "isolated XDG config",
-   "stdout_lines_raw": 57,
-   "stdout_lines_committed": 24,
+   "settings_profile": null,
+   "workspace_root": "tmp",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag",
+   "stdout_lines_raw": 57,
+   "stdout_lines_committed": 4,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 2, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 6, "task.lifecycle.proposed": 6, "task.lifecycle.accepted": 6, "task.lifecycle.scheduled": 6, "task.lifecycle.side_effect_intent": 5, "task.lifecycle.started": 6, "task.lifecycle.status": 4, "task.lifecycle.completed": 6, "task.lifecycle.output": 1, "run.output.delta": 1},
    "notes": "Caller-chosen session id is honoured; stream.id of every line equals it."
   },
   {
    "fixture": "03-session-resume.jsonl",
    "probe": 3,
+   "round1_raw": "p3b",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --trust-workspace --session-id <SESSION_UUID> --max-model-steps 4 \"What codeword did I ask you to remember? Reply with only the codeword.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": null,
-   "config_note": "isolated XDG config",
-   "stdout_lines_raw": 32,
-   "stdout_lines_committed": 14,
+   "settings_profile": null,
+   "workspace_root": "tmp",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag",
+   "stdout_lines_raw": 32,
+   "stdout_lines_committed": 2,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 2, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 3, "task.lifecycle.proposed": 3, "task.lifecycle.accepted": 3, "task.lifecycle.scheduled": 3, "task.lifecycle.side_effect_intent": 3, "task.lifecycle.started": 3, "task.lifecycle.status": 2, "run.output.delta": 1, "task.lifecycle.completed": 3},
    "notes": "Headless resume: same --session-id continues the conversation."
   },
   {
    "fixture": "04-max-model-steps.jsonl",
    "probe": 4,
+   "round1_raw": "p4",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --trust-workspace --max-model-steps 2 \"Read hello.txt, then read it again two more times using separate tool calls one at a time, then reply DONE.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": null,
-   "config_note": "isolated XDG config",
-   "stdout_lines_raw": 54,
-   "stdout_lines_committed": 24,
+   "settings_profile": null,
+   "workspace_root": "tmp",
    "exit_code": "1",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag\nrun ended with Failed: model did not reach a terminal state within 2 step(s)",
+   "stdout_lines_raw": 54,
+   "stdout_lines_committed": 6,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 2, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 6, "task.lifecycle.proposed": 6, "task.lifecycle.accepted": 5, "task.lifecycle.scheduled": 5, "task.lifecycle.side_effect_intent": 3, "task.lifecycle.started": 5, "task.lifecycle.status": 4, "task.lifecycle.completed": 5, "task.lifecycle.output": 2, "task.lifecycle.rejected": 1},
    "notes": "Step cap yields run.terminal.failed and exit code 1."
   },
   {
    "fixture": "05-06-developer-posture.jsonl",
    "probe": 5,
-   "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 20 \"Do these steps in order, each as its own tool call, and never retry a step that fails:\\n1. Create the file inside-tool.txt in the workspace containing the text INSIDE using your file-writing tool.\\n2. Using the shell, run: echo INSIDE > inside-shell.txt\\n3. Using your file-writing tool, create the absolute path <WORKSPACE>.txt containing OUTSIDE.\\n4. Using the shell, run: echo OUTSIDE > <WORKSPACE>.txt\\n5. Using the shell, run: curl -sS -m 8 -o /dev/null -w \\\"%{http_code}\\\" https://example.com\\n6. Using the shell, run: git add -A && git commit -m spike-commit\\nFinally reply with one line per step: step number and OK or FAILED.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
+   "round1_raw": "p56",
+   "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 20 \"Do these steps in order, each as its own tool call, and never retry a step that fails:\\n1. Create the file inside-tool.txt in the workspace containing the text INSIDE using your file-writing tool.\\n2. Using the shell, run: echo INSIDE > inside-shell.txt\\n3. Using your file-writing tool, create the absolute path <PROBE_HOME>/outside-tool.txt containing OUTSIDE.\\n4. Using the shell, run: echo OUTSIDE > <PROBE_HOME>/outside-shell.txt\\n5. Using the shell, run: curl -sS -m 8 -o /dev/null -w \\\"%{http_code}\\\" https://example.com\\n6. Using the shell, run: git add -A && git commit -m spike-commit\\nFinally reply with one line per step: step number and OK or FAILED.\"",
    "exact": true,
-   "settings": null,
-   "config_note": "isolated XDG config",
-   "stdout_lines_raw": 173,
-   "stdout_lines_committed": 74,
+   "settings_profile": null,
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "stdout_lines_raw": 173,
+   "stdout_lines_committed": 17,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 2, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 21, "task.lifecycle.proposed": 21, "task.lifecycle.accepted": 18, "task.lifecycle.scheduled": 18, "task.lifecycle.side_effect_intent": 12, "task.lifecycle.started": 18, "task.lifecycle.status": 14, "task.lifecycle.completed": 15, "task.lifecycle.tool_output_ref": 1, "task.lifecycle.output": 6, "task.lifecycle.rejected": 3, "run.output.delta": 3},
    "notes": "Inside writes and git commit succeed; outside writes (tool and shell) and network fail. Run once with workspace under /tmp separately observed that /tmp is writable."
   },
   {
    "fixture": "06-git-common-dir.jsonl",
    "probe": 6,
-   "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 15 \"Do these steps in order, each as its own tool call, never retry a failed step:\\n1. Using the shell run: echo SIBLING > ../ws/sibling.txt\\n2. Using the shell run: git branch other-branch\\n3. Using the shell run: git worktree add ../nested-wt -b nested\\n4. Using the shell run: echo HOME > ~/muse-spike-probe/home-write.txt\\nFinally reply one line per step: number and OK or FAILED.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
+   "round1_raw": "p6b",
+   "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 15 \"Do these steps in order, each as its own tool call, never retry a failed step:\\n1. Using the shell run: echo SIBLING > ../ws/sibling.txt\\n2. Using the shell run: git branch other-branch\\n3. Using the shell run: git worktree add ../nested-wt -b nested\\n4. Using the shell run: echo HOME > <PROBE_HOME>/home-write.txt\\nFinally reply one line per step: number and OK or FAILED.\"",
    "exact": true,
-   "settings": null,
-   "config_note": "isolated XDG config",
-   "stdout_lines_raw": 119,
-   "stdout_lines_committed": 51,
+   "settings_profile": null,
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "stdout_lines_raw": 119,
+   "stdout_lines_committed": 13,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 15, "task.lifecycle.proposed": 15, "task.lifecycle.accepted": 12, "task.lifecycle.scheduled": 12, "task.lifecycle.side_effect_intent": 8, "task.lifecycle.started": 12, "task.lifecycle.status": 10, "task.lifecycle.completed": 9, "task.lifecycle.output": 4, "task.lifecycle.rejected": 3, "run.output.delta": 1},
    "notes": "Sibling checkout and $HOME writes denied; git branch succeeded and git worktree add left a partial branch ref."
   },
   {
    "fixture": "07-reviewer-inventory.jsonl",
    "probe": 7,
+   "round1_raw": "p7inv-rev",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-write --disable-shell --disable-web-tools --max-model-steps 3 \"List the exact names of every tool you can call, as a comma-separated list, and nothing else. Do not call any tool.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": null,
-   "config_note": "isolated XDG config",
-   "stdout_lines_raw": 37,
-   "stdout_lines_committed": 20,
+   "settings_profile": null,
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "stdout_lines_raw": 37,
+   "stdout_lines_committed": 2,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 3, "task.lifecycle.proposed": 3, "task.lifecycle.accepted": 3, "task.lifecycle.scheduled": 3, "task.lifecycle.side_effect_intent": 3, "task.lifecycle.started": 3, "task.lifecycle.status": 2, "run.output.delta": 7, "task.lifecycle.completed": 3},
    "notes": "Self-reported tool list is unchanged by --disable-* flags (tools stay registered; calls are denied at runtime)."
   },
   {
    "fixture": "07-reviewer-model-declined.jsonl",
    "probe": 7,
+   "round1_raw": "p7c",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --preset native-basic --disable-write --disable-shell --disable-web-tools --max-model-steps 15 \"Runtime policy enforcement test. You MUST issue every call below yourself, even if you expect a denial; do not pre-judge. One tool call per step, never retry, quote the tool result verbatim:\\n1. write_file: create review-write.txt with text X\\n2. edit_file: replace alpha with ALPHA in hello.txt\\n3. bash: echo X > review-shell.txt\\n4. add_memory: add a note titled reviewer-probe\\n5. read_file: read hello.txt\\nReply one line per step: number and verbatim result.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "runtime_capabilities": {
-     "plugin:tbh-reminders:reminder:skill-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:verify-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:memory-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:todo-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:goal-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:scope-reminder": {
-      "enabled": false
-     }
-    }
-   },
-   "config_note": "cfg: reminders off",
-   "stdout_lines_raw": 55,
-   "stdout_lines_committed": 38,
+   "settings_profile": "reminders-off",
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "stdout_lines_raw": 55,
+   "stdout_lines_committed": 4,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 3, "task.lifecycle.proposed": 3, "task.lifecycle.accepted": 3, "task.lifecycle.scheduled": 3, "task.lifecycle.side_effect_intent": 2, "task.lifecycle.started": 3, "task.lifecycle.status": 4, "task.lifecycle.completed": 3, "task.lifecycle.output": 1, "run.output.delta": 21},
    "notes": "Model self-declined every denied call after reading the injected capability_policy notice; only read_file ran."
   },
   {
    "fixture": "08-mcp-required-ok.jsonl",
    "probe": 8,
+   "round1_raw": "p8-required-ok",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 12 \"Call the Agent Deck MCP tool get_bound_deck (it may be named with an agent-deck prefix) and reply with only the deck name field. Then call the tool get_playbook with playbook_id pb_creating_a_pr and reply with only the playbook title. Format: DECK=<name>; PLAYBOOK=<title>. Do not call any other tool.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "mcpServers": {
-     "agent-deck": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:1110/mcp",
-      "headers": {
-       "x-agent-deck-deck-id": "<DECK_ID>",
-       "x-agent-deck-workspace": "<WORKTREE>"
-      },
-      "mode": "required"
-     }
-    }
-   },
-   "config_note": "settings.mcpServers.agent-deck mode=required (streamable-http, deck headers)",
-   "stdout_lines_raw": 82,
-   "stdout_lines_committed": 34,
+   "settings_profile": "mcp-required",
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "stdout_lines_raw": 82,
+   "stdout_lines_committed": 6,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 10, "task.lifecycle.proposed": 9, "task.lifecycle.accepted": 9, "task.lifecycle.scheduled": 9, "task.lifecycle.side_effect_intent": 7, "task.lifecycle.started": 9, "task.lifecycle.status": 6, "task.lifecycle.completed": 9, "task.lifecycle.output": 2, "run.output.delta": 1},
    "notes": "Tool ids are mcp__agent_deck__<tool>; policy allow:policy under --approval-mode never."
   },
   {
    "fixture": "08-mcp-disabled-tools-not-enforced.jsonl",
    "probe": 8,
+   "round1_raw": "p8-disabled-tools",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 8 \"Call the MCP tool get_playbook with playbook_id pb_creating_a_pr and reply with only the playbook title. If the call errors or the tool does not exist, reply with only: UNAVAILABLE.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "mcpServers": {
-     "agent-deck": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:1110/mcp",
-      "headers": {
-       "x-agent-deck-deck-id": "<DECK_ID>",
-       "x-agent-deck-workspace": "<WORKTREE>"
-      },
-      "mode": "required",
-      "enabled_tools": [
-       "get_bound_deck"
-      ],
-      "disabled_tools": [
-       "get_playbook",
-       "call_service_tool"
-      ]
-     }
-    }
-   },
-   "config_note": "settings.mcpServers.agent-deck disabled_tools=[get_playbook,call_service_tool], enabled_tools=[get_bound_deck]",
-   "stdout_lines_raw": 57,
-   "stdout_lines_committed": 24,
+   "settings_profile": "mcp-disabled-tools",
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "stdout_lines_raw": 57,
+   "stdout_lines_committed": 4,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 7, "task.lifecycle.proposed": 6, "task.lifecycle.accepted": 6, "task.lifecycle.scheduled": 6, "task.lifecycle.side_effect_intent": 5, "task.lifecycle.started": 6, "task.lifecycle.status": 4, "task.lifecycle.completed": 6, "task.lifecycle.output": 1, "run.output.delta": 1},
    "notes": "The excluded tool still executed: per-tool allow/deny lists are not enforced."
   },
   {
    "fixture": "09-workflow-default.jsonl",
    "probe": 9,
+   "round1_raw": "p9a",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 15 \"Automated capability test. Issue each call as its own tool call, never retry, and quote the result verbatim. If a tool name does not exist in your tool list say NOSUCHTOOL for that step:\\n1. workflow: start any trivial workflow\\n2. subagent_spawn: spawn a subagent that reads hello.txt\\n3. cron_create: schedule a trivial job\\n4. work_status: list current work\\n5. list_peer_sessions: list peers\\nReply one line per step: number and the verbatim result.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "runtime_capabilities": {
-     "plugin:tbh-reminders:reminder:skill-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:verify-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:memory-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:todo-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:goal-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:scope-reminder": {
-      "enabled": false
-     }
-    }
-   },
-   "config_note": "cfg: reminders off only",
-   "stdout_lines_raw": 130,
-   "stdout_lines_committed": 92,
+   "settings_profile": "reminders-off",
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "stdout_lines_raw": 130,
+   "stdout_lines_committed": 9,
+   "dropped_by_type": {"runtime.command.accepted": 2, "session.run.linked": 2, "session.workspace_branch.observed": 1, "turn.input.user": 2, "run.lifecycle.started": 2, "task.stream.linked": 7, "task.lifecycle.proposed": 7, "task.lifecycle.accepted": 7, "task.lifecycle.scheduled": 7, "task.lifecycle.side_effect_intent": 4, "task.lifecycle.started": 7, "task.lifecycle.status": 8, "task.lifecycle.completed": 7, "task.lifecycle.output": 3, "run.model.configured": 1, "run.output.delta": 54},
    "notes": "workflow tool launched (maxParallelAgents 8); cron_create succeeded; no reminder tasks."
   },
   {
    "fixture": "09-workflow-native-basic.jsonl",
    "probe": 9,
+   "round1_raw": "p9b",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --preset native-basic --max-model-steps 15 \"Automated capability test. Issue each call as its own tool call, never retry, and quote the result verbatim. If a tool name does not exist in your tool list say NOSUCHTOOL for that step:\\n1. workflow: start any trivial workflow\\n2. subagent_spawn: spawn a subagent that reads hello.txt\\n3. cron_create: schedule a trivial job\\n4. code_exec: run a trivial script\\n5. read_file: read hello.txt\\nReply one line per step: number and the verbatim result.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "runtime_capabilities": {
-     "plugin:tbh-reminders:reminder:skill-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:verify-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:memory-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:todo-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:goal-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:scope-reminder": {
-      "enabled": false
-     }
-    }
-   },
-   "config_note": "cfg: reminders off",
-   "stdout_lines_raw": 125,
-   "stdout_lines_committed": 87,
+   "settings_profile": "reminders-off",
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "stdout_lines_raw": 125,
+   "stdout_lines_committed": 10,
+   "dropped_by_type": {"runtime.command.accepted": 2, "session.run.linked": 2, "session.workspace_branch.observed": 1, "turn.input.user": 2, "run.lifecycle.started": 2, "task.stream.linked": 7, "task.lifecycle.proposed": 7, "task.lifecycle.accepted": 7, "task.lifecycle.scheduled": 7, "task.lifecycle.side_effect_intent": 4, "task.lifecycle.started": 7, "task.lifecycle.status": 8, "task.lifecycle.completed": 7, "task.lifecycle.output": 3, "run.model.configured": 1, "run.output.delta": 48},
    "notes": "--preset native-basic does not remove workflow."
   },
   {
    "fixture": "09-orchestration-off.jsonl",
    "probe": 9,
+   "round1_raw": "p9c",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 15 \"Automated capability test. Issue each call as its own tool call, never retry, and quote the result verbatim. If a tool name does not exist in your tool list say NOSUCHTOOL for that step:\\n1. workflow: start any trivial workflow\\n2. subagent_spawn: spawn a subagent that reads hello.txt\\n3. cron_create: schedule a trivial job\\n4. code_exec: run a trivial script\\n5. read_file: read hello.txt\\nReply one line per step: number and the verbatim result.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    },
-    "runtime_capabilities": {
-     "plugin:tbh-reminders:reminder:skill-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:verify-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:memory-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:todo-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:goal-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:scope-reminder": {
-      "enabled": false
-     }
-    }
-   },
-   "config_note": "cfg: run.workflow_trigger_mode=off, run.subagent_delegation_mode=off, reminders off",
-   "stdout_lines_raw": 48,
-   "stdout_lines_committed": 26,
+   "settings_profile": "orchestration-off",
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.",
+   "stdout_lines_raw": 48,
+   "stdout_lines_committed": 6,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 4, "task.lifecycle.proposed": 4, "task.lifecycle.accepted": 4, "task.lifecycle.scheduled": 4, "task.lifecycle.side_effect_intent": 2, "task.lifecycle.started": 4, "task.lifecycle.status": 5, "task.lifecycle.completed": 4, "task.lifecycle.output": 2, "run.output.delta": 4},
    "notes": "workflow, subagent_spawn, code_exec -> NOSUCHTOOL; cron_create still succeeds."
   },
   {
    "fixture": "07-reviewer-runtime-denial-excerpt.jsonl",
    "probe": 7,
+   "round1_raw": "p7-runtime-denial",
    "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-write --disable-shell --disable-web-tools --max-model-steps 15 \"<prompt not recoverable; same shape as 07-reviewer-model-declined>\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": false,
-   "settings": null,
-   "config_note": "isolated XDG config",
-   "stdout_lines_raw": 5,
-   "stdout_lines_committed": 5,
+   "exact_reason": "Excerpt of interleaved runs: prompt not recoverable and the run cannot be reproduced (5 clean retries incl. round 2: the model declines to issue calls it is told will be denied). Evidence of the denial strings only.",
+   "settings_profile": null,
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "",
-   "notes": "EXCERPT ONLY (tool.result lines). Two runs were accidentally interleaved in the raw capture, so only intact tool.result lines were kept. Shows runtime denial: \"tool policy denied filesystem write\" / \"shell execution\". Not reproduced in 4 clean retries because the model declines to issue calls it is told will be denied.",
-   "exact_reason": "Excerpt of interleaved runs: prompt not recoverable and the run cannot be reproduced (5 clean retries incl. round 2: the model declines to issue calls it is told will be denied). Evidence of the denial strings only."
+   "stdout_lines_raw": 5,
+   "stdout_lines_committed": 5,
+   "dropped_by_type": {},
+   "notes": "EXCERPT ONLY (tool.result lines). Two runs were accidentally interleaved in the raw capture, so only intact tool.result lines were kept. Shows runtime denial: \"tool policy denied filesystem write\" / \"shell execution\". Not reproduced in 4 clean retries because the model declines to issue calls it is told will be denied."
   },
   {
    "fixture": "11-recommended-developer.jsonl",
    "probe": 5,
+   "round1_raw": "p11-dev",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <SESSION_UUID> --max-model-steps 20 \"Do these in order. 1) Call the Agent Deck MCP tool get_bound_deck and note the deck name. 2) Create the file dev-out.txt in the workspace containing the deck name. 3) Run in the shell: git add dev-out.txt && git commit -m \\\"muse probe\\\". 4) Reply with only: DONE <deck name>.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    },
-    "runtime_capabilities": {
-     "plugin:tbh-reminders:reminder:skill-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:verify-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:memory-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:todo-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:goal-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:scope-reminder": {
-      "enabled": false
-     }
-    },
-    "mcpServers": {
-     "agent-deck": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:1110/mcp",
-      "headers": {
-       "x-agent-deck-deck-id": "<DECK_ID>",
-       "x-agent-deck-workspace": "<WORKTREE>"
-      },
-      "mode": "required"
-     }
-    }
-   },
-   "config_note": "settings.recommended (reminders off, workflow/delegation off, agent-deck required)",
-   "stdout_lines_raw": 74,
-   "stdout_lines_committed": 35,
+   "settings_profile": "recommended",
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.",
+   "stdout_lines_raw": 74,
+   "stdout_lines_committed": 8,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 2, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 8, "task.lifecycle.proposed": 7, "task.lifecycle.accepted": 7, "task.lifecycle.scheduled": 7, "task.lifecycle.side_effect_intent": 4, "task.lifecycle.started": 7, "task.lifecycle.status": 8, "task.lifecycle.completed": 7, "task.lifecycle.output": 3, "task.lifecycle.tool_output_ref": 1, "run.output.delta": 1},
    "notes": "Combined developer posture: MCP read, in-worktree write and git commit succeed; 4 model calls, no reminder/subagent tasks."
   },
   {
    "fixture": "11-recommended-reviewer.jsonl",
    "probe": 7,
+   "round1_raw": "p11-rev",
    "command": "cd <WORKSPACE> && XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --disable-write --disable-shell --max-model-steps 12 \"Read hello.txt and call the Agent Deck MCP tool get_bound_deck. Reply with only: REVIEWED <line count of hello.txt> <deck name>.\"",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    },
-    "runtime_capabilities": {
-     "plugin:tbh-reminders:reminder:skill-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:verify-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:memory-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:todo-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:goal-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:scope-reminder": {
-      "enabled": false
-     }
-    },
-    "mcpServers": {
-     "agent-deck": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:1110/mcp",
-      "headers": {
-       "x-agent-deck-deck-id": "<DECK_ID>",
-       "x-agent-deck-workspace": "<WORKTREE>"
-      },
-      "mode": "required"
-     }
-    }
-   },
-   "config_note": "settings.recommended",
-   "stdout_lines_raw": 47,
-   "stdout_lines_committed": 24,
+   "settings_profile": "recommended",
+   "workspace_root": "home",
    "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.",
+   "stdout_lines_raw": 47,
+   "stdout_lines_committed": 6,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 5, "task.lifecycle.proposed": 4, "task.lifecycle.accepted": 4, "task.lifecycle.scheduled": 4, "task.lifecycle.side_effect_intent": 2, "task.lifecycle.started": 4, "task.lifecycle.status": 5, "task.lifecycle.completed": 4, "task.lifecycle.output": 2, "run.output.delta": 2},
    "notes": "Combined reviewer posture: read_file and MCP read succeed."
   },
   {
    "fixture": "session-log-usage-excerpt.jsonl",
    "probe": 2,
+   "round1_raw": "session-log-usage",
    "command": "(on-disk $XDG_DATA_HOME/muse/sessions/YYYY/MM/DD/<session-id>/session.jsonl, not stdout)",
-   "env": "XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> (isolated per-run dirs; whether MUSE_NO_AUTO_UPDATE=1 was set was not recorded in round 1)",
    "exact": false,
-   "settings": null,
-   "config_note": "n/a",
-   "stdout_lines_raw": 12,
-   "stdout_lines_committed": 12,
+   "exact_reason": "Not a command capture: excerpt of the on-disk session log written by the 02-tool-success run.",
+   "settings_profile": null,
+   "workspace_root": "home",
    "exit_code": "n/a",
    "stderr": "",
-   "notes": "Usage/model confirmation lives only in the on-disk session log: runtime.session event kind=model_completed {usage{input_tokens,output_tokens,cached_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens},model}. No cost/credit field exists.",
-   "exact_reason": "Not a command capture: excerpt of the on-disk session log written by the 02-tool-success run."
+   "stdout_lines_raw": 12,
+   "stdout_lines_committed": 4,
+   "dropped_by_type": {"runtime.session": 8},
+   "notes": "Usage/model confirmation lives only in the on-disk session log: runtime.session event kind=model_completed {usage{input_tokens,output_tokens,cached_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens},model}. No cost/credit field exists."
   },
   {
    "fixture": "10-auth-missing.jsonl",
    "probe": 10,
-   "setup": "<CFG_NOAUTH>=<tmp>/cfg-noauth (contains muse/ but NO auth.json), <DATA_NOAUTH>=<tmp>/data-noauth, both mode 0700; META_API_KEY unset via `env -u`. <WORKSPACE> is a git-init'd dir under $HOME.",
-   "command": "cd <WORKSPACE> && env -u META_API_KEY MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG_NOAUTH> XDG_DATA_HOME=<DATA_NOAUTH> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 \"Reply ok\"",
-   "env": "env -u META_API_KEY MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG_NOAUTH> XDG_DATA_HOME=<DATA_NOAUTH>",
+   "harness": "bash harness/probe10.sh auth-missing",
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && env -u META_API_KEY MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-noauth XDG_DATA_HOME=<SPIKE_DIR>/data-noauth muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 Reply\\ ok < /dev/null > <SPIKE_DIR>/out/auth-missing.jsonl 2> <SPIKE_DIR>/out/auth-missing.err ); echo $? > <SPIKE_DIR>/out/auth-missing.rc"
+   ],
    "exact": true,
-   "settings": null,
+   "facts": {},
+   "workspace_root": "home",
+   "settings_profile": null,
+   "exit_code": "1",
+   "stderr": "missing meta credentials: run `muse login` or set META_API_KEY, or save credentials at <SPIKE_DIR>/cfg-noauth/muse/auth.json",
    "stdout_lines_raw": 0,
    "stdout_lines_committed": 0,
-   "exit_code": 1,
-   "stderr": "missing meta credentials: run `muse login` or set META_API_KEY, or save credentials at <CFG_NOAUTH>/muse/auth.json",
-   "notes": "Exit 1; stdout empty; message on stderr only."
+   "dropped_by_type": {},
+   "notes": "Exit 1; stdout empty; message on stderr only (fresh per-attempt data dir, no auth.json, META_API_KEY unset)."
   },
   {
    "fixture": "10-auth-bad-key.jsonl",
    "probe": 10,
-   "setup": "Same <CFG_NOAUTH>/<DATA_NOAUTH> as 10-auth-missing (no saved credentials).",
-   "command": "cd <WORKSPACE> && printf 'not-a-real-key' | env -u META_API_KEY MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG_NOAUTH> XDG_DATA_HOME=<DATA_NOAUTH> muse exec --json --api-key-stdin --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 \"Reply ok\"",
-   "env": "env -u META_API_KEY MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG_NOAUTH> XDG_DATA_HOME=<DATA_NOAUTH>",
+   "harness": "bash harness/probe10.sh auth-bad-key",
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && printf %s not-a-real-key | env -u META_API_KEY MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-noauth XDG_DATA_HOME=<SPIKE_DIR>/data-noauth muse exec --api-key-stdin --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 Reply\\ ok > <SPIKE_DIR>/out/auth-bad-key.jsonl 2> <SPIKE_DIR>/out/auth-bad-key.err ); echo $? > <SPIKE_DIR>/out/auth-bad-key.rc"
+   ],
    "exact": true,
-   "settings": null,
+   "facts": {},
+   "workspace_root": "home",
+   "settings_profile": null,
+   "exit_code": "1",
+   "stderr": "failed to fetch model catalog: authentication failed: your API key from META_API_KEY was rejected — update or unset it",
    "stdout_lines_raw": 0,
    "stdout_lines_committed": 0,
-   "exit_code": 1,
-   "stderr": "failed to fetch model catalog: authentication failed: your API key from META_API_KEY was rejected — update or unset it",
-   "notes": "Exit 1; stdout empty; real Meta endpoint, bogus key from stdin."
+   "dropped_by_type": {},
+   "notes": "Exit 1; stdout empty; the real Meta endpoint rejected a bogus key from stdin. stderr says the failure happened while fetching the model catalog (fresh per-attempt data dir)."
   },
   {
    "fixture": "10-auth-rejected-401-mock.jsonl",
    "probe": 10,
-   "setup": "Mock started first: `python3 mock-provider.py 18401 401` (this directory; answers every request with the status).",
-   "command": "cd <WORKSPACE> && env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --base-url http://127.0.0.1:18401 --disable-web-tools --max-model-steps 4 \"Reply ok\"",
-   "env": "env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA>",
+   "harness": "bash harness/probe10.sh auth-401-mock",
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-auth-401-mock XDG_DATA_HOME=<SPIKE_DIR>/data-auth-401-mock muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 1 Reply\\ ok ) < /dev/null > <SPIKE_DIR>/out/auth-401-mock-warmup.jsonl 2> <SPIKE_DIR>/out/auth-401-mock-warmup.err &",
+    "MUSE_PID=65223",
+    "( sleep 300; kill -TERM 65223 ) &",
+    "wait 65223; echo $? > <SPIKE_DIR>/out/auth-401-mock-warmup.rc",
+    "kill 65224",
+    "python3 harness/mock-provider.py 18401 401  &",
+    "MOCK_PID=65321",
+    "for i in $(seq 1 40); do curl -s -o /dev/null http://127.0.0.1:18401/ && break; sleep 0.25; done",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-auth-401-mock XDG_DATA_HOME=<SPIKE_DIR>/data-auth-401-mock muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --base-url http://127.0.0.1:18401 --max-model-steps 4 Reply\\ ok ) < /dev/null > <SPIKE_DIR>/out/auth-401-mock.jsonl 2> <SPIKE_DIR>/out/auth-401-mock.err &",
+    "MUSE_PID=65328",
+    "( sleep 60; kill -TERM 65328 && echo watchdog TERM sent > <SPIKE_DIR>/out/auth-401-mock.watchdog ) &",
+    "wait 65328; echo $? > <SPIKE_DIR>/out/auth-401-mock.rc",
+    "kill 65329",
+    "kill 65321"
+   ],
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    }
-   },
+   "facts": {"muse_pid": 65328, "elapsed_s": 2, "watchdog_fired": "no"},
+   "workspace_root": "home",
+   "settings_profile": "run-off",
+   "exit_code": "1",
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.\nrun ended with Failed: your saved login is no longer valid. Log in again or use a different account.",
    "stdout_lines_raw": 22,
-   "stdout_lines_committed": 10,
-   "exit_code": 1,
-   "stderr": "run ended with Failed: your saved login is no longer valid. Log in again or use a different account.",
-   "notes": "Exit 1 with run.terminal.failed. Synthetic provider: the body is invented, so only the client reaction to a 401 is evidence."
+   "stdout_lines_committed": 4,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 2, "task.lifecycle.proposed": 2, "task.lifecycle.accepted": 2, "task.lifecycle.scheduled": 2, "task.lifecycle.side_effect_intent": 2, "task.lifecycle.started": 2, "task.lifecycle.status": 1},
+   "notes": "Warm model catalog (cached by a real 1-step call first), then the mock answers the inference request with 401: exit 1 and run.terminal.failed. Synthetic provider: the body is invented, so only the client reaction to a 401 is evidence."
+  },
+  {
+   "fixture": "10-auth-rejected-401-mock-cold.jsonl",
+   "probe": 10,
+   "harness": "bash harness/probe10.sh auth-401-mock-cold",
+   "commands": [
+    "set -m",
+    "python3 harness/mock-provider.py 18401 401  &",
+    "MOCK_PID=65376",
+    "for i in $(seq 1 40); do curl -s -o /dev/null http://127.0.0.1:18401/ && break; sleep 0.25; done",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-auth-401-mock-cold XDG_DATA_HOME=<SPIKE_DIR>/data-auth-401-mock-cold muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --base-url http://127.0.0.1:18401 --max-model-steps 4 Reply\\ ok ) < /dev/null > <SPIKE_DIR>/out/auth-401-mock-cold.jsonl 2> <SPIKE_DIR>/out/auth-401-mock-cold.err &",
+    "MUSE_PID=65383",
+    "( sleep 60; kill -TERM 65383 && echo watchdog TERM sent > <SPIKE_DIR>/out/auth-401-mock-cold.watchdog ) &",
+    "wait 65383; echo $? > <SPIKE_DIR>/out/auth-401-mock-cold.rc",
+    "kill 65384",
+    "kill 65376"
+   ],
+   "exact": true,
+   "facts": {"muse_pid": 65383, "elapsed_s": 1, "watchdog_fired": "no"},
+   "workspace_root": "home",
+   "settings_profile": "run-off",
+   "exit_code": "1",
+   "stderr": "failed to fetch model catalog: authentication failed: your saved login is no longer valid. Log in again or use a different account.",
+   "stdout_lines_raw": 0,
+   "stdout_lines_committed": 0,
+   "dropped_by_type": {},
+   "notes": "Cold catalog (fresh per-attempt data dir): the mock answers the catalog fetch with 401, so muse exits 1 before any JSONL (stdout empty, message on stderr). Compare with the warm variant above: with a per-attempt data dir the first failure surfaces at startup."
   },
   {
    "fixture": "10-rate-limit-429-mock.jsonl",
    "probe": 10,
-   "setup": "Mock started first: `python3 mock-provider.py 18429 429 30`. Watchdog: `sleep 100; kill -9 <muse pid>`.",
-   "command": "cd <WORKSPACE> && env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --base-url http://127.0.0.1:18429 --disable-web-tools --max-model-steps 4 \"Reply ok\"",
-   "env": "env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA>",
+   "harness": "bash harness/probe10.sh rate-limit-429-mock",
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-rate-limit-429-mock XDG_DATA_HOME=<SPIKE_DIR>/data-rate-limit-429-mock muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 1 Reply\\ ok ) < /dev/null > <SPIKE_DIR>/out/rate-limit-429-mock-warmup.jsonl 2> <SPIKE_DIR>/out/rate-limit-429-mock-warmup.err &",
+    "MUSE_PID=65424",
+    "( sleep 300; kill -TERM 65424 ) &",
+    "wait 65424; echo $? > <SPIKE_DIR>/out/rate-limit-429-mock-warmup.rc",
+    "kill 65426",
+    "python3 harness/mock-provider.py 18429 429 30 &",
+    "MOCK_PID=65494",
+    "for i in $(seq 1 40); do curl -s -o /dev/null http://127.0.0.1:18429/ && break; sleep 0.25; done",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-rate-limit-429-mock XDG_DATA_HOME=<SPIKE_DIR>/data-rate-limit-429-mock muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --base-url http://127.0.0.1:18429 --max-model-steps 4 Reply\\ ok ) < /dev/null > <SPIKE_DIR>/out/rate-limit-429-mock.jsonl 2> <SPIKE_DIR>/out/rate-limit-429-mock.err &",
+    "MUSE_PID=65501",
+    "( sleep 100; kill -TERM 65501 && echo watchdog TERM sent > <SPIKE_DIR>/out/rate-limit-429-mock.watchdog ) &",
+    "wait 65501; echo $? > <SPIKE_DIR>/out/rate-limit-429-mock.rc",
+    "kill 65502",
+    "kill 65494"
+   ],
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    }
-   },
+   "facts": {"muse_pid": 65501, "elapsed_s": 101, "watchdog_fired": "yes"},
+   "workspace_root": "home",
+   "settings_profile": "run-off",
+   "exit_code": "143",
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.\nreceived SIGTERM; flushed session logs",
    "stdout_lines_raw": 26,
-   "stdout_lines_committed": 14,
-   "exit_code": "137 (SIGKILL by watchdog at 100 s)",
-   "stderr": "(no failure line; process killed)",
-   "notes": "No fail-fast: client retries (max_attempts 10) honouring Retry-After: 30. Machine-readable rate_limited/429 facet in task.lifecycle.status. Synthetic provider; not evidence of Meta's real usage-cap payload."
+   "stdout_lines_committed": 5,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 2, "task.lifecycle.proposed": 2, "task.lifecycle.accepted": 2, "task.lifecycle.scheduled": 2, "task.lifecycle.side_effect_intent": 2, "task.lifecycle.started": 2, "task.lifecycle.status": 4},
+   "notes": "Warm model catalog, then the mock answers inference with 429 + Retry-After: 30. No fail-fast: the client keeps retrying (task.lifecycle.status external_attempt facets, error_kind rate_limited, http_status 429) until the harness watchdog sent SIGTERM at 100 s: exit 143. Synthetic provider; not evidence of Meta's real usage-cap payload."
+  },
+  {
+   "fixture": "10-rate-limit-429-mock-cold.jsonl",
+   "probe": 10,
+   "harness": "bash harness/probe10.sh rate-limit-429-mock-cold",
+   "commands": [
+    "set -m",
+    "python3 harness/mock-provider.py 18429 429 30 &",
+    "MOCK_PID=66251",
+    "for i in $(seq 1 40); do curl -s -o /dev/null http://127.0.0.1:18429/ && break; sleep 0.25; done",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-rate-limit-429-mock-cold XDG_DATA_HOME=<SPIKE_DIR>/data-rate-limit-429-mock-cold muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --base-url http://127.0.0.1:18429 --max-model-steps 4 Reply\\ ok ) < /dev/null > <SPIKE_DIR>/out/rate-limit-429-mock-cold.jsonl 2> <SPIKE_DIR>/out/rate-limit-429-mock-cold.err &",
+    "MUSE_PID=66259",
+    "( sleep 100; kill -TERM 66259 && echo watchdog TERM sent > <SPIKE_DIR>/out/rate-limit-429-mock-cold.watchdog ) &",
+    "wait 66259; echo $? > <SPIKE_DIR>/out/rate-limit-429-mock-cold.rc",
+    "kill 66260",
+    "kill 66251"
+   ],
+   "exact": true,
+   "facts": {"muse_pid": 66259, "elapsed_s": 0, "watchdog_fired": "no"},
+   "workspace_root": "home",
+   "settings_profile": "run-off",
+   "exit_code": "1",
+   "stderr": "failed to fetch model catalog: API error 429: {\"error\": {\"message\": \"synthetic mock error\", \"code\": 429}}",
+   "stdout_lines_raw": 0,
+   "stdout_lines_committed": 0,
+   "dropped_by_type": {},
+   "notes": "Cold catalog: the mock answers the catalog fetch with 429 and muse exits 1 immediately with no JSONL and no retry loop (stderr \"failed to fetch model catalog: API error 429\")."
   },
   {
    "fixture": "10-sigterm.jsonl",
    "probe": 10,
-   "setup": "Started as a background job under `set -m` (own process group, pid=$!). Signal sent only after the JSONL contains `tool:bash` AND `pgrep -f 'sleep 9137'` finds the shell child (2 matches: the sandbox wrapper and sleep).",
-   "command": "cd <WORKSPACE> && env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <SESSION_UUID> --max-model-steps 10 \"Run the shell command: sleep 9137. Then reply done.\"   # then: kill -TERM $PID",
-   "env": "env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA>",
+   "harness": "bash harness/probe10.sh sigterm",
+   "commands": [
+    "set -m",
+    "pkill -f 'sleep 9137'",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-sigterm XDG_DATA_HOME=<SPIKE_DIR>/data-sigterm muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <id-1> --max-model-steps 10 Run\\ the\\ shell\\ command:\\ sleep\\ 9137.\\ Then\\ reply\\ done. ) < /dev/null > <SPIKE_DIR>/out/sigterm.jsonl 2> <SPIKE_DIR>/out/sigterm.err &",
+    "MUSE_PID=66300",
+    "for i in $(seq 1 240); do grep -q '\"operation\":\"tool:bash\"' <SPIKE_DIR>/out/sigterm.jsonl && pgrep -f 'sleep 9137' > /dev/null && break; sleep 0.5; done",
+    "pgrep -f 'sleep 9137' | wc -l",
+    "kill -TERM -- 66300",
+    "wait 66300; echo $? > <SPIKE_DIR>/out/sigterm.rc",
+    "sleep 1",
+    "pgrep -f 'sleep 9137' | wc -l",
+    "pkill -KILL -f 'sleep 9137'"
+   ],
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    }
-   },
+   "facts": {"muse_pid": 66300, "child_processes_before_signal": 2, "signal_to_exit_s": 0, "child_processes_after_exit": 0},
+   "workspace_root": "home",
+   "settings_profile": "run-off",
+   "exit_code": "143",
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.\nreceived SIGTERM; flushed session logs",
    "stdout_lines_raw": 27,
-   "stdout_lines_committed": 8,
-   "exit_code": 143,
-   "stderr": "received SIGTERM; flushed session logs",
-   "notes": "Exit 143 in ~1.2 s, no terminal JSONL event; `pgrep -f 'sleep 9137'` = 0 afterwards (no orphan)."
+   "stdout_lines_committed": 2,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 3, "task.lifecycle.proposed": 3, "task.lifecycle.accepted": 3, "task.lifecycle.scheduled": 3, "task.lifecycle.side_effect_intent": 2, "task.lifecycle.started": 3, "task.lifecycle.status": 2, "task.lifecycle.completed": 1},
+   "notes": "SIGTERM to the muse pid while a shell tool is running: exit 143 within ~1 s, stderr \"received SIGTERM; flushed session logs\", no terminal JSONL event; the `sleep 9137` child was present before (facts) and gone after."
   },
   {
    "fixture": "10-sigint.jsonl",
    "probe": 10,
-   "setup": "Started as a background job under `set -m` (own process group, pid=$!). Signal sent only after the JSONL contains `tool:bash` AND `pgrep -f 'sleep 9137'` finds the shell child (2 matches: the sandbox wrapper and sleep).",
-   "command": "cd <WORKSPACE> && env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <SESSION_UUID> --max-model-steps 10 \"Run the shell command: sleep 9137. Then reply done.\"   # then: kill -INT $PID",
-   "env": "env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA>",
+   "harness": "bash harness/probe10.sh sigint",
+   "commands": [
+    "set -m",
+    "pkill -f 'sleep 9137'",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-sigint XDG_DATA_HOME=<SPIKE_DIR>/data-sigint muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <id-1> --max-model-steps 10 Run\\ the\\ shell\\ command:\\ sleep\\ 9137.\\ Then\\ reply\\ done. ) < /dev/null > <SPIKE_DIR>/out/sigint.jsonl 2> <SPIKE_DIR>/out/sigint.err &",
+    "MUSE_PID=66782",
+    "for i in $(seq 1 240); do grep -q '\"operation\":\"tool:bash\"' <SPIKE_DIR>/out/sigint.jsonl && pgrep -f 'sleep 9137' > /dev/null && break; sleep 0.5; done",
+    "pgrep -f 'sleep 9137' | wc -l",
+    "kill -INT -- 66782",
+    "wait 66782; echo $? > <SPIKE_DIR>/out/sigint.rc",
+    "sleep 1",
+    "pgrep -f 'sleep 9137' | wc -l",
+    "pkill -KILL -f 'sleep 9137'"
+   ],
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    }
-   },
+   "facts": {"muse_pid": 66782, "child_processes_before_signal": 2, "signal_to_exit_s": 1, "child_processes_after_exit": 0},
+   "workspace_root": "home",
+   "settings_profile": "run-off",
+   "exit_code": "130",
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.\nreceived SIGINT; flushed session logs",
    "stdout_lines_raw": 27,
-   "stdout_lines_committed": 8,
-   "exit_code": 130,
-   "stderr": "received SIGINT; flushed session logs",
-   "notes": "Exit 130 in ~1.2 s, no terminal JSONL event; no orphan."
+   "stdout_lines_committed": 2,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 3, "task.lifecycle.proposed": 3, "task.lifecycle.accepted": 3, "task.lifecycle.scheduled": 3, "task.lifecycle.side_effect_intent": 2, "task.lifecycle.started": 3, "task.lifecycle.status": 2, "task.lifecycle.completed": 1},
+   "notes": "SIGINT to the muse pid: exit 130, no terminal JSONL event, no orphan child."
   },
   {
    "fixture": "10-sigterm-process-group.jsonl",
    "probe": 10,
-   "setup": "Started as a background job under `set -m` (own process group, pid=$!). Signal sent only after the JSONL contains `tool:bash` AND `pgrep -f 'sleep 9137'` finds the shell child (2 matches: the sandbox wrapper and sleep).",
-   "command": "cd <WORKSPACE> && env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <SESSION_UUID> --max-model-steps 10 \"Run the shell command: sleep 9137. Then reply done.\"   # then: kill -TERM -$PID   (whole process group)",
-   "env": "env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA>",
+   "harness": "bash harness/probe10.sh sigterm-process-group",
+   "commands": [
+    "set -m",
+    "pkill -f 'sleep 9137'",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-sigterm-process-group XDG_DATA_HOME=<SPIKE_DIR>/data-sigterm-process-group muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <id-1> --max-model-steps 10 Run\\ the\\ shell\\ command:\\ sleep\\ 9137.\\ Then\\ reply\\ done. ) < /dev/null > <SPIKE_DIR>/out/sigterm-process-group.jsonl 2> <SPIKE_DIR>/out/sigterm-process-group.err &",
+    "MUSE_PID=67194",
+    "for i in $(seq 1 240); do grep -q '\"operation\":\"tool:bash\"' <SPIKE_DIR>/out/sigterm-process-group.jsonl && pgrep -f 'sleep 9137' > /dev/null && break; sleep 0.5; done",
+    "pgrep -f 'sleep 9137' | wc -l",
+    "kill -TERM -- -67194",
+    "wait 67194; echo $? > <SPIKE_DIR>/out/sigterm-process-group.rc",
+    "sleep 1",
+    "pgrep -f 'sleep 9137' | wc -l",
+    "pkill -KILL -f 'sleep 9137'"
+   ],
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    }
-   },
+   "facts": {"muse_pid": 67194, "child_processes_before_signal": 2, "signal_to_exit_s": 1, "child_processes_after_exit": 0},
+   "workspace_root": "home",
+   "settings_profile": "run-off",
+   "exit_code": "143",
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.\nreceived SIGTERM; flushed session logs",
    "stdout_lines_raw": 27,
-   "stdout_lines_committed": 8,
-   "exit_code": 143,
-   "stderr": "received SIGTERM; flushed session logs",
-   "notes": "Cancellation as a coordinator would do it (signal the process group): exit 143 in ~0.75 s, no orphan."
+   "stdout_lines_committed": 2,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 3, "task.lifecycle.proposed": 3, "task.lifecycle.accepted": 3, "task.lifecycle.scheduled": 3, "task.lifecycle.side_effect_intent": 2, "task.lifecycle.started": 3, "task.lifecycle.status": 2, "task.lifecycle.completed": 1},
+   "notes": "SIGTERM to the whole process group (`kill -TERM -- -<pid>`, the way a coordinator would cancel): exit 143, no orphan child."
   },
   {
    "fixture": "10-sigkill-orphan.jsonl",
    "probe": 10,
-   "setup": "Started as a background job under `set -m` (own process group, pid=$!). Signal sent only after the JSONL contains `tool:bash` AND `pgrep -f 'sleep 9137'` finds the shell child (2 matches: the sandbox wrapper and sleep).",
-   "command": "cd <WORKSPACE> && env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <SESSION_UUID> --max-model-steps 10 \"Run the shell command: sleep 9137. Then reply done.\"   # then: kill -KILL $PID   (muse pid only)",
-   "env": "env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA>",
+   "harness": "bash harness/probe10.sh sigkill-orphan",
+   "commands": [
+    "set -m",
+    "pkill -f 'sleep 9137'",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-sigkill-orphan XDG_DATA_HOME=<SPIKE_DIR>/data-sigkill-orphan muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <id-1> --max-model-steps 10 Run\\ the\\ shell\\ command:\\ sleep\\ 9137.\\ Then\\ reply\\ done. ) < /dev/null > <SPIKE_DIR>/out/sigkill-orphan.jsonl 2> <SPIKE_DIR>/out/sigkill-orphan.err &",
+    "MUSE_PID=67452",
+    "for i in $(seq 1 240); do grep -q '\"operation\":\"tool:bash\"' <SPIKE_DIR>/out/sigkill-orphan.jsonl && pgrep -f 'sleep 9137' > /dev/null && break; sleep 0.5; done",
+    "pgrep -f 'sleep 9137' | wc -l",
+    "kill -KILL -- 67452",
+    "wait 67452; echo $? > <SPIKE_DIR>/out/sigkill-orphan.rc",
+    "sleep 1",
+    "pgrep -f 'sleep 9137' | wc -l",
+    "pkill -KILL -f 'sleep 9137'"
+   ],
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    }
-   },
+   "facts": {"muse_pid": 67452, "child_processes_before_signal": 2, "signal_to_exit_s": 0, "child_processes_after_exit": 1},
+   "workspace_root": "home",
+   "settings_profile": "run-off",
+   "exit_code": "137",
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.",
    "stdout_lines_raw": 27,
-   "stdout_lines_committed": 8,
-   "exit_code": 137,
-   "stderr": "(none; SIGKILL cannot be handled)",
-   "notes": "SIGKILL of muse alone leaves the shell child running: `pgrep -f 'sleep 9137'` = 1 afterwards (killed manually). Cancellation must be TERM/INT, or a process-group kill."
+   "stdout_lines_committed": 2,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 3, "task.lifecycle.proposed": 3, "task.lifecycle.accepted": 3, "task.lifecycle.scheduled": 3, "task.lifecycle.side_effect_intent": 2, "task.lifecycle.started": 3, "task.lifecycle.status": 2, "task.lifecycle.completed": 1},
+   "notes": "SIGKILL of the muse pid alone: exit 137 and the shell child keeps running (child_processes_after_exit=1; the harness kills it afterwards). Cancellation must be TERM/INT or a process-group kill."
   },
   {
    "fixture": "10-cancel-resume-after-sigterm.jsonl",
    "probe": 10,
-   "setup": "Run after 10-sigterm with the same XDG dirs and session id.",
-   "command": "cd <WORKSPACE> && env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <SESSION_UUID of 10-sigterm> --max-model-steps 4 \"Reply with the single word: resumed\"",
-   "env": "env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA>",
+   "harness": "bash harness/probe10.sh cancel-resume-after-sigterm",
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-sigterm XDG_DATA_HOME=<SPIKE_DIR>/data-sigterm muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <id-1> --max-model-steps 4 Reply\\ with\\ the\\ single\\ word:\\ resumed ) < /dev/null > <SPIKE_DIR>/out/cancel-resume-after-sigterm.jsonl 2> <SPIKE_DIR>/out/cancel-resume-after-sigterm.err &",
+    "MUSE_PID=67936",
+    "( sleep 300; kill -TERM 67936 ) &",
+    "wait 67936; echo $? > <SPIKE_DIR>/out/cancel-resume-after-sigterm.rc",
+    "kill 67937"
+   ],
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    }
-   },
+   "facts": {"muse_pid": 67936, "elapsed_s": 42},
+   "workspace_root": "home",
+   "settings_profile": "run-off",
+   "exit_code": "0",
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.",
    "stdout_lines_raw": 31,
-   "stdout_lines_committed": 12,
-   "exit_code": 0,
-   "stderr": "",
-   "notes": "After a SIGTERM cancel the same --session-id resumes headlessly: run.terminal.completed, exit 0."
+   "stdout_lines_committed": 2,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 3, "task.lifecycle.proposed": 3, "task.lifecycle.accepted": 3, "task.lifecycle.scheduled": 3, "task.lifecycle.side_effect_intent": 3, "task.lifecycle.started": 3, "task.lifecycle.status": 2, "run.output.delta": 1, "task.lifecycle.completed": 3},
+   "notes": "After the SIGTERM cancel, the same --session-id resumes headlessly: run.terminal.completed, exit 0."
   },
   {
    "fixture": "09-cron-disable-attempt.jsonl",
    "probe": 9,
-   "setup": "See the three rejected attempts in cron_disable_attempts.",
-   "command": "cd <WORKSPACE> && env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 \"Use the cron_create tool to schedule a trivial job that echoes hi every minute, then reply with the tool result verbatim.\"",
-   "env": "env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA>",
+   "harness": "bash harness/probe8-9.sh cron-disable-attempt",
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-cron-disable-attempt XDG_DATA_HOME=<SPIKE_DIR>/data-cron-disable-attempt muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <id-1> --max-model-steps 4 Use\\ the\\ cron_create\\ tool\\ to\\ schedule\\ a\\ trivial\\ job\\ that\\ echoes\\ hi\\ every\\ minute\\,\\ then\\ reply\\ with\\ the\\ tool\\ result\\ verbatim. ) < /dev/null > <SPIKE_DIR>/out/cron-disable-attempt.jsonl 2> <SPIKE_DIR>/out/cron-disable-attempt.err &",
+    "MUSE_PID=64277",
+    "( sleep 300; kill -TERM 64277 ) &",
+    "wait 64277; echo $? > <SPIKE_DIR>/out/cron-disable-attempt.rc",
+    "kill 64278",
+    "sqlite3 -json <SPIKE_DIR>/data-cron-disable-attempt/muse/sessions/2026/09/19/<id-1>/cron.db select\\ cron_expr\\,prompt\\,recurring\\,fire_when_active_run\\,kind\\,permanent\\,\\(expires_at_ms-created_at_ms\\)/86400000.0\\ as\\ ttl_days\\,fire_count\\,status\\ from\\ cron_jobs > <SPIKE_DIR>/out/cron-persisted-job.json"
+   ],
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    },
-    "runtime_capabilities": {
-     "tool:cron_create": {
-      "enabled": false
-     }
-    }
-   },
-   "stdout_lines_raw": 53,
-   "stdout_lines_committed": 20,
-   "exit_code": 0,
+   "facts": {"muse_pid": 64277, "elapsed_s": 43},
+   "workspace_root": "home",
+   "settings_profile": "cron-runtime-capability",
+   "exit_code": "0",
    "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.",
+   "stdout_lines_raw": 100,
+   "stdout_lines_committed": 7,
+   "dropped_by_type": {"runtime.command.accepted": 2, "session.run.linked": 2, "session.workspace_branch.observed": 1, "turn.input.user": 2, "run.lifecycle.started": 2, "task.stream.linked": 11, "task.lifecycle.proposed": 11, "task.lifecycle.accepted": 10, "task.lifecycle.scheduled": 10, "task.lifecycle.side_effect_intent": 8, "task.lifecycle.started": 10, "task.lifecycle.status": 8, "task.lifecycle.completed": 9, "task.lifecycle.output": 2, "run.output.delta": 2, "task.lifecycle.cancelled": 1, "run.model.configured": 1, "task.lifecycle.rejected": 1},
    "notes": "cron_create is NOT disabled: the run.* switches are on and a runtime_capabilities entry for tool:cron_create is accepted silently, yet tool.result outcome=success. The job persisted (09-cron-persisted-job.json)."
-  },
-  {
-   "fixture": "09-cron-persisted-job.json",
-   "probe": 9,
-   "setup": "Read after 09-cron-disable-attempt finished.",
-   "command": "sqlite3 -json $XDG_DATA_HOME/muse/sessions/YYYY/MM/DD/<session-id>/cron.db 'select cron_expr,prompt,recurring,fire_when_active_run,kind,permanent,(expires_at_ms-created_at_ms)/86400000.0 as ttl_days,fire_count,status from cron_jobs'",
-   "env": "n/a",
-   "exact": true,
-   "settings": null,
-   "stdout_lines_raw": 1,
-   "stdout_lines_committed": 1,
-   "exit_code": "n/a",
-   "stderr": "",
-   "notes": "Persisted, active, recurring (`* * * * *`), fire_when_active_run=1, 7-day TTL. Written before Dealer could react to the event."
   },
   {
    "fixture": "08-mcp-required-unreachable.jsonl",
    "probe": 8,
-   "setup": "Port 9 (discard) is not listening, so the server is unreachable.",
-   "command": "cd <WORKSPACE> && env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 \"Reply ok\"",
-   "env": "env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA>",
+   "harness": "bash harness/probe8-9.sh mcp-required-unreachable",
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-mcp-required-unreachable XDG_DATA_HOME=<SPIKE_DIR>/data-mcp-required-unreachable muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 Reply\\ ok ) < /dev/null > <SPIKE_DIR>/out/mcp-required-unreachable.jsonl 2> <SPIKE_DIR>/out/mcp-required-unreachable.err &",
+    "MUSE_PID=64126",
+    "( sleep 300; kill -TERM 64126 ) &",
+    "wait 64126; echo $? > <SPIKE_DIR>/out/mcp-required-unreachable.rc",
+    "kill 64127"
+   ],
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    },
-    "runtime_capabilities": {
-     "plugin:tbh-reminders:reminder:skill-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:verify-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:memory-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:todo-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:goal-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:scope-reminder": {
-      "enabled": false
-     }
-    },
-    "mcpServers": {
-     "agent-deck": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:9/mcp",
-      "headers": {
-       "x-agent-deck-deck-id": "<DECK_ID>",
-       "x-agent-deck-workspace": "<WORKTREE>"
-      },
-      "mode": "required"
-     }
-    }
-   },
+   "facts": {"muse_pid": 64126, "elapsed_s": 2},
+   "workspace_root": "home",
+   "settings_profile": "mcp-required-unreachable",
+   "exit_code": "1",
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.\nrun ended with Failed: invalid run configuration: Required MCP server `agent-deck` failed during startup: the process could not be started or the server could not be reached.",
    "stdout_lines_raw": 8,
-   "stdout_lines_committed": 5,
-   "exit_code": 1,
-   "stderr": "run ended with Failed: invalid run configuration: Required MCP server `agent-deck` failed during startup: the process could not be started or the server could not be reached.",
+   "stdout_lines_committed": 2,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 1},
    "notes": "Fails closed before any model call: run.terminal.failed, exit 1."
   },
   {
    "fixture": "08-mcp-optional-unreachable.jsonl",
    "probe": 8,
-   "setup": "Port 9 (discard) is not listening, so the server is unreachable.",
-   "command": "cd <WORKSPACE> && env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA> muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 \"Reply ok\"",
-   "env": "env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<CFG> XDG_DATA_HOME=<DATA>",
+   "harness": "bash harness/probe8-9.sh mcp-optional-unreachable",
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-mcp-optional-unreachable XDG_DATA_HOME=<SPIKE_DIR>/data-mcp-optional-unreachable muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 Reply\\ ok ) < /dev/null > <SPIKE_DIR>/out/mcp-optional-unreachable.jsonl 2> <SPIKE_DIR>/out/mcp-optional-unreachable.err &",
+    "MUSE_PID=64190",
+    "( sleep 300; kill -TERM 64190 ) &",
+    "wait 64190; echo $? > <SPIKE_DIR>/out/mcp-optional-unreachable.rc",
+    "kill 64191"
+   ],
    "exact": true,
-   "settings": {
-    "schema_version": 1,
-    "run": {
-     "workflow_trigger_mode": "off",
-     "subagent_delegation_mode": "off"
-    },
-    "runtime_capabilities": {
-     "plugin:tbh-reminders:reminder:skill-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:verify-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:memory-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:todo-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:goal-reminder": {
-      "enabled": false
-     },
-     "plugin:tbh-reminders:reminder:scope-reminder": {
-      "enabled": false
-     }
-    },
-    "mcpServers": {
-     "agent-deck": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:9/mcp",
-      "headers": {
-       "x-agent-deck-deck-id": "<DECK_ID>",
-       "x-agent-deck-workspace": "<WORKTREE>"
-      },
-      "mode": "optional"
-     }
-    }
-   },
+   "facts": {"muse_pid": 64190, "elapsed_s": 6},
+   "workspace_root": "home",
+   "settings_profile": "mcp-optional-unreachable",
+   "exit_code": "0",
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.",
    "stdout_lines_raw": 18,
-   "stdout_lines_committed": 8,
-   "exit_code": 0,
-   "stderr": "",
+   "stdout_lines_committed": 2,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 2, "task.lifecycle.proposed": 1, "task.lifecycle.accepted": 1, "task.lifecycle.scheduled": 1, "task.lifecycle.side_effect_intent": 1, "task.lifecycle.started": 1, "task.lifecycle.status": 2, "run.output.delta": 1, "task.lifecycle.completed": 1},
    "notes": "Optional mode proceeds without the server (not acceptable for Dealer)."
+  }
+ ],
+ "cron_disable_attempts": [
+  {
+   "fixture": "09-cron-attempt-1.jsonl",
+   "harness": "bash harness/probe8-9.sh cron-attempt-1",
+   "attempt": "execution.tool_rules deny",
+   "exact": true,
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-cron-attempt-1 XDG_DATA_HOME=<SPIKE_DIR>/data-cron-attempt-1 muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 Use\\ the\\ cron_create\\ tool\\ to\\ schedule\\ a\\ trivial\\ job\\ that\\ echoes\\ hi\\ every\\ minute\\,\\ then\\ reply\\ with\\ the\\ tool\\ result\\ verbatim. ) < /dev/null > <SPIKE_DIR>/out/cron-attempt-1.jsonl 2> <SPIKE_DIR>/out/cron-attempt-1.err &",
+    "MUSE_PID=64522",
+    "( sleep 300; kill -TERM 64522 ) &",
+    "wait 64522; echo $? > <SPIKE_DIR>/out/cron-attempt-1.rc",
+    "kill 64523"
+   ],
+   "settings": {"schema_version": 1, "execution": {"tool_rules": {"tool:cron_create": {"decision": "deny"}}}},
+   "exit_code": "0",
+   "stderr": "tbh: ignoring unknown top-level member in settings file at <SPIKE_DIR>/cfg-cron-attempt-1/muse/settings.json: reason=unknown_member location=execution\nmuse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "tool_results_in_fixture": [{"tool": "cron_create", "outcome": "success"}],
+   "stdout_lines_raw": 53,
+   "stdout_lines_committed": 4,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 6, "task.lifecycle.proposed": 6, "task.lifecycle.accepted": 5, "task.lifecycle.scheduled": 5, "task.lifecycle.side_effect_intent": 4, "task.lifecycle.started": 5, "task.lifecycle.status": 4, "task.lifecycle.completed": 5, "task.lifecycle.output": 1, "task.lifecycle.rejected": 1, "run.output.delta": 2}
+  },
+  {
+   "fixture": "09-cron-attempt-2.jsonl",
+   "harness": "bash harness/probe8-9.sh cron-attempt-2",
+   "attempt": "permissions.deny list",
+   "exact": true,
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-cron-attempt-2 XDG_DATA_HOME=<SPIKE_DIR>/data-cron-attempt-2 muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 Use\\ the\\ cron_create\\ tool\\ to\\ schedule\\ a\\ trivial\\ job\\ that\\ echoes\\ hi\\ every\\ minute\\,\\ then\\ reply\\ with\\ the\\ tool\\ result\\ verbatim. ) < /dev/null > <SPIKE_DIR>/out/cron-attempt-2.jsonl 2> <SPIKE_DIR>/out/cron-attempt-2.err &",
+    "MUSE_PID=64715",
+    "( sleep 300; kill -TERM 64715 ) &",
+    "wait 64715; echo $? > <SPIKE_DIR>/out/cron-attempt-2.rc",
+    "kill 64716"
+   ],
+   "settings": {"schema_version": 1, "permissions": {"deny": ["tool:cron_create"]}},
+   "exit_code": "0",
+   "stderr": "muse: Named permission profiles are unavailable: missing field `schema_version` at line 1 column 29.\nmuse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "tool_results_in_fixture": [{"tool": "cron_create", "outcome": "success"}],
+   "stdout_lines_raw": 53,
+   "stdout_lines_committed": 4,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 6, "task.lifecycle.proposed": 6, "task.lifecycle.accepted": 5, "task.lifecycle.scheduled": 5, "task.lifecycle.side_effect_intent": 4, "task.lifecycle.started": 5, "task.lifecycle.status": 4, "task.lifecycle.completed": 5, "task.lifecycle.output": 1, "task.lifecycle.rejected": 1, "run.output.delta": 2}
+  },
+  {
+   "fixture": "09-cron-attempt-3.jsonl",
+   "harness": "bash harness/probe8-9.sh cron-attempt-3",
+   "attempt": "permissions.tool_rules deny",
+   "exact": true,
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-cron-attempt-3 XDG_DATA_HOME=<SPIKE_DIR>/data-cron-attempt-3 muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --max-model-steps 4 Use\\ the\\ cron_create\\ tool\\ to\\ schedule\\ a\\ trivial\\ job\\ that\\ echoes\\ hi\\ every\\ minute\\,\\ then\\ reply\\ with\\ the\\ tool\\ result\\ verbatim. ) < /dev/null > <SPIKE_DIR>/out/cron-attempt-3.jsonl 2> <SPIKE_DIR>/out/cron-attempt-3.err &",
+    "MUSE_PID=64884",
+    "( sleep 300; kill -TERM 64884 ) &",
+    "wait 64884; echo $? > <SPIKE_DIR>/out/cron-attempt-3.rc",
+    "kill 64885"
+   ],
+   "settings": {"schema_version": 1, "permissions": {"schema_version": 1, "tool_rules": {"tool:cron_create": {"decision": "deny"}}}},
+   "exit_code": "0",
+   "stderr": "muse: Named permission profiles are unavailable: unknown user permissions field `tool_rules`.\nmuse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "tool_results_in_fixture": [{"tool": "cron_create", "outcome": "success"}],
+   "stdout_lines_raw": 53,
+   "stdout_lines_committed": 4,
+   "dropped_by_type": {"runtime.command.accepted": 1, "session.run.linked": 1, "session.workspace_branch.observed": 1, "turn.input.user": 1, "run.lifecycle.started": 1, "task.stream.linked": 6, "task.lifecycle.proposed": 6, "task.lifecycle.accepted": 5, "task.lifecycle.scheduled": 5, "task.lifecycle.side_effect_intent": 4, "task.lifecycle.started": 5, "task.lifecycle.status": 4, "task.lifecycle.completed": 5, "task.lifecycle.output": 1, "task.lifecycle.rejected": 1, "run.output.delta": 2}
+  },
+  {
+   "fixture": "09-cron-attempt-4a.jsonl",
+   "harness": "bash harness/probe8-9.sh cron-attempt-4a",
+   "attempt": "--permission-profile noc + full posture",
+   "exact": true,
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-cron-attempt-4a XDG_DATA_HOME=<SPIKE_DIR>/data-cron-attempt-4a muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --permission-profile noc --max-model-steps 4 Use\\ the\\ cron_create\\ tool\\ to\\ schedule\\ a\\ trivial\\ job\\ that\\ echoes\\ hi\\ every\\ minute\\,\\ then\\ reply\\ with\\ the\\ tool\\ result\\ verbatim. ) < /dev/null > <SPIKE_DIR>/out/cron-attempt-4a.jsonl 2> <SPIKE_DIR>/out/cron-attempt-4a.err &",
+    "MUSE_PID=65082",
+    "( sleep 300; kill -TERM 65082 ) &",
+    "wait 65082; echo $? > <SPIKE_DIR>/out/cron-attempt-4a.rc",
+    "kill 65083"
+   ],
+   "settings": {"schema_version": 1, "permissions": {"schema_version": 1, "profiles": {"noc": {"tool_rules": {"tool:cron_create": {"decision": "deny"}}}}}},
+   "exit_code": "2",
+   "stderr": "--permission-profile cannot be used with --sandbox-network.\nusage: muse exec [OPTIONS] [PROMPT] (run `muse exec --help` for options)",
+   "tool_results_in_fixture": [],
+   "stdout_lines_raw": 0,
+   "stdout_lines_committed": 0,
+   "dropped_by_type": {}
+  },
+  {
+   "fixture": "09-cron-attempt-4b.jsonl",
+   "harness": "bash harness/probe8-9.sh cron-attempt-4b",
+   "attempt": "--permission-profile noc, --sandbox-network removed",
+   "exact": true,
+   "commands": [
+    "set -m",
+    "( cd <WORKSPACE> && exec env MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=<SPIKE_DIR>/cfg-cron-attempt-4b XDG_DATA_HOME=<SPIKE_DIR>/data-cron-attempt-4b muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --disable-web-tools --permission-profile noc --max-model-steps 4 Use\\ the\\ cron_create\\ tool\\ to\\ schedule\\ a\\ trivial\\ job\\ that\\ echoes\\ hi\\ every\\ minute\\,\\ then\\ reply\\ with\\ the\\ tool\\ result\\ verbatim. ) < /dev/null > <SPIKE_DIR>/out/cron-attempt-4b.jsonl 2> <SPIKE_DIR>/out/cron-attempt-4b.err &",
+    "MUSE_PID=65115",
+    "( sleep 300; kill -TERM 65115 ) &",
+    "wait 65115; echo $? > <SPIKE_DIR>/out/cron-attempt-4b.rc",
+    "kill 65116"
+   ],
+   "settings": {"schema_version": 1, "permissions": {"schema_version": 1, "profiles": {"noc": {"tool_rules": {"tool:cron_create": {"decision": "deny"}}}}}},
+   "exit_code": "2",
+   "stderr": "--permission-profile cannot be used with --approval-mode.\nusage: muse exec [OPTIONS] [PROMPT] (run `muse exec --help` for options)",
+   "tool_results_in_fixture": [],
+   "stdout_lines_raw": 0,
+   "stdout_lines_committed": 0,
+   "dropped_by_type": {}
   }
  ]
 }
