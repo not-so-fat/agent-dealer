@@ -76,3 +76,7 @@ git diff --check
 ```
 
 The validator needs the full commit history. It checks: parseable JSON; both subjects freeze a non-null runtime, model id, effort, CLI version and an invocation that passes the model; a frozen `costModel`; exactly 5 tasks with every required field (`id`, `sourceIssue`, `repository`, `startingSha`, `referenceSha`, `workerSpec`, `role`, `category`, `sizeClass`, `sensitivity`, verification commands with `expectedExitCode` and `expectedResult`); coverage minimums (at least 3 implementation, 1 test/debug, 1 medium or long); that both SHAs resolve to real commits with `startingSha` an ancestor of `referenceSha`; and that each held-out path exists at `referenceSha` and is run by a verification command.
+
+## Amendments
+
+- **2026-09-20 (NOT-187): muse-02 spec.** The worker spec named `assertReviewerReadOnly` but not its sibling `isReviewerReadOnly`, which the held-out test calls with the context. The spec and acceptance criteria now name it. The amendment applies to retries only. `poc-results.md` was produced with the original spec, is unchanged, and both arms failed that one test; the original wording is in git history (`ec8c118`).
