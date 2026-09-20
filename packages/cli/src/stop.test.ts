@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { runStart } from "./start.js";
 import { runStop } from "./stop.js";
 
 const HEALTH_SERVER = `
@@ -109,4 +110,29 @@ test("stop on the default home keeps sweeping the port when run.json is lost", a
     child.kill("SIGKILL");
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+async function assertForcedStartRefusesUnownedListener(options: { daemon: boolean }): Promise<void> {
+  const { child, port } = await startFakeServer();
+  const home = tempHome();
+  try {
+    await withEnv({ AGENT_DEALER_HOME: home, PORT: String(port), WEB_PORT: undefined }, async () => {
+      // The isolated-home stop leaves the listener up (no run.json = no proof of ownership).
+      // Forced start must fail instead of launching a second server onto the occupied port.
+      assert.equal(await runStart({ force: true, daemon: options.daemon, port }), 1);
+    });
+    assert.equal(isAlive(child.pid!), true, "the unrelated listener must survive a forced start");
+    assert.equal(fs.existsSync(path.join(home, "run.json")), false, "no run state may be written for a server that never launched");
+  } finally {
+    child.kill("SIGKILL");
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test("start --force in the foreground fails when the isolated-home stop leaves a listener up", async () => {
+  await assertForcedStartRefusesUnownedListener({ daemon: false });
+});
+
+test("start --daemon --force fails when the isolated-home stop leaves a listener up", async () => {
+  await assertForcedStartRefusesUnownedListener({ daemon: true });
 });
