@@ -7,7 +7,8 @@ import {
   assertMuseArgv,
   buildMuseArgv,
   MuseIsolationError,
-  prepareMuseAttempt,
+  museConfigTesting,
+  prepareMuseAttempt as prepareMuseAttemptPinned,
   unenforceableRestrictions,
   type MuseAttemptInput,
   type MuseEnforcementEvidence,
@@ -19,6 +20,10 @@ const SCRATCH = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-config-test
 after(() => fs.rmSync(SCRATCH, { recursive: true, force: true }));
 
 const ENFORCED: MuseEnforcementEvidence = { mcp_tool_allowlist_enforcement: true, cron_tool_disable: true };
+
+// Production `prepareMuseAttempt` is pinned to the NOT-177 evidence; the enforced paths are exercised
+// through the test seam against a hypothetical build that enforces both controls.
+const prepareMuseAttempt = (i: MuseAttemptInput) => museConfigTesting.prepareWithEvidence(i, ENFORCED);
 const SESSION = "11111111-2222-4333-8444-555555555555";
 const API_KEY = "mk-live-SECRET-0123456789abcdef";
 const DECK_URL = "http://127.0.0.1:1110/mcp";
@@ -53,7 +58,6 @@ function input(fx: Fixture, role: MuseRole, over: Partial<MuseAttemptInput> = {}
     sessionId: SESSION,
     prompt: "Implement the ticket",
     maxModelSteps: 300,
-    evidence: ENFORCED,
     env: { PATH: "/usr/bin", HOME: os.homedir() },
     ...over,
   };
@@ -81,7 +85,7 @@ test("with NOT-177 evidence both roles fail before anything is written", () => {
     const fx = fixture();
     let thrown: MuseIsolationError | undefined;
     try {
-      prepareMuseAttempt(input(fx, role, { evidence: undefined }));
+      prepareMuseAttemptPinned(input(fx, role));
     } catch (err) {
       thrown = err as MuseIsolationError;
     }
@@ -333,9 +337,11 @@ test("api key never reaches argv, env, disk, or error text; redact scrubs it", (
   } finally {
     attempt.cleanup();
   }
-  for (const over of [{ sessionId: "bad" }, { prompt: "-x" }, { evidence: undefined }] as Partial<MuseAttemptInput>[]) {
+  for (const over of [{ sessionId: "bad" }, { prompt: "-x" }, {}] as Partial<MuseAttemptInput>[]) {
     try {
-      prepareMuseAttempt(input(fx, "developer", { credential: { kind: "api-key", apiKey: API_KEY }, ...over }));
+      // The `{}` case goes through the pinned entry point, which refuses on NOT-177 evidence.
+      const prepare = Object.keys(over).length === 0 ? prepareMuseAttemptPinned : prepareMuseAttempt;
+      prepare(input(fx, "developer", { credential: { kind: "api-key", apiKey: API_KEY }, ...over }));
       assert.fail("expected refusal");
     } catch (err) {
       assert.ok(err instanceof MuseIsolationError);
@@ -344,4 +350,57 @@ test("api key never reaches argv, env, disk, or error text; redact scrubs it", (
     }
   }
   assert.deepEqual(fs.readdirSync(fx.baseDir), []);
+});
+
+test("callers cannot supply enforcement evidence: an injected evidence field is ignored", () => {
+  for (const role of ["developer", "reviewer"] as const) {
+    const fx = fixture();
+    const forged = { ...input(fx, role), evidence: ENFORCED } as MuseAttemptInput;
+    assert.equal(code(() => prepareMuseAttemptPinned(forged)), "unenforceable_restriction", role);
+    assert.deepEqual(fs.readdirSync(fx.baseDir), []);
+  }
+});
+
+test("launch contract: cwd is the real worktree and argv/env/cwd/stdin must match exactly", () => {
+  const fx = fixture();
+  const link = path.join(fx.baseDir, "worktree-link");
+  fs.symlinkSync(fx.worktree, link);
+  const attempt = prepareMuseAttempt(input(fx, "developer", { worktreePath: link }));
+  try {
+    assert.equal(attempt.cwd, fs.realpathSync(fx.worktree));
+    assert.doesNotThrow(() => attempt.verify());
+    assert.doesNotThrow(() => attempt.verify({ cwd: attempt.cwd, argv: [...attempt.argv], env: { ...attempt.env }, stdin: attempt.stdin }));
+
+    // Returned data is immutable.
+    assert.throws(() => (attempt.argv as string[]).push("--yolo"));
+    assert.throws(() => ((attempt.env as Record<string, string>).XDG_CONFIG_HOME = "/ambient"));
+    assert.throws(() => ((attempt as { cwd: string }).cwd = "/"));
+    assert.throws(() => ((attempt.settings.mcpServers as Record<string, unknown>).extra = {}));
+
+    // A consumer that builds its own launch is checked against the approved one.
+    const launch = { cwd: attempt.cwd, argv: [...attempt.argv], env: { ...attempt.env }, stdin: attempt.stdin };
+    const without = (flag: string, n = 1) => {
+      const i = launch.argv.indexOf(flag);
+      return [...launch.argv.slice(0, i), ...launch.argv.slice(i + n)];
+    };
+    const widened: Record<string, typeof launch> = {
+      "spawn from server dir": { ...launch, cwd: process.cwd() },
+      "spawn from parent dir": { ...launch, cwd: path.dirname(fx.worktree) },
+      "drop --disable-web-tools": { ...launch, argv: without("--disable-web-tools") },
+      "drop --approval-judge off": { ...launch, argv: without("--approval-judge", 2) },
+      "add --base-url": { ...launch, argv: [...launch.argv.slice(0, -1), "--base-url", "http://evil.invalid", launch.argv.at(-1)!] },
+      "duplicate flag": { ...launch, argv: [...launch.argv.slice(0, -1), "--json", launch.argv.at(-1)!] },
+      "change prompt": { ...launch, argv: [...launch.argv.slice(0, -1), "other prompt"] },
+      "ambient XDG_CONFIG_HOME": { ...launch, env: { ...launch.env, XDG_CONFIG_HOME: fx.operatorConfigHome } },
+      "ambient XDG_DATA_HOME": { ...launch, env: { ...launch.env, XDG_DATA_HOME: "/operator/data" } },
+      "extra env": { ...launch, env: { ...launch.env, META_API_KEY: API_KEY } },
+      "dropped env": { ...launch, env: Object.fromEntries(Object.entries(launch.env).filter(([k]) => k !== "MUSE_NO_AUTO_UPDATE")) },
+      "injected stdin": { ...launch, stdin: "key\n" },
+    };
+    for (const [name, bad] of Object.entries(widened)) {
+      assert.equal(code(() => attempt.verify(bad)), "invalid_argv", name);
+    }
+  } finally {
+    attempt.cleanup();
+  }
 });

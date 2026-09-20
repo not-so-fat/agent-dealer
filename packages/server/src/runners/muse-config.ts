@@ -15,8 +15,9 @@ export type MuseCapability = "mcp_tool_allowlist_enforcement" | "cron_tool_disab
 
 /**
  * What has been proven to be enforced by the pinned Muse build. Both are `false` on
- * 1.3.0-R3401.1 (probes 7-9). Flip one only after re-running probe 8 / 9 against a build that
- * enforces it; the generated settings then carry the matching control.
+ * 1.3.0-R3401.1 (probes 7-9). Callers cannot supply this: `prepareMuseAttempt` always uses
+ * `NOT_177_EVIDENCE`. Flip a value here only after re-running probe 8 / 9 against the pinned build
+ * (or pin a new build) and committing the result; the generated settings then carry the control.
  */
 export interface MuseEnforcementEvidence {
   mcp_tool_allowlist_enforcement: boolean;
@@ -104,24 +105,31 @@ export interface MuseAttemptInput {
   sessionId: string;
   prompt: string;
   maxModelSteps: number;
-  /** Defaults to what NOT-177 proved, so the unenforceable restrictions refuse. */
-  evidence?: MuseEnforcementEvidence;
   /** Ambient environment to filter; defaults to process.env. */
   env?: NodeJS.ProcessEnv;
 }
 
-export interface MuseAttempt {
+/** The exact launch contract of one attempt. Frozen; anything else is not an approved launch. */
+export interface MuseLaunch {
+  /** Real path of the assigned worktree. The Muse sandbox roots its write access at cwd (NOT-177). */
+  readonly cwd: string;
+  readonly argv: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+  /** Only set for api-key credentials: write to the child's stdin, never argv/env/disk. */
+  readonly stdin?: string;
+}
+
+export interface MuseAttempt extends MuseLaunch {
   root: string;
   settingsPath: string;
   settings: MuseSettings;
-  argv: string[];
-  env: Record<string, string>;
-  /** Only set for api-key credentials: write to the child's stdin, never argv/env/disk. */
-  stdin?: string;
   /** Scrubs the credential from text bound for logs, errors, or the database. */
   redact(text: string): string;
-  /** Re-reads and re-validates what is on disk. Call immediately before spawn. */
-  verify(): void;
+  /**
+   * Re-reads the config on disk and requires `launch` (default: this attempt) to equal the
+   * approved cwd/argv/env/stdin exactly. Pass what you actually spawn with, immediately before spawn.
+   */
+  verify(launch?: MuseLaunch): void;
   /** Removes the per-attempt dir (settings, data, auth link). Idempotent; never touches the operator's auth. */
   cleanup(): void;
 }
@@ -417,7 +425,32 @@ function writePrivate(file: string, content: string): void {
  * settings.json (0600) and an auth link. Throws before spawn; leaves nothing behind on failure.
  */
 export function prepareMuseAttempt(input: MuseAttemptInput): MuseAttempt {
-  const evidence = input.evidence ?? NOT_177_EVIDENCE;
+  return prepareWithEvidence(input, NOT_177_EVIDENCE);
+}
+
+/**
+ * Test seam for exercising the enforced-restriction paths against a hypothetical build. Not part
+ * of the production API: production code must go through `prepareMuseAttempt`, which is pinned to
+ * `NOT_177_EVIDENCE`.
+ */
+export const museConfigTesting = {
+  prepareWithEvidence: (input: MuseAttemptInput, evidence: MuseEnforcementEvidence): MuseAttempt =>
+    prepareWithEvidence(input, evidence),
+};
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const v of Object.values(value)) deepFreeze(v);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function sameJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(sortKeys(a)) === JSON.stringify(sortKeys(b));
+}
+
+function prepareWithEvidence(input: MuseAttemptInput, evidence: MuseEnforcementEvidence): MuseAttempt {
   const missing = unenforceableRestrictions(input.role, evidence);
   if (missing.length > 0) {
     throw new MuseIsolationError(
@@ -428,7 +461,7 @@ export function prepareMuseAttempt(input: MuseAttemptInput): MuseAttempt {
   }
   const { worktree, baseDir } = validateInput(input);
   const agentDeck = input.agentDeck;
-  const settings = buildMuseSettings(agentDeck, evidence);
+  const settings = deepFreeze(buildMuseSettings(agentDeck, evidence));
   assertMuseSettings(settings, agentDeck, evidence);
   const apiKey = input.credential.kind === "api-key" ? input.credential.apiKey : undefined;
   const argv = buildMuseArgv({
@@ -452,7 +485,28 @@ export function prepareMuseAttempt(input: MuseAttemptInput): MuseAttempt {
   };
 
   const settingsPath = path.join(root, "config", "muse", "settings.json");
-  const verify = () => {
+  const approved = deepFreeze({
+    cwd: worktree,
+    argv: [...argv],
+    env: buildMuseEnv(root, input.env),
+    stdin: apiKey === undefined ? undefined : `${apiKey}\n`,
+  }) as MuseLaunch;
+  const verify = (launch: MuseLaunch = attempt) => {
+    if (launch.cwd !== approved.cwd) {
+      throw new MuseIsolationError("invalid_argv", "Muse must be launched with cwd set to the assigned worktree");
+    }
+    if (fs.realpathSync(launch.cwd) !== worktree) {
+      throw new MuseIsolationError("invalid_argv", "Muse launch cwd no longer resolves to the assigned worktree");
+    }
+    if (!sameJson([...launch.argv], approved.argv)) {
+      throw new MuseIsolationError("invalid_argv", "Muse argv differs from the approved launch argv");
+    }
+    if (!sameJson(launch.env, approved.env)) {
+      throw new MuseIsolationError("invalid_argv", "Muse env differs from the approved launch env");
+    }
+    if (launch.stdin !== approved.stdin) {
+      throw new MuseIsolationError("invalid_argv", "Muse stdin differs from the approved launch stdin");
+    }
     const expectDir = (dir: string) => {
       if ((fs.statSync(dir).mode & 0o077) !== 0) throw new MuseIsolationError("unsafe_path", "Attempt dir is not private");
     };
@@ -473,7 +527,7 @@ export function prepareMuseAttempt(input: MuseAttemptInput): MuseAttempt {
     if (entries.join() !== allowed.join()) {
       throw new MuseIsolationError("invalid_settings", "Unexpected files in the per-attempt Muse config dir");
     }
-    assertMuseArgv(argv, input.role);
+    assertMuseArgv([...approved.argv], input.role);
   };
 
   try {
@@ -485,22 +539,28 @@ export function prepareMuseAttempt(input: MuseAttemptInput): MuseAttempt {
     if (input.credential.kind === "auth-file") {
       fs.symlinkSync(input.credential.path, path.join(path.dirname(settingsPath), "auth.json"));
     }
-    verify();
   } catch (err) {
     cleanup();
     throw err;
   }
 
-  const redact = createRedactor(apiKey ? [apiKey] : []);
-  return {
+  const attempt: MuseAttempt = Object.freeze({
     root,
     settingsPath,
     settings,
-    argv,
-    env: buildMuseEnv(root, input.env),
-    stdin: apiKey === undefined ? undefined : `${apiKey}\n`,
-    redact,
+    cwd: approved.cwd,
+    argv: approved.argv,
+    env: approved.env,
+    stdin: approved.stdin,
+    redact: createRedactor(apiKey ? [apiKey] : []),
     verify,
     cleanup,
-  };
+  });
+  try {
+    verify();
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
+  return attempt;
 }
