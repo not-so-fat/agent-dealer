@@ -1,4 +1,4 @@
-import { test, after } from "node:test";
+import { test, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -317,6 +317,83 @@ test("cleanup removes ephemeral config and auth link but never operator-owned st
   fs.rmSync(path.join(foreign.root, ".dealer-muse-attempt"));
   foreign.cleanup();
   assert.ok(fs.existsSync(foreign.root));
+});
+
+test("cleanup is retryable: a transient rmSync failure does not strand the attempt dir", () => {
+  const fx = fixture();
+  const attempt = prepareMuseAttempt(input(fx, "developer"));
+  const link = path.join(path.dirname(attempt.settingsPath), "auth.json");
+  const realRm = fs.rmSync;
+  const rm = mock.method(fs, "rmSync", () => {
+    throw Object.assign(new Error("EBUSY: transient"), { code: "EBUSY" });
+  });
+  try {
+    assert.throws(() => attempt.cleanup(), /EBUSY/);
+    assert.throws(() => attempt.cleanup(), /EBUSY/, "a failed cleanup is not terminal");
+    assert.ok(fs.existsSync(attempt.settingsPath));
+    assert.ok(fs.lstatSync(link).isSymbolicLink());
+  } finally {
+    rm.mock.restore();
+  }
+  assert.equal(fs.rmSync, realRm);
+  attempt.cleanup();
+  assert.equal(fs.existsSync(attempt.root), false);
+  assert.equal(fs.readFileSync(fx.operatorAuth, "utf8"), '{"token":"operator-owned"}');
+  assert.doesNotThrow(() => attempt.cleanup());
+});
+
+test("cleanup treats an already-removed dir as done", () => {
+  const fx = fixture();
+  const attempt = prepareMuseAttempt(input(fx, "developer"));
+  fs.rmSync(attempt.root, { recursive: true });
+  assert.doesNotThrow(() => attempt.cleanup());
+  assert.doesNotThrow(() => attempt.cleanup());
+});
+
+test("a failure before the sentinel is written still removes the new attempt dir", () => {
+  const fx = fixture();
+  const realWrite = fs.writeFileSync;
+  const write = mock.method(fs, "writeFileSync", ((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    if (String(file).endsWith(".dealer-muse-attempt")) throw new Error("ENOSPC: injected");
+    return (realWrite as (...a: unknown[]) => void)(file, ...rest);
+  }) as typeof fs.writeFileSync);
+  try {
+    assert.throws(() => prepareMuseAttempt(input(fx, "developer")), /ENOSPC: injected/);
+  } finally {
+    write.mock.restore();
+  }
+  assert.deepEqual(fs.readdirSync(fx.baseDir), [], "no sentinel-less attempt dir is left behind");
+  assert.equal(fs.readFileSync(fx.operatorAuth, "utf8"), '{"token":"operator-owned"}');
+});
+
+test("if setup fails and the new dir cannot be removed, the failure names the stranded dir", () => {
+  const fx = fixture();
+  const realWrite = fs.writeFileSync;
+  const write = mock.method(fs, "writeFileSync", ((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    if (String(file).endsWith("settings.json")) throw new Error("EIO: injected");
+    return (realWrite as (...a: unknown[]) => void)(file, ...rest);
+  }) as typeof fs.writeFileSync);
+  const rm = mock.method(fs, "rmSync", () => {
+    throw new Error("EBUSY: transient");
+  });
+  let thrown: unknown;
+  try {
+    try {
+      prepareMuseAttempt(input(fx, "developer", { credential: { kind: "api-key", apiKey: API_KEY } }));
+    } catch (err) {
+      thrown = err;
+    }
+  } finally {
+    write.mock.restore();
+    rm.mock.restore();
+  }
+  assert.equal((thrown as MuseIsolationError | undefined)?.code, "cleanup_failed");
+  const [stranded] = fs.readdirSync(fx.baseDir);
+  assert.ok(stranded);
+  assert.ok((thrown as Error).message.includes(stranded!));
+  assert.ok(!(thrown as Error).message.includes(API_KEY));
+  // Nothing tracks it any more, so the operator removes it; the sentinel makes it identifiable.
+  assert.ok(fs.existsSync(path.join(fx.baseDir, stranded!, ".dealer-muse-attempt")));
 });
 
 test("an unwritable base dir fails without leaving a partial attempt", () => {

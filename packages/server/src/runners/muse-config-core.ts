@@ -77,7 +77,8 @@ export type MuseIsolationCode =
   | "invalid_input"
   | "unsafe_path"
   | "invalid_settings"
-  | "invalid_argv";
+  | "invalid_argv"
+  | "cleanup_failed";
 
 /** Messages name fields and paths, never values that could be credentials. */
 export class MuseIsolationError extends Error {
@@ -483,15 +484,41 @@ function prepareWithEvidence(rawInput: MuseAttemptInput, evidence: MuseEnforceme
   });
 
   const root = fs.mkdtempSync(path.join(baseDir, ATTEMPT_PREFIX));
+  // Terminal only once the dir is confirmed gone, so a failed rmSync can be retried.
   let cleaned = false;
-  const cleanup = () => {
+  const removeRoot = (requireSentinel: boolean) => {
     if (cleaned) return;
-    cleaned = true;
-    // Only a dir this module created (prefix + sentinel) directly under baseDir is removed.
-    // rmSync unlinks the auth symlink without following it.
+    // Only a dir this module created (prefix) directly under baseDir is removed.
     if (path.dirname(root) !== baseDir || !path.basename(root).startsWith(ATTEMPT_PREFIX)) return;
-    if (!fs.existsSync(path.join(root, SENTINEL))) return;
-    fs.rmSync(root, { recursive: true, force: true });
+    let present = true;
+    try {
+      fs.lstatSync(root);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      present = false;
+    }
+    if (present) {
+      // After construction the sentinel proves the dir is still ours; the dir mkdtemp just returned
+      // is ours by construction even if the sentinel was never written.
+      if (requireSentinel && !fs.existsSync(path.join(root, SENTINEL))) return;
+      // rmSync unlinks the auth symlink without following it.
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+    cleaned = true;
+  };
+  const cleanup = () => removeRoot(true);
+  const abortConstruction = (original: unknown): never => {
+    try {
+      removeRoot(false);
+    } catch (rmErr) {
+      const reason = original instanceof Error ? original.message : "unknown error";
+      const rmReason = rmErr instanceof Error ? rmErr.message : "unknown error";
+      throw new MuseIsolationError(
+        "cleanup_failed",
+        `Muse attempt setup failed (${reason}) and its dir ${root} could not be removed: ${rmReason}`
+      );
+    }
+    throw original;
   };
 
   const settingsPath = path.join(root, "config", "muse", "settings.json");
@@ -550,8 +577,7 @@ function prepareWithEvidence(rawInput: MuseAttemptInput, evidence: MuseEnforceme
       fs.symlinkSync(input.credential.path, path.join(path.dirname(settingsPath), "auth.json"));
     }
   } catch (err) {
-    cleanup();
-    throw err;
+    return abortConstruction(err);
   }
 
   const attempt: MuseAttempt = Object.freeze({
@@ -569,8 +595,7 @@ function prepareWithEvidence(rawInput: MuseAttemptInput, evidence: MuseEnforceme
   try {
     verify();
   } catch (err) {
-    cleanup();
-    throw err;
+    return abortConstruction(err);
   }
   return attempt;
 }
