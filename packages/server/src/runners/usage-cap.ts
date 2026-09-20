@@ -268,3 +268,27 @@ export function recordUsageCapFromEvents(
   });
   return cap;
 }
+
+/**
+ * NOT-181: Muse's usage-cap signal is the parsed failure kind (runners/muse-code-jsonl.ts), not a
+ * Claude-shaped log event. Muse reports no reset time (NOT-177: real cap payload never observed),
+ * so the deferral uses the fallback cooldown.
+ */
+export function recordMuseUsageCap(
+  failure: { kind: string; message: string } | null,
+  nowMs = Date.now()
+): UsageCapDetection | null {
+  if (failure?.kind !== "usage_cap") return null;
+  const cap: UsageCapDetection = {
+    unavailableUntil: fallbackUntil(nowMs),
+    reason: capReason("muse_code", failure.message.slice(0, 120) || "usage cap"),
+    evidence: { muse_failure: failure },
+  };
+  recordRuntimeAvailability({
+    runtime: "muse_code",
+    unavailableUntil: cap.unavailableUntil,
+    reason: cap.reason,
+    evidence: cap.evidence,
+  });
+  return cap;
+}

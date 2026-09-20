@@ -13,6 +13,7 @@ interface UsageEventRow {
   cost_usd: number | null;
   duration_ms: number | null;
   ts: string;
+  model: string | null;
 }
 
 function rowToUsageEvent(row: UsageEventRow): UsageEvent {
@@ -27,6 +28,7 @@ function rowToUsageEvent(row: UsageEventRow): UsageEvent {
     costUsd: row.cost_usd,
     durationMs: row.duration_ms,
     ts: row.ts,
+    model: row.model,
   };
 }
 
@@ -39,6 +41,8 @@ export interface RecordUsageEventInput {
   tokensOut?: number | null;
   costUsd?: number | null;
   durationMs?: number | null;
+  /** The model the session ran; null/omitted when the runtime did not report one. */
+  model?: string | null;
 }
 
 export function recordUsageEvent(input: RecordUsageEventInput): UsageEvent {
@@ -53,12 +57,13 @@ export function recordUsageEvent(input: RecordUsageEventInput): UsageEvent {
     cost_usd: input.costUsd ?? null,
     duration_ms: input.durationMs ?? null,
     ts: new Date().toISOString(),
+    model: input.model ?? null,
   };
   getDb().prepare(`
     INSERT INTO usage_events (
-      id, issue_id, worker_session_id, role, runtime, tokens_in, tokens_out, cost_usd, duration_ms, ts
+      id, issue_id, worker_session_id, role, runtime, tokens_in, tokens_out, cost_usd, duration_ms, ts, model
     ) VALUES (
-      @id, @issue_id, @worker_session_id, @role, @runtime, @tokens_in, @tokens_out, @cost_usd, @duration_ms, @ts
+      @id, @issue_id, @worker_session_id, @role, @runtime, @tokens_in, @tokens_out, @cost_usd, @duration_ms, @ts, @model
     )
   `).run(row);
   return rowToUsageEvent(row);

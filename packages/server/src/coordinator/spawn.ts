@@ -19,12 +19,18 @@ import { spawnCli } from "../runners/spawn-cli.js";
 import { buildDeveloperArgs, buildReviewerArgs } from "./args.js";
 import { assertReviewerReadOnly } from "./permissions.js";
 import { extractResultTranscript } from "./usage.js";
+import { runMuseDeveloperSession, type MuseSessionSummary } from "./muse-spawn.js";
 
 export interface DeveloperSpawnResult {
   exitCode: number;
   transcript: string;
   logPath: string;
   timedOut: boolean;
+  /**
+   * Set only for a `muse_code` session (NOT-181): the parsed outcome the effect needs beyond
+   * exit code and transcript — confirmed model, nullable usage, failure kind, `cron_*` activity.
+   */
+  muse?: MuseSessionSummary;
 }
 
 export interface DeveloperSpawnInput {
@@ -34,6 +40,8 @@ export interface DeveloperSpawnInput {
   model: string | null;
   /** Frozen profile reasoning effort (NOT-81); null = runtime default. */
   effort?: ReasoningEffort | null;
+  /** Frozen profile `maxTurns`; Muse's `--max-model-steps` (NOT-181). Other runtimes do not read it. */
+  maxModelSteps?: number | null;
   prompt: string;
   cwd: string;
   timeoutMs: number;
@@ -89,6 +97,14 @@ const BIN_FOR: Record<Runtime, () => string> = {
 };
 
 export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
+  if (input.runtime === "muse_code") {
+    // Own argv, per-attempt XDG dirs and result parsing; deck/MCP are never wired for Muse.
+    return runMuseDeveloperSession({
+      ...input,
+      maxModelSteps: input.maxModelSteps ?? undefined,
+      logPath: input.logPath ?? developerSessionLogPath(input.sessionId),
+    });
+  }
   const args = buildDeveloperArgs(
     input.runtime,
     input.prompt,
