@@ -4,13 +4,14 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## 1.1.0 — 2026-09-20
 
-Minor over 1.0.5: an opt-in trial of native Muse Code as the developer agent, plus tighter review-loop and retry behavior.
+Minor over 1.0.5: an opt-in trial of native Muse Code as the developer agent, plus review-loop, retry and Linear-error refinements.
 
 ### Features
 
-- **Muse Code developer trial (opt-in per issue)** — choose a Muse Code developer profile (pinned model) and the issue runs the normal Dev-review workflow, with Codex/Claude as reviewer (Muse cannot review). Muse gets no MCP and no Agent Deck, so a deck outage never parks it; token counts are recorded when Muse reports them, and cost is always empty. Health tells a missing CLI from missing credentials from an unexplained probe failure. A supervised trial only — the PoC recommended “retry later”, and contributor-tier content may be used for product improvement, so pick non-sensitive tickets (NOT-178, NOT-179, NOT-181).
+- **Muse Code developer trial (opt-in per issue)** — supervised trial only: the PoC recommended “retry later”, and contributor-tier content may be used for product improvement, so pick non-sensitive tickets. Choose a Muse Code developer profile (pinned model) and the issue runs the normal Dev-review workflow, with Codex/Claude as reviewer (Muse cannot review). Muse gets no MCP and no Agent Deck, so a deck outage never parks it; token counts are recorded when Muse reports them, and cost is always empty (NOT-178, NOT-179, NOT-181).
+- **Muse health checks** — tells a missing CLI from missing credentials from an unexplained probe failure (NOT-178).
 - **Muse failure handling** — auth failures retry as infra without spending a review round, usage caps defer the issue, and a session that used Muse’s `cron_*` tools is failed and escalated to you with no retry. That last check runs after the fact and cannot prevent a job from firing (NOT-181).
-- **`usage_events.model`** — usage records now store the model that actually ran; an automatic migration adds the column and older rows stay empty (NOT-181).
+- **`usage_events.model`** — developer usage records now store the model (the confirmed model for Muse, the profile’s model otherwise); reviewer rows stay empty. An automatic migration adds the column and older rows stay empty (NOT-181).
 
 ### Improvements
 
@@ -21,7 +22,7 @@ Minor over 1.0.5: an opt-in trial of native Muse Code as the developer agent, pl
 
 ### Internal
 
-- **Muse evaluation** — budget-first evaluation contract, headless/orchestration spike, PoC results with the go/no-go decision (“retry later”), and the committed PoC harness in `scripts/muse-poc/` (NOT-176, NOT-177, NOT-183, NOT-187). Opt-in paid real-CLI check: `MUSE_SMOKE=1 npm run smoke:muse`.
+- **Muse evaluation** — budget-first evaluation contract, headless/orchestration spike, PoC results, and the committed PoC harness in `scripts/muse-poc/` (NOT-176, NOT-177, NOT-183, NOT-187). Opt-in paid real-CLI check: `MUSE_SMOKE=1 npm run smoke:muse`.
 - **Execution analysis** — contract and evidence-quality rules for analysing runs (NOT-167).
 
 ## 1.0.5 — 2026-09-19
