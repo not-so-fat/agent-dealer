@@ -84,11 +84,11 @@ export function getAgent(id: string): AgentProfile | null {
 
 /**
  * Muse accepts an unknown `--model` silently and, when none is passed, picks its own profile
- * (NOT-177), so a Muse profile always names the pinned contributor model rather than storing null.
+ * (NOT-177), so a Muse profile always stores the pinned contributor model — whatever the caller
+ * sent, and whatever a previous runtime left behind — rather than null or an arbitrary string.
  */
-function museModelOrDefault(runtime: Runtime, model: string | null | undefined): string | null {
-  const trimmed = model?.trim() || null;
-  return runtime === "muse_code" ? (trimmed ?? MUSE_CODE_CONTRIBUTOR_MODEL) : (model ?? null);
+function pinnedModel(runtime: Runtime, model: string | null | undefined): string | null {
+  return runtime === "muse_code" ? MUSE_CODE_CONTRIBUTOR_MODEL : (model ?? null);
 }
 
 export function createAgent(input: CreateAgentInput, deckName?: string | null): AgentProfile {
@@ -110,7 +110,7 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
     deckName ?? null,
     null, // playbook_id — dead legacy (NOT-149)
     null, // workspace_root — dead legacy (NOT-149)
-    museModelOrDefault(input.runtime, input.defaultModel),
+    pinnedModel(input.runtime, input.defaultModel),
     input.defaultEffort ?? null,
     serializePhaseBudget(input.defaultBudget),
     input.purpose?.trim() || null,
@@ -141,7 +141,7 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
   // a legacy profile saved a null role-neutral model while the legacy column kept winning the
   // fallback — so the form showed blank while the session still ran the hidden value, and
   // switching runtime carried the old runtime's model into the new one's snapshot.
-  const defaultModel = museModelOrDefault(
+  const defaultModel = pinnedModel(
     runtime,
     input.defaultModel !== undefined ? input.defaultModel : resolveProfileModel(existing)
   );

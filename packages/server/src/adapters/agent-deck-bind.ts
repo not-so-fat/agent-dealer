@@ -271,6 +271,12 @@ async function materializeWorkerMcpConfig(opts: {
   const mcpUrl = `${mcpBase}/mcp`;
   const headers = deckLaunchHeaders(opts.deckId, opts.worktreePath);
 
+  // Muse Code has no Agent Deck / MCP wiring (NOT-178 non-goal; NOT-181 owns it). Refuse before
+  // anything is written rather than fall through to the Claude config below.
+  if (opts.runtime === "muse_code") {
+    throw new Error("Muse Code does not support Agent Deck MCP configuration");
+  }
+
   if (opts.runtime === "codex_local") {
     const codexHome = path.join(getWorkerMcpConfigDir(), `codex-home-${opts.deckId.slice(0, 8)}-${randomUUID()}`);
     fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
@@ -321,7 +327,7 @@ async function materializeWorkerMcpConfig(opts: {
     return { mcpConfigPath: filePath };
   }
 
-  // claude_code
+  // claude_code — the only runtime left.
   const dir = getWorkerMcpConfigDir();
   const filePath = path.join(dir, `claude-mcp-${opts.deckId.slice(0, 8)}-${randomUUID()}.json`);
   try {

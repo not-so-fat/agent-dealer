@@ -316,6 +316,12 @@ test("Muse's captured auth text is attributed to Muse, and other runtimes' text 
   assert.equal(runtimeAuthIssueFromOutput("codex_local", capture("muse-exec-missing-credentials.txt")), null);
 });
 
+test("a generic `authentication failed` line is not read as Muse (NOT-178)", () => {
+  const generic = "error: authentication failed for https://git.example.com/repo.git\n";
+  assert.equal(runtimeAuthIssueFromOutput("muse_code", generic), null);
+  assert.notEqual(anyRuntimeAuthIssueFromOutput(generic)?.runtime, "muse_code");
+});
+
 test("every runtime has an auth label and a remediation", () => {
   for (const runtime of Runtime.options) {
     assert.ok(RUNTIME_AUTH_LABEL[runtime], runtime);

@@ -102,9 +102,10 @@ const MUSE_AUTH_PATTERNS: RegExp[] = [
   // `muse exec` with no credentials (muse-exec-missing-credentials.txt) — exits 1, stdout empty.
   /missing meta credentials/i,
   // `muse exec` when the catalog fetch is refused (muse-exec-bad-api-key.txt and
-  // muse-exec-saved-login-invalid.txt) — exits 1. Both captures carry this prefix; the tails
-  // differ (rejected META_API_KEY vs. an expired saved login), the remedy does not.
-  /authentication failed/i,
+  // muse-exec-saved-login-invalid.txt) — exits 1. Both captures carry this full prefix; the tails
+  // differ (rejected META_API_KEY vs. an expired saved login), the remedy does not. The bare
+  // phrase `authentication failed` is not Muse's voice — other CLIs and tools print it too.
+  /failed to fetch model catalog: authentication failed/i,
   // The expired-login tail on its own (also a `run.terminal.failed` reason in the JSONL
   // stream, 10-auth-rejected-401-mock.jsonl, where the prefix above is absent).
   /saved login is no longer valid/i,
