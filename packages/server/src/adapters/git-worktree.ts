@@ -31,6 +31,76 @@ async function git(cwd: string, args: string[]): Promise<{ stdout: string; stder
   }
 }
 
+/** Default bound for the pre-branch fetch of `origin/<baseBranch>` (NOT-197). */
+export const DEFAULT_BASE_FETCH_TIMEOUT_MS = 60_000;
+
+export type FreshBaseFetch =
+  /** `ref` is the worktree-add ref a fresh branch must be cut from; `sha` is its tip. */
+  | { ok: true; sha: string; ref: string }
+  | { ok: false; reason: string };
+
+function clampFetchTimeoutMs(timeoutMs: number | undefined): number {
+  return Number.isFinite(timeoutMs) && (timeoutMs as number) > 0
+    ? (timeoutMs as number)
+    : DEFAULT_BASE_FETCH_TIMEOUT_MS;
+}
+
+/** Whether `repo` has an `origin` remote at all. */
+async function hasOriginRemote(repo: string): Promise<boolean> {
+  try {
+    await git(repo, ["remote", "get-url", "origin"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * NOT-197: resolve the commit a fresh developer branch must start from. Fetches
+ * `origin/<baseBranch>` in the cached clone with a bounded timeout and returns the
+ * fetched `origin/<baseBranch>` tip — never the possibly-stale local base branch the
+ * cached clone was left on.
+ *
+ * A repo with no `origin` remote has no fresher truth than its local branches, so the
+ * local base is used as-is (legacy local checkouts keep working offline). Any other
+ * fetch failure — network down, VPN, timeout — is returned, never silently replaced
+ * with the stale local branch: the caller defers the start instead.
+ */
+export async function fetchFreshBase(
+  repo: string,
+  baseBranch: string,
+  timeoutMs?: number
+): Promise<FreshBaseFetch> {
+  const boundMs = clampFetchTimeoutMs(timeoutMs);
+  if (!(await hasOriginRemote(repo))) {
+    try {
+      const { stdout } = await git(repo, ["rev-parse", baseBranch]);
+      return { ok: true, sha: stdout.trim(), ref: baseBranch };
+    } catch (err) {
+      return { ok: false, reason: `no origin remote and local base ${baseBranch} does not resolve: ${(err as Error).message}` };
+    }
+  }
+  try {
+    await run("git", ["fetch", "origin", baseBranch], { cwd: repo, timeout: boundMs });
+  } catch (err) {
+    const e = err as { message?: string; stderr?: string; killed?: boolean };
+    const timedOut = e?.killed === true;
+    const detail = typeof e?.stderr === "string" && e.stderr.trim() ? e.stderr.trim() : e?.message;
+    return {
+      ok: false,
+      reason: timedOut
+        ? `git fetch origin ${baseBranch} timed out after ${boundMs}ms — network or VPN may be down`
+        : `git fetch origin ${baseBranch} failed: ${detail}`,
+    };
+  }
+  try {
+    const { stdout } = await git(repo, ["rev-parse", `origin/${baseBranch}`]);
+    return { ok: true, sha: stdout.trim(), ref: `origin/${baseBranch}` };
+  } catch (err) {
+    return { ok: false, reason: `fetched origin ${baseBranch} but origin/${baseBranch} does not resolve: ${(err as Error).message}` };
+  }
+}
+
 export async function addWorktree(opts: {
   repo: string;
   path: string;
@@ -525,10 +595,24 @@ function tryRealpath(p: string): string {
 }
 
 export type DeveloperWorktreeResolution =
-  | { kind: "created" | "reused"; path: string }
+  /**
+   * A worktree was created. `baseSha`/`baseRef` name the commit a NEW branch was cut
+   * from (NOT-197: the freshly fetched `origin/<base>`, recorded so the issue's base
+   * SHA reflects the true branch point); both are null when no new branch was cut —
+   * a fresh checkout of an already-existing branch for a retry.
+   */
+  | { kind: "created"; path: string; baseSha: string | null; baseRef: string | null }
+  | { kind: "reused"; path: string }
   | { kind: "conflict"; path: string; reason: string; recoveryCommands: string[] }
   /** NOT-127: leftover is still owned by a session whose CLI is live — do not adopt or escalate. */
-  | { kind: "live_owner"; path: string; ownerSessionId: string; reason: string };
+  | { kind: "live_owner"; path: string; ownerSessionId: string; reason: string }
+  /**
+   * NOT-197: the pre-branch `git fetch origin <base>` failed or timed out, so no fresh
+   * branch could be cut from a known-current base — and no branch was created. The
+   * caller defers the start instead of falling back to the stale local base. The
+   * reuse path never produces this: checking out an existing branch needs no fetch.
+   */
+  | { kind: "base_unavailable"; reason: string };
 
 /**
  * Session id encoded in a coordinator-managed role worktree path
@@ -573,6 +657,11 @@ export async function resolveDeveloperWorktree(opts: {
    */
   worktreePath?: string;
   ownerLiveness?: (worktreePath: string) => WorktreeOwnerLiveness | Promise<WorktreeOwnerLiveness>;
+  /**
+   * NOT-197: bound for the pre-branch `git fetch origin <baseBranch>` on the
+   * fresh-branch path. Defaults to {@link DEFAULT_BASE_FETCH_TIMEOUT_MS}.
+   */
+  fetchTimeoutMs?: number;
 }): Promise<DeveloperWorktreeResolution> {
   return withRepoLock(opts.repo, async () => {
     await pruneWorktrees(opts.repo);
@@ -637,16 +726,38 @@ export async function resolveDeveloperWorktree(opts: {
       }
       await pruneWorktrees(opts.repo);
     }
+    // NOT-197: a fresh issue branch starts from the freshly fetched
+    // `origin/<baseBranch>` tip — never the cached clone's possibly-stale local base.
+    // A failed fetch returns `base_unavailable` (no branch is created) instead of
+    // silently falling back to the stale local branch. The reuse path below needs no
+    // fetch — it checks out a branch that already exists — and is unchanged.
+    let ref: string;
+    let newBranch: string | undefined;
+    let baseSha: string | null = null;
+    let baseRef: string | null = null;
+    if (!opts.reuseBranch) {
+      const fresh = await fetchFreshBase(opts.repo, opts.baseBranch, opts.fetchTimeoutMs);
+      if (!fresh.ok) {
+        return { kind: "base_unavailable", reason: fresh.reason };
+      }
+      ref = fresh.ref;
+      newBranch = opts.branchName;
+      baseSha = fresh.sha;
+      baseRef = fresh.ref;
+    } else {
+      ref = opts.branchName;
+      newBranch = undefined;
+    }
     const worktreePath =
       opts.worktreePath ?? roleWorktreePath(opts.repo, opts.sessionId, "developer");
     ensureParentDir(worktreePath);
     await addWorktree({
       repo: opts.repo,
       path: worktreePath,
-      ref: opts.reuseBranch ? opts.branchName : opts.baseBranch,
+      ref,
       detach: false,
-      newBranch: opts.reuseBranch ? undefined : opts.branchName,
+      newBranch,
     });
-    return { kind: "created", path: tryRealpath(worktreePath) };
+    return { kind: "created", path: tryRealpath(worktreePath), baseSha, baseRef };
   });
 }
