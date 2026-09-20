@@ -86,6 +86,16 @@ switch (scenario) {
     completed("Implementation conclusion: added the widget.");
     break;
   }
+  case "smoke": {
+    // What scripts/muse-smoke.mts asks for, so the smoke script itself can be checked without Meta.
+    tool("bash", "call-1");
+    fs.writeFileSync(path.join(process.cwd(), "hello.txt"), "hello from muse\n");
+    execFileSync("git", ["add", "."]);
+    execFileSync("git", ["-c", "user.email=muse@test", "-c", "user.name=Muse", "commit", "-q", "-m", "hello"]);
+    writeSessionLog({ usage: USAGE });
+    completed("Created hello.txt.");
+    break;
+  }
   case "cron": {
     tool("cron_create", "call-1");
     commitFeature();
