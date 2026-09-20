@@ -117,3 +117,28 @@ test("muse-12 rejects approved results with no defect, broad vocabulary, wrong f
   assert.equal(gradeReview(t12, review("changes_requested", [good], { baseSha: base, headSha: base })).ok, false);
   assert.equal(gradeReview(t12, review("changes_requested", [good])).ok, true);
 });
+
+test("muse-12 rejects findings that assert the opposite of a known defect", () => {
+  const rec = `${P}/coordinator/recovery.ts`;
+  // Exact opposite of the recovery defect: describes correct behavior, shares all the vocabulary.
+  const opposite = finding(rec, "Lease expiry recovery consults runtime availability", "recovery defers the item instead of dead-lettering it.");
+  assert.equal(gradeReview(t12, review("approved", [opposite])).ok, false);
+  assert.equal(gradeReview(t12, review("changes_requested", [opposite])).ok, false);
+  const opposite2 = finding(rec, "Recovery handles usage caps", "On lease expiry recovery correctly defers when runtime_availability shows a usage cap; no dead-lettering.");
+  assert.equal(gradeReview(t12, review("changes_requested", [opposite2])).ok, false);
+
+  const cli = `${P}/adapters/agent-health.ts`;
+  const notDup = finding(cli, "cli_missing is reported once", "For a missing Codex CLI, runtimeIssuesUncached pushes cli_missing only once and does not repeat the version check; there is no duplicate.");
+  assert.equal(gradeReview(t12, review("approved", [notDup])).ok, false);
+
+  const ceiling = `${P}/coordinator/usage-cap-defer.ts`;
+  const tested = finding(ceiling, "24 h deferral ceiling is tested", "The 24 h ceiling escalation is covered by tests and is well tested; there is coverage for deferralCeilingExceeded.");
+  assert.equal(gradeReview(t12, review("approved", [tested])).ok, false);
+});
+
+test("muse-12 still accepts differently worded true statements of each defect", () => {
+  const rec = finding(`${P}/coordinator/recovery.ts`, "Expired-lease recovery does not consult runtime availability", "After a crash mid cap observation, recovery dead-letters the item and burns an attempt because it never consults runtime_availability.");
+  assert.deepEqual(gradeReview(t12, review("changes_requested", [rec])).matched, ["recovery-ignores-runtime-availability"]);
+  const ceiling = finding(`${P}/coordinator/usage-cap-defer.ts`, "24 h deferral ceiling has no test coverage", "The ceiling escalation is untested: nothing exercises deferralCeilingExceeded.");
+  assert.deepEqual(gradeReview(t12, review("changes_requested", [ceiling])).matched, ["untested-deferral-ceiling"]);
+});

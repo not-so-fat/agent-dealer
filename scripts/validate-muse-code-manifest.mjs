@@ -76,6 +76,9 @@ const loop = manifest.controls?.reviewLoop;
 if (!loop || !Number.isInteger(loop.maxReviewerRounds) || loop.maxReviewerRounds < 2 || !str(loop.protocol) ||
     !Array.isArray(loop.countedVerdicts) || !loop.countedVerdicts.includes("changes_requested")) {
   fail("controls.reviewLoop must define maxReviewerRounds (>= 2), countedVerdicts (incl. changes_requested) and protocol");
+} else if (loop.countedVerdicts.some((v) => v !== "changes_requested") || !loop.terminalVerdicts?.escalated) {
+  // G4 counts change-request rounds only; escalation is a terminal outcome with its own rule.
+  fail("controls.reviewLoop.countedVerdicts must be exactly [changes_requested] and terminalVerdicts.escalated must be defined");
 }
 
 const tasks = manifest.tasks;
@@ -127,7 +130,8 @@ for (const t of Array.isArray(tasks) ? tasks : []) {
         continue;
       }
       for (const f of d.files) if (!gitOk("cat-file", "-e", `${t.startingSha}:${f}`)) fail(`${where}: defect ${d.id} file ${f} does not exist at startingSha`);
-      for (const src of d.evidence.flat()) {
+      if (!Array.isArray(d.contradicts) || d.contradicts.length === 0) fail(`${where}: knownDefect ${d.id} needs contradicts[] patterns (polarity check)`);
+      for (const src of [...d.evidence.flat(), ...(d.contradicts ?? [])]) {
         try {
           new RegExp(src, "i");
         } catch {

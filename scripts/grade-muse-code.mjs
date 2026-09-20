@@ -106,13 +106,20 @@ export function parseReviewerResultStrict(text) {
 
 const DISMISSAL = /\b(no (issue|problem|defect|bug)s?|not (a |an )?(problem|issue|bug|defect)|works? (correctly|as intended)|is (correct|fine|safe|well[- ]tested))\b/i;
 
-/** A finding matches a known defect only if it names one of the defect's files AND every evidence group matches. */
+/**
+ * A finding matches a known defect only if it names one of the defect's files, every evidence group
+ * matches, and nothing in it asserts the opposite. Evidence groups establish that the defect's
+ * relationship is asserted (e.g. "never consults runtime availability"); `contradicts` patterns
+ * reject text that describes the correct behavior of the same code (e.g. "defers the item instead
+ * of dead-lettering it"), so shared vocabulary alone cannot satisfy a defect.
+ */
 export function findingMatchesDefect(finding, defect) {
   if (typeof finding.file !== "string") return false;
   const file = norm(finding.file);
   if (!defect.files.some((f) => file === f)) return false;
   const text = `${finding.title}\n${finding.rationale}`;
   if (DISMISSAL.test(text)) return false;
+  if ((defect.contradicts ?? []).some((src) => rx(src).test(text))) return false;
   return defect.evidence.every((group) => group.some((src) => rx(src).test(text)));
 }
 

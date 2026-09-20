@@ -32,7 +32,7 @@
       "runtime": "codex_local",
       "model": "gpt-5.6-sol",
       "effort": "medium",
-      "pricingBasis": "Reviewer sessions are the fixed measurement instrument for change-request rounds, not a compared subject; their cost is excluded from both arms. The muse-12 task (reviewer role) compares the candidate against this profile on the token list rate basis above; the Codex JSONL reports tokens but no cost, so a missing token kind makes that arm's cost null.",
+      "pricingBasis": "Two roles for this profile. (1) In the review loop of tasks muse-01..09 it is fixed instrumentation, identical for both arms, and those reviewer passes are excluded from w_i, c_i and K. (2) On muse-12 (reviewer role) it is the baseline subject session: it IS included in w_i, c_i and K for the baseline arm, priced on the token list rate basis above for the frozen model gpt-5.6-sol; the Codex JSONL reports tokens but no cost, so a missing token kind (including cache tokens) makes that run's cost null, never 0.",
       "permissionPolicy": {
         "worktreeWrite": false,
         "publishReview": false,
@@ -84,10 +84,13 @@
       "reviewer": "Codex Dev (frozen as baseline.reviewer)",
       "maxReviewerRounds": 3,
       "countedVerdicts": [
-        "changes_requested",
-        "escalated"
+        "changes_requested"
       ],
-      "protocol": "After the developer session, the fixed reviewer reviews the diff (round 1). On a counted verdict the same arm's developer profile gets a remediation session in the same worktree (Dealer's rework prompt carrying the reviewer's findings; timeout = the task's timeoutSeconds) and the reviewer re-reviews (round 2, 3). The loop stops on 'approved', after maxReviewerRounds reviewer rounds, on 'escalated', or when a remediation session fails or times out. R_i = the number of reviewer rounds with a counted verdict. The reviewer sees the diff and worker spec only, never held-out tests."
+      "protocol": "After the developer session, the fixed reviewer reviews the diff (round 1). On 'changes_requested' the same arm's developer profile gets a remediation session in the same worktree (Dealer's rework prompt carrying the reviewer's findings; timeout = the task's timeoutSeconds) and the reviewer re-reviews (round 2, 3). 'escalated' terminates the loop with no remediation. The loop also stops on 'approved', after maxReviewerRounds reviewer rounds, or when a remediation session fails or times out. R_i = the number of reviewer rounds whose verdict is 'changes_requested' (an 'escalated' verdict is never counted in R_i; it adds 1 to that run's human interventions instead). The reviewer sees the diff and worker spec only, never held-out tests. Reviewer passes in this loop are fixed instrumentation and are excluded from w_i, c_i and K; remediation developer sessions are subject sessions and are included.",
+      "terminalVerdicts": {
+        "approved": "loop ends; run is resolved",
+        "escalated": "loop ends immediately with no remediation session; NOT a change-request round (R_i unchanged); recorded as one human intervention (Dealer would block on a human action) and the run is flagged 'escalated'"
+      }
     }
   },
   "tasks": [
@@ -833,8 +836,14 @@
                 "missing (codex )?cli|cli not found|not found"
               ],
               [
-                "twice|duplicate|double|redundant|second (\\w+ )?(check|version|push)|again|repeat"
+                "reported twice|(pushed|added|emitted|raised|listed) (it |this |the issue )?twice|duplicat(e[sd]?|ing)\\b|double[- ](report|push|count)|redundant(ly)? (push|check|report)|second (\\w+ )?(check|version|push)|repeats? the"
               ]
+            ],
+            "contradicts": [
+              "\\b(not|never|no|isn'?t|without|doesn'?t|does not)\\b[^.\\n]{0,40}\\b(twice|duplicat\\w*|double\\w*|repeat\\w*|redundant\\w*)",
+              "\\b(only|exactly|just) once\\b",
+              "\\bonce only\\b",
+              "\\b(correctly|properly) (reports?|guards?|handles?|returns?)"
             ]
           },
           {
@@ -851,8 +860,14 @@
                 "runtime[_ -]?availab|usage[_ -]?cap|capped|cap observation"
               ],
               [
-                "dead[- ]?letter|escalat|spend|burn|consum|attempt|infra|instead of defer|not defer|never defer|ignor|never consult|does not consult|doesn't consult|not consult"
+                "\\b(ignor\\w*|never consult\\w*|does not consult|doesn'?t consult|not consult\\w*|without consult\\w*|fails? to (consult|check|defer)|(does not|doesn'?t|never|not|fail\\w* to) (defer|check)|no (check|consultation)|bypass\\w*|skips?)\\b|dead[- ]?letter\\w* (it )?(instead of|rather than|and does not|without) defer\\w*|(burn|spend|consum)\\w* (an? )?(infra|attempt)"
               ]
+            ],
+            "contradicts": [
+              "(defer\\w*|hold\\w*|park\\w*|postpon\\w*)[^.\\n]{0,40}(instead of|rather than|not|without)\\s+(dead[- ]?letter\\w*|fail\\w*|escalat\\w*)",
+              "(?<!never )(?<!not )(?<!n't )(?<!fails to )(?<!without )\\b(consults?|checks?|honou?rs?|respects?)\\b[^.\\n]{0,40}(runtime[_ -]?availab|usage[_ -]?cap|cap observation)",
+              "\\b(correctly|properly|already|now) (defer\\w*|consult\\w*|handl\\w*|check\\w*)",
+              "\\b(is|are) (already )?(handled|covered|safe)\\b"
             ]
           },
           {
@@ -868,8 +883,14 @@
                 "24 ?h|24-hour|ceiling|deferralCeilingExceeded|USAGE_CAP_DEFERRAL_CEILING_MS"
               ],
               [
-                "untested|not tested|no test|without (a )?test|no (test )?coverage|not covered|uncovered|lacks? (a )?(test|coverage)|missing (a )?test|never exercised|no .{0,40}test"
+                "\\buntested\\b|not (tested|covered|exercised)|no (test|tests|coverage)\\b|without (a )?tests?|no (test )?coverage|uncovered|lacks? (a )?(test|tests|coverage)|missing (a )?tests?|never exercised|no .{0,40}\\btests?\\b"
               ]
+            ],
+            "contradicts": [
+              "\\b(is|are|was|were) (now |already |also )?(tested|covered|exercised)\\b|\\b(well|fully|properly|adequately|thoroughly)[- ](tested|covered|exercised)\\b",
+              "\\b(has|have|includes?|adds?|there is|there are)\\b (a |an |good |full |explicit |dedicated )?(test|tests|coverage)\\b",
+              "\\b(covered|exercised|verified) by\\b",
+              "\\btests? (cover|exercise|verif\\w+|assert)s?\\b"
             ]
           }
         ],
