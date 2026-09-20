@@ -751,11 +751,12 @@ function applyReviewer(
         round: issue.currentRound,
       });
     }
-    // A completed review that no longer reports a finding closes it. Failed / verdict-less
-    // outcomes never reach here, so they resolve nothing.
+    // A completed review that no longer reports a finding closes it. Compared against the
+    // normalized findings just reconciled above; failed, stale and verdict-less outcomes
+    // never reach here, so they resolve nothing.
     resolveFindingsAbsentFromRound(
       issue.id,
-      outcome.result.findings.map((f) => f.fingerprint)
+      verdictResult.findings.map((f) => f.fingerprint)
     );
   }
 
