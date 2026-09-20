@@ -46,6 +46,16 @@ test("Claude rate_limit_event rejected writes runtime_availability with resetsAt
   }
 });
 
+test("allowed rate_limit_event with overage rejected (org disabled overage) is not a cap", () => {
+  const raw = [
+    '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1784283600,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled_until","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.17,"resetsAt":1784283600}}}}',
+    '{"type":"result","is_error":false,"result":"done"}',
+  ].join("\n");
+  assert.equal(detectUsageCapFromNdjson(raw, "claude_code"), null);
+  assert.equal(recordUsageCapFromEvents(parseNdjson(raw), "claude_code"), null);
+  assert.equal(runtimeAvailability("claude_code").available, true);
+});
+
 test("allowed_warning rate_limit_event is ignored (hard cap only)", () => {
   const raw = [
     '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1784283600,"rateLimitType":"five_hour"}}',

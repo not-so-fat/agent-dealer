@@ -46,10 +46,11 @@ function capReason(runtime: Runtime, detail: string): string {
   return `${runtime} usage capped — ${detail}`;
 }
 
+// `status` is the verdict on the plan window. `overageStatus` only says whether pay-as-you-go
+// overage is available: orgs with overage disabled report "rejected" on every event of a healthy
+// session (status "allowed", isUsingOverage false), so it must not open a deferral by itself.
 function isHardCapRateLimitInfo(info: Record<string, unknown>): boolean {
-  if (info.status === "rejected") return true;
-  if (info.overageStatus === "rejected") return true;
-  return false;
+  return info.status === "rejected";
 }
 
 function signalFromRateLimitInfo(
