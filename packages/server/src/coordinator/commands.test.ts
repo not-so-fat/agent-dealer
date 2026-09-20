@@ -14,7 +14,7 @@ const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
   "../repository/workflow-events.js"
 );
 const { createHumanAction, listHumanActionsForIssue } = await import("../repository/human-actions.js");
-const { listFindingsForIssue } = await import("../repository/findings.js");
+const { listFindingsForIssue, reconcileFinding } = await import("../repository/findings.js");
 const { claimWorkItem, listWorkItemsForIssue, getWorkItem } = await import("../repository/work-items.js");
 const { createWorkerSession, startSession, listWorkerSessionsForIssue } = await import(
   "../repository/worker-sessions.js"
@@ -280,6 +280,43 @@ test("reviewer changes_requested with rounds left → repair round with a fresh 
   assert.deepEqual(pending.map((i) => [i.kind, i.round]), [["developer", 2]]);
   assert.equal(listFindingsForIssue(issueId).length, 1);
   assert.ok(listWorkflowEventsForIssue(issueId).map((e) => e.type).includes("repair.started"));
+});
+
+test("a later completed review resolves findings it no longer reports and keeps re-reported ones", async () => {
+  const issueId = newIssue({ maxReviewRounds: 4 });
+  const otherId = newIssue({ maxReviewRounds: 4 });
+  reconcileFinding({ issueId: otherId, fingerprint: "f1", severity: "blocking", title: "Other", rationale: "r", round: 1 });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  const finding = (fingerprint: string) => ({ fingerprint, severity: "blocking" as const, title: fingerprint, rationale: "why" });
+  await complete(issueId, {
+    kind: "verdict",
+    result: { ...okReview("changes_requested"), findings: [finding("f1"), finding("f2")] }});
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, {
+    kind: "verdict",
+    result: { ...okReview("changes_requested"), findings: [finding("f2"), finding("f3")] }});
+
+  const byFp = Object.fromEntries(listFindingsForIssue(issueId).map((f) => [f.fingerprint, f]));
+  assert.equal(byFp.f1.status, "resolved");
+  assert.equal(byFp.f2.status, "recurring");
+  assert.equal(byFp.f2.lastRound, 2);
+  assert.equal(byFp.f3.status, "open");
+  assert.equal(listFindingsForIssue(otherId)[0].status, "open", "other issues' findings are untouched");
+});
+
+test("a failed or verdict-less reviewer session resolves no findings", async () => {
+  const issueId = newIssue({ maxReviewRounds: 4, maxInfraAttempts: 5 });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, {
+    kind: "verdict",
+    result: { ...okReview("changes_requested"), findings: [{ fingerprint: "f1", severity: "blocking", title: "Bug", rationale: "why" }] }});
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "session_failed" });
+  await complete(issueId, { kind: "stale", currentHeadSha: "head-B" });
+
+  assert.deepEqual(listFindingsForIssue(issueId).map((f) => f.status), ["open"]);
 });
 
 test("reviewer changes_requested at the round limit → attempts_exhausted", async () => {

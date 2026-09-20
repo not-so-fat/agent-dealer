@@ -38,7 +38,7 @@ import {
   listHumanActionsForIssue,
   resolveHumanAction,
 } from "../repository/human-actions.js";
-import { reconcileFinding } from "../repository/findings.js";
+import { reconcileFinding, resolveFindingsAbsentFromRound } from "../repository/findings.js";
 import { normalizeReviewerResult } from "./reviewer-result.js";
 import { getAgent } from "../repository/agents.js";
 import { githubIssuesSync } from "../adapters/agent-health.js";
@@ -751,6 +751,13 @@ function applyReviewer(
         round: issue.currentRound,
       });
     }
+    // A completed review that no longer reports a finding closes it. Compared against the
+    // normalized findings just reconciled above; failed, stale and verdict-less outcomes
+    // never reach here, so they resolve nothing.
+    resolveFindingsAbsentFromRound(
+      issue.id,
+      verdictResult.findings.map((f) => f.fingerprint)
+    );
   }
 
   applyProjectionTransition(issue, projection, patch);

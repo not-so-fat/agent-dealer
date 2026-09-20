@@ -9,7 +9,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-fi
 const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue } = await import("./issues.js");
-const { reconcileFinding, resolveFinding, listFindingsForIssue } = await import("./findings.js");
+const { reconcileFinding, resolveFinding, resolveFindingsAbsentFromRound, listFindingsForIssue } = await import("./findings.js");
 
 before(() => {
   migrate();
@@ -68,4 +68,23 @@ test("resolves a finding", () => {
   const resolved = resolveFinding(finding.id);
   assert.equal(resolved.status, "resolved");
   assert.equal(listFindingsForIssue(issueId).find((f) => f.id === finding.id)?.status, "resolved");
+});
+
+test("resolveFindingsAbsentFromRound resolves only open/recurring findings of that issue missing from the round", () => {
+  const issueId = seedIssue("Finding issue 4");
+  const otherId = seedIssue("Finding issue 5");
+  const base = { severity: "blocking" as const, title: "T", rationale: "R" };
+  reconcileFinding({ ...base, issueId, fingerprint: "gone", round: 1 });
+  reconcileFinding({ ...base, issueId, fingerprint: "kept", round: 1 });
+  reconcileFinding({ ...base, issueId, fingerprint: "kept", round: 2 });
+  reconcileFinding({ ...base, issueId: otherId, fingerprint: "gone", round: 1 });
+
+  const resolved = resolveFindingsAbsentFromRound(issueId, ["kept"]);
+  assert.deepEqual(resolved.map((f) => f.fingerprint), ["gone"]);
+  const byFp = Object.fromEntries(listFindingsForIssue(issueId).map((f) => [f.fingerprint, f.status]));
+  assert.deepEqual(byFp, { gone: "resolved", kept: "recurring" });
+  assert.equal(listFindingsForIssue(otherId)[0].status, "open");
+
+  assert.equal(resolveFindingsAbsentFromRound(issueId, []).length, 1, "an empty round resolves the remaining open findings");
+  assert.equal(resolveFindingsAbsentFromRound(issueId, []).length, 0, "already-resolved findings are not touched again");
 });
