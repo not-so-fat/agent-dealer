@@ -182,3 +182,18 @@ test("muse-12 accepts findings with non-claim fingerprints next to valid claims"
   const extra = { fingerprint: "style-nit", severity: "non_blocking", title: "naming", rationale: "prose", file: HEALTH, line: 3 };
   assert.equal(gradeReview(t12, review("changes_requested", [dup(), rec(), extra])).ok, true);
 });
+
+test("muse-12 rejects artifacts that do not parse as a ReviewerResult (every declared field is validated)", () => {
+  const good = { verdict: "changes_requested", baseSha: base, headSha: head, acceptanceCriteriaAssessment: "ok", evidenceAssessment: "ok", findings: [dup(), rec()], risks: [] };
+  assert.equal(gradeReview(t12, fence({ ...good, productScopeQuestion: "Which runtimes?" })).ok, true);
+  const bad = [
+    { ...good, productScopeQuestion: 123 },
+    { ...good, productScopeQuestion: null },
+    { ...good, risks: [1] },
+    { ...good, findings: [null, dup(), rec()] },
+    { ...good, findings: [{ ...dup(), line: 1.5 }, rec()] },
+    { ...good, findings: [{ ...dup(), file: 7 }, rec()] },
+    { ...good, acceptanceCriteriaAssessment: 1 },
+  ];
+  for (const b of bad) assert.equal(gradeReview(t12, fence(b)).ok, false, JSON.stringify(b).slice(0, 120));
+});

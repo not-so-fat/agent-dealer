@@ -94,12 +94,21 @@ export function parseReviewerResultStrict(text) {
   }
   if (!str(r.acceptanceCriteriaAssessment) || !str(r.evidenceAssessment)) return { error: "not a ReviewerResult (assessments)" };
   if (!Array.isArray(r.risks) || !r.risks.every(str)) return { error: "not a ReviewerResult (risks)" };
+  if (r.productScopeQuestion !== undefined && !str(r.productScopeQuestion)) {
+    return { error: "not a ReviewerResult (productScopeQuestion must be a string when present)" };
+  }
   if (!Array.isArray(r.findings)) return { error: "not a ReviewerResult (findings)" };
   for (const f of r.findings) {
     const okShape =
-      f && str(f.fingerprint) && (f.severity === "blocking" || f.severity === "non_blocking") && str(f.title) && str(f.rationale);
-    const okOptional = (f.file === undefined || str(f.file)) && (f.line === undefined || Number.isInteger(f.line));
-    if (!okShape || !okOptional) return { error: "not a ReviewerResult (finding shape)" };
+      f &&
+      typeof f === "object" &&
+      str(f.fingerprint) &&
+      (f.severity === "blocking" || f.severity === "non_blocking") &&
+      str(f.title) &&
+      str(f.rationale) &&
+      (f.file === undefined || str(f.file)) &&
+      (f.line === undefined || Number.isInteger(f.line));
+    if (!okShape) return { error: "not a ReviewerResult (finding shape)" };
   }
   return { value: r };
 }
