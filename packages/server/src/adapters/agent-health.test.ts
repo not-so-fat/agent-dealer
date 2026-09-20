@@ -51,6 +51,21 @@ test("missing deckId: reports deck_missing", async () => {
   assert.equal(result.healthy, false);
 });
 
+// NOT-181: a Muse Code worker gets no MCP servers and no Agent Deck, so no deck problem may park it.
+test("muse_code ignores deck state: no deck, offline deck or unreadable deck raises a deck issue", async () => {
+  const created = createAgent({ name: "muse-no-deck", runtime: "muse_code", deckId: randomUUID() });
+  getDb().prepare("UPDATE agents SET deck_id = NULL WHERE id = ?").run(created.id);
+  for (const [agent, online] of [
+    [getAgent(created.id)!, true],
+    [createAgent({ name: "muse-offline", runtime: "muse_code", deckId: randomUUID() }), false],
+    [createAgent({ name: "muse-stale", runtime: "muse_code", deckId: randomUUID() }), true],
+  ] as const) {
+    const result = await healthForAgent(agent, online, new Map(), true, FAILURE, NO_GITHUB);
+    assert.deepEqual(result.issues, [], agent.name);
+    assert.equal(result.healthy, true);
+  }
+});
+
 test("agent deck offline: reports deck_offline, not deck_unauthorized", async () => {
   const agent = createAgent({
     name: "offline",
