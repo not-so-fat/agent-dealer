@@ -7,13 +7,13 @@ import {
   assertMuseArgv,
   buildMuseArgv,
   MuseIsolationError,
-  museConfigTesting,
   prepareMuseAttempt as prepareMuseAttemptPinned,
   unenforceableRestrictions,
   type MuseAttemptInput,
   type MuseEnforcementEvidence,
   type MuseRole,
 } from "./muse-config.js";
+import { prepareWithEvidence } from "./muse-config-core.js";
 
 // The Muse sandbox leaves temp dirs writable, so the module refuses them: fixtures live under $HOME.
 const SCRATCH = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-config-test-"));
@@ -22,8 +22,8 @@ after(() => fs.rmSync(SCRATCH, { recursive: true, force: true }));
 const ENFORCED: MuseEnforcementEvidence = { mcp_tool_allowlist_enforcement: true, cron_tool_disable: true };
 
 // Production `prepareMuseAttempt` is pinned to the NOT-177 evidence; the enforced paths are exercised
-// through the test seam against a hypothetical build that enforces both controls.
-const prepareMuseAttempt = (i: MuseAttemptInput) => museConfigTesting.prepareWithEvidence(i, ENFORCED);
+// through the internal core against a hypothetical build that enforces both controls.
+const prepareMuseAttempt = (i: MuseAttemptInput) => prepareWithEvidence(i, ENFORCED);
 const SESSION = "11111111-2222-4333-8444-555555555555";
 const API_KEY = "mk-live-SECRET-0123456789abcdef";
 const DECK_URL = "http://127.0.0.1:1110/mcp";
@@ -403,4 +403,46 @@ test("launch contract: cwd is the real worktree and argv/env/cwd/stdin must matc
   } finally {
     attempt.cleanup();
   }
+});
+
+test("verification is snapshotted: mutating the original input cannot retarget the MCP server", () => {
+  const fx = fixture();
+  const original = input(fx, "developer");
+  const attempt = prepareMuseAttempt(original);
+  try {
+    // Attacker rewrites the caller's objects and settings.json to a different deck / URL.
+    original.agentDeck.url = "http://evil.invalid/mcp";
+    original.agentDeck.deckId = "deck-evil";
+    (original as { credential: unknown }).credential = { kind: "api-key", apiKey: API_KEY };
+    original.role = "reviewer";
+    const evil = JSON.parse(fs.readFileSync(attempt.settingsPath, "utf8"));
+    evil.mcpServers["agent-deck"].url = "http://evil.invalid/mcp";
+    evil.mcpServers["agent-deck"].headers["x-agent-deck-deck-id"] = "deck-evil";
+    fs.writeFileSync(attempt.settingsPath, JSON.stringify(evil));
+    assert.equal(code(() => attempt.verify()), "invalid_settings");
+
+    // Restoring the approved settings passes again, so verify compares against the snapshot.
+    evil.mcpServers["agent-deck"].url = DECK_URL;
+    evil.mcpServers["agent-deck"].headers["x-agent-deck-deck-id"] = "deck-123";
+    fs.writeFileSync(attempt.settingsPath, JSON.stringify(evil));
+    assert.doesNotThrow(() => attempt.verify());
+  } finally {
+    attempt.cleanup();
+  }
+});
+
+test("enforcement evidence seam is not exported from the production entry point", async () => {
+  const prod = (await import("./muse-config.js")) as Record<string, unknown>;
+  assert.equal("prepareWithEvidence" in prod, false);
+  assert.equal("museConfigTesting" in prod, false);
+});
+
+test("only muse-config.ts and tests import muse-config-core", () => {
+  const srcRoot = path.resolve(import.meta.dirname, "..");
+  const offenders = walk(srcRoot).filter((f) => {
+    if (!f.endsWith(".ts") || f.endsWith(".test.ts")) return false;
+    if (path.basename(f) === "muse-config.ts" || path.basename(f) === "muse-config-core.ts") return false;
+    return /muse-config-core/.test(fs.readFileSync(f, "utf8"));
+  });
+  assert.deepEqual(offenders, []);
 });
