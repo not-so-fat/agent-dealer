@@ -32,6 +32,8 @@ export const WorkflowEventType = z.enum([
   "review.submitted",
   "repair.started",
   "guidance.added",
+  /** A retry after an `attempts_exhausted` park re-froze the task snapshot (NOT-185). */
+  "task_snapshot.refreshed",
   "human_action.requested",
   "human_action.resolved",
   "final_review.requested",

@@ -20,7 +20,7 @@ import {
 } from "../repository/workflow-events.js";
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
-import { abortIssue, checkIssueReadiness } from "../coordinator/commands.js";
+import { abortIssue, canEditParkedIssue, checkIssueReadiness } from "../coordinator/commands.js";
 import { isStartable, queueStatusForIssue, startIssueViaQueue } from "../coordinator/admission.js";
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
 import { enqueueIssue, enqueueIssueWithOutcome, getQueuedEntryForIssue } from "../repository/queue-entries.js";
@@ -30,6 +30,8 @@ import { branchTipStatusForIssue } from "../coordinator/branch-tip-status.js";
 
 const TRACE_DEFAULT_MAX_CHARS = 50_000;
 const TRACE_HARD_MAX_CHARS = 200_000;
+/** NOT-185: the only fields PATCH accepts at an open attempts_exhausted park. */
+const PARKED_EDITABLE_FIELDS: ReadonlySet<string> = new Set(["title", "description", "acceptanceCriteria"]);
 
 /** Non-numeric, non-finite, zero, or negative all fall back to the default rather than
  * disabling the cap — `Number("not-a-number")` is NaN, and `Math.min(NaN, N)` is NaN,
@@ -222,8 +224,20 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     if (issue.status !== "ready" && issue.status !== "needs_human") {
       return reply.status(409).send({ error: `Cannot edit an issue that is ${issue.status}` });
     }
+    // NOT-185: the one active-workflow exception — parked at an open attempts_exhausted
+    // action with nothing pending/leased. Retry re-freezes the snapshot from these fields.
     if (getActiveWorkflowInstance(id)) {
-      return reply.status(409).send({ error: "Cannot edit an issue with an active workflow" });
+      if (!canEditParkedIssue(issue)) {
+        return reply.status(409).send({ error: "Cannot edit an issue with an active workflow" });
+      }
+      // Only the fields the snapshot is frozen from may change at the park: the review budget,
+      // repo/base branch, agents and autoMerge stay as the running workflow saw them.
+      const blocked = Object.keys(parsed.data).filter((k) => !PARKED_EDITABLE_FIELDS.has(k));
+      if (blocked.length > 0) {
+        return reply.status(409).send({
+          error: `Only title, description and acceptanceCriteria can be edited while parked at attempts_exhausted (got: ${blocked.join(", ")})`,
+        });
+      }
     }
     return updateIssue(id, parsed.data);
   });

@@ -132,6 +132,30 @@ export function getTaskSnapshot(issue: Issue): TaskSnapshotContent {
   };
 }
 
+/**
+ * NOT-185: an issue parked at `attempts_exhausted` may be re-scoped (PATCH) before it is
+ * retried. True only while the workflow is active, the issue is `needs_human` with that
+ * action open, and no work item is pending or leased — so no session can be reading the
+ * snapshot an edit would supersede.
+ */
+export function canEditParkedIssue(issue: Issue): boolean {
+  if (issue.status !== "needs_human") return false;
+  if (!getActiveWorkflowInstance(issue.id)) return false;
+  if (!findOpenHumanAction(issue.id, "attempts_exhausted")) return false;
+  return !listWorkItemsForIssue(issue.id).some((w) => w.status === "pending" || w.status === "leased");
+}
+
+/** Re-freezes the snapshot when the operator edited title/description/criteria; returns the changed fields (empty = no-op). */
+function refreshTaskSnapshotIfEdited(issue: Issue): string[] {
+  const frozen = getTaskSnapshot(issue);
+  const changed: string[] = [];
+  if (frozen.title !== issue.title) changed.push("title");
+  if (frozen.description !== (issue.description ?? "")) changed.push("description");
+  if (frozen.acceptanceCriteria !== (issue.acceptanceCriteria ?? "")) changed.push("acceptanceCriteria");
+  if (changed.length > 0) freezeTaskSnapshot(issue);
+  return changed;
+}
+
 function freezeTaskSnapshot(issue: Issue): void {
   createIssueArtifact({
     issueId: issue.id,
@@ -1217,6 +1241,14 @@ export function resolveHumanActionAndAdvance(
         break;
     }
     const issueNow = getIssue(issue.id)!;
+    // NOT-185: freeze before queuing so the next developer prompt and the reviewer both
+    // read the re-scoped task. An unedited issue writes nothing.
+    if (action.actionType === "attempts_exhausted" && resolution.choice === "retry") {
+      const changedFields = refreshTaskSnapshotIfEdited(issueNow);
+      if (changedFields.length > 0) {
+        ev.emit("task_snapshot.refreshed", { actorType: "human", payload: { actionId: action.id, changedFields } });
+      }
+    }
     // A reviewer resume is a retry of the review, not a repair round — mirrors
     // projection.ts's own retry_reviewer, which likewise emits no "started" marker.
     if (!resumeAsReviewer) ev.emit("repair.started");
