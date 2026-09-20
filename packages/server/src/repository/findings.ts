@@ -100,6 +100,26 @@ export function resolveFinding(id: string): Finding {
   return rowToFinding(row);
 }
 
+/**
+ * Marks every open/recurring finding of the issue whose fingerprint is not in
+ * `presentFingerprints` as resolved. Call after a completed review with a verdict
+ * has reconciled its findings; returns the findings that were resolved.
+ */
+export function resolveFindingsAbsentFromRound(
+  issueId: string,
+  presentFingerprints: readonly string[]
+): Finding[] {
+  const db = getDb();
+  const present = new Set(presentFingerprints);
+  const rows = db
+    .prepare("SELECT * FROM findings WHERE issue_id = ? AND status IN ('open', 'recurring')")
+    .all(issueId) as FindingRow[];
+  const absent = rows.filter((row) => !present.has(row.fingerprint));
+  const update = db.prepare("UPDATE findings SET status = 'resolved' WHERE id = ?");
+  for (const row of absent) update.run(row.id);
+  return absent.map((row) => rowToFinding({ ...row, status: "resolved" }));
+}
+
 export function listFindingsForIssue(issueId: string): Finding[] {
   const rows = getDb()
     .prepare("SELECT * FROM findings WHERE issue_id = ? ORDER BY first_round ASC")
