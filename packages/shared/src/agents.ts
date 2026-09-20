@@ -14,10 +14,21 @@ export const CURSOR_DEFAULT_MODEL = "auto";
 /** Cursor models that draw from the Auto + Composer pool on individual Pro plans. */
 export const CURSOR_SUBSCRIPTION_MODEL_IDS = ["auto", "composer-2.5", "composer-2.5-fast"] as const;
 
+/**
+ * Pinned Muse Code contributor-tier model (NOT-177). Muse accepts unknown `--model` ids
+ * silently, so the profile always names this one explicitly.
+ */
+export const MUSE_CODE_CONTRIBUTOR_MODEL = "muse-spark-1.3-contributor";
+
 export const AgentHealthIssue = z.object({
   code: z.enum([
     "cli_missing",
     "runtime_auth",
+    /**
+     * The runtime probe failed in a way no capture explains (not a missing CLI, not a
+     * classified auth failure). Reported as unknown rather than guessed at (NOT-178).
+     */
+    "runtime_unknown",
     /**
      * Cursor macOS keychain stuck (errSecDuplicateItem / exit 45) — sessions die mid-run
      * even when status briefly looked logged-in (NOT-114 / NOT-103).

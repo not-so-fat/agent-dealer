@@ -32,6 +32,7 @@ const {
   occupyingStatuses,
   countOccupyingIssues,
   admitNext,
+  checkRoleAgentHealthy,
   setAdmissionHealthCheckerForTests,
   setCapacityPolicyForTests,
   resetCapacityPolicyForTests,
@@ -69,8 +70,8 @@ afterEach(() => {
 function seedAgents(
   suffix: string,
   runtimes: {
-    dev: "claude_code" | "codex_local" | "cursor_local";
-    rev: "claude_code" | "codex_local" | "cursor_local";
+    dev: "claude_code" | "codex_local" | "cursor_local" | "muse_code";
+    rev: "claude_code" | "codex_local" | "cursor_local" | "muse_code";
   } = { dev: "claude_code", rev: "claude_code" }
 ) {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), `dealer-admit-repo-${suffix}-`));
@@ -84,8 +85,8 @@ function readyIssue(
   opts: {
     acceptanceCriteria?: string | null;
     runtimes?: {
-      dev: "claude_code" | "codex_local" | "cursor_local";
-      rev: "claude_code" | "codex_local" | "cursor_local";
+      dev: "claude_code" | "codex_local" | "cursor_local" | "muse_code";
+      rev: "claude_code" | "codex_local" | "cursor_local" | "muse_code";
     };
   } = {}
 ) {
@@ -423,6 +424,71 @@ test("NOT-133: a logged-out Cursor runtime is not admitted; it waits with an aut
     if (prevSkipHealth === undefined) delete process.env.AGENT_DEALER_SKIP_AGENT_HEALTH;
     else process.env.AGENT_DEALER_SKIP_AGENT_HEALTH = prevSkipHealth;
     clearAgentHealthCaches();
+    setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
+  }
+});
+
+// NOT-178: an unhealthy Muse Code developer profile waits with a Muse-specific reason and
+// spends nothing — status stays ready, no workflow instance, no attempt. Runs the *real*
+// health checker against a stub CLI and an empty config home (no META_API_KEY, no auth.json).
+test("NOT-178: a Muse Code developer without credentials is refused at admission", async () => {
+  const { clearAgentHealthCaches } = await import("../adapters/agent-health.js");
+  const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-stub-"));
+  const stub = path.join(stubDir, "muse");
+  fs.writeFileSync(stub, "#!/bin/sh\necho 'Muse Code 1.3.0 (1.3.0-R3401.1)'\n");
+  fs.chmodSync(stub, 0o755);
+
+  const saved = {
+    MUSE_CLI: process.env.MUSE_CLI,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+    META_API_KEY: process.env.META_API_KEY,
+    SKIP: process.env.AGENT_DEALER_SKIP_AGENT_HEALTH,
+  };
+  process.env.MUSE_CLI = stub;
+  process.env.XDG_CONFIG_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-cfg-"));
+  delete process.env.META_API_KEY;
+  delete process.env.AGENT_DEALER_SKIP_AGENT_HEALTH;
+  setAdmissionHealthCheckerForTests(null);
+  clearAgentHealthCaches();
+  try {
+    const issue = readyIssue("muse-logged-out", {
+      runtimes: { dev: "muse_code", rev: "codex_local" },
+    });
+    enqueueIssue(issue.id);
+
+    assert.equal(await admitNext(), null);
+    assert.equal(getIssue(issue.id)!.status, "ready");
+    assert.equal(getActiveWorkflowInstance(issue.id), null);
+
+    const entry = getQueuedEntryForIssue(issue.id);
+    assert.equal(entry?.state, "queued");
+    assert.match(entry!.waitReason!, /developer unhealthy/);
+    assert.match(entry!.waitReason!, /muse login/);
+  } finally {
+    for (const [key, value] of Object.entries({
+      MUSE_CLI: saved.MUSE_CLI,
+      XDG_CONFIG_HOME: saved.XDG_CONFIG_HOME,
+      META_API_KEY: saved.META_API_KEY,
+      AGENT_DEALER_SKIP_AGENT_HEALTH: saved.SKIP,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    clearAgentHealthCaches();
+    setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
+  }
+});
+
+// NOT-178: Muse Code is developer-only, so it is never a healthy reviewer — even with the
+// unit-test health skip on, and without probing the CLI.
+test("NOT-178: a Muse Code reviewer is refused regardless of CLI health", async () => {
+  const issue = readyIssue("muse-reviewer", { runtimes: { dev: "claude_code", rev: "muse_code" } });
+  setAdmissionHealthCheckerForTests(null);
+  try {
+    const result = await checkRoleAgentHealthy(getIssue(issue.id)!, "reviewer", { deckOnline: true });
+    assert.equal(result.ok, false);
+    assert.match(result.ok ? "" : result.reason, /reviewer unhealthy.*developer role only/);
+  } finally {
     setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
   }
 });

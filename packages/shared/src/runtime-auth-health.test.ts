@@ -15,12 +15,15 @@ import {
   CODEX_AUTH_REMEDIATION,
   CURSOR_AUTH_REMEDIATION,
   CURSOR_KEYCHAIN_HEALTH_ISSUE,
+  MUSE_AUTH_REMEDIATION,
+  RUNTIME_AUTH_LABEL,
   anyRuntimeAuthIssueFromOutput,
   cursorAuthIssueFromOutput,
   isCursorKeychainStuckOutput,
   runtimeAuthClassificationForLog,
   runtimeAuthIssueFromOutput,
 } from "./runtime-auth-health.js";
+import { Runtime } from "./runtime.js";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures/runtime-auth");
 
@@ -265,4 +268,57 @@ test("the keychain classification still wins over the plain logged-out one", () 
 
 test("cursorAuthIssueFromOutput returns null for clean output", () => {
   assert.equal(cursorAuthIssueFromOutput("✓ Logged in\n"), null);
+});
+
+// NOT-178: Muse Code. The fixtures are the stderr of `muse exec` recorded by the NOT-177 spike
+// (packages/server/src/runners/fixtures/muse-code/manifest.json, probes 10-auth-*) with only the
+// scratch config path sanitized; muse-version.txt is a live `muse --version` capture.
+
+test("muse missing-credentials stderr is the captured string, not a paraphrase", () => {
+  assert.equal(
+    capture("muse-exec-missing-credentials.txt"),
+    "missing meta credentials: run `muse login` or set META_API_KEY, or save credentials at <SPIKE_DIR>/cfg-noauth/muse/auth.json\n"
+  );
+});
+
+test("every captured Muse auth failure classifies as runtime_auth with the Muse remediation", () => {
+  for (const name of [
+    "muse-exec-missing-credentials.txt",
+    "muse-exec-bad-api-key.txt",
+    "muse-exec-saved-login-invalid.txt",
+  ]) {
+    const issue = runtimeAuthIssueFromOutput("muse_code", capture(name));
+    assert.equal(issue?.code, "runtime_auth", name);
+    assert.equal(issue?.message, MUSE_AUTH_REMEDIATION, name);
+  }
+  assert.match(MUSE_AUTH_REMEDIATION, /muse login/);
+  assert.match(MUSE_AUTH_REMEDIATION, /META_API_KEY/);
+});
+
+test("a healthy `muse --version` capture is not an auth failure", () => {
+  assert.equal(runtimeAuthIssueFromOutput("muse_code", capture("muse-version.txt")), null);
+});
+
+test("Muse's captured auth text is attributed to Muse, and other runtimes' text is not", () => {
+  for (const name of ["muse-exec-missing-credentials.txt", "muse-exec-bad-api-key.txt"]) {
+    assert.equal(anyRuntimeAuthIssueFromOutput(capture(name))?.runtime, "muse_code", name);
+  }
+  // Only the shared `Not logged in` and Cursor/Codex/Claude captures existed before; none may
+  // start reading as Muse.
+  for (const name of [
+    "cursor-agent-print-logged-out.txt",
+    "codex-exec-logged-out.txt",
+    "claude-print-logged-out.txt",
+    "claude-auth-status-logged-out.txt",
+  ]) {
+    assert.notEqual(anyRuntimeAuthIssueFromOutput(capture(name))?.runtime, "muse_code", name);
+  }
+  assert.equal(runtimeAuthIssueFromOutput("codex_local", capture("muse-exec-missing-credentials.txt")), null);
+});
+
+test("every runtime has an auth label and a remediation", () => {
+  for (const runtime of Runtime.options) {
+    assert.ok(RUNTIME_AUTH_LABEL[runtime], runtime);
+  }
+  assert.equal(RUNTIME_AUTH_LABEL.muse_code, "Muse Code");
 });

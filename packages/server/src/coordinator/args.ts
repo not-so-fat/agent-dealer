@@ -52,6 +52,11 @@ function buildArgs(
   mcpConfigPath?: string,
   effort?: ReasoningEffort | null
 ): string[] {
+  if (runtime === "muse_code") {
+    // NOT-178 only makes Muse Code selectable and health-checked. Falling through to the
+    // Claude arm below would spawn `muse` with Claude flags; the runner lands in NOT-179/181.
+    throw new Error("muse_code has no spawn args yet — the Muse Code runner is not wired (NOT-179/181)");
+  }
   if (runtime === "codex_local") {
     const args = ["exec", "--json", "-s", policy.worktreeWrite ? "workspace-write" : "read-only"];
     // codex's read-only sandbox constrains shell/files but NOT configured MCP/plugin

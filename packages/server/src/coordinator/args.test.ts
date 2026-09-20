@@ -152,3 +152,17 @@ test("buildDeveloperArgs for cursor_local has no separate effort flag (effort li
   assert.ok(!args.some((a) => a.includes("model_reasoning_effort")));
   assert.ok(!args.includes("-c"));
 });
+
+test("every runtime either builds developer args or is the not-yet-wired muse_code", async () => {
+  const { Runtime } = await import("@agent-dealer/shared");
+  for (const runtime of Runtime.options) {
+    if (runtime === "muse_code") {
+      // NOT-178 made Muse selectable but the runner is NOT-179/181. Falling through to the
+      // Claude flags would launch `muse` with arguments it does not understand.
+      assert.throws(() => buildDeveloperArgs(runtime, "prompt"), /not wired/);
+      assert.throws(() => buildReviewerArgs(runtime, "prompt"), /not wired/);
+    } else {
+      assert.ok(buildDeveloperArgs(runtime, "prompt").includes("prompt"), runtime);
+    }
+  }
+});

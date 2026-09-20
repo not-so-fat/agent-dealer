@@ -1,5 +1,6 @@
 import type { AgentProfile, CreateAgentInput, ReasoningEffort, Runtime, UpdateAgentInput } from "@agent-dealer/shared";
 import {
+  MUSE_CODE_CONTRIBUTOR_MODEL,
   ReasoningEffort as ReasoningEffortSchema,
   resolveProfileBudgetJson,
   resolveProfileModel,
@@ -81,6 +82,15 @@ export function getAgent(id: string): AgentProfile | null {
   return row ? rowToAgent(row) : null;
 }
 
+/**
+ * Muse accepts an unknown `--model` silently and, when none is passed, picks its own profile
+ * (NOT-177), so a Muse profile always names the pinned contributor model rather than storing null.
+ */
+function museModelOrDefault(runtime: Runtime, model: string | null | undefined): string | null {
+  const trimmed = model?.trim() || null;
+  return runtime === "muse_code" ? (trimmed ?? MUSE_CODE_CONTRIBUTOR_MODEL) : (model ?? null);
+}
+
 export function createAgent(input: CreateAgentInput, deckName?: string | null): AgentProfile {
   const db = getDb();
   const now = new Date().toISOString();
@@ -100,7 +110,7 @@ export function createAgent(input: CreateAgentInput, deckName?: string | null): 
     deckName ?? null,
     null, // playbook_id — dead legacy (NOT-149)
     null, // workspace_root — dead legacy (NOT-149)
-    input.defaultModel ?? null,
+    museModelOrDefault(input.runtime, input.defaultModel),
     input.defaultEffort ?? null,
     serializePhaseBudget(input.defaultBudget),
     input.purpose?.trim() || null,
@@ -131,8 +141,10 @@ export function updateAgent(id: string, input: UpdateAgentInput, deckName?: stri
   // a legacy profile saved a null role-neutral model while the legacy column kept winning the
   // fallback — so the form showed blank while the session still ran the hidden value, and
   // switching runtime carried the old runtime's model into the new one's snapshot.
-  const defaultModel =
-    input.defaultModel !== undefined ? input.defaultModel : resolveProfileModel(existing);
+  const defaultModel = museModelOrDefault(
+    runtime,
+    input.defaultModel !== undefined ? input.defaultModel : resolveProfileModel(existing)
+  );
   const defaultEffort =
     input.defaultEffort !== undefined ? input.defaultEffort : existing.defaultEffort;
   const defaultBudgetJson =

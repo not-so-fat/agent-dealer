@@ -147,3 +147,37 @@ test("snapshot freezes defaultEffort alongside the model", () => {
   const cleared = updateAgent(agent.id, { defaultEffort: null })!;
   assert.equal(buildProfileSnapshot(cleared, "developer").effort, null);
 });
+
+test("a Muse Code profile round-trips through the agent APIs and its frozen snapshot (NOT-178)", async () => {
+  const { MUSE_CODE_CONTRIBUTOR_MODEL } = await import("@agent-dealer/shared");
+  const { parseProfileSnapshot } = await import("@agent-dealer/shared");
+  const created = createAgent({
+    name: "muse",
+    runtime: "muse_code",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
+  assert.equal(getAgent(created.id)!.runtime, "muse_code");
+  // No model given: the pinned contributor model is stored, not null (Muse would otherwise
+  // pick its own profile).
+  assert.equal(created.defaultModel, MUSE_CODE_CONTRIBUTOR_MODEL);
+
+  const snap = buildProfileSnapshot(created, "developer");
+  assert.equal(snap.runtime, "muse_code");
+  assert.equal(snap.model, MUSE_CODE_CONTRIBUTOR_MODEL);
+  assert.deepEqual(parseProfileSnapshot(JSON.stringify(snap)), snap);
+
+  // Editing keeps it a Muse profile, and clearing the model re-pins rather than storing null.
+  const edited = updateAgent(created.id, { name: "muse-2", defaultModel: null })!;
+  assert.equal(edited.runtime, "muse_code");
+  assert.equal(edited.defaultModel, MUSE_CODE_CONTRIBUTOR_MODEL);
+  assert.equal(edited.name, "muse-2");
+
+  // Switching another runtime to Muse also pins.
+  const claude = createAgent({
+    name: "to-muse",
+    runtime: "claude_code",
+    defaultModel: "sonnet",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
+  assert.equal(updateAgent(claude.id, { runtime: "muse_code", defaultModel: null })!.defaultModel, MUSE_CODE_CONTRIBUTOR_MODEL);
+});

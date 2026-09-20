@@ -14,7 +14,7 @@
 import path from "node:path";
 import type { PermissionPolicy, ReasoningEffort, Runtime } from "@agent-dealer/shared";
 import { getTemporalLogsDir } from "../paths.js";
-import { resolveClaudeBin, resolveCodexBin, resolveCursorBin } from "../cli-env.js";
+import { resolveClaudeBin, resolveCodexBin, resolveCursorBin, resolveMuseBin } from "../cli-env.js";
 import { spawnCli } from "../runners/spawn-cli.js";
 import { buildDeveloperArgs, buildReviewerArgs } from "./args.js";
 import { assertReviewerReadOnly } from "./permissions.js";
@@ -85,6 +85,7 @@ const BIN_FOR: Record<Runtime, () => string> = {
   claude_code: resolveClaudeBin,
   cursor_local: resolveCursorBin,
   codex_local: resolveCodexBin,
+  muse_code: resolveMuseBin,
 };
 
 export const realDeveloperSpawn: DeveloperSpawn = async (input) => {

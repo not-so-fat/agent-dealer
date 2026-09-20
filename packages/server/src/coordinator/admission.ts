@@ -132,6 +132,13 @@ async function defaultAgentHealth(
   role: AgentRole,
   deckOnline: boolean
 ): Promise<EligibilityResult> {
+  // NOT-178: Muse Code is a developer-only trial runtime — the reviewer stays Codex/Claude.
+  if (role === "reviewer" && agent.runtime === "muse_code") {
+    return {
+      ok: false,
+      reason: `reviewer unhealthy: ${agent.name} — Muse Code cannot be a reviewer (developer role only)`,
+    };
+  }
   // Unit/CI tests must not call real CLIs / Agent Deck — runners usually have no deck MCP.
   // Production leaves this unset. NOT-133 clears it so the real auth classifier still runs.
   if (process.env.AGENT_DEALER_SKIP_AGENT_HEALTH === "1") {

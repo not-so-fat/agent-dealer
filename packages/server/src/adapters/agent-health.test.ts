@@ -437,6 +437,123 @@ test("NOT-157: verbatim logged-out capture still blocks immediately (hard fail)"
   }
 });
 
+// ---------------------------------------------------------------------------
+// NOT-178: Muse Code health. Missing CLI, missing credentials and healthy classify distinctly;
+// a probe that fails for any other reason is `runtime_unknown`, never a guessed auth failure.
+// The missing-credentials remediation quotes the captured `muse exec` stderr
+// (shared/src/fixtures/runtime-auth/muse-exec-missing-credentials.txt).
+// ---------------------------------------------------------------------------
+
+/** Stub `muse` that runs `body` and records the env it saw, so the pin can be asserted. */
+function stubMuse(body: string): { bin: string; envLog: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-stub-"));
+  const bin = path.join(dir, "muse");
+  const envLog = path.join(dir, "env.log");
+  fs.writeFileSync(bin, `#!/bin/sh\necho "$MUSE_NO_AUTO_UPDATE" > ${JSON.stringify(envLog)}\n${body}\n`);
+  fs.chmodSync(bin, 0o755);
+  return { bin, envLog };
+}
+
+async function withMuseEnv<T>(
+  env: { MUSE_CLI: string; META_API_KEY?: string; configHome: string },
+  fn: () => Promise<T>
+): Promise<T> {
+  const keys = ["MUSE_CLI", "META_API_KEY", "XDG_CONFIG_HOME"] as const;
+  const prev = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  process.env.MUSE_CLI = env.MUSE_CLI;
+  process.env.XDG_CONFIG_HOME = env.configHome;
+  if (env.META_API_KEY === undefined) delete process.env.META_API_KEY;
+  else process.env.META_API_KEY = env.META_API_KEY;
+  clearAgentHealthCaches();
+  try {
+    return await fn();
+  } finally {
+    for (const k of keys) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+    clearAgentHealthCaches();
+  }
+}
+
+const emptyConfigHome = () => fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-cfg-"));
+
+test("muse_code with a missing CLI reports cli_missing", async () => {
+  const missing = path.join(os.tmpdir(), `dealer-absent-muse-${randomUUID()}`);
+  const issues = await withMuseEnv(
+    { MUSE_CLI: missing, META_API_KEY: "k", configHome: emptyConfigHome() },
+    () => runtimeIssuesUncached("muse_code")
+  );
+  assert.deepEqual(issues.map((i) => i.code), ["cli_missing"]);
+  assert.match(issues[0]!.message, /Muse Code CLI not found/);
+});
+
+test("muse_code with no META_API_KEY and no saved login reports runtime_auth", async () => {
+  const stub = stubMuse(`cat ${JSON.stringify(path.join(FIXTURES, "muse-version.txt"))}`);
+  const issues = await withMuseEnv(
+    { MUSE_CLI: stub.bin, configHome: emptyConfigHome() },
+    () => runtimeIssuesUncached("muse_code")
+  );
+  assert.deepEqual(issues.map((i) => i.code), ["runtime_auth"]);
+  assert.match(issues[0]!.message, /muse login/);
+  assert.match(issues[0]!.message, /META_API_KEY/);
+});
+
+test("muse_code is healthy with a saved login file or a META_API_KEY", async () => {
+  const stub = stubMuse(`cat ${JSON.stringify(path.join(FIXTURES, "muse-version.txt"))}`);
+  const withLogin = emptyConfigHome();
+  fs.mkdirSync(path.join(withLogin, "muse"));
+  fs.writeFileSync(path.join(withLogin, "muse", "auth.json"), "{}");
+  assert.deepEqual(
+    await withMuseEnv({ MUSE_CLI: stub.bin, configHome: withLogin }, () =>
+      runtimeIssuesUncached("muse_code")
+    ),
+    []
+  );
+  assert.deepEqual(
+    await withMuseEnv(
+      { MUSE_CLI: stub.bin, META_API_KEY: "k", configHome: emptyConfigHome() },
+      () => runtimeIssuesUncached("muse_code")
+    ),
+    []
+  );
+});
+
+test("muse probes run with MUSE_NO_AUTO_UPDATE=1 so the launcher cannot swap the pinned version", async () => {
+  const stub = stubMuse("echo 'Muse Code 1.3.0 (1.3.0-R3401.1)'");
+  delete process.env.MUSE_NO_AUTO_UPDATE;
+  await withMuseEnv({ MUSE_CLI: stub.bin, META_API_KEY: "k", configHome: emptyConfigHome() }, () =>
+    runtimeIssuesUncached("muse_code")
+  );
+  assert.equal(fs.readFileSync(stub.envLog, "utf8").trim(), "1");
+});
+
+test("a muse probe that fails for any other reason is runtime_unknown, not a guessed auth failure", async () => {
+  const stub = stubMuse("echo 'panic: something else broke'; exit 3");
+  const issues = await withMuseEnv(
+    { MUSE_CLI: stub.bin, configHome: emptyConfigHome() },
+    () => runtimeIssuesUncached("muse_code")
+  );
+  assert.deepEqual(issues.map((i) => i.code), ["runtime_unknown"]);
+  assert.match(issues[0]!.message, /panic: something else broke/);
+  assert.doesNotMatch(issues[0]!.message, /muse login/);
+});
+
+test("a muse probe that hangs past the timeout is runtime_unknown", async () => {
+  const stub = stubMuse("sleep 30");
+  setCursorProbeTimingForTests({ timeoutMs: 150 });
+  try {
+    const issues = await withMuseEnv(
+      { MUSE_CLI: stub.bin, META_API_KEY: "k", configHome: emptyConfigHome() },
+      () => runtimeIssuesUncached("muse_code")
+    );
+    assert.deepEqual(issues.map((i) => i.code), ["runtime_unknown"]);
+    assert.match(issues[0]!.message, /timed out/);
+  } finally {
+    setCursorProbeTimingForTests(null);
+  }
+});
+
 test("claude MCP endpoint mismatch surfaces a distinct message, not the generic setup hint", async () => {
   const agent = createAgent({
     name: "claude-mcp-mismatch",
