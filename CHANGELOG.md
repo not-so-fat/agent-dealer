@@ -2,6 +2,14 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.1.2 — 2026-09-20
+
+Patch over 1.1.1: internal groundwork for Muse Code isolation; no change to how existing runs behave.
+
+### Internal
+
+- **Muse Code per-attempt config (NOT-180)** — adds a module that builds the isolated config for one Muse Code attempt (single Agent Deck MCP server, sandbox on, approvals never, filtered env, reviewer write/shell disabled) and refuses restrictions that cannot yet be enforced. It is not yet wired into the Muse runner, so Muse runs are unchanged.
+
 ## 1.1.1 — 2026-09-20
 
 Patch over 1.1.0: stop/start safety fixes (`stop` for isolated homes, `start --force` port check) and a false usage-cap deferral fix.
