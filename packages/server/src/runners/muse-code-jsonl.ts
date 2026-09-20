@@ -63,12 +63,15 @@ export interface MuseRunResult {
   terminal: "completed" | "failed" | null;
   /** `run.terminal.completed.text` of the primary run: model prose, not a verified result. */
   finalText: string | null;
-  /** More than one means something else (e.g. a cron job) started a run inside this process. */
+  /**
+   * Distinct runs observed on stdout, terminated or not. More than one means something else (e.g. a
+   * cron job) started a run inside this process.
+   */
   runCount: number;
   confirmedModel: string | null;
   tools: MuseToolActivity[];
   usage: MuseUsage;
-  /** A `rate_limited` / HTTP 429 retry facet was seen on stdout. */
+  /** A `rate_limited` / HTTP 429 retry facet was seen on stdout for the primary run. */
   rateLimited: boolean;
   failure: MuseFailure | null;
   exitCode: number | null;
@@ -219,12 +222,15 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
   let rateLimited = false;
   // The first run seen is the primary one; a cron job may start further runs in the same process.
   let primaryRunId: string | null = null;
+  const runIds = new Set<string>();
 
   for (const env of envelopes) {
     const p = env.payload;
     if (sessionId === null && env.streamKind === "session" && env.streamId) sessionId = env.streamId;
 
-    if (primaryRunId === null) primaryRunId = runIdOf(p) ?? null;
+    const runId = runIdOf(p);
+    if (runId !== undefined) runIds.add(runId);
+    if (primaryRunId === null) primaryRunId = runId ?? null;
 
     if (env.payloadType === "run.terminal.completed" || env.payloadType === "run.terminal.failed") {
       terminals.push({
@@ -262,7 +268,8 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
       const prev = callId ? tools.get(callId) : undefined;
       if (prev) prev.error = cap(str(event?.reason) ?? "");
     } else if (env.payloadType === "task.lifecycle.status" && hasRateLimitFacet(p)) {
-      rateLimited = true;
+      // Another run's 429 says nothing about the primary run; a facet naming no run is attributed to it.
+      if (runId === undefined || runId === primaryRunId) rateLimited = true;
     }
   }
 
@@ -281,6 +288,15 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
     if (malformed > 0) {
       return { kind: "malformed_stream", message: `${malformed} stdout line(s) were not muse JSON envelopes` };
     }
+    // The configured-model check holds for whatever the primary run's terminal turned out to be.
+    const wrong = calls.find((c) => c.model !== null && c.model !== input.expectedModel);
+    if (wrong) {
+      const detail = first?.terminal === "failed" ? `; run also failed: ${classifyReason(first.reason).message}` : "";
+      return {
+        kind: "model_mismatch",
+        message: cap(`configured ${input.expectedModel}, server confirmed ${wrong.model}${detail}`),
+      };
+    }
     if (first?.terminal === "failed") return classifyReason(first.reason);
     if (!first) {
       if (rateLimited) return { kind: "usage_cap", message: "rate limited (429) and never reached a terminal event" };
@@ -298,10 +314,6 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
     if (input.exitCode !== 0) {
       return { kind: "other", message: `run.terminal.completed but muse exited ${input.exitCode ?? "without a status"}` };
     }
-    const wrong = calls.find((c) => c.model !== null && c.model !== input.expectedModel);
-    if (wrong) {
-      return { kind: "model_mismatch", message: `configured ${input.expectedModel}, server confirmed ${wrong.model}` };
-    }
     if (confirmedModel === null) {
       return { kind: "model_mismatch", message: `server did not confirm model ${input.expectedModel}` };
     }
@@ -315,7 +327,8 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
     sessionId,
     terminal: first?.terminal ?? null,
     finalText: finalText === "" ? null : finalText,
-    runCount: terminals.length,
+    // Without run ids on stdout there is nothing to count but the terminals.
+    runCount: Math.max(runIds.size, terminals.length),
     confirmedModel,
     tools: toolList,
     usage,

@@ -217,6 +217,32 @@ test("a cron terminal alone does not stand in for a primary run that never termi
   assert.equal(r.failure?.kind, "malformed_stream");
 });
 
+test("an interrupted secondary run is still counted", () => {
+  const stdout = interleavedStdout.split("\n").filter((l) => !l.includes('"id":"cron"') || !l.includes("terminal")).join("\n");
+  const r = parseMuseRun({ stdout, exitCode: 0, sessionLog: modelCompletedLine("primary", {}), expectedModel: MODEL });
+  assert.equal(r.runCount, 2);
+  assert.equal(r.finalText, "primary text");
+  assert.equal(r.failure, null);
+});
+
+test("a secondary run's 429 does not make the primary run usage-capped", () => {
+  const status = (runId: string) =>
+    runLine(runId, "task.lifecycle.status", {
+      event: { details: { facets: [{ kind: "external_attempt", error_kind: "rate_limited", http_status: 429 }] } },
+    });
+  const cronOnly = [runLine("primary", "session.run.linked", {}), status("cron")].join("\n");
+  const r = parseMuseRun({ stdout: cronOnly, exitCode: 0, sessionLog: modelCompletedLine("primary", {}), expectedModel: MODEL });
+  assert.equal(r.rateLimited, false);
+  assert.equal(r.failure?.kind, "malformed_stream");
+  const own = parseMuseRun({
+    stdout: [runLine("primary", "session.run.linked", {}), status("primary")].join("\n"),
+    exitCode: 1,
+    expectedModel: MODEL,
+  });
+  assert.equal(own.rateLimited, true);
+  assert.equal(own.failure?.kind, "usage_cap");
+});
+
 test("session id comes from stream.id of the session stream", () => {
   const line = JSON.stringify({
     stream: { kind: "session", id: SESSION },
@@ -309,6 +335,13 @@ test("a server-confirmed model different from the configured one is a failure", 
   assert.equal(r.failure?.kind, "model_mismatch");
   assert.match(r.failure?.message ?? "", /muse-spark-9\.9.*muse-spark-1\.3-contributor/);
   assert.equal(r.events.find((e) => e.type === "result")?.is_error, true);
+});
+
+test("a mismatched primary-run model is reported even when the run failed", () => {
+  const r = fixture("04-max-model-steps", { sessionLog, expectedModel: "muse-spark-9.9" });
+  assert.equal(r.terminal, "failed");
+  assert.equal(r.failure?.kind, "model_mismatch");
+  assert.match(r.failure?.message ?? "", /muse-spark-9\.9.*muse-spark-1\.3-contributor.*run also failed/);
 });
 
 test("an unconfirmed model (no model_completed) is a failure even at exit 0", () => {
