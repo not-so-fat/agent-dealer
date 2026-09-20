@@ -1,0 +1,277 @@
+{
+ "muse_version": "1.3.0-R3401.1",
+ "binary_sha256": "20c5eb32f6aea741adac032c14be2f1897432caaf35144c33279a4d2b0bd8840",
+ "model": "muse-spark-1.3-contributor",
+ "probes": [
+  {
+   "fixture": "01-exec-success.jsonl",
+   "probe": 1,
+   "command": "muse exec --json --trust-workspace --approval-mode never --max-model-steps 3 \"<prompt: reply pong>\"",
+   "config": "default (no --model; default model resolved to contributor, profile_id=tbh)",
+   "exit_code": "0",
+   "stdout_lines": 32,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag",
+   "notes": "Default model resolution; run.model.configured.profile_id is \"tbh\" only when --model is omitted."
+  },
+  {
+   "fixture": "02-tool-success.jsonl",
+   "probe": 2,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --trust-workspace --max-model-steps 8 \"<prompt: read hello.txt, count lines>\"",
+   "config": "isolated XDG config",
+   "exit_code": "0",
+   "stdout_lines": 53,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag",
+   "notes": "Successful read_file tool call."
+  },
+  {
+   "fixture": "02-tool-failure.jsonl",
+   "probe": 2,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --trust-workspace --max-model-steps 8 \"<prompt: read does-not-exist.txt>\"",
+   "config": "isolated XDG config",
+   "exit_code": "0",
+   "stdout_lines": 53,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag",
+   "notes": "Deterministic tool failure: tool.result outcome=failure; process exit stays 0 and run.terminal.completed."
+  },
+  {
+   "fixture": "03-session-first.jsonl",
+   "probe": 3,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --trust-workspace --session-id <UUID> --max-model-steps 4 \"<prompt: remember codeword>\"",
+   "config": "isolated XDG config",
+   "exit_code": "0",
+   "stdout_lines": 57,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag",
+   "notes": "Caller-chosen session id is honoured; stream.id of every line equals it."
+  },
+  {
+   "fixture": "03-session-resume.jsonl",
+   "probe": 3,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --trust-workspace --session-id <same UUID> --max-model-steps 4 \"<prompt: recall codeword>\"",
+   "config": "isolated XDG config",
+   "exit_code": "0",
+   "stdout_lines": 32,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag",
+   "notes": "Headless resume: same --session-id continues the conversation."
+  },
+  {
+   "fixture": "04-max-model-steps.jsonl",
+   "probe": 4,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --trust-workspace --max-model-steps 2 \"<prompt: three sequential reads>\"",
+   "config": "isolated XDG config",
+   "exit_code": "1",
+   "stdout_lines": 54,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: workspace trust: trusted source=run-flag\nrun ended with Failed: model did not reach a terminal state within 2 step(s)",
+   "notes": "Step cap yields run.terminal.failed and exit code 1."
+  },
+  {
+   "fixture": "05-06-developer-posture.jsonl",
+   "probe": 5,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 20 \"<prompt: 6 scripted steps>\"  (cwd = linked git worktree under $HOME)",
+   "config": "isolated XDG config",
+   "exit_code": "0",
+   "stdout_lines": 173,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "notes": "Inside writes and git commit succeed; outside writes (tool and shell) and network fail. Run once with workspace under /tmp separately observed that /tmp is writable."
+  },
+  {
+   "fixture": "06-git-common-dir.jsonl",
+   "probe": 6,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 15 \"<prompt: sibling write, git branch, git worktree add, home write>\"",
+   "config": "isolated XDG config",
+   "exit_code": "0",
+   "stdout_lines": 119,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "notes": "Sibling checkout and $HOME writes denied; git branch succeeded and git worktree add left a partial branch ref."
+  },
+  {
+   "fixture": "07-reviewer-inventory.jsonl",
+   "probe": 7,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-write --disable-shell --disable-web-tools --max-model-steps 3 \"<prompt: list tools>\"",
+   "config": "isolated XDG config",
+   "exit_code": "0",
+   "stdout_lines": 37,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "notes": "Self-reported tool list is unchanged by --disable-* flags (tools stay registered; calls are denied at runtime)."
+  },
+  {
+   "fixture": "07-reviewer-model-declined.jsonl",
+   "probe": 7,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --preset native-basic --disable-write --disable-shell --disable-web-tools --max-model-steps 15 \"<prompt: forced mutation calls>\"",
+   "config": "cfg: reminders off",
+   "exit_code": "0",
+   "stdout_lines": 55,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "notes": "Model self-declined every denied call after reading the injected capability_policy notice; only read_file ran."
+  },
+  {
+   "fixture": "08-mcp-required-ok.jsonl",
+   "probe": 8,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 12 \"<prompt: get_bound_deck + get_playbook>\"",
+   "config": "settings.mcpServers.agent-deck mode=required (streamable-http, deck headers)",
+   "exit_code": "0",
+   "stdout_lines": 82,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "notes": "Tool ids are mcp__agent_deck__<tool>; policy allow:policy under --approval-mode never."
+  },
+  {
+   "fixture": "08-mcp-required-unreachable.jsonl",
+   "probe": 8,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 4 \"<prompt>\"",
+   "config": "settings.mcpServers.agent-deck mode=required, url unreachable",
+   "exit_code": "1",
+   "stdout_lines": 8,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.\nrun ended with Failed: invalid run configuration: Required MCP server `agent-deck` failed during startup: the process could not be started or the server could not be reached.",
+   "notes": "Fails closed before any model call: run.terminal.failed, exit 1."
+  },
+  {
+   "fixture": "08-mcp-optional-unreachable.jsonl",
+   "probe": 8,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 4 \"<prompt>\"",
+   "config": "settings.mcpServers.agent-deck mode=optional, url unreachable",
+   "exit_code": "0",
+   "stdout_lines": 32,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "notes": "Optional mode proceeds without the server (not acceptable for Dealer)."
+  },
+  {
+   "fixture": "08-mcp-disabled-tools-not-enforced.jsonl",
+   "probe": 8,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 8 \"<prompt: call get_playbook>\"",
+   "config": "settings.mcpServers.agent-deck disabled_tools=[get_playbook,call_service_tool], enabled_tools=[get_bound_deck]",
+   "exit_code": "0",
+   "stdout_lines": 57,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "notes": "The excluded tool still executed: per-tool allow/deny lists are not enforced."
+  },
+  {
+   "fixture": "09-workflow-default.jsonl",
+   "probe": 9,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 15 \"<prompt: workflow/subagent/cron/work_status/peers>\"",
+   "config": "cfg: reminders off only",
+   "exit_code": "0",
+   "stdout_lines": 130,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "notes": "workflow tool launched (maxParallelAgents 8); cron_create succeeded; no reminder tasks."
+  },
+  {
+   "fixture": "09-workflow-native-basic.jsonl",
+   "probe": 9,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --preset native-basic --max-model-steps 15 \"<prompt>\"",
+   "config": "cfg: reminders off",
+   "exit_code": "0",
+   "stdout_lines": 125,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "notes": "--preset native-basic does not remove workflow."
+  },
+  {
+   "fixture": "09-orchestration-off.jsonl",
+   "probe": 9,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 15 \"<prompt>\"",
+   "config": "cfg: run.workflow_trigger_mode=off, run.subagent_delegation_mode=off, reminders off",
+   "exit_code": "0",
+   "stdout_lines": 48,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.",
+   "notes": "workflow, subagent_spawn, code_exec -> NOSUCHTOOL; cron_create still succeeds."
+  },
+  {
+   "fixture": "10-auth-missing.jsonl",
+   "probe": 10,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted ...",
+   "config": "no auth.json in config dir",
+   "exit_code": "1",
+   "stdout_lines": 0,
+   "stderr": "missing meta credentials: run `muse login` or set META_API_KEY, or save credentials at <WORKSPACE>/muse/auth.json",
+   "notes": "Exit 1; message on stderr only; stdout empty."
+  },
+  {
+   "fixture": "10-auth-bad-key.jsonl",
+   "probe": 10,
+   "command": "muse exec --json ... --api-key-stdin  (stdin: bogus key)",
+   "config": "isolated XDG config",
+   "exit_code": "1",
+   "stdout_lines": 0,
+   "stderr": "failed to fetch model catalog: authentication failed: your API key from META_API_KEY was rejected \u2014 update or unset it",
+   "notes": "Exit 1; message on stderr only; stdout empty."
+  },
+  {
+   "fixture": "10-auth-rejected-401-mock.jsonl",
+   "probe": 10,
+   "command": "muse exec --json ... --base-url http://127.0.0.1:<port> (local mock returning 401)",
+   "config": "synthetic server",
+   "exit_code": "1",
+   "stdout_lines": 22,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.\nrun ended with Failed: your saved login is no longer valid. Log in again or use a different account.",
+   "notes": "Exit 1 with run.terminal.failed. Synthetic mock, not the real Meta error body."
+  },
+  {
+   "fixture": "10-rate-limit-429-mock.jsonl",
+   "probe": 10,
+   "command": "muse exec --json ... --base-url http://127.0.0.1:<port> (local mock returning 429, Retry-After: 30)",
+   "config": "synthetic server",
+   "exit_code": "TIMEOUT",
+   "stdout_lines": 26,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.",
+   "notes": "Client retries (max_attempts 10) and honours retry-after; killed by harness at 100s. Machine-readable task.lifecycle.status with error_kind=rate_limited. Synthetic mock."
+  },
+  {
+   "fixture": "10-sigterm.jsonl",
+   "probe": 10,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 10 \"<prompt: sleep 90>\"  + SIGTERM",
+   "config": "isolated XDG config",
+   "exit_code": "143",
+   "stdout_lines": 27,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.\nreceived SIGTERM; flushed session logs",
+   "notes": "Exit 143 in ~0.7s, no terminal JSONL event, no orphan child; stderr \"received SIGTERM; flushed session logs\"."
+  },
+  {
+   "fixture": "10-sigint.jsonl",
+   "probe": 10,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --max-model-steps 10 \"<prompt: sleep 90>\"  + SIGINT",
+   "config": "isolated XDG config",
+   "exit_code": "130",
+   "stdout_lines": 27,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: auto unavailable: workspace is untrusted.\nreceived SIGINT; flushed session logs",
+   "notes": "Exit 130 in ~0.7s, no terminal JSONL event, no orphan child."
+  },
+  {
+   "fixture": "07-reviewer-runtime-denial-excerpt.jsonl",
+   "probe": 7,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-write --disable-shell --disable-web-tools --max-model-steps 15 \"<prompt: forced mutation calls>\"",
+   "config": "isolated XDG config",
+   "exit_code": "0",
+   "stdout_lines": 5,
+   "stderr": "",
+   "notes": "EXCERPT ONLY (tool.result lines). Two runs were accidentally interleaved in the raw capture, so only intact tool.result lines were kept. Shows runtime denial: \"tool policy denied filesystem write\" / \"shell execution\". Not reproduced in 4 clean retries because the model declines to issue calls it is told will be denied."
+  },
+  {
+   "fixture": "11-recommended-developer.jsonl",
+   "probe": 5,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --session-id <UUID> --max-model-steps 20 \"<prompt: get_bound_deck, write file, git commit>\"",
+   "config": "settings.recommended (reminders off, workflow/delegation off, agent-deck required)",
+   "exit_code": "0",
+   "stdout_lines": 74,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.",
+   "notes": "Combined developer posture: MCP read, in-worktree write and git commit succeed; 4 model calls, no reminder/subagent tasks."
+  },
+  {
+   "fixture": "11-recommended-reviewer.jsonl",
+   "probe": 7,
+   "command": "muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor --approval-mode never --approval-judge off --sandbox-network restricted --disable-web-tools --disable-write --disable-shell --max-model-steps 12 \"<prompt: read hello.txt, get_bound_deck>\"",
+   "config": "settings.recommended",
+   "exit_code": "0",
+   "stdout_lines": 47,
+   "stderr": "muse: workspace root: <WORKSPACE> (cwd default)\nmuse: Agent delegation: off; native subagent tools are hidden. Set run.subagent_delegation_mode = \"auto\" in settings to enable delegation.",
+   "notes": "Combined reviewer posture: read_file and MCP read succeed."
+  },
+  {
+   "fixture": "session-log-usage-excerpt.jsonl",
+   "probe": 2,
+   "command": "(on-disk $XDG_DATA_HOME/muse/sessions/YYYY/MM/DD/<session-id>/session.jsonl, not stdout)",
+   "config": "n/a",
+   "exit_code": "n/a",
+   "stdout_lines": 12,
+   "stderr": "",
+   "notes": "Usage/model confirmation lives only in the on-disk session log: runtime.session event kind=model_completed {usage{...},model}. No cost/credit field exists."
+  }
+ ]
+}

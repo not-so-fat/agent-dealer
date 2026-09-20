@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "run": {
+    "workflow_trigger_mode": "off",
+    "subagent_delegation_mode": "off"
+  },
+  "runtime_capabilities": {
+    "plugin:tbh-reminders:reminder:skill-reminder": {
+      "enabled": false
+    },
+    "plugin:tbh-reminders:reminder:verify-reminder": {
+      "enabled": false
+    },
+    "plugin:tbh-reminders:reminder:memory-reminder": {
+      "enabled": false
+    },
+    "plugin:tbh-reminders:reminder:todo-reminder": {
+      "enabled": false
+    },
+    "plugin:tbh-reminders:reminder:goal-reminder": {
+      "enabled": false
+    },
+    "plugin:tbh-reminders:reminder:scope-reminder": {
+      "enabled": false
+    }
+  },
+  "mcpServers": {
+    "agent-deck": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:1110/mcp",
+      "headers": {
+        "x-agent-deck-deck-id": "<DECK_ID>",
+        "x-agent-deck-workspace": "<WORKTREE>"
+      },
+      "mode": "required"
+    }
+  }
+}
