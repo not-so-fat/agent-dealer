@@ -1,136 +1,78 @@
-# Muse Code evaluation contract (NOT-176, epic NOT-164)
+# Muse Code PoC protocol (NOT-176, epic NOT-164)
 
-Fixed, budget-first contract for one question:
+A small go/no-go screen for one question:
 
-> Can **native Muse Code on the Muse contributor tier** materially reduce Agent Dealer execution cost while keeping acceptable task quality and reliability?
+> Can **native Muse Code on the Muse contributor tier** do Agent Dealer developer work well enough, and cheaply enough, to justify building an adapter?
 
-This document and [`tasks.json`](./tasks.json) are written **before** any adapter exists or any result is available. Nothing here is tuned to results. Changing a task, threshold, formula or subject after the first run starts invalidates the affected runs.
-
-**Non-goals:** configuring Muse through Codex (Muse Spark via Codex is not the candidate), implementing the `muse_code` adapter, running the bakeoff, or running any sensitive production work on the contributor tier.
+The protocol and [`tasks.json`](./tasks.json) are fixed **before** any run. Changing a task, threshold or subject after the first run invalidates the affected runs. It is not a full benchmark: 5 tasks, one developer role, 3 thresholds. Muse Spark through Codex is not the candidate. The adapter (NOT-178, NOT-179, NOT-181) is only built if NOT-183 decides "go".
 
 ## Subjects
 
-Every compared subject is frozen to an explicit runtime, model id, effort, CLI version and invocation. Nothing resolves from a CLI default during the experiment; the validator rejects `null` or descriptive values.
+Each subject is frozen to an explicit runtime, model id, effort, CLI version and invocation; nothing resolves from a CLI default during the run. `scripts/validate-muse-code-manifest.mjs` rejects nulls and descriptive values.
 
-| | Runtime | Model | Effort | CLI | Pricing basis |
-|---|---|---|---|---|---|
-| **Baseline developer** (`Claude Dev`) | `claude_code` | `claude-sonnet-5` (`--model`) | `high` (`--effort`) | Claude Code 2.1.278 | list-rate shadow cost (G6 below); `total_cost_usd` recorded as a cross-check |
-| **Baseline reviewer** (`Codex Dev`) | `codex_local` | `gpt-5.6-sol` | `medium` (`-c model_reasoning_effort=medium`) | codex-cli 0.150.0-alpha.12.2 | fixed review-loop instrumentation on muse-01…09 (excluded from `w_i`/`c_i`/`K`); the **baseline subject** on muse-12, where it is included; list-rate shadow cost |
-| **Candidate** (both roles) | `muse_code` (native Muse Code CLI, contributor tier) | `muse-spark-1.3` (`--model`) | `high` (`--reasoning-effort`) | Muse Code 1.3.0 (1.3.0-R3401.1), `MUSE_NO_AUTO_UPDATE=1` | list-rate shadow cost (G6 below) |
+| | Runtime | Model | Effort | CLI |
+|---|---|---|---|---|
+| **Baseline** (`Claude Dev`, the production developer profile) | `claude_code` | `claude-sonnet-5` (`--model`) | `high` (`--effort`) | Claude Code 2.1.278 |
+| **Candidate** | `muse_code` (native Muse Code CLI, contributor tier) | `muse-spark-1.3-contributor` (`--model`) | `high` (Muse default, not varied) | Muse Code 1.3.0 (1.3.0-R3401.1), `MUSE_NO_AUTO_UPDATE=1` |
 
-The baseline pair is the one recorded in the production Dealer database (`~/.agent-dealer/dealer.db`) on 2026-09-19 when this contract was committed and used by issues NOT-158, NOT-167 and NOT-176: developer `Claude Dev` (agent `d353f7bd-654f-4bc8-a567-5cfb81f527aa`), reviewer `Codex Dev` (agent `5e438d1e-4ac2-4e7f-8a7b-07deda1863fa`). Developer-role tasks compare the candidate against `Claude Dev`; the reviewer task compares against `Codex Dev`.
+The baseline profile leaves model and effort unset, so the CLI resolves them; on 2026-09-19 that gives `claude-sonnet-5` and `high`. The evaluation uses an eval copy of the profile with both set explicitly. A baseline run whose stream init event reports a different model is infrastructure-invalid.
 
-- **Baseline developer.** The production profile leaves model and effort unset, so the CLI resolves them. On 2026-09-19 they resolve to `claude-sonnet-5` and `high` (operator `~/.claude/settings.json`: model alias `sonnet`, `effortLevel: high`; the Claude Dev session that authored this contract reports `claude-sonnet-5`). The evaluation uses an eval copy of the profile with both values set explicitly, so a later change to the CLI default cannot move the baseline between paired tasks. A run whose stream init event reports a different model id is infrastructure-invalid.
-- **Candidate.** `muse-spark-1.3` is the highest `muse-spark-*` id embedded in the installed Muse Code 1.3.0 binary (`muse-spark-1.2` is also present). It has **not** been confirmed against the contributor tier: doing so sends a prompt to Meta before the privacy acceptance below exists. The operator confirms it before run 1 and records `candidate.confirmation.confirmedAt/confirmedBy` in `tasks.json`; if the tier serves a different current model the contract is amended and re-validated **before** run 1. `node scripts/validate-muse-code-manifest.mjs --ready` fails until that confirmation, and the Muse Code token mapping below, are recorded (see the mapping paragraph in G6). `MUSE_NO_AUTO_UPDATE=1` stops the launcher swapping the binary mid-experiment.
+The candidate id is the one pinned by NOT-177. Muse accepts an unknown `--model` and still exits 0, so a candidate run counts only if the session log's `model_completed.model` equals `muse-spark-1.3-contributor`; otherwise it is infrastructure-invalid.
 
-`muse_code` is not yet a value of the Dealer `Runtime` enum; the adapter is a follow-up.
-
-## Privacy decision
+## Privacy
 
 Contributor-tier prompts and completions **may be used to improve Meta products.**
 
-1. **Operator acceptance is recorded first.** Before the first candidate run the operator writes `privacyAcceptance` into the run plan: `{ acceptedBy, acceptedAt (ISO 8601), statement: "I accept that prompts and completions from these runs may be used to improve Meta products.", termsVersionOrUrl, tasksCovered: [task ids] }`. No record, no candidate run.
-2. **Only tasks marked non-sensitive run on the tier.** Every task in `tasks.json` carries `sensitivity.classification: "non_sensitive"` with a rationale; all 12 are historical changes or read-only questions about the public repository `github.com/not-so-fat/agent-dealer` at a pinned commit. A task without that field, or added later, must be classified and re-validated before it may run on the tier. Sensitive production work is out of scope.
-3. **The Agent Deck is non-sensitive too.** Workers pull playbooks through the deck, so the evaluation uses one dedicated deck with non-sensitive playbooks only, no Linear service and no credentials. Playbook ids and content hashes are recorded in the run plan and reused for both arms. No secrets are placed in the worker environment.
+1. The operator records the acceptance in `poc-results.md` before the first candidate run. No record, no candidate run.
+2. Only tasks marked `sensitivity.classification: "non_sensitive"` run on the tier. All 5 are historical changes to the public repository `github.com/not-so-fat/agent-dealer` at a pinned commit. Anything added later must be classified first.
+3. Neither arm gets MCP servers, an Agent Deck, or credentials in its environment.
 
-## Comparison controls
+## Run rules
 
-Per task, baseline and candidate share the identical: rendered task prompt (Dealer's developer/reviewer prompt built from `workerSpec`), `startingSha` (detached checkout of the same commit), Agent Deck, role permission policy (developer: worktree write only; reviewer: read-only; neither may publish reviews, mutate outbound, or resolve human actions), `timeoutSeconds` (small 1200, medium 2400, long 3600) and verification commands. One valid paired sample per task (12 pairs). Arm order is alternated by task index to spread time-of-day and cache effects.
+Per task, both arms share the identical worker spec, `startingSha` (detached checkout of the same commit), `timeoutSeconds` (small 1200, medium 2400) and verification commands. One valid run per task per arm (10 runs). Arm order alternates by task index.
 
-Only **infrastructure-invalid** attempts are rerun, and every such attempt is retained in the evidence. Infrastructure-invalid means the failure is provably not the model's: Dealer/harness crash, network or auth failure, deck unreachable, CLI failing before its first model turn, or account usage cap. Timeouts, wrong output, giving up, and tool misuse are **valid** runs and count against the arm. Classification is recorded from the log before verification runs.
+- **Fresh worktree** at `startingSha` for every run. Muse runs with the sandbox on, approvals off, never `--yolo`, no MCP (the safe developer posture from NOT-177). A supervised run is required: NOT-177 found that Muse cannot disable `cron_*`.
+- **Held-out tests.** Verification copies the test files from `referenceSha` into the worktree after the run, replacing anything the worker wrote there. The worker spec therefore states the interface the tests depend on. Each command was checked to fail at `startingSha` and pass at `referenceSha`:
 
-Held-out tests: for tasks with `verification.heldOutPaths`, the test files (and fixtures) come from `referenceSha` and are copied in at verification time, replacing anything the worker wrote at those paths. The worker spec therefore states the interface contract the tests depend on. The clone's history contains the reference commits; a run whose transcript reads `referenceSha` content (for example `git show <referenceSha>`) is scored as failed for contamination, in both arms.
+  | Task | at startingSha | at referenceSha |
+  |---|---|---|
+  | muse-01 | exit 1 (1 fail) | pass 17 |
+  | muse-02 | exit 1 (2 fail) | pass 12 |
+  | muse-04 | exit 1 (32 fail) | pass 92 |
+  | muse-05 | exit 1 (4 fail) | pass 86 |
+  | muse-07 | exit 1 (1 fail) | pass 21 |
 
-Eval-owned checks: where the held-out tests cannot cover a surface the worker spec requires, `verification.evalChecks` names test files kept in `$EVAL_ROOT/scripts/eval-checks/` and copied into the worktree only by the verification command, so the worker never sees them. muse-06 uses two: `muse-06-effort-forwarding.test.ts` (a real coordinator run with fake spawn/GitHub, asserting developer-effect.ts and reviewer-effect.ts forward the frozen snapshot effort into the spawn input, unaffected by later profile edits) and `muse-06-effort-form.test.tsx` (the web app has no test runner and the check uses no DOM: it renders the real `AgentConfigFields` to static markup for the selector, its options including the clearing one, value reflection and cursor exclusion; it invokes the selector's real `onChange` handler (calling the component against a stub hook dispatcher and reading the returned element tree) for each of `low`/`medium`/`high`/`""` on both runtimes and asserts `AgentConfigFields.onChange` receives the full config with that `defaultEffort`, so a selector that renders but cannot change or clear the value fails; and it inspects `AgentsPage` with the TypeScript compiler API for `defaultEffort` seeded, loaded and submitted in create and update). The residual is browser-level event wiring (a real click), which is why the worker spec still states the web contract explicitly. muse-06 also runs `npm run typecheck` for shared, server and web before the eval checks are copied in.
+- **Contamination.** A run whose transcript reads `referenceSha` content (for example `git show <referenceSha>`) or `docs/evaluations/muse-code` is scored as failed, in both arms. The clone's history contains the reference commits.
+- **Verified completion.** Every verification command exits with its `expectedExitCode` and matches `expectedResult`, capped at 600 s (a hang is a failure). The worker's own exit code and its final message decide nothing.
+- **Infrastructure-invalid vs valid.** Invalid means provably not the model's fault: harness crash, network or auth failure, CLI failing before its first model turn, account usage cap. Rerun only these, once, and keep every attempt in the results. Timeouts, wrong output, giving up and tool misuse are valid runs and count against the arm.
+- **Interventions.** Any operator action after launch that changes a run's course is counted and reported. It is reported, not gated.
 
-Graders and answer keys live in the Dealer checkout named by `$EVAL_ROOT` (the commit recorded in the run plan), not in the worker's worktree, and are run from there. A transcript that reads `docs/evaluations/muse-code` or `scripts/grade-muse-code.mjs` from any ref is also contaminated.
+## Cost
 
-## Run protocol
+One frozen basis for both arms: **list-rate shadow cost**, i.e. token usage priced at the vendor's published per-token rates for the frozen model, whatever plan each arm actually pays. Record the rate source URL and retrieval date per model in `poc-results.md` before run 1.
 
-1. Validate the manifest (below), run `node --test scripts/grade-muse-code.test.mjs`, confirm the candidate model (`--ready`), and record the run plan: frozen subjects (already in `tasks.json`), token-rate sources and retrieval dates, the Muse Code raw-field token mapping, actual plan spend to report, deck id and playbook hashes, `privacyAcceptance`, Dealer commit (`$EVAL_ROOT`).
-2. For each task and arm, create a fresh worktree at `startingSha`, launch the arm's frozen profile with the task prompt, and capture the session log, `usage_events` row, wall time, and every human action.
-3. **Review loop** (tasks whose artifact is `git_commits`, i.e. muse-01…09). The fixed reviewer (`Codex Dev`, same for both arms) reviews the resulting diff. If the verdict is `changes_requested`, the same arm's developer profile runs a remediation session in the same worktree with Dealer's rework prompt carrying the reviewer's findings (timeout = the task's `timeoutSeconds`), then the reviewer re-reviews. The loop stops on `approved`, after **3 reviewer rounds**, or when a remediation session fails or times out. An `escalated` verdict **terminates** the loop immediately: no remediation session runs, the run is flagged `escalated`, and it is recorded as one human intervention (Dealer would block on a human action) — it is **not** a change-request round and adds nothing to `R_i`. Each reviewer round whose verdict is `changes_requested` adds 1 to `R_i`. The reviewer sees the diff and the worker spec, never the held-out tests. Exploration and reviewer-role tasks have no diff and no loop (`R_i = 0`). Remediation is harness-driven and is not a human intervention. Two kinds of session are distinguished. **Subject sessions** are what each arm is being compared on: the initial session of every task (developer role for muse-01…11, reviewer role for muse-12, run by the arm's own profile) and every remediation developer session. They are included in `w_i`, `c_i` and `K`. **Review-loop reviewer passes** (the fixed `Codex Dev` instrument, identical in both arms) are excluded from `w_i`, `c_i` and `K` only. The muse-12 reviewer session is a subject session, not a loop pass: baseline = `Codex Dev`, candidate = native Muse Code reviewer, and its wall time and cost enter the 12-run median and `K_x` like any other task (a missing token kind makes it `null`, never 0).
-4. After the loop, run each verification command in the worktree with the task's setup (`npm ci`), on the **final** tree. `$ARTIFACT` is the worker's final message saved verbatim to `<runDir>/artifact.md`; `$EVAL_ROOT` is the grader checkout. A verification run is capped at 600 s; a hang counts as failure. The pre-loop tree is also verified and reported, but only the final tree decides `V`.
-5. Read per-run duration and status from `usage_events` rows, **never** from `summarizeIssueUsage`, which `COALESCE`s missing values to 0. Read token kinds for costing from the raw result/usage event of the session log (`usage_events` does not hold cache tokens).
+Providers report cached tokens either inside or outside their input total, so raw fields are never summed. Cost uses four disjoint quantities: `cost = uncached_input × r_input + cache_read × r_cache_read + cache_write × r_cache_write + output × r_output`. `tasks.json` maps each runtime's raw usage fields to them (Claude: `input_tokens` already excludes cache; Codex-style totals subtract the cached subset). Costing reads the raw result event, not Dealer's `usage_events`, which lacks cache tokens.
 
-Reference validation (2026-09-19, scratch worktree after `npm ci`): each held-out command fails at `startingSha` and passes at `referenceSha`.
+Missing token or cost data is `null`, never 0, and never a saving. Attributable cost `K` is the sum over an arm's 5 valid runs **plus** any paid infrastructure-invalid attempts (real spend). `K` is `null` if any term is `null`. If Meta publishes no per-token rate for the model, or Muse reports no token counts, the candidate's cost is `null`. Report each arm's actual plan and price separately; a contributor-tier price of $0 is payment in data, not a like-for-like cost, and cannot satisfy the cost threshold.
 
-| Task | at startingSha | at referenceSha |
+## Thresholds
+
+`V_x` is the number of verified completions of the 5 tasks, `w_i` the wall time of a run in seconds (spawn to exit or kill; a timed-out run counts as `timeoutSeconds`), and `K_x` as above.
+
+| # | Threshold | Formula |
 |---|---|---|
-| muse-01 | exit 1 (1 fail) | pass 17 |
-| muse-02 | exit 1 (2 fail) | pass 12 |
-| muse-03 | hangs until `--test-timeout` (abort tests never end) | pass 6 |
-| muse-04 | exit 1 (32 fail) | pass 92 |
-| muse-05 | exit 1 (4 fail) | pass 86 |
-| muse-06 (4 commands) | held-out non-zero (clean tree: shared build exits 2; prebuilt dist: 6 fail); typecheck non-zero with held-out files in place; forwarding check exit 1 (0/1 pass); web form check exit 1 (1/5 pass) | held-out pass 33; typecheck exit 0; forwarding check pass 1; web form check pass 5 |
-| muse-07 | exit 1 (1 fail) | pass 21 |
-| muse-08 | exit 1 (7 fail) | pass 34 |
-| muse-09 | exit 1 (4 fail) | pass 28 |
+| 1 | Completion | `V_candidate ≥ V_baseline − 1` |
+| 2 | Time | `median(w_i, candidate) ≤ 2 × median(w_i, baseline)` |
+| 3 | Cost | `K_candidate < K_baseline`; `incomparable` if either is `null` |
 
-muse-10/11 (structured answer keys) and muse-12 (claim catalogue) are covered by `node --test scripts/grade-muse-code.test.mjs`. It accepts a correct deliverable and rejects the false positives a keyword or regex grader would pass: an answer that names every symbol but denies each relationship, `sources` values wrapped in negation or prose (`not usage.input_tokens`), keyword-stuffed prose without the JSON block, two JSON blocks, an `approved` review, prose-only findings that state a defect perfectly, natural-language denials of a defect ("The claim that lease recovery ignores runtime availability is false", "The 24 h deferral ceiling is not untested", "recovery defers the item instead of dead-lettering it"), an asserted decoy claim, and an unknown claim id.
+Each threshold is reported as pass, fail or incomparable. **Go** needs thresholds 1 and 2 to pass and threshold 3 to pass or be incomparable with a written note; anything else is no-go or retry-later, decided in NOT-183.
 
-Nothing is graded by matching free prose, because no regex or blacklist can establish the polarity of a sentence. Exploration answers (muse-10, muse-11) must contain exactly one fenced JSON block whose fields are compared to `verification.answerKey` with exact normalized identifiers (`$equals`, `$oneOf`), sets and booleans; a value with surrounding words is a mismatch, and free-text fields do not exist. The reviewer task (muse-12) carries polarity structurally: the worker spec states a **claim catalogue** of six claims (three true defects, three false decoys, restated verbatim in `verification.claims`, which the validator checks). The reviewer emits a finding with fingerprint exactly `claim:<id>` for each claim it finds true and none for claims it finds false or cannot verify; a `claim:` fingerprint *is* the assertion. The result passes only if it parses as a `ReviewerResult` with the pinned SHAs and verdict `changes_requested`, asserts at least `minHeldClaims` (2) distinct true claims with a finding naming one of that claim's files, asserts **no** decoy, and uses no `claim:` id outside the catalogue. "Parses as a `ReviewerResult`" means every field the repository's Zod schema declares is validated, including the optional `productScopeQuestion` (a string when present) and each finding's optional `file`/`line`; a malformed artifact is rejected, not partially graded. The decoys make guessing lose: asserting every claim fails. Finding titles and rationales are recorded for humans but never affect the grade. Matches are reported as `n/3`.
-
-## Metrics and decision rubric
-
-Definitions (N = 12 tasks, one valid run per task per arm, `x` ∈ {baseline, candidate}):
-
-- **Verified completion**: a valid run in which every verification command exits with its `expectedExitCode` and matches `expectedResult` within the timeout. `V_x` = number of verified completions; **`C_x = V_x / 12`**.
-- **Human intervention**: any operator action after launch that changes a run's course (guidance, approval, manual edit, manual rerun of a valid attempt, clearing a human action) and each run ended by an `escalated` review verdict (one each). Infrastructure reruns and harness-driven remediation are not interventions. **`H_x`** = total over the arm.
-- **Change-request rounds `R_i`, `R_x`**: for a run in the review loop, `R_i` is the number of reviewer rounds (max 3) whose verdict is `changes_requested`; a run needing three correction rounds contributes 3, one needing one contributes 1, and an `approved` first pass contributes 0. An `escalated` verdict terminates the loop, is **not** counted in `R_i`, and instead adds 1 to that run's human interventions (`H`). **`R_x = Σ R_i`** over the arm. A run still not `approved` after the cap (or ended by `escalated`) is flagged `unresolved` and keeps its `R_i` (it is not verified merely because rounds ran out; verified completion is judged on verification alone).
-- **Wall time `w_i`**: seconds from spawn to exit or kill, summed over the run's subject sessions (the initial session — developer or, for muse-12, reviewer — plus any remediation developer sessions); a timed-out session counts as `timeoutSeconds`; review-loop reviewer passes and verification time excluded. Median is over the 12 runs.
-- **Attempt cost `a_j`**: USD or `null`, on the list-rate shadow basis below, for one attempt (a subject session, including every remediation session). **Run cost `c_i`** = sum of `a_j` over the valid run's subject sessions (as defined for `w_i`); `null` if any is `null`. Review-loop reviewer passes are not `a_j` terms.
-- **Attributable cost `K_x`** = `Σ c_i` over the arm's 12 valid runs **plus** `Σ a_j` over the arm's infrastructure-invalid attempts. Paid infrastructure-invalid attempts (a harness crash or network failure after model usage) are real spend needed to reach a verified completion, so a non-null cost is included, not dropped. They are still listed separately for reliability reporting (attempt count, cause, cost). An infrastructure-invalid attempt with `null` cost contributes `0` only when the log proves no model request was issued (recorded as `noModelTurnEvidence: <log path>`); otherwise it is `null`. `K_x = null` if any term is `null`. **`CPV_x = K_x / V_x`**, undefined when `V_x = 0`.
-
-The candidate advances only if **all six** hold:
-
-| Gate | Formula |
-|---|---|
-| G1 completion floor | `C_candidate ≥ 0.80` (≥ 10 of 12) |
-| G2 completion parity | `C_baseline − C_candidate ≤ 0.10` (`V_baseline − V_candidate ≤ 1`) |
-| G3 speed | `median(w_i over 12 candidate runs) ≤ 1.5 × median(w_i over 12 baseline runs)` |
-| G4 oversight | `H_candidate ≤ 1.2 × H_baseline` **and** `R_candidate ≤ 1.2 × R_baseline` (`R` = `changes_requested` rounds summed over the review loop; `H` includes one per `escalated` run); when a baseline value is 0 the candidate value must be 0 |
-| G5 deck access | in **every valid run of both arms (all 24: 12 baseline + 12 candidate)**, the log shows a successful `bind_workspace` and at least one successful playbook/deck read (`get_bound_deck` or `get_playbook`). Any valid run of either arm without both fails G5. A deck that is unreachable is infrastructure-invalid and is rerun; a reachable deck the worker never bound or read is a valid run and fails G5 |
-| G6 cost | `CPV_candidate ≤ 0.5 × CPV_baseline` (attributable cost per verified completion ≥ 50% lower), evaluated only when comparable |
-
-### G6 — cost per verified completion
-
-Missing token or cost data is `null` and makes the affected arm's cost incomparable. It is never treated as 0 and never yields a saving.
-
-**One frozen basis for both arms: list-rate shadow cost.** Nothing about the pricing basis is left to the run plan. Whatever either arm actually pays (a subscription, a quota, a contributor-tier plan, metered API), the G6 number is its token usage priced at the vendor's published per-token rates for the frozen model. This is the documented conversion of plan usage to dollars; it needs no per-plan allowance and no time-based allocation, and it is applied identically to both arms, so list-rate and plan-allocated figures are never mixed. Rate source URL and retrieval date per model are recorded in the run plan before run 1 (`claude-sonnet-5`, `gpt-5.6-sol`, `muse-spark-1.3`). Claude Code's `total_cost_usd` is a baseline cross-check only and is never mixed in.
-
-**Disjoint quantities.** Providers report cached tokens either outside or inside their input total, so summing raw fields double-counts. Cost is computed only from four disjoint quantities:
-
-`cost = uncached_input × r_input + cache_read × r_cache_read + cache_write × r_cache_write + output × r_output`
-
-Each frozen runtime's raw fields map to them as recorded in `tasks.json` (`tokenMapping`); costing reads the raw result/usage event, not `usage_events`:
-
-| Runtime | `uncached_input` | `cache_read` | `cache_write` | `output` |
-|---|---|---|---|---|
-| `claude_code` (`result.usage`) | `input_tokens` (already excludes cache) | `cache_read_input_tokens` | `cache_creation_input_tokens` | `output_tokens` |
-| `codex_local` (`turn.completed.usage`) | `input_tokens − cached_input_tokens` (cached is a **subset** of input; fixture `24763 − 24448 = 315`) | `cached_input_tokens` | `0` by definition (no cache-write tier) | `output_tokens` (`reasoning_output_tokens` is a subset, not added again) |
-| `muse_code` (`muse exec --json`) | raw input, minus raw cached tokens if input is reported inclusive of cache | raw cached tokens | raw cache-write tokens, or `0` by definition if Meta has no such tier | raw output, reasoning counted once |
-
-A quantity the vendor has no tier for is `0` by the mapping; a quantity that has a tier and is not reported is `null`. For Muse Code the adapter does not exist, so before run 1 the operator records in the run plan, and in `candidate.tokenMapping`, the exact raw field path for each of `rawFields.input/cache_read/cache_write/output`, whether input includes cache (`inputIncludesCached`) and the attestation `mappingRecordedInRunPlan: true`; `--ready` fails without all of them. Two sentinels keep the null branch reachable: `"none"` (Meta has no billing tier for it, so the quantity is `0`; allowed for `cache_read` and `cache_write`) and `"unreported"` (the tier applies but Muse Code does not report it, so the quantity and the cost are `null`; allowed for all four). `inputIncludesCached` must be a boolean when `input` and `cache_read` are both field paths, and may be `"not_applicable"` otherwise. If the log or Meta's documentation does not establish a mapping, nothing is guessed: record `"unreported"` and the candidate's cost is `null`.
-
-**Actual plan spend is reported, not gated.** Alongside G6, report for each arm the plan, price, billing period, number of runs, and provider-reported consumption. A contributor-tier cash price of $0 is payment in data, not a like-for-like cost; it is reported and cannot satisfy G6. If Meta publishes no per-token rate for `muse-spark-1.3`, or Muse Code reports no token counts, the candidate's cost is `null`, G6 is **incomparable**, and both arms' actual plan spend is reported separately with no saving claimed.
-
-### Outcome
-
-| Outcome | Condition |
-|---|---|
-| **ADVANCE** | G1–G6 all pass |
-| **DO NOT ADVANCE** | any of G1–G5 fails, or G6 is comparable and fails |
-| **NOT ADVANCED — COST INCOMPARABLE** | G1–G5 pass but G6 is incomparable; report both cost views, claim no saving |
-| **INCOMPLETE** | any task lacks a valid pair after infrastructure reruns |
-
-## Validating the contract
+## Validating the manifest
 
 ```bash
-node scripts/validate-muse-code-manifest.mjs   # shape, frozen subjects, coverage, pinned commits, grader keys
-node --test scripts/grade-muse-code.test.mjs scripts/validate-muse-code-manifest.test.mjs   # graders and --ready gate accept correct deliverables, reject false positives
+node scripts/validate-muse-code-manifest.mjs   # shape, frozen subjects, coverage, pinned commits, held-out paths
+node --test scripts/validate-muse-code-manifest.test.mjs
 git diff --check
-node scripts/validate-muse-code-manifest.mjs --ready   # pre-run gate: fails until the operator confirms the candidate model and records its token mapping (attestation flag, cached-input semantics, per raw field an exact path or a `none`/`unreported` sentinel)
 ```
 
-The validator needs the full commit history. It checks: parseable JSON; baseline developer, baseline reviewer and candidate each freeze a non-null runtime, model id, effort, CLI version, invocation (which must pass that model and effort explicitly), pricing basis and raw-field `tokenMapping`; a single `costModel` freezes the list-rate shadow basis and disjoint token quantities; a review loop with a round cap whose counted verdicts are exactly `changes_requested` and whose `escalated` handling is defined; exactly 12 tasks with every required field (`id`, `sourceIssue`, `repository`, `startingSha`, `workerSpec`, `role`, `category`, verification commands with `expectedExitCode` and `expectedResult`, `expectedArtifact`, `sizeClass`, `sensitivity`); coverage minimums (≥ 6 implementation, ≥ 2 test/debug, ≥ 2 repository exploration, ≥ 1 reviewer, ≥ 1 medium/long — currently 7 / 2 / 2 / 1 / 6); that `startingSha` and `referenceSha` resolve to real commits with `startingSha` an ancestor of `referenceSha`; that each held-out path exists at `referenceSha` and is used by a verification command; that each eval-owned check exists in this checkout and is run by a verification command; that each exploration task has a structured `answerKey` and grader command; and that the reviewer task's `claims` catalogue has unique ids, files that exist at `startingSha`, at least one false decoy, `minHeldClaims` within the number of true claims, each statement restated verbatim in the worker spec, and its pinned `headSha` equals `startingSha`.
+The validator needs the full commit history. It checks: parseable JSON; both subjects freeze a non-null runtime, model id, effort, CLI version and an invocation that passes the model; a frozen `costModel`; exactly 5 tasks with every required field (`id`, `sourceIssue`, `repository`, `startingSha`, `referenceSha`, `workerSpec`, `role`, `category`, `sizeClass`, `sensitivity`, verification commands with `expectedExitCode` and `expectedResult`); coverage minimums (at least 3 implementation, 1 test/debug, 1 medium or long); that both SHAs resolve to real commits with `startingSha` an ancestor of `referenceSha`; and that each held-out path exists at `referenceSha` and is run by a verification command.

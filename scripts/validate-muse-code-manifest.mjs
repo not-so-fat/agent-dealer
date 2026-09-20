@@ -1,28 +1,20 @@
 #!/usr/bin/env node
-// Validates docs/evaluations/muse-code/tasks.json (NOT-176): shape, coverage minimums, and that
-// every pinned commit is real and consistent. Read-only; needs the full commit history.
+// Validates docs/evaluations/muse-code/tasks.json (NOT-176): shape, coverage minimums, frozen subjects,
+// and that every pinned commit and held-out test path is real. Read-only; needs the full commit history.
 //
-//   node scripts/validate-muse-code-manifest.mjs [--ready] [path/to/tasks.json]
-//
-// --ready is the pre-run gate: it additionally fails until the operator has confirmed the frozen
-// candidate model against the contributor tier (candidate.confirmation.confirmedAt/confirmedBy) and
-// recorded the Muse Code token mapping (attestation flag, cached-input semantics, and per raw field an exact
-// path or an explicit `none` / `unreported` sentinel).
+//   node scripts/validate-muse-code-manifest.mjs [path/to/tasks.json]
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 
-const args = process.argv.slice(2);
-const ready = args.includes("--ready");
-const file = args.find((a) => !a.startsWith("--")) ?? "docs/evaluations/muse-code/tasks.json";
+const file = process.argv[2] ?? "docs/evaluations/muse-code/tasks.json";
 const errors = [];
 const fail = (msg) => errors.push(msg);
+const str = (v) => typeof v === "string" && v.trim().length > 0;
+const SHA = /^[0-9a-f]{40}$/;
 
-function git(...args) {
-  return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-}
 function gitOk(...args) {
   try {
-    git(...args);
+    execFileSync("git", args, { stdio: "ignore" });
     return true;
   } catch {
     return false;
@@ -37,121 +29,44 @@ try {
   process.exit(1);
 }
 
-const ROLES = new Set(["developer", "reviewer"]);
-const CATEGORIES = new Set(["implementation", "test_debug", "repository_exploration", "review"]);
-const SIZES = new Set(["small", "medium", "long"]);
-const SHA = /^[0-9a-f]{40}$/;
-const str = (v) => typeof v === "string" && v.trim().length > 0;
-
-for (const side of ["baseline", "candidate"]) {
-  if (typeof manifest[side] !== "object" || manifest[side] === null) fail(`missing ${side}`);
-}
-// Every compared subject is frozen: an explicit runtime, model id, effort, CLI version and invocation.
-// null or a generic description ("current model", CLI default) is a failure, not a valid value.
-const subjects = {
-  "baseline.developer": manifest.baseline?.developer,
-  "baseline.reviewer": manifest.baseline?.reviewer,
-  candidate: manifest.candidate,
-};
+// Both compared subjects are frozen: explicit runtime, model id, effort, CLI version and invocation.
+// A null or a description ("current model", CLI default) is a failure, not a value.
+const subjects = { "baseline.developer": manifest.baseline?.developer, candidate: manifest.candidate };
 for (const [name, s] of Object.entries(subjects)) {
-  if (!s || !str(s.runtime) || !str(s.model) || !str(s.effort) || !str(s.cliVersion) || !str(s.frozenInvocation) || !str(s.pricingBasis)) {
-    fail(`${name} must freeze non-null runtime, model, effort, cliVersion, frozenInvocation and pricingBasis`);
+  if (!s || !str(s.runtime) || !str(s.model) || !str(s.effort) || !str(s.cliVersion) || !str(s.frozenInvocation)) {
+    fail(`${name} must freeze non-null runtime, model, effort, cliVersion and frozenInvocation`);
     continue;
   }
-  if (/\b(current|default|latest)\b/i.test(`${s.model} ${s.effort}`) || /\s/.test(s.model)) {
-    fail(`${name}: model/effort must be explicit identifiers, not descriptions (${s.model} / ${s.effort})`);
-  }
-  if (!s.frozenInvocation.includes(s.model) || !s.frozenInvocation.includes(s.effort)) {
-    fail(`${name}: frozenInvocation must pass the frozen model (${s.model}) and effort (${s.effort}) explicitly`);
-  }
+  if (/\b(current|default|latest)\b/i.test(s.model) || /\s/.test(s.model)) fail(`${name}: model must be an explicit id, got "${s.model}"`);
+  if (!s.frozenInvocation.includes(s.model)) fail(`${name}: frozenInvocation must pass the frozen model ${s.model} explicitly`);
 }
-// One frozen cost basis for both arms, with disjoint token quantities and a per-runtime mapping from raw
-// log fields, so cached input is never charged at two rates and no plan/list-rate choice is left open.
+if (manifest.candidate?.runtime !== "muse_code") fail("candidate must be runtime muse_code");
+if (manifest.candidate?.privacy?.allowedTaskClassification !== "non_sensitive") {
+  fail("candidate.privacy.allowedTaskClassification must be non_sensitive");
+}
+
+// One frozen cost basis with disjoint token quantities, so cached input is never charged at two rates.
 const cm = manifest.costModel;
-if (cm?.basis !== "list_rate_shadow_cost" || cm.frozenNow !== true || !str(cm.formula) || !str(cm.actualPlanSpendReport) ||
-    !str(cm.nullRule) || !cm.disjointQuantities) {
-  fail("costModel must freeze basis list_rate_shadow_cost with formula, disjointQuantities, nullRule and actualPlanSpendReport");
+if (cm?.basis !== "list_rate_shadow_cost" || !str(cm.formula) || !str(cm.nullRule) || !cm.disjointQuantities) {
+  fail("costModel must freeze basis list_rate_shadow_cost with formula, disjointQuantities and nullRule");
 } else {
   for (const k of ["uncached_input", "cache_read", "cache_write", "output"]) {
     if (!str(cm.disjointQuantities[k])) fail(`costModel.disjointQuantities.${k} missing`);
   }
 }
-for (const [name, s] of Object.entries(subjects)) {
-  const tm = s?.tokenMapping;
-  if (!tm || !str(tm.source) || !["uncached_input", "cache_read", "cache_write", "output"].every((k) => str(tm[k]))) {
-    fail(`${name}.tokenMapping must map raw fields to uncached_input, cache_read, cache_write and output`);
-  } else if (name !== "candidate" && typeof tm.inputIncludesCached !== "boolean") {
-    fail(`${name}.tokenMapping.inputIncludesCached must be true or false (cached tokens inside or outside raw input)`);
-  }
-  if (/subscription|quota/i.test(s?.pricingBasis ?? "") && !/list-rate shadow/i.test(s.pricingBasis)) {
-    fail(`${name}.pricingBasis must use the frozen list-rate shadow basis, not a plan allocation`);
-  }
-}
-const c = manifest.candidate;
-if (ready) {
-  // The Muse Code adapter does not exist yet, so its token mapping is recorded by the operator from a real
-  // usage event before run 1: exact raw field paths, whether input includes cached tokens, and the attestation.
-  const tmc = c?.tokenMapping;
-  if (tmc?.mappingRecordedInRunPlan !== true) {
-    fail("--ready: candidate.tokenMapping.mappingRecordedInRunPlan must be true (operator attests the mapping is in the run plan)");
-  }
-  // Each raw field is an exact dotted path, or a sentinel that keeps the null-cost branch reachable:
-  //   "none"       the vendor has no billing tier for it -> quantity is 0 by definition (cache_read, cache_write only)
-  //   "unreported" the tier applies but Muse Code does not report it -> quantity, and so cost, is null
-  const FIELD_PATH = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
-  const NONE_ALLOWED = new Set(["cache_read", "cache_write"]);
-  const raw = {};
-  for (const k of ["input", "cache_read", "cache_write", "output"]) {
-    const v = tmc?.rawFields?.[k];
-    raw[k] = v;
-    const ok = typeof v === "string" && (v === "unreported" || (v === "none" ? NONE_ALLOWED.has(k) : FIELD_PATH.test(v)));
-    if (!ok) {
-      fail(`--ready: candidate.tokenMapping.rawFields.${k} must be an exact raw field path such as usage.input_tokens, "unreported" (tier applies, not reported: cost null)${NONE_ALLOWED.has(k) ? ', or "none" (no such billing tier: 0)' : ""}, got ${JSON.stringify(v)}`);
-    }
-  }
-  // Whether raw input includes cached tokens only matters when both are reported as field paths.
-  const paths = (k) => typeof raw[k] === "string" && FIELD_PATH.test(raw[k]) && raw[k] !== "unreported" && raw[k] !== "none";
-  const inclusion = tmc?.inputIncludesCached;
-  if (paths("input") && paths("cache_read")) {
-    if (typeof inclusion !== "boolean") {
-      fail("--ready: candidate.tokenMapping.inputIncludesCached must be true or false when input and cache_read are both reported fields");
-    }
-  } else if (typeof inclusion !== "boolean" && inclusion !== "not_applicable") {
-    fail('--ready: candidate.tokenMapping.inputIncludesCached must be true, false or "not_applicable" (input or cache_read is none/unreported)');
-  }
-}
-if (c?.runtime !== "muse_code") fail("candidate must be runtime muse_code");
-if (c?.privacy?.allowedTaskClassification !== "non_sensitive") {
-  fail("candidate.privacy.allowedTaskClassification must be non_sensitive");
-}
-if (ready && (!str(c?.confirmation?.confirmedAt) || !str(c?.confirmation?.confirmedBy))) {
-  fail("--ready: candidate.confirmation.confirmedAt/confirmedBy not set; confirm the frozen model against the contributor tier first");
-}
 
-const loop = manifest.controls?.reviewLoop;
-if (!loop || !Number.isInteger(loop.maxReviewerRounds) || loop.maxReviewerRounds < 2 || !str(loop.protocol) ||
-    !Array.isArray(loop.countedVerdicts) || !loop.countedVerdicts.includes("changes_requested")) {
-  fail("controls.reviewLoop must define maxReviewerRounds (>= 2), countedVerdicts (incl. changes_requested) and protocol");
-} else if (loop.countedVerdicts.some((v) => v !== "changes_requested") || !loop.terminalVerdicts?.escalated) {
-  // G4 counts change-request rounds only; escalation is a terminal outcome with its own rule.
-  fail("controls.reviewLoop.countedVerdicts must be exactly [changes_requested] and terminalVerdicts.escalated must be defined");
-}
-
-const tasks = manifest.tasks;
-if (!Array.isArray(tasks) || tasks.length !== 12) {
-  fail(`tasks must contain exactly 12 entries (found ${Array.isArray(tasks) ? tasks.length : "none"})`);
-}
+const tasks = Array.isArray(manifest.tasks) ? manifest.tasks : [];
+if (tasks.length !== 5) fail(`tasks must contain exactly 5 entries (found ${tasks.length})`);
 
 const ids = new Set();
-for (const t of Array.isArray(tasks) ? tasks : []) {
+for (const t of tasks) {
   const where = `task ${t?.id ?? "(no id)"}`;
   if (!str(t.id) || ids.has(t.id)) fail(`${where}: id missing or duplicated`);
   ids.add(t.id);
-  if (!str(t.sourceIssue)) fail(`${where}: sourceIssue missing`);
-  if (!str(t.repository)) fail(`${where}: repository missing`);
-  if (!ROLES.has(t.role)) fail(`${where}: bad role ${t.role}`);
-  if (!CATEGORIES.has(t.category)) fail(`${where}: bad category ${t.category}`);
-  if (!SIZES.has(t.sizeClass)) fail(`${where}: bad sizeClass ${t.sizeClass}`);
+  if (!str(t.sourceIssue) || !str(t.repository)) fail(`${where}: sourceIssue and repository are required`);
+  if (t.role !== "developer") fail(`${where}: role must be developer in the PoC`);
+  if (!["implementation", "test_debug"].includes(t.category)) fail(`${where}: bad category ${t.category}`);
+  if (!["small", "medium", "long"].includes(t.sizeClass)) fail(`${where}: bad sizeClass ${t.sizeClass}`);
   if (!Number.isInteger(t.timeoutSeconds) || t.timeoutSeconds <= 0) fail(`${where}: timeoutSeconds missing`);
   if (t.sensitivity?.classification !== "non_sensitive" || !str(t.sensitivity?.rationale)) {
     fail(`${where}: sensitivity must be non_sensitive with a rationale`);
@@ -160,7 +75,6 @@ for (const t of Array.isArray(tasks) ? tasks : []) {
   if (!spec || !str(spec.title) || !str(spec.description) || !Array.isArray(spec.acceptanceCriteria) || spec.acceptanceCriteria.length === 0) {
     fail(`${where}: workerSpec needs title, description and acceptanceCriteria[]`);
   }
-  if (!str(t.expectedArtifact?.type) || !str(t.expectedArtifact?.description)) fail(`${where}: expectedArtifact incomplete`);
   const cmds = t.verification?.commands;
   if (!Array.isArray(cmds) || cmds.length === 0) fail(`${where}: verification.commands missing`);
   for (const cmd of cmds ?? []) {
@@ -169,82 +83,30 @@ for (const t of Array.isArray(tasks) ? tasks : []) {
     }
   }
 
-  // Deterministic graders: exploration answers are checked against a structured answerKey and review
-  // results against a closed claim catalogue (true claims plus decoys) asserted via `claim:<id>` fingerprints,
-  // never against free-prose matching.
-  const graderCmds = (cmds ?? []).filter((cmd) => str(cmd.run) && cmd.run.includes("$EVAL_ROOT/scripts/grade-muse-code.mjs"));
-  if (t.category === "repository_exploration") {
-    if (!t.verification?.answerKey || typeof t.verification.answerKey !== "object") fail(`${where}: exploration task needs verification.answerKey`);
-    if (!graderCmds.some((cmd) => cmd.run.includes(` answer ${t.id} `))) fail(`${where}: no structured 'answer' grader command`);
-    if (!t.workerSpec?.description?.includes("exactly one fenced")) fail(`${where}: workerSpec must require the structured JSON answer block`);
+  // Pinned commits are real, and the reference descends from the starting SHA.
+  for (const key of ["startingSha", "referenceSha"]) {
+    if (!SHA.test(t[key] ?? "")) fail(`${where}: ${key} must be a full 40-hex SHA`);
+    else if (!gitOk("cat-file", "-e", `${t[key]}^{commit}`)) fail(`${where}: ${key} ${t[key]} is not a commit in this repository`);
   }
-  if (t.role === "reviewer") {
-    const claims = t.verification?.claims;
-    if (!Array.isArray(claims) || claims.length === 0) fail(`${where}: reviewer task needs a verification.claims catalogue`);
-    const ids = new Set();
-    for (const c of Array.isArray(claims) ? claims : []) {
-      if (!str(c?.id) || typeof c.holds !== "boolean" || !Array.isArray(c.files) || c.files.length === 0 || !str(c.statement) || !str(c.evidence)) {
-        fail(`${where}: claim ${c?.id ?? "?"} needs id, holds (boolean), files[], statement and evidence`);
-        continue;
-      }
-      if (ids.has(c.id)) fail(`${where}: duplicate claim id ${c.id}`);
-      ids.add(c.id);
-      for (const f of c.files) if (!gitOk("cat-file", "-e", `${t.startingSha}:${f}`)) fail(`${where}: claim ${c.id} file ${f} does not exist at startingSha`);
-      // The catalogue the worker sees must be the one the grader uses.
-      if (!t.workerSpec?.description?.includes(`claim:${c.id}: ${c.statement}`)) fail(`${where}: workerSpec does not state claim ${c.id} verbatim`);
-    }
-    const held = (Array.isArray(claims) ? claims : []).filter((c) => c.holds).length;
-    const decoys = (Array.isArray(claims) ? claims : []).length - held;
-    if (decoys < 1) fail(`${where}: claim catalogue needs at least one false decoy claim (holds: false)`);
-    if (!Number.isInteger(t.verification?.minHeldClaims) || t.verification.minHeldClaims < 1 || t.verification.minHeldClaims > held) {
-      fail(`${where}: verification.minHeldClaims must be an integer in [1, ${held}]`);
-    }
-    if (!graderCmds.some((cmd) => cmd.run.includes(` review ${t.id} `))) fail(`${where}: no structured 'review' grader command`);
-    if (t.verification?.expectedShas?.headSha !== t.startingSha) fail(`${where}: expectedShas.headSha must equal startingSha`);
+  if (SHA.test(t.startingSha ?? "") && SHA.test(t.referenceSha ?? "") && !gitOk("merge-base", "--is-ancestor", t.startingSha, t.referenceSha)) {
+    fail(`${where}: startingSha is not an ancestor of referenceSha`);
   }
-
-  // Eval-owned checks referenced by verification commands exist in $EVAL_ROOT (this checkout).
-  for (const f of t.verification?.evalChecks ?? []) {
-    if (!fs.existsSync(f)) fail(`${where}: eval check ${f} does not exist`);
-    if (!cmds?.some((cmd) => cmd.run.includes(`$EVAL_ROOT/${f}`))) fail(`${where}: no verification command runs eval check ${f}`);
-  }
-
-  // Pinned commits are real, and the reference (if any) descends from the starting SHA.
-  if (!SHA.test(t.startingSha ?? "")) {
-    fail(`${where}: startingSha must be a full 40-hex SHA`);
-  } else if (!gitOk("cat-file", "-e", `${t.startingSha}^{commit}`)) {
-    fail(`${where}: startingSha ${t.startingSha} is not a commit in this repository`);
-  }
-  if (t.referenceSha !== null && t.referenceSha !== undefined) {
-    if (!SHA.test(t.referenceSha)) {
-      fail(`${where}: referenceSha must be a full 40-hex SHA or null`);
-    } else if (!gitOk("cat-file", "-e", `${t.referenceSha}^{commit}`)) {
-      fail(`${where}: referenceSha ${t.referenceSha} is not a commit in this repository`);
-    } else if (SHA.test(t.startingSha ?? "") && !gitOk("merge-base", "--is-ancestor", t.startingSha, t.referenceSha)) {
-      fail(`${where}: startingSha is not an ancestor of referenceSha`);
-    }
-    for (const p of t.verification?.heldOutPaths ?? []) {
-      if (!gitOk("cat-file", "-e", `${t.referenceSha}:${p}`)) fail(`${where}: held-out path ${p} does not exist at referenceSha`);
-      if (!cmds?.some((cmd) => cmd.run.includes(p))) fail(`${where}: no verification command references held-out path ${p}`);
-    }
-  } else if ((t.verification?.heldOutPaths ?? []).length > 0) {
-    fail(`${where}: heldOutPaths requires a referenceSha`);
+  // Held-out tests come from referenceSha, and a verification command must actually run them.
+  const held = t.verification?.heldOutPaths ?? [];
+  if (held.length === 0) fail(`${where}: verification.heldOutPaths is required (tests the worker never sees)`);
+  for (const p of held) {
+    if (!gitOk("cat-file", "-e", `${t.referenceSha}:${p}`)) fail(`${where}: held-out path ${p} does not exist at referenceSha`);
+    if (!cmds?.some((cmd) => cmd.run.includes(p))) fail(`${where}: no verification command references held-out path ${p}`);
   }
 }
 
-if (!fs.existsSync("scripts/grade-muse-code.mjs")) fail("scripts/grade-muse-code.mjs is missing");
-
 // Coverage minimums from the NOT-176 contract.
-const list = Array.isArray(tasks) ? tasks : [];
-const count = (fn) => list.filter(fn).length;
 const coverage = {
-  implementation: count((t) => t.category === "implementation"),
-  test_debug: count((t) => t.category === "test_debug"),
-  repository_exploration: count((t) => t.category === "repository_exploration"),
-  reviewer: count((t) => t.role === "reviewer"),
-  medium_or_long: count((t) => t.sizeClass === "medium" || t.sizeClass === "long"),
+  implementation: tasks.filter((t) => t.category === "implementation").length,
+  test_debug: tasks.filter((t) => t.category === "test_debug").length,
+  medium_or_long: tasks.filter((t) => t.sizeClass === "medium" || t.sizeClass === "long").length,
 };
-const minimums = { implementation: 6, test_debug: 2, repository_exploration: 2, reviewer: 1, medium_or_long: 1 };
+const minimums = { implementation: 3, test_debug: 1, medium_or_long: 1 };
 for (const [k, min] of Object.entries(minimums)) {
   if (coverage[k] < min) fail(`coverage: need at least ${min} ${k} task(s), found ${coverage[k]}`);
 }
@@ -254,4 +116,4 @@ if (errors.length > 0) {
   for (const e of errors) console.error(` - ${e}`);
   process.exit(1);
 }
-console.log(`OK: ${file}: ${list.length} tasks; coverage ${JSON.stringify(coverage)}; all pinned commits resolve.`);
+console.log(`OK: ${file}: ${tasks.length} tasks; coverage ${JSON.stringify(coverage)}; all pinned commits resolve.`);

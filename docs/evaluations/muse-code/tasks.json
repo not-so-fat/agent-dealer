@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "evaluation": "muse-code-budget-first",
+  "evaluation": "muse-code-poc",
   "epic": "NOT-164",
   "contract": "NOT-176",
-  "runtimeNamesNote": "'muse_code' is not yet a value of the Dealer Runtime enum; the adapter is a follow-up. It names the native Muse Code CLI as the candidate.",
+  "runtimeNamesNote": "'muse_code' is not yet a value of the Dealer Runtime enum; the adapter is a follow-up that only starts if the PoC (NOT-183) says go. It names the native Muse Code CLI as the candidate.",
   "baseline": {
-    "pairSource": "Dealer SQLite agents table on the operator machine (~/.agent-dealer/dealer.db), read 2026-09-19 when the contract was committed; the pair used by issues NOT-158, NOT-167 and NOT-176.",
+    "pairSource": "Dealer SQLite agents table on the operator machine (~/.agent-dealer/dealer.db), read 2026-09-19: the developer profile in production use. The baseline arm is re-run on the same 5 tasks; the shipped tickets have no recorded Dealer usage to reuse.",
     "developer": {
       "agentName": "Claude Dev",
       "agentId": "d353f7bd-654f-4bc8-a567-5cfb81f527aa",
@@ -33,41 +33,17 @@
         "output": "usage.output_tokens",
         "inputIncludesCached": false
       }
-    },
-    "reviewer": {
-      "agentName": "Codex Dev",
-      "agentId": "5e438d1e-4ac2-4e7f-8a7b-07deda1863fa",
-      "runtime": "codex_local",
-      "model": "gpt-5.6-sol",
-      "effort": "medium",
-      "pricingBasis": "Two roles for this profile. (1) In the review loop of tasks muse-01..09 it is fixed instrumentation, identical for both arms, and those reviewer passes are excluded from w_i, c_i and K. (2) On muse-12 (reviewer role) it is the baseline subject session: it IS included in w_i, c_i and K for the baseline arm, priced on the list-rate shadow basis in costModel for the frozen model gpt-5.6-sol. The Codex JSONL reports tokens but no cost.",
-      "permissionPolicy": {
-        "worktreeWrite": false,
-        "publishReview": false,
-        "outboundMutation": false,
-        "resolveHumanAction": false
-      },
-      "cliVersion": "codex-cli 0.150.0-alpha.12.2",
-      "frozenInvocation": "codex <Dealer buildReviewerArgs> with model gpt-5.6-sol and -c model_reasoning_effort=medium, unchanged for every review and re-review round.",
-      "tokenMapping": {
-        "source": "raw `turn.completed.usage` of the Codex JSONL log, summed over the session's turn.completed events",
-        "uncached_input": "usage.input_tokens − usage.cached_input_tokens (Codex reports cached_input_tokens as a subset of input_tokens, e.g. input_tokens=24763, cached_input_tokens=24448 gives 315 uncached)",
-        "cache_read": "usage.cached_input_tokens",
-        "cache_write": "0 by definition: the OpenAI rate card has no cache-write tier",
-        "output": "usage.output_tokens; usage.reasoning_output_tokens is a subset of output_tokens and is NOT added again (Dealer's usage_events adds it, one more reason costing reads the raw log)",
-        "inputIncludesCached": true
-      }
     }
   },
   "candidate": {
     "runtime": "muse_code",
     "cli": "native Muse Code (not Muse Spark through Codex)",
     "tier": "Muse contributor tier",
-    "model": "muse-spark-1.3",
-    "modelResolution": "Identifier taken from the model ids embedded in the installed Muse Code 1.3.0 (1.3.0-R3401.1) binary (muse-spark-1.3 is the highest version; muse-spark-1.2 is also present). It was NOT confirmed against the contributor tier, because doing so sends a prompt to Meta before privacy acceptance is recorded. The operator confirms it before run 1 (see confirmation); if the tier serves a different current model, this contract is amended and re-validated before run 1, never mid-evaluation.",
+    "model": "muse-spark-1.3-contributor",
+    "modelResolution": "Pinned by NOT-177 (docs/evaluations/muse-code/headless-contract.md): catalog id for the contributor tier. Muse accepts an unknown --model id and exits 0, so a run is valid only if the session log's model_completed.model equals this id.",
     "effort": "high",
-    "effortResolution": "Explicit --reasoning-effort high (also the CLI default), identical for every candidate run.",
-    "pricingBasis": "List-rate shadow cost, one frozen method for both arms (see costModel): cost_usd = uncached_input × r_input + cache_read × r_cache_read + cache_write × r_cache_write + output × r_output, over the disjoint token quantities defined in costModel and the raw-field mapping in this subject's tokenMapping; r_* are the vendor's published per-token rates for the frozen model (source URL and retrieval date recorded in the run plan before run 1). If any applicable quantity is not reported, or the mapping cannot be applied because the log does not say whether cached tokens are inside input, the run's cost is null, never 0. The contributor-tier cash price ($0, paid in data-use rights) is reported but is not a cost and cannot satisfy G6. If Meta publishes no per-token rate for the frozen model, or Muse Code reports no token counts, the candidate's cost is null and G6 is incomparable.",
+    "effortResolution": "Muse's default reasoning effort is high (NOT-177); it is not passed or varied in the PoC, identical for every candidate run.",
+    "pricingBasis": "List-rate shadow cost, same frozen method as the baseline (see costModel).",
     "permissionPolicy": "identical to the baseline policy of the task's role",
     "privacy": {
       "dataUse": "Prompts and completions may be used to improve Meta products.",
@@ -75,56 +51,26 @@
       "allowedTaskClassification": "non_sensitive"
     },
     "cliVersion": "Muse Code 1.3.0 (1.3.0-R3401.1)",
-    "frozenInvocation": "MUSE_NO_AUTO_UPDATE=1 muse exec --provider meta --model muse-spark-1.3 --reasoning-effort high --json (adapter adds workspace/permission flags per role); CLI version, model and effort are identical for every candidate run and MUSE_NO_AUTO_UPDATE=1 keeps the launcher from changing the binary mid-evaluation.",
-    "confirmation": {
-      "required": true,
-      "confirmedAt": null,
-      "confirmedBy": null,
-      "note": "Operator sets these after checking that the contributor tier serves the frozen model. `validate-muse-code-manifest.mjs --ready` fails until they are set."
-    },
+    "frozenInvocation": "MUSE_NO_AUTO_UPDATE=1 muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor \"<task prompt>\" (sandbox on, approvals off, never --yolo, no MCP servers; safe posture per NOT-177)",
     "tokenMapping": {
-      "source": "raw usage object of the `muse exec --json` event stream; the adapter does not exist yet, so field names are fixed here by rule and by the run plan",
-      "rule": "Before run 1 the operator records in the run plan the raw Muse Code field for each quantity and whether its reported input total includes cached tokens (subtracting cached from input when it does). If the log or Meta documentation does not establish that, the candidate's cost is null and G6 is incomparable; nothing is guessed.",
+      "source": "raw usage object of the `muse exec --json` event stream (fields per NOT-177's report)",
       "uncached_input": "raw input tokens, minus raw cached tokens when the runtime reports input inclusive of cache",
       "cache_read": "raw cached/cache-read input tokens",
       "cache_write": "raw cache-write tokens if the Meta rate card has a cache-write tier, otherwise 0 by definition",
       "output": "raw output tokens with reasoning tokens counted once",
-      "inputIncludesCached": null,
-      "mappingRecordedInRunPlan": false,
-      "rawFields": {
-        "input": null,
-        "cache_read": null,
-        "cache_write": null,
-        "output": null
-      },
-      "rawFieldsNote": "Operator fills these before run 1. Each value is the exact dotted field path from a real `muse exec --json` usage event (for example `usage.input_tokens`), or a sentinel: \"none\" = Meta has no billing tier for it, so the quantity is 0 by definition (allowed for cache_read and cache_write only); \"unreported\" = the tier applies but Muse Code does not report it, so the quantity and every cost that needs it is null (allowed for all four). Set inputIncludesCached to true/false (or \"not_applicable\" when input or cache_read is none/unreported) and mappingRecordedInRunPlan to true at the same time. `validate-muse-code-manifest.mjs --ready` fails until all of it is present."
-    },
-    "pricingBasisFrozenNow": true
+      "inputIncludesCached": "record from the first real usage event; null until then"
+    }
   },
   "controls": {
-    "pairing": "One valid paired sample per task: identical workerSpec, startingSha, Agent Deck, role permission policy, timeoutSeconds and verification commands for both arms.",
-    "agentDeck": "One dedicated evaluation deck, non-sensitive playbooks only, no Linear service and no credentials; playbook ids and content hashes recorded in the run plan and reused for both arms.",
+    "pairing": "One valid run per task per arm (5 tasks x 2 arms = 10 runs): identical workerSpec, startingSha, timeoutSeconds and verification commands for both arms. Both arms run without MCP servers or a deck. Arm order alternates by task index.",
     "timeoutsSeconds": {
       "small": 1200,
       "medium": 2400,
       "long": 3600
     },
     "verificationTimeoutSeconds": 600,
-    "rerunPolicy": "Rerun only infrastructure-invalid attempts; retain them in the evidence.",
-    "evalRoot": "$EVAL_ROOT is the Dealer checkout at the commit recorded in the run plan; it holds scripts/grade-muse-code.mjs and the answer keys. Graders run from $EVAL_ROOT, never from the worker's worktree.",
-    "reviewLoop": {
-      "appliesTo": "tasks whose expectedArtifact.type is git_commits",
-      "reviewer": "Codex Dev (frozen as baseline.reviewer)",
-      "maxReviewerRounds": 3,
-      "countedVerdicts": [
-        "changes_requested"
-      ],
-      "protocol": "After the developer session, the fixed reviewer reviews the diff (round 1). On 'changes_requested' the same arm's developer profile gets a remediation session in the same worktree (Dealer's rework prompt carrying the reviewer's findings; timeout = the task's timeoutSeconds) and the reviewer re-reviews (round 2, 3). 'escalated' terminates the loop with no remediation. The loop also stops on 'approved', after maxReviewerRounds reviewer rounds, or when a remediation session fails or times out. R_i = the number of reviewer rounds whose verdict is 'changes_requested' (an 'escalated' verdict is never counted in R_i; it adds 1 to that run's human interventions instead). The reviewer sees the diff and worker spec only, never held-out tests. Reviewer passes in this loop are fixed instrumentation and are excluded from w_i, c_i and K; remediation developer sessions are subject sessions and are included.",
-      "terminalVerdicts": {
-        "approved": "loop ends; run is resolved",
-        "escalated": "loop ends immediately with no remediation session; NOT a change-request round (R_i unchanged); recorded as one human intervention (Dealer would block on a human action) and the run is flagged 'escalated'"
-      }
-    }
+    "rerunPolicy": "Rerun once, and only, an infrastructure-invalid attempt (harness crash, network or auth failure, CLI failing before its first model turn, account usage cap). Timeouts, wrong output, giving up and tool misuse are valid runs. Every attempt stays in the results.",
+    "contamination": "A run whose transcript reads referenceSha content (for example `git show <referenceSha>`) or docs/evaluations/muse-code is scored as failed, in both arms."
   },
   "tasks": [
     {
@@ -222,54 +168,6 @@
       "expectedArtifact": {
         "type": "git_commits",
         "description": "Commits on the task branch changing packages/server/src/coordinator/permissions.ts and packages/server/src/coordinator/spawn.ts."
-      }
-    },
-    {
-      "id": "muse-03-abort-kills-spawned-cli",
-      "sourceIssue": "NOT-126",
-      "sourcePullRequest": "not-so-fat/agent-dealer#44",
-      "repository": "github.com/not-so-fat/agent-dealer",
-      "startingSha": "127eb1ded54747db997f0655e16355e0aadad782",
-      "referenceSha": "ef69721899946919bc26766046c630de007b89f2",
-      "workerSpec": {
-        "title": "Kill the spawned CLI when an attempt aborts",
-        "description": "An aborted attempt stops at the effect handler: ctx.signal reaches deck prep and the PR-checks poll but never spawn, so the agent CLI keeps running, keeps editing the worktree and keeps spending tokens under a session the DB already marked failed; the successor attempt is then handed the same worktree. Thread ctx.signal from runDeveloperEffect and runReviewerEffect through the DeveloperSpawnInput/ReviewerSpawnInput in packages/server/src/coordinator/spawn.ts into spawnCli (packages/server/src/runners/spawn-cli.ts), which must accept an optional `signal?: AbortSignal` in its options. On abort: send SIGTERM to the child first (so the CLI can reap its own children), then SIGKILL after a grace period if it is still alive. The grace period defaults to a sensible value and is overridable by the env var SPAWN_ABORT_KILL_GRACE_MS (milliseconds, read when the abort fires). An abort is a lost lease, not a wall-clock timeout: the promise still resolves, `timedOut` is false, and output produced before the abort is still returned in `transcript`. A signal already aborted at spawn time kills the child immediately. Listeners must be removed when the child closes so a long-lived signal does not leak them. An un-aborted signal must not change behavior.",
-        "acceptanceCriteria": [
-          "spawnCli resolves promptly after abort with timedOut === false and the pre-abort transcript preserved.",
-          "A child that ignores SIGTERM is SIGKILLed after SPAWN_ABORT_KILL_GRACE_MS.",
-          "spawnCli with an un-aborted signal behaves exactly as without one (exitCode, transcript).",
-          "Both developer and reviewer effects pass ctx.signal to their spawn call."
-        ]
-      },
-      "role": "developer",
-      "category": "implementation",
-      "sizeClass": "small",
-      "timeoutSeconds": 1200,
-      "sensitivity": {
-        "classification": "non_sensitive",
-        "rationale": "Historical change to the public repository github.com/not-so-fat/agent-dealer; worker spec and reference diff contain no credentials, customer data, or personal data."
-      },
-      "verification": {
-        "setup": [
-          "npm ci"
-        ],
-        "heldOutPaths": [
-          "packages/server/src/runners/spawn-cli.test.ts"
-        ],
-        "heldOutSource": "referenceSha",
-        "commands": [
-          {
-            "id": "held-out-tests",
-            "run": "git checkout ef69721899946919bc26766046c630de007b89f2 -- packages/server/src/runners/spawn-cli.test.ts && npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/runners/spawn-cli.test.ts",
-            "expectedExitCode": 0,
-            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 6'.",
-            "startingShaResult": "non-zero exit or hang until --test-timeout (3 abort tests fail: the child is never terminated)."
-          }
-        ]
-      },
-      "expectedArtifact": {
-        "type": "git_commits",
-        "description": "Commits on the task branch changing packages/server/src/runners/spawn-cli.ts, coordinator/spawn.ts, developer-effect.ts and reviewer-effect.ts."
       }
     },
     {
@@ -375,83 +273,6 @@
       }
     },
     {
-      "id": "muse-06-reasoning-effort-profiles",
-      "sourceIssue": "NOT-81",
-      "sourcePullRequest": "not-so-fat/agent-dealer#63",
-      "repository": "github.com/not-so-fat/agent-dealer",
-      "startingSha": "d5171766bbf35a112755522f9b7b6c76e2003d0d",
-      "referenceSha": "2a51ca68402675f2a16af391c8539310d2437800",
-      "workerSpec": {
-        "title": "Add reasoning effort to agent profiles and frozen snapshots",
-        "description": "Wire a low/medium/high reasoning effort through the whole stack so a profile's effort is frozen into the worker session and a mid-session profile edit cannot change a running worker.\n\nContract: (shared) packages/shared/src/profile-snapshot.ts exports ReasoningEffort = z.enum(['low','medium','high']) (+ type) and ProfileSnapshot gains `effort: ReasoningEffort.nullable().default(null)` so snapshots written before this field still parse with effort null. packages/shared/src/agents.ts: AgentProfile gains `defaultEffort: ReasoningEffort.nullable()`, and CreateAgentInput/UpdateAgentInput gain `defaultEffort: ReasoningEffort.nullable().optional()`. (db) agents table gains nullable TEXT column default_effort in schema.sql and an idempotent ALTER TABLE migration in packages/server/src/db/index.ts. (repository) packages/server/src/repository/agents.ts persists/reads default_effort on create/update/read (unrecognised stored values read as null; update keeps the existing value when the input omits it). (snapshot) coordinator/profile-snapshot.ts freezes `effort: agent.defaultEffort` into the snapshot. (args) buildArgs/buildDeveloperArgs/buildReviewerArgs in coordinator/args.ts take an optional trailing `effort?: ReasoningEffort | null` parameter: codex_local adds `-c model_reasoning_effort=<effort>` (accepted under --strict-config), claude_code adds `--effort <effort>`, cursor_local ignores it (no separate flag; effort only exists inside a parameterized model id). Null/undefined adds nothing. (spawn) coordinator/spawn.ts's DeveloperSpawnInput/ReviewerSpawnInput gain `effort?: ReasoningEffort | null` and forward it; developer-effect.ts and reviewer-effect.ts pass the frozen snapshot effort. (web) apps/web AgentConfigFields/AgentsPage expose an effort selector (default runtime default/null) for runtimes that support it. Web contract: AgentConfigValue gains `defaultEffort: \"\" | ReasoningEffort` (\"\" = runtime default); AgentConfigFields renders, only for claude_code and codex_local, a <select> whose options have values \"\", \"low\", \"medium\", \"high\" (the \"\" option is the one that clears effort) and whose value is defaultEffort; AgentsPage seeds defaultEffort \"\" in its empty config, loads `agent.defaultEffort ?? \"\"` when editing, and sends `defaultEffort: <form value> || null` in both the create and the update request. Verification also checks that developer-effect.ts and reviewer-effect.ts pass the frozen snapshot effort as `effort` into the spawn input.",
-        "acceptanceCriteria": [
-          "parseProfileSnapshot defaults a missing effort to null for pre-existing snapshots.",
-          "Codex args include '-c model_reasoning_effort=<tier>' and Claude args include '--effort <tier>' when set; neither when null; cursor never.",
-          "createAgent/updateAgent round-trip defaultEffort; a later agent edit does not alter an existing snapshot.",
-          "The web Agents form can set and clear effort (selector low/medium/high plus a 'Runtime default' option that clears it, hidden for cursor; AgentsPage seeds, loads and submits defaultEffort in create and update); developer-effect.ts and reviewer-effect.ts forward the frozen snapshot effort into the spawn input; npm run typecheck for shared, server and web passes."
-        ]
-      },
-      "role": "developer",
-      "category": "implementation",
-      "sizeClass": "long",
-      "timeoutSeconds": 3600,
-      "sensitivity": {
-        "classification": "non_sensitive",
-        "rationale": "Historical change to the public repository github.com/not-so-fat/agent-dealer; worker spec and reference diff contain no credentials, customer data, or personal data."
-      },
-      "verification": {
-        "setup": [
-          "npm ci"
-        ],
-        "heldOutPaths": [
-          "packages/server/src/coordinator/args.test.ts",
-          "packages/server/src/coordinator/execution-env.integration.test.ts",
-          "packages/server/src/coordinator/profile-snapshot.test.ts",
-          "packages/shared/src/profile-snapshot.test.ts"
-        ],
-        "heldOutSource": "referenceSha",
-        "commands": [
-          {
-            "id": "held-out-tests",
-            "run": "git checkout 2a51ca68402675f2a16af391c8539310d2437800 -- packages/server/src/coordinator/args.test.ts packages/server/src/coordinator/execution-env.integration.test.ts packages/server/src/coordinator/profile-snapshot.test.ts packages/shared/src/profile-snapshot.test.ts && npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/coordinator/args.test.ts packages/server/src/coordinator/execution-env.integration.test.ts packages/server/src/coordinator/profile-snapshot.test.ts packages/shared/src/profile-snapshot.test.ts",
-            "expectedExitCode": 0,
-            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 33'.",
-            "startingShaResult": "non-zero: on a clean tree `npm run build -w @agent-dealer/shared` exits 2 (the held-out profile-snapshot.test.ts reads `effort`, absent at startingSha); with an already-built shared dist the tests run and 6 fail."
-          },
-          {
-            "id": "typecheck-shared-server-web",
-            "run": "npm run build -w @agent-dealer/shared && npm run typecheck",
-            "expectedExitCode": 0,
-            "expectedResult": "npm run typecheck exits 0: tsc --noEmit passes for @agent-dealer/shared, @agent-dealer/server and @agent-dealer/web (run before the eval-owned checks are copied in).",
-            "startingShaResult": "non-zero (exit 2) while the held-out test files are checked out (type errors on `effort`); exit 0 without them, so types alone never prove the wiring."
-          },
-          {
-            "id": "effort-forwarding-to-spawn",
-            "run": "cp $EVAL_ROOT/scripts/eval-checks/muse-06-effort-forwarding.test.ts packages/server/src/coordinator/eval-muse-06-effort-forwarding.test.ts && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/coordinator/eval-muse-06-effort-forwarding.test.ts",
-            "expectedExitCode": 0,
-            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 1': the developer spawn receives the frozen effort 'high' and the reviewer spawn 'low', not later profile edits.",
-            "startingShaResult": "exit code 1 (developer spawn input has no effort)."
-          },
-          {
-            "id": "web-effort-form",
-            "run": "cp $EVAL_ROOT/scripts/eval-checks/muse-06-effort-form.test.tsx apps/web/src/eval-muse-06-effort-form.test.tsx && npx tsx --tsconfig apps/web/tsconfig.json --test --test-timeout=60000 apps/web/src/eval-muse-06-effort-form.test.tsx",
-            "expectedExitCode": 0,
-            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 5': the selector, its options, value reflection, the onChange handler for each effort (including the clearing value), the cursor exclusion and the AgentsPage request fields.",
-            "startingShaResult": "exit code 1 (4 of 5 fail: no effort selector, no onChange handler, no defaultEffort in AgentsPage; only the cursor exclusion passes)."
-          }
-        ],
-        "evalChecks": [
-          "scripts/eval-checks/muse-06-effort-forwarding.test.ts",
-          "scripts/eval-checks/muse-06-effort-form.test.tsx"
-        ],
-        "evalChecksNote": "Eval-owned checks live in $EVAL_ROOT and are copied into the worker tree only at verification time (never visible to the worker). They cover the required surfaces the held-out server/shared tests do not: effort forwarding from developer-effect.ts / reviewer-effect.ts into the spawn input (behavioral, real coordinator run with fake spawn/GitHub), and the web Agents form (renders the real AgentConfigFields to static markup; inspects AgentsPage with the TypeScript compiler API). The web app has no test runner, so the form check does not use a DOM: it verifies the rendered selector, its options (including the clearing 'Runtime default' option), value reflection and the cursor exclusion, and it invokes the selector's real onChange handler (calling AgentConfigFields against a stub hook dispatcher and reading the returned element tree) for every effort in low/medium/high/'' on both runtimes, asserting AgentConfigFields.onChange receives the full config with the chosen defaultEffort. It also inspects AgentsPage to confirm it seeds, loads and submits defaultEffort in both requests."
-      },
-      "expectedArtifact": {
-        "type": "git_commits",
-        "description": "Commits touching packages/shared, packages/server (db, repository, coordinator) and apps/web (Agents form)."
-      }
-    },
-    {
       "id": "muse-07-head-reconcile-push-lag",
       "sourceIssue": "NOT-110",
       "sourcePullRequest": null,
@@ -498,479 +319,12 @@
         "type": "git_commits",
         "description": "Commits changing packages/server/src/coordinator/developer-effect.ts."
       }
-    },
-    {
-      "id": "muse-08-usage-cap-false-positives",
-      "sourceIssue": "NOT-117",
-      "sourcePullRequest": null,
-      "repository": "github.com/not-so-fat/agent-dealer",
-      "startingSha": "86187bc81bfc357313b6b960b494e94eef78a379",
-      "referenceSha": "30c103ea79cc57b54e4306e61897230930896e20",
-      "workerSpec": {
-        "title": "Usage-cap detection false positives and tip rebuilds",
-        "description": "Debug two production failures. (A) packages/server/src/runners/usage-cap.ts's Cursor/Codex text fallback scans the whole NDJSON log, so a successful session whose file reads/tool output contain source text like 'infra-attempt limit reached' opens a bogus deferral and marks the runtime unavailable. (B) developer-effect.ts, on any detected usage cap, removes the worktree and returns usage_capped even when the session succeeded with commits, discarding the tip; the deferred retry then looks like a blank round-1 rebuild.\n\nFix (A): the text fallback haystack must be only the stderr trailer (after '\\n--- stderr ---\\n') plus `result` strings from error results (is_error true) — never assistant/tool/file bodies. Use a narrower pattern that requires rate|usage|quota|subscription near 'limit' (e.g. 'usage limit reached', 'rate limit', 'quota exceeded', 'billing_error', 'subscription limit') and never matches a bare 'limit reached'. A session that ended successfully never opens a deferral from body text: Cursor/Claude streams end with a non-error `result` event; Codex native JSONL ends with `turn.completed` (a later `turn.failed` or `error` means not successful). Export `detectUsageCapFromRawLog(raw: string, runtime: Runtime, nowMs = Date.now()): UsageCapDetection | null` from usage-cap.ts and make detectUsageCapFromLog read the file and delegate to it. Structured detection (e.g. a rejected rate_limit_event, billing_error and usage-limit result errors) must still detect.\nFix (B): in developer-effect.ts, when a usage cap is recorded, compute commitsAhead against origin/<baseBranch>; if the session was ok (not timed out, exit 0) and has commits ahead, continue with push/PR instead of deferring (the cap is still recorded for future spawns, so runtimeAvailability(runtime).available stays false). Otherwise remove the worktree and return usage_capped, adding `resume: { retryReason }` to the outcome when commits exist, where retryReason contains 'usage cap after local commits' and tells the next developer not to re-implement from scratch and to continue from the existing branch. routing.ts's usage_capped outcome gains optional `resume?: { retryReason: string }`, usage-cap-defer.ts stores retryReason on the deferred work item payload, and the branch must remain the existing tip (no new branch, tip SHA unchanged).",
-        "acceptanceCriteria": [
-          "A successful Cursor session containing 'infra-attempt limit reached' in file contents yields no detection and leaves runtimeAvailability available.",
-          "Billing-error and usage-limit result errors, and a stderr trailer saying 'usage limit reached', still detect; a bare 'limit reached' in stderr does not.",
-          "A successful Codex session (turn.completed) with cap-like prose is not a detection.",
-          "A mid-success usage cap continues to publish (issue reaches 'reviewing') while runtime availability stays capped.",
-          "A capped session with commits defers with a retryReason that preserves the tip; the follow-up prompt does not say 'fresh branch'."
-        ]
-      },
-      "role": "developer",
-      "category": "test_debug",
-      "sizeClass": "medium",
-      "timeoutSeconds": 2400,
-      "sensitivity": {
-        "classification": "non_sensitive",
-        "rationale": "Historical change to the public repository github.com/not-so-fat/agent-dealer; worker spec and reference diff contain no credentials, customer data, or personal data."
-      },
-      "verification": {
-        "setup": [
-          "npm ci"
-        ],
-        "heldOutPaths": [
-          "packages/server/src/coordinator/developer-effect.test.ts",
-          "packages/server/src/runners/usage-cap.test.ts",
-          "packages/server/src/runners/fixtures/cursor-billing-error.ndjson",
-          "packages/server/src/runners/fixtures/cursor-result-usage-limit.ndjson",
-          "packages/server/src/runners/fixtures/cursor-success-with-infra-attempt-limit-text.ndjson"
-        ],
-        "heldOutSource": "referenceSha",
-        "commands": [
-          {
-            "id": "held-out-tests",
-            "run": "git checkout 30c103ea79cc57b54e4306e61897230930896e20 -- packages/server/src/coordinator/developer-effect.test.ts packages/server/src/runners/usage-cap.test.ts packages/server/src/runners/fixtures/cursor-billing-error.ndjson packages/server/src/runners/fixtures/cursor-result-usage-limit.ndjson packages/server/src/runners/fixtures/cursor-success-with-infra-attempt-limit-text.ndjson && npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/coordinator/developer-effect.test.ts packages/server/src/runners/usage-cap.test.ts",
-            "expectedExitCode": 0,
-            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 34'.",
-            "startingShaResult": "exit code 1 (7 failing tests)."
-          }
-        ]
-      },
-      "expectedArtifact": {
-        "type": "git_commits",
-        "description": "Commits changing packages/server/src/runners/usage-cap.ts, coordinator/developer-effect.ts, routing.ts, usage-cap-defer.ts."
-      }
-    },
-    {
-      "id": "muse-09-codex-send-gate-deny",
-      "sourceIssue": "NOT-134",
-      "sourcePullRequest": "not-so-fat/agent-dealer#49",
-      "repository": "github.com/not-so-fat/agent-dealer",
-      "startingSha": "10c7cf216c7cc3734776f08fcec6b40ce890ed27",
-      "referenceSha": "d36e18ad736ad1a2365bb306b67e5b4a84d698e2",
-      "workerSpec": {
-        "title": "Deny the send gate in the scoped codex MCP config",
-        "description": "codex has no --disallowedTools, so the outbound-mutation denial that assertReviewerReadOnly's header promises has no expression for codex once a deck MCP server is attached (NOT-132 removed the vacuous --ignore-user-config path). materializeWorkerMcpConfig (packages/server/src/adapters/agent-deck-bind.ts) is policy-blind: developer and reviewer get the same scoped config.toml. Make the denial real.\n\nContract: create packages/server/src/adapters/codex-scoped-config.ts exporting CODEX_SEND_GATE_TOOL = 'call_service_tool', CODEX_DECK_READ_TOOLS (the read-only deck tool names the worker may still use), codexMcpServersTable({ mcpUrl, headers, allowOutboundMutation }) returning the `mcp_servers` table with the single 'agent-deck' server (url + http_headers) and, unless allowOutboundMutation, `disabled_tools: [CODEX_SEND_GATE_TOOL]`, and codexScopedConfigDeniesSendGate(codexHome: string): boolean which reads the config.toml in that directory and returns true only if the agent-deck server lists the send-gate tool in disabled_tools (or otherwise cannot call it). materializeWorkerMcpConfig gains a required `policy: PermissionPolicy` option (and its callers in developer-effect.ts / reviewer-effect.ts pass the session policy) and builds the codex table from policy.outboundMutation. In permissions.ts the codex branch of assertReviewerReadOnly, when a scoped CODEX_HOME is in effect, must additionally throw 'reviewer codex scoped config does not deny the outbound-mutation tool' unless codexScopedConfigDeniesSendGate(CODEX_HOME) is true — read the file codex will read rather than trusting a flag. Leave a documented KNOWN GAP comment at the assertion site for cursor (--force is load-bearing for headless MCP; the only deny list is the user-global ~/.cursor/cli-config.json, which a per-attempt worker must not write).",
-        "acceptanceCriteria": [
-          "A codex scoped config generated with outboundMutation=false lists disabled_tools = ['call_service_tool']; with outboundMutation=true it does not.",
-          "assertReviewerReadOnly rejects a scoped-CODEX_HOME codex reviewer whose config.toml does not deny the send gate, and accepts one that does.",
-          "Developer and reviewer effects both pass their resolved policy into materializeWorkerMcpConfig.",
-          "Claude/Cursor behavior is unchanged; the cursor gap is documented in a comment."
-        ]
-      },
-      "role": "developer",
-      "category": "implementation",
-      "sizeClass": "medium",
-      "timeoutSeconds": 2400,
-      "sensitivity": {
-        "classification": "non_sensitive",
-        "rationale": "Historical change to the public repository github.com/not-so-fat/agent-dealer; worker spec and reference diff contain no credentials, customer data, or personal data."
-      },
-      "verification": {
-        "setup": [
-          "npm ci"
-        ],
-        "heldOutPaths": [
-          "packages/server/src/adapters/agent-deck-bind.test.ts",
-          "packages/server/src/coordinator/permissions.test.ts"
-        ],
-        "heldOutSource": "referenceSha",
-        "commands": [
-          {
-            "id": "held-out-tests",
-            "run": "git checkout d36e18ad736ad1a2365bb306b67e5b4a84d698e2 -- packages/server/src/adapters/agent-deck-bind.test.ts packages/server/src/coordinator/permissions.test.ts && npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/adapters/agent-deck-bind.test.ts packages/server/src/coordinator/permissions.test.ts",
-            "expectedExitCode": 0,
-            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 28'.",
-            "startingShaResult": "exit code 1 (4 failing tests)."
-          }
-        ]
-      },
-      "expectedArtifact": {
-        "type": "git_commits",
-        "description": "Commits adding packages/server/src/adapters/codex-scoped-config.ts and changing agent-deck-bind.ts, permissions.ts, developer-effect.ts, reviewer-effect.ts."
-      }
-    },
-    {
-      "id": "muse-10-explore-usage-capture",
-      "sourceIssue": "NOT-176",
-      "sourceNote": "Authored for this evaluation; no historical issue.",
-      "sourcePullRequest": null,
-      "repository": "github.com/not-so-fat/agent-dealer",
-      "startingSha": "42d01670de76dff6e851f75905f6146e65571e93",
-      "referenceSha": null,
-      "workerSpec": {
-        "title": "Explore: how a worker session's token and cost usage is captured and stored",
-        "description": "Read-only exploration of the repository at the pinned commit; change no files and make no commits. Answer in markdown, citing file paths and function names:\n1. Which function parses a finished developer/reviewer session's log into token/cost usage, in which file, and which field of the log's result event does each value come from (input tokens, output tokens, cost)?\n2. How is a missing value represented at that step?\n3. Which functions in which coordinator files call it and persist the result, which repository function inserts the row, and into which table and columns?\n4. Which repository aggregate helper sums usage per issue, and what does it do with missing values — is that safe for a cost comparison that must not treat unknown cost as zero?\nEnd with a one-paragraph summary. Your final message is the deliverable.\n\nAnswer format: the final message may contain prose, but it MUST contain exactly one fenced ```json block (and no other fenced json block) with this shape, using repo-relative file paths and bare function names:\n{\n  \"extractor\": { \"function\": \"...\", \"file\": \"...\" },\n  \"sources\": { \"tokensIn\": \"<bare result-event field name, e.g. usage.some_field; no other words>\", \"tokensOut\": \"<bare result-event field name, e.g. usage.some_field; no other words>\", \"costUsd\": \"<bare result-event field name, e.g. usage.some_field; no other words>\" },\n  \"missingValue\": \"<how a missing value is represented>\",\n  \"recordedBy\": { \"developer\": \"<coordinator file>\", \"reviewer\": \"<coordinator file>\" },\n  \"insert\": { \"function\": \"...\", \"file\": \"...\", \"table\": \"...\", \"columns\": [\"...\"] },\n  \"aggregate\": { \"function\": \"...\", \"file\": \"...\", \"coalescesMissingToZero\": true|false, \"safeForUnknownCostComparison\": true|false }\n}",
-        "acceptanceCriteria": [
-          "The JSON block names the extractor function and its file, and the result-event field each of tokensIn, tokensOut and costUsd is read from.",
-          "It states that a missing value is represented as null, names the file that records usage for each of the developer and reviewer roles, and the repository insert function, file, table and all columns.",
-          "It names the per-issue aggregate helper and its file, and correctly states whether it coalesces missing values to zero and whether it is safe for a cost comparison.",
-          "No repository file is modified."
-        ]
-      },
-      "role": "developer",
-      "category": "repository_exploration",
-      "sizeClass": "small",
-      "timeoutSeconds": 1200,
-      "sensitivity": {
-        "classification": "non_sensitive",
-        "rationale": "Read-only questions about the public repository github.com/not-so-fat/agent-dealer at a pinned commit; no credentials, customer data, or personal data."
-      },
-      "verification": {
-        "setup": [],
-        "heldOutPaths": [],
-        "heldOutSource": null,
-        "commands": [
-          {
-            "id": "worktree-unchanged",
-            "run": "test -z \"$(git status --porcelain)\" && test \"$(git rev-parse HEAD)\" = 42d01670de76dff6e851f75905f6146e65571e93",
-            "expectedExitCode": 0,
-            "expectedResult": "No output; the exploration left the worktree clean and HEAD at the pinned SHA."
-          },
-          {
-            "id": "answer-facts",
-            "run": "node \"$EVAL_ROOT/scripts/grade-muse-code.mjs\" answer muse-10-explore-usage-capture \"$ARTIFACT\"",
-            "expectedExitCode": 0,
-            "expectedResult": "Prints 'ok': the single fenced JSON block matches every field of the task's answerKey (exact function/file pairs, exact result-event field identifiers, missing-value representation, booleans); any wrong or prose-wrapped value prints 'FAIL: ...' and exits 1."
-          }
-        ],
-        "answerKey": {
-          "extractor": {
-            "function": {
-              "$equals": "extractSpawnUsage"
-            },
-            "file": {
-              "$equals": "packages/server/src/coordinator/usage.ts"
-            }
-          },
-          "sources": {
-            "tokensIn": {
-              "$oneOf": [
-                "usage.input_tokens",
-                "input_tokens",
-                "usage.inputTokens",
-                "inputTokens"
-              ]
-            },
-            "tokensOut": {
-              "$oneOf": [
-                "usage.output_tokens",
-                "output_tokens",
-                "usage.outputTokens",
-                "outputTokens"
-              ]
-            },
-            "costUsd": {
-              "$oneOf": [
-                "total_cost_usd"
-              ]
-            }
-          },
-          "missingValue": {
-            "$equals": "null"
-          },
-          "recordedBy": {
-            "developer": {
-              "$equals": "packages/server/src/coordinator/developer-effect.ts"
-            },
-            "reviewer": {
-              "$equals": "packages/server/src/coordinator/reviewer-effect.ts"
-            }
-          },
-          "insert": {
-            "function": {
-              "$equals": "recordUsageEvent"
-            },
-            "file": {
-              "$equals": "packages/server/src/repository/usage-events.ts"
-            },
-            "table": {
-              "$equals": "usage_events"
-            },
-            "columns": {
-              "$setEquals": [
-                "id",
-                "issue_id",
-                "worker_session_id",
-                "role",
-                "runtime",
-                "tokens_in",
-                "tokens_out",
-                "cost_usd",
-                "duration_ms",
-                "ts"
-              ]
-            }
-          },
-          "aggregate": {
-            "function": {
-              "$equals": "summarizeIssueUsage"
-            },
-            "file": {
-              "$equals": "packages/server/src/repository/usage-events.ts"
-            },
-            "coalescesMissingToZero": {
-              "$equals": true
-            },
-            "safeForUnknownCostComparison": {
-              "$equals": false
-            }
-          }
-        }
-      },
-      "expectedArtifact": {
-        "type": "markdown_answer",
-        "description": "The worker's final message, saved by the harness verbatim to $ARTIFACT (<runDir>/artifact.md). No repository files may be changed."
-      }
-    },
-    {
-      "id": "muse-11-explore-reviewer-read-only",
-      "sourceIssue": "NOT-176",
-      "sourceNote": "Authored for this evaluation; no historical issue.",
-      "sourcePullRequest": null,
-      "repository": "github.com/not-so-fat/agent-dealer",
-      "startingSha": "42d01670de76dff6e851f75905f6146e65571e93",
-      "referenceSha": null,
-      "workerSpec": {
-        "title": "Explore: how a reviewer session is kept read-only and away from outbound mutation",
-        "description": "Read-only exploration of the repository at the pinned commit; change no files and make no commits. Answer in markdown, citing file paths, function names and constants:\n1. Which function asserts the reviewer read-only invariant, in which file, and where in the spawn path is it invoked relative to launching the CLI?\n2. For a Claude reviewer: which CLI flags/modes make it read-only (name at least --restricted, the permission mode, and the outbound-mutation deny flag), and which constant in args.ts names the denied tool?\n3. For a Codex reviewer with a deck attached: how is the send gate (call_service_tool) denied, which config key expresses it, and which function verifies it before spawn?\n4. Is Cursor covered equally? State the known gap: whether outbound mutation is denied, whether headless Cursor needs --force, and whether the only deny list is user-global or per-invocation.\nEnd with a one-paragraph summary. Your final message is the deliverable.\n\nAnswer format: the final message may contain prose, but it MUST contain exactly one fenced ```json block (and no other fenced json block) with this shape, using repo-relative file paths and bare function names:\n{\n  \"assertion\": { \"function\": \"...\", \"file\": \"...\", \"calledFrom\": { \"function\": \"...\", \"file\": \"...\" }, \"calledBeforeSpawnCli\": true|false },\n  \"claude\": { \"restrictedFlag\": \"...\", \"permissionMode\": \"...\", \"denyFlag\": \"...\", \"deniedTool\": \"...\", \"deniedToolConstant\": \"...\", \"constantFile\": \"...\" },\n  \"codex\": { \"deniedTool\": \"...\", \"configKey\": \"...\", \"verifier\": \"...\", \"verifierFile\": \"...\", \"verifiedIn\": \"<function that calls the verifier>\" },\n  \"cursor\": { \"deniesOutboundMutation\": true|false, \"forceRequiredHeadless\": true|false, \"denyListScope\": \"user-global\"|\"per-invocation\" }\n}",
-        "acceptanceCriteria": [
-          "The JSON block names the assertion function and file, the function that calls it and that the call precedes spawnCli.",
-          "It names the Claude flags, the denied tool and the constant (with its file) that holds it.",
-          "It names the Codex denied tool, config key, the verifier function, its file and the function that invokes it.",
-          "It states that Cursor does not deny outbound mutation, that headless Cursor needs --force, and that the only deny list is user-global. No repository file is modified."
-        ]
-      },
-      "role": "developer",
-      "category": "repository_exploration",
-      "sizeClass": "small",
-      "timeoutSeconds": 1200,
-      "sensitivity": {
-        "classification": "non_sensitive",
-        "rationale": "Read-only questions about the public repository github.com/not-so-fat/agent-dealer at a pinned commit; no credentials, customer data, or personal data."
-      },
-      "verification": {
-        "setup": [],
-        "heldOutPaths": [],
-        "heldOutSource": null,
-        "commands": [
-          {
-            "id": "worktree-unchanged",
-            "run": "test -z \"$(git status --porcelain)\" && test \"$(git rev-parse HEAD)\" = 42d01670de76dff6e851f75905f6146e65571e93",
-            "expectedExitCode": 0,
-            "expectedResult": "No output; the exploration left the worktree clean and HEAD at the pinned SHA."
-          },
-          {
-            "id": "answer-facts",
-            "run": "node \"$EVAL_ROOT/scripts/grade-muse-code.mjs\" answer muse-11-explore-reviewer-read-only \"$ARTIFACT\"",
-            "expectedExitCode": 0,
-            "expectedResult": "Prints 'ok': the single fenced JSON block matches every field of the task's answerKey (exact function/file pairs, constants, flags, booleans, enumerated Cursor gap); any wrong relationship prints 'FAIL: ...' and exits 1."
-          }
-        ],
-        "answerKey": {
-          "assertion": {
-            "function": {
-              "$equals": "assertReviewerReadOnly"
-            },
-            "file": {
-              "$equals": "packages/server/src/coordinator/permissions.ts"
-            },
-            "calledFrom": {
-              "function": {
-                "$equals": "realReviewerSpawn"
-              },
-              "file": {
-                "$equals": "packages/server/src/coordinator/spawn.ts"
-              }
-            },
-            "calledBeforeSpawnCli": {
-              "$equals": true
-            }
-          },
-          "claude": {
-            "restrictedFlag": {
-              "$equals": "--restricted"
-            },
-            "permissionMode": {
-              "$equals": "dontAsk"
-            },
-            "denyFlag": {
-              "$equals": "--disallowedTools"
-            },
-            "deniedTool": {
-              "$equals": "mcp__agent-deck__call_service_tool"
-            },
-            "deniedToolConstant": {
-              "$equals": "DENY_SEND_TOOL"
-            },
-            "constantFile": {
-              "$equals": "packages/server/src/coordinator/args.ts"
-            }
-          },
-          "codex": {
-            "deniedTool": {
-              "$equals": "call_service_tool"
-            },
-            "configKey": {
-              "$equals": "disabled_tools"
-            },
-            "verifier": {
-              "$equals": "codexScopedConfigDeniesSendGate"
-            },
-            "verifierFile": {
-              "$equals": "packages/server/src/adapters/codex-scoped-config.ts"
-            },
-            "verifiedIn": {
-              "$equals": "assertReviewerReadOnly"
-            }
-          },
-          "cursor": {
-            "deniesOutboundMutation": {
-              "$equals": false
-            },
-            "forceRequiredHeadless": {
-              "$equals": true
-            },
-            "denyListScope": {
-              "$equals": "user-global"
-            }
-          }
-        }
-      },
-      "expectedArtifact": {
-        "type": "markdown_answer",
-        "description": "The worker's final message, saved by the harness verbatim to $ARTIFACT (<runDir>/artifact.md). No repository files may be changed."
-      }
-    },
-    {
-      "id": "muse-12-review-usage-cap-deferral",
-      "sourceIssue": "NOT-111",
-      "sourcePullRequest": "not-so-fat/agent-dealer#36",
-      "repository": "github.com/not-so-fat/agent-dealer",
-      "startingSha": "9dda237c316f22d2b2c112048be7a1d1fe9c99f1",
-      "referenceSha": "65a01344ac6b4bfa6f8ee16dd1748c1015acd5ed",
-      "workerSpec": {
-        "title": "Review: defer work on runtime usage caps instead of failing (NOT-111)",
-        "description": "Review the change introduced by commit 9dda237c316f22d2b2c112048be7a1d1fe9c99f1 against its parent 86d9cc644d53830f0457b6b3e8437be13c9cd30a (base SHA). Intent: when a runtime account hits a usage cap, the coordinator should defer the work item until the cap lifts instead of failing it or burning infra attempts; a 24 h per-item deferral ceiling escalates to a human. The diff is embedded in the reviewer prompt; you may read the checked-out tree read-only. Judge correctness, crash/lease recovery paths, health-preflight behavior and test coverage.\n\nClaim catalogue. A reviewer has raised the claims below. Verify each against the code. For every claim you find TRUE, emit exactly one finding whose fingerprint is exactly `claim:<id>` (for example `claim:duplicate-cli-missing`), whose `file` is the file the claim concerns, and whose title and rationale explain the evidence. For a claim you find false or cannot verify, emit NO finding with that fingerprint: a `claim:` fingerprint is an assertion that the claim holds, and asserting a false claim fails the review. Any other finding you make must use a fingerprint that does not start with `claim:`. Set the verdict to changes_requested when you assert any claim.\n- claim:duplicate-cli-missing: In runtimeIssuesUncached (agent-health.ts), a codex_local runtime whose CLI is missing gets the cli_missing health issue pushed more than once.\n- claim:recovery-ignores-runtime-availability: Lease-expiry recovery (recovery.ts) never consults runtime availability, so an item whose lease expired during a usage-cap observation is dead-lettered instead of deferred.\n- claim:untested-deferral-ceiling: The 24 h deferral-ceiling escalation (deferralCeilingExceeded in usage-cap-defer.ts) has no test coverage in this change.\n- claim:attempt-count-not-reverted: deferLeasedWorkItemForUsageCap does not revert the claim's attempt_count bump, so every usage-cap deferral spends an attempt.\n- claim:capped-session-marked-failed: worker-loop.ts records a worker session that ended with a usage_capped outcome as failed.\n- claim:stale-cap-health-cache: agent-health.ts caches usage_capped health issues for RUNTIME_CACHE_MS, so a lifted cap keeps being reported until the cache expires.\n\nReturn exactly one fenced reviewer result JSON block required by the reviewer prompt (verdict, baseSha, headSha, acceptanceCriteriaAssessment, evidenceAssessment, findings with fingerprint/severity/title/rationale/file/line, risks) with baseSha and headSha set to the two SHAs above.",
-        "acceptanceCriteria": [
-          "Final message contains exactly one fenced JSON block that satisfies the ReviewerResult schema (packages/server/src/coordinator/reviewer-result.ts).",
-          "baseSha and headSha equal the two SHAs named in the spec, and the verdict is changes_requested.",
-          "Findings with a `claim:<id>` fingerprint are emitted for at least two of the three claims that hold (claim:duplicate-cli-missing, claim:recovery-ignores-runtime-availability, claim:untested-deferral-ceiling), each naming a file the claim concerns.",
-          "No finding carries the fingerprint of a claim that does not hold, and no `claim:` fingerprint is outside the catalogue.",
-          "The reviewer modifies no files."
-        ]
-      },
-      "role": "reviewer",
-      "category": "review",
-      "sizeClass": "medium",
-      "timeoutSeconds": 2400,
-      "sensitivity": {
-        "classification": "non_sensitive",
-        "rationale": "Review of a historical commit in the public repository github.com/not-so-fat/agent-dealer; no credentials, customer data, or personal data."
-      },
-      "verification": {
-        "setup": [],
-        "heldOutPaths": [],
-        "heldOutSource": null,
-        "claims": [
-          {
-            "id": "duplicate-cli-missing",
-            "holds": true,
-            "files": [
-              "packages/server/src/adapters/agent-health.ts"
-            ],
-            "statement": "In runtimeIssuesUncached (agent-health.ts), a codex_local runtime whose CLI is missing gets the cli_missing health issue pushed more than once.",
-            "evidence": "The missing-CLI branch pushes cli_missing without returning, then the repeated `--version` check pushes it again (fixed in 65a0134)."
-          },
-          {
-            "id": "recovery-ignores-runtime-availability",
-            "holds": true,
-            "files": [
-              "packages/server/src/coordinator/recovery.ts"
-            ],
-            "statement": "Lease-expiry recovery (recovery.ts) never consults runtime availability, so an item whose lease expired during a usage-cap observation is dead-lettered instead of deferred.",
-            "evidence": "recovery.ts has no runtimeAvailability / runtime_availability reference at the head SHA (fixed in 65a0134)."
-          },
-          {
-            "id": "untested-deferral-ceiling",
-            "holds": true,
-            "files": [
-              "packages/server/src/coordinator/usage-cap-defer.ts",
-              "packages/server/src/coordinator/usage-cap-config.ts",
-              "packages/server/src/coordinator/usage-cap.integration.test.ts"
-            ],
-            "statement": "The 24 h deferral-ceiling escalation (deferralCeilingExceeded in usage-cap-defer.ts) has no test coverage in this change.",
-            "evidence": "No test at the head SHA exercises deferralCeilingExceeded or the ceiling escalation (fixed in 65a0134)."
-          },
-          {
-            "id": "attempt-count-not-reverted",
-            "holds": false,
-            "files": [
-              "packages/server/src/coordinator/usage-cap-defer.ts"
-            ],
-            "statement": "deferLeasedWorkItemForUsageCap does not revert the claim's attempt_count bump, so every usage-cap deferral spends an attempt.",
-            "evidence": "False decoy: deferWorkItem is called with revertAttemptCount: true."
-          },
-          {
-            "id": "capped-session-marked-failed",
-            "holds": false,
-            "files": [
-              "packages/server/src/coordinator/worker-loop.ts"
-            ],
-            "statement": "worker-loop.ts records a worker session that ended with a usage_capped outcome as failed.",
-            "evidence": "False decoy: sessionStatus maps usage_capped to done."
-          },
-          {
-            "id": "stale-cap-health-cache",
-            "holds": false,
-            "files": [
-              "packages/server/src/adapters/agent-health.ts"
-            ],
-            "statement": "agent-health.ts caches usage_capped health issues for RUNTIME_CACHE_MS, so a lifted cap keeps being reported until the cache expires.",
-            "evidence": "False decoy: cap issues are computed fresh on every call and filtered out of the cached issue list."
-          }
-        ],
-        "minHeldClaims": 2,
-        "commands": [
-          {
-            "id": "reviewer-result-defects",
-            "run": "node \"$EVAL_ROOT/scripts/grade-muse-code.mjs\" review muse-12-review-usage-cap-deferral \"$ARTIFACT\"",
-            "expectedExitCode": 0,
-            "expectedResult": "Prints 'ok (matched <claim ids>; n/3)': the artifact parses as a ReviewerResult with the pinned base/head SHAs and verdict changes_requested, asserts (via `claim:<id>` fingerprints, naming a claim file) at least 2 of the 3 true claims, and asserts no false claim and no unknown claim id. Approved results, missing/insufficient claims, or any asserted decoy print 'FAIL: ...' and exit 1. Finding prose is never graded."
-          },
-          {
-            "id": "worktree-unchanged",
-            "run": "test -z \"$(git status --porcelain)\" && test \"$(git rev-parse HEAD)\" = 9dda237c316f22d2b2c112048be7a1d1fe9c99f1",
-            "expectedExitCode": 0,
-            "expectedResult": "No output; the read-only reviewer left the worktree clean."
-          }
-        ],
-        "expectedShas": {
-          "baseSha": "86d9cc644d53830f0457b6b3e8437be13c9cd30a",
-          "headSha": "9dda237c316f22d2b2c112048be7a1d1fe9c99f1"
-        }
-      },
-      "expectedArtifact": {
-        "type": "reviewer_result_json",
-        "description": "The reviewer's final message saved verbatim to $ARTIFACT (<runDir>/artifact.md), containing a fenced JSON ReviewerResult."
-      }
     }
   ],
   "costModel": {
     "basis": "list_rate_shadow_cost",
     "frozenNow": true,
-    "appliesTo": "both arms and every subject session; it is the only cost that enters G6. Actual plan/quota spend is reported separately (actualPlanSpendReport) and is never substituted for, mixed into or averaged with the shadow cost.",
+    "appliesTo": "both arms and every subject session; it is the only cost that enters threshold 3. Actual plan/quota spend is reported separately (actualPlanSpendReport) and is never substituted for, mixed into or averaged with the shadow cost.",
     "disjointQuantities": {
       "uncached_input": "input tokens billed at the normal input rate; excludes every cached token",
       "cache_read": "input tokens served from cache, billed at the cache-read rate",
@@ -980,7 +334,7 @@
     "formula": "cost_usd = uncached_input × r_input + cache_read × r_cache_read + cache_write × r_cache_write + output × r_output. The four quantities are disjoint by construction; no token is charged at two rates.",
     "notApplicable": "A quantity the runtime's vendor has no tier for (Codex cache_write) is defined as 0 by that runtime's tokenMapping, not by absence of data. A quantity that has a tier but is not reported is null.",
     "nullRule": "Any applicable quantity that is missing, or a mapping whose subset/disjoint semantics cannot be established from the raw log, makes the attempt cost null, never 0 and never a saving.",
-    "actualPlanSpendReport": "Reported alongside G6, not gated: for each arm the plan, price, billing period, number of runs, and provider-reported consumption. The candidate's contributor-tier cash price ($0, paid in data-use rights) is reported but is not a cost and cannot satisfy G6. No time-based or quota-share allocation is used; the shadow list-rate cost is the documented conversion of plan usage to dollars.",
-    "noPublishedRate": "If a vendor publishes no per-token rate for its frozen model (possible for muse-spark-1.3), or a runtime reports no token counts, that arm's cost is null and G6 is incomparable; both arms' actual plan spend is then reported separately."
+    "actualPlanSpendReport": "Reported alongside threshold 3, not gated: for each arm the plan, price, billing period, number of runs, and provider-reported consumption. The candidate's contributor-tier cash price ($0, paid in data-use rights) is reported but is not a cost and cannot satisfy threshold 3. No time-based or quota-share allocation is used; the shadow list-rate cost is the documented conversion of plan usage to dollars.",
+    "noPublishedRate": "If a vendor publishes no per-token rate for its frozen model (possible for muse-spark-1.3), or a runtime reports no token counts, that arm's cost is null and threshold 3 is incomparable; both arms' actual plan spend is then reported separately."
   }
 }
