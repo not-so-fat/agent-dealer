@@ -5,7 +5,8 @@
 //   node scripts/validate-muse-code-manifest.mjs [--ready] [path/to/tasks.json]
 //
 // --ready is the pre-run gate: it additionally fails until the operator has confirmed the frozen
-// candidate model against the contributor tier (candidate.confirmation.confirmedAt/confirmedBy).
+// candidate model against the contributor tier (candidate.confirmation.confirmedAt/confirmedBy) and
+// recorded the Muse Code token mapping (attestation flag, cached-input semantics and exact raw field paths).
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 
@@ -86,8 +87,23 @@ for (const [name, s] of Object.entries(subjects)) {
   }
 }
 const c = manifest.candidate;
-if (ready && typeof c?.tokenMapping?.inputIncludesCached !== "boolean") {
-  fail("--ready: candidate.tokenMapping.inputIncludesCached not set; record how Muse Code reports cached input first");
+if (ready) {
+  // The Muse Code adapter does not exist yet, so its token mapping is recorded by the operator from a real
+  // usage event before run 1: exact raw field paths, whether input includes cached tokens, and the attestation.
+  const tmc = c?.tokenMapping;
+  if (typeof tmc?.inputIncludesCached !== "boolean") {
+    fail("--ready: candidate.tokenMapping.inputIncludesCached not set; record how Muse Code reports cached input first");
+  }
+  if (tmc?.mappingRecordedInRunPlan !== true) {
+    fail("--ready: candidate.tokenMapping.mappingRecordedInRunPlan must be true (operator attests the mapping is in the run plan)");
+  }
+  const FIELD_PATH = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+  for (const k of ["input", "cache_read", "cache_write", "output"]) {
+    const v = tmc?.rawFields?.[k];
+    if (typeof v !== "string" || !(FIELD_PATH.test(v) || (k === "cache_write" && v === "none"))) {
+      fail(`--ready: candidate.tokenMapping.rawFields.${k} must be an exact raw field path such as usage.input_tokens${k === "cache_write" ? ' (or "none")' : ""}, got ${JSON.stringify(v)}`);
+    }
+  }
 }
 if (c?.runtime !== "muse_code") fail("candidate must be runtime muse_code");
 if (c?.privacy?.allowedTaskClassification !== "non_sensitive") {
@@ -170,6 +186,12 @@ for (const t of Array.isArray(tasks) ? tasks : []) {
     }
     if (!graderCmds.some((cmd) => cmd.run.includes(` review ${t.id} `))) fail(`${where}: no structured 'review' grader command`);
     if (t.verification?.expectedShas?.headSha !== t.startingSha) fail(`${where}: expectedShas.headSha must equal startingSha`);
+  }
+
+  // Eval-owned checks referenced by verification commands exist in $EVAL_ROOT (this checkout).
+  for (const f of t.verification?.evalChecks ?? []) {
+    if (!fs.existsSync(f)) fail(`${where}: eval check ${f} does not exist`);
+    if (!cmds?.some((cmd) => cmd.run.includes(`$EVAL_ROOT/${f}`))) fail(`${where}: no verification command runs eval check ${f}`);
   }
 
   // Pinned commits are real, and the reference (if any) descends from the starting SHA.

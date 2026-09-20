@@ -90,7 +90,14 @@
       "cache_write": "raw cache-write tokens if the Meta rate card has a cache-write tier, otherwise 0 by definition",
       "output": "raw output tokens with reasoning tokens counted once",
       "inputIncludesCached": null,
-      "mappingRecordedInRunPlan": false
+      "mappingRecordedInRunPlan": false,
+      "rawFields": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null
+      },
+      "rawFieldsNote": "Operator fills these before run 1 with the exact dotted field paths from a real `muse exec --json` usage event (for example `usage.input_tokens`); cache_write is a field path, or the literal \"none\" when Meta's rate card has no cache-write tier. Set inputIncludesCached (true/false) and mappingRecordedInRunPlan (true) at the same time. `validate-muse-code-manifest.mjs --ready` fails until all of it is present."
     },
     "pricingBasisFrozenNow": true
   },
@@ -376,12 +383,12 @@
       "referenceSha": "2a51ca68402675f2a16af391c8539310d2437800",
       "workerSpec": {
         "title": "Add reasoning effort to agent profiles and frozen snapshots",
-        "description": "Wire a low/medium/high reasoning effort through the whole stack so a profile's effort is frozen into the worker session and a mid-session profile edit cannot change a running worker.\n\nContract: (shared) packages/shared/src/profile-snapshot.ts exports ReasoningEffort = z.enum(['low','medium','high']) (+ type) and ProfileSnapshot gains `effort: ReasoningEffort.nullable().default(null)` so snapshots written before this field still parse with effort null. packages/shared/src/agents.ts: AgentProfile gains `defaultEffort: ReasoningEffort.nullable()`, and CreateAgentInput/UpdateAgentInput gain `defaultEffort: ReasoningEffort.nullable().optional()`. (db) agents table gains nullable TEXT column default_effort in schema.sql and an idempotent ALTER TABLE migration in packages/server/src/db/index.ts. (repository) packages/server/src/repository/agents.ts persists/reads default_effort on create/update/read (unrecognised stored values read as null; update keeps the existing value when the input omits it). (snapshot) coordinator/profile-snapshot.ts freezes `effort: agent.defaultEffort` into the snapshot. (args) buildArgs/buildDeveloperArgs/buildReviewerArgs in coordinator/args.ts take an optional trailing `effort?: ReasoningEffort | null` parameter: codex_local adds `-c model_reasoning_effort=<effort>` (accepted under --strict-config), claude_code adds `--effort <effort>`, cursor_local ignores it (no separate flag; effort only exists inside a parameterized model id). Null/undefined adds nothing. (spawn) coordinator/spawn.ts's DeveloperSpawnInput/ReviewerSpawnInput gain `effort?: ReasoningEffort | null` and forward it; developer-effect.ts and reviewer-effect.ts pass the frozen snapshot effort. (web) apps/web AgentConfigFields/AgentsPage expose an effort selector (default runtime default/null) for runtimes that support it.",
+        "description": "Wire a low/medium/high reasoning effort through the whole stack so a profile's effort is frozen into the worker session and a mid-session profile edit cannot change a running worker.\n\nContract: (shared) packages/shared/src/profile-snapshot.ts exports ReasoningEffort = z.enum(['low','medium','high']) (+ type) and ProfileSnapshot gains `effort: ReasoningEffort.nullable().default(null)` so snapshots written before this field still parse with effort null. packages/shared/src/agents.ts: AgentProfile gains `defaultEffort: ReasoningEffort.nullable()`, and CreateAgentInput/UpdateAgentInput gain `defaultEffort: ReasoningEffort.nullable().optional()`. (db) agents table gains nullable TEXT column default_effort in schema.sql and an idempotent ALTER TABLE migration in packages/server/src/db/index.ts. (repository) packages/server/src/repository/agents.ts persists/reads default_effort on create/update/read (unrecognised stored values read as null; update keeps the existing value when the input omits it). (snapshot) coordinator/profile-snapshot.ts freezes `effort: agent.defaultEffort` into the snapshot. (args) buildArgs/buildDeveloperArgs/buildReviewerArgs in coordinator/args.ts take an optional trailing `effort?: ReasoningEffort | null` parameter: codex_local adds `-c model_reasoning_effort=<effort>` (accepted under --strict-config), claude_code adds `--effort <effort>`, cursor_local ignores it (no separate flag; effort only exists inside a parameterized model id). Null/undefined adds nothing. (spawn) coordinator/spawn.ts's DeveloperSpawnInput/ReviewerSpawnInput gain `effort?: ReasoningEffort | null` and forward it; developer-effect.ts and reviewer-effect.ts pass the frozen snapshot effort. (web) apps/web AgentConfigFields/AgentsPage expose an effort selector (default runtime default/null) for runtimes that support it. Web contract: AgentConfigValue gains `defaultEffort: \"\" | ReasoningEffort` (\"\" = runtime default); AgentConfigFields renders, only for claude_code and codex_local, a <select> whose options have values \"\", \"low\", \"medium\", \"high\" (the \"\" option is the one that clears effort) and whose value is defaultEffort; AgentsPage seeds defaultEffort \"\" in its empty config, loads `agent.defaultEffort ?? \"\"` when editing, and sends `defaultEffort: <form value> || null` in both the create and the update request. Verification also checks that developer-effect.ts and reviewer-effect.ts pass the frozen snapshot effort as `effort` into the spawn input.",
         "acceptanceCriteria": [
           "parseProfileSnapshot defaults a missing effort to null for pre-existing snapshots.",
           "Codex args include '-c model_reasoning_effort=<tier>' and Claude args include '--effort <tier>' when set; neither when null; cursor never.",
           "createAgent/updateAgent round-trip defaultEffort; a later agent edit does not alter an existing snapshot.",
-          "The web Agents form can set and clear effort; npm run typecheck for shared, server and web passes."
+          "The web Agents form can set and clear effort (selector low/medium/high plus a 'Runtime default' option that clears it, hidden for cursor; AgentsPage seeds, loads and submits defaultEffort in create and update); developer-effect.ts and reviewer-effect.ts forward the frozen snapshot effort into the spawn input; npm run typecheck for shared, server and web passes."
         ]
       },
       "role": "developer",
@@ -409,9 +416,35 @@
             "run": "git checkout 2a51ca68402675f2a16af391c8539310d2437800 -- packages/server/src/coordinator/args.test.ts packages/server/src/coordinator/execution-env.integration.test.ts packages/server/src/coordinator/profile-snapshot.test.ts packages/shared/src/profile-snapshot.test.ts && npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/coordinator/args.test.ts packages/server/src/coordinator/execution-env.integration.test.ts packages/server/src/coordinator/profile-snapshot.test.ts packages/shared/src/profile-snapshot.test.ts",
             "expectedExitCode": 0,
             "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 33'.",
-            "startingShaResult": "exit code 1 (6 failing tests)."
+            "startingShaResult": "non-zero: on a clean tree `npm run build -w @agent-dealer/shared` exits 2 (the held-out profile-snapshot.test.ts reads `effort`, absent at startingSha); with an already-built shared dist the tests run and 6 fail."
+          },
+          {
+            "id": "typecheck-shared-server-web",
+            "run": "npm run build -w @agent-dealer/shared && npm run typecheck",
+            "expectedExitCode": 0,
+            "expectedResult": "npm run typecheck exits 0: tsc --noEmit passes for @agent-dealer/shared, @agent-dealer/server and @agent-dealer/web (run before the eval-owned checks are copied in).",
+            "startingShaResult": "non-zero (exit 2) while the held-out test files are checked out (type errors on `effort`); exit 0 without them, so types alone never prove the wiring."
+          },
+          {
+            "id": "effort-forwarding-to-spawn",
+            "run": "cp $EVAL_ROOT/scripts/eval-checks/muse-06-effort-forwarding.test.ts packages/server/src/coordinator/eval-muse-06-effort-forwarding.test.ts && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/coordinator/eval-muse-06-effort-forwarding.test.ts",
+            "expectedExitCode": 0,
+            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 1': the developer spawn receives the frozen effort 'high' and the reviewer spawn 'low', not later profile edits.",
+            "startingShaResult": "exit code 1 (developer spawn input has no effort)."
+          },
+          {
+            "id": "web-effort-form",
+            "run": "cp $EVAL_ROOT/scripts/eval-checks/muse-06-effort-form.test.tsx apps/web/src/eval-muse-06-effort-form.test.tsx && npx tsx --tsconfig apps/web/tsconfig.json --test --test-timeout=60000 apps/web/src/eval-muse-06-effort-form.test.tsx",
+            "expectedExitCode": 0,
+            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 4'.",
+            "startingShaResult": "exit code 1 (3 failing tests: no effort selector, no defaultEffort in AgentsPage)."
           }
-        ]
+        ],
+        "evalChecks": [
+          "scripts/eval-checks/muse-06-effort-forwarding.test.ts",
+          "scripts/eval-checks/muse-06-effort-form.test.tsx"
+        ],
+        "evalChecksNote": "Eval-owned checks live in $EVAL_ROOT and are copied into the worker tree only at verification time (never visible to the worker). They cover the required surfaces the held-out server/shared tests do not: effort forwarding from developer-effect.ts / reviewer-effect.ts into the spawn input (behavioral, real coordinator run with fake spawn/GitHub), and the web Agents form (renders the real AgentConfigFields to static markup; inspects AgentsPage with the TypeScript compiler API). The web app has no test runner, so the form check cannot click; it verifies the rendered selector, its options (including the clearing 'Runtime default' option), value reflection, the cursor exclusion and that AgentsPage seeds, loads and submits defaultEffort in both requests."
       },
       "expectedArtifact": {
         "type": "git_commits",
