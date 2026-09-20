@@ -76,10 +76,12 @@ import {
 } from "./non-convergence.js";
 import {
   capEscalationEvents,
+  deferLeasedWorkItemForBaseFetch,
   deferLeasedWorkItemForDeckOutage,
   deferLeasedWorkItemForUsageCap,
   formatCapEscalationReason,
   usageCapDeferralStartedAt,
+  type BaseFetchFailedOutcome,
   type DeckUnavailableOutcome,
   type DeferralOutcome,
   type DeferWorkItemResult,
@@ -393,6 +395,11 @@ export async function applyCompletion(
   if (outcome.kind === "deck_unavailable") {
     return applyDeckOutageCompletion(workItemId, leaseToken, outcome);
   }
+  // NOT-197: same shape as a deck outage — the start never happened (no branch, no
+  // spawn), so the work item waits for the network instead of spending an attempt.
+  if (outcome.kind === "base_fetch_failed") {
+    return applyBaseFetchDeferralCompletion(workItemId, leaseToken, outcome);
+  }
 
   const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
@@ -500,6 +507,17 @@ function applyDeckOutageCompletion(
 ): ApplyResult {
   return applyDeferralCompletion(workItemId, leaseToken, outage, (item, issue, instance) =>
     deferLeasedWorkItemForDeckOutage(item, leaseToken, outage, issue, instance)
+  );
+}
+
+/** NOT-197: no escalation arm — the item waits for the network for as long as it takes. */
+function applyBaseFetchDeferralCompletion(
+  workItemId: string,
+  leaseToken: string,
+  failure: BaseFetchFailedOutcome
+): ApplyResult {
+  return applyDeferralCompletion(workItemId, leaseToken, failure, (item, issue, instance) =>
+    deferLeasedWorkItemForBaseFetch(item, leaseToken, failure, issue, instance)
   );
 }
 

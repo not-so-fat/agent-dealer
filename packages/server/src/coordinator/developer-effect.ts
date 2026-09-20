@@ -24,6 +24,7 @@ import { buildDeveloperPrompt } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn } from "./spawn.js";
 import {
+  DEFAULT_BASE_FETCH_TIMEOUT_MS,
   resolveDeveloperWorktree,
   safeRemoveWorktree,
   isWorktreeClean,
@@ -39,6 +40,7 @@ import {
   dirtyWorktreeRecoveryCommands,
   withRepoLock,
 } from "../adapters/git-worktree.js";
+import { recordIssueBaseSha } from "../repository/issues.js";
 import {
   ensureIssueRepoCheckout,
   roleWorktreePathForResolution,
@@ -139,6 +141,10 @@ export const developerEffectConfig = {
   },
   get checksPollIntervalMs(): number {
     return num("CHECKS_POLL_INTERVAL_MS", 15_000);
+  },
+  /** NOT-197: bound for the pre-branch `git fetch origin <base>` on a fresh issue branch. */
+  get baseFetchTimeoutMs(): number {
+    return num("BASE_FETCH_TIMEOUT_MS", DEFAULT_BASE_FETCH_TIMEOUT_MS);
   },
   /** NOT-110: bounded window to let a lagging `gh pr view` catch up to a just-pushed HEAD. */
   get headReconcileTimeoutMs(): number {
@@ -638,7 +644,14 @@ export async function runDeveloperEffect(
       reuseBranch,
       worktreePath: desiredWorktreePath,
       ownerLiveness: checkDeveloperWorktreeOwnerLiveness,
+      fetchTimeoutMs: developerEffectConfig.baseFetchTimeoutMs,
     });
+    if (resolved.kind === "base_unavailable") {
+      // NOT-197: the pre-branch fetch failed or timed out — defer the start (no branch
+      // was created, nothing spawned, no attempt spent) instead of falling back to the
+      // stale local base.
+      return { kind: "base_fetch_failed", reason: resolved.reason };
+    }
     if (resolved.kind === "conflict") {
       return { kind: "worktree_conflict", path: resolved.path, reason: resolved.reason, recoveryCommands: resolved.recoveryCommands };
     }
@@ -651,6 +664,13 @@ export async function runDeveloperEffect(
       };
     }
     worktreePath = resolved.path;
+    if (resolved.kind === "created" && resolved.baseSha) {
+      // NOT-197: record the true branch point while it is known — the verified handoff
+      // re-checks it via merge-base, but crash/timeout progress inspection below already
+      // reads issue.baseSha.
+      recordIssueBaseSha(issue.id, resolved.baseSha);
+      issue.baseSha = resolved.baseSha;
+    }
   } catch (err) {
     return { kind: "adapter_failure", reason: `worktree setup failed: ${String(err)}` };
   }

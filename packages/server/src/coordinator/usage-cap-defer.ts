@@ -35,6 +35,15 @@ export interface DeckUnavailableOutcome {
   evidence?: unknown;
 }
 
+/** NOT-197: the pre-branch `git fetch origin <base>` failed or timed out, so no fresh
+ * branch could be cut. No `until` — the retry time comes from the same backoff curve
+ * as a deck outage (see deckOutageBackoffMs). */
+export interface BaseFetchFailedOutcome {
+  kind: "base_fetch_failed";
+  reason: string;
+  evidence?: unknown;
+}
+
 /** NOT-156: active-role health failed before spawn — wait and retry, do not burn infra. */
 export interface AgentUnhealthyOutcome {
   kind: "agent_unhealthy";
@@ -42,7 +51,11 @@ export interface AgentUnhealthyOutcome {
   evidence?: unknown;
 }
 
-export type DeferralOutcome = UsageCappedOutcome | DeckUnavailableOutcome | AgentUnhealthyOutcome;
+export type DeferralOutcome =
+  | UsageCappedOutcome
+  | DeckUnavailableOutcome
+  | AgentUnhealthyOutcome
+  | BaseFetchFailedOutcome;
 
 const roleFor: Record<WorkItemKind, "developer" | "reviewer"> = {
   developer: "developer",
@@ -247,6 +260,57 @@ export function deferLeasedWorkItemForDeckOutage(
       }),
       intent: (_role, untilLabel) =>
         `Waiting for Agent Deck — ${outage.reason}${waitLabel ? ` (${waitLabel})` : ""} (retrying ${untilLabel})`,
+    });
+  })();
+}
+
+export function baseFetchDeferralStartedAt(payload: Record<string, unknown>): string | null {
+  const v = payload.baseFetchUnavailableSince;
+  return typeof v === "string" && v ? v : null;
+}
+
+/** How many times this item has already waited on the network — drives the backoff curve. */
+export function baseFetchDeferralCount(payload: Record<string, unknown>): number {
+  const v = payload.baseFetchDeferrals;
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+}
+
+/**
+ * NOT-197: the pre-branch fetch failed, so the start never happened. The same deferral
+ * as an unreachable deck — no infra burn, exponential backoff, never escalate (the
+ * network returning unblocks the issue on its own; handing it to a human would strand
+ * an issue that would otherwise resume by itself).
+ */
+export function deferLeasedWorkItemForBaseFetch(
+  item: WorkItem,
+  leaseToken: string,
+  failure: BaseFetchFailedOutcome,
+  issue: Issue,
+  instance: WorkflowInstance,
+  nowMs = Date.now()
+): DeferWorkItemResult {
+  return getDb().transaction(() => {
+    const live = liveLeasedItem(item.id, leaseToken);
+    if (!live) return { deferred: false, escalated: false, reason: "lease_lost" as const };
+
+    const payload = parsePayload(live.payloadJson);
+    const firstDeferredAt = baseFetchDeferralStartedAt(payload) ?? new Date(nowMs).toISOString();
+    const priorDeferrals = baseFetchDeferralCount(payload);
+    const until = new Date(nowMs + deckOutageBackoffMs(priorDeferrals)).toISOString();
+    const waitLabel = deckOutageWaitLabel(firstDeferredAt, nowMs);
+
+    return applyDeferral(live, leaseToken, issue, instance, {
+      until,
+      reason: failure.reason,
+      outcome: "base_fetch_failed",
+      error: { kind: "base_fetch_failed", until, reason: failure.reason, evidence: failure.evidence },
+      payloadJson: JSON.stringify({
+        ...payload,
+        baseFetchUnavailableSince: firstDeferredAt,
+        baseFetchDeferrals: priorDeferrals + 1,
+      }),
+      intent: (_role, untilLabel) =>
+        `Waiting for network — ${failure.reason}${waitLabel ? ` (${waitLabel})` : ""} (retrying ${untilLabel})`,
     });
   })();
 }

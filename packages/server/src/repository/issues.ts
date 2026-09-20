@@ -244,6 +244,24 @@ export function transitionIssue(id: string, to: IssueStatus, patch?: TransitionI
   return updated;
 }
 
+/**
+ * NOT-197: record the commit a freshly created issue branch was cut from (the fetched
+ * `origin/<base>` tip). Coordinator-owned like the handoff-time base_sha write in
+ * transitionIssue — but that path requires a status transition while the branch is cut
+ * before any transition happens, so this bare update exists for the creation moment.
+ * The verified handoff later overwrites it with the merge-base.
+ */
+export function recordIssueBaseSha(id: string, baseSha: string): Issue {
+  const current = getIssue(id);
+  if (!current) throw new Error(`Issue not found: ${id}`);
+  getDb()
+    .prepare(`UPDATE issues SET base_sha = @base_sha, updated_at = @updated_at WHERE id = @id`)
+    .run({ id, base_sha: baseSha, updated_at: new Date().toISOString() });
+  const updated = getIssue(id);
+  if (!updated) throw new Error(`Issue vanished: ${id}`);
+  return updated;
+}
+
 export interface UpdateIssuePatch {
   title?: string;
   description?: string | null;
