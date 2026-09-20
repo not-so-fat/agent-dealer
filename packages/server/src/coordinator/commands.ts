@@ -66,7 +66,13 @@ import {
 } from "./routing.js";
 import type { ReviewerResult } from "./reviewer-result.js";
 import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } from "./projection.js";
-import { parseHumanResolution, resolveHumanActionOutcome, type HumanResolution } from "./human-resolution.js";
+import {
+  MERGE_FAILURE_EVIDENCE_KEY,
+  MERGE_FAILURE_RESPONSE_OPTIONS,
+  parseHumanResolution,
+  resolveHumanActionOutcome,
+  type HumanResolution,
+} from "./human-resolution.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
 import {
   detectNonConvergence,
@@ -960,13 +966,33 @@ function applyEffect(
   return base;
 }
 
-function questionFor(actionType: HumanActionType, reason: string, resumeAsReviewer = false): string {
+/**
+ * NOT-194: true when the action is a merge-failure escalation (evidence carries
+ * `mergeFailure: true`). Pre-NOT-194 open merge-failure actions have no such evidence and
+ * read as ordinary policy_escalations — that is what keeps their `resume` path working.
+ */
+export function isMergeFailureAction(action: { evidenceJson: string | null }): boolean {
+  if (!action.evidenceJson) return false;
+  try {
+    return (JSON.parse(action.evidenceJson) as Record<string, unknown>)[MERGE_FAILURE_EVIDENCE_KEY] === true;
+  } catch {
+    return false;
+  }
+}
+
+function questionFor(
+  actionType: HumanActionType,
+  reason: string,
+  resumeAsReviewer = false,
+  mergeFailure = false
+): string {
   switch (actionType) {
     case "final_review":
       return "Merge this work, send it back for another repair round, or close it?";
     case "attempts_exhausted":
       return "The review-round limit is reached. Retry with a fresh round, or close the issue?";
     case "policy_escalation":
+      if (mergeFailure) return `${reason} Retry the merge, queue another repair round, or close the issue?`;
       return resumeAsReviewer
         ? `${reason} Retry the review, or close the issue?`
         : `${reason} Resume development, or close the issue?`;
@@ -995,7 +1021,8 @@ function questionFor(actionType: HumanActionType, reason: string, resumeAsReview
  * response_options_json as no options and renders nothing to resolve it with. */
 export function responseOptionsFor(
   actionType: HumanActionType,
-  resumeAsReviewer = false
+  resumeAsReviewer = false,
+  opts: { mergeFailure?: boolean } = {}
 ): Array<{ choice: string; label: string }> {
   switch (actionType) {
     case "final_review":
@@ -1010,6 +1037,8 @@ export function responseOptionsFor(
         { choice: "close", label: "Close" },
       ];
     case "policy_escalation":
+      // NOT-194: a merge failure after approval offers retry/repair/close — never resume.
+      if (opts.mergeFailure) return [...MERGE_FAILURE_RESPONSE_OPTIONS];
       return [
         { choice: "resume", label: resumeAsReviewer ? "Retry review" : "Resume development" },
         { choice: "close", label: "Close" },
@@ -1085,6 +1114,21 @@ export function resolveHumanActionAndAdvance(
   if (!resolution) {
     return { ok: false, code: 400, error: `Invalid choice "${choice}" for ${action.actionType}` };
   }
+  // NOT-194: narrow policy_escalation choices per action. A merge-failure action offers
+  // retry_merge/repair/close only (resume would re-run development on approved work);
+  // every other policy_escalation keeps resume/close only. Pre-NOT-194 open merge-failure
+  // actions carry no mergeFailure evidence, so they still accept resume here.
+  if (resolution.actionType === "policy_escalation") {
+    const mergeFailure = isMergeFailureAction(action);
+    const allowed = mergeFailure ? ["retry_merge", "repair", "close"] : ["resume", "close"];
+    if (!allowed.includes(resolution.choice)) {
+      return {
+        ok: false,
+        code: 400,
+        error: `Invalid choice "${choice}" for ${mergeFailure ? "a merge-failure" : "this"} policy_escalation`,
+      };
+    }
+  }
   // parseHumanResolution already rejects every Run-scoped action type (NOT-95) above, so
   // every action reaching here is Issue-scoped — this narrows action.issueId for TS.
   if (!action.issueId) return { ok: false, code: 500, error: "Human action has no issue" };
@@ -1095,10 +1139,13 @@ export function resolveHumanActionAndAdvance(
 
   // NOT-102 / NOT-150: human Merge (or legacy "complete") must undraft+merge.
   // Park like auto-merge, then the async wrapper runs finalizeAutoMerge outside this txn.
+  // NOT-194: a merge-failure retry_merge parks the same way — the old action is resolved
+  // first, so a second failure escalates exactly one fresh action with the new reason.
   if (
     instance &&
-    resolution.actionType === "final_review" &&
-    (resolution.choice === "merge" || resolution.choice === "complete")
+    ((resolution.actionType === "final_review" &&
+      (resolution.choice === "merge" || resolution.choice === "complete")) ||
+      (resolution.actionType === "policy_escalation" && resolution.choice === "retry_merge"))
   ) {
     return getDb().transaction((): ResolveResult => {
       resolveHumanAction(actionId, resolvedBy, { choice });
@@ -1108,9 +1155,9 @@ export function resolveHumanActionAndAdvance(
         type: "human_action.resolved",
         actorType: "human",
         actorRef: resolvedBy,
-        stage: "final_review",
+        stage: resolution.actionType === "final_review" ? "final_review" : issue.status,
         round: issue.currentRound,
-        payload: { actionType: "final_review", choice: resolution.choice, pendingMerge: true },
+        payload: { actionType: action.actionType, choice: resolution.choice, pendingMerge: true },
       });
       transitionIssue(issue.id, "final_review", {
         currentOwner: "system",
