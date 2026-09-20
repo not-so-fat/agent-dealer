@@ -115,3 +115,38 @@ export function codexBinExists(): boolean {
 export function resolveAmbientCodexHome(): string {
   return process.env.CODEX_HOME ?? path.join(process.env.HOME ?? os.homedir(), ".codex");
 }
+
+/**
+ * Resolve the Muse Code CLI (`muse`). `~/.local/bin/muse` is a launcher that re-execs the
+ * versioned `muse-bin-<version>`; callers must set `MUSE_NO_AUTO_UPDATE=1` (`MUSE_CLI_ENV`) or
+ * the launcher can swap the pinned version mid-fleet (NOT-177).
+ */
+export function resolveMuseBin(): string {
+  const home = process.env.HOME ?? os.homedir();
+  if (process.env.MUSE_CLI) return process.env.MUSE_CLI;
+  return (
+    firstExisting([
+      path.join(home, ".local/bin/muse"),
+      "/opt/homebrew/bin/muse",
+      "/usr/local/bin/muse",
+    ]) ?? "muse"
+  );
+}
+
+export function museBinExists(): boolean {
+  const bin = resolveMuseBin();
+  return bin !== "muse" ? fs.existsSync(bin) : false;
+}
+
+/** Env every Muse invocation carries so the launcher never self-updates (NOT-177 pin). */
+export const MUSE_CLI_ENV = { MUSE_NO_AUTO_UPDATE: "1" } as const;
+
+/**
+ * Where Muse keeps its file-backed login (`$XDG_CONFIG_HOME/muse/auth.json`, else
+ * `~/.config/muse/auth.json`). Callers may test for existence only — never read it.
+ */
+export function resolveMuseAuthFile(): string {
+  const configHome =
+    process.env.XDG_CONFIG_HOME || path.join(process.env.HOME ?? os.homedir(), ".config");
+  return path.join(configHome, "muse", "auth.json");
+}

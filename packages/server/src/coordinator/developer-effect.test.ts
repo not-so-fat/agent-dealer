@@ -33,7 +33,7 @@ const { listWorkItemsForIssue, claimWorkItem, bindWorkItemSession, cancelWorkIte
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listUsageEventsForIssue } = await import("../repository/usage-events.js");
-const { getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
+const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
 const { startWorkflow, resolveHumanActionAndAdvance } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
 const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
@@ -933,6 +933,165 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
       staleLocalBase,
       "sanity: the fetched and stale-local bases must actually differ, or this test can't tell them apart"
     );
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-197: with a lagging local main, a new developer branch starts at the origin/main tip", async () => {
+  // The NOT-197 incident: the cached clone's local main lagged origin/main, so branches
+  // cut from it conflicted with already-merged work. Unlike the test above, the fake
+  // agent does NOT merge origin/main itself — the branch must already start there.
+  const isoRepo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-197-repo-"));
+  const isoRemote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-197-remote-"));
+  try {
+    git(isoRepo, "init", "-q", "-b", "main");
+    git(isoRepo, "config", "user.email", "test@example.com");
+    git(isoRepo, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(isoRepo, "README.md"), "hello\n");
+    git(isoRepo, "add", ".");
+    git(isoRepo, "commit", "-q", "-m", "init");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", isoRemote]);
+    git(isoRepo, "remote", "add", "origin", isoRemote);
+    git(isoRepo, "push", "-q", "origin", "main");
+    const staleLocalMain = git(isoRepo, "rev-parse", "main");
+
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-197-other-"));
+    execFileSync("git", ["clone", "-q", isoRemote, other]);
+    git(other, "config", "user.email", "test@example.com");
+    git(other, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(other, "upstream-change.txt"), "z");
+    git(other, "add", ".");
+    git(other, "commit", "-q", "-m", "upstream change");
+    git(other, "push", "-q", "origin", "main");
+    const originTip = git(other, "rev-parse", "HEAD");
+    fs.rmSync(other, { recursive: true, force: true });
+    assert.notEqual(staleLocalMain, originTip, "the local main must lag origin/main for this test to mean anything");
+
+    const dev = createAgent({ name: `dev-197-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const rev = createAgent({ name: `rev-197-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const issueId = createIssue({
+      title: "Fresh base",
+      acceptanceCriteria: "works",
+      repo: isoRepo,
+      baseBranch: "main",
+      developerAgentId: dev.id,
+      reviewerAgentId: rev.id,
+      maxReviewRounds: 3,
+      maxInfraAttempts: 3,
+      source: "manual"}).id;
+
+    const isoPrs = new Map<string, { number: number; url: string; base: string }>();
+    const isoGithub: GithubFn = {
+      async viewPr({ branch }) {
+        if (!branch) throw new Error("isoGithub.viewPr requires an explicit branch — bare current-branch lookup is the NOT-82 bug");
+        const pr = isoPrs.get(branch);
+        if (!pr) return null;
+        return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: branch, headRefOid: git(isoRemote, "rev-parse", branch), isDraft: true };
+      },
+      async createDraftPr({ base, head }) {
+        if (!head) throw new Error("isoGithub.createDraftPr requires an explicit --head — bare create is the NOT-82 bug");
+        isoPrs.set(head, { number: 1, url: "https://github.com/o/r/pull/1", base });
+        return { ok: true, number: 1, url: "https://github.com/o/r/pull/1" };
+      },
+      async checksSnapshot() {
+        return "success";
+      },
+      async publishReview() {
+        throw new Error("publishReview is unused by the developer effect");
+      }};
+
+    registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: isoGithub }));
+    startWorkflow(issueId);
+    await pump(1);
+
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.status, "reviewing");
+    const branch = `issue-${issueId}`;
+    assert.equal(issue.branch, branch);
+    assert.equal(
+      git(isoRepo, "rev-parse", `${branch}^`),
+      originTip,
+      "the new branch must be cut from the origin/main tip, not the stale local main"
+    );
+    assert.equal(issue.baseSha, originTip, "base_sha must equal the fetched origin/main tip");
+    assert.equal(git(isoRepo, "rev-parse", "main"), staleLocalMain, "sanity: the local main is still stale — the fix fetches, it does not move local branches");
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-197: a failed pre-branch fetch defers the start without a branch, a spawn, or an attempt", async () => {
+  // origin points at nothing fetchable: the effect must defer (worker.deferred, item
+  // pending, budgets untouched) instead of cutting the branch from the stale local base.
+  const isoRepo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-197fail-repo-"));
+  const isoRemote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-197fail-remote-"));
+  try {
+    git(isoRepo, "init", "-q", "-b", "main");
+    git(isoRepo, "config", "user.email", "test@example.com");
+    git(isoRepo, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(isoRepo, "README.md"), "hello\n");
+    git(isoRepo, "add", ".");
+    git(isoRepo, "commit", "-q", "-m", "init");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", isoRemote]);
+    git(isoRepo, "remote", "add", "origin", isoRemote);
+    git(isoRepo, "push", "-q", "origin", "main");
+    git(isoRepo, "remote", "set-url", "origin", path.join(isoRemote, "does-not-exist.git"));
+
+    const dev = createAgent({ name: `dev-197f-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const rev = createAgent({ name: `rev-197f-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const issueId = createIssue({
+      title: "Fetch fails",
+      acceptanceCriteria: "works",
+      repo: isoRepo,
+      baseBranch: "main",
+      developerAgentId: dev.id,
+      reviewerAgentId: rev.id,
+      maxReviewRounds: 3,
+      maxInfraAttempts: 3,
+      source: "manual"}).id;
+
+    let spawnCalled = false;
+    const spySpawn: SpawnFn = async () => {
+      spawnCalled = true;
+      return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false };
+    };
+    registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: spySpawn, github: fakeGithub() }));
+    startWorkflow(issueId);
+    await pump(1);
+
+    assert.equal(spawnCalled, false, "nothing may spawn when the base could not be fetched");
+    assert.equal(await branchExists(isoRepo, `issue-${issueId}`), false, "no branch may be created from a base that was never confirmed");
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.branch, null);
+    assert.equal(issue.baseSha, null);
+    assert.equal(issue.infraAttempts, 0, "a deferred start spends no infra attempt");
+    assert.equal(issue.currentRound, 1);
+    assert.notEqual(issue.status, "needs_human");
+    assert.match(issue.currentIntent ?? "", /Waiting for network/);
+
+    const { listWorkItemsForIssue } = await import("../repository/work-items.js");
+    const items = listWorkItemsForIssue(issueId);
+    assert.equal(items.length, 1);
+    assert.equal(items[0]!.status, "pending", "the item waits, it is not finished or dead-lettered");
+    assert.equal(items[0]!.attemptCount, 0, "the claim-time attempt bump is reverted");
+    assert.ok(
+      Date.parse(items[0]!.availableAt) > Date.parse(items[0]!.updatedAt),
+      "the next start is gated behind a wait"
+    );
+
+    assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
+    const events = listWorkflowEventsForIssue(issueId);
+    const deferrals = events.filter((e) => e.type === "worker.deferred");
+    assert.ok(deferrals.length > 0);
+    const payload = JSON.parse(deferrals[0]!.payloadJson ?? "{}");
+    assert.equal(payload.outcome, "base_fetch_failed");
+    assert.equal(events.some((e) => e.type === "worker.failed"), false, "a deferred start is not a failure");
+
+    const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
+    assert.equal(listWorkerSessionsForIssue(issueId).every((s) => s.status === "cancelled"), true);
   } finally {
     fs.rmSync(isoRepo, { recursive: true, force: true });
     fs.rmSync(isoRemote, { recursive: true, force: true });

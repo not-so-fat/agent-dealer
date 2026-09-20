@@ -19,7 +19,10 @@ export HOME="$HOME_DIR"
 PORT=49221
 
 cleanup() {
-  if [[ -n "${HOME_DIR:-}" ]] && command -v agent-dealer >/dev/null 2>&1; then
+  # Only stop what this run started. After a successful stop run.json is gone, and a second
+  # `stop` would resolve the bundled port (2222, see the PORT=2221 legacy check above) and
+  # SIGTERM whatever listens there — the developer's real agent-dealer.
+  if [[ -n "${HOME_DIR:-}" && -f "$HOME_DIR/.agent-dealer/run.json" ]] && command -v agent-dealer >/dev/null 2>&1; then
     AGENT_DEALER_HOME="$HOME_DIR/.agent-dealer" agent-dealer stop >/dev/null 2>&1 || true
   fi
   # Cursor status under a temp HOME can leave half-written agent installs; never fail the gate on cleanup.

@@ -35,6 +35,22 @@ env -i PATH="$PATH" HOME="$PROBE" <cli> <args> </dev/null > <fixture> 2>&1
 | `claude-auth-status-logged-out.txt` | `claude auth status` | 1 |
 | `claude-auth-status-logged-in.txt` | `claude auth status` (real HOME) | 0 |
 
+Muse Code (NOT-178) — `muse exec` never prints on stdout when auth fails, so these are its
+stderr, taken from the NOT-177 spike's `manifest.json` (Muse Code `1.3.0-R3401.1`); the scratch
+config path is the only sanitization. The missing-credentials text was re-observed live on the
+same version.
+
+| File | Command | Exit |
+| ---- | ------- | ---- |
+| `muse-exec-missing-credentials.txt` | `muse exec` with `META_API_KEY` unset and an empty `XDG_CONFIG_HOME` | 1 |
+| `muse-exec-bad-api-key.txt` | `muse exec --api-key-stdin` with a bogus key | 1 |
+| `muse-exec-saved-login-invalid.txt` | `muse exec` against a provider that answers 401 | 1 |
+| `muse-version.txt` | `muse --version` | 0 |
+
+Muse has no offline `auth status`, so the health check cannot ask it whether a *saved* login is
+still valid; it checks that a credential exists and leaves an expired one to fail at run time,
+where the second and third captures above are what classify it.
+
 Notes:
 
 - `cursor-agent status` prints **`Not logged in`** and exits **0** when logged out — that is

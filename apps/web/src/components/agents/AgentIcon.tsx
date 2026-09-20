@@ -58,6 +58,25 @@ export function CodexIcon({ className = "h-8 w-8" }: IconProps) {
   );
 }
 
+export function MuseIcon({ className = "h-8 w-8" }: IconProps) {
+  return (
+    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden>
+      <rect width="32" height="32" rx="8" fill="white" fillOpacity="0.06" />
+      <text
+        x="16"
+        y="21"
+        textAnchor="middle"
+        fill="#92E4DD"
+        fontSize="11"
+        fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+        fontWeight="600"
+      >
+        Mu
+      </text>
+    </svg>
+  );
+}
+
 export function AgentRuntimeIcon({
   runtime,
   className = "h-8 w-8 shrink-0",
@@ -68,5 +87,6 @@ export function AgentRuntimeIcon({
   if (runtime === "claude_code") return <ClaudeIcon className={className} />;
   if (runtime === "cursor_local") return <CursorIcon className={className} />;
   if (runtime === "codex_local") return <CodexIcon className={className} />;
+  if (runtime === "muse_code") return <MuseIcon className={className} />;
   return <GenericAgentIcon className={className} />;
 }

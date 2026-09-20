@@ -170,6 +170,21 @@ test("an unreachable deck defers instead of spending an infra attempt (NOT-136)"
   }
 });
 
+test("a failed base fetch defers instead of spending an infra attempt (NOT-197)", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "base_fetch_failed",
+    reason: "git fetch origin main timed out after 60000ms — network or VPN may be down",
+  };
+  // Even with the infra budget already exhausted it waits — no branch was created and
+  // nothing spawned, so there is nothing to escalate and no stale base to fall back to.
+  for (const limits of [INFRA_ATTEMPTS_LEFT, INFRA_AT_LIMIT]) {
+    assert.deepStrictEqual(routeDeveloperOutcome(outcome, limits), {
+      next: "defer_work",
+      reason: "git fetch origin main timed out after 60000ms — network or VPN may be down",
+    });
+  }
+});
+
 test("adapter failure after push retries publish only (no full developer session)", () => {
   const outcome: DeveloperOutcome = {
     kind: "adapter_failure",
@@ -456,4 +471,16 @@ test("NOT-147: noProgressInfraAttempts is tunable (N=1 escalates on first empty-
   const result = routeDeveloperOutcome({ kind: "timed_out", commitsAhead: 0 }, limits);
   assert.equal(result.next, "human_action");
   assert.match((result as { reason: string }).reason, /stuck: no commits after 1 timeouts\/crashes/i);
+});
+
+// NOT-181: Muse cannot disable cron_*; a session that used it is escalated, never retried.
+test("muse_cron_used escalates to the operator without spending any budget, even with attempts left", () => {
+  const outcome: DeveloperOutcome = { kind: "muse_cron_used", reason: "muse_cron_used: the Muse session called cron_create" };
+  for (const limits of [REVIEW_ROUNDS_LEFT, INFRA_ATTEMPTS_LEFT, INFRA_AT_LIMIT]) {
+    assert.deepStrictEqual(routeDeveloperOutcome(outcome, limits), {
+      next: "human_action",
+      actionType: "policy_escalation",
+      reason: "muse_cron_used: the Muse session called cron_create",
+    });
+  }
 });

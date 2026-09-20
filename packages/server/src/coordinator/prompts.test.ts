@@ -220,3 +220,19 @@ test("reviewer prompt deck section requires bind_workspace first, matching the d
   assert.match(prompt, /do not web-fetch Linear/);
   assert.doesNotMatch(prompt, /get_playbook\(/);
 });
+
+// NOT-181: a Muse Code worker has no Agent Deck, so it must not be told the session is
+// misconfigured (the deckless default) nor to bind a deck; it is told never to touch cron_*.
+test("NOT-181: noAgentDeck prompt states there is no deck/MCP and forbids cron_* instead of the misconfigured stop", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, noAgentDeck: true, deckId: null, worktreePath: "/wt" });
+  assert.match(prompt, /no Agent Deck and no MCP servers/);
+  assert.match(prompt, /cron_create/);
+  assert.doesNotMatch(prompt, /misconfigured/);
+  assert.doesNotMatch(prompt, /bind_workspace/);
+  assert.match(prompt, /do NOT push and do NOT open a pull request/);
+});
+
+test("NOT-181: without noAgentDeck a deckless prompt still fails closed", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, deckId: null });
+  assert.match(prompt, /misconfigured: Agent Deck is required but missing/);
+});

@@ -14,8 +14,10 @@ const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-ho
 process.env.AGENT_DEALER_HOME = home;
 
 const {
+  branchExists,
   createRoleWorktree,
   safeRemoveWorktree,
+  fetchFreshBase,
   inspectLeftoverWorktree,
   isWorktreeClean,
   withRepoLock,
@@ -561,4 +563,175 @@ test("NOT-127: resolveDeveloperWorktree still escalates a dirty leftover when th
   assert.ok(fs.existsSync(leftover.path), "dead-and-dirty leftover must still never be force-removed");
   fs.rmSync(leftover.path, { recursive: true, force: true });
   await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+// ---------------------------------------------------------------- NOT-197: fresh base
+
+/** An isolated repo + file remote pair, so tests can move or break origin without
+ * touching the module-level fixture every other test shares. */
+function makeIsoRepoPair(tag: string): { isoRepo: string; isoRemote: string } {
+  const isoRepo = fs.mkdtempSync(path.join(os.tmpdir(), `dealer-wt197-repo-${tag}-`));
+  git(isoRepo, "init", "-b", "main");
+  git(isoRepo, "config", "user.email", "test@example.com");
+  git(isoRepo, "config", "user.name", "Test");
+  fs.writeFileSync(path.join(isoRepo, "README.md"), "hello\n");
+  git(isoRepo, "add", ".");
+  git(isoRepo, "commit", "-m", "init");
+  const isoRemote = fs.mkdtempSync(path.join(os.tmpdir(), `dealer-wt197-remote-${tag}-`));
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", isoRemote]);
+  git(isoRepo, "remote", "add", "origin", isoRemote);
+  git(isoRepo, "push", "-q", "origin", "main");
+  return { isoRepo, isoRemote };
+}
+
+/** Advance origin/main from a separate clone so the repo's own local main stays stale. */
+function advanceOriginMain(isoRemote: string, file: string): string {
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt197-other-"));
+  try {
+    execFileSync("git", ["clone", "-q", isoRemote, other]);
+    git(other, "config", "user.email", "test@example.com");
+    git(other, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(other, file), "upstream\n");
+    git(other, "add", ".");
+    git(other, "commit", "-q", "-m", "upstream change");
+    git(other, "push", "-q", "origin", "main");
+    return git(other, "rev-parse", "HEAD");
+  } finally {
+    fs.rmSync(other, { recursive: true, force: true });
+  }
+}
+
+async function removeIsoWorktree(isoRepo: string, worktreePath: string, branch: string): Promise<void> {
+  fs.rmSync(worktreePath, { recursive: true, force: true });
+  await withRepoLock(isoRepo, async () => execFileSync("git", ["worktree", "prune"], { cwd: isoRepo }));
+  execFileSync("git", ["branch", "-D", branch], { cwd: isoRepo });
+}
+
+test("NOT-197: a fresh developer branch starts from the fetched origin/<base>, not the stale local base", async () => {
+  const { isoRepo, isoRemote } = makeIsoRepoPair("fresh");
+  try {
+    const staleLocalMain = git(isoRepo, "rev-parse", "main");
+    const originTip = advanceOriginMain(isoRemote, "upstream-change.txt");
+    assert.notEqual(staleLocalMain, originTip, "the local main must lag origin/main for this test to mean anything");
+    assert.equal(git(isoRepo, "rev-parse", "main"), staleLocalMain, "advancing origin must not move the local main");
+
+    const resolved = await resolveDeveloperWorktree({
+      repo: isoRepo,
+      sessionId: "s-fresh-base",
+      branchName: "issue-fresh-base",
+      baseBranch: "main",
+      reuseBranch: false,
+    });
+    assert.equal(resolved.kind, "created");
+    if (resolved.kind !== "created") return;
+    assert.equal(resolved.baseSha, originTip, "the recorded base must be the fetched origin/main tip");
+    assert.equal(resolved.baseRef, "origin/main");
+    assert.equal(
+      git(isoRepo, "rev-parse", "issue-fresh-base"),
+      originTip,
+      "the new branch must start exactly at the origin/main tip, not the stale local main"
+    );
+    assert.equal(git(isoRepo, "rev-parse", "main"), staleLocalMain, "the stale local base itself is left untouched");
+    await removeIsoWorktree(isoRepo, resolved.path, "issue-fresh-base");
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-197: a failed pre-branch fetch returns base_unavailable and creates no branch", async () => {
+  const { isoRepo, isoRemote } = makeIsoRepoPair("fail");
+  try {
+    git(isoRepo, "remote", "set-url", "origin", path.join(isoRemote, "does-not-exist.git"));
+
+    const resolved = await resolveDeveloperWorktree({
+      repo: isoRepo,
+      sessionId: "s-fetch-fail",
+      branchName: "issue-no-base",
+      baseBranch: "main",
+      reuseBranch: false,
+    });
+    assert.equal(resolved.kind, "base_unavailable");
+    if (resolved.kind === "base_unavailable") assert.match(resolved.reason, /fetch/i);
+    assert.equal(
+      await branchExists(isoRepo, "issue-no-base"),
+      false,
+      "a failed fetch must never fall back to cutting the branch from the stale local base"
+    );
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-197: the reuse path checks out the existing branch without fetching", async () => {
+  const { isoRepo, isoRemote } = makeIsoRepoPair("reuse");
+  try {
+    git(isoRepo, "branch", "issue-reuse-197");
+    // Break origin so thoroughly that any fetch attempt would fail — reuse must not care.
+    git(isoRepo, "remote", "set-url", "origin", path.join(isoRemote, "does-not-exist.git"));
+    const broken = await fetchFreshBase(isoRepo, "main");
+    assert.equal(broken.ok, false, "sanity: a fetch against this origin really does fail");
+
+    const leftover = await createRoleWorktree({ repo: isoRepo, role: "developer", sessionId: "s-reuse-left", ref: "issue-reuse-197" });
+    const resolved = await resolveDeveloperWorktree({
+      repo: isoRepo,
+      sessionId: "s-reuse-new",
+      branchName: "issue-reuse-197",
+      baseBranch: "main",
+      reuseBranch: true,
+    });
+    assert.equal(resolved.kind, "reused");
+    if (resolved.kind === "reused") assert.equal(resolved.path, leftover.path);
+    fs.rmSync(leftover.path, { recursive: true, force: true });
+    await withRepoLock(isoRepo, async () => execFileSync("git", ["worktree", "prune"], { cwd: isoRepo }));
+    execFileSync("git", ["branch", "-D", "issue-reuse-197"], { cwd: isoRepo });
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-197: fetchFreshBase bounds a hanging fetch with a timeout instead of hanging", async () => {
+  const { isoRepo, isoRemote } = makeIsoRepoPair("timeout");
+  try {
+    // An ssh remote whose "ssh" is a script that sleeps: the fetch can only end when our
+    // timeout kills it, so this deterministically exercises the timeout classification.
+    const sleeper = path.join(isoRepo, "fake-ssh.sh");
+    fs.writeFileSync(sleeper, "#!/bin/sh\nsleep 30\n");
+    fs.chmodSync(sleeper, 0o755);
+    git(isoRepo, "remote", "set-url", "origin", "ssh://git@example.invalid/repo.git");
+    git(isoRepo, "config", "core.sshCommand", sleeper);
+
+    const startedAt = Date.now();
+    const result = await fetchFreshBase(isoRepo, "main", 1000);
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, /timed out/);
+    assert.ok(elapsedMs < 20_000, `the fetch must be bounded (took ${elapsedMs}ms)`);
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-197: fetchFreshBase uses the local base as-is when the repo has no origin remote", async () => {
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt197-noorigin-"));
+  try {
+    git(bare, "init", "-b", "main");
+    git(bare, "config", "user.email", "test@example.com");
+    git(bare, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(bare, "README.md"), "hello\n");
+    git(bare, "add", ".");
+    git(bare, "commit", "-m", "init");
+
+    const result = await fetchFreshBase(bare, "main");
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.ref, "main");
+      assert.equal(result.sha, git(bare, "rev-parse", "main"));
+    }
+  } finally {
+    fs.rmSync(bare, { recursive: true, force: true });
+  }
 });

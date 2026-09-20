@@ -28,6 +28,7 @@ const LABELS: Record<string, (e: WorkflowEvent) => string> = {
   "review.submitted": () => "Reviewer submitted a review",
   "repair.started": (e) => `Repair round ${e.round ?? "?"} started`,
   "guidance.added": () => "Guidance added",
+  "task_snapshot.refreshed": () => "Task snapshot refreshed",
   "human_action.requested": () => "Human action requested",
   "human_action.resolved": () => "Human action resolved",
   "final_review.requested": () => "Final review requested",

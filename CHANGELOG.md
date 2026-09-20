@@ -2,6 +2,51 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.1.2 — 2026-09-20
+
+Patch over 1.1.1: internal groundwork for Muse Code isolation; no change to how existing runs behave.
+
+### Internal
+
+- **Muse Code per-attempt config (NOT-180)** — adds a module that builds the isolated config for one Muse Code attempt (single Agent Deck MCP server, sandbox on, approvals never, filtered env, reviewer write/shell disabled) and refuses restrictions that cannot yet be enforced. It is not yet wired into the Muse runner, so Muse runs are unchanged.
+
+## 1.1.1 — 2026-09-20
+
+Patch over 1.1.0: stop/start safety fixes (`stop` for isolated homes, `start --force` port check) and a false usage-cap deferral fix.
+
+### Fixes
+
+- **`agent-dealer stop` with an isolated home** — with an explicit `AGENT_DEALER_HOME` and no `run.json`, `stop` no longer falls back to the default port and terminates whatever listens there (previously it could stop your real install). It now only stops the pids recorded in that home's own `run.json`.
+- **`start --force` port check** — exits with an error whenever an agent-dealer is still listening on the port after the forced stop (for example one owned by a different home), instead of launching a second server onto an occupied port.
+- **False Claude usage-cap deferral** — for Claude rate-limit events, only a rejected plan-window `status` now defers an issue; a rejected `overageStatus` alone (orgs with pay-as-you-go disabled, `status` still allowed) is ignored. Other usage-cap signals (billing errors, cap error text) are unchanged.
+
+### Internal
+
+- `install:smoke` only runs its cleanup `stop` while its temp `run.json` still exists, so a release smoke can no longer take down the developer's running instance.
+
+## 1.1.0 — 2026-09-20
+
+Minor over 1.0.5: an opt-in trial of native Muse Code as the developer agent, plus review-loop, retry and Linear-error refinements.
+
+### Features
+
+- **Muse Code developer trial (opt-in per issue)** — supervised trial only: the PoC recommended “retry later”, and contributor-tier content may be used for product improvement, so pick non-sensitive tickets. Choose a Muse Code developer profile (pinned model) and the issue runs the normal Dev-review workflow, with Codex/Claude as reviewer (Muse cannot review). Muse gets no MCP and no Agent Deck, so a deck outage never parks it; token counts are recorded when Muse reports them, and cost is always empty (NOT-178, NOT-179, NOT-181).
+- **Muse health checks** — tells a missing CLI from missing credentials from an unexplained probe failure (NOT-178).
+- **Muse failure handling** — auth failures retry as infra without spending a review round, usage caps defer the issue, and a session that used Muse’s `cron_*` tools is failed and escalated to you with no retry. That last check runs after the fact and cannot prevent a job from firing (NOT-181).
+- **`usage_events.model`** — developer usage records now store the model (the confirmed model for Muse, the profile’s model otherwise); reviewer rows stay empty. An automatic migration adds the column and older rows stay empty (NOT-181).
+
+### Improvements
+
+- **Early escalation on repeated blockers** — a file with a blocking review finding in each of the last 3 rounds raises a policy escalation naming the file(s) instead of queuing another developer round; resuming spends the skipped repair round, and three fresh rounds are needed before it can fire again (NOT-184).
+- **Edit, then retry** — an issue parked at `attempts_exhausted` now lets you edit its title, description and acceptance criteria (`PATCH /api/issues/:id`); retrying re-freezes the task snapshot if any changed and records a `task_snapshot.refreshed` event (NOT-185).
+- **Findings resolve themselves** — a later completed review that no longer reports a finding marks it resolved (NOT-186).
+- **Clearer Linear blocker errors** — names the cause, and the rate-limit reset ETA, when blocker state is unavailable (NOT-158).
+
+### Internal
+
+- **Muse evaluation** — budget-first evaluation contract, headless/orchestration spike, PoC results, and the committed PoC harness in `scripts/muse-poc/` (NOT-176, NOT-177, NOT-183, NOT-187). Opt-in paid real-CLI check: `MUSE_SMOKE=1 npm run smoke:muse`.
+- **Execution analysis** — contract and evidence-quality rules for analysing runs (NOT-167).
+
 ## 1.0.5 — 2026-09-19
 
 Patch over 1.0.4: Agents list shows the effective model for profiles saved before NOT-71.
