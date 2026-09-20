@@ -1,0 +1,340 @@
+{
+  "schemaVersion": 1,
+  "evaluation": "muse-code-poc",
+  "epic": "NOT-164",
+  "contract": "NOT-176",
+  "runtimeNamesNote": "'muse_code' is not yet a value of the Dealer Runtime enum; the adapter is a follow-up that only starts if the PoC (NOT-183) says go. It names the native Muse Code CLI as the candidate.",
+  "baseline": {
+    "pairSource": "Dealer SQLite agents table on the operator machine (~/.agent-dealer/dealer.db), read 2026-09-19: the developer profile in production use. The baseline arm is re-run on the same 5 tasks; the shipped tickets have no recorded Dealer usage to reuse.",
+    "developer": {
+      "agentName": "Claude Dev",
+      "agentId": "d353f7bd-654f-4bc8-a567-5cfb81f527aa",
+      "runtime": "claude_code",
+      "model": "claude-sonnet-5",
+      "modelResolution": "The production profile leaves model unset, so the CLI default applies; on 2026-09-19 that default resolves to claude-sonnet-5 (operator ~/.claude/settings.json sets model alias 'sonnet'; the Claude Dev session that authored this contract reports claude-sonnet-5). The evaluation does NOT rely on the default: the frozen invocation passes --model claude-sonnet-5 explicitly, and a run whose stream init event reports a different model id is infrastructure-invalid.",
+      "effort": "high",
+      "effortResolution": "The production profile leaves effort unset; the operator's ~/.claude/settings.json sets effortLevel 'high'. The frozen invocation passes --effort high explicitly.",
+      "pricingBasis": "List-rate shadow cost, one frozen method for both arms (see costModel): cost_usd = uncached_input × r_input + cache_read × r_cache_read + cache_write × r_cache_write + output × r_output, over the disjoint token quantities defined in costModel and the raw-field mapping in this subject's tokenMapping; r_* are the vendor's published per-token rates for the frozen model (source URL and retrieval date recorded in the run plan before run 1). If any applicable quantity is not reported, or the mapping cannot be applied because the log does not say whether cached tokens are inside input, the run's cost is null, never 0. Claude Code's reported result.total_cost_usd is recorded as a cross-check only.",
+      "permissionPolicy": {
+        "worktreeWrite": true,
+        "publishReview": false,
+        "outboundMutation": false,
+        "resolveHumanAction": false
+      },
+      "profileModel": null,
+      "profileEffort": null,
+      "cliVersion": "2.1.278 (Claude Code)",
+      "frozenInvocation": "claude <Dealer buildDeveloperArgs> --model claude-sonnet-5 --effort high, via a dedicated eval copy of the Claude Dev profile with model=claude-sonnet-5 and defaultEffort=high; cliVersion, model and effort are identical for every baseline developer run.",
+      "tokenMapping": {
+        "source": "raw `result.usage` of the stream-json session log (not usage_events, which lacks cache tokens and reads cache-write from a field Claude Code does not emit)",
+        "uncached_input": "usage.input_tokens (Anthropic reports it excluding cache tokens)",
+        "cache_read": "usage.cache_read_input_tokens",
+        "cache_write": "usage.cache_creation_input_tokens",
+        "output": "usage.output_tokens",
+        "inputIncludesCached": false
+      }
+    }
+  },
+  "candidate": {
+    "runtime": "muse_code",
+    "cli": "native Muse Code (not Muse Spark through Codex)",
+    "tier": "Muse contributor tier",
+    "model": "muse-spark-1.3-contributor",
+    "modelResolution": "Pinned by NOT-177 (docs/evaluations/muse-code/headless-contract.md): catalog id for the contributor tier. Muse accepts an unknown --model id and exits 0, so a run is valid only if the session log's model_completed.model equals this id.",
+    "effort": "high",
+    "effortResolution": "Muse's default reasoning effort is high (NOT-177); it is not passed or varied in the PoC, identical for every candidate run.",
+    "pricingBasis": "List-rate shadow cost, same frozen method as the baseline (see costModel).",
+    "permissionPolicy": "identical to the baseline policy of the task's role",
+    "privacy": {
+      "dataUse": "Prompts and completions may be used to improve Meta products.",
+      "requiresOperatorAcceptance": true,
+      "allowedTaskClassification": "non_sensitive"
+    },
+    "cliVersion": "Muse Code 1.3.0 (1.3.0-R3401.1)",
+    "frozenInvocation": "MUSE_NO_AUTO_UPDATE=1 muse exec --json --no-foreign-personal-context --model muse-spark-1.3-contributor \"<task prompt>\" (sandbox on, approvals off, never --yolo, no MCP servers; safe posture per NOT-177)",
+    "tokenMapping": {
+      "source": "raw usage object of the `muse exec --json` event stream (fields per NOT-177's report)",
+      "uncached_input": "raw input tokens, minus raw cached tokens when the runtime reports input inclusive of cache",
+      "cache_read": "raw cached/cache-read input tokens",
+      "cache_write": "raw cache-write tokens if the Meta rate card has a cache-write tier, otherwise 0 by definition",
+      "output": "raw output tokens with reasoning tokens counted once",
+      "inputIncludesCached": "record from the first real usage event; null until then"
+    }
+  },
+  "controls": {
+    "pairing": "One valid run per task per arm (5 tasks x 2 arms = 10 runs): identical workerSpec, startingSha, timeoutSeconds and verification commands for both arms. Both arms run without MCP servers or a deck. Arm order alternates by task index.",
+    "timeoutsSeconds": {
+      "small": 1200,
+      "medium": 2400,
+      "long": 3600
+    },
+    "verificationTimeoutSeconds": 600,
+    "rerunPolicy": "Rerun once, and only, an infrastructure-invalid attempt (harness crash, network or auth failure, CLI failing before its first model turn, account usage cap). Timeouts, wrong output, giving up and tool misuse are valid runs. Every attempt stays in the results.",
+    "contamination": "A run whose transcript reads referenceSha content (for example `git show <referenceSha>`) or docs/evaluations/muse-code is scored as failed, in both arms."
+  },
+  "tasks": [
+    {
+      "id": "muse-01-incremental-commit-prompt",
+      "sourceIssue": "NOT-115",
+      "sourcePullRequest": "not-so-fat/agent-dealer#64",
+      "repository": "github.com/not-so-fat/agent-dealer",
+      "startingSha": "2a51ca68402675f2a16af391c8539310d2437800",
+      "referenceSha": "8b031ae6a8c85dfec970671264c195a19473a368",
+      "workerSpec": {
+        "title": "Ask developer agents for incremental commits at slice boundaries",
+        "description": "In packages/server/src/coordinator/prompts.ts, buildDeveloperPrompt's '## Required' section currently says only: run tests and Lens checks, and commit with git without pushing or opening a PR. When a developer session dies mid-run, everything uncommitted is stranded (dirty_worktree). Soft-mitigate this by prompting the developer to make incremental commits at coherent slice boundaries (for example after the tests for that slice pass) rather than leaving all work uncommitted until the end. The final commit of any remaining changes and the implementation conclusion must stay required. Routing semantics must not change.",
+        "acceptanceCriteria": [
+          "The prompt returned by buildDeveloperPrompt for round 1 matches /incremental commits?/i and /slice/i.",
+          "It still matches /final commit/i and /implementation conclusion/i.",
+          "It still contains the literal text 'do NOT push and do NOT open a pull request'.",
+          "Existing prompt tests still pass; no change outside the prompt text (routing/coordinator behavior untouched)."
+        ]
+      },
+      "role": "developer",
+      "category": "implementation",
+      "sizeClass": "small",
+      "timeoutSeconds": 1200,
+      "sensitivity": {
+        "classification": "non_sensitive",
+        "rationale": "Historical change to the public repository github.com/not-so-fat/agent-dealer; worker spec and reference diff contain no credentials, customer data, or personal data."
+      },
+      "verification": {
+        "setup": [
+          "npm ci"
+        ],
+        "heldOutPaths": [
+          "packages/server/src/coordinator/prompts.test.ts"
+        ],
+        "heldOutSource": "referenceSha",
+        "commands": [
+          {
+            "id": "held-out-tests",
+            "run": "git checkout 8b031ae6a8c85dfec970671264c195a19473a368 -- packages/server/src/coordinator/prompts.test.ts && npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/coordinator/prompts.test.ts",
+            "expectedExitCode": 0,
+            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 17'.",
+            "startingShaResult": "exit code 1 (1 failing test: the incremental-commit prompt test)."
+          }
+        ]
+      },
+      "expectedArtifact": {
+        "type": "git_commits",
+        "description": "One or more commits on the task branch changing packages/server/src/coordinator/prompts.ts (and optionally its test)."
+      }
+    },
+    {
+      "id": "muse-02-codex-reviewer-scoped-home",
+      "sourceIssue": "NOT-132",
+      "sourcePullRequest": "not-so-fat/agent-dealer#48",
+      "repository": "github.com/not-so-fat/agent-dealer",
+      "startingSha": "71724abeecbae5e6893dc9e9d2aa243aff344c01",
+      "referenceSha": "10c7cf216c7cc3734776f08fcec6b40ce890ed27",
+      "workerSpec": {
+        "title": "Let a codex reviewer spawn with a scoped CODEX_HOME",
+        "description": "A codex_local reviewer on a deck-attached profile can never start. packages/server/src/coordinator/args.ts omits --ignore-user-config once a per-attempt CODEX_HOME exists (the flag would skip the scoped config.toml that defines the deck MCP server), but assertReviewerReadOnly in packages/server/src/coordinator/permissions.ts demands that flag unconditionally, so realReviewerSpawn (coordinator/spawn.ts) throws before spawnCli on every attempt. Make the preflight accept either form of ambient-config isolation: --ignore-user-config in the args, OR a scoped CODEX_HOME. Add an optional second parameter to assertReviewerReadOnly, an exported interface ReviewerSpawnContext { mcpConfigPath?: string; mcpEnv?: Record<string,string> }, and pass { mcpConfigPath: input.mcpConfigPath, mcpEnv: input.mcpEnv } from realReviewerSpawn. Omitting the context must stay the strict reading (a caller that forgets it can only over-reject). The scoped-CODEX_HOME arm must be justified by the spawn env (mcpEnv.CODEX_HOME equal to mcpConfigPath), not by mcpConfigPath alone, because CODEX_HOME in the spawned env is what makes codex skip ~/.codex. Keep the existing rejections: workspace-write sandbox, non-read-only sandbox, missing isolation, and all Claude/Cursor checks.",
+        "acceptanceCriteria": [
+          "assertReviewerReadOnly(args) with no context still throws 'reviewer codex args do not isolate configured MCP servers' for codex args lacking --ignore-user-config.",
+          "assertReviewerReadOnly(args, ctx) accepts codex read-only args without --ignore-user-config when ctx.mcpEnv.CODEX_HOME is defined and equals ctx.mcpConfigPath.",
+          "A ctx with only mcpConfigPath (no matching mcpEnv.CODEX_HOME) is still rejected.",
+          "ReviewerSpawnContext is exported from permissions.ts and realReviewerSpawn passes it.",
+          "Codex args with a writable sandbox are still rejected before reaching the isolation check."
+        ]
+      },
+      "role": "developer",
+      "category": "implementation",
+      "sizeClass": "small",
+      "timeoutSeconds": 1200,
+      "sensitivity": {
+        "classification": "non_sensitive",
+        "rationale": "Historical change to the public repository github.com/not-so-fat/agent-dealer; worker spec and reference diff contain no credentials, customer data, or personal data."
+      },
+      "verification": {
+        "setup": [
+          "npm ci"
+        ],
+        "heldOutPaths": [
+          "packages/server/src/coordinator/permissions.test.ts"
+        ],
+        "heldOutSource": "referenceSha",
+        "commands": [
+          {
+            "id": "held-out-tests",
+            "run": "git checkout 10c7cf216c7cc3734776f08fcec6b40ce890ed27 -- packages/server/src/coordinator/permissions.test.ts && npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/coordinator/permissions.test.ts",
+            "expectedExitCode": 0,
+            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 12'.",
+            "startingShaResult": "exit code 1 (2 failing tests: the runtime x deck preflight matrix)."
+          }
+        ]
+      },
+      "expectedArtifact": {
+        "type": "git_commits",
+        "description": "Commits on the task branch changing packages/server/src/coordinator/permissions.ts and packages/server/src/coordinator/spawn.ts."
+      }
+    },
+    {
+      "id": "muse-04-salvage-dirty-worktree",
+      "sourceIssue": "NOT-145",
+      "sourcePullRequest": "not-so-fat/agent-dealer#65",
+      "repository": "github.com/not-so-fat/agent-dealer",
+      "startingSha": "8b031ae6a8c85dfec970671264c195a19473a368",
+      "referenceSha": "e9472a5ab93f31d32231c95da1a14443cc19a4ed",
+      "workerSpec": {
+        "title": "Salvage dirty developer worktrees on timeout/crash before remove",
+        "description": "When a developer session times out or crashes and leaves the worktree dirty, developer-effect.ts currently returns dirty_worktree and preserves the checkout, which keeps the issue branch checked out so the next retry cannot re-add it. Instead, never wipe uncommitted work: auto-commit it as a clearly marked tip so infra retries continue from the branch tip, and only when that fails preserve the dirty checkout and escalate with actionable recovery.\n\nContract (tests depend on these exact names/strings):\n(1) packages/server/src/adapters/git-worktree.ts exports SALVAGE_TIMEOUT_MESSAGE = 'wip: timeout salvage', SALVAGE_CRASH_MESSAGE = 'wip: crash salvage', type SalvageResult = { ok: true; commitSha: string; message: string } | { ok: false; reason: string }, async salvageDirtyWorktree(worktreePath, kind: 'timeout' | 'crash'): Promise<SalvageResult> and dirtyWorktreeRecoveryCommands(repo, worktreePath): string[]. salvageDirtyWorktree stages everything (git add -A) and commits with an explicit identity (user.name 'Agent Dealer', user.email 'agent-dealer@localhost') and the kind-specific message; it must never report ok while the tree is still dirty, and with nothing to commit it returns { ok: false } without mutating history. dirtyWorktreeRecoveryCommands returns lines: 'cd <worktreePath>', 'git status', 'git log --oneline -5', 'git stash list', and 'git -C <repo> worktree remove <worktreePath>  # only after the work is saved'.\n(2) In developer-effect.ts, on a dirty worktree after a timeout or non-zero exit: call salvageDirtyWorktree ('timeout' if spawned.timedOut else 'crash'). If it succeeds, remove the worktree (safeRemoveWorktree, checking removal actually happened); if removed, return { kind: 'timed_out' } or { kind: 'session_failed' } (infra retry) with a reason that ends with 'Salvaged uncommitted work as <message> (<7-char sha>).'; if removal did not happen, return dirty_worktree with the salvage note. If salvage fails, do not remove: return dirty_worktree with reason ending 'Auto-commit salvage failed: <reason>', plus path and recoveryCommands. The existing NOT-113 auth/keychain classification of the reason must survive.\n(3) In routing.ts, the dirty_worktree outcome gains optional `path` and `recoveryCommands`; when recoveryCommands is non-empty the escalation reason becomes '<base> Recovery:\\n<commands joined by newline>' (same shape as worktree_conflict).",
+        "acceptanceCriteria": [
+          "salvageDirtyWorktree lands a 'wip: timeout salvage' / 'wip: crash salvage' commit and returns ok:true with its sha; empty worktrees return ok:false unchanged.",
+          "A dirty crash or timeout ends with the salvage tip on the issue branch, the worktree removed, and the issue retried on the infra budget rather than escalated.",
+          "If the salvage commit is rejected (e.g. a failing pre-commit hook) the dirty checkout is preserved and the escalation carries path, recovery commands and 'Auto-commit salvage failed'.",
+          "Clean-worktree timeouts with existing commits still retry without losing the tip.",
+          "routing.ts folds recoveryCommands into the dirty_worktree escalation reason."
+        ]
+      },
+      "role": "developer",
+      "category": "implementation",
+      "sizeClass": "medium",
+      "timeoutSeconds": 2400,
+      "sensitivity": {
+        "classification": "non_sensitive",
+        "rationale": "Historical change to the public repository github.com/not-so-fat/agent-dealer; worker spec and reference diff contain no credentials, customer data, or personal data."
+      },
+      "verification": {
+        "setup": [
+          "npm ci"
+        ],
+        "heldOutPaths": [
+          "packages/server/src/adapters/git-worktree.test.ts",
+          "packages/server/src/coordinator/developer-effect.test.ts",
+          "packages/server/src/coordinator/routing.test.ts"
+        ],
+        "heldOutSource": "referenceSha",
+        "commands": [
+          {
+            "id": "held-out-tests",
+            "run": "git checkout e9472a5ab93f31d32231c95da1a14443cc19a4ed -- packages/server/src/adapters/git-worktree.test.ts packages/server/src/coordinator/developer-effect.test.ts packages/server/src/coordinator/routing.test.ts && npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/adapters/git-worktree.test.ts packages/server/src/coordinator/developer-effect.test.ts packages/server/src/coordinator/routing.test.ts",
+            "expectedExitCode": 0,
+            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 92'.",
+            "startingShaResult": "exit code 1 (32 failing tests)."
+          }
+        ]
+      },
+      "expectedArtifact": {
+        "type": "git_commits",
+        "description": "Commits changing adapters/git-worktree.ts, coordinator/developer-effect.ts and coordinator/routing.ts."
+      }
+    },
+    {
+      "id": "muse-05-push-rejection-facts",
+      "sourceIssue": "NOT-137",
+      "sourcePullRequest": "not-so-fat/agent-dealer#62",
+      "repository": "github.com/not-so-fat/agent-dealer",
+      "startingSha": "cc4fb8a31939b24978e880fa7f84bd5794376d13",
+      "referenceSha": "d5171766bbf35a112755522f9b7b6c76e2003d0d",
+      "workerSpec": {
+        "title": "Make unpushed_commit escalations actionable with divergence facts",
+        "description": "When the coordinator's push of a developer branch is rejected, the unpushed_commit escalation carries only raw git stderr, which repeats git's misleading 'use git pull' hint for rewritten/diverged histories. Gather divergence facts after a rejected push and fold a concrete recovery command into the escalation, without ever force-pushing.\n\nContract: packages/server/src/adapters/git-worktree.ts exports type PushRejectionFacts = { localSha; remoteSha; ahead: number; behind: number; relationship: 'diverged' | 'behind'; summary: string; recoveryCommands: string[] } and PushResult becomes { ok: true } | { ok: false; reason: string; rejected: boolean; facts?: PushRejectionFacts }. For both pushBranch (worktree, local ref HEAD) and pushBranchRef (repo, local ref refs/heads/<branch>), after a push failure matching the existing rejection patterns: fetch the branch ref (ignore fetch errors), and if origin/<branch> exists compute `git rev-list --left-right --count <localSha>...<remoteSha>` (ahead = left, behind = right). relationship is 'diverged' when ahead>0 and behind>0, else 'behind'. When facts are available, reason is facts.summary instead of raw git stderr; if the remote tip cannot be resolved, keep the raw message and omit facts (never invent facts). diverged: summary reads \"local and origin/<branch> have diverged: local <12-char sha> is <ahead> commit(s) ahead, remote <12-char sha> is <behind> commit(s) ahead. Do not git pull — that integrates the wrong history for a rewritten branch.\" with recoveryCommands ['# Confirm the remote tip is still <12-char remote sha>, then publish local with a lease pin:', 'git push --force-with-lease=refs/heads/<branch>:<remoteSha> origin <localSha>:refs/heads/<branch>']. behind: summary \"local <sha12> is behind origin/<branch> at <sha12> (remote is <behind> commit(s) ahead; local is <ahead> commit(s) ahead).\" with recoveryCommands ['git fetch origin <branch>', 'git rebase origin/<branch>', 'git push origin HEAD:refs/heads/<branch>']. In developer-effect.ts the { kind: 'unpushed_commit' } outcome gains optional recoveryCommands taken from the push result's facts (both push paths). In routing.ts the escalation reason becomes \"Developer's commits could not be pushed: <reason>\" followed, when recoveryCommands is non-empty, by ' Recovery:\\n<commands joined by newline>'.",
+        "acceptanceCriteria": [
+          "A rejected push against a diverged remote returns facts.relationship === 'diverged' with correct ahead/behind counts and never suggests git pull.",
+          "A rejected push against a remote that is strictly ahead returns relationship 'behind' with the fetch/rebase/push recovery.",
+          "If origin/<branch> cannot be resolved the result carries the raw reason and no facts.",
+          "unpushed_commit escalations fold the recovery commands into the human-action reason.",
+          "No path force-pushes on the coordinator's behalf."
+        ]
+      },
+      "role": "developer",
+      "category": "implementation",
+      "sizeClass": "medium",
+      "timeoutSeconds": 2400,
+      "sensitivity": {
+        "classification": "non_sensitive",
+        "rationale": "Historical change to the public repository github.com/not-so-fat/agent-dealer; worker spec and reference diff contain no credentials, customer data, or personal data."
+      },
+      "verification": {
+        "setup": [
+          "npm ci"
+        ],
+        "heldOutPaths": [
+          "packages/server/src/adapters/git-worktree.test.ts",
+          "packages/server/src/coordinator/developer-effect.test.ts",
+          "packages/server/src/coordinator/routing.test.ts"
+        ],
+        "heldOutSource": "referenceSha",
+        "commands": [
+          {
+            "id": "held-out-tests",
+            "run": "git checkout d5171766bbf35a112755522f9b7b6c76e2003d0d -- packages/server/src/adapters/git-worktree.test.ts packages/server/src/coordinator/developer-effect.test.ts packages/server/src/coordinator/routing.test.ts && npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/adapters/git-worktree.test.ts packages/server/src/coordinator/developer-effect.test.ts packages/server/src/coordinator/routing.test.ts",
+            "expectedExitCode": 0,
+            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 86'.",
+            "startingShaResult": "exit code 1 (4 failing tests)."
+          }
+        ]
+      },
+      "expectedArtifact": {
+        "type": "git_commits",
+        "description": "Commits changing adapters/git-worktree.ts, coordinator/developer-effect.ts and coordinator/routing.ts."
+      }
+    },
+    {
+      "id": "muse-07-head-reconcile-push-lag",
+      "sourceIssue": "NOT-110",
+      "sourcePullRequest": null,
+      "repository": "github.com/not-so-fat/agent-dealer",
+      "startingSha": "e539dd507cc264e6f3659ea845b58b982504aa8a",
+      "referenceSha": "c5ab0bd9f67ab707850d8bb8f1cd5534922343ff",
+      "workerSpec": {
+        "title": "Bug: post-push gh pr view head lag is treated as a developer failure",
+        "description": "Right after a successful `git push`, `gh pr view`'s head (headRefOid) can briefly lag the real remote tip. In runDeveloperEffect (packages/server/src/coordinator/developer-effect.ts) a one-shot mismatch between prView.headRefOid and the local head is indistinguishable from 'developer never pushed' and is failed as adapter_failure, burning an infra retry even though the commit is already on the remote. Reproduce with a fake GithubAdapter whose viewPr returns a stale headRefOid for the first two reads, then fix it: before the PR identity check runs, reconcile by polling viewPr (by the already-resolved PR number and branch, never bare current-branch inference) until headRefOid equals the local head or a bounded deadline passes; return the last view either way so a persistent mismatch still fails exactly as before. Make the window configurable through developerEffectConfig getters headReconcileTimeoutMs (env HEAD_RECONCILE_TIMEOUT_MS, default 30000) and headReconcileIntervalMs (env HEAD_RECONCILE_INTERVAL_MS, default 3000), read at call time so tests can shorten them. Keep a test that a head that never catches up is still rejected after the bounded timeout.",
+        "acceptanceCriteria": [
+          "A briefly stale headRefOid (e.g. two stale reads) reconciles and the issue reaches 'reviewing' with no infra attempt consumed.",
+          "A headRefOid that never catches up is still rejected as adapter_failure after HEAD_RECONCILE_TIMEOUT_MS.",
+          "Every re-read passes both PR number and branch to viewPr.",
+          "The polling loop never sleeps past the deadline."
+        ]
+      },
+      "role": "developer",
+      "category": "test_debug",
+      "sizeClass": "small",
+      "timeoutSeconds": 1200,
+      "sensitivity": {
+        "classification": "non_sensitive",
+        "rationale": "Historical change to the public repository github.com/not-so-fat/agent-dealer; worker spec and reference diff contain no credentials, customer data, or personal data."
+      },
+      "verification": {
+        "setup": [
+          "npm ci"
+        ],
+        "heldOutPaths": [
+          "packages/server/src/coordinator/developer-effect.test.ts"
+        ],
+        "heldOutSource": "referenceSha",
+        "commands": [
+          {
+            "id": "held-out-tests",
+            "run": "git checkout c5ab0bd9f67ab707850d8bb8f1cd5534922343ff -- packages/server/src/coordinator/developer-effect.test.ts && npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 npx tsx --test --test-timeout=60000 packages/server/src/coordinator/developer-effect.test.ts",
+            "expectedExitCode": 0,
+            "expectedResult": "Node test runner summary shows 'ℹ fail 0' and 'ℹ pass 21'.",
+            "startingShaResult": "exit code 1 (1 failing test: a briefly stale headRefOid is treated as adapter_failure)."
+          }
+        ]
+      },
+      "expectedArtifact": {
+        "type": "git_commits",
+        "description": "Commits changing packages/server/src/coordinator/developer-effect.ts."
+      }
+    }
+  ],
+  "costModel": {
+    "basis": "list_rate_shadow_cost",
+    "frozenNow": true,
+    "appliesTo": "both arms and every subject session; it is the only cost that enters threshold 3. Actual plan/quota spend is reported separately (actualPlanSpendReport) and is never substituted for, mixed into or averaged with the shadow cost.",
+    "disjointQuantities": {
+      "uncached_input": "input tokens billed at the normal input rate; excludes every cached token",
+      "cache_read": "input tokens served from cache, billed at the cache-read rate",
+      "cache_write": "input tokens written to cache, billed at the cache-write rate (only where the vendor has such a tier)",
+      "output": "all generated tokens including reasoning tokens, each counted once"
+    },
+    "formula": "cost_usd = uncached_input × r_input + cache_read × r_cache_read + cache_write × r_cache_write + output × r_output. The four quantities are disjoint by construction; no token is charged at two rates.",
+    "notApplicable": "A quantity the runtime's vendor has no tier for (Codex cache_write) is defined as 0 by that runtime's tokenMapping, not by absence of data. A quantity that has a tier but is not reported is null.",
+    "nullRule": "Any applicable quantity that is missing, or a mapping whose subset/disjoint semantics cannot be established from the raw log, makes the attempt cost null, never 0 and never a saving.",
+    "actualPlanSpendReport": "Reported alongside threshold 3, not gated: for each arm the plan, price, billing period, number of runs, and provider-reported consumption. The candidate's contributor-tier cash price ($0, paid in data-use rights) is reported but is not a cost and cannot satisfy threshold 3. No time-based or quota-share allocation is used; the shadow list-rate cost is the documented conversion of plan usage to dollars.",
+    "noPublishedRate": "If a vendor publishes no per-token rate for its frozen model (possible for muse-spark-1.3), or a runtime reports no token counts, that arm's cost is null and threshold 3 is incomparable; both arms' actual plan spend is then reported separately."
+  }
+}
