@@ -45,18 +45,27 @@ export async function runStop(): Promise<number> {
     clearRunState();
   }
 
+  // An explicit AGENT_DEALER_HOME means "only this home" (smoke tests, side-by-side installs).
+  // Its run.json is the sole proof of ownership, so never sweep the port: with no run state the
+  // port falls back to the bundled 2222, which belongs to the default install.
+  const isolatedHome = Boolean(process.env.AGENT_DEALER_HOME?.trim());
+
   let probe = await probeAgentDealer(host, port);
   if (probe.up) {
-    for (const pid of listListeningPids(port)) {
-      if (terminatePid(pid, `listener on :${port}`)) {
-        stopped += 1;
+    if (!isolatedHome) {
+      for (const pid of listListeningPids(port)) {
+        if (terminatePid(pid, `listener on :${port}`)) {
+          stopped += 1;
+        }
       }
     }
-    await waitForShutdown(host, port);
-    probe = await probeAgentDealer(host, port);
+    if (!isolatedHome || state) {
+      await waitForShutdown(host, port);
+      probe = await probeAgentDealer(host, port);
+    }
   }
 
-  if (probe.up) {
+  if (probe.up && (!isolatedHome || state)) {
     console.warn("[agent-dealer] agent-dealer still responds on configured port. Kill remaining processes manually:");
     console.warn(`  lsof -ti :${port} -sTCP:LISTEN | xargs kill`);
     return 1;
