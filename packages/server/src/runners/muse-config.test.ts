@@ -9,11 +9,12 @@ import {
   MuseIsolationError,
   prepareMuseAttempt as prepareMuseAttemptPinned,
   unenforceableRestrictions,
+  type MuseAttempt,
   type MuseAttemptInput,
   type MuseEnforcementEvidence,
   type MuseRole,
 } from "./muse-config.js";
-import { prepareWithEvidence } from "./muse-config-core.js";
+import { pathToFileURL } from "node:url";
 
 // The Muse sandbox leaves temp dirs writable, so the module refuses them: fixtures live under $HOME.
 const SCRATCH = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-config-test-"));
@@ -21,9 +22,19 @@ after(() => fs.rmSync(SCRATCH, { recursive: true, force: true }));
 
 const ENFORCED: MuseEnforcementEvidence = { mcp_tool_allowlist_enforcement: true, cron_tool_disable: true };
 
-// Production `prepareMuseAttempt` is pinned to the NOT-177 evidence; the enforced paths are exercised
-// through the internal core against a hypothetical build that enforces both controls.
-const prepareMuseAttempt = (i: MuseAttemptInput) => prepareWithEvidence(i, ENFORCED);
+// Production code has no seam that accepts other enforcement evidence. The enforced paths are exercised
+// against a hypothetical build by loading a source-rewritten copy of the core with the pinned evidence
+// flipped to true. The copy lives in SCRATCH (outside src/ and dist/), so it never ships.
+async function loadEnforcedCore(): Promise<{ prepareMuseAttempt: (i: MuseAttemptInput) => MuseAttempt }> {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "muse-config-core.ts"), "utf8");
+  const literal = /(mcp_tool_allowlist_enforcement|cron_tool_disable): false,/g;
+  assert.equal(source.match(literal)?.length, 2, "pinned evidence literal changed; update the test rewrite");
+  const copy = path.join(SCRATCH, "muse-config-core.enforced.ts");
+  fs.writeFileSync(copy, source.replace(literal, "$1: true,"));
+  return import(pathToFileURL(copy).href);
+}
+const enforcedCore = await loadEnforcedCore();
+const prepareMuseAttempt = (i: MuseAttemptInput) => enforcedCore.prepareMuseAttempt(i);
 const SESSION = "11111111-2222-4333-8444-555555555555";
 const API_KEY = "mk-live-SECRET-0123456789abcdef";
 const DECK_URL = "http://127.0.0.1:1110/mcp";
@@ -67,8 +78,9 @@ function code(fn: () => unknown): string | undefined {
   try {
     fn();
   } catch (err) {
-    assert.ok(err instanceof MuseIsolationError, String(err));
-    return err.code;
+    // The enforced-core copy has its own MuseIsolationError class, so match by name.
+    assert.ok(err instanceof Error && err.name === "MuseIsolationError", String(err));
+    return (err as MuseIsolationError).code;
   }
   return undefined;
 }
@@ -344,7 +356,7 @@ test("api key never reaches argv, env, disk, or error text; redact scrubs it", (
       prepare(input(fx, "developer", { credential: { kind: "api-key", apiKey: API_KEY }, ...over }));
       assert.fail("expected refusal");
     } catch (err) {
-      assert.ok(err instanceof MuseIsolationError);
+      assert.ok(err instanceof Error && err.name === "MuseIsolationError");
       assert.ok(!err.message.includes(API_KEY));
       assert.ok(!String(err.stack).includes(API_KEY));
     }
@@ -431,10 +443,22 @@ test("verification is snapshotted: mutating the original input cannot retarget t
   }
 });
 
-test("enforcement evidence seam is not exported from the production entry point", async () => {
-  const prod = (await import("./muse-config.js")) as Record<string, unknown>;
-  assert.equal("prepareWithEvidence" in prod, false);
-  assert.equal("museConfigTesting" in prod, false);
+test("no runtime export can produce a launchable attempt from caller-supplied evidence", async () => {
+  for (const mod of ["./muse-config.js", "./muse-config-core.js"]) {
+    const exported = (await import(mod)) as Record<string, unknown>;
+    assert.equal("prepareWithEvidence" in exported, false, mod);
+    assert.equal("museConfigTesting" in exported, false, mod);
+    // Only the pinned preparer returns a MuseAttempt-producing function; it takes exactly one argument.
+    for (const [name, value] of Object.entries(exported)) {
+      if (typeof value === "function" && /^prepare/.test(name)) assert.equal(value.length, 1, `${mod}#${name}`);
+    }
+  }
+  // The pinned core cannot be talked into success with a forged evidence argument or field.
+  const core = (await import("./muse-config-core.js")) as { prepareMuseAttempt: (...a: unknown[]) => unknown };
+  const fx = fixture();
+  const forged = () => core.prepareMuseAttempt(input(fx, "developer"), ENFORCED);
+  assert.equal(code(forged), "unenforceable_restriction");
+  assert.deepEqual(fs.readdirSync(fx.baseDir), []);
 });
 
 test("only muse-config.ts and tests import muse-config-core", () => {

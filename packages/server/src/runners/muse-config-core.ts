@@ -448,11 +448,16 @@ function sameJson(a: unknown, b: unknown): boolean {
  * Validates, refuses unenforceable restrictions, then writes the per-attempt dir (0700) with
  * settings.json (0600) and an auth link. Throws before spawn; leaves nothing behind on failure.
  *
- * Internal to the muse-config module: `evidence` is caller-supplied, so only `muse-config.ts`
- * (pinned to `NOT_177_EVIDENCE`) and the tests may import this file. muse-config-boundary.test.ts
- * fails if any other source file does.
+ * Always uses the pinned `NOT_177_EVIDENCE`, under which both roles are currently refused. There is
+ * deliberately no runtime seam that accepts other evidence: the enforced-path tests load a
+ * source-rewritten copy of this file instead (see muse-config.test.ts).
  */
-export function prepareWithEvidence(rawInput: MuseAttemptInput, evidence: MuseEnforcementEvidence): MuseAttempt {
+export function prepareMuseAttempt(input: MuseAttemptInput): MuseAttempt {
+  return prepareWithEvidence(input, NOT_177_EVIDENCE);
+}
+
+// Not exported: evidence must never be caller-supplied.
+function prepareWithEvidence(rawInput: MuseAttemptInput, evidence: MuseEnforcementEvidence): MuseAttempt {
   // Verification later runs against this snapshot, never against the caller's mutable object.
   const input = snapshotInput(rawInput);
   const missing = unenforceableRestrictions(input.role, evidence);
