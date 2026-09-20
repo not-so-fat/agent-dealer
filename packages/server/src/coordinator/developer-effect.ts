@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
+import { parsePhaseBudget, parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
 import type { EffectContext } from "./effect-registry.js";
 import type { DeveloperOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
@@ -57,7 +57,7 @@ import { createIssueArtifact, latestIssueArtifact } from "../repository/artifact
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
 import { syncIssueBaseBranch } from "./sync-issue-base-branch.js";
-import { recordUsageCapFromLog } from "../runners/usage-cap.js";
+import { recordMuseUsageCap, recordUsageCapFromLog } from "../runners/usage-cap.js";
 import { reasonForDirtyWorktree, reasonForSessionCrash } from "./failure-reason.js";
 import {
   emitSessionMilestone,
@@ -665,16 +665,19 @@ export async function runDeveloperEffect(
   // agree by inspection — the exact shape this stack exists to remove (NOT-134 review).
   const policy = snapshot?.permissionPolicy ?? roleCeiling("developer");
 
+  // NOT-181: Muse Code workers get no MCP servers and no Agent Deck — nothing is materialized,
+  // verified or released for them, whatever deck the profile happens to carry.
+  const isMuse = runtime === "muse_code";
   let workerAuthority: { mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   try {
-    if (!snapshot?.deckId) {
+    if (!isMuse && !snapshot?.deckId) {
       await bestEffortRemove(repoPath, worktreePath);
       return {
         kind: "deck_failure",
         reason: "Agent profile has no Agent Deck — workers never start without one",
       };
     }
-    {
+    if (!isMuse && snapshot?.deckId) {
       const prepared = await prepareWorkerDeckConnection({
         deckId: snapshot.deckId,
         worktreePath,
@@ -698,7 +701,7 @@ export async function runDeveloperEffect(
       });
     }
 
-    if (taskBriefIsComplete(taskSnapshot)) {
+    if (taskBriefIsComplete(taskSnapshot) || isMuse) {
       milestone("brief.resolved", `Developer · brief ready (Task/AC complete)`, {
         resolution: "task_complete",
       });
@@ -743,7 +746,8 @@ export async function runDeveloperEffect(
       priorConclusion,
       priorVerificationReceipt,
       worktreePath,
-      deckId: snapshot?.deckId ?? null,
+      deckId: isMuse ? null : (snapshot?.deckId ?? null),
+      noAgentDeck: isMuse,
       guidance: guidance.length ? guidance : undefined,
     });
 
@@ -773,6 +777,8 @@ export async function runDeveloperEffect(
         policy,
         model: snapshot?.model ?? null,
         effort: snapshot?.effort ?? null,
+        // Frozen profile budget → Muse's `--max-model-steps`; the other runtimes ignore it.
+        maxModelSteps: parsePhaseBudget(snapshot?.budgetJson)?.maxTurns ?? null,
         prompt,
         cwd: worktreePath,
         timeoutMs: developerEffectConfig.sessionTimeoutMs,
@@ -805,12 +811,22 @@ export async function runDeveloperEffect(
     // Recorded unconditionally, before any early return below: cost is incurred the
     // moment the process runs, whether or not the session subsequently timed out,
     // exited non-zero, or failed later-stage verification.
-    const usage = extractSpawnUsage(spawned.logPath, runtime);
+    // Muse reports usage only in its on-disk session log, already parsed by the spawn; tokens stay
+    // null when it did not report them and cost is always null (Muse has no cost figure, NOT-177).
+    const usage = spawned.muse
+      ? {
+          tokensIn: spawned.muse.usage.inputTokens,
+          tokensOut: spawned.muse.usage.outputTokens,
+          costUsd: spawned.muse.usage.costUsd,
+        }
+      : extractSpawnUsage(spawned.logPath, runtime);
     recordUsageEvent({
       issueId: issue.id,
       workerSessionId: sessionId,
       role: "developer",
       runtime,
+      // What actually ran: Muse's server-confirmed model, else what the frozen profile asked for.
+      model: spawned.muse?.confirmedModel ?? snapshot?.model ?? null,
       durationMs: Date.now() - spawnStartedAt,
       ...usage,
     });
@@ -827,7 +843,31 @@ export async function runDeveloperEffect(
       workerAuthority = null;
     }
 
-    const usageCap = recordUsageCapFromLog(spawned.logPath, runtime);
+    // NOT-181: Muse cannot disable `cron_*`, so a session that touched any is failed and handed to
+    // the operator before anything else is decided. Detection only — a scheduled job could already
+    // have fired inside the process; its per-attempt data dir (and the job store in it) is gone.
+    if (spawned.muse && spawned.muse.cronCalls.length > 0) {
+      createIssueArtifact({
+        issueId: issue.id,
+        workerSessionId: sessionId,
+        kind: "developer_transcript",
+        author: "system",
+        blobPath: spawned.logPath,
+      });
+      return {
+        kind: "muse_cron_used",
+        reason:
+          `muse_cron_used: the Muse session called ${[...new Set(spawned.muse.cronCalls)].join(", ")}, ` +
+          `which Muse cannot disable. Worktree ${worktreePath} and session log ${spawned.logPath} were left ` +
+          `for inspection; nothing was pushed.`,
+        path: worktreePath,
+        logPath: spawned.logPath,
+      };
+    }
+
+    const usageCap = spawned.muse
+      ? recordMuseUsageCap(spawned.muse.failure)
+      : recordUsageCapFromLog(spawned.logPath, runtime);
     if (usageCap) {
       const clean = await isWorktreeClean(worktreePath).catch(() => false);
       if (!clean) {

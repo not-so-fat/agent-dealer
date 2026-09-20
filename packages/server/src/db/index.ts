@@ -157,6 +157,13 @@ export function migrate(): void {
     db.exec("ALTER TABLE worker_sessions ADD COLUMN process_started_at TEXT");
   }
 
+  // NOT-181: the model a session actually ran (Muse's server-confirmed one). Existing rows stay
+  // NULL, which every reader treats as "not recorded".
+  const usageEventCols = db.prepare("PRAGMA table_info(usage_events)").all() as Array<{ name: string }>;
+  if (!usageEventCols.some((c) => c.name === "model")) {
+    db.exec("ALTER TABLE usage_events ADD COLUMN model TEXT");
+  }
+
   // Tighten the workflow-event idempotency index to UNIQUE for DBs created before the
   // constraint (schema.sql's IF NOT EXISTS won't upgrade an existing non-unique index).
   // A pre-fix DB may already hold duplicate keys — the old index was non-unique and

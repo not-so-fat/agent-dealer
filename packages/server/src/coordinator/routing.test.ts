@@ -457,3 +457,15 @@ test("NOT-147: noProgressInfraAttempts is tunable (N=1 escalates on first empty-
   assert.equal(result.next, "human_action");
   assert.match((result as { reason: string }).reason, /stuck: no commits after 1 timeouts\/crashes/i);
 });
+
+// NOT-181: Muse cannot disable cron_*; a session that used it is escalated, never retried.
+test("muse_cron_used escalates to the operator without spending any budget, even with attempts left", () => {
+  const outcome: DeveloperOutcome = { kind: "muse_cron_used", reason: "muse_cron_used: the Muse session called cron_create" };
+  for (const limits of [REVIEW_ROUNDS_LEFT, INFRA_ATTEMPTS_LEFT, INFRA_AT_LIMIT]) {
+    assert.deepStrictEqual(routeDeveloperOutcome(outcome, limits), {
+      next: "human_action",
+      actionType: "policy_escalation",
+      reason: "muse_cron_used: the Muse session called cron_create",
+    });
+  }
+});

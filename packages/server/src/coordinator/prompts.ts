@@ -41,6 +41,9 @@ export interface DeveloperPromptInput {
   /** The generated worktree the agent is actually running in — binding must target this, not the original repo checkout. */
   worktreePath?: string;
   deckId?: string | null;
+  /** NOT-181: a Muse Code session has no MCP servers and no Agent Deck — say so instead of the
+   * "misconfigured: Agent Deck is required" stop, and forbid the `cron_*` tools Muse cannot hide. */
+  noAgentDeck?: boolean;
   /** Human guidance markdown added since this issue's previous worker session (design
    * doc "Guidance semantics") — a one-shot CLI process never inherits a running session,
    * so this is how guidance actually reaches the next developer/reviewer input. */
@@ -71,7 +74,20 @@ function guidanceSection(guidance: string[] | undefined): string[] {
  *
  * Workers never start without a deckId (fail-closed at admission/effect).
  */
-function agentDeckSection(worktreePath: string | undefined, deckId: string | null | undefined): string[] {
+function noAgentDeckSection(): string[] {
+  return [
+    `This session has no Agent Deck and no MCP servers. The Task and Acceptance criteria above are the complete brief — if they only reference a ticket id you cannot look it up, so say so in your conclusion instead of guessing.`,
+    `Never call \`cron_create\`, \`cron_list\` or \`cron_delete\` and never schedule anything: a session that does is failed and escalated to the operator.`,
+    ``,
+  ];
+}
+
+function agentDeckSection(
+  worktreePath: string | undefined,
+  deckId: string | null | undefined,
+  noAgentDeck?: boolean
+): string[] {
+  if (noAgentDeck) return noAgentDeckSection();
   if (!deckId || !worktreePath) {
     return [
       `This session is misconfigured: Agent Deck is required but missing. Stop and report the bootstrap failure — do not improvise without the deck.`,
@@ -131,7 +147,7 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
   }
 
   parts.push(...guidanceSection(input.guidance));
-  parts.push(...agentDeckSection(input.worktreePath, input.deckId));
+  parts.push(...agentDeckSection(input.worktreePath, input.deckId, input.noAgentDeck));
 
   parts.push(
     `## Required`,

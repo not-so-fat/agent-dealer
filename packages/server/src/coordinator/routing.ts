@@ -17,6 +17,11 @@ export type DeveloperOutcome =
   | { kind: "worktree_conflict"; path: string; reason: string; recoveryCommands: string[] }
   /** NOT-127: leftover worktree still has a live owning process — do not adopt or treat as conflict. */
   | { kind: "live_owner"; path: string; ownerSessionId: string; reason: string }
+  /** NOT-181: a Muse session's tool activity included `cron_create`/`cron_list`/`cron_delete`, which
+   * Muse cannot disable (NOT-177). Detected after the fact; the session is failed and the operator
+   * decides — never an infra retry, since a retry would hand the same model the same tool.
+   * The worktree is left as it was (`path`) and `logPath` points at the normalized session log. */
+  | { kind: "muse_cron_used"; reason: string; path?: string; logPath?: string }
   | { kind: "checks_failed"; details?: string }
   /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll.
    * NOT-147: `commitsAhead` (when known) feeds the empty-tip no-progress gate; optional
@@ -170,6 +175,10 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
         actionType: "policy_escalation",
         reason: `${outcome.reason} Recovery:\n${outcome.recoveryCommands.join("\n")}`,
       };
+    case "muse_cron_used":
+      // Spends no budget and never retries: a policy breach the operator must look at, like a
+      // preserved dirty worktree.
+      return { next: "human_action", actionType: "policy_escalation", reason: outcome.reason };
     case "live_owner":
       // NOT-127: predecessor CLI is still running in this worktree. Never escalate as a
       // worktree_conflict (that mislabels live WIP as abandoned dirt) and never adopt the

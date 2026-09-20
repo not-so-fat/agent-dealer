@@ -264,7 +264,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
   tokens_out INTEGER,
   cost_usd REAL,
   duration_ms INTEGER,
-  ts TEXT NOT NULL
+  ts TEXT NOT NULL,
+  model TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_events_issue ON usage_events(issue_id);

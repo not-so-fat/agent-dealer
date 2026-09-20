@@ -91,7 +91,12 @@ export function activeAttemptCount(): number {
 }
 
 function isFailureOutcome(outcome: DeveloperOutcome | ReviewerOutcome): boolean {
-  return outcome.kind === "session_failed" || outcome.kind === "publish_failed" || outcome.kind === "deck_failure";
+  return (
+    outcome.kind === "session_failed" ||
+    outcome.kind === "publish_failed" ||
+    outcome.kind === "deck_failure" ||
+    outcome.kind === "muse_cron_used"
+  );
 }
 
 /** `timed_out` is the only outcome meaning the agent process itself hit its wall clock —
