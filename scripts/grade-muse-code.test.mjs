@@ -51,7 +51,7 @@ const readOnlyAnswer = () => ({
     verifierFile: `${P}/adapters/codex-scoped-config.ts`,
     verifiedIn: "assertReviewerReadOnly",
   },
-  cursor: { deniesOutboundMutation: false, gapReason: "--force is needed headless and the only deny list is the user-global cli-config.json." },
+  cursor: { deniesOutboundMutation: false, forceRequiredHeadless: true, denyListScope: "user-global" },
 });
 
 test("muse-10 accepts the correct structured answer", () => {
@@ -72,6 +72,22 @@ test("muse-10 rejects an answer denying every correct relationship", () => {
   assert.ok(r.problems.length >= 8, r.problems.join("\n"));
 });
 
+test("muse-10 rejects sources that deny each requested field (prose around the identifier)", () => {
+  const a = usageAnswer();
+  a.sources = { tokensIn: "not usage.input_tokens", tokensOut: "not usage.output_tokens", costUsd: "not total_cost_usd" };
+  const r = gradeAnswer(task("muse-10-explore-usage-capture"), fence(a));
+  assert.equal(r.ok, false);
+  assert.equal(r.problems.length, 3, r.problems.join("\n"));
+  for (const wrapped of ["usage.input_tokens is wrong", "usage.input_tokens or output_tokens", "input_tokens, not output_tokens"]) {
+    const b = usageAnswer();
+    b.sources.tokensIn = wrapped;
+    assert.equal(gradeAnswer(task("muse-10-explore-usage-capture"), fence(b)).ok, false, wrapped);
+  }
+  const alias = usageAnswer();
+  alias.sources = { tokensIn: "`input_tokens`", tokensOut: "usage.outputTokens", costUsd: "total_cost_usd" };
+  assert.equal(gradeAnswer(task("muse-10-explore-usage-capture"), fence(alias)).ok, true);
+});
+
 test("muse-10 rejects keyword stuffing without the structured block, and two blocks", () => {
   const prose = "extractSpawnUsage packages/server/src/coordinator/usage.ts recordUsageEvent usage_events summarizeIssueUsage COALESCE null total_cost_usd";
   assert.equal(gradeAnswer(task("muse-10-explore-usage-capture"), prose).ok, false);
@@ -85,6 +101,8 @@ test("muse-11 accepts the correct answer and rejects a wrong-relationship one", 
   bad.assertion.calledBeforeSpawnCli = false;
   bad.cursor.deniesOutboundMutation = true;
   bad.codex.configKey = "allowed_tools";
+  bad.cursor.forceRequiredHeadless = false;
+  bad.cursor.denyListScope = "per-invocation";
   bad.claude.permissionMode = "bypassPermissions";
   assert.equal(gradeAnswer(task("muse-11-explore-reviewer-read-only"), fence(bad)).ok, false);
 });
@@ -93,52 +111,74 @@ const base = "86d9cc644d53830f0457b6b3e8437be13c9cd30a";
 const head = "9dda237c316f22d2b2c112048be7a1d1fe9c99f1";
 const review = (verdict, findings, shas = { baseSha: base, headSha: head }) =>
   fence({ verdict, ...shas, acceptanceCriteriaAssessment: "ok", evidenceAssessment: "ok", findings, risks: [] });
-const finding = (file, title, rationale) => ({ fingerprint: "f", severity: "non_blocking", title, rationale, file, line: 1 });
+const claimFinding = (id, file, title = "t", rationale = "r") => ({ fingerprint: `claim:${id}`, severity: "blocking", title, rationale, file, line: 1 });
 const t12 = task("muse-12-review-usage-cap-deferral");
+const HEALTH = `${P}/adapters/agent-health.ts`;
+const REC = `${P}/coordinator/recovery.ts`;
+const CEIL = `${P}/coordinator/usage-cap-defer.ts`;
+const dup = () => claimFinding("duplicate-cli-missing", HEALTH);
+const rec = () => claimFinding("recovery-ignores-runtime-availability", REC);
+const ceil = () => claimFinding("untested-deferral-ceiling", CEIL);
 
-test("muse-12 accepts a finding that names a known defect with specific evidence", () => {
-  const r = gradeReview(
-    t12,
-    review("changes_requested", [
-      finding(`${P}/adapters/agent-health.ts`, "Codex cli_missing is reported twice", "When the CLI is missing, runtimeIssuesUncached pushes cli_missing and then repeats the --version check, duplicating the issue."),
-    ])
-  );
+test("muse-12 accepts two true claims and reports which matched", () => {
+  const r = gradeReview(t12, review("changes_requested", [dup(), rec()]));
   assert.equal(r.ok, true, r.problems?.join("\n"));
-  assert.deepEqual(r.matched, ["duplicate-cli-missing"]);
+  assert.deepEqual(r.matched, ["duplicate-cli-missing", "recovery-ignores-runtime-availability"]);
+  assert.equal(gradeReview(t12, review("changes_requested", [dup(), rec(), ceil()])).matched.length, 3);
 });
 
-test("muse-12 rejects approved results with no defect, broad vocabulary, wrong files and wrong SHAs", () => {
+test("muse-12 rejects approved results, too few claims, wrong files, wrong SHAs, and unstructured findings", () => {
   assert.equal(gradeReview(t12, review("approved", [])).ok, false);
-  const vocab = finding(`${P}/coordinator/commands.ts`, "recovery and lease handling", "recovery, work-items, lease, ceiling, dead-letter and cli_missing are all mentioned here.");
-  assert.equal(gradeReview(t12, review("approved", [vocab])).ok, false);
-  const rightFileBroad = finding(`${P}/coordinator/recovery.ts`, "Recovery looks fine", "recovery is fine, lease code is well-tested.");
-  assert.equal(gradeReview(t12, review("changes_requested", [rightFileBroad])).ok, false);
-  const good = finding(`${P}/coordinator/recovery.ts`, "Lease-expiry recovery ignores runtime availability", "A crash during a usage cap observation leaves an expired lease that recovery dead-letters instead of deferring; it never consults runtime_availability.");
-  assert.equal(gradeReview(t12, review("changes_requested", [good], { baseSha: base, headSha: base })).ok, false);
-  assert.equal(gradeReview(t12, review("changes_requested", [good])).ok, true);
+  assert.equal(gradeReview(t12, review("approved", [dup(), rec(), ceil()])).ok, false, "approved verdict with defects asserted");
+  assert.equal(gradeReview(t12, review("escalated", [dup(), rec()])).ok, false);
+  assert.equal(gradeReview(t12, review("changes_requested", [dup()])).ok, false, "only one true claim, need 2");
+  assert.equal(gradeReview(t12, review("changes_requested", [dup(), dup()])).ok, false, "same claim twice is one claim");
+  assert.equal(gradeReview(t12, review("changes_requested", [dup(), claimFinding("recovery-ignores-runtime-availability", `${P}/coordinator/commands.ts`)])).ok, false);
+  assert.equal(gradeReview(t12, review("changes_requested", [dup(), rec()], { baseSha: base, headSha: base })).ok, false);
+  const prose = (file, title, rationale) => ({ fingerprint: "f", severity: "blocking", title, rationale, file, line: 1 });
+  const freeText = [
+    prose(HEALTH, "cli_missing is reported twice", "runtimeIssuesUncached pushes cli_missing twice, duplicating the issue."),
+    prose(REC, "recovery ignores runtime availability", "recovery never consults runtime_availability and dead-letters instead of deferring."),
+  ];
+  assert.equal(gradeReview(t12, review("changes_requested", freeText)).ok, false, "prose alone earns no credit");
 });
 
-test("muse-12 rejects findings that assert the opposite of a known defect", () => {
-  const rec = `${P}/coordinator/recovery.ts`;
-  // Exact opposite of the recovery defect: describes correct behavior, shares all the vocabulary.
-  const opposite = finding(rec, "Lease expiry recovery consults runtime availability", "recovery defers the item instead of dead-lettering it.");
-  assert.equal(gradeReview(t12, review("approved", [opposite])).ok, false);
-  assert.equal(gradeReview(t12, review("changes_requested", [opposite])).ok, false);
-  const opposite2 = finding(rec, "Recovery handles usage caps", "On lease expiry recovery correctly defers when runtime_availability shows a usage cap; no dead-lettering.");
-  assert.equal(gradeReview(t12, review("changes_requested", [opposite2])).ok, false);
-
-  const cli = `${P}/adapters/agent-health.ts`;
-  const notDup = finding(cli, "cli_missing is reported once", "For a missing Codex CLI, runtimeIssuesUncached pushes cli_missing only once and does not repeat the version check; there is no duplicate.");
-  assert.equal(gradeReview(t12, review("approved", [notDup])).ok, false);
-
-  const ceiling = `${P}/coordinator/usage-cap-defer.ts`;
-  const tested = finding(ceiling, "24 h deferral ceiling is tested", "The 24 h ceiling escalation is covered by tests and is well tested; there is coverage for deferralCeilingExceeded.");
-  assert.equal(gradeReview(t12, review("approved", [tested])).ok, false);
+test("muse-12 rejects natural-language denials, because the fingerprint alone carries the assertion and prose is not graded", () => {
+  // Every case from the review findings: correct behavior, negated defects, refuted claims. None of these
+  // texts can earn credit because credit requires a `claim:<id>` fingerprint, which asserts the claim.
+  const denials = [
+    [REC, "Lease expiry recovery consults runtime availability", "recovery defers the item instead of dead-lettering it."],
+    [REC, "The claim that lease recovery ignores runtime availability is false", "It is inaccurate that the code never consults runtime_availability."],
+    [CEIL, "The 24 h deferral ceiling is not untested", "There is no missing test."],
+    [HEALTH, "cli_missing is reported once", "There is no duplicate."],
+  ];
+  for (const [file, title, rationale] of denials) {
+    const f = { fingerprint: "recovery-consults", severity: "non_blocking", title, rationale, file, line: 1 };
+    for (const verdict of ["approved", "changes_requested"]) {
+      assert.equal(gradeReview(t12, review(verdict, [f])).ok, false, `${verdict}: ${title}`);
+    }
+  }
+  // A reviewer who refutes a claim by omitting it, and asserts the true ones, passes.
+  assert.equal(gradeReview(t12, review("changes_requested", [dup(), ceil()])).ok, true);
 });
 
-test("muse-12 still accepts differently worded true statements of each defect", () => {
-  const rec = finding(`${P}/coordinator/recovery.ts`, "Expired-lease recovery does not consult runtime availability", "After a crash mid cap observation, recovery dead-letters the item and burns an attempt because it never consults runtime_availability.");
-  assert.deepEqual(gradeReview(t12, review("changes_requested", [rec])).matched, ["recovery-ignores-runtime-availability"]);
-  const ceiling = finding(`${P}/coordinator/usage-cap-defer.ts`, "24 h deferral ceiling has no test coverage", "The ceiling escalation is untested: nothing exercises deferralCeilingExceeded.");
-  assert.deepEqual(gradeReview(t12, review("changes_requested", [ceiling])).matched, ["untested-deferral-ceiling"]);
+test("muse-12 rejects asserting a false decoy claim or an unknown claim id, even alongside true claims", () => {
+  const decoys = [
+    claimFinding("attempt-count-not-reverted", CEIL),
+    claimFinding("capped-session-marked-failed", `${P}/coordinator/worker-loop.ts`),
+    claimFinding("stale-cap-health-cache", HEALTH),
+  ];
+  for (const d of decoys) {
+    const r = gradeReview(t12, review("changes_requested", [dup(), rec(), ceil(), d]));
+    assert.equal(r.ok, false, d.fingerprint);
+    assert.ok(r.problems.some((p) => p.startsWith("asserted false claim")), r.problems.join("\n"));
+  }
+  assert.equal(gradeReview(t12, review("changes_requested", [dup(), rec(), claimFinding("made-up", HEALTH)])).ok, false);
+  // Asserting every claim in the catalogue (a guess-them-all strategy) fails on the decoys.
+  assert.equal(gradeReview(t12, review("changes_requested", [dup(), rec(), ceil(), ...decoys])).ok, false);
+});
+
+test("muse-12 accepts findings with non-claim fingerprints next to valid claims", () => {
+  const extra = { fingerprint: "style-nit", severity: "non_blocking", title: "naming", rationale: "prose", file: HEALTH, line: 3 };
+  assert.equal(gradeReview(t12, review("changes_requested", [dup(), rec(), extra])).ok, true);
 });

@@ -552,7 +552,7 @@
       "referenceSha": null,
       "workerSpec": {
         "title": "Explore: how a worker session's token and cost usage is captured and stored",
-        "description": "Read-only exploration of the repository at the pinned commit; change no files and make no commits. Answer in markdown, citing file paths and function names:\n1. Which function parses a finished developer/reviewer session's log into token/cost usage, in which file, and which field of the log's result event does each value come from (input tokens, output tokens, cost)?\n2. How is a missing value represented at that step?\n3. Which functions in which coordinator files call it and persist the result, which repository function inserts the row, and into which table and columns?\n4. Which repository aggregate helper sums usage per issue, and what does it do with missing values — is that safe for a cost comparison that must not treat unknown cost as zero?\nEnd with a one-paragraph summary. Your final message is the deliverable.\n\nAnswer format: the final message may contain prose, but it MUST contain exactly one fenced ```json block (and no other fenced json block) with this shape, using repo-relative file paths and bare function names:\n{\n  \"extractor\": { \"function\": \"...\", \"file\": \"...\" },\n  \"sources\": { \"tokensIn\": \"<result-event field>\", \"tokensOut\": \"<result-event field>\", \"costUsd\": \"<result-event field>\" },\n  \"missingValue\": \"<how a missing value is represented>\",\n  \"recordedBy\": { \"developer\": \"<coordinator file>\", \"reviewer\": \"<coordinator file>\" },\n  \"insert\": { \"function\": \"...\", \"file\": \"...\", \"table\": \"...\", \"columns\": [\"...\"] },\n  \"aggregate\": { \"function\": \"...\", \"file\": \"...\", \"coalescesMissingToZero\": true|false, \"safeForUnknownCostComparison\": true|false }\n}",
+        "description": "Read-only exploration of the repository at the pinned commit; change no files and make no commits. Answer in markdown, citing file paths and function names:\n1. Which function parses a finished developer/reviewer session's log into token/cost usage, in which file, and which field of the log's result event does each value come from (input tokens, output tokens, cost)?\n2. How is a missing value represented at that step?\n3. Which functions in which coordinator files call it and persist the result, which repository function inserts the row, and into which table and columns?\n4. Which repository aggregate helper sums usage per issue, and what does it do with missing values — is that safe for a cost comparison that must not treat unknown cost as zero?\nEnd with a one-paragraph summary. Your final message is the deliverable.\n\nAnswer format: the final message may contain prose, but it MUST contain exactly one fenced ```json block (and no other fenced json block) with this shape, using repo-relative file paths and bare function names:\n{\n  \"extractor\": { \"function\": \"...\", \"file\": \"...\" },\n  \"sources\": { \"tokensIn\": \"<bare result-event field name, e.g. usage.some_field; no other words>\", \"tokensOut\": \"<bare result-event field name, e.g. usage.some_field; no other words>\", \"costUsd\": \"<bare result-event field name, e.g. usage.some_field; no other words>\" },\n  \"missingValue\": \"<how a missing value is represented>\",\n  \"recordedBy\": { \"developer\": \"<coordinator file>\", \"reviewer\": \"<coordinator file>\" },\n  \"insert\": { \"function\": \"...\", \"file\": \"...\", \"table\": \"...\", \"columns\": [\"...\"] },\n  \"aggregate\": { \"function\": \"...\", \"file\": \"...\", \"coalescesMissingToZero\": true|false, \"safeForUnknownCostComparison\": true|false }\n}",
         "acceptanceCriteria": [
           "The JSON block names the extractor function and its file, and the result-event field each of tokensIn, tokensOut and costUsd is read from.",
           "It states that a missing value is represented as null, names the file that records usage for each of the developer and reviewer roles, and the repository insert function, file, table and all columns.",
@@ -583,7 +583,7 @@
             "id": "answer-facts",
             "run": "node \"$EVAL_ROOT/scripts/grade-muse-code.mjs\" answer muse-10-explore-usage-capture \"$ARTIFACT\"",
             "expectedExitCode": 0,
-            "expectedResult": "Prints 'ok': the single fenced JSON block matches every field of the task's answerKey (function/file pairs, field sources, missing-value representation, booleans); any wrong relationship prints 'FAIL: ...' and exits 1."
+            "expectedResult": "Prints 'ok': the single fenced JSON block matches every field of the task's answerKey (exact function/file pairs, exact result-event field identifiers, missing-value representation, booleans); any wrong or prose-wrapped value prints 'FAIL: ...' and exits 1."
           }
         ],
         "answerKey": {
@@ -597,23 +597,23 @@
           },
           "sources": {
             "tokensIn": {
-              "$matches": [
-                "input_?tokens"
-              ],
-              "$notMatches": [
-                "output"
+              "$oneOf": [
+                "usage.input_tokens",
+                "input_tokens",
+                "usage.inputTokens",
+                "inputTokens"
               ]
             },
             "tokensOut": {
-              "$matches": [
-                "output_?tokens"
-              ],
-              "$notMatches": [
-                "input"
+              "$oneOf": [
+                "usage.output_tokens",
+                "output_tokens",
+                "usage.outputTokens",
+                "outputTokens"
               ]
             },
             "costUsd": {
-              "$matches": [
+              "$oneOf": [
                 "total_cost_usd"
               ]
             }
@@ -685,12 +685,12 @@
       "referenceSha": null,
       "workerSpec": {
         "title": "Explore: how a reviewer session is kept read-only and away from outbound mutation",
-        "description": "Read-only exploration of the repository at the pinned commit; change no files and make no commits. Answer in markdown, citing file paths, function names and constants:\n1. Which function asserts the reviewer read-only invariant, in which file, and where in the spawn path is it invoked relative to launching the CLI?\n2. For a Claude reviewer: which CLI flags/modes make it read-only (name at least --restricted, the permission mode, and the outbound-mutation deny flag), and which constant in args.ts names the denied tool?\n3. For a Codex reviewer with a deck attached: how is the send gate (call_service_tool) denied, which config key expresses it, and which function verifies it before spawn?\n4. Is Cursor covered equally? State the known gap and why.\nEnd with a one-paragraph summary. Your final message is the deliverable.\n\nAnswer format: the final message may contain prose, but it MUST contain exactly one fenced ```json block (and no other fenced json block) with this shape, using repo-relative file paths and bare function names:\n{\n  \"assertion\": { \"function\": \"...\", \"file\": \"...\", \"calledFrom\": { \"function\": \"...\", \"file\": \"...\" }, \"calledBeforeSpawnCli\": true|false },\n  \"claude\": { \"restrictedFlag\": \"...\", \"permissionMode\": \"...\", \"denyFlag\": \"...\", \"deniedTool\": \"...\", \"deniedToolConstant\": \"...\", \"constantFile\": \"...\" },\n  \"codex\": { \"deniedTool\": \"...\", \"configKey\": \"...\", \"verifier\": \"...\", \"verifierFile\": \"...\", \"verifiedIn\": \"<function that calls the verifier>\" },\n  \"cursor\": { \"deniesOutboundMutation\": true|false, \"gapReason\": \"<one or two sentences>\" }\n}",
+        "description": "Read-only exploration of the repository at the pinned commit; change no files and make no commits. Answer in markdown, citing file paths, function names and constants:\n1. Which function asserts the reviewer read-only invariant, in which file, and where in the spawn path is it invoked relative to launching the CLI?\n2. For a Claude reviewer: which CLI flags/modes make it read-only (name at least --restricted, the permission mode, and the outbound-mutation deny flag), and which constant in args.ts names the denied tool?\n3. For a Codex reviewer with a deck attached: how is the send gate (call_service_tool) denied, which config key expresses it, and which function verifies it before spawn?\n4. Is Cursor covered equally? State the known gap: whether outbound mutation is denied, whether headless Cursor needs --force, and whether the only deny list is user-global or per-invocation.\nEnd with a one-paragraph summary. Your final message is the deliverable.\n\nAnswer format: the final message may contain prose, but it MUST contain exactly one fenced ```json block (and no other fenced json block) with this shape, using repo-relative file paths and bare function names:\n{\n  \"assertion\": { \"function\": \"...\", \"file\": \"...\", \"calledFrom\": { \"function\": \"...\", \"file\": \"...\" }, \"calledBeforeSpawnCli\": true|false },\n  \"claude\": { \"restrictedFlag\": \"...\", \"permissionMode\": \"...\", \"denyFlag\": \"...\", \"deniedTool\": \"...\", \"deniedToolConstant\": \"...\", \"constantFile\": \"...\" },\n  \"codex\": { \"deniedTool\": \"...\", \"configKey\": \"...\", \"verifier\": \"...\", \"verifierFile\": \"...\", \"verifiedIn\": \"<function that calls the verifier>\" },\n  \"cursor\": { \"deniesOutboundMutation\": true|false, \"forceRequiredHeadless\": true|false, \"denyListScope\": \"user-global\"|\"per-invocation\" }\n}",
         "acceptanceCriteria": [
           "The JSON block names the assertion function and file, the function that calls it and that the call precedes spawnCli.",
           "It names the Claude flags, the denied tool and the constant (with its file) that holds it.",
           "It names the Codex denied tool, config key, the verifier function, its file and the function that invokes it.",
-          "It states that Cursor does not deny outbound mutation and gives the reason. No repository file is modified."
+          "It states that Cursor does not deny outbound mutation, that headless Cursor needs --force, and that the only deny list is user-global. No repository file is modified."
         ]
       },
       "role": "developer",
@@ -716,7 +716,7 @@
             "id": "answer-facts",
             "run": "node \"$EVAL_ROOT/scripts/grade-muse-code.mjs\" answer muse-11-explore-reviewer-read-only \"$ARTIFACT\"",
             "expectedExitCode": 0,
-            "expectedResult": "Prints 'ok': the single fenced JSON block matches every field of the task's answerKey (function/file pairs, field sources, missing-value representation, booleans); any wrong relationship prints 'FAIL: ...' and exits 1."
+            "expectedResult": "Prints 'ok': the single fenced JSON block matches every field of the task's answerKey (exact function/file pairs, constants, flags, booleans, enumerated Cursor gap); any wrong relationship prints 'FAIL: ...' and exits 1."
           }
         ],
         "answerKey": {
@@ -780,11 +780,11 @@
             "deniesOutboundMutation": {
               "$equals": false
             },
-            "gapReason": {
-              "$matches": [
-                "--force",
-                "cli-config|global|per-invocation|per-attempt"
-              ]
+            "forceRequiredHeadless": {
+              "$equals": true
+            },
+            "denyListScope": {
+              "$equals": "user-global"
             }
           }
         }
@@ -803,11 +803,12 @@
       "referenceSha": "65a01344ac6b4bfa6f8ee16dd1748c1015acd5ed",
       "workerSpec": {
         "title": "Review: defer work on runtime usage caps instead of failing (NOT-111)",
-        "description": "Review the change introduced by commit 9dda237c316f22d2b2c112048be7a1d1fe9c99f1 against its parent 86d9cc644d53830f0457b6b3e8437be13c9cd30a (base SHA). Intent: when a runtime account hits a usage cap, the coordinator should defer the work item until the cap lifts instead of failing it or burning infra attempts; a 24 h per-item deferral ceiling escalates to a human. The diff is embedded in the reviewer prompt; you may read the checked-out tree read-only. Judge correctness, crash/lease recovery paths, health-preflight behavior and test coverage. Return exactly one fenced reviewer result JSON block required by the reviewer prompt (verdict, baseSha, headSha, acceptanceCriteriaAssessment, evidenceAssessment, findings with fingerprint/severity/title/rationale/file/line, risks) with baseSha and headSha set to the two SHAs above.",
+        "description": "Review the change introduced by commit 9dda237c316f22d2b2c112048be7a1d1fe9c99f1 against its parent 86d9cc644d53830f0457b6b3e8437be13c9cd30a (base SHA). Intent: when a runtime account hits a usage cap, the coordinator should defer the work item until the cap lifts instead of failing it or burning infra attempts; a 24 h per-item deferral ceiling escalates to a human. The diff is embedded in the reviewer prompt; you may read the checked-out tree read-only. Judge correctness, crash/lease recovery paths, health-preflight behavior and test coverage.\n\nClaim catalogue. A reviewer has raised the claims below. Verify each against the code. For every claim you find TRUE, emit exactly one finding whose fingerprint is exactly `claim:<id>` (for example `claim:duplicate-cli-missing`), whose `file` is the file the claim concerns, and whose title and rationale explain the evidence. For a claim you find false or cannot verify, emit NO finding with that fingerprint: a `claim:` fingerprint is an assertion that the claim holds, and asserting a false claim fails the review. Any other finding you make must use a fingerprint that does not start with `claim:`. Set the verdict to changes_requested when you assert any claim.\n- claim:duplicate-cli-missing: In runtimeIssuesUncached (agent-health.ts), a codex_local runtime whose CLI is missing gets the cli_missing health issue pushed more than once.\n- claim:recovery-ignores-runtime-availability: Lease-expiry recovery (recovery.ts) never consults runtime availability, so an item whose lease expired during a usage-cap observation is dead-lettered instead of deferred.\n- claim:untested-deferral-ceiling: The 24 h deferral-ceiling escalation (deferralCeilingExceeded in usage-cap-defer.ts) has no test coverage in this change.\n- claim:attempt-count-not-reverted: deferLeasedWorkItemForUsageCap does not revert the claim's attempt_count bump, so every usage-cap deferral spends an attempt.\n- claim:capped-session-marked-failed: worker-loop.ts records a worker session that ended with a usage_capped outcome as failed.\n- claim:stale-cap-health-cache: agent-health.ts caches usage_capped health issues for RUNTIME_CACHE_MS, so a lifted cap keeps being reported until the cache expires.\n\nReturn exactly one fenced reviewer result JSON block required by the reviewer prompt (verdict, baseSha, headSha, acceptanceCriteriaAssessment, evidenceAssessment, findings with fingerprint/severity/title/rationale/file/line, risks) with baseSha and headSha set to the two SHAs above.",
         "acceptanceCriteria": [
           "Final message contains exactly one fenced JSON block that satisfies the ReviewerResult schema (packages/server/src/coordinator/reviewer-result.ts).",
-          "baseSha and headSha equal the two SHAs named in the spec.",
-          "At least one finding names the file of, and specifically describes, one of: the duplicated cli_missing health issue for a missing Codex CLI (agent-health.ts), lease-expiry recovery ignoring runtime availability (recovery.ts), or the untested 24 h deferral ceiling.",
+          "baseSha and headSha equal the two SHAs named in the spec, and the verdict is changes_requested.",
+          "Findings with a `claim:<id>` fingerprint are emitted for at least two of the three claims that hold (claim:duplicate-cli-missing, claim:recovery-ignores-runtime-availability, claim:untested-deferral-ceiling), each naming a file the claim concerns.",
+          "No finding carries the fingerprint of a claim that does not hold, and no `claim:` fingerprint is outside the catalogue.",
           "The reviewer modifies no files."
         ]
       },
@@ -823,83 +824,71 @@
         "setup": [],
         "heldOutPaths": [],
         "heldOutSource": null,
-        "knownDefects": [
+        "claims": [
           {
             "id": "duplicate-cli-missing",
-            "description": "runtimeIssuesUncached reports cli_missing twice for a codex_local runtime with a missing CLI (fixed in 65a0134).",
+            "holds": true,
             "files": [
               "packages/server/src/adapters/agent-health.ts"
             ],
-            "evidence": [
-              [
-                "cli_missing",
-                "missing (codex )?cli|cli not found|not found"
-              ],
-              [
-                "reported twice|(pushed|added|emitted|raised|listed) (it |this |the issue )?twice|duplicat(e[sd]?|ing)\\b|double[- ](report|push|count)|redundant(ly)? (push|check|report)|second (\\w+ )?(check|version|push)|repeats? the"
-              ]
-            ],
-            "contradicts": [
-              "\\b(not|never|no|isn'?t|without|doesn'?t|does not)\\b[^.\\n]{0,40}\\b(twice|duplicat\\w*|double\\w*|repeat\\w*|redundant\\w*)",
-              "\\b(only|exactly|just) once\\b",
-              "\\bonce only\\b",
-              "\\b(correctly|properly) (reports?|guards?|handles?|returns?)"
-            ]
+            "statement": "In runtimeIssuesUncached (agent-health.ts), a codex_local runtime whose CLI is missing gets the cli_missing health issue pushed more than once.",
+            "evidence": "The missing-CLI branch pushes cli_missing without returning, then the repeated `--version` check pushes it again (fixed in 65a0134)."
           },
           {
             "id": "recovery-ignores-runtime-availability",
-            "description": "Lease-expiry recovery never consults runtime_availability, so a crash during a cap observation can dead-letter instead of defer (fixed in 65a0134).",
+            "holds": true,
             "files": [
               "packages/server/src/coordinator/recovery.ts"
             ],
-            "evidence": [
-              [
-                "lease|expir|crash|recover"
-              ],
-              [
-                "runtime[_ -]?availab|usage[_ -]?cap|capped|cap observation"
-              ],
-              [
-                "\\b(ignor\\w*|never consult\\w*|does not consult|doesn'?t consult|not consult\\w*|without consult\\w*|fails? to (consult|check|defer)|(does not|doesn'?t|never|not|fail\\w* to) (defer|check)|no (check|consultation)|bypass\\w*|skips?)\\b|dead[- ]?letter\\w* (it )?(instead of|rather than|and does not|without) defer\\w*|(burn|spend|consum)\\w* (an? )?(infra|attempt)"
-              ]
-            ],
-            "contradicts": [
-              "(defer\\w*|hold\\w*|park\\w*|postpon\\w*)[^.\\n]{0,40}(instead of|rather than|not|without)\\s+(dead[- ]?letter\\w*|fail\\w*|escalat\\w*)",
-              "(?<!never )(?<!not )(?<!n't )(?<!fails to )(?<!without )\\b(consults?|checks?|honou?rs?|respects?)\\b[^.\\n]{0,40}(runtime[_ -]?availab|usage[_ -]?cap|cap observation)",
-              "\\b(correctly|properly|already|now) (defer\\w*|consult\\w*|handl\\w*|check\\w*)",
-              "\\b(is|are) (already )?(handled|covered|safe)\\b"
-            ]
+            "statement": "Lease-expiry recovery (recovery.ts) never consults runtime availability, so an item whose lease expired during a usage-cap observation is dead-lettered instead of deferred.",
+            "evidence": "recovery.ts has no runtimeAvailability / runtime_availability reference at the head SHA (fixed in 65a0134)."
           },
           {
             "id": "untested-deferral-ceiling",
-            "description": "The 24 h deferral-ceiling escalation had no test coverage (fixed in 65a0134).",
+            "holds": true,
             "files": [
               "packages/server/src/coordinator/usage-cap-defer.ts",
               "packages/server/src/coordinator/usage-cap-config.ts",
               "packages/server/src/coordinator/usage-cap.integration.test.ts"
             ],
-            "evidence": [
-              [
-                "24 ?h|24-hour|ceiling|deferralCeilingExceeded|USAGE_CAP_DEFERRAL_CEILING_MS"
-              ],
-              [
-                "\\buntested\\b|not (tested|covered|exercised)|no (test|tests|coverage)\\b|without (a )?tests?|no (test )?coverage|uncovered|lacks? (a )?(test|tests|coverage)|missing (a )?tests?|never exercised|no .{0,40}\\btests?\\b"
-              ]
+            "statement": "The 24 h deferral-ceiling escalation (deferralCeilingExceeded in usage-cap-defer.ts) has no test coverage in this change.",
+            "evidence": "No test at the head SHA exercises deferralCeilingExceeded or the ceiling escalation (fixed in 65a0134)."
+          },
+          {
+            "id": "attempt-count-not-reverted",
+            "holds": false,
+            "files": [
+              "packages/server/src/coordinator/usage-cap-defer.ts"
             ],
-            "contradicts": [
-              "\\b(is|are|was|were) (now |already |also )?(tested|covered|exercised)\\b|\\b(well|fully|properly|adequately|thoroughly)[- ](tested|covered|exercised)\\b",
-              "\\b(has|have|includes?|adds?|there is|there are)\\b (a |an |good |full |explicit |dedicated )?(test|tests|coverage)\\b",
-              "\\b(covered|exercised|verified) by\\b",
-              "\\btests? (cover|exercise|verif\\w+|assert)s?\\b"
-            ]
+            "statement": "deferLeasedWorkItemForUsageCap does not revert the claim's attempt_count bump, so every usage-cap deferral spends an attempt.",
+            "evidence": "False decoy: deferWorkItem is called with revertAttemptCount: true."
+          },
+          {
+            "id": "capped-session-marked-failed",
+            "holds": false,
+            "files": [
+              "packages/server/src/coordinator/worker-loop.ts"
+            ],
+            "statement": "worker-loop.ts records a worker session that ended with a usage_capped outcome as failed.",
+            "evidence": "False decoy: sessionStatus maps usage_capped to done."
+          },
+          {
+            "id": "stale-cap-health-cache",
+            "holds": false,
+            "files": [
+              "packages/server/src/adapters/agent-health.ts"
+            ],
+            "statement": "agent-health.ts caches usage_capped health issues for RUNTIME_CACHE_MS, so a lifted cap keeps being reported until the cache expires.",
+            "evidence": "False decoy: cap issues are computed fresh on every call and filtered out of the cached issue list."
           }
         ],
+        "minHeldClaims": 2,
         "commands": [
           {
             "id": "reviewer-result-defects",
             "run": "node \"$EVAL_ROOT/scripts/grade-muse-code.mjs\" review muse-12-review-usage-cap-deferral \"$ARTIFACT\"",
             "expectedExitCode": 0,
-            "expectedResult": "Prints 'ok (matched <defect ids>; n/3)': the artifact parses as a ReviewerResult with the pinned base/head SHAs and at least one finding names a known defect's file and matches all of that defect's specific evidence patterns. Approved or unrelated findings, or broad vocabulary alone, print 'FAIL: ...' and exit 1."
+            "expectedResult": "Prints 'ok (matched <claim ids>; n/3)': the artifact parses as a ReviewerResult with the pinned base/head SHAs and verdict changes_requested, asserts (via `claim:<id>` fingerprints, naming a claim file) at least 2 of the 3 true claims, and asserts no false claim and no unknown claim id. Approved results, missing/insufficient claims, or any asserted decoy print 'FAIL: ...' and exit 1. Finding prose is never graded."
           },
           {
             "id": "worktree-unchanged",

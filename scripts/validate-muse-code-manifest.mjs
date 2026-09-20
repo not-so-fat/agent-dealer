@@ -114,7 +114,8 @@ for (const t of Array.isArray(tasks) ? tasks : []) {
   }
 
   // Deterministic graders: exploration answers are checked against a structured answerKey and review
-  // results against knownDefects with file + evidence patterns, never against keyword presence.
+  // results against a closed claim catalogue (true claims plus decoys) asserted via `claim:<id>` fingerprints,
+  // never against free-prose matching.
   const graderCmds = (cmds ?? []).filter((cmd) => str(cmd.run) && cmd.run.includes("$EVAL_ROOT/scripts/grade-muse-code.mjs"));
   if (t.category === "repository_exploration") {
     if (!t.verification?.answerKey || typeof t.verification.answerKey !== "object") fail(`${where}: exploration task needs verification.answerKey`);
@@ -122,22 +123,25 @@ for (const t of Array.isArray(tasks) ? tasks : []) {
     if (!t.workerSpec?.description?.includes("exactly one fenced")) fail(`${where}: workerSpec must require the structured JSON answer block`);
   }
   if (t.role === "reviewer") {
-    const kd = t.verification?.knownDefects;
-    if (!Array.isArray(kd) || kd.length === 0) fail(`${where}: reviewer task needs structured knownDefects`);
-    for (const d of Array.isArray(kd) ? kd : []) {
-      if (!str(d?.id) || !Array.isArray(d.files) || d.files.length === 0 || !Array.isArray(d.evidence) || d.evidence.length < 2) {
-        fail(`${where}: knownDefect ${d?.id ?? "?"} needs id, files[] and at least two evidence groups`);
+    const claims = t.verification?.claims;
+    if (!Array.isArray(claims) || claims.length === 0) fail(`${where}: reviewer task needs a verification.claims catalogue`);
+    const ids = new Set();
+    for (const c of Array.isArray(claims) ? claims : []) {
+      if (!str(c?.id) || typeof c.holds !== "boolean" || !Array.isArray(c.files) || c.files.length === 0 || !str(c.statement) || !str(c.evidence)) {
+        fail(`${where}: claim ${c?.id ?? "?"} needs id, holds (boolean), files[], statement and evidence`);
         continue;
       }
-      for (const f of d.files) if (!gitOk("cat-file", "-e", `${t.startingSha}:${f}`)) fail(`${where}: defect ${d.id} file ${f} does not exist at startingSha`);
-      if (!Array.isArray(d.contradicts) || d.contradicts.length === 0) fail(`${where}: knownDefect ${d.id} needs contradicts[] patterns (polarity check)`);
-      for (const src of [...d.evidence.flat(), ...(d.contradicts ?? [])]) {
-        try {
-          new RegExp(src, "i");
-        } catch {
-          fail(`${where}: defect ${d.id} has an invalid pattern ${src}`);
-        }
-      }
+      if (ids.has(c.id)) fail(`${where}: duplicate claim id ${c.id}`);
+      ids.add(c.id);
+      for (const f of c.files) if (!gitOk("cat-file", "-e", `${t.startingSha}:${f}`)) fail(`${where}: claim ${c.id} file ${f} does not exist at startingSha`);
+      // The catalogue the worker sees must be the one the grader uses.
+      if (!t.workerSpec?.description?.includes(`claim:${c.id}: ${c.statement}`)) fail(`${where}: workerSpec does not state claim ${c.id} verbatim`);
+    }
+    const held = (Array.isArray(claims) ? claims : []).filter((c) => c.holds).length;
+    const decoys = (Array.isArray(claims) ? claims : []).length - held;
+    if (decoys < 1) fail(`${where}: claim catalogue needs at least one false decoy claim (holds: false)`);
+    if (!Number.isInteger(t.verification?.minHeldClaims) || t.verification.minHeldClaims < 1 || t.verification.minHeldClaims > held) {
+      fail(`${where}: verification.minHeldClaims must be an integer in [1, ${held}]`);
     }
     if (!graderCmds.some((cmd) => cmd.run.includes(` review ${t.id} `))) fail(`${where}: no structured 'review' grader command`);
     if (t.verification?.expectedShas?.headSha !== t.startingSha) fail(`${where}: expectedShas.headSha must equal startingSha`);

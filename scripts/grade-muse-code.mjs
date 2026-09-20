@@ -4,11 +4,12 @@
 // a worker at its pinned SHA cannot read the answer keys.
 //
 //   node scripts/grade-muse-code.mjs answer <taskId> <artifact.md>   # structured exploration answer
-//   node scripts/grade-muse-code.mjs review <taskId> <artifact.md>   # reviewer result vs known defects
+//   node scripts/grade-muse-code.mjs review <taskId> <artifact.md>   # reviewer result vs claim catalogue
 //
-// Answers are graded on structured relationships (function <-> file, field <-> source, booleans),
-// not on keyword presence, so an answer that names the right symbols but asserts the wrong
-// relationship fails.
+// Nothing here is graded by matching free prose. Exploration answers are compared field by field to
+// exact normalized identifiers, booleans and enumerated values. Reviewer results assert defects
+// through an explicit, closed vocabulary (`claim:<id>` fingerprints), so polarity is structural: a
+// finding that carries a claim id asserts that claim, and prose cannot flip it.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,7 +39,6 @@ const norm = (s) =>
         .replace(/\(\)$/, "")
     : s;
 const isLeaf = (spec) => spec && typeof spec === "object" && Object.keys(spec).some((k) => k.startsWith("$"));
-const rx = (src) => new RegExp(src, "i");
 
 /** Compare `value` to the answer-key `spec`; push a message per mismatch. */
 export function checkSpec(spec, value, where, problems) {
@@ -47,18 +47,18 @@ export function checkSpec(spec, value, where, problems) {
       const same = typeof spec.$equals === "string" ? norm(value) === spec.$equals : value === spec.$equals;
       if (!same) problems.push(`${where}: expected ${JSON.stringify(spec.$equals)}, got ${JSON.stringify(value)}`);
     }
+    if ("$oneOf" in spec) {
+      const got = norm(value);
+      if (typeof got !== "string" || !spec.$oneOf.includes(got)) {
+        problems.push(`${where}: expected exactly one of ${JSON.stringify(spec.$oneOf)}, got ${JSON.stringify(value)}`);
+      }
+    }
     if ("$setEquals" in spec) {
       const got = Array.isArray(value) ? [...new Set(value.map(norm))].sort() : null;
       const want = [...new Set(spec.$setEquals)].sort();
       if (!got || got.length !== want.length || got.some((v, i) => v !== want[i])) {
         problems.push(`${where}: expected exactly ${JSON.stringify(want)}, got ${JSON.stringify(value)}`);
       }
-    }
-    for (const src of spec.$matches ?? []) {
-      if (typeof value !== "string" || !rx(src).test(value)) problems.push(`${where}: must match /${src}/i, got ${JSON.stringify(value)}`);
-    }
-    for (const src of spec.$notMatches ?? []) {
-      if (typeof value === "string" && rx(src).test(value)) problems.push(`${where}: must not match /${src}/i, got ${JSON.stringify(value)}`);
     }
     return;
   }
@@ -104,37 +104,47 @@ export function parseReviewerResultStrict(text) {
   return { value: r };
 }
 
-const DISMISSAL = /\b(no (issue|problem|defect|bug)s?|not (a |an )?(problem|issue|bug|defect)|works? (correctly|as intended)|is (correct|fine|safe|well[- ]tested))\b/i;
+const CLAIM_PREFIX = "claim:";
 
 /**
- * A finding matches a known defect only if it names one of the defect's files, every evidence group
- * matches, and nothing in it asserts the opposite. Evidence groups establish that the defect's
- * relationship is asserted (e.g. "never consults runtime availability"); `contradicts` patterns
- * reject text that describes the correct behavior of the same code (e.g. "defers the item instead
- * of dead-lettering it"), so shared vocabulary alone cannot satisfy a defect.
+ * Grade a reviewer result against the task's claim catalogue (`verification.claims`, restated in the
+ * worker spec). Each finding whose fingerprint is `claim:<id>` asserts that claim; the finding must
+ * name one of the claim's files. Claims are either true (`holds: true`, a real defect) or false
+ * decoys (`holds: false`). Passing needs: the pinned SHAs, a non-approved verdict, at least
+ * `minHeldClaims` distinct true claims asserted, no false claim asserted, and no unknown claim id.
+ * Asserting a claim you find false is not a thing the format lets you do: report only what holds.
  */
-export function findingMatchesDefect(finding, defect) {
-  if (typeof finding.file !== "string") return false;
-  const file = norm(finding.file);
-  if (!defect.files.some((f) => file === f)) return false;
-  const text = `${finding.title}\n${finding.rationale}`;
-  if (DISMISSAL.test(text)) return false;
-  if ((defect.contradicts ?? []).some((src) => rx(src).test(text))) return false;
-  return defect.evidence.every((group) => group.some((src) => rx(src).test(text)));
-}
-
 export function gradeReview(task, artifactText) {
-  const spec = task.verification?.knownDefects;
-  if (!Array.isArray(spec) || spec.length === 0) return { ok: false, problems: [`task ${task.id} has no verification.knownDefects`] };
+  const claims = task.verification?.claims;
+  if (!Array.isArray(claims) || claims.length === 0) return { ok: false, problems: [`task ${task.id} has no verification.claims`] };
   const parsed = parseReviewerResultStrict(artifactText);
   if (parsed.error) return { ok: false, problems: [parsed.error] };
   const r = parsed.value;
   const problems = [];
   const want = task.verification.expectedShas;
   if (r.baseSha !== want.baseSha || r.headSha !== want.headSha) problems.push("wrong baseSha/headSha");
-  const matched = spec.filter((d) => r.findings.some((f) => findingMatchesDefect(f, d))).map((d) => d.id);
-  if (matched.length === 0) problems.push("no finding matches a known defect (file + specific evidence)");
-  return { ok: problems.length === 0, problems, matched, total: spec.length };
+  if (r.verdict !== "changes_requested") problems.push(`verdict must be changes_requested when defects are asserted, got ${r.verdict}`);
+
+  const byId = new Map(claims.map((c) => [c.id, c]));
+  const matched = new Set();
+  for (const f of r.findings) {
+    if (!f.fingerprint.startsWith(CLAIM_PREFIX)) continue;
+    const id = f.fingerprint.slice(CLAIM_PREFIX.length);
+    const claim = byId.get(id);
+    if (!claim) {
+      problems.push(`unknown claim id ${JSON.stringify(id)}`);
+    } else if (!claim.holds) {
+      problems.push(`asserted false claim ${id}`);
+    } else if (typeof f.file !== "string" || !claim.files.includes(norm(f.file))) {
+      problems.push(`claim ${id} finding must name one of ${JSON.stringify(claim.files)}, got ${JSON.stringify(f.file)}`);
+    } else {
+      matched.add(id);
+    }
+  }
+  const need = task.verification.minHeldClaims ?? 1;
+  if (matched.size < need) problems.push(`asserted ${matched.size} true claim(s), need at least ${need}`);
+  const total = claims.filter((c) => c.holds).length;
+  return { ok: problems.length === 0, problems, matched: [...matched], total };
 }
 
 function main(argv) {
