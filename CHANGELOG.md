@@ -2,6 +2,16 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.1.3 — 2026-09-20
+
+Patch over 1.1.2: three review-loop and queue fixes so a stale base or a hand-merged PR no longer stalls issues or their dependents.
+
+### Fixes
+
+- **Issue branches start from the latest base (NOT-197)** — a fresh developer branch is now cut from a freshly fetched `origin/<base>` instead of the cached clone's possibly stale local base, so PRs no longer conflict with work merged while the issue was queued. The fetched SHA is recorded as the issue's `base_sha`. If the fetch fails or times out, no branch is created and the issue is deferred and retried automatically, without spending an infra attempt or a review round. Reusing an existing branch is unchanged.
+- **Merge failure after approval offers Retry merge (NOT-194)** — when auto-merge fails after the review is approved, the parked action now offers **Retry merge**, **Another repair round** and **Close** instead of only Resume development or Close. The failure text is shown verbatim.
+- **Closing an issue whose PR was already merged (NOT-196)** — when a human action is resolved with `close` (or an issue is aborted) and the issue's PR is `MERGED` on GitHub, the issue now ends `done` with an event recording the external merge, so its dependents are released. If the PR is open, closed unmerged, or absent, the issue is `closed` as before; if the PR state cannot be read, it is `closed` and the event records that the merge state was unknown, never `done`. `blockerVerdict` is unchanged, and an abort from a status with no route to `done` still ends `closed`.
+
 ## 1.1.2 — 2026-09-20
 
 Patch over 1.1.1: internal groundwork for Muse Code isolation; no change to how existing runs behave.
