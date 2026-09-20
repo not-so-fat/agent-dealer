@@ -9,22 +9,23 @@ No production Runtime/profile/spawn code was changed.
 
 **`blocked_by_named_capability`**
 
-Named capability: **`mcp_tool_allowlist_enforcement`** — Muse Code 1.3.0-R3401.1 stores but does
-not enforce per-tool MCP `enabled_tools` / `disabled_tools` (its own migration guide says so;
-probe 8 confirmed it: an excluded tool still executed). Agent Deck has no server-side read-only
-mode either (deck headers select a deck and workspace only). A reviewer that has Agent Deck
-configured — which Dealer requires — can therefore always reach `call_service_tool`, the outbound
-mutation path, so the ticket's "reviewer cannot perform outbound mutation" requirement cannot be
-met mechanically. A second, smaller gap is that `cron_create` cannot be disabled (see probe 9).
+Four named capabilities block integration. None was found to be enforceable, and none is assumed:
 
-Everything else needed for a **developer** adapter worked (probes 1–6, 8, 9, 10), so this is a
-narrow, named block, not a `do_not_integrate`. Unblock paths, none of which were probed:
+| Capability | Gap | Probe |
+|------------|-----|-------|
+| `mcp_tool_allowlist_enforcement` | Muse Code 1.3.0-R3401.1 stores but does not enforce per-tool MCP `enabled_tools` / `disabled_tools` (its own migration guide says so; an excluded tool still executed). Agent Deck has no server-side read-only mode either (deck headers select a deck and workspace only). A reviewer with Agent Deck configured, which Dealer requires, can always reach `call_service_tool`, the outbound-mutation path. | 7, 8 |
+| `cron_tool_disable` | `cron_create` / `cron_list` / `cron_delete` stay available with workflows and subagents off, and no per-run switch removes them (four different attempts, below). A created job persists in the session's `cron.db` as an active recurring row and can re-inject a prompt into a resumed session, so Agent Dealer is not assured to be the sole orchestrator. Detecting the event afterwards is not prevention. | 9 |
+| `plan_identifier_observability` | The operator's contributor plan cannot be observed. Only the `-contributor` model suffix is a tier signal, and there is no independent plan/tier evidence in the CLI, JSONL, session log, catalog, or `muse config status`. | pins |
+| `usage_cap_observability` | A real usage-cap / quota failure could not be triggered or observed on the operator's account. Only a synthetic 429 mock exists, and Meta's real payload, status, and headers are unknown. | 10 |
 
-1. Muse enforces `enabled_tools`/`disabled_tools` for `mcpServers` entries (then re-run probe 8).
-2. Dealer ships a filtering stdio MCP proxy as the only configured server (new production
-   surface; needs its own ticket and threat model).
-3. Reviewer runs with no MCP server, with playbook/deck text fetched by Dealer and put in the
-   prompt. This relaxes acceptance criterion 8 for the reviewer and still leaves `cron_create`.
+Everything else worked, so this is a set of narrow, named blocks and not `do_not_integrate`:
+probes 1–6 and 8 pass, and probe 10 passes for authentication failure, cancellation, and signals.
+Unblock paths (none probed):
+
+1. Muse enforces `enabled_tools`/`disabled_tools` for `mcpServers` entries, or offers a per-run switch for `cron_*` (then re-run probes 8 and 9).
+2. Dealer ships a filtering stdio MCP proxy as the only configured server (new production surface; needs its own ticket and threat model).
+3. Reviewer runs with no MCP server, with playbook/deck text fetched by Dealer and put in the prompt. This relaxes acceptance criterion 8 for the reviewer and still leaves `cron_create`.
+4. The operator supplies plan-identifier evidence (e.g. an account/plan screenshot or billing record, sanitized) and a real usage-cap capture; both need the operator's account.
 
 ## Pins
 
@@ -35,7 +36,7 @@ narrow, named block, not a `do_not_integrate`. Unblock paths, none of which were
 | Model | `muse-spark-1.3-contributor` (catalog: provider `meta`, profile `tbh`, `is_default: true`, released 2026-09-02, context 1,007,997, output 128,000; description "Your content, including inter-session messages, may be used for product improvement.") |
 | Reasoning effort | default `high` (catalog tiers: minimal, low, medium, high, xhigh, max; CLI also accepts `none`, `ultra`). Not varied. |
 | Auth | `muse login` (Meta account, stored in `$XDG_CONFIG_HOME/muse/auth.json`; contents never read). `META_API_KEY` in the environment takes priority. |
-| Plan | **Not observable.** No plan/tier field appears in the JSONL, the session log, or the model catalog (`cost: null`). The only tier signal is the `-contributor` model id. |
+| Plan | **Not pinned: blocked by `plan_identifier_observability`.** No plan/tier field appears in the JSONL, the session log, the model catalog (`cost: null`), or `muse config status`. The `-contributor` model id is the only tier signal, and it is a model identifier, not evidence of the operator's plan. |
 
 Pinning gotchas that the adapter must handle:
 
@@ -113,10 +114,10 @@ Why each piece:
 | 4 | `--max-model-steps` | **Pass.** `run.terminal.failed` "model did not reach a terminal state within 2 step(s)", exit 1. | `04-max-model-steps` |
 | 5 | Unattended, approvals off, sandbox on | **Pass.** `--approval-mode never` never prompts; sandbox violations return failures instead of prompting. `--yolo` not used. | `05-06-developer-posture` |
 | 6 | Writes restricted to worktree | **Pass with caveats** (below). | `05-06-*`, `06-git-common-dir` |
-| 7 | Reviewer read-only | **Blocked** (`mcp_tool_allowlist_enforcement`; also `cron_create`). File/shell/memory writes are denied by the runtime. | `07-*`, `08-mcp-disabled-tools-not-enforced` |
+| 7 | Reviewer read-only | **Blocked** (`mcp_tool_allowlist_enforcement`; also `cron_tool_disable`). File/shell/memory writes are denied by the runtime. | `07-*`, `08-mcp-disabled-tools-not-enforced` |
 | 8 | Required Agent Deck MCP | **Pass** for bind/playbook reads and fail-closed startup; per-tool restriction **not enforced**. | `08-*`, `11-*` |
-| 9 | Workflows/subagents/background/nested worktrees | **Pass with settings**, `cron_create` remains. | `09-*`, `11-*` |
-| 10 | Auth, usage cap, cancel, signals | **Pass** for auth, cancel, signals; usage-cap is **synthetic only**. | `10-*` |
+| 9 | Workflows/subagents/background/nested worktrees | **Blocked** (`cron_tool_disable`). Workflows, subagents, and reminder children are switched off by settings; `cron_create` cannot be, and its job persists. | `09-*`, `11-*` |
+| 10 | Auth, usage cap, cancel, signals | **Partial.** Auth failure, cancellation, and SIGINT/SIGTERM **pass**. Real usage-cap is **blocked** (`usage_cap_observability`); only a synthetic 429 mock exists. | `10-*` |
 
 ### 1–2. JSONL contract
 
@@ -177,7 +178,8 @@ real denials is an excerpt of an accidentally interleaved run. So file/shell/mem
 observed but thinly sampled.
 
 Not blockable, from probes 8 and 9: any MCP tool on a configured server, including Agent Deck's
-`call_service_tool`, and `cron_create`. Hence the block.
+`call_service_tool`, and `cron_create`. Hence the block (`mcp_tool_allowlist_enforcement`,
+`cron_tool_disable`).
 
 ### 8. Agent Deck as the only MCP surface
 
@@ -210,49 +212,75 @@ With `run.workflow_trigger_mode = "off"` and `run.subagent_delegation_mode = "of
 `--subagent-worktree-isolation` are startup flags only (omit them); a shell `git worktree add`
 inside the sandbox is the developer-shell caveat above.
 
-Residual: **`cron_create` / `cron_list` / `cron_delete` have no documented off switch.** Jobs are
-stored in the session's `cron.db` and can fire when the session is live, so a resumed session could
-re-inject a scheduled prompt into Dealer's turn. Mitigate by treating any `tool:cron_create` in
-the JSONL as a policy violation and never resuming a session whose `cron.db` has rows. This is a
-mitigation, not enforcement. Also not blocked: `memory` tools outside the reviewer flag
-(`add_memory` writes to `$XDG_DATA_HOME/muse/memory`, so the per-attempt data dir matters; the
-note written by probe 3 remained in the shared data dir afterwards).
+**Blocking gap `cron_tool_disable`.** `cron_create` / `cron_list` / `cron_delete` stay callable in the
+recommended posture, and there is no per-run switch that removes them. Evidence:
 
-### 10. Failures
+- `09-orchestration-off` and `09-cron-disable-attempt`: with `run.workflow_trigger_mode = "off"` and
+  `run.subagent_delegation_mode = "off"`, `cron_create` returns `outcome: "success"`.
+- `09-cron-persisted-job.json`: the job is an **active, recurring (`* * * * *`), `fire_when_active_run: 1`**
+  row in the session's `cron.db`, with a 7-day TTL and `permanent: 0`. It outlives the process, so a later
+  `--session-id` resume can have a prompt injected into a Dealer-owned turn. (Whether it fires headlessly
+  was not measured; the row and its fields are the evidence, not a firing.)
+- Attempts to disable it (`manifest.json` → `cron_disable_attempts`): `execution.tool_rules` in user
+  `settings.json` is ignored as an unknown member (it is a policy-plane field); `permissions` is a named-profile
+  document that rejects `deny` / `tool_rules`; a named profile is mutually exclusive with `--sandbox-network`
+  and `--approval-mode`, which the unattended posture needs; a `runtime_capabilities["tool:cron_create"]`
+  entry is accepted silently and `cron_create` still succeeds. The enterprise policy plane
+  (`muse config validate --plane policy`) needs a system-level file and is not per-attempt.
+
+Detecting `tool:cron_create` in the JSONL and refusing to resume would only react after the side effect,
+so it is a mitigation, not enforcement, and does not satisfy the criterion. Also not blocked: `memory` tools
+outside the reviewer flag (`add_memory` writes to `$XDG_DATA_HOME/muse/memory`, so the per-attempt data dir
+matters; the note written by probe 3 remained in the shared data dir afterwards).
+
+### 10. Failures, cancellation, signals
+
+Commands, mock setup, and signal delivery are recorded exactly in `manifest.json` (`setup` and `command`).
 
 | Case | Behaviour |
 |------|-----------|
-| No credentials | Exit 1; stderr `missing meta credentials: run muse login or set META_API_KEY ...`; **stdout empty** (`10-auth-missing`) |
-| Rejected key | Exit 1; stderr `authentication failed: your API key from META_API_KEY was rejected`; stdout empty (`10-auth-bad-key`, real endpoint, bogus key) |
-| 401 from provider (mock) | Exit 1; `run.terminal.failed` "your saved login is no longer valid..." (`10-auth-rejected-401-mock`) |
-| 429 / rate limit (mock) | **Does not fail fast.** Retries up to 10 attempts, honours `Retry-After` (30 s each); killed by the harness at 100 s. Detectable early via `error_kind: "rate_limited"`, `http_status: 429` in `task.lifecycle.status` (`10-rate-limit-429-mock`) |
-| Bad CLI args | Exit 2 |
-| SIGTERM / SIGINT | Exit 143 / 130 in ~0.7 s; stderr `received SIGTERM; flushed session logs`; **no terminal JSONL event**; the running shell child (`sleep 90`) was not orphaned |
+| No credentials | Exit 1; stderr `missing meta credentials: run muse login or set META_API_KEY ...`; **stdout empty** (`10-auth-missing`). Recaptured in round 2. |
+| Rejected key | Exit 1; stderr `authentication failed: your API key from META_API_KEY was rejected`; stdout empty (`10-auth-bad-key`, real endpoint, bogus key via `--api-key-stdin`). Recaptured in round 2. |
+| 401 from provider (mock) | Exit 1; `run.terminal.failed` "your saved login is no longer valid..." (`10-auth-rejected-401-mock`; `mock-provider.py 18401 401`). |
+| 429 / rate limit (mock) | **Does not fail fast.** Retries up to 10 attempts, honours `Retry-After` (30 s each); killed by a 100 s watchdog. Detectable early via `error_kind: "rate_limited"`, `http_status: 429` in `task.lifecycle.status` (`10-rate-limit-429-mock`; `mock-provider.py 18429 429 30`). |
+| Bad CLI args | Exit 2 (`--permission-profile` with `--sandbox-network` / `--approval-mode`). |
+| Cancellation: SIGTERM / SIGINT to the muse pid | Exit 143 / 130 in ~1.2 s; stderr `received SIGTERM; flushed session logs`; **no terminal JSONL event**; the running shell child (`sleep 9137`) was not orphaned (`pgrep` 2 before, 0 after) (`10-sigterm`, `10-sigint`). |
+| Cancellation: SIGTERM to the process group | Exit 143 in ~0.75 s, no orphan (`10-sigterm-process-group`). |
+| Cancellation: SIGKILL to the muse pid only | Exit 137; the shell child **is orphaned** (`pgrep` 1 after) (`10-sigkill-orphan`). Cancel with TERM/INT (or a process-group kill), never a lone KILL. |
+| Resume after cancellation | The SIGTERM-cancelled session id resumed headlessly: `run.terminal.completed`, exit 0 (`10-cancel-resume-after-sigterm`). |
 
-The usage-cap result is **inconclusive against the real service**: the operator's cap cannot be
-triggered on demand, and the mock's body shape is invented. What is verified is only the client's
-retry/exit behaviour and the `rate_limited` status facet. Do not assume Meta's real cap payload
-(headers, status code, and body for a real usage cap were never observed). The adapter needs a wall-clock
-timeout and should treat the first `rate_limited` status as a cap signal.
+"Cancellation" here is the coordinator terminating a live run by signal, since `muse exec` has no other
+cancel channel. Because cancel produces no terminal event, the adapter must classify a signal exit code
+(130/143) plus a missing terminal event as `cancelled`, not `failed`.
+
+**Blocking gap `usage_cap_observability`.** The operator's cap cannot be triggered on demand, and the mock's
+body shape is invented, so what was verified is only the client's retry/exit behaviour and the `rate_limited`
+status facet. The real usage-cap status, headers, and body were never observed and are not assumed. The
+adapter needs a wall-clock timeout and could treat the first `rate_limited` status as a cap signal, but that
+is a design guess until a real capture exists.
 
 ## Acceptance criteria
 
 | Criterion | Status |
 |-----------|--------|
-| Muse Code and contributor model/plan identifiers pinned | Met for version/binary/model. **Plan is not observable** (see Pins). |
-| All ten probes have evidence or a named blocking capability | Met (usage-cap evidence is synthetic; reviewer denial is an excerpt). |
+| Muse Code and contributor model/plan identifiers pinned | **Not met.** Version, binary sha256, and model id are pinned. The plan identifier is not (`plan_identifier_observability`). |
+| All ten probes have evidence or a named blocking capability | Met: probes 1–6, 8 have evidence; 7 (`mcp_tool_allowlist_enforcement`, `cron_tool_disable`), 9 (`cron_tool_disable`), and the usage-cap half of 10 (`usage_cap_observability`) are named blocks. Probe 10 auth, cancellation, and signals have evidence. |
 | Report distinguishes turn completion from verified correctness | Met. |
 | Exact JSONL fields documented | Met (usage is session-log only, no cost). |
-| Safe unattended developer posture without `--yolo` | Met. |
-| Mechanically enforceable reviewer read-only posture | **Not met**: `mcp_tool_allowlist_enforcement`, `cron_create`. |
+| Safe unattended developer posture without `--yolo` | Met for approvals/sandbox/writes; the developer also has `cron_create` (`cron_tool_disable`). |
+| Mechanically enforceable reviewer read-only posture | **Not met**: `mcp_tool_allowlist_enforcement`, `cron_tool_disable`. |
 | Agent Deck only MCP surface, required startup fails closed | Met. |
-| Native workflows/subagents cannot compete with Dealer | Met with the two `run.*` settings; `cron_*` mitigated, not blocked. |
-| Fixtures contain no credentials/sensitive prompts/user data | Met after redaction of Agent Deck MCP payloads (scanned for ids, emails, tokens, OAuth/credential names, home paths). |
+| Native workflows/subagents cannot compete with Dealer | **Not met**: workflows and subagents are switched off, but `cron_*` cannot be (`cron_tool_disable`). |
+| Fixtures contain no credentials/sensitive prompts/user data | Met (scanned for ids, emails, tokens, OAuth/credential names, home paths; Agent Deck MCP payloads redacted). |
 | `git diff --check` | Passes. |
+
+Fixtures are compacted (see the fixtures README) and `manifest.json` gives complete commands, exact
+`settings.json`, env, and raw vs committed line counts. Two entries are flagged `exact: false` with a reason:
+the interleaved reviewer-denial excerpt and the session-log usage excerpt.
 
 ## Not tested / follow-ups
 
-- The real usage-cap failure; `muse login` expiry; `--reasoning-effort` variants; `--output-schema`;
+- The real usage-cap failure (blocking); plan identifier evidence (blocking); `muse login` expiry; `--reasoning-effort` variants; `--output-schema`;
   `--prompt-file` for large prompts; images.
 - Whether sandbox escalation can ever be granted under `--approval-mode never`; hooks/config
   writes to the shared git common dir.
