@@ -176,7 +176,7 @@ Duration/token/cost evidence by role and runtime (PRD §9.1, required for §10's
 | `tokens_in`, `tokens_out`, `cost_usd`, `duration_ms` | |
 | `ts` | |
 
-Per-issue session duration and cost are computed from `usage_events`. Total issue duration is wall-clock time from workflow start to completion (or now while active), not a sum of possibly overlapping sessions. Stage duration is reconstructed from transition-event timestamps; review-round count is the number of non-stale reviewer verdicts; and “final review without intervention” is false when any non-final human action was requested. Human wait is the union of intervals in which at least one human action was open, avoiding double-counting overlapping actions. No separate rollup table is needed for v1.
+Per-issue token and cost rollups read `usage_events`. Duration, phase, overlap, human-wait, and evidence-quality semantics — including what `usage_events.duration_ms` does and does not measure, how issue elapsed time differs from summed session time, and how stage time is derived — are defined only in [EXECUTION_ANALYSIS.md](EXECUTION_ANALYSIS.md); this document does not define them. Review-round count is the number of non-stale reviewer verdicts, and “final review without intervention” is false when any non-final human action was requested. No separate rollup table is needed for v1.
 
 ## Coordinator
 

@@ -504,6 +504,8 @@ Per issue:
 
 The issue page shows duration, cost, rounds, and human wait. Aggregate analysis may initially be a query or export rather than a dedicated analytics product.
 
+The execution-time phases, overlap and aggregation rules, evidence-quality labels, and failure vocabulary behind these measurements are defined in [EXECUTION_ANALYSIS.md](EXECUTION_ANALYSIS.md).
+
 ## 11. Functional requirements
 
 ### P0 — required for the experiment

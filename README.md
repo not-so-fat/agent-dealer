@@ -134,6 +134,8 @@ Production (git): see [docs/PROD_SETUP.md](docs/PROD_SETUP.md) — API **2221**,
 
 **Spec:** [docs/PRD_ISSUE_COORDINATION.md](docs/PRD_ISSUE_COORDINATION.md) (current) · [docs/PRD_V0.md](docs/PRD_V0.md) (historical — the plan/execute product removed in NOT-71) · [independent workflows design](docs/superpowers/specs/2026-09-12-independent-workflows-architecture-design.md) · vocabulary [`CONTEXT.md`](CONTEXT.md) · **Direction (cross-product):** [agent_deck/docs/DIRECTION.md](https://github.com/not-so-fat/agent_deck/blob/main/docs/DIRECTION.md)
 
+**Execution analysis contract:** [docs/EXECUTION_ANALYSIS.md](docs/EXECUTION_ANALYSIS.md) defines phase boundaries, failure vocabulary, and evidence-quality rules for execution-time metrics.
+
 **Agent-operated CLI:** see [docs/AGENT_OPERATED_DEV_REVIEW.md](docs/AGENT_OPERATED_DEV_REVIEW.md) for the exact minimal commands to drive one Dev-review issue end to end without the dashboard.
 
 ### P0 proof script
