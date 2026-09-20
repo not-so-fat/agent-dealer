@@ -41,7 +41,7 @@ Issue-coordinator role worktrees are generated under the managed execution root 
 
 | Field | Required | Role |
 |-------|----------|------|
-| `runtime` | Yes | `claude_code`, `cursor_local`, or `codex_local` |
+| `runtime` | Yes | `claude_code`, `cursor_local`, `codex_local`, or `muse_code` (developer role only; trial — NOT-178. Model is pinned to `muse-spark-1.3-contributor`; no spawn is wired yet) |
 | `deckId` | Yes (before kick) | Exactly one Agent Deck — workers never start without one |
 | `name` | Yes | Display label |
 | `defaultModel` / `defaultEffort` / `defaultBudget` | No | Session defaults (snapshotted) |
@@ -88,8 +88,9 @@ Permissions are explicit tools and paths — not category presets like "Artifact
 | Code | When |
 |------|------|
 | `deck_missing` | No `deckId` configured |
-| `cli_missing` | Claude / Cursor / Codex CLI not installed |
-| `runtime_auth` | Cursor or Codex not logged in / missing auth |
+| `cli_missing` | Claude / Cursor / Codex / Muse CLI not installed |
+| `runtime_auth` | Cursor, Codex or Muse Code not logged in / missing auth (Muse: no `META_API_KEY` and no saved `muse login`; an expired login is only seen at run time) |
+| `runtime_unknown` | Muse Code probe failed for a reason no capture explains — reported, not guessed |
 | `cursor_keychain` | Cursor macOS keychain stuck (`errSecDuplicateItem`) — see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md#cursor-macos-keychain-auth) |
 | `deck_offline` | Agent has deck but Agent Deck API unreachable |
 | `deck_unauthorized` | Bound deck not available from Agent Deck |
