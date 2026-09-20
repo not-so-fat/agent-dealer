@@ -71,6 +71,25 @@ test("prepareWorkerDeckConnection verifies and writes a claude MCP config with d
   }
 });
 
+test("prepareWorkerDeckConnection refuses Muse Code before writing any MCP config or verifying (NOT-178)", async () => {
+  let verifyCalled = false;
+  const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    runtime: "muse_code",
+    verifyCallTool: async () => {
+      verifyCalled = true;
+      return textResult({ id: DECK });
+    },
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.kind, "infra_failure");
+    assert.match(result.reason, /Muse Code does not support Agent Deck MCP/);
+  }
+  assert.equal(verifyCalled, false);
+});
+
 test("prepareWorkerDeckConnection rejects when get_bound_deck reports a different deck", async () => {
   const result = await prepareWorkerDeckConnection({
     policy: DENIED,

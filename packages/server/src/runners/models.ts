@@ -3,7 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Runtime, RuntimeModelOption } from "@agent-dealer/shared";
-import { CURSOR_DEFAULT_MODEL, CURSOR_SUBSCRIPTION_MODEL_IDS } from "@agent-dealer/shared";
+import {
+  CURSOR_DEFAULT_MODEL,
+  CURSOR_SUBSCRIPTION_MODEL_IDS,
+  MUSE_CODE_CONTRIBUTOR_MODEL,
+} from "@agent-dealer/shared";
 import { cursorInvokeArgs, resolveCursorBin, resolveCodexBin } from "../cli-env.js";
 
 const CURSOR_PINNED: RuntimeModelOption[] = [
@@ -27,6 +31,11 @@ const CODEX_FALLBACK: RuntimeModelOption[] = [
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
   { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
+];
+
+/** Muse Code is pinned to the one contributor-tier model (NOT-177); there is no catalog probe. */
+const MUSE_PINNED: RuntimeModelOption[] = [
+  { id: MUSE_CODE_CONTRIBUTOR_MODEL, label: "Muse Spark 1.3 Contributor" },
 ];
 
 type ModelsResult = { models: RuntimeModelOption[]; source: "live" | "fallback" };
@@ -157,6 +166,10 @@ async function fetchRuntimeModelsFresh(runtime: Runtime): Promise<ModelsResult> 
 
   if (runtime === "codex_local") {
     return listCodexModels();
+  }
+
+  if (runtime === "muse_code") {
+    return { models: MUSE_PINNED, source: "fallback" };
   }
 
   const fromApi = await tryAnthropicModelsApi();
