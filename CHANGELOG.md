@@ -9,8 +9,8 @@ Patch over 1.1.4: execution analysis — see where time and retries go per issue
 ### Features
 
 - **Per-issue execution analysis (NOT-173, NOT-174)** — Issue Detail now shows execution phases, failure state, observational silence intervals, and failed-attempt/retry waste with per-attempt reuse badges. Backed by new issue and cohort execution-analysis APIs that carry quality/coverage metadata; cohort aggregates cover the full matching window (not just the current page), and attempt filters (role/runtime/model/status) scope waste, retry, reviewer and failure metrics too.
-- **Runtime and model execution-comparison report (NOT-175)** — a new Execution report page (`GET /api/execution-report`) compares runtimes and models with URL-persisted filters, coverage tables, failure buckets, per-row waste/retry columns and cohort deep links.
-- **Version on `start` and `status` (NOT-224)** — `agent-dealer start` and `agent-dealer status` now print the running Agent Dealer version.
+- **Runtime and model execution-comparison report (NOT-175)** — a new Execution report page under **Reports** in the nav (`/reports/execution`, backed by `GET /api/execution-report`) compares runtimes and models with URL-persisted filters, coverage tables, failure buckets, per-row waste/retry columns and cohort deep links.
+- **Version on `start` (NOT-224)** — `agent-dealer start` now prints `Agent Dealer version X` (not in supervisor mode), and `agent-dealer status` labels its existing version line the same way instead of `CLI package X`.
 
 ### UI
 
@@ -19,7 +19,7 @@ Patch over 1.1.4: execution analysis — see where time and retries go per issue
 
 ### Internal
 
-- **Activity and checkpoint evidence (NOT-170, NOT-172)** — structured session activity is persisted (new `session_activity_events` table, migrated automatically on start) and silence intervals are derived from it. First-checkpoint and retry-reuse evidence is emitted from developer sessions, with the worktree HEAD captured at session start as the sampler baseline. This is the evidence the analysis above reads; it changes no run behavior.
+- **Activity and checkpoint evidence (NOT-170, NOT-172)** — structured session activity is persisted (new `session_activity_events` table, migrated automatically on start) and silence intervals are derived from it. First-checkpoint and retry-reuse evidence is emitted from developer sessions, with the worktree HEAD captured at session start as the sampler baseline. This is the evidence the analysis above reads. It is observational only: the new emitters are best-effort and never fail or alter an attempt.
 
 ## 1.1.4 — 2026-09-21
 
