@@ -5,12 +5,14 @@
 import {
   coverageCellText,
   EXECUTION_REPORT_MAX_LIMIT,
+  formatCompactCount,
   formatCount,
   formatMs,
   formatRate,
   formatUsd,
   isSparseSample,
   percentileCellText,
+  sampleLabel,
   type CohortRow,
   type ExecutionReportResponse,
   type FailureDistributionEntry,
@@ -52,6 +54,100 @@ export interface CohortDisplayRow {
   failedDurationText: string;
   failedIncomplete: boolean;
   sparse: boolean;
+  /** NOT-229 structured readouts: values kept separate from their labels/notes. */
+  wall: PercentileDisplay;
+  envelope: PercentileDisplay;
+  tokensIn: CoverageDisplay;
+  tokensOut: CoverageDisplay;
+  cost: CoverageDisplay;
+  duration: CoverageDisplay;
+  failedCost: CoverageDisplay;
+  failedTokensIn: CoverageDisplay;
+  failedTokensOut: CoverageDisplay;
+  failedDuration: CoverageDisplay;
+}
+
+/**
+ * NOT-229: percentile as structured parts — P50/P95 values separate from
+ * their labels, sample size/sparse as supporting text. `available === false`
+ * renders one `Unavailable` state with no P50/P95 numbers.
+ */
+export interface PercentileDisplay {
+  available: boolean;
+  p50Text: string | null;
+  p95Text: string | null;
+  /** Supporting sample note, e.g. `n=2 (sparse)`; never part of the value. */
+  sampleText: string;
+  sampleTitle: string;
+  sparse: boolean;
+}
+
+/**
+ * NOT-229: coverage sum as structured parts — the known aggregate stays the
+ * primary value while `known/total` evidence is a separate note. Missing
+ * metadata is Unavailable, never zero. With `compact`, the visible value is
+ * shortened (tokens) and `exactText` carries the full comma-formatted value
+ * for accessible/title text.
+ */
+export interface CoverageDisplay {
+  available: boolean;
+  valueText: string;
+  exactText: string | null;
+  noteText: string | null;
+  noteTitle: string | null;
+  incomplete: boolean;
+}
+
+export function toPercentileDisplay(
+  stat: { p50: number | null; p95: number | null; n: number },
+  format: (n: number) => string
+): PercentileDisplay {
+  if (stat.n === 0 || (stat.p50 === null && stat.p95 === null)) {
+    return {
+      available: false,
+      p50Text: null,
+      p95Text: null,
+      sampleText: "n=0",
+      sampleTitle: "No observations in this cohort",
+      sparse: true,
+    };
+  }
+  return {
+    available: true,
+    p50Text: stat.p50 === null ? null : format(stat.p50),
+    p95Text: stat.p95 === null ? null : format(stat.p95),
+    sampleText: sampleLabel(stat.n),
+    sampleTitle: `Sample size ${stat.n}${isSparseSample(stat.n) ? " — fewer than 5 observations, compare with care" : ""}`,
+    sparse: isSparseSample(stat.n),
+  };
+}
+
+export function toCoverageDisplay(
+  stat: { sum: number | null; known: number; total: number },
+  format: (n: number) => string,
+  opts?: { compact?: boolean }
+): CoverageDisplay {
+  if (stat.sum === null || stat.known === 0) {
+    return {
+      available: false,
+      valueText: "Unavailable",
+      exactText: null,
+      noteText: null,
+      noteTitle: null,
+      incomplete: stat.known < stat.total,
+    };
+  }
+  const exact = format(stat.sum);
+  const valueText = opts?.compact ? formatCompactCount(stat.sum) : exact;
+  const incomplete = stat.known < stat.total;
+  return {
+    available: true,
+    valueText,
+    exactText: opts?.compact ? exact : null,
+    noteText: incomplete ? `${formatCount(stat.known)}/${formatCount(stat.total)} known` : null,
+    noteTitle: incomplete ? "Partial sample — missing provider metadata is excluded, never zero" : null,
+    incomplete,
+  };
 }
 
 /** "50.0% (1/2 closed)" or an explicit Unavailable with the missing denominator. */
@@ -91,6 +187,16 @@ export function toCohortDisplay(row: CohortRow): CohortDisplayRow {
     failedCostText: coverageCellText(row.failedCostUsd, formatUsd),
     failedTokensText: `${coverageCellText(row.failedTokensIn, formatCount)} in · ${coverageCellText(row.failedTokensOut, formatCount)} out`,
     failedDurationText: coverageCellText(row.failedDurationMs, formatMs),
+    wall: toPercentileDisplay(row.sessionWallMs, formatMs),
+    envelope: toPercentileDisplay(row.spawnEnvelopeMs, formatMs),
+    tokensIn: toCoverageDisplay(row.tokensIn, formatCount, { compact: true }),
+    tokensOut: toCoverageDisplay(row.tokensOut, formatCount, { compact: true }),
+    cost: toCoverageDisplay(row.costUsd, formatUsd),
+    duration: toCoverageDisplay(row.durationMs, formatMs),
+    failedCost: toCoverageDisplay(row.failedCostUsd, formatUsd),
+    failedTokensIn: toCoverageDisplay(row.failedTokensIn, formatCount, { compact: true }),
+    failedTokensOut: toCoverageDisplay(row.failedTokensOut, formatCount, { compact: true }),
+    failedDuration: toCoverageDisplay(row.failedDurationMs, formatMs),
     failedIncomplete:
       row.failedCostUsd.known < row.failedCostUsd.total ||
       row.failedTokensIn.known < row.failedTokensIn.total ||
@@ -109,11 +215,16 @@ export interface FailureDisplayEntry {
   shareTitle: string;
   isUnknown: boolean;
   blurb: string;
+  /** NOT-229 operator wording: `unknown` reads as `Cause not recorded`. */
+  displayCode: string;
+  /** NOT-229 subordinate explanation for the displayed code. */
+  displayNote: string;
   issueIds: string[];
   hiddenIssueCount: number;
 }
 
 export function toFailureDisplay(entry: FailureDistributionEntry, failedTotal: number): FailureDisplayEntry {
+  const isUnknown = entry.code === "unknown";
   return {
     code: entry.code,
     domain: entry.domain,
@@ -123,11 +234,13 @@ export function toFailureDisplay(entry: FailureDistributionEntry, failedTotal: n
       failedTotal > 0
         ? `${formatCount(entry.count)} of ${formatCount(failedTotal)} issues with a failed attempt`
         : "No issues with a failed attempt in scope",
-    isUnknown: entry.code === "unknown",
+    isUnknown,
     blurb:
-      entry.code === "unknown"
+      isUnknown
         ? "Ambiguous evidence — not promoted to a specific cause."
         : `Primary cause · ${entry.domain} domain`,
+    displayCode: isUnknown ? "Cause not recorded" : entry.code,
+    displayNote: isUnknown ? "Needs more evidence" : `Primary cause · ${entry.domain} domain`,
     issueIds: entry.issueIds,
     hiddenIssueCount: Math.max(0, entry.issueTotal - entry.issueIds.length),
   };

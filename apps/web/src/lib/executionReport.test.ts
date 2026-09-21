@@ -18,6 +18,8 @@ import {
   setPageQuery,
   successText,
   toCohortDisplay,
+  toCoverageDisplay,
+  toPercentileDisplay,
 } from "./executionReport.js";
 
 function cohort(over: Partial<CohortRow>): CohortRow {
@@ -174,6 +176,56 @@ test("fetch filters carry only URL params: no client-clock dates, no stale to", 
   assert.equal(dated.limit, 10);
   // Invalid page/limit are dropped; oversized limits clamp to the API max.
   assert.deepEqual(searchToFilters("?page=abc&limit=9999"), { limit: 100 });
+});
+
+// NOT-229: structured percentile/coverage readouts keep values separate from
+// labels and notes, with one Unavailable state and compact tokens.
+test("percentile display separates P50/P95 values from sample notes", () => {
+  const shown = toPercentileDisplay({ p50: 1000, p95: 2000, n: 2 }, String);
+  assert.equal(shown.available, true);
+  assert.equal(shown.p50Text, "1000");
+  assert.equal(shown.p95Text, "2000");
+  assert.equal(shown.sampleText, "n=2 (sparse)");
+  assert.equal(shown.sparse, true);
+  assert.ok(shown.sampleTitle.includes("Sample size 2"));
+  const missing = toPercentileDisplay({ p50: null, p95: null, n: 0 }, String);
+  assert.equal(missing.available, false);
+  assert.equal(missing.p50Text, null);
+  assert.equal(missing.p95Text, null);
+});
+
+test("coverage display keeps the known aggregate primary with a separate note", () => {
+  const partial = toCoverageDisplay({ sum: 110, known: 2, total: 3 }, String);
+  assert.equal(partial.available, true);
+  assert.equal(partial.valueText, "110");
+  assert.equal(partial.noteText, "2/3 known");
+  assert.ok(partial.noteTitle!.includes("never zero"));
+  const full = toCoverageDisplay({ sum: 110, known: 3, total: 3 }, String);
+  assert.equal(full.noteText, null);
+  const missing = toCoverageDisplay({ sum: null, known: 0, total: 3 }, String);
+  assert.equal(missing.available, false);
+  assert.equal(missing.valueText, "Unavailable");
+});
+
+test("compact token coverage shows a short value with the exact count alongside", () => {
+  const tokens = toCoverageDisplay({ sum: 1_234_567, known: 3, total: 3 }, (n) => n.toLocaleString("en-US"), {
+    compact: true,
+  });
+  assert.equal(tokens.valueText, "1.2M");
+  assert.equal(tokens.exactText, "1,234,567");
+});
+
+test("unknown failures display operator wording while keeping the raw code", () => {
+  const shown = orderFailureDisplay([
+    { code: "validation_failure", domain: "task", count: 5, share: 5 / 6, issueIds: ["a"], issueTotal: 5 },
+    { code: "unknown", domain: "unknown", count: 1, share: 1 / 6, issueIds: ["u1"], issueTotal: 1 },
+  ]);
+  const unknown = shown.find((e) => e.code === "unknown")!;
+  assert.equal(unknown.displayCode, "Cause not recorded");
+  assert.equal(unknown.displayNote, "Needs more evidence");
+  assert.equal(unknown.code, "unknown", "raw code preserved for ordering/links");
+  const named = shown.find((e) => e.code === "validation_failure")!;
+  assert.equal(named.displayCode, "validation_failure");
 });
 
 test("cohort rows link to the report filtered by that dimension", () => {
