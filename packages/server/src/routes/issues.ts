@@ -34,6 +34,7 @@ import {
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
 import { enqueueIssue, enqueueIssueWithOutcome, getQueuedEntryForIssue } from "../repository/queue-entries.js";
 import { latestSessionFailureForIssue } from "../coordinator/latest-failure.js";
+import { getIssueExecutionAnalysis } from "../read-models/execution-analysis.js";
 import { deriveLiveProgressFromLog } from "../coordinator/session-progress.js";
 import { branchTipStatusForIssue } from "../coordinator/branch-tip-status.js";
 
@@ -133,6 +134,15 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       // NOT-118: position + current wait reason so a queued `ready` issue never reads as idle.
       queueEntry: queueStatusForIssue(id),
     };
+  });
+
+  /** NOT-173: stable issue-level execution read model. The existing
+   * `GET /api/issues/:id` response is unchanged (backward compatible). */
+  app.get("/api/issues/:id/execution-analysis", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const analysis = getIssueExecutionAnalysis(id);
+    if (!analysis) return reply.status(404).send({ error: "Not found" });
+    return analysis;
   });
 
   app.get("/api/issues/:id/evidence", async (req, reply) => {
