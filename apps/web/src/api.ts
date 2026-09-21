@@ -6,6 +6,7 @@ import type {
   CreateIssueInput,
   CreateIssueResult,
   DeckAccessErrorCode,
+  ExecuteIssueResponse,
   Finding,
   HumanAction,
   Issue,
@@ -264,6 +265,19 @@ export type StartIssueResult = StartIssueResponse;
 
 export async function startIssue(id: string): Promise<StartIssueResult> {
   const res = await fetch(`${API}/api/issues/${id}/start`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+/**
+ * NOT-217 Execute now: strict direct admission — bypasses queue order only. Resolves
+ * when the workflow starts immediately; throws the server's refusal reason (capacity,
+ * readiness, blockers, agent health) when it cannot run — the queue is never touched.
+ */
+export type ExecuteIssueResult = ExecuteIssueResponse;
+
+export async function executeIssue(id: string): Promise<ExecuteIssueResult> {
+  const res = await fetch(`${API}/api/issues/${id}/execute`, { method: "POST" });
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
 }

@@ -23,6 +23,7 @@ function printUsage(): void {
   agent-dealer issue list [--status S1,S2]
   agent-dealer issue show <id> [--include evidence]
   agent-dealer issue start <id>
+  agent-dealer issue execute <id>
   agent-dealer issue guide <id> --message M
   agent-dealer queue add <issueId>
   agent-dealer queue remove <issueId>

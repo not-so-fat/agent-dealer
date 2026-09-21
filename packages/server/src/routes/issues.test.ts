@@ -25,7 +25,11 @@ const { listHumanActionsForIssue } = await import("../repository/human-actions.j
 const { applyCompletion, resolveHumanActionAndAdvance, getTaskSnapshot } = await import("../coordinator/commands.js");
 const { ReviewerResult } = await import("../coordinator/reviewer-result.js");
 const { getQueuedEntryForIssue, listQueuedEntries } = await import("../repository/queue-entries.js");
-const { setAdmissionHealthCheckerForTests } = await import("../coordinator/admission.js");
+const { setAdmissionHealthCheckerForTests, queueStatusForIssue } = await import(
+  "../coordinator/admission.js"
+);
+const { createAgent } = await import("../repository/agents.js");
+const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
 
 before(() => {
   migrate();
@@ -684,5 +688,209 @@ test("NOT-148: GET /api/issues/:id surfaces branchTipStatus with restart risk af
   const idle = await app.inject({ method: "GET", url: `/api/issues/${readyCreated.id}` });
   assert.equal((idle.json() as { branchTipStatus: unknown }).branchTipStatus, null);
 
+  await app.close();
+});
+
+test("NOT-217: PATCH agent assignments on a queued issue preserves position, refreshes the wait reason, and records issue.reassigned", async () => {
+  const app = await buildApp();
+  try {
+    // Only the builtin Claude developer is unhealthy — everything else admits.
+    setAdmissionHealthCheckerForTests(async (agent, role) =>
+      role === "developer" && agent.id === BUILTIN_AGENT_CLAUDE_ID
+        ? { ok: false, reason: `developer unhealthy: ${agent.name} — CLI missing` }
+        : { ok: true }
+    );
+    const mk = async (title: string): Promise<string> =>
+      (
+        (
+          await app.inject({
+            method: "POST",
+            url: "/api/issues",
+            payload: {
+              title,
+              repo: "acme/app",
+              baseBranch: "main",
+              developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+              reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+              acceptanceCriteria: "It works",
+            },
+          })
+        ).json() as { id: string }
+      ).id;
+    const a = await mk("Queued A");
+    const b = await mk("Queued B");
+    assert.equal(queueStatusForIssue(a)?.position, 1);
+    assert.equal(queueStatusForIssue(b)?.position, 2);
+
+    // Switch A onto the capped/unhealthy developer: same position, new wait reason, audit.
+    const bad = await app.inject({
+      method: "PATCH",
+      url: `/api/issues/${a}`,
+      payload: { developerAgentId: BUILTIN_AGENT_CLAUDE_ID },
+    });
+    assert.equal(bad.statusCode, 200);
+    assert.equal((bad.json() as { developerAgentId: string }).developerAgentId, BUILTIN_AGENT_CLAUDE_ID);
+    assert.deepEqual(
+      listQueuedEntries().map((e) => e.issueId),
+      [a, b],
+      "reassignment must not reorder the queue"
+    );
+    assert.equal(queueStatusForIssue(a)?.position, 1);
+    assert.match(queueStatusForIssue(a)?.waitReason ?? "", /developer unhealthy/);
+
+    const events = listWorkflowEventsForIssue(a).filter((e) => e.type === "issue.reassigned");
+    assert.equal(events.length, 1);
+    assert.deepEqual(JSON.parse(events[0]!.payloadJson!), {
+      fromDeveloperAgentId: BUILTIN_AGENT_CURSOR_ID,
+      toDeveloperAgentId: BUILTIN_AGENT_CLAUDE_ID,
+      fromReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+      toReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    });
+
+    // Switch back to the healthy developer: position unchanged, wait reason clears.
+    const good = await app.inject({
+      method: "PATCH",
+      url: `/api/issues/${a}`,
+      payload: { developerAgentId: BUILTIN_AGENT_CURSOR_ID },
+    });
+    assert.equal(good.statusCode, 200);
+    assert.deepEqual(
+      listQueuedEntries().map((e) => e.issueId),
+      [a, b]
+    );
+    assert.equal(queueStatusForIssue(a)?.position, 1);
+    assert.equal(queueStatusForIssue(a)?.waitReason, null);
+    assert.equal(
+      listWorkflowEventsForIssue(a).filter((e) => e.type === "issue.reassigned").length,
+      2,
+      "each assignment change is its own audit event"
+    );
+  } finally {
+    setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
+  }
+  await app.close();
+});
+
+test("NOT-217: PATCH reviewer-only edit records before/after reviewers without touching the developer", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Reviewer swap",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+
+  const res = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${created.id}`,
+    payload: { reviewerAgentId: BUILTIN_AGENT_CLAUDE_ID },
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { developerAgentId: string; reviewerAgentId: string };
+  assert.equal(body.developerAgentId, BUILTIN_AGENT_CURSOR_ID);
+  assert.equal(body.reviewerAgentId, BUILTIN_AGENT_CLAUDE_ID);
+
+  const events = listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned");
+  assert.equal(events.length, 1);
+  assert.deepEqual(JSON.parse(events[0]!.payloadJson!), {
+    fromDeveloperAgentId: BUILTIN_AGENT_CURSOR_ID,
+    toDeveloperAgentId: BUILTIN_AGENT_CURSOR_ID,
+    fromReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    toReviewerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+  });
+  // No-op rewrites (same assignment) emit no audit event.
+  assert.equal(
+    (await app.inject({ method: "PATCH", url: `/api/issues/${created.id}`, payload: { reviewerAgentId: BUILTIN_AGENT_CLAUDE_ID } })).statusCode,
+    200
+  );
+  assert.equal(
+    listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned").length,
+    1
+  );
+  await app.close();
+});
+
+test("NOT-217: PATCH title-only edit on a queued issue emits no reassignment event", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Title tweak",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+
+  const res = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${created.id}`,
+    payload: { title: "Title tweaked" },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(
+    listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned").length,
+    0
+  );
+  await app.close();
+});
+
+test("NOT-217: PATCH that races admission answers 409 and never mutates the frozen workflow snapshot", async () => {
+  const app = await buildApp();
+  const healthyDev = createAgent({
+    name: `not217-dev-${Math.random()}`,
+    runtime: "claude_code",
+    deckId: "00000000-0000-4000-a000-000000002217",
+  });
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Raced edit",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+  // The editor is open; another request admits the issue first.
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` })).statusCode, 200);
+  assert.equal(getQueuedEntryForIssue(created.id), null);
+
+  // Save now conflicts instead of displaying stale success.
+  const save = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${created.id}`,
+    payload: { developerAgentId: healthyDev.id, reviewerAgentId: healthyDev.id },
+  });
+  assert.equal(save.statusCode, 409);
+  // Admitted issues read as their live status; parked-needs_human ones name the workflow.
+  // Either way the save conflicts instead of displaying stale success.
+  assert.match(String((save.json() as { error: string }).error), /developing|active workflow/);
+
+  const issue = getIssue(created.id)!;
+  assert.equal(issue.developerAgentId, BUILTIN_AGENT_CURSOR_ID, "frozen assignment untouched");
+  assert.equal(issue.reviewerAgentId, BUILTIN_AGENT_CURSOR_ID, "frozen assignment untouched");
+  assert.equal(
+    listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned").length,
+    0,
+    "a conflicted edit leaves no audit event"
+  );
   await app.close();
 });

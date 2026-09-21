@@ -1,4 +1,4 @@
-import type { CreateIssueResult, StartIssueResponse } from "@agent-dealer/shared";
+import type { CreateIssueResult, ExecuteIssueResponse, StartIssueResponse } from "@agent-dealer/shared";
 import { apiFetch } from "./http.js";
 
 /**
@@ -35,6 +35,7 @@ export type ParsedIssueArgs =
   | { subcommand: "list"; status?: string }
   | { subcommand: "show"; id: string; includeEvidence: boolean }
   | { subcommand: "start"; id: string }
+  | { subcommand: "execute"; id: string }
   | { subcommand: "guide"; id: string; message: string };
 
 function flag(args: string[], name: string): string | undefined {
@@ -74,6 +75,11 @@ export function parseIssueArgs(args: string[]): ParsedIssueArgs {
       const id = rest[0];
       if (!id) throw new Error("start requires an issue id");
       return { subcommand: "start", id };
+    }
+    case "execute": {
+      const id = rest[0];
+      if (!id) throw new Error("execute requires an issue id");
+      return { subcommand: "execute", id };
     }
     case "guide": {
       const id = rest[0];
@@ -138,6 +144,15 @@ export async function runIssueCommand(args: string[]): Promise<number> {
             ? "Admitted — the workflow started."
             : `Queued at position ${result.position}${result.waitReason ? ` — ${result.waitReason}` : ""}.`
         );
+        return 0;
+      }
+      case "execute": {
+        // NOT-217: strict direct admission — bypasses queue order only. A refusal
+        // (apiFetch throws on the 409) reports the reason and changes nothing: no
+        // enqueue, no move, no reorder. `start` stays the move-to-front Run next.
+        const result = (await apiFetch(`/api/issues/${parsed.id}/execute`, { method: "POST" })) as ExecuteIssueResponse;
+        console.log(JSON.stringify(result, null, 2));
+        console.error("Admitted — the workflow started immediately (queue order bypassed).");
         return 0;
       }
       case "guide": {
