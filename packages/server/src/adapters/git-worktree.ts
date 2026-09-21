@@ -441,7 +441,7 @@ export type PushRejectionFacts = {
 };
 
 export type PushResult =
-  | { ok: true }
+  | { ok: true; leasePush?: { oldSha: string; newSha: string } }
   | { ok: false; reason: string; rejected: boolean; facts?: PushRejectionFacts };
 
 const PUSH_REJECTION_PATTERNS = /rejected|non-fast-forward|fetch first|stale info/i;
@@ -524,21 +524,106 @@ async function gatherPushRejectionFacts(opts: {
   }
 }
 
+/**
+ * NOT-220: whether a rejected diverged push is provably safe to recover with a
+ * lease-pinned force push. Returns the remote SHA to pin the lease to, or null
+ * when today's `unpushed_commit` escalation must stand. ALL must hold:
+ *
+ * 1. The fetched remote tip is exactly the last head Dealer verified/pushed
+ *    (`lastKnownHeadSha`) — anyone else having pushed since rules recovery out.
+ * 2. Every remote-only commit has a patch-equivalent local counterpart:
+ *    `git cherry <local> <remote>` lists the remote-only non-merge commits, one
+ *    line each, `-` when an equivalent patch exists locally. (Note the argument
+ *    order: head must be the remote so the lines enumerate remote-only commits.)
+ * 3. The output is non-empty AND the remote-only range holds no merge commits —
+ *    `git cherry` never lists merges, so a pure-merge range would otherwise be
+ *    vacuously "all equivalent" with nothing actually proven.
+ */
+async function leasePushExpectedRemoteSha(opts: {
+  cwd: string;
+  localSha: string;
+  remoteSha: string;
+  lastKnownHeadSha: string | null | undefined;
+}): Promise<string | null> {
+  try {
+    if (!opts.lastKnownHeadSha || opts.remoteSha !== opts.lastKnownHeadSha) return null;
+    const { stdout } = await git(opts.cwd, ["cherry", opts.localSha, opts.remoteSha]);
+    const lines = stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    if (lines.length === 0) return null;
+    if (!lines.every((l) => l.startsWith("-"))) return null;
+    const { stdout: merges } = await git(opts.cwd, [
+      "rev-list",
+      "--merges",
+      `${opts.localSha}..${opts.remoteSha}`,
+    ]);
+    if (merges.trim().length > 0) return null;
+    return opts.remoteSha;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * NOT-220: the single lease-pinned retry. Pins the lease to the fetched remote
+ * SHA — a race where origin moves between fetch and push makes this fail instead
+ * of overwriting anyone's work. Same `-u` upstream tracking as the plain push.
+ */
+export async function pushWithLease(opts: {
+  cwd: string;
+  branch: string;
+  localRef: string;
+  expectedRemoteSha: string;
+}): Promise<{ ok: true; newSha: string } | { ok: false; reason: string }> {
+  try {
+    await git(opts.cwd, [
+      "push",
+      "-u",
+      "origin",
+      `--force-with-lease=refs/heads/${opts.branch}:${opts.expectedRemoteSha}`,
+      `${opts.localRef}:refs/heads/${opts.branch}`,
+    ]);
+    return { ok: true, newSha: await revParseRef(opts.cwd, opts.localRef) };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
 async function pushFailureResult(
   cwd: string,
   branch: string,
   localRef: string,
-  message: string
-): Promise<Extract<PushResult, { ok: false }>> {
+  message: string,
+  lastKnownHeadSha?: string | null
+): Promise<PushResult> {
   const rejected = PUSH_REJECTION_PATTERNS.test(message);
   if (!rejected) return { ok: false, reason: message, rejected: false };
   const facts = await gatherPushRejectionFacts({ cwd, branch, localRef });
-  if (facts) {
-    // Prefer the classified summary over raw git stderr so the escalation never carries
-    // git's misleading `use 'git pull'` hint for a diverged branch (NOT-137).
-    return { ok: false, reason: facts.summary, rejected: true, facts };
+  if (!facts) return { ok: false, reason: message, rejected: true };
+  // NOT-220: a divergence Dealer can prove safe to resolve (remote tip is the
+  // last verified head, every remote-only commit patch-equivalent locally) is
+  // retried once with the lease pin — no human action needed.
+  if (facts.relationship === "diverged") {
+    const pin = await leasePushExpectedRemoteSha({
+      cwd,
+      localSha: facts.localSha,
+      remoteSha: facts.remoteSha,
+      lastKnownHeadSha,
+    });
+    if (pin !== null) {
+      const retried = await pushWithLease({ cwd, branch, localRef, expectedRemoteSha: pin });
+      if (retried.ok) return { ok: true, leasePush: { oldSha: pin, newSha: retried.newSha } };
+      // The lease lost its race (or the retry failed another way): re-gather so
+      // the escalation names the tip that actually beat us, not the stale one.
+      const fresh = await gatherPushRejectionFacts({ cwd, branch, localRef });
+      if (fresh) return { ok: false, reason: fresh.summary, rejected: true, facts: fresh };
+    }
   }
-  return { ok: false, reason: message, rejected: true };
+  // Prefer the classified summary over raw git stderr so the escalation never carries
+  // git's misleading `use 'git pull'` hint for a diverged branch (NOT-137).
+  return { ok: false, reason: facts.summary, rejected: true, facts };
 }
 
 /**
@@ -549,12 +634,23 @@ async function pushFailureResult(
  * Distinguishes a clean rejection (remote diverged — `unpushed_commit`, a policy_escalation
  * a human resolves) from an unexpected tooling failure (`adapter_failure`).
  */
-export async function pushBranch(opts: { worktreePath: string; branch: string }): Promise<PushResult> {
+export async function pushBranch(opts: {
+  worktreePath: string;
+  branch: string;
+  /** NOT-220: the last head Dealer verified/pushed — enables the proven-equivalent lease retry. */
+  lastKnownHeadSha?: string | null;
+}): Promise<PushResult> {
   try {
     await git(opts.worktreePath, ["push", "-u", "origin", `HEAD:refs/heads/${opts.branch}`]);
     return { ok: true };
   } catch (err) {
-    return pushFailureResult(opts.worktreePath, opts.branch, "HEAD", (err as Error).message);
+    return pushFailureResult(
+      opts.worktreePath,
+      opts.branch,
+      "HEAD",
+      (err as Error).message,
+      opts.lastKnownHeadSha
+    );
   }
 }
 
@@ -564,7 +660,12 @@ export async function pushBranch(opts: { worktreePath: string; branch: string })
  * there is no worktree whose HEAD `pushBranch` could use — the branch ref in the shared repo
  * is the only durable handle on that work.
  */
-export async function pushBranchRef(opts: { repo: string; branch: string }): Promise<PushResult> {
+export async function pushBranchRef(opts: {
+  repo: string;
+  branch: string;
+  /** NOT-220: the last head Dealer verified/pushed — enables the proven-equivalent lease retry. */
+  lastKnownHeadSha?: string | null;
+}): Promise<PushResult> {
   try {
     await git(opts.repo, ["push", "-u", "origin", `refs/heads/${opts.branch}:refs/heads/${opts.branch}`]);
     return { ok: true };
@@ -573,7 +674,8 @@ export async function pushBranchRef(opts: { repo: string; branch: string }): Pro
       opts.repo,
       opts.branch,
       `refs/heads/${opts.branch}`,
-      (err as Error).message
+      (err as Error).message,
+      opts.lastKnownHeadSha
     );
   }
 }

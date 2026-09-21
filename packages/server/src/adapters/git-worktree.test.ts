@@ -22,6 +22,7 @@ const {
   isWorktreeClean,
   withRepoLock,
   pushBranch,
+  pushWithLease,
   commitsAhead,
   findWorktreeForBranch,
   resolveDeveloperWorktree,
@@ -34,6 +35,33 @@ let remote: string;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+/** `git` with extra env — used to pin commit dates apart so rebuilt/cherry-picked
+ * equivalents never collide with the original SHAs within the same second. */
+function gitEnv(cwd: string, env: Record<string, string>, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, ...env } }).trim();
+}
+
+/** Fixed past identity dates: commits made "then" always differ in SHA from an
+ * equivalent patch committed "now", however fast the test runs. */
+const PAST_DATES = {
+  GIT_AUTHOR_DATE: "2020-01-01T00:00:00Z",
+  GIT_COMMITTER_DATE: "2020-01-01T00:00:00Z",
+};
+
+function commitFileAs(
+  cwd: string,
+  name: string,
+  content: string,
+  message: string,
+  env?: Record<string, string>
+): string {
+  fs.writeFileSync(path.join(cwd, name), content);
+  const run = env ? (args: string[]) => gitEnv(cwd, env, ...args) : (args: string[]) => git(cwd, ...args);
+  run(["add", "."]);
+  run(["commit", "-m", message]);
+  return git(cwd, "rev-parse", "HEAD");
 }
 
 before(() => {
@@ -318,6 +346,368 @@ test("NOT-137: pushBranch rejection when local is strictly behind reports behind
     assert.ok(rejected.facts.recoveryCommands.some((c) => /rebase/i.test(c)));
     assert.ok(!rejected.facts.recoveryCommands.some((c) => c.includes("force-with-lease")));
   }
+
+  fs.rmSync(dev.path, { recursive: true, force: true });
+  fs.rmSync(other, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  execFileSync("git", ["branch", "-D", branch], { cwd: repo });
+});
+
+test("NOT-220: diverged push with remote tip == last known head and patch-equivalent remote commits recovers via the lease pin", async () => {
+  const branch = "issue-push-lease";
+  const dev = await createRoleWorktree({
+    repo,
+    role: "developer",
+    sessionId: "s-dev-push-lease",
+    ref: "main",
+    newBranch: branch,
+  });
+  const commitFile = (cwd: string, name: string, content: string, message: string) => {
+    fs.writeFileSync(path.join(cwd, name), content);
+    git(cwd, "add", ".");
+    git(cwd, "commit", "-m", message);
+    return git(cwd, "rev-parse", "HEAD");
+  };
+  const base = commitFile(dev.path, "base.txt", "base\n", "base");
+  assert.deepEqual(await pushBranch({ worktreePath: dev.path, branch }), { ok: true });
+
+  // The reviewed remote head: two commits Dealer recorded as its last known head.
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-lease-other-"));
+  execFileSync("git", ["clone", "-q", remote, other]);
+  git(other, "checkout", branch);
+  git(other, "config", "user.email", "test@example.com");
+  git(other, "config", "user.name", "Test");
+  // Past dates: the local cherry-picks below (made "now") can never collide with
+  // these SHAs, however fast the test runs.
+  const r1 = commitFileAs(other, "r1.txt", "r1\n", "remote1", PAST_DATES);
+  const remoteSha = commitFileAs(other, "r2.txt", "r2\n", "remote2", PAST_DATES);
+  git(other, "push", "origin", branch);
+
+  // Local rebuild: the same patches (cherry-picked, so new SHAs) plus one new commit.
+  git(dev.path, "fetch", "origin", branch);
+  git(dev.path, "reset", "--hard", base);
+  git(dev.path, "cherry-pick", r1);
+  git(dev.path, "cherry-pick", remoteSha);
+  const localSha = commitFile(dev.path, "new.txt", "new\n", "new work");
+  assert.notEqual(localSha, remoteSha);
+  // Drop upstream tracking so the test proves the LEASE push sets it like the plain push.
+  git(dev.path, "branch", "--unset-upstream");
+
+  const result = await pushBranch({ worktreePath: dev.path, branch, lastKnownHeadSha: remoteSha });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    // Audit facts: the rewrite pins old -> new SHA.
+    assert.deepEqual(result.leasePush, { oldSha: remoteSha, newSha: localSha });
+  }
+  assert.equal(git(remote, "rev-parse", branch), localSha, "the lease push must publish the local tip");
+  assert.equal(
+    git(dev.path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"),
+    `origin/${branch}`,
+    "the lease retry must set upstream tracking like the plain push"
+  );
+
+  fs.rmSync(dev.path, { recursive: true, force: true });
+  fs.rmSync(other, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  execFileSync("git", ["branch", "-D", branch], { cwd: repo });
+});
+
+test("NOT-220: remote tip past the last known head keeps today's escalation — no force push attempted", async () => {
+  const branch = "issue-push-lease-moved";
+  const dev = await createRoleWorktree({
+    repo,
+    role: "developer",
+    sessionId: "s-dev-push-lease-moved",
+    ref: "main",
+    newBranch: branch,
+  });
+  fs.writeFileSync(path.join(dev.path, "base.txt"), "base\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "base");
+  const base = git(dev.path, "rev-parse", "HEAD");
+  assert.deepEqual(await pushBranch({ worktreePath: dev.path, branch }), { ok: true });
+
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-lease-moved-"));
+  execFileSync("git", ["clone", "-q", remote, other]);
+  git(other, "checkout", branch);
+  git(other, "config", "user.email", "test@example.com");
+  git(other, "config", "user.name", "Test");
+  fs.writeFileSync(path.join(other, "r1.txt"), "r1\n");
+  git(other, "add", ".");
+  git(other, "commit", "-m", "remote1");
+  git(other, "push", "origin", branch);
+  const knownHead = git(other, "rev-parse", "HEAD");
+  // Someone else pushes after Dealer's last known head.
+  fs.writeFileSync(path.join(other, "r2.txt"), "r2\n");
+  git(other, "add", ".");
+  git(other, "commit", "-m", "remote2");
+  git(other, "push", "origin", branch);
+  const movedSha = git(other, "rev-parse", "HEAD");
+
+  // Local diverges with genuinely different content.
+  git(dev.path, "fetch", "origin", branch);
+  git(dev.path, "reset", "--hard", base);
+  fs.writeFileSync(path.join(dev.path, "local.txt"), "local\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "local");
+
+  const result = await pushBranch({ worktreePath: dev.path, branch, lastKnownHeadSha: knownHead });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.rejected, true);
+    assert.ok(result.facts);
+    assert.equal(result.facts.relationship, "diverged");
+    assert.equal(result.facts.remoteSha, movedSha);
+  }
+  assert.equal(
+    git(remote, "rev-parse", branch),
+    movedSha,
+    "no force push may run once the remote moved past the known head"
+  );
+
+  fs.rmSync(dev.path, { recursive: true, force: true });
+  fs.rmSync(other, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  execFileSync("git", ["branch", "-D", branch], { cwd: repo });
+});
+
+test("NOT-220: a remote-only commit with different content escalates — no force push attempted", async () => {
+  const branch = "issue-push-lease-content";
+  const dev = await createRoleWorktree({
+    repo,
+    role: "developer",
+    sessionId: "s-dev-push-lease-content",
+    ref: "main",
+    newBranch: branch,
+  });
+  fs.writeFileSync(path.join(dev.path, "base.txt"), "base\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "base");
+  const base = git(dev.path, "rev-parse", "HEAD");
+  assert.deepEqual(await pushBranch({ worktreePath: dev.path, branch }), { ok: true });
+
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-lease-content-"));
+  execFileSync("git", ["clone", "-q", remote, other]);
+  git(other, "checkout", branch);
+  git(other, "config", "user.email", "test@example.com");
+  git(other, "config", "user.name", "Test");
+  fs.writeFileSync(path.join(other, "remote.txt"), "remote work\n");
+  git(other, "add", ".");
+  git(other, "commit", "-m", "remote-only");
+  git(other, "push", "origin", branch);
+  const remoteSha = git(other, "rev-parse", "HEAD");
+
+  // Local diverges with content that matches nothing on the remote.
+  git(dev.path, "fetch", "origin", branch);
+  git(dev.path, "reset", "--hard", base);
+  fs.writeFileSync(path.join(dev.path, "local.txt"), "local work\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "local-only");
+
+  const result = await pushBranch({ worktreePath: dev.path, branch, lastKnownHeadSha: remoteSha });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.rejected, true);
+    assert.ok(result.facts);
+    assert.equal(result.facts.relationship, "diverged");
+    assert.equal(result.facts.remoteSha, remoteSha);
+  }
+  assert.equal(
+    git(remote, "rev-parse", branch),
+    remoteSha,
+    "a remote-only commit without a local equivalent must never be overwritten"
+  );
+
+  fs.rmSync(dev.path, { recursive: true, force: true });
+  fs.rmSync(other, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  execFileSync("git", ["branch", "-D", branch], { cwd: repo });
+});
+
+test("NOT-220: a lease pin for a SHA origin has left behind fails instead of overwriting — the race escalates", async () => {
+  const branch = "issue-push-lease-race";
+  const dev = await createRoleWorktree({
+    repo,
+    role: "developer",
+    sessionId: "s-dev-push-lease-race",
+    ref: "main",
+    newBranch: branch,
+  });
+  fs.writeFileSync(path.join(dev.path, "base.txt"), "base\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "base");
+  const base = git(dev.path, "rev-parse", "HEAD");
+  assert.deepEqual(await pushBranch({ worktreePath: dev.path, branch }), { ok: true });
+
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-lease-race-"));
+  execFileSync("git", ["clone", "-q", remote, other]);
+  git(other, "checkout", branch);
+  git(other, "config", "user.email", "test@example.com");
+  git(other, "config", "user.name", "Test");
+  commitFileAs(other, "r1.txt", "r1\n", "remote1", PAST_DATES);
+  git(other, "push", "origin", branch);
+  const knownHead = git(other, "rev-parse", "HEAD");
+
+  // Local rebuild, patch-equivalent to the remote tip plus new work — eligible for now.
+  git(dev.path, "fetch", "origin", branch);
+  git(dev.path, "reset", "--hard", base);
+  git(dev.path, "cherry-pick", knownHead);
+  fs.writeFileSync(path.join(dev.path, "new.txt"), "new\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "new work");
+
+  // Capture the fetched tip via a plain rejection (no known head, so no retry) …
+  const stale = await pushBranch({ worktreePath: dev.path, branch });
+  assert.equal(stale.ok, false);
+  if (!stale.ok) assert.equal(stale.facts?.remoteSha, knownHead);
+
+  // … then origin moves before the lease push runs: the stale pin must fail.
+  fs.writeFileSync(path.join(other, "r2.txt"), "r2\n");
+  git(other, "add", ".");
+  git(other, "commit", "-m", "remote2");
+  git(other, "push", "origin", branch);
+  const movedSha = git(other, "rev-parse", "HEAD");
+
+  const raced = await pushWithLease({
+    cwd: dev.path,
+    branch,
+    localRef: "HEAD",
+    expectedRemoteSha: knownHead,
+  });
+  assert.equal(raced.ok, false, "a lease pinned to a superseded SHA must fail");
+  assert.equal(
+    git(remote, "rev-parse", branch),
+    movedSha,
+    "the stale lease must not overwrite the new tip"
+  );
+
+  // And the full path now escalates against the fresh tip instead of force-pushing.
+  const escalated = await pushBranch({ worktreePath: dev.path, branch, lastKnownHeadSha: knownHead });
+  assert.equal(escalated.ok, false);
+  if (!escalated.ok) {
+    assert.equal(escalated.rejected, true);
+    assert.equal(escalated.facts?.remoteSha, movedSha);
+  }
+  assert.equal(git(remote, "rev-parse", branch), movedSha);
+
+  fs.rmSync(dev.path, { recursive: true, force: true });
+  fs.rmSync(other, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  execFileSync("git", ["branch", "-D", branch], { cwd: repo });
+});
+
+test("NOT-220: a remote-only merge commit is never lease-pushed even when cherry proves its side equivalent", async () => {
+  // `git cherry` never lists merge commits, so cherry alone would approve this range
+  // (the side commit is patch-equivalent locally) while saying nothing about the merge
+  // itself — a GitHub-style 'Update branch' merge must keep today's escalation.
+  const branch = "issue-push-lease-merge";
+  const dev = await createRoleWorktree({
+    repo,
+    role: "developer",
+    sessionId: "s-dev-push-lease-merge",
+    ref: "main",
+    newBranch: branch,
+  });
+  fs.writeFileSync(path.join(dev.path, "app.txt"), "v1\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "base");
+  const base = git(dev.path, "rev-parse", "HEAD");
+  assert.deepEqual(await pushBranch({ worktreePath: dev.path, branch }), { ok: true });
+
+  // Local rebuilds the same change directly on the branch.
+  git(dev.path, "reset", "--hard", base);
+  fs.writeFileSync(path.join(dev.path, "app.txt"), "v1\npatched\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "patch app");
+
+  // Remote carries the identical patch on a side branch, merged with --no-ff.
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-lease-merge-"));
+  execFileSync("git", ["clone", "-q", remote, other]);
+  git(other, "checkout", branch);
+  git(other, "config", "user.email", "test@example.com");
+  git(other, "config", "user.name", "Test");
+  git(other, "checkout", "-b", "side");
+  fs.writeFileSync(path.join(other, "app.txt"), "v1\npatched\n");
+  git(other, "add", ".");
+  git(other, "commit", "-m", "patch app on side");
+  git(other, "checkout", branch);
+  git(other, "merge", "--no-ff", "-m", "merge side", "side");
+  git(other, "push", "origin", branch);
+  const mergeSha = git(other, "rev-parse", "HEAD");
+
+  const result = await pushBranch({ worktreePath: dev.path, branch, lastKnownHeadSha: mergeSha });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.rejected, true);
+    assert.ok(result.facts);
+    assert.equal(result.facts.relationship, "diverged");
+    assert.equal(result.facts.remoteSha, mergeSha);
+  }
+  assert.equal(
+    git(remote, "rev-parse", branch),
+    mergeSha,
+    "a remote-only merge commit must never be lease-overwritten"
+  );
+
+  fs.rmSync(dev.path, { recursive: true, force: true });
+  fs.rmSync(other, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+  execFileSync("git", ["branch", "-D", branch], { cwd: repo });
+});
+
+test("NOT-220: a remote-only range of pure merges (empty cherry output) proves nothing and escalates", async () => {
+  // Both sides merged the same upstream tip and got different merge SHAs: the only
+  // remote-only commit is the remote merge itself, so `git cherry` prints nothing —
+  // an empty output must not count as "all equivalent".
+  const branch = "issue-push-lease-merges";
+  const dev = await createRoleWorktree({
+    repo,
+    role: "developer",
+    sessionId: "s-dev-push-lease-merges",
+    ref: "main",
+    newBranch: branch,
+  });
+  fs.writeFileSync(path.join(dev.path, "base.txt"), "base\n");
+  git(dev.path, "add", ".");
+  git(dev.path, "commit", "-m", "base");
+  assert.deepEqual(await pushBranch({ worktreePath: dev.path, branch }), { ok: true });
+
+  // A shared upstream commit both sides will merge.
+  git(repo, "checkout", "-q", "main");
+  fs.writeFileSync(path.join(repo, "upstream.txt"), "upstream\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "upstream");
+  git(repo, "push", "-q", "origin", "main");
+
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-lease-merges-"));
+  execFileSync("git", ["clone", "-q", remote, other]);
+  git(other, "checkout", branch);
+  git(other, "config", "user.email", "test@example.com");
+  git(other, "config", "user.name", "Test");
+  git(other, "fetch", "origin", "main");
+  // Past dates: the local merge below (made "now") must get a different merge SHA.
+  gitEnv(other, PAST_DATES, "merge", "--no-ff", "-m", "merge main", "origin/main");
+  git(other, "push", "origin", branch);
+  const mergeSha = git(other, "rev-parse", "HEAD");
+
+  // Local merges the same upstream tip — same content, different merge SHA.
+  git(dev.path, "fetch", "origin", "main");
+  git(dev.path, "fetch", "origin", branch);
+  git(dev.path, "merge", "--no-ff", "-m", "merge main", "origin/main");
+
+  const result = await pushBranch({ worktreePath: dev.path, branch, lastKnownHeadSha: mergeSha });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.rejected, true);
+    assert.ok(result.facts);
+    assert.equal(result.facts.relationship, "diverged");
+    assert.equal(result.facts.remoteSha, mergeSha);
+  }
+  assert.equal(
+    git(remote, "rev-parse", branch),
+    mergeSha,
+    "an unproven merge-only range must never be lease-overwritten"
+  );
 
   fs.rmSync(dev.path, { recursive: true, force: true });
   fs.rmSync(other, { recursive: true, force: true });

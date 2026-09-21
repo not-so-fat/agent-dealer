@@ -372,7 +372,11 @@ async function runPublishOnlyHandoff(
           issue.id,
           `Developer · pushing ${progress.unpushed} recovered commit${progress.unpushed === 1 ? "" : "s"} (round ${round})`
         );
-        const recovered = await pushBranchRef({ repo: cwd, branch: branchName });
+        const recovered = await pushBranchRef({
+          repo: cwd,
+          branch: branchName,
+          lastKnownHeadSha: issue.headSha,
+        });
         if (!recovered.ok) {
           // Same policy as a live attempt's push: a clean rejection is a human decision, a
           // tooling error is a bounded infra retry. Either way the commits stay on the branch.
@@ -404,7 +408,19 @@ async function runPublishOnlyHandoff(
         milestone(
           "branch.pushed",
           `Developer · recovered branch pushed (${progress.unpushed} commit${progress.unpushed === 1 ? "" : "s"})`,
-          { branch: branchName, commitsAhead: progress.ahead, recoveredCommits: progress.unpushed }
+          {
+            branch: branchName,
+            commitsAhead: progress.ahead,
+            recoveredCommits: progress.unpushed,
+            // NOT-220: a lease-recovered rewrite is auditable — old and new SHA.
+            ...(recovered.leasePush
+              ? {
+                  viaLeasePush: true,
+                  oldSha: recovered.leasePush.oldSha,
+                  newSha: recovered.leasePush.newSha,
+                }
+              : {}),
+          }
         );
       }
 
@@ -1123,10 +1139,18 @@ export async function runDeveloperEffect(
     }
 
     setLiveIntent(issue.id, `Developer · pushing branch (round ${round})`);
-    const pushed = await pushBranch({ worktreePath, branch: branchName });
+    // NOT-220: pushBranch retries once with a lease pin when the divergence is
+    // proven safe (remote tip is issue.headSha, remote-only commits
+    // patch-equivalent locally). Anything else keeps the escalation below.
+    const pushed = await pushBranch({
+      worktreePath,
+      branch: branchName,
+      lastKnownHeadSha: issue.headSha,
+    });
     if (!pushed.ok) {
-      // Local commits preserved either way — never discarded, never force-retried. The
-      // worktree is deliberately NOT removed here: it is the preserved checkout a later
+      // Local commits preserved either way — never discarded, never force-retried
+      // beyond the proven-equivalent lease recovery inside pushBranch. The worktree is
+      // deliberately NOT removed here: it is the preserved checkout a later
       // push_with_lease resolution pushes from (NOT-221).
       return pushed.rejected
         ? {
@@ -1142,6 +1166,10 @@ export async function runDeveloperEffect(
     milestone("branch.pushed", `Developer · branch pushed (${ahead} commit${ahead === 1 ? "" : "s"})`, {
       branch: branchName,
       commitsAhead: ahead,
+      // NOT-220: a lease-recovered rewrite is auditable — old and new SHA.
+      ...(pushed.leasePush
+        ? { viaLeasePush: true, oldSha: pushed.leasePush.oldSha, newSha: pushed.leasePush.newSha }
+        : {}),
     });
     // NOT-219: the worker may have committed on a side branch while this push just
     // published HEAD to the issue branch — the managed clone's local issue-branch ref
