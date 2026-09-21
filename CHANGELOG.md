@@ -11,17 +11,17 @@ Patch over 1.1.3: queue controls (configurable concurrency, Execute now, queued 
 - **Configurable active-issue concurrency (NOT-215)** — the Issues page header now sets how many issues run at once (1–2, default 1, persisted across restarts and clamped to the worker/spawn ceiling). At most one active issue per repository; same-repo waiters stay queued with a concrete reason. Lowering the limit never preempts running issues. Adds `GET /api/queue/status` and `PUT /api/queue/settings`.
 - **Execute now and queued agent reassignment (NOT-217)** — a queued issue can be started immediately (`POST /api/issues/:id/execute`, `issue execute` in the CLI, and a UI action) with the same eligibility and capacity checks as normal admission; it only bypasses queue order. A queued issue's agent can be changed in the UI without losing its queue position, with an `issue.reassigned` audit event.
 - **Push with lease on diverged pushes (NOT-221)** — when an `unpushed_commit` escalation has a diverged branch, the dashboard shows the diverging SHAs and offers **Push with lease** alongside Resume and Close.
-- **Configurable UI display font (NOT-216)** — navigation, headings, buttons, selects and links use a single system display-font token; Monaco is kept for operational content.
+- **System display font for navigation and headings (NOT-216)** — navigation, headings, buttons, selects and links now use a single `--font-ui-display` design token (a system font); Monaco is kept for operational content. It is a design token, not a user setting.
 
 ### Fixes
 
-- **Repair rounds start from the pushed tip (NOT-219)** — a repair round is now cut from the fetched `origin/<branch>` tip rather than the clone's stale local issue branch, and the local ref is fast-forwarded after push. A fetch failure defers the round instead of starting from stale state.
+- **Repair rounds start from the pushed tip (NOT-219)** — a repair round is now cut from the fetched `origin/<branch>` tip rather than the clone's stale local issue branch, and the local ref is fast-forwarded (best-effort) after push. A fetch failure defers the round instead of starting from stale state.
 - **Diverged push auto-recovery (NOT-220)** — when the remote tip is Dealer's last-known head and the local branch is patch-equivalent, the push is recovered automatically with a lease pinned to that SHA (auditable `branch.pushed` event, no escalation).
 
 ### Internal
 
 - **Normalized failure causes (NOT-171)** — a shared failure-cause contract and classifier is applied to observed failures and recovery reclaims, persisted append-only in `failure_causes` with raw error/reason/log/events untouched. Legacy rows are backfilled as inferred on read.
-- **Durable timing evidence (NOT-168, NOT-169)** — queue and admission wait history, plus setup, agent-process, validation and host-sleep boundaries, are emitted as durable events for exact attribution.
+- **Durable timing evidence (NOT-168, NOT-169)** — queue and admission wait history is now recorded as `queue.*` events. New `agent.started`, `agent.completed` and `host.suspended` events let setup, agent-process, validation and host-sleep intervals be derived exactly.
 
 ## 1.1.3 — 2026-09-20
 
