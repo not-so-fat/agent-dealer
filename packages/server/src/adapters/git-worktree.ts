@@ -690,7 +690,7 @@ export async function pushBranchRef(opts: {
  * When origin no longer matches the pin the push fails and nothing is published — the
  * caller leaves the action open and shows the freshly observed tip instead.
  */
-export async function pushWithLease(opts: {
+export async function pushLeaseToSha(opts: {
   cwd: string;
   branch: string;
   localSha: string;

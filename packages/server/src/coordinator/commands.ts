@@ -43,7 +43,7 @@ import {
   resolveHumanAction,
   updateOpenHumanAction,
 } from "../repository/human-actions.js";
-import { pushWithLease, readRemoteTip } from "../adapters/git-worktree.js";
+import { pushLeaseToSha, readRemoteTip } from "../adapters/git-worktree.js";
 import { ensureIssueRepoCheckout } from "../adapters/managed-repo.js";
 import { reconcileFinding, resolveFindingsAbsentFromRound } from "../repository/findings.js";
 import { normalizeReviewerResult } from "./reviewer-result.js";
@@ -1636,7 +1636,7 @@ async function resolvePushWithLeaseAsync(actionId: string, resolvedBy: string): 
     }
   }
 
-  const pushed = await pushWithLease({
+  const pushed = await pushLeaseToSha({
     cwd,
     branch: facts.branch,
     localSha: facts.localSha,
