@@ -315,6 +315,22 @@ export function formatCount(n: number): string {
   return n.toLocaleString("en-US");
 }
 
+/**
+ * NOT-229: compact count for large token quantities. Exact comma-formatted
+ * below 1,000; `K` for thousands and `M` for millions with one decimal of
+ * precision (trailing `.0` trimmed, values >= 100 shown whole). Callers must
+ * keep the exact `formatCount` value in an accessible label or title.
+ */
+export function formatCompactCount(n: number): string {
+  if (!Number.isFinite(n)) return formatCount(n);
+  const abs = Math.abs(n);
+  if (abs < 1000) return formatCount(n);
+  const unit = (v: number): string =>
+    v >= 100 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, "");
+  if (abs < 1_000_000) return `${unit(n / 1000)}K`;
+  return `${unit(n / 1_000_000)}M`;
+}
+
 export function formatMs(n: number): string {
   if (n < 1000) return `${Math.round(n)} ms`;
   const s = n / 1000;

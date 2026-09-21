@@ -10,6 +10,8 @@ import {
   defaultExecutionReportWindow,
   DEFAULT_EXECUTION_REPORT_WINDOW_DAYS,
   EXECUTION_REPORT_DEFAULT_LIMIT,
+  formatCompactCount,
+  formatCount,
   formatRate,
   isSparseSample,
   nearestRankPercentiles,
@@ -96,6 +98,17 @@ test("sparse samples are explicit and percentiles always show n", () => {
   const cell = percentileCellText({ p50: 1000, p95: 2000, n: 2 }, String);
   assert.ok(cell.includes("n=2 (sparse)"));
   assert.equal(percentileCellText({ p50: null, p95: null, n: 0 }, String), "Unavailable");
+});
+
+test("compact counts stay exact below 1,000 and shorten above", () => {
+  assert.equal(formatCompactCount(999), "999");
+  assert.equal(formatCompactCount(1000), "1K");
+  assert.equal(formatCompactCount(1234), "1.2K");
+  assert.equal(formatCompactCount(12400), "12.4K");
+  assert.equal(formatCompactCount(1_234_567), "1.2M");
+  assert.equal(formatCompactCount(2_000_000), "2M");
+  // The exact value always survives alongside the compact form.
+  assert.equal(formatCount(1_234_567), "1,234,567");
 });
 
 test("rates render Unavailable instead of zero when there is no denominator", () => {

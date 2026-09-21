@@ -80,10 +80,15 @@ test("pagination renders labelled nav only across pages", () => {
   assert.ok(!single.includes('aria-label="Report pages"'));
 });
 
-test("unknown failures keep their own visible bucket with issue links", () => {
+test("failures read as plain language with the raw code preserved", () => {
   const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
-  assert.ok(html.includes("unknown"));
-  assert.ok(html.includes("needs evidence"));
+  assert.ok(html.includes("Why attempts failed"), "operator heading, not statistical wording");
+  assert.ok(!html.includes("Primary failure distribution"), "internal wording retired");
+  assert.ok(html.includes("counted once using its primary"), "counting rule explained");
+  assert.ok(html.includes("may later have recovered"), "recovery explained");
+  assert.ok(html.includes("Cause not recorded"), "unknown bucket renamed for operators");
+  assert.ok(html.includes("Needs more evidence"), "unknown bucket explains itself");
+  assert.ok(html.includes('title="unknown"'), "underlying unknown code preserved in markup");
   assert.ok(html.includes('href="/issues/issue-b"'), "failure rows deep-link to issue detail");
   assert.ok(html.includes("1 of 2 issues with a failed attempt"), "share names its denominator");
 });
@@ -94,7 +99,8 @@ test("comparison rows expose retry, duration coverage, and failed waste", () => 
     assert.ok(html.includes(header), `column: ${header}`);
   }
   assert.ok(html.includes("$1.50"), "per-cohort failed cost renders");
-  assert.ok(html.includes("100 in"), "per-cohort failed tokens render");
+  assert.ok(html.includes("&gt;100&lt;/span&gt;") || html.includes(">100</span>"), "per-cohort failed token value renders");
+  assert.ok(html.includes(">in</span>") && html.includes(">out</span>"), "in/out stay separate labels");
 });
 
 test("missing failed waste reads Unavailable, never zero", () => {
@@ -164,4 +170,91 @@ test("phase section describes the shared read-model derivation", () => {
   const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
   assert.ok(html.includes("execution-analysis read model"));
   assert.ok(!html.includes("no defensible evidence today"));
+});
+
+// NOT-229: metric hierarchy — chrome on the shared display token, values on Monaco.
+test("report chrome uses font-ui-display while values stay Monaco", () => {
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
+  assert.ok(html.includes("font-ui-display"), "labels, headings, headers, and notes opt into the token");
+  assert.ok(html.includes("Why attempts failed"), "section heading renders");
+  assert.ok(html.includes("font-mono"), "metric values and identifiers stay Monaco");
+  assert.ok(!html.includes("Avenir"), "no hard-coded face at call sites");
+  assert.ok(!html.includes("Optima"), "no hard-coded face at call sites");
+});
+
+test("percentiles label P50/P95 separately with sample size as supporting text", () => {
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
+  assert.ok(html.includes(">P50</span>"), "P50 label distinct from its value");
+  assert.ok(html.includes(">P95</span>"), "P95 label distinct from its value");
+  assert.ok(html.includes("n=2 (sparse)"), "sample size/sparse stays visible as a note");
+  assert.ok(html.includes("Sample size 2"), "sample note explains itself to assistive tech via title");
+});
+
+test("missing percentiles render one Unavailable state with no P50/P95 numbers", () => {
+  const noEvidence: { p50: null; p95: null; n: number; quality: "unavailable"; reasons: string[] } = {
+    p50: null, p95: null, n: 0, quality: "unavailable", reasons: ["no_observations"],
+  };
+  const base = fixtureReport();
+  const html = render({
+    loading: false,
+    error: null,
+    report: fixtureReport({
+      summary: {
+        ...base.summary,
+        sessionWallMs: { ...noEvidence },
+        spawnEnvelopeMs: { ...base.summary.spawnEnvelopeMs },
+        checkpointMs: { ...base.summary.checkpointMs },
+      },
+      byRole: [],
+      byRuntime: [],
+      byModel: [],
+    }),
+    onRetry: noop,
+    onPage: noop,
+  });
+  assert.ok(html.includes("No attempts in this dimension"), "empty cohorts still explain themselves");
+  assert.ok(html.includes(">Unavailable</span>"), "missing percentiles read Unavailable");
+});
+
+test("large token totals render compact with the exact count accessible", () => {
+  const html = render({
+    loading: false,
+    error: null,
+    report: fixtureReport({
+      byRole: [],
+      byRuntime: [
+        fixtureCohort({
+          key: "claude_code",
+          tokensIn: { sum: 1_234_567, known: 3, total: 3, quality: "exact", reasons: [] },
+        }),
+      ],
+      byModel: [],
+    }),
+    onRetry: noop,
+    onPage: noop,
+  });
+  assert.ok(html.includes(">1.2M</span>"), "visible token total is compact");
+  assert.ok(html.includes('title="1,234,567"'), "exact comma-formatted value in title text");
+  assert.ok(html.includes('aria-label="1,234,567"'), "exact value available to assistive technology");
+});
+
+test("partial coverage keeps the known value primary with a separate note", () => {
+  const html = render({
+    loading: false,
+    error: null,
+    report: fixtureReport({
+      byRole: [],
+      byRuntime: [
+        fixtureCohort({
+          key: "claude_code",
+          tokensIn: { sum: 110, known: 2, total: 3, quality: "exact", reasons: ["partial_sample"] },
+        }),
+      ],
+      byModel: [],
+    }),
+    onRetry: noop,
+    onPage: noop,
+  });
+  assert.ok(html.includes(">110</span>"), "known aggregate is the primary value");
+  assert.ok(html.includes(">2/3 known</span>"), "coverage denominator is a separate note");
 });
