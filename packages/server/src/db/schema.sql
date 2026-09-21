@@ -196,6 +196,12 @@ CREATE TABLE IF NOT EXISTS workflow_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_workflow_events_issue ON workflow_events(issue_id, ts);
+-- NOT-173: the execution-analysis read model loads one issue set's events with
+-- `WHERE issue_id IN (...) ORDER BY ts, rowid`, and the cohort listing filters
+-- sessions/instances per issue via EXISTS. EXPLAIN QUERY PLAN for those
+-- statements must show index use (asserted in the route tests).
+CREATE INDEX IF NOT EXISTS idx_workflow_events_issue_type ON workflow_events(issue_id, type);
+CREATE INDEX IF NOT EXISTS idx_workflow_events_session ON workflow_events(worker_session_id, type);
 -- Provider-native idempotency key is unique: re-ingesting the same delivery must not
 -- create a duplicate event (PRD §9.3).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_events_idempotency ON workflow_events(idempotency_key)
@@ -269,6 +275,9 @@ CREATE TABLE IF NOT EXISTS usage_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_events_issue ON usage_events(issue_id);
+-- NOT-173: usage evidence joins to its session (`worker_session_id`) in the
+-- read-model loaders.
+CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(worker_session_id);
 
 -- NOT-59: the coordinator kernel's durable work-item / outbox. Each applied coordinator
 -- command records the state transition, the workflow event, and exactly one next work
@@ -472,3 +481,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_entries_queued_issue
   ON queue_entries(issue_id) WHERE state = 'queued';
 CREATE INDEX IF NOT EXISTS idx_queue_entries_queued_position
   ON queue_entries(position) WHERE state = 'queued';
+-- NOT-173: the read model loads every queue-entry row for an issue set.
+CREATE INDEX IF NOT EXISTS idx_queue_entries_issue ON queue_entries(issue_id);
