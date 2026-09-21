@@ -273,6 +273,64 @@ test("recovery, deck, unknown, and incomplete-metadata cases", () => {
   assert.equal(empty[0]!.rawReason, "no failure evidence recorded");
 });
 
+test("recovery flag alone without the presumed-dead marker classifies no reclaim", () => {
+  // Publish-only observed failures pass recovery: null today, but even a stale
+  // "republish" flag must not invent a coordinator_crash primary: the real
+  // publish cause stays primary and no recovery consequence is recorded.
+  const publishLog = writeLog(`\n--- stderr ---\nError: 429 rate limit exceeded\n`);
+  const causes = classifyAttemptFailure({
+    outcomeKind: "publish_failed",
+    outcomeReason: "Review publication to GitHub failed: push rejected",
+    logPath: publishLog,
+    recovery: "republish",
+    sessionId: "s-publish-only",
+  });
+  assert.equal(primary(causes).code, "provider_capacity_rate_limit");
+  assert.ok(causes.every((c) => c.code !== "coordinator_crash"));
+  assert.ok(causes.every((c) => c.code !== "host_sleep_liveness"));
+
+  const bareFlag = classifyAttemptFailure({
+    outcomeKind: "publish_failed",
+    outcomeReason: "Review publication to GitHub failed: push rejected",
+    recovery: "republish",
+    sessionId: "s-bare-flag",
+  });
+  assert.equal(primary(bareFlag).code, "publish_git_failure");
+  assert.ok(bareFlag.every((c) => c.code !== "coordinator_crash"));
+});
+
+test("reclaimed session with provider/auth log evidence keeps it primary", () => {
+  const providerLog = writeLog(`\n--- stderr ---\nError: 429 rate limit exceeded, try again later\n`);
+  const reclaimed = classifyAttemptFailure({
+    outcomeKind: "session_failed",
+    outcomeReason: `${PRESUMED_DEAD_REASON} — re-running the developer`,
+    recovery: "rerun",
+    logPath: providerLog,
+    sessionId: "s-reclaim-429",
+  });
+  assert.equal(reclaimed[0]!.code, "provider_capacity_rate_limit");
+  assert.equal(reclaimed[0]!.primary, true);
+  const crash = reclaimed.find((c) => c.code === "coordinator_crash")!;
+  assert.ok(crash, "recovery failure recorded as a consequence");
+  assert.equal(crash.primary, false);
+
+  const authLog = writeLog(`\n--- stderr ---\n${CURSOR_LOGGED_OUT_STDERR}\n`);
+  const reclaimedAuth = classifyAttemptFailure({
+    outcomeKind: "session_failed",
+    outcomeReason: PRESUMED_DEAD_REASON,
+    recovery: "rerun",
+    logPath: authLog,
+    runtime: "cursor_local",
+    sessionId: "s-reclaim-auth",
+  });
+  assert.equal(reclaimedAuth[0]!.code, "authentication_configuration");
+  assert.equal(reclaimedAuth[0]!.primary, true);
+  assert.equal(
+    reclaimedAuth.find((c) => c.code === "coordinator_crash")?.primary,
+    false
+  );
+});
+
 test("usage-capped and tool-timeout evidence map to capacity/task", () => {
   const capped = primary(
     classifyAttemptFailure({ outcomeKind: "usage_capped", outcomeReason: "claude_code usage capped — plan limit rejected" })

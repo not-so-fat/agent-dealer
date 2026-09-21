@@ -746,7 +746,13 @@ function applyDeveloper(
           outcomeKind: outcome.kind,
           outcomeReason: "reason" in outcome ? (outcome.reason ?? null) : null,
           routeReason: "reason" in route ? route.reason : null,
-          recovery: isPublishOnlyItem(item) ? "republish" : null,
+          // NOT-171: observed failures are never presumed-dead reclaims — not even
+          // for publish-only items. The recovery flag (and its coordinator_crash /
+          // host_sleep signal) comes only from the recovery path
+          // (recovery.ts emitPresumedDeadFailed), which always carries the
+          // presumed-dead marker. Passing "republish" here demoted real
+          // publish/auth/provider causes to consequences.
+          recovery: null,
         });
       }
     } else {
@@ -832,7 +838,7 @@ function applyReviewer(
         payload,
       });
       if (type === "worker.failed") {
-        // NOT-171: see applyDeveloper.
+        // NOT-171: see applyDeveloper — observed failures never carry the recovery flag.
         recordCausesForWorkerFailedEvent({
           issueId: issue.id,
           workflowInstanceId: instance.id,
@@ -840,7 +846,7 @@ function applyReviewer(
           outcomeKind: outcome.kind,
           outcomeReason: "reason" in outcome ? (outcome.reason ?? null) : null,
           routeReason: "reason" in route ? route.reason : null,
-          recovery: isPublishOnlyItem(item) ? "republish" : null,
+          recovery: null,
         });
       }
     } else {

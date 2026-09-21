@@ -323,27 +323,35 @@ export function classifyAttemptFailure(input: AttemptFailureInput): FailureCause
   // Recovery-produced failures share the classifier. A reclaim over a
   // host-sleep window is host_sleep_liveness; any other presumed-dead reclaim
   // is a coordinator/host crash, never a task failure.
+  //
+  // The presumed-dead marker in the reason text is required — the recovery flag
+  // alone never fires this signal. Observed failures (including publish-only
+  // items) pass recovery: null, and a bare flag without the recorded marker is
+  // not a reclaim. The signal is built here but pushed AFTER log/outcome
+  // signals below: within one observation every cause shares occurredAt and the
+  // event cursor, so insertion order decides the primary, and the documented
+  // order is log before outcome before recovery. A reclaimed session whose log
+  // already shows a 429 or auth failure keeps that earlier cause as primary;
+  // the recovery failure is recorded as a consequence.
   const presumedDead =
-    input.recovery != null ||
     (sessionReason ?? "").includes(PRESUMED_DEAD_REASON) ||
     (outcomeReason ?? "").includes(PRESUMED_DEAD_REASON);
+  let recoverySignal: Signal | null = null;
   if (presumedDead) {
     const sleepEvidence = input.hostSuspended === true || SLEEP_WORD_RE.test(rawReason);
-    signals.push(
-      sleepEvidence
-        ? {
-            code: "host_sleep_liveness",
-            confidence: input.hostSuspended === true ? "high" : "medium",
-            evidenceSource: input.recovery != null ? "recovery" : "session_error",
-            rawReason: rawReason || PRESUMED_DEAD_REASON,
-          }
-        : {
-            code: "coordinator_crash",
-            confidence: "medium",
-            evidenceSource: input.recovery != null ? "recovery" : "session_error",
-            rawReason: rawReason || PRESUMED_DEAD_REASON,
-          }
-    );
+    recoverySignal = sleepEvidence
+      ? {
+          code: "host_sleep_liveness",
+          confidence: input.hostSuspended === true ? "high" : "medium",
+          evidenceSource: input.recovery != null ? "recovery" : "session_error",
+          rawReason: rawReason || PRESUMED_DEAD_REASON,
+        }
+      : {
+          code: "coordinator_crash",
+          confidence: "medium",
+          evidenceSource: input.recovery != null ? "recovery" : "session_error",
+          rawReason: rawReason || PRESUMED_DEAD_REASON,
+        };
   }
 
   // Spawn-log evidence predates outcome evidence: a provider/auth crash that
@@ -410,6 +418,10 @@ export function classifyAttemptFailure(input: AttemptFailureInput): FailureCause
     // specific validation/publish/deck/cap cause is recorded as a consequence.
     signals.push(outcomeSignal);
   }
+
+  // Recovery evidence sorts last (log before outcome before recovery), so a
+  // reclaim never displaces an earlier actionable cause as primary.
+  if (recoverySignal) signals.push(recoverySignal);
 
   // Non-zero CLI exit with no other signal is a CLI crash. A timeout's exit
   // code (kill escalation) is ambiguous, never a crash.
