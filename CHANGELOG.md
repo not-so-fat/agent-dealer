@@ -2,6 +2,25 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.1.5 — 2026-09-21
+
+Patch over 1.1.4: execution analysis — see where time and retries go per issue and compare runtimes and models across a fleet — plus small UI and CLI polish.
+
+### Features
+
+- **Per-issue execution analysis (NOT-173, NOT-174)** — Issue Detail now shows execution phases, failure state, observational silence intervals, and failed-attempt/retry waste with per-attempt reuse badges. Backed by new issue and cohort execution-analysis APIs that carry quality/coverage metadata; cohort aggregates cover the full matching window (not just the current page), and attempt filters (role/runtime/model/status) scope waste, retry, reviewer and failure metrics too.
+- **Runtime and model execution-comparison report (NOT-175)** — a new Execution report page (`GET /api/execution-report`) compares runtimes and models with URL-persisted filters, coverage tables, failure buckets, per-row waste/retry columns and cohort deep links.
+- **Version on `start` and `status` (NOT-224)** — `agent-dealer start` and `agent-dealer status` now print the running Agent Dealer version.
+
+### UI
+
+- **New issue panel placement (NOT-223)** — the New issue form now renders directly below the header, above the admission queue. Presentation order only.
+- **Avenir for UI chrome, Monaco for values (NOT-222)** — the `--font-ui-display` token now resolves to an Avenir-first system stack for navigation, headings and buttons; form fields and value-bearing selects stay in Monaco.
+
+### Internal
+
+- **Activity and checkpoint evidence (NOT-170, NOT-172)** — structured session activity is persisted (new `session_activity_events` table, migrated automatically on start) and silence intervals are derived from it. First-checkpoint and retry-reuse evidence is emitted from developer sessions, with the worktree HEAD captured at session start as the sampler baseline. This is the evidence the analysis above reads; it changes no run behavior.
+
 ## 1.1.4 — 2026-09-21
 
 Patch over 1.1.3: queue controls (configurable concurrency, Execute now, queued agent reassignment), safer push/repair recovery, and durable failure-cause and timing evidence.
