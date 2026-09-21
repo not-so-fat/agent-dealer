@@ -16,7 +16,7 @@ const { createIssue, transitionIssue } = await import("../repository/issues.js")
 const { createWorkerSession, completeSession, startSession } = await import("../repository/worker-sessions.js");
 const { recordUsageEvent } = await import("../repository/usage-events.js");
 const { appendWorkflowEvent } = await import("../repository/workflow-events.js");
-const { buildExecutionReport, classifyFailureReason } = await import("./execution-report.js");
+const { buildExecutionReport, classifyFailureReason, matchesSessionValue } = await import("./execution-report.js");
 
 before(() => {
   migrate();
@@ -161,16 +161,56 @@ test("unknown failures have their own visible bucket", () => {
   assert.equal(total, 2);
 });
 
-test("percentiles carry sample counts and phases stay unavailable", () => {
+test("phases are composed from the NOT-173 read model with sample counts", () => {
   const report = buildExecutionReport({});
   assert.ok(report.summary.sessionWallMs.n >= 0);
   assert.equal(report.summary.phaseWallMs.length, 4);
+  // agent_process carries the NOT-173 usage-envelope backfill for the two
+  // sessions with usage rows (5s reviewer + 60s failed developer): nearest-rank
+  // P50/P95 with an explicit sample count, never a guess.
+  const agent = report.summary.phaseWallMs.find((p) => p.phase === "agent_process")!;
+  assert.equal(agent.stat.n, 2);
+  assert.equal(agent.stat.p50, 5_000);
+  assert.equal(agent.stat.p95, 60_000);
+  assert.equal(agent.stat.quality, "inferred");
+  assert.ok(agent.stat.reasons.includes("backfill"));
+  // Phases without recorded boundaries stay unavailable with reasons — never zero.
   for (const p of report.summary.phaseWallMs) {
+    assert.ok(typeof p.stat.n === "number");
+    if (p.phase === "agent_process") continue;
     assert.equal(p.stat.n, 0);
     assert.equal(p.stat.p50, null);
+    assert.equal(p.stat.p95, null);
     assert.equal(p.stat.quality, "unavailable");
+    assert.ok(p.stat.reasons.length > 0);
   }
   assert.equal(report.meta.partial, true);
+});
+
+test("phase percentiles follow the session-level filter scope", () => {
+  const filtered = buildExecutionReport({ runtime: "cursor_local" });
+  // Only the reviewer attempt (5s usage backfill) contributes.
+  const agent = filtered.summary.phaseWallMs.find((p) => p.phase === "agent_process")!;
+  assert.equal(agent.stat.n, 1);
+  assert.equal(agent.stat.p50, 5_000);
+  assert.equal(agent.stat.p95, 5_000);
+  const empty = buildExecutionReport({ runtime: "no_such_runtime" });
+  for (const p of empty.summary.phaseWallMs) {
+    assert.equal(p.stat.n, 0);
+    assert.equal(p.stat.p50, null);
+  }
+});
+
+test("unknown runtime/model filter matches null values, never everything", () => {
+  assert.equal(matchesSessionValue(null, "unknown"), true);
+  assert.equal(matchesSessionValue("", "unknown"), true);
+  assert.equal(matchesSessionValue("cursor_local", "unknown"), false);
+  assert.equal(matchesSessionValue("cursor_local", null), true);
+  assert.equal(matchesSessionValue(null, null), true);
+  // The seed has no null runtimes, so the unknown cohort is honestly empty.
+  const unk = buildExecutionReport({ runtime: "unknown" });
+  assert.equal(unk.summary.issues, 0);
+  assert.equal(unk.summary.attempts, 0);
 });
 
 test("failed-attempt waste sums known values only", () => {
@@ -214,9 +254,11 @@ test("role/runtime filters scope issues, success, failures, and pagination", () 
   assert.equal(filtered.issues[0]!.attempts, 1);
   assert.equal(filtered.summary.retryExtraAttempts, 0);
   assert.equal(filtered.summary.retryRate, 0);
-  assert.equal(filtered.failures.length, 1);
-  assert.equal(filtered.failures[0]!.code, "provider_capacity_rate_limit");
-  assert.deepEqual(filtered.failures[0]!.issueIds, [seeded.a.id]);
+  // Failures attribute only to matching failed sessions: the Cursor
+  // reviewer-only cohort has no failed attempts, so no failure bucket — the
+  // Claude developer's rate-limit payload must not leak in while
+  // failed-waste cards show no failed attempts.
+  assert.deepEqual(filtered.failures, []);
 
   const reviewers = buildExecutionReport({ role: "reviewer" });
   assert.equal(reviewers.summary.issues, 1);
