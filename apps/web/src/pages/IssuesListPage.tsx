@@ -1,19 +1,32 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import type { AgentWithHealth, HumanAction, LinearCandidate } from "@agent-dealer/shared";
 import {
   createIssue,
   dequeueIssue,
-  fetchIssues,
+  fetchIssuesPage,
   fetchLinearInbox,
   fetchQueue,
   fetchRecentRepos,
   lookupLinearIssue,
   moveQueueEntry,
   resolveHumanAction,
-  type IssueListRow,
+  type IssuesListPageResult,
   type QueueEntryRow,
 } from "../api";
+import {
+  EMPTY_ISSUES_FORM,
+  formToIssuesFilters,
+  hasActiveIssuesFilters,
+  issuesPageText,
+  issuesRangeText,
+  searchToIssuesFilters,
+  searchToIssuesForm,
+  serializeIssuesQuery,
+  setIssuesPageQuery,
+  ISSUE_STATUS_OPTIONS,
+  type IssuesFilterForm,
+} from "../lib/issuesList";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
 import NeedsAttentionPanel from "../components/issues/NeedsAttentionPanel";
 import AlertIcon from "../components/ui/AlertIcon";
@@ -50,8 +63,17 @@ export default function IssuesListPage({
   humanActions,
   onHumanActionsChanged,
 }: Props) {
-  const [issues, setIssues] = useState<IssueListRow[] | null>(null);
+  const [issuePage, setIssuePage] = useState<IssuesListPageResult | null>(null);
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
+  // NOT-228: applied list filters + page live in the `/issues` query string so
+  // reload and back/forward restore the same view. The filter bar edits a
+  // draft that only takes effect on Apply; Previous/Next touch the page only.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const search = searchParams.toString();
+  const applied = searchToIssuesFilters(search);
+  const appliedRef = useRef(applied);
+  appliedRef.current = applied;
+  const [filters, setFilters] = useState<IssuesFilterForm>(() => searchToIssuesForm(search));
   const [showCreate, setShowCreate] = useState(false);
   const [sourceMode, setSourceMode] = useState<"manual" | "linear">("manual");
   const [candidates, setCandidates] = useState<LinearCandidate[]>([]);
@@ -73,12 +95,38 @@ export default function IssuesListPage({
   const selectedLinear = candidates.find((c) => c.id === selectedLinearId) ?? null;
   const linearLocked = sourceMode === "linear" && selectedLinear != null;
 
+  const refreshIssues = (f: typeof applied) => {
+    fetchIssuesPage(f).then(setIssuePage).catch((e) => setError(String(e)));
+  };
+
+  /** Queue panel, Needs-attention panel, and historical list stay in sync.
+   * The queue/admission panels are global and unfiltered; applied URL filters
+   * scope only the historical list below them. */
   const refresh = () => {
-    fetchIssues().then(setIssues).catch((e) => setError(String(e)));
+    refreshIssues(appliedRef.current);
     fetchQueue()
       .then(setQueue)
       .catch(() => undefined);
   };
+
+  /** Apply writes the draft to the URL and returns to page 1. */
+  const applyFilters = (next: IssuesFilterForm) => {
+    const qs = serializeIssuesQuery(formToIssuesFilters(next));
+    setSearchParams(qs ? Object.fromEntries(new URLSearchParams(qs)) : {});
+  };
+
+  const resetFilters = () => {
+    setFilters(EMPTY_ISSUES_FORM);
+    setSearchParams({});
+  };
+
+  /** Previous/Next change only the applied page — draft edits stay in the form. */
+  const gotoPage = (page: number) => {
+    const qs = setIssuesPageQuery(search, page);
+    setSearchParams(qs ? Object.fromEntries(new URLSearchParams(qs)) : {});
+  };
+
+  const setFilter = (patch: Partial<IssuesFilterForm>) => setFilters((f) => ({ ...f, ...patch }));
 
   /** Resolve an action inline (run-scoped items have no issue page to resolve them on). */
   const resolveAction = async (actionId: string, choice: string) => {
@@ -95,11 +143,27 @@ export default function IssuesListPage({
     }
   };
 
+  // Draft form follows the URL (reload / back / forward restore the view);
+  // fetching follows the URL too, so unapplied drafts never affect results.
   useEffect(() => {
-    refresh();
-    const poll = setInterval(refresh, 5000);
+    setFilters(searchToIssuesForm(search));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
+
+  useEffect(() => {
+    refreshIssues(appliedRef.current);
+    fetchQueue()
+      .then(setQueue)
+      .catch(() => undefined);
+    const poll = setInterval(() => {
+      refreshIssues(appliedRef.current);
+      fetchQueue()
+        .then(setQueue)
+        .catch(() => undefined);
+    }, 5000);
     return () => clearInterval(poll);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
 
   useEffect(() => {
     if (!showCreate) return;
@@ -484,13 +548,99 @@ export default function IssuesListPage({
         </div>
       )}
 
-      {issues === null ? (
+      <form
+        aria-label="Issues filters"
+        className="mb-4 p-4 rounded border border-white/10 bg-panel-elevated/60"
+        onSubmit={(e) => {
+          e.preventDefault();
+          applyFilters(filters);
+        }}
+      >
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <label className="block text-sm">
+            <span className="block text-xs text-white/50 mb-1">Search</span>
+            <input
+              type="text"
+              placeholder="Title or label (e.g. NOT-175)"
+              className="w-full bg-black/30 border border-white/10 rounded px-3 py-2"
+              value={filters.q}
+              onChange={(e) => setFilter({ q: e.target.value })}
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="block text-xs text-white/50 mb-1">Status</span>
+            <select
+              className="w-full bg-black/30 border border-white/10 rounded px-3 py-2"
+              value={filters.status}
+              onChange={(e) => setFilter({ status: e.target.value })}
+            >
+              <option value="">All statuses</option>
+              {ISSUE_STATUS_OPTIONS.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </label>
+          <label className="block text-sm">
+            <span className="block text-xs text-white/50 mb-1">Repository</span>
+            <input
+              type="text"
+              placeholder="github.com/owner/repo"
+              title="Exact repository identity"
+              className="w-full bg-black/30 border border-white/10 rounded px-3 py-2"
+              value={filters.repo}
+              onChange={(e) => setFilter({ repo: e.target.value })}
+            />
+          </label>
+          <div className="flex items-end gap-2">
+            <label className="flex items-center gap-2 text-sm text-white/70 cursor-pointer pb-2">
+              <input
+                type="checkbox"
+                checked={filters.needsAttention}
+                onChange={(e) => setFilter({ needsAttention: e.target.checked })}
+                className="accent-[#C4B643]"
+              />
+              Needs attention
+            </label>
+          </div>
+          <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-4">
+            <button type="submit" className="btn-gold px-4">Apply</button>
+            <button
+              type="button"
+              className="px-4 py-2 text-sm text-white/60 hover:text-white"
+              onClick={resetFilters}
+            >
+              Reset
+            </button>
+          </div>
+        </div>
+      </form>
+
+      {issuePage === null ? (
         <p className="text-white/50 text-sm">Loading…</p>
-      ) : issues.length === 0 ? (
+      ) : issuePage.total === 0 && !hasActiveIssuesFilters(applied) ? (
         <p className="text-white/45 text-sm">No issues yet — create one to get started.</p>
+      ) : issuePage.total === 0 ? (
+        <div className="rounded border border-white/10 bg-panel-elevated/40 px-4 py-3">
+          <p className="text-white/45 text-sm">{issuesRangeText(issuePage)}</p>
+          <button
+            type="button"
+            className="mt-2 px-3 py-1.5 text-sm rounded border border-white/15 text-white/70 hover:text-white"
+            onClick={resetFilters}
+          >
+            Reset filters
+          </button>
+        </div>
       ) : (
-        <div className="space-y-2">
-          {issues.map((issue) => {
+        <div>
+          <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+            <h3 className="text-sm font-medium text-white/80">Issues</h3>
+            <p className="text-xs text-white/40 tabular-nums">
+              {issuesRangeText(issuePage)}
+              {issuesPageText(issuePage) ? ` · ${issuesPageText(issuePage)}` : ""}
+            </p>
+          </div>
+          <div className="space-y-2">
+          {issuePage.issues.map((issue) => {
             // NOT-118: a queued `ready` issue must not read as an idle one — show its
             // position and what it is waiting for, right on the row.
             const entry = queue.find((e) => e.issueId === issue.id);
@@ -525,6 +675,30 @@ export default function IssuesListPage({
               </Link>
             );
           })}
+          </div>
+          {issuePage.totalPages > 1 && (
+            <nav aria-label="Issues pages" className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                className="px-3 py-1.5 text-sm rounded border border-white/15 text-white/70 hover:text-white disabled:opacity-40"
+                disabled={issuePage.page <= 1}
+                onClick={() => gotoPage(issuePage.page - 1)}
+              >
+                Previous
+              </button>
+              <span className="text-xs text-white/45 tabular-nums">
+                Page {issuePage.page} of {issuePage.totalPages}
+              </span>
+              <button
+                type="button"
+                className="px-3 py-1.5 text-sm rounded border border-white/15 text-white/70 hover:text-white disabled:opacity-40"
+                disabled={issuePage.page >= issuePage.totalPages}
+                onClick={() => gotoPage(issuePage.page + 1)}
+              >
+                Next
+              </button>
+            </nav>
+          )}
         </div>
       )}
     </div>

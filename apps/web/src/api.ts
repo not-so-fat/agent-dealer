@@ -202,6 +202,38 @@ export async function fetchIssues(status?: IssueStatus[]): Promise<IssueListRow[
   return res.json();
 }
 
+/** NOT-228: paginated Issues list fetch — applied filters plus `{ page, limit, total, totalPages }`. */
+export interface IssuesListPageResult {
+  issues: IssueListRow[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface IssuesListQuery {
+  q?: string;
+  status?: string;
+  repo?: string;
+  needsAttention?: boolean;
+  page?: number;
+}
+
+export async function fetchIssuesPage(query: IssuesListQuery): Promise<IssuesListPageResult> {
+  const qs = new URLSearchParams();
+  if (query.q?.trim()) qs.set("q", query.q.trim());
+  if (query.status?.trim()) qs.set("status", query.status.trim());
+  if (query.repo?.trim()) qs.set("repo", query.repo.trim());
+  if (query.needsAttention) qs.set("needsAttention", "1");
+  // Always send the page so the server answers the paginated shape; page 1 is
+  // still canonicalized out of the browser URL by the view-model.
+  qs.set("page", String(query.page && query.page > 1 ? Math.floor(query.page) : 1));
+  qs.sort();
+  const res = await fetch(`${API}/api/issues?${qs.toString()}`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 /** Recent local repo paths from prior issues for the kick picker (NOT-102). */
 export async function fetchRecentRepos(): Promise<string[]> {
   const res = await fetch(`${API}/api/issues/recent-repos`);
