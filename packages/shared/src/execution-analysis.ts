@@ -12,6 +12,7 @@
 // known < total; known = 0 is `unavailable`, never 0.
 import { z } from "zod";
 import { FailureCause } from "./failure-cause.js";
+import { RetryReuseKind } from "./attempt-waste.js";
 
 /** Evidence quality tier for one derived metric (§4). */
 export const ExecutionQuality = z.enum(["exact", "inferred", "unavailable"]);
@@ -119,6 +120,14 @@ export const AttemptAnalysis = z.object({
   spawnEnvelopeQuality: ExecutionQuality,
   spawnEnvelopeReasons: z.array(z.string()),
   failureCauses: z.array(FailureCause),
+  /**
+   * Retry-reuse kinds this attempt preserved from prior work (NOT-174).
+   * Only meaningful on retries (not the first attempt): a non-empty list names
+   * exactly what was preserved, an empty list marks an explicit cold retry, and
+   * undefined (legacy payloads) means unknown. Optional so older payloads
+   * without this field still parse.
+   */
+  reuseKinds: z.array(RetryReuseKind).optional(),
   /** Silence intervals nested inside this attempt's agent_process (§5). */
   silence: z.array(NestedInterval),
   silenceQuality: ExecutionQuality,
@@ -149,6 +158,12 @@ export const RetryReuseView = z.object({
   unknown: z.number().int(),
   publishOnly: z.number().int(),
   reuseRate: z.number().nullable(),
+  /**
+   * Union of reuse kinds preserved across retries (NOT-174) — exactly what was
+   * preserved, not just how many retries reused something. Empty when nothing
+   * was preserved. Optional so older payloads without this field still parse.
+   */
+  preservedKinds: z.array(RetryReuseKind).optional(),
   quality: ExecutionQuality,
   reasons: z.array(z.string()),
 });
