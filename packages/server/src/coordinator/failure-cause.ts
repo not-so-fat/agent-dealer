@@ -32,7 +32,7 @@ import { recordFailureCauses } from "../repository/failure-causes.js";
 
 /** Input evidence for classifying one failed attempt's observation. */
 export interface AttemptFailureInput {
-  outcomeKind: string | null;
+  outcomeKind?: string | null;
   outcomeReason?: string | null;
   sessionErrorJson?: string | null;
   routeReason?: string | null;
@@ -222,15 +222,15 @@ function detectOutcomeSignal(
         rawReason: rawReason || "Git/GitHub verification failed.",
       };
     case "timed_out": {
-      const toolEvidence =
-        opts.toolInFlight ||
-        (TIMEOUT_WORD_RE.test(`${rawReason}\n${opts.logHaystack}`) &&
-          TOOL_TEST_RE.test(`${rawReason}\n${opts.logHaystack}`));
-      if (toolEvidence) {
+      const toolInLog =
+        TIMEOUT_WORD_RE.test(opts.logHaystack) && TOOL_TEST_RE.test(opts.logHaystack);
+      const toolInReason =
+        TIMEOUT_WORD_RE.test(rawReason) && TOOL_TEST_RE.test(rawReason);
+      if (opts.toolInFlight || toolInLog || toolInReason) {
         return {
           code: "tool_test_timeout",
           confidence: opts.toolInFlight ? "high" : "medium",
-          evidenceSource: opts.toolInFlight ? "workflow_event" : "spawn_log",
+          evidenceSource: opts.toolInFlight ? "workflow_event" : toolInLog ? "spawn_log" : "outcome_kind",
           rawReason: rawReason || "Developer session timed out.",
         };
       }
@@ -288,7 +288,8 @@ export function classifyAttemptFailure(input: AttemptFailureInput): FailureCause
   const routeReason = input.routeReason?.trim() || null;
   const rawReason = outcomeReason ?? sessionReason ?? routeReason ?? "";
   const logHaystack = readSpawnLogFailureText(input.logPath);
-  const timedOut = input.timedOut ?? input.outcomeKind === "timed_out";
+  const outcomeKind = input.outcomeKind ?? null;
+  const timedOut = input.timedOut ?? outcomeKind === "timed_out";
   const toolInFlight = input.toolInFlight ?? false;
 
   const base = {
@@ -350,6 +351,42 @@ export function classifyAttemptFailure(input: AttemptFailureInput): FailureCause
   const logSignal = detectLogSignal(logHaystack, runtime);
   if (logSignal) signals.push(logSignal);
 
+  // The same signals in recorded reason text (outcome/session/route reasons are
+  // short effect strings, never transcripts, so matching them is safe). Covers
+  // log-less rows: a lost log must not turn an auth death into unknown.
+  const combinedReason = `${outcomeReason ?? ""}\n${sessionReason ?? ""}\n${routeReason ?? ""}`;
+  if (!signals.some((s) => s.code === "authentication_configuration")) {
+    if (isCursorKeychainStuckOutput(combinedReason)) {
+      signals.push({
+        code: "authentication_configuration",
+        confidence: "high",
+        evidenceSource: sessionReason ? "session_error" : "outcome_kind",
+        rawReason: combinedReason.trim().slice(0, 500),
+      });
+    } else {
+      const auth = runtimeAuthClassificationForLog(combinedReason, runtime);
+      if (auth?.issue.code === "runtime_auth") {
+        signals.push({
+          code: "authentication_configuration",
+          confidence: auth.runtime ? "high" : "medium",
+          evidenceSource: sessionReason ? "session_error" : "outcome_kind",
+          rawReason: combinedReason.trim().slice(0, 500),
+        });
+      }
+    }
+  }
+  if (
+    !signals.some((s) => s.code === "provider_capacity_rate_limit") &&
+    hasProviderCapacitySignal(combinedReason)
+  ) {
+    signals.push({
+      code: "provider_capacity_rate_limit",
+      confidence: "medium",
+      evidenceSource: sessionReason ? "session_error" : "outcome_kind",
+      rawReason: combinedReason.trim().slice(0, 500),
+    });
+  }
+
   // Deck words in failure-bearing text (not transcript prose) name the Deck.
   if (
     !signals.some((s) => s.code === "agent_deck_unavailable") &&
@@ -357,13 +394,13 @@ export function classifyAttemptFailure(input: AttemptFailureInput): FailureCause
   ) {
     signals.push({
       code: "agent_deck_unavailable",
-      confidence: input.outcomeKind === "deck_failure" ? "high" : "medium",
+      confidence: outcomeKind === "deck_failure" ? "high" : "medium",
       evidenceSource: logHaystack && /\bagent deck\b/i.test(logHaystack) ? "spawn_log" : "outcome_kind",
       rawReason: rawReason || "Agent Deck failure.",
     });
   }
 
-  const outcomeSignal = detectOutcomeSignal(input.outcomeKind, rawReason, {
+  const outcomeSignal = detectOutcomeSignal(outcomeKind, rawReason, {
     timedOut,
     toolInFlight,
     logHaystack,
