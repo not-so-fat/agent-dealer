@@ -164,6 +164,26 @@ export function migrate(): void {
     db.exec("ALTER TABLE usage_events ADD COLUMN model TEXT");
   }
 
+  // NOT-170 round 3: per-line sequence in the activity idempotency key so parallel
+  // tool blocks on one NDJSON line persist as distinct rows. Existing rows keep the
+  // DEFAULT 0 (single-entry lines are unaffected). The old
+  // (worker_session_id, source_offset) unique index must go: it would reject the
+  // second entry of a two-block line. Rebuild only when the stored index definition
+  // predates source_seq, so steady-state migrate() stays a no-op.
+  const activityCols = db.prepare("PRAGMA table_info(session_activity_events)").all() as Array<{ name: string }>;
+  if (!activityCols.some((c) => c.name === "source_seq")) {
+    db.exec("ALTER TABLE session_activity_events ADD COLUMN source_seq INTEGER NOT NULL DEFAULT 0");
+  }
+  const activityIdem = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_session_activity_idempotency'")
+    .get() as { sql: string | null } | undefined;
+  if (activityIdem && activityIdem.sql && !activityIdem.sql.includes("source_seq")) {
+    db.exec("DROP INDEX idx_session_activity_idempotency");
+    db.exec(`CREATE UNIQUE INDEX idx_session_activity_idempotency
+      ON session_activity_events(worker_session_id, source_offset, source_seq)
+      WHERE source_offset IS NOT NULL`);
+  }
+
   // Tighten the workflow-event idempotency index to UNIQUE for DBs created before the
   // constraint (schema.sql's IF NOT EXISTS won't upgrade an existing non-unique index).
   // A pre-fix DB may already hold duplicate keys — the old index was non-unique and

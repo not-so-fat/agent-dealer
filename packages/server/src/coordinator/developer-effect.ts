@@ -924,6 +924,7 @@ export async function runDeveloperEffect(
       role: "developer",
       round,
       logPath,
+      workerSessionId: sessionId,
       headCheck: {
         inputSha: samplerInputSha,
         readHead: () => revParseHead(worktreePath).catch(() => null),
