@@ -303,9 +303,10 @@ export function scanNewActivityLines(
   if (raw.length < fromOffset) cursor = 0;
   const scanned: ScannedActivity[] = [];
   let offset = base;
-  // Preserve line boundaries including the trailing partial line (not yet complete).
+  // Every "\n" terminates exactly one line; a trailing partial line (no newline yet)
+  // is held back, and the phantom segment after a final newline is not a line.
   const parts = slice.split("\n");
-  const complete = raw.endsWith("\n") ? parts.length : parts.length - 1;
+  const complete = parts.length - 1;
   for (let i = 0; i < complete; i++) {
     const line = parts[i]!;
     const lineStart = offset;

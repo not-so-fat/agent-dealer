@@ -227,9 +227,21 @@ export function deriveSilenceIntervals(input: DeriveSilenceInput): SilenceDeriva
       lastKind = inWindow[i]!.kind;
     }
   }
+  // Adjacent gaps with the same category merge: intervals split only when the
+  // category changes (or a sleep window overrides part of a gap below).
+  const merged: Gap[] = [];
+  for (const gap of gaps) {
+    const last = merged[merged.length - 1];
+    if (last && last.category === gap.category && last.endMs === gap.startMs) {
+      last.endMs = gap.endMs;
+    } else {
+      merged.push({ ...gap });
+    }
+  }
+
   const reasons = [...new Set([...processReasons, "sampler_observed_time"])];
   const intervals: SilenceInterval[] = [];
-  for (const gap of gaps) {
+  for (const gap of merged) {
     for (const part of applySleepOverride(gap, sleepWindows)) {
       intervals.push({ ...part, quality: "inferred", reasons: [...reasons] });
     }
