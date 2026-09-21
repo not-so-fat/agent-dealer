@@ -43,6 +43,7 @@ import { infraAttemptsRemain } from "./routing.js";
 import { activeClockJumpGrace, type ClockJump } from "./clock-jump.js";
 import { inspectWorkerProcess, terminateWorkerProcess } from "./process-liveness.js";
 import { maxAliveHoldMsFor } from "./session-timeouts.js";
+import { emitHostSuspended } from "./agent-boundaries.js";
 import { routeAppliedOutcome } from "./commands.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
 import { workerSessionPayload } from "./session-progress.js";
@@ -391,6 +392,31 @@ export async function recoverCoordinator(opts?: {
     // resumed heartbeat to renew the lease and drop the item from the candidate set.
     if (protectedByClockJump(item, grace)) {
       heldAcrossClockJump.push(item.id);
+      // NOT-169: durable sleep evidence, one idempotent host.suspended per affected
+      // session/jump. Observational only — the hold decision above is unchanged, and a
+      // failure here never fails, retries, or reassigns the item.
+      try {
+        const issue = getIssue(item.issueId);
+        const instance = getActiveWorkflowInstance(item.issueId);
+        if (issue && instance && instance.id === item.workflowInstanceId && item.workerSessionId && grace) {
+          const role = item.kind === "developer" ? "developer" : "reviewer";
+          emitHostSuspended({
+            issueId: issue.id,
+            workflowInstanceId: instance.id,
+            workerSessionId: item.workerSessionId,
+            role,
+            stage: issue.status,
+            round: item.round,
+            detectedAt: grace.detectedAt,
+            graceUntil: grace.graceUntil,
+            wallGapMs: grace.wallGapMs,
+            unelapsedMs: grace.unelapsedMs,
+            unobservedMs: grace.unobservedMs,
+          });
+        }
+      } catch {
+        // evidence must never change recovery decisions
+      }
       continue;
     }
 
