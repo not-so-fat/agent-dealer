@@ -9,12 +9,12 @@ Patch over 1.1.5: a filterable, paginated Issues list, a more readable Execution
 ### Features
 
 - **Issues list filters and pagination (NOT-228)** — the Issues page history now has a filter bar (search across title and external label, status, exact repository, Needs attention) that applies on **Apply**, with applied filters and the page persisted in the `/issues` query string so views are linkable and survive reload. The list shows `Showing X–Y of N` with Previous/Next, and a filter-specific empty state with **Reset** (distinct from the first-run empty state). The New issue form, Admission queue and Needs-attention panel stay global and unfiltered.
-- **Paginated `GET /api/issues` (NOT-228)** — when `page`/`limit` are passed (default 25, max 100) the endpoint answers `{ issues, page, limit, total, totalPages }` with stable `updated_at DESC` ordering; without them it keeps returning the legacy unpaginated array, so existing API consumers are unaffected.
+- **Paginated `GET /api/issues` (NOT-228)** — passing `page` and/or `limit` (default 25, max 100) returns `{ issues, page, limit, total, totalPages }` in stable `updated_at DESC` order, and enables the filters `q` (title / external label), `status` (comma-separated), `repo` (exact) and `needsAttention` (`1` or `true`). Filters apply only in paginated mode; without `page`/`limit` the endpoint returns the legacy array exactly as before (still honouring `status` only), so existing API consumers are unaffected.
 
 ### UI
 
-- **Readable Execution report (NOT-229)** — clearer metric hierarchy, structured percentile/coverage/failure presentation, compact token quantities (e.g. `1.2M`) and plainer failure wording. Presentation only; `GET /api/execution-report` gains no new required fields.
-- **Monaco header wordmark and Issues-first navigation (NOT-227)** — the dashboard header wordmark now reads **Monaco** (was "AgentDealer"); it links to Issues, which leads the nav. The CLI, npm package name and `agent-dealer` command are unchanged.
+- **Readable Execution report (NOT-229)** — clearer hierarchy on the Execution report page: percentile and coverage values are laid out as labelled figures, missing data reads **Unavailable**, large token counts are compact (e.g. `1.2K`, `1.2M`), and the failure section is now titled **Why attempts failed**. Presentation only: the `GET /api/execution-report` response is unchanged.
+- **Dashboard header name and nav order (NOT-227)** — the dashboard header now shows **Monaco** as its display name (previously "AgentDealer"; unrelated to the Monaco font), and Issues now comes before Reports in the nav. The browser tab title, CLI, npm package name and `agent-dealer` command are unchanged.
 
 ## 1.1.5 — 2026-09-21
 
