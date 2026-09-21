@@ -52,6 +52,18 @@ const SILENCE_LABELS: Record<string, string> = {
   unknown: "Silent · unknown cause",
 };
 
+/** Operator labels for the retry-reuse kinds a retry actually preserved. */
+const REUSE_KIND_LABELS: Record<string, string> = {
+  worktree: "worktree",
+  commit: "commit",
+  verification_receipt: "verification receipt",
+  publish_only: "publish-only result",
+};
+
+/** Attempt statuses that count as failed evidence (mirrors isWastedSession for
+ * failed/timed_out; cancelled counts only with failure causes, checked below). */
+const FAILED_ATTEMPT_STATUSES = new Set(["failed", "timed_out", "error"]);
+
 function humanizeCode(code: string): string {
   return code.replace(/_/g, " ");
 }
@@ -61,20 +73,22 @@ function qualityTitle(quality: ExecutionQuality, reasons: string[]): string {
   return reasons.length > 0 ? `${base} — ${reasons.join(", ")}` : base;
 }
 
-/** Inline quality marker — always text, never color-only. */
+/** Inline quality marker — always text, never color-only. Reasons are in a
+ * screen-reader span as well as the hover title so keyboard/touch users get them. */
 function QualityTag({ quality, reasons }: { quality: ExecutionQuality; reasons: string[] }) {
   return (
     <span
       className={`text-[11px] tabular-nums ${
         quality === "exact"
-          ? "text-white/40"
+          ? "text-white/60"
           : quality === "inferred"
             ? "text-amber-300/90"
-            : "text-white/35 italic"
+            : "text-white/60 italic"
       }`}
       title={qualityTitle(quality, reasons)}
     >
       · {quality}
+      {reasons.length > 0 && <span className="sr-only"> ({reasons.join(", ")})</span>}
     </span>
   );
 }
@@ -108,7 +122,7 @@ function CoveredValue({
       {format(covered.value)}
       <QualityTag quality={covered.quality} reasons={covered.reasons} />
       {partial && (
-        <span className="text-[11px] text-white/40" title={`Known for ${covered.known} of ${covered.total} ${unit}`}>
+        <span className="text-[11px] text-white/60" title={`Known for ${covered.known} of ${covered.total} ${unit}`}>
           {" "}
           (known {covered.known} of {covered.total})
         </span>
@@ -133,7 +147,7 @@ function FailureCard({ cause, primary }: { cause: FailureCause; primary: boolean
       <p className={primary ? "text-sm text-white/85 whitespace-pre-wrap break-words" : "text-xs text-white/55 whitespace-pre-wrap break-words"}>
         {cause.rawReason}
       </p>
-      <p className="text-[11px] text-white/40" title={qualityTitle(cause.quality === "exact" ? "exact" : "inferred", [`evidence: ${cause.evidenceSource}`, `confidence: ${cause.confidence}`])}>
+      <p className="text-[11px] text-white/60" title={qualityTitle(cause.quality === "exact" ? "exact" : "inferred", [`evidence: ${cause.evidenceSource}`, `confidence: ${cause.confidence}`])}>
         {cause.domain} · {cause.confidence} confidence · via {cause.evidenceSource.replace(/_/g, " ")} · {cause.quality}
         {cause.occurredAt ? ` · ${new Date(cause.occurredAt).toLocaleString()}` : ""}
       </p>
@@ -171,10 +185,50 @@ function SilenceRow({ interval }: { interval: NestedInterval }) {
   );
 }
 
-function AttemptRow({ attempt }: { attempt: AttemptAnalysis }) {
+/** Per-attempt reuse badges — exactly what this retry preserved. Only the
+ * developer retries carry reuse evidence; the first attempt is never a retry. */
+function ReuseBadges({ attempt }: { attempt: AttemptAnalysis }) {
+  const kinds = attempt.reuseKinds;
+  if (kinds === undefined) {
+    return (
+      <span
+        className="ml-2 text-[11px] px-1.5 py-0.5 rounded border border-white/15 bg-white/5 text-white/60 italic"
+        title="Reuse unknown for this retry — no reuse evidence recorded."
+      >
+        reuse unknown
+      </span>
+    );
+  }
+  if (kinds.length === 0) {
+    return (
+      <span
+        className="ml-2 text-[11px] px-1.5 py-0.5 rounded border border-white/15 bg-white/5 text-white/60"
+        title="Cold retry — no prior worktree, commit, or verification was reused."
+      >
+        cold retry
+      </span>
+    );
+  }
+  return (
+    <>
+      {kinds.map((kind) => (
+        <span
+          key={kind}
+          className="ml-2 text-[11px] px-1.5 py-0.5 rounded border border-cyber-teal/40 bg-cyber-teal/10 text-cyber-teal"
+          title={`This retry preserved the prior ${REUSE_KIND_LABELS[kind] ?? kind} instead of starting cold.`}
+        >
+          reused {REUSE_KIND_LABELS[kind] ?? kind}
+        </span>
+      ))}
+    </>
+  );
+}
+
+function AttemptRow({ attempt, isRetry }: { attempt: AttemptAnalysis; isRetry: boolean }) {
   const setup = fmtAnalysisDuration(attempt.setup.durationMs);
   const process = fmtAnalysisDuration(attempt.agentProcess.durationMs);
   const validation = fmtAnalysisDuration(attempt.validationPublish.durationMs);
+  const showReuse = isRetry && attempt.role === "developer";
   return (
     <li className="py-1.5 border-b border-white/5 last:border-0 space-y-0.5">
       <p className="text-sm text-white/85">
@@ -186,12 +240,13 @@ function AttemptRow({ attempt }: { attempt: AttemptAnalysis }) {
         </span>
         {attempt.publishOnly && (
           <span
-            className="ml-2 text-[11px] px-1.5 py-0.5 rounded border border-cyber-teal/40 bg-cyber-teal/10 text-cyber-teal"
+            className="ml-2 text-[11px] px-1.5 py-0.5 rounded border border-cyber-violet/40 bg-cyber-violet/10 text-cyber-violet-light"
             title="Publish-only attempt: no agent process ran — the coordinator published prior work."
           >
             publish-only
           </span>
         )}
+        {showReuse && !attempt.publishOnly && <ReuseBadges attempt={attempt} />}
       </p>
       <p className="text-xs text-white/50 tabular-nums">
         <span title={setup ? undefined : `Setup unavailable — ${attempt.setup.reasons.join(", ") || "no reason recorded"}`}>
@@ -210,7 +265,7 @@ function AttemptRow({ attempt }: { attempt: AttemptAnalysis }) {
         <QualityTag quality={attempt.validationPublish.quality} reasons={attempt.validationPublish.reasons} />
       </p>
       {attempt.failureCauses.length > 0 && (
-        <p className="text-[11px] text-white/45">
+        <p className="text-[11px] text-white/60">
           Failures: {attempt.failureCauses.map((c) => humanizeCode(c.code)).join(", ")}
         </p>
       )}
@@ -224,14 +279,30 @@ export function ExecutionAnalysisView({ analysis }: { analysis: IssueExecutionAn
   const exclusive = fmtAnalysisDuration(analysis.exclusiveTotalMs);
   const checkpointMs = fmtAnalysisDuration(analysis.firstCheckpoint.msSinceWorkflowStart);
   const nestedWaits = analysis.nested.filter((n) => n.kind !== "unexplained_silence");
-  const nestedSilence = analysis.nested.filter((n) => n.kind === "unexplained_silence");
-  const attemptSilence = analysis.attempts.flatMap((a) => a.silence);
-  const allSilence = [...nestedSilence, ...attemptSilence];
+  // Single source for silence: the server mirrors each attempt's silence
+  // intervals into `nested`, so reading both would render every interval twice.
+  // Attempt silence is authoritative; `nested` contributes only non-silence waits.
+  const allSilence = analysis.attempts.flatMap((a) => a.silence);
   const silenceUnknown =
     analysis.attempts.length > 0 &&
     analysis.attempts.every((a) => a.silence.length === 0 && a.silenceQuality === "unavailable");
+  const silenceUnknownAttempts = analysis.attempts.filter(
+    (a) => a.silence.length === 0 && a.silenceQuality === "unavailable",
+  );
+  // The server reports primaryFailureQuality 'unavailable' with
+  // 'missing_classification' whenever primaryFailure is null — including a
+  // clean success. Derive the state from failure evidence instead: no failed
+  // attempts means no failure was recorded; Unknown is reserved for a failed
+  // attempt with no classified cause.
+  const hasFailedAttempt =
+    analysis.waste.failedAttempts > 0 ||
+    analysis.waste.publishOnlyAttempts > 0 ||
+    analysis.attempts.some((a) => a.failureCauses.length > 0 || FAILED_ATTEMPT_STATUSES.has(a.status));
   const humanWait = fmtAnalysisDuration(analysis.humanWaitMs);
   const reuseRate = analysis.retry.reuseRate == null ? null : `${Math.round(analysis.retry.reuseRate * 100)}% reused`;
+  const preservedKinds = analysis.retry.preservedKinds ?? [];
+  const preservedLabels = preservedKinds.map((k) => REUSE_KIND_LABELS[k] ?? k);
+  const hasWaste = analysis.waste.failedAttempts > 0 || analysis.waste.publishOnlyAttempts > 0;
 
   return (
     <div className="space-y-3">
@@ -265,7 +336,7 @@ export function ExecutionAnalysisView({ analysis }: { analysis: IssueExecutionAn
                 </span>
                 <QualityTag quality={d.quality} reasons={d.reasons} />
                 {d.known < d.total && (
-                  <span className="text-[11px] text-white/40">(known {d.known} of {d.total})</span>
+                  <span className="text-[11px] text-white/60">(known {d.known} of {d.total})</span>
                 )}
               </li>
             );
@@ -300,8 +371,8 @@ export function ExecutionAnalysisView({ analysis }: { analysis: IssueExecutionAn
           <p className="text-xs text-white/45 italic">No attempts recorded yet.</p>
         ) : (
           <ul>
-            {analysis.attempts.map((a) => (
-              <AttemptRow key={a.sessionId} attempt={a} />
+            {analysis.attempts.map((a, i) => (
+              <AttemptRow key={a.sessionId} attempt={a} isRetry={i > 0} />
             ))}
           </ul>
         )}
@@ -321,7 +392,7 @@ export function ExecutionAnalysisView({ analysis }: { analysis: IssueExecutionAn
               </div>
             )}
           </div>
-        ) : analysis.primaryFailureQuality === "unavailable" ? (
+        ) : hasFailedAttempt ? (
           <p className="text-sm text-white/60 italic" title={qualityTitle("unavailable", analysis.primaryFailureReasons)}>
             Unknown — {analysis.primaryFailureReasons.join(", ") || "no failure evidence recorded"}
           </p>
@@ -335,20 +406,24 @@ export function ExecutionAnalysisView({ analysis }: { analysis: IssueExecutionAn
         <h4 className="text-xs text-white/45 uppercase tracking-wide mb-1">
           Retry waste ({analysis.waste.failedAttempts} failed attempt{analysis.waste.failedAttempts === 1 ? "" : "s"})
         </h4>
-        <p className="text-sm text-white/85 flex flex-wrap gap-x-3 gap-y-0.5 tabular-nums">
-          <span title="Failed-attempt agent-process time over known values only">
-            Runtime <CoveredValue covered={analysis.waste.runtimeMs} format={(v) => fmtAnalysisDuration(Math.round(v)) ?? "?"} unit="attempts" />
-          </span>
-          <span title="Failed-attempt input tokens over known values only">
-            In <CoveredValue covered={analysis.waste.tokensIn} format={(v) => fmtAnalysisTokens(v) ?? "?"} unit="attempts" />
-          </span>
-          <span title="Failed-attempt output tokens over known values only">
-            Out <CoveredValue covered={analysis.waste.tokensOut} format={(v) => fmtAnalysisTokens(v) ?? "?"} unit="attempts" />
-          </span>
-          <span title="Failed-attempt known cost over known values only">
-            Cost <CoveredValue covered={analysis.waste.costUsd} format={(v) => fmtAnalysisCost(v) ?? "?"} unit="attempts" />
-          </span>
-        </p>
+        {!hasWaste ? (
+          <p className="text-sm text-white/45">No failed attempts — no retry waste.</p>
+        ) : (
+          <p className="text-sm text-white/85 flex flex-wrap gap-x-3 gap-y-0.5 tabular-nums">
+            <span title="Failed-attempt agent-process time over known values only">
+              Runtime <CoveredValue covered={analysis.waste.runtimeMs} format={(v) => fmtAnalysisDuration(Math.round(v)) ?? "?"} unit="attempts" />
+            </span>
+            <span title="Failed-attempt input tokens over known values only">
+              In <CoveredValue covered={analysis.waste.tokensIn} format={(v) => fmtAnalysisTokens(v) ?? "?"} unit="attempts" />
+            </span>
+            <span title="Failed-attempt output tokens over known values only">
+              Out <CoveredValue covered={analysis.waste.tokensOut} format={(v) => fmtAnalysisTokens(v) ?? "?"} unit="attempts" />
+            </span>
+            <span title="Failed-attempt known cost over known values only">
+              Cost <CoveredValue covered={analysis.waste.costUsd} format={(v) => fmtAnalysisCost(v) ?? "?"} unit="attempts" />
+            </span>
+          </p>
+        )}
       </div>
 
       {/* First checkpoint. */}
@@ -371,7 +446,7 @@ export function ExecutionAnalysisView({ analysis }: { analysis: IssueExecutionAn
       {/* Retry reuse. */}
       <div>
         <h4 className="text-xs text-white/45 uppercase tracking-wide mb-1">Retry reuse</h4>
-        <p className="flex flex-wrap gap-1.5" aria-label="Retry reuse summary">
+        <div className="flex flex-wrap gap-1.5" role="group" aria-label="Retry reuse summary">
           <span
             className="text-[11px] px-1.5 py-0.5 rounded border border-cyber-teal/40 bg-cyber-teal/10 text-cyber-teal"
             title="Retries that preserved prior work — a reused worktree, commit, or verification receipt."
@@ -400,20 +475,30 @@ export function ExecutionAnalysisView({ analysis }: { analysis: IssueExecutionAn
               Publish-only {analysis.retry.publishOnly}
             </span>
           )}
-          <span className="text-[11px] text-white/45 tabular-nums self-center">
-            {reuseRate ?? <Unavailable reasons={analysis.retry.reasons} />}
+          <span className="text-[11px] text-white/60 tabular-nums self-center">
+            {analysis.retry.retries === 0 ? (
+              "No retries"
+            ) : (
+              reuseRate ?? <Unavailable reasons={analysis.retry.reasons} />
+            )}
             <QualityTag quality={analysis.retry.quality} reasons={analysis.retry.reasons} />
           </span>
-        </p>
-        <p className="text-[11px] text-white/40 mt-0.5">
-          Reuse preserves a worktree, commit, verification receipt, or publish-only result.
+        </div>
+        <p className="text-[11px] text-white/60 mt-0.5">
+          {analysis.retry.retries === 0
+            ? "No retries — nothing to preserve."
+            : preservedLabels.length > 0
+              ? `Preserved: ${preservedLabels.join(", ")}.`
+              : analysis.retry.unknown > 0
+                ? `Preservation unknown for ${analysis.retry.unknown} retr${analysis.retry.unknown === 1 ? "y" : "ies"} — no reuse evidence.`
+                : "No prior work preserved — every retry started cold."}
         </p>
       </div>
 
       {/* Silence — observational only, never idle/hung. */}
       <div>
         <h4 className="text-xs text-white/45 uppercase tracking-wide mb-1">Silence</h4>
-        <p className="text-[11px] text-white/40 mb-1">
+        <p className="text-[11px] text-white/60 mb-1">
           Silence is observational — gaps with no new structured activity. It describes what was observed, never a diagnosis.
         </p>
         {allSilence.length === 0 ? (
@@ -423,11 +508,23 @@ export function ExecutionAnalysisView({ analysis }: { analysis: IssueExecutionAn
             <p className="text-sm text-white/45">No silence observed.</p>
           )
         ) : (
-          <ul aria-label="Observed silence intervals">
-            {allSilence.map((s, i) => (
-              <SilenceRow key={i} interval={s} />
-            ))}
-          </ul>
+          <>
+            <ul aria-label="Observed silence intervals">
+              {allSilence.map((s, i) => (
+                <SilenceRow key={i} interval={s} />
+              ))}
+            </ul>
+            {silenceUnknownAttempts.length > 0 && (
+              <ul aria-label="Attempts with unknown silence" className="mt-1">
+                {silenceUnknownAttempts.map((a) => (
+                  <li key={a.sessionId} className="text-[11px] text-white/60 italic py-0.5">
+                    Silence unknown for attempt {a.sessionId.length > 12 ? `${a.sessionId.slice(0, 8)}…` : a.sessionId} —{" "}
+                    {a.silenceReasons.join(", ") || "no silence evidence recorded"}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
         )}
       </div>
     </div>

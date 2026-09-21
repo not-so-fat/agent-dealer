@@ -126,8 +126,10 @@ function completeFixture(): IssueExecutionAnalysis {
       }),
     ],
     primaryFailure: null,
-    primaryFailureQuality: "exact",
-    primaryFailureReasons: [],
+    // Server-real values: null primaryFailure always yields unavailable /
+    // missing_classification, even on a clean success.
+    primaryFailureQuality: "unavailable",
+    primaryFailureReasons: ["missing_classification"],
     consequenceCauses: [],
     waste: {
       failedAttempts: 0,
@@ -206,7 +208,7 @@ function failedRetryFixture(): IssueExecutionAnalysis {
           },
         ],
       }),
-      attempt({ sessionId: "session-2", status: "done", publishOnly: false, round: 2 }),
+      attempt({ sessionId: "session-2", status: "done", publishOnly: false, round: 2, reuseKinds: ["worktree", "commit"] }),
     ],
     primaryFailure: {
       code: "tool_test_timeout",
@@ -258,6 +260,7 @@ function failedRetryFixture(): IssueExecutionAnalysis {
       unknown: 0,
       publishOnly: 0,
       reuseRate: 1,
+      preservedKinds: ["worktree", "commit"],
       quality: "exact",
       reasons: [],
     },
@@ -287,7 +290,12 @@ test("one-attempt success shows phase breakdown and checkpoint timing", () => {
   assert.match(html, /First checkpoint/);
   assert.match(html, /commit/);
   assert.match(html, /5m/); // 300_000 ms after workflow start
+  // Server-real values (unavailable / missing_classification) still read as a
+  // clean success when no attempt failed.
   assert.match(html, /No failure recorded/);
+  assert.doesNotMatch(html, /Unknown — missing_classification/);
+  assert.match(html, /No failed attempts/);
+  assert.match(html, /No retries/);
   assert.match(html, /developer/);
   assert.match(html, /claude/);
 });
@@ -305,7 +313,36 @@ test("failed-then-reused retry shows primary failure, waste, and what was preser
   assert.match(html, /Retry waste/);
   assert.match(html, /Reused 1/);
   assert.match(html, /100% reused/);
-  assert.match(html, /worktree, commit, verification receipt/);
+  // Exactly what was preserved: per-attempt badges plus the aggregate list.
+  assert.match(html, /reused worktree/);
+  assert.match(html, /reused commit/);
+  assert.match(html, /Preserved: worktree, commit/);
+});
+
+test("silence shared by nested and attempt sources renders exactly once", () => {
+  // The server mirrors each attempt's silence intervals into `nested`; the
+  // view must use a single source so the operator never sees doubled silence.
+  const shared: NestedInterval = {
+    kind: "unexplained_silence",
+    startMs: 1_700_000_100_000,
+    endMs: 1_700_000_160_000,
+    durationMs: 60_000,
+    quality: "inferred",
+    reasons: ["sampler_observed_time"],
+    category: "tool_or_subprocess_in_flight",
+    sessionId: "session-1",
+  };
+  const base = completeFixture();
+  const analysis: IssueExecutionAnalysis = {
+    ...base,
+    nested: [shared],
+    attempts: [
+      attempt({ silence: [shared], silenceQuality: "inferred", silenceReasons: ["sampler_observed_time"] }),
+    ],
+  };
+  const html = renderToStaticMarkup(<ExecutionAnalysisView analysis={analysis} />);
+  const occurrences = html.split("tool/subprocess in flight").length - 1;
+  assert.equal(occurrences, 1, `expected one silence row, saw ${occurrences}`);
 });
 
 test("unknown failure and unknown silence remain explicitly unknown", () => {
@@ -314,14 +351,73 @@ test("unknown failure and unknown silence remain explicitly unknown", () => {
     ...base,
     primaryFailure: null,
     primaryFailureQuality: "unavailable",
-    primaryFailureReasons: ["missing_provider_metadata"],
-    attempts: [attempt({ silence: [], silenceQuality: "unavailable", silenceReasons: ["missing_provider_metadata"] })],
+    primaryFailureReasons: ["missing_classification"],
+    // Unknown requires a failed attempt with no classified cause — a clean
+    // success with the same quality/reasons reads "No failure recorded".
+    attempts: [
+      attempt({ status: "failed", silence: [], silenceQuality: "unavailable", silenceReasons: ["missing_provider_metadata"] }),
+    ],
   };
   const html = renderToStaticMarkup(<ExecutionAnalysisView analysis={analysis} />);
   assert.match(html, /Unknown/);
-  assert.match(html, /missing_provider_metadata/);
+  assert.match(html, /missing_classification/);
   assert.doesNotMatch(html, /No failure recorded/);
   assert.match(html, /silence cannot be derived/i);
+});
+
+test("silence unknown for one attempt is reported when others have intervals", () => {
+  const base = completeFixture();
+  const analysis: IssueExecutionAnalysis = {
+    ...base,
+    attempts: [
+      attempt({
+        sessionId: "session-1",
+        silence: [silenceInterval("tool_or_subprocess_in_flight", 60_000)],
+        silenceQuality: "inferred",
+        silenceReasons: ["sampler_observed_time"],
+      }),
+      attempt({
+        sessionId: "session-2",
+        round: 2,
+        silence: [],
+        silenceQuality: "unavailable",
+        silenceReasons: ["missing_provider_metadata"],
+      }),
+    ],
+  };
+  const html = renderToStaticMarkup(<ExecutionAnalysisView analysis={analysis} />);
+  assert.match(html, /tool\/subprocess in flight/);
+  assert.match(html, /Silence unknown for attempt session-2/);
+  assert.match(html, /missing_provider_metadata/);
+});
+
+test("cold and unknown retries get their own badges", () => {
+  const base = completeFixture();
+  const cold: IssueExecutionAnalysis = {
+    ...base,
+    attempts: [
+      attempt({ sessionId: "session-1", status: "failed" }),
+      attempt({ sessionId: "session-2", round: 2, reuseKinds: [] }),
+    ],
+    retry: { ...base.retry, attempts: 2, retries: 1, cold: 1, reused: 0, unknown: 0, quality: "exact", reasons: [] },
+  };
+  assert.match(renderToStaticMarkup(<ExecutionAnalysisView analysis={cold} />), /cold retry/);
+  assert.match(
+    renderToStaticMarkup(<ExecutionAnalysisView analysis={cold} />),
+    /No prior work preserved — every retry started cold/,
+  );
+
+  const unknown: IssueExecutionAnalysis = {
+    ...base,
+    attempts: [
+      attempt({ sessionId: "session-1", status: "failed" }),
+      attempt({ sessionId: "session-2", round: 2 }),
+    ],
+    retry: { ...base.retry, attempts: 2, retries: 1, cold: 0, reused: 0, unknown: 1, quality: "inferred", reasons: ["partial_sample"] },
+  };
+  const unknownHtml = renderToStaticMarkup(<ExecutionAnalysisView analysis={unknown} />);
+  assert.match(unknownHtml, /reuse unknown/);
+  assert.match(unknownHtml, /Preservation unknown for 1 retry/);
 });
 
 test("host-suspended silence is distinguishable from tool/provider silence", () => {

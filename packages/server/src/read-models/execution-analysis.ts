@@ -861,6 +861,18 @@ export function composeIssueAnalysis(ev: IssueEvidence): IssueExecutionAnalysis 
   const reuse: ReuseRecord[] = ev.events.filter((e) => e.type === "retry.reused").map(parseReuseRecord).filter((r): r is ReuseRecord => r !== null);
   const retrySummary = deriveRetrySummary({ sessions: developerSessions, reuse, hints: new Map() });
   const retryKnown = retrySummary.attemptsDetail.filter((a) => a.cold !== null);
+  // NOT-174: pass the per-attempt reuse kinds through so the UI can badge
+  // exactly what each retry preserved. `cold: null` means unknown (no evidence
+  // either way) — those attempts keep `reuseKinds` absent, distinct from an
+  // explicit cold retry (`[]`).
+  const reuseBySession = new Map(retrySummary.attemptsDetail.map((d) => [d.sessionId, d]));
+  for (const attempt of attempts) {
+    const detail = reuseBySession.get(attempt.sessionId);
+    if (detail && detail.cold !== null) attempt.reuseKinds = [...detail.kinds];
+  }
+  const preservedKinds = [...new Set(
+    retrySummary.attemptsDetail.flatMap((d) => (d.cold === false ? d.kinds : [])),
+  )];
   const retry: RetryReuseView = {
     attempts: retrySummary.attempts,
     retries: retrySummary.retries,
@@ -869,6 +881,7 @@ export function composeIssueAnalysis(ev: IssueEvidence): IssueExecutionAnalysis 
     unknown: retrySummary.unknown,
     publishOnly: retrySummary.publishOnly,
     reuseRate: retryKnown.length > 0 ? retryKnown.filter((a) => !a.cold).length / retryKnown.length : null,
+    preservedKinds,
     quality: retrySummary.retries === 0 ? "unavailable" : retrySummary.unknown > 0 ? "inferred" : "exact",
     reasons: retrySummary.retries === 0 ? ["missing_provider_metadata"] : retrySummary.unknown > 0 ? ["partial_sample"] : [],
   };
