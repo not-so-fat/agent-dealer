@@ -75,7 +75,7 @@ export default function ModelSelect({
     <label className="block space-y-1">
       <span className="text-xs text-[#A8C4C0] uppercase">{label}</span>
       <select
-        className="field text-sm"
+        className="field font-ui-display text-sm"
         disabled={disabled || loading}
         value={value}
         onChange={(e) => onChange(e.target.value)}

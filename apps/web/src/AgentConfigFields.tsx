@@ -76,10 +76,10 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
 
   return (
     <div className="space-y-2">
-      <div className="text-base uppercase tracking-wide text-[#92E4DD]">Agent</div>
+      <div className="font-ui-display text-base uppercase tracking-wide text-[#92E4DD]">Agent</div>
       <label className="text-xs text-[#A8C4C0] uppercase">Runtime (required)</label>
       <select
-        className="field"
+        className="field font-ui-display"
         disabled={disabled}
         value={value.runtime}
         onChange={(e) => {
@@ -105,7 +105,7 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
       </select>
       <label className="text-xs text-[#A8C4C0] uppercase">Agent Deck (required)</label>
       <select
-        className="field"
+        className="field font-ui-display"
         disabled={disabled || !agentDeckOnline || !!deckError}
         value={value.deckId}
         onChange={(e) => set({ deckId: e.target.value })}
@@ -129,7 +129,7 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
       )}
 
       <div className="pt-2 mt-2 border-t border-white/10 space-y-2">
-        <div className="text-xs uppercase tracking-wide text-white/40">
+        <div className="font-ui-display text-xs uppercase tracking-wide text-white/40">
           Issue-centric session defaults
         </div>
         <label className="block space-y-1">
@@ -155,7 +155,7 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
             <label className="space-y-1">
               <span className="text-xs text-[#A8C4C0] uppercase">Reasoning effort</span>
               <select
-                className="field text-sm"
+                className="field font-ui-display text-sm"
                 disabled={disabled}
                 value={value.defaultEffort}
                 onChange={(e) =>
