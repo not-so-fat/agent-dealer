@@ -1,4 +1,5 @@
 import type {
+  AdmissionStatus,
   AgentDeckStatus,
   AgentWithHealth,
   CreateAgentInput,
@@ -332,6 +333,26 @@ export interface QueueEntryRow {
 
 export async function fetchQueue(): Promise<QueueEntryRow[]> {
   const res = await fetch(`${API}/api/queue`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+/** NOT-215: truthful Admission read model — `N active · M waiting · limit X`. */
+export type { AdmissionStatus };
+
+export async function fetchQueueStatus(): Promise<AdmissionStatus> {
+  const res = await fetch(`${API}/api/queue/status`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+/** NOT-215: operator-chosen active-issue limit (persisted server-side). */
+export async function updateAdmissionSettings(maxActiveIssues: number): Promise<AdmissionStatus> {
+  const res = await fetch(`${API}/api/queue/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ maxActiveIssues }),
+  });
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
 }
