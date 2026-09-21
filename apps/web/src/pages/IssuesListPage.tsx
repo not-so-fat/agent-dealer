@@ -300,6 +300,185 @@ export default function IssuesListPage({
 
       {error && <p className="text-sm text-red-300 mb-3">{error}</p>}
 
+      {showCreate && (
+        <div className="mb-4 p-4 rounded border border-white/10 bg-panel-elevated/60 space-y-2">
+          <p className="text-xs text-white/50">
+            Workflow:{" "}
+            <span className="text-white/75">
+              developer → reviewer → {autoMerge ? "auto-merge on approve" : "final human review"}
+            </span>
+            .
+          </p>
+          <div className="flex gap-2 text-sm">
+            <button
+              type="button"
+              className={`font-ui-display px-3 py-1 rounded border ${sourceMode === "manual" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
+              onClick={() => {
+                setSourceMode("manual");
+                setSelectedLinearId("");
+              }}
+            >
+              Manual
+            </button>
+            <button
+              type="button"
+              className={`font-ui-display px-3 py-1 rounded border ${sourceMode === "linear" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
+              onClick={() => setSourceMode("linear")}
+            >
+              From Linear
+            </button>
+          </div>
+
+          {sourceMode === "linear" && (
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <input
+                  className="flex-1 bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                  placeholder="NOT-103 or Linear URL"
+                  value={linearRef}
+                  onChange={(e) => setLinearRef(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void resolveLinearRef();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="font-ui-display px-3 py-2 rounded border border-teal/40 text-teal text-sm disabled:opacity-50"
+                  disabled={linearLookupBusy || !linearRef.trim()}
+                  onClick={() => void resolveLinearRef()}
+                >
+                  {linearLookupBusy ? "…" : "Lookup"}
+                </button>
+              </div>
+              <select
+                className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                value={selectedLinearId}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  setSelectedLinearId(id);
+                  const c = candidates.find((x) => x.id === id);
+                  if (c) setLinearRef(c.identifier);
+                }}
+              >
+                <option value="">Or pick from open inbox…</option>
+                {candidates.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.identifier}: {c.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <input
+            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm disabled:opacity-60"
+            placeholder="Title"
+            value={title}
+            disabled={linearLocked}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+          <textarea
+            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm disabled:opacity-60"
+            rows={3}
+            placeholder="Problem statement / description"
+            value={description}
+            disabled={linearLocked}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+          <textarea
+            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+            rows={3}
+            placeholder="Acceptance criteria"
+            value={acceptanceCriteria}
+            onChange={(e) => setAcceptanceCriteria(e.target.value)}
+          />
+          <div className="flex gap-2 items-stretch">
+            <div className="flex-1 space-y-1">
+              {recentRepos.length > 0 && (
+                <select
+                  className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                  value={recentRepos.includes(repo) ? repo : ""}
+                  onChange={(e) => {
+                    if (e.target.value) setRepo(e.target.value);
+                  }}
+                >
+                  <option value="">Recent repositories…</option>
+                  {recentRepos.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <input
+                className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                placeholder="GitHub URL or owner/repo"
+                value={repo}
+                onChange={(e) => setRepo(e.target.value)}
+              />
+            </div>
+            <input
+              className="w-32 bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+              placeholder="Base (seed)"
+              title="Seed only — managed GitHub clones use the remote default at first checkout"
+              value={baseBranch}
+              onChange={(e) => setBaseBranch(e.target.value)}
+            />
+          </div>
+          <select
+            className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+            value={developerAgentId}
+            onChange={(e) => setDeveloperAgentId(e.target.value)}
+          >
+            <option value="">Developer agent…</option>
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+          <select
+            className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+            value={reviewerAgentId}
+            onChange={(e) => setReviewerAgentId(e.target.value)}
+          >
+            <option value="">Reviewer agent…</option>
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+          <label className="flex items-center gap-2 text-sm text-white/70 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoMerge}
+              onChange={(e) => setAutoMerge(e.target.checked)}
+              className="accent-[#C4B643]"
+            />
+            Auto-merge when reviewer approves (skip final human review)
+          </label>
+          <div className="flex gap-2">
+            <button type="button" className="btn-gold px-4" onClick={submitCreate}>
+              {sourceMode === "linear" ? "Kick from Linear" : "Create"}
+            </button>
+            <button
+              type="button"
+              className="font-ui-display px-4 py-2 text-sm text-white/60 hover:text-white"
+              onClick={() => {
+                setShowCreate(false);
+                resetForm();
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {(queue.length > 0 || admission) && (
         <div className="mb-4 rounded border border-cyber-teal/25 bg-cyber-teal/5">
           <div className="px-4 py-2 border-b border-cyber-teal/20 flex items-center justify-between gap-3">
@@ -486,185 +665,6 @@ export default function IssuesListPage({
         busyActionId={busyActionId}
         onResolve={(actionId, choice) => void resolveAction(actionId, choice)}
       />
-
-      {showCreate && (
-        <div className="mb-4 p-4 rounded border border-white/10 bg-panel-elevated/60 space-y-2">
-          <p className="text-xs text-white/50">
-            Workflow:{" "}
-            <span className="text-white/75">
-              developer → reviewer → {autoMerge ? "auto-merge on approve" : "final human review"}
-            </span>
-            .
-          </p>
-          <div className="flex gap-2 text-sm">
-            <button
-              type="button"
-              className={`font-ui-display px-3 py-1 rounded border ${sourceMode === "manual" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
-              onClick={() => {
-                setSourceMode("manual");
-                setSelectedLinearId("");
-              }}
-            >
-              Manual
-            </button>
-            <button
-              type="button"
-              className={`font-ui-display px-3 py-1 rounded border ${sourceMode === "linear" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
-              onClick={() => setSourceMode("linear")}
-            >
-              From Linear
-            </button>
-          </div>
-
-          {sourceMode === "linear" && (
-            <div className="space-y-2">
-              <div className="flex gap-2">
-                <input
-                  className="flex-1 bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-                  placeholder="NOT-103 or Linear URL"
-                  value={linearRef}
-                  onChange={(e) => setLinearRef(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void resolveLinearRef();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className="font-ui-display px-3 py-2 rounded border border-teal/40 text-teal text-sm disabled:opacity-50"
-                  disabled={linearLookupBusy || !linearRef.trim()}
-                  onClick={() => void resolveLinearRef()}
-                >
-                  {linearLookupBusy ? "…" : "Lookup"}
-                </button>
-              </div>
-              <select
-                className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-                value={selectedLinearId}
-                onChange={(e) => {
-                  const id = e.target.value;
-                  setSelectedLinearId(id);
-                  const c = candidates.find((x) => x.id === id);
-                  if (c) setLinearRef(c.identifier);
-                }}
-              >
-                <option value="">Or pick from open inbox…</option>
-                {candidates.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.identifier}: {c.title}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          <input
-            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm disabled:opacity-60"
-            placeholder="Title"
-            value={title}
-            disabled={linearLocked}
-            onChange={(e) => setTitle(e.target.value)}
-          />
-          <textarea
-            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm disabled:opacity-60"
-            rows={3}
-            placeholder="Problem statement / description"
-            value={description}
-            disabled={linearLocked}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-          <textarea
-            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-            rows={3}
-            placeholder="Acceptance criteria"
-            value={acceptanceCriteria}
-            onChange={(e) => setAcceptanceCriteria(e.target.value)}
-          />
-          <div className="flex gap-2 items-stretch">
-            <div className="flex-1 space-y-1">
-              {recentRepos.length > 0 && (
-                <select
-                  className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-                  value={recentRepos.includes(repo) ? repo : ""}
-                  onChange={(e) => {
-                    if (e.target.value) setRepo(e.target.value);
-                  }}
-                >
-                  <option value="">Recent repositories…</option>
-                  {recentRepos.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
-              )}
-              <input
-                className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-                placeholder="GitHub URL or owner/repo"
-                value={repo}
-                onChange={(e) => setRepo(e.target.value)}
-              />
-            </div>
-            <input
-              className="w-32 bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-              placeholder="Base (seed)"
-              title="Seed only — managed GitHub clones use the remote default at first checkout"
-              value={baseBranch}
-              onChange={(e) => setBaseBranch(e.target.value)}
-            />
-          </div>
-          <select
-            className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-            value={developerAgentId}
-            onChange={(e) => setDeveloperAgentId(e.target.value)}
-          >
-            <option value="">Developer agent…</option>
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-          <select
-            className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-            value={reviewerAgentId}
-            onChange={(e) => setReviewerAgentId(e.target.value)}
-          >
-            <option value="">Reviewer agent…</option>
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-          <label className="flex items-center gap-2 text-sm text-white/70 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autoMerge}
-              onChange={(e) => setAutoMerge(e.target.checked)}
-              className="accent-[#C4B643]"
-            />
-            Auto-merge when reviewer approves (skip final human review)
-          </label>
-          <div className="flex gap-2">
-            <button type="button" className="btn-gold px-4" onClick={submitCreate}>
-              {sourceMode === "linear" ? "Kick from Linear" : "Create"}
-            </button>
-            <button
-              type="button"
-              className="font-ui-display px-4 py-2 text-sm text-white/60 hover:text-white"
-              onClick={() => {
-                setShowCreate(false);
-                resetForm();
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
 
       {issues === null ? (
         <p className="text-white/50 text-sm">Loading…</p>
