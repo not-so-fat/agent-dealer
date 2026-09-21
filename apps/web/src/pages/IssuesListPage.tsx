@@ -316,7 +316,7 @@ export default function IssuesListPage({
                     <label className="flex items-center gap-1">
                       <span className="text-white/35">limit</span>
                       <select
-                        className="font-ui-display bg-black/30 border border-white/10 rounded px-1.5 py-0.5 text-xs text-white/80 disabled:opacity-50"
+                        className="bg-black/30 border border-white/10 rounded px-1.5 py-0.5 text-xs text-white/80 disabled:opacity-50"
                         value={admission.options.includes(admission.maxActiveIssues) ? admission.maxActiveIssues : admission.limit}
                         disabled={limitBusy}
                         title={
@@ -369,7 +369,7 @@ export default function IssuesListPage({
                 <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
                   <button
                     type="button"
-                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
                     disabled={rowBusyId === entry.issueId}
                     title="Change the developer/reviewer agents — keeps queue position and rechecks the wait reason"
                     onClick={() => void openEditor(entry.issueId)}
@@ -378,7 +378,7 @@ export default function IssuesListPage({
                   </button>
                   <button
                     type="button"
-                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
                     disabled={rowBusyId === entry.issueId}
                     title="Run next — move to the front of the admission queue; runs now if a slot is free, otherwise waits first with a reason"
                     onClick={() => void runNext(entry.issueId)}
@@ -387,7 +387,7 @@ export default function IssuesListPage({
                   </button>
                   <button
                     type="button"
-                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
                     disabled={rowBusyId === entry.issueId}
                     title="Execute now — start immediately, skipping queue order; refuses (changing nothing) when capacity, readiness, blockers, or agent health prevents it"
                     onClick={() => void executeNow(entry.issueId)}
@@ -541,7 +541,7 @@ export default function IssuesListPage({
                 </button>
               </div>
               <select
-                className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
                 value={selectedLinearId}
                 onChange={(e) => {
                   const id = e.target.value;
@@ -586,7 +586,7 @@ export default function IssuesListPage({
             <div className="flex-1 space-y-1">
               {recentRepos.length > 0 && (
                 <select
-                  className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                  className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
                   value={recentRepos.includes(repo) ? repo : ""}
                   onChange={(e) => {
                     if (e.target.value) setRepo(e.target.value);
@@ -616,7 +616,7 @@ export default function IssuesListPage({
             />
           </div>
           <select
-            className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
             value={developerAgentId}
             onChange={(e) => setDeveloperAgentId(e.target.value)}
           >
@@ -628,7 +628,7 @@ export default function IssuesListPage({
             ))}
           </select>
           <select
-            className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
             value={reviewerAgentId}
             onChange={(e) => setReviewerAgentId(e.target.value)}
           >
