@@ -408,6 +408,55 @@ CREATE TABLE IF NOT EXISTS failure_causes (
 CREATE INDEX IF NOT EXISTS idx_failure_causes_session ON failure_causes(worker_session_id);
 CREATE INDEX IF NOT EXISTS idx_failure_causes_issue ON failure_causes(issue_id);
 
+-- NOT-170: append-only structured activity evidence for observational silence analysis.
+-- One row per new structured stream event (assistant/model output, provider wait/retry,
+-- tool/subprocess start/completion, unknown structured activity) observed by the live
+-- activity sampler — never one row per sampler tick. Sampler ticks with no new log lines
+-- persist nothing.
+--
+-- Retention/size notes:
+-- - Rows are small by construction: `summary` is the existing ≤120-char operator line
+--   (formatToolProgress / assistant excerpt); no transcript bodies, file contents, or
+--   tool arguments are copied into SQLite. `raw_evidence` is a pointer
+--   (`<log_path>#offset=<n>`), never payload.
+-- - Expected volume is one row per tool call / assistant turn / retry signal — tens to
+--   low hundreds per session. Dedupe is structural: UNIQUE(worker_session_id,
+--   source_offset, source_seq) makes sampler re-reads and restarts idempotent, and
+--   restart resumes from MAX(source_offset) for the session. source_seq is the 0-based
+--   index of the entry within its NDJSON line, so parallel tool blocks on one line
+--   (e.g. two Claude tool_use blocks in one assistant message) persist as distinct
+--   rows instead of colliding on the shared line offset. All offsets are byte offsets
+--   into the log file, never string character offsets.
+-- - Retention follows the session log: rows are derived evidence for a worker session
+--   and may be removed together with that session's log; they are never inputs to
+--   admission, leases, recovery, routing, retry, termination, or scheduling.
+-- - `observed_at` is the sampler's read time, not the event's occurrence time: after a
+--   restart, backlogged lines are stamped at restart time. Derived silence over these
+--   rows is therefore always quality `inferred` (reason `sampler_observed_time`), even
+--   when the enclosing agent_process bounds are `exact`.
+CREATE TABLE IF NOT EXISTS session_activity_events (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL,
+  worker_session_id TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  source_cursor INTEGER,
+  source_offset INTEGER,
+  source_seq INTEGER NOT NULL DEFAULT 0,
+  activity_kind TEXT NOT NULL,
+  state TEXT NOT NULL,
+  call_id TEXT,
+  summary TEXT,
+  raw_evidence TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_activity_session_time
+  ON session_activity_events(worker_session_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_session_activity_issue
+  ON session_activity_events(issue_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_activity_idempotency
+  ON session_activity_events(worker_session_id, source_offset, source_seq)
+  WHERE source_offset IS NOT NULL;
+
 -- NOT-103: operator-owned sequential issue admission queue (order / wait_reason).
 CREATE TABLE IF NOT EXISTS queue_entries (
   id TEXT PRIMARY KEY,

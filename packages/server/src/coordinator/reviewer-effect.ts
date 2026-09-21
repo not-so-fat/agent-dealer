@@ -416,7 +416,7 @@ export async function runReviewerEffect(
     const logPath = reviewerSessionLogPath(sessionId);
     patchRunningSession(sessionId, { logPath, worktreePath });
     setLiveIntent(issue.id, `Reviewer · session running (round ${round})`);
-    const sampler = startActivitySampler({ issueId: issue.id, role: "reviewer", round, logPath });
+    const sampler = startActivitySampler({ issueId: issue.id, role: "reviewer", round, logPath, workerSessionId: sessionId });
 
     const spawnStartedAt = Date.now();
     const agentModel = snapshot?.model ?? null;
