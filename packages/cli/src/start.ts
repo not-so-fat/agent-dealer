@@ -17,6 +17,7 @@ import { formatPortConflict, isTcpPortOpen, probeAgentDealer } from "./ports.js"
 import { resolveServerEntry, resolveUiDist } from "./paths.js";
 import { clearRunState, writeRunState } from "./runtime-state.js";
 import { runStop } from "./stop.js";
+import { getVersion } from "./version.js";
 
 export interface StartOptions {
   port?: number;
@@ -193,6 +194,9 @@ async function stopForForcedRestart(host: string, port: number): Promise<number 
 }
 
 export async function runStart(options: StartOptions = {}): Promise<number> {
+  if (!isSupervisorMode(options)) {
+    console.log(`Agent Dealer version ${getVersion()}`);
+  }
   const envFile = loadProdEnvFile();
   const home = prodHomeDir();
   const uiDist = resolveUiDist();
