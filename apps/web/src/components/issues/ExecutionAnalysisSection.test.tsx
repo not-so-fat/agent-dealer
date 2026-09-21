@@ -3,6 +3,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
+// node --import tsx compiles JSX in classic mode: components reference the
+// React global at render time. (Under automatic JSX runtimes this is inert.)
+(globalThis as { React?: unknown }).React ??= React;
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
   AttemptAnalysis,

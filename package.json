@@ -20,7 +20,7 @@
     "db:migrate-to-issues": "npm run db:migrate-to-issues -w @agent-dealer/server --",
     "p0": "tsx scripts/p0-linear-batch.ts",
     "smoke:muse": "tsx scripts/muse-smoke.mts",
-    "test:unit": "AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 tsx --test $(find packages -name '*.test.ts' -not -path '*/node_modules/*' -not -path '*/dist/*')",
+    "test:unit": "AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 tsx --test $(find packages -name '*.test.ts' -not -path '*/node_modules/*' -not -path '*/dist/*') && npm run test -w @agent-dealer/web",
     "test:ci": "npm run test:unit",
     "poc:integration": "tsx scripts/poc/run-all.ts",
     "poc:deep": "tsx scripts/poc/claude-runner-probe.ts && tsx scripts/poc/cursor-agent-probe.ts",
