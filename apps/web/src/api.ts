@@ -392,10 +392,11 @@ export async function guideIssue(id: string, markdown: string): Promise<Workflow
 }
 
 /** NOT-175: fleet execution-comparison report. Filters serialize with shared
- * defaults — an empty filter object requests the API's conservative window. */
+ * defaults — an empty filter object requests the API's conservative window.
+ * Served by GET /api/execution-report (NOT-173 owns /api/execution-analysis). */
 export async function fetchExecutionAnalysis(filters: ReportFilterState): Promise<ExecutionReportResponse> {
   const qs = serializeExecutionReportQuery(filters);
-  const res = await fetch(`${API}/api/execution-analysis${qs ? `?${qs}` : ""}`);
+  const res = await fetch(`${API}/api/execution-report${qs ? `?${qs}` : ""}`);
   if (!res.ok) throw new Error(await readApiError(res));
   const json = await res.json();
   const parsed = ExecutionReportSchema.safeParse(json);

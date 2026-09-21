@@ -16,11 +16,12 @@ import {
   RUNTIME_OPTIONS,
   ROLE_OPTIONS,
   STATUS_OPTIONS,
-  filtersToForm,
   formToFilters,
   issueDetailHref,
   orderFailureDisplay,
   paginationText,
+  searchToForm,
+  setPageQuery,
   toCohortDisplay,
   type CohortDisplayRow,
   type ReportFormState,
@@ -51,7 +52,7 @@ function CohortTable({ caption, rows }: { caption: string; rows: CohortDisplayRo
   }
   return (
     <div className="rounded border border-white/10 bg-panel-elevated/60 overflow-x-auto">
-      <table className="w-full min-w-[880px] text-sm">
+      <table className="w-full min-w-[1440px] text-sm">
         <caption className="sr-only">{caption} — sorted by name, never by cost</caption>
         <thead>
           <tr className="text-left text-xs uppercase tracking-wide text-white/40 border-b border-white/10">
@@ -61,9 +62,14 @@ function CohortTable({ caption, rows }: { caption: string; rows: CohortDisplayRo
             <th scope="col" className="px-3 py-2 font-medium">Issue success</th>
             <th scope="col" className="px-3 py-2 font-medium">Attempt success</th>
             <th scope="col" className="px-3 py-2 font-medium">Session wall P50/P95</th>
+            <th scope="col" className="px-3 py-2 font-medium">Retry rate</th>
             <th scope="col" className="px-3 py-2 font-medium">Tokens in</th>
             <th scope="col" className="px-3 py-2 font-medium">Tokens out</th>
             <th scope="col" className="px-3 py-2 font-medium">Cost</th>
+            <th scope="col" className="px-3 py-2 font-medium">Duration</th>
+            <th scope="col" className="px-3 py-2 font-medium">Failed cost</th>
+            <th scope="col" className="px-3 py-2 font-medium">Failed tokens</th>
+            <th scope="col" className="px-3 py-2 font-medium">Failed runtime</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
@@ -82,6 +88,7 @@ function CohortTable({ caption, rows }: { caption: string; rows: CohortDisplayRo
               <td className="px-3 py-2 text-white/75" title={r.issueSuccessTitle}>{r.issueSuccessText}</td>
               <td className="px-3 py-2 text-white/75" title={r.attemptSuccessTitle}>{r.attemptSuccessText}</td>
               <td className="px-3 py-2 text-white/75">{r.wallText}</td>
+              <td className="px-3 py-2 text-white/75" title={r.retryTitle}>{r.retryText}</td>
               <td className="px-3 py-2 text-white/75">{r.tokensInText}</td>
               <td className="px-3 py-2 text-white/75">{r.tokensOutText}</td>
               <td
@@ -90,6 +97,15 @@ function CohortTable({ caption, rows }: { caption: string; rows: CohortDisplayRo
               >
                 {r.costText}
               </td>
+              <td className="px-3 py-2 text-white/75">{r.durationText}</td>
+              <td
+                className="px-3 py-2 text-white/75"
+                title={r.failedIncomplete ? "Partial sample — missing provider metadata is excluded, never zero" : undefined}
+              >
+                {r.failedCostText}
+              </td>
+              <td className="px-3 py-2 text-white/75">{r.failedTokensText}</td>
+              <td className="px-3 py-2 text-white/75">{r.failedDurationText}</td>
             </tr>
           ))}
         </tbody>
@@ -108,18 +124,298 @@ const EMPTY_FORM: ReportFormState = {
   status: "",
 };
 
+export interface ReportContentProps {
+  loading: boolean;
+  error: string | null;
+  report: ExecutionReportResponse | null;
+  onRetry: () => void;
+  onPage: (page: number) => void;
+}
+
+/**
+ * Pure presentational view of the report states (loading, error, empty,
+ * partial, pagination). No hooks or fetching — renderable to static markup in
+ * tests without a browser.
+ */
+export function ReportContent({ loading, error, report, onRetry, onPage }: ReportContentProps) {
+  const summary = report?.summary ?? null;
+  const failures = useMemo(() => (report ? orderFailureDisplay(report.failures) : []), [report]);
+  const failedTotal = useMemo(
+    () => (report ? report.failures.reduce((n, f) => n + f.count, 0) : 0),
+    [report]
+  );
+  return (
+    <div aria-live="polite">
+      {loading && <p role="status" className="text-sm text-white/50">Loading execution report…</p>}
+      {!loading && error && (
+        <div className="rounded border border-red-400/30 bg-red-500/10 px-4 py-3" role="alert">
+          <p className="text-sm text-red-200">Couldn’t load the execution report: {error}</p>
+          <button
+            type="button"
+            className="mt-2 px-3 py-1.5 text-sm rounded border border-red-300/40 text-red-100 hover:bg-red-500/20"
+            onClick={onRetry}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {!loading && !error && report && summary && (
+        <div className="space-y-6">
+          {report.meta.partial && (
+            <div className="rounded border border-amber-300/30 bg-amber-400/10 px-4 py-3">
+              <p className="text-sm text-amber-100 font-medium">Partial metadata</p>
+              <ul className="mt-1 list-disc list-inside text-sm text-amber-100/80">
+                {report.meta.partialReasons.map((r) => (
+                  <li key={r}>{r}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {summary.issues === 0 ? (
+            <p className="text-sm text-white/45">
+              No issues match these filters in this window. Widen the date range or clear filters.
+            </p>
+          ) : (
+            <>
+              <section aria-label="Summary">
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+                  <Card
+                    label="Issue success"
+                    value={formatRate(summary.issueSuccess)}
+                    title={`done / (done + closed), denominator ${summary.closedIssues}`}
+                    hint={`${formatCount(summary.issues)} issues · ${formatCount(summary.closedIssues)} closed`}
+                  />
+                  <Card
+                    label="Attempt success"
+                    value={formatRate(summary.attemptSuccess)}
+                    title={`done sessions / terminal sessions, denominator ${summary.terminalAttempts}`}
+                    hint={`${formatCount(summary.attempts)} attempts · ${formatCount(summary.terminalAttempts)} terminal`}
+                  />
+                  <Card
+                    label="Retry rate"
+                    value={formatRate(summary.retryRate)}
+                    title={`${summary.retryExtraAttempts} extra attempts after a terminal attempt in the same issue/role/round ÷ ${summary.attempts} attempts`}
+                    hint={`Reuse rate ${formatRate(summary.reuseRate)} over ${formatCount(summary.reuseDenominator)} reviewer sessions with input SHA`}
+                  />
+                  <Card
+                    label="Human wait"
+                    value={formatMs(summary.humanWaitMs)}
+                    hint={`${formatCount(summary.interventions)} interventions`}
+                  />
+                  <Card
+                    label="Session wall P50/P95"
+                    value={percentileCellText(summary.sessionWallMs, formatMs)}
+                    hint="Session bookkeeping proxy — never CLI runtime"
+                  />
+                  <Card
+                    label="Spawn envelope P50/P95"
+                    value={percentileCellText(summary.spawnEnvelopeMs, formatMs)}
+                    hint="Coordinator-measured; includes slot wait + post-exit work"
+                  />
+                  <Card
+                    label="Checkpoint latency P50/P95"
+                    value={percentileCellText(summary.checkpointMs, formatMs)}
+                    hint="Session start → first heartbeat"
+                  />
+                  <Card
+                    label="Reviewer rounds (avg)"
+                    value={summary.avgReviewerRounds === null ? "Unavailable" : summary.avgReviewerRounds.toFixed(1)}
+                    hint={`Change-request rate ${formatRate(summary.changeRequestRate)} over ${formatCount(summary.reviewedIssues)} reviewed`}
+                  />
+                </div>
+              </section>
+
+              <section aria-label="Failed-attempt waste">
+                <h3 className="text-sm font-medium text-white/80 mb-2">Failed-attempt waste (known values only)</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <Card label="Failed cost" value={coverageCellText(summary.failedCostUsd, formatUsd)} />
+                  <Card
+                    label="Failed tokens"
+                    value={`${coverageCellText(summary.failedTokensIn, formatCount)} in · ${coverageCellText(summary.failedTokensOut, formatCount)} out`}
+                  />
+                  <Card label="Failed runtime" value={coverageCellText(summary.failedDurationMs, formatMs)} />
+                </div>
+              </section>
+
+              <section aria-label="Phase wall time">
+                <h3 className="text-sm font-medium text-white/80 mb-2">Phase wall time</h3>
+                <p className="text-xs text-white/40 mb-2">
+                  Exclusive phase boundaries have no defensible evidence today, so every row reads
+                  Unavailable — never a guess. See per-row reasons.
+                </p>
+                <div className="rounded border border-white/10 bg-panel-elevated/60 overflow-x-auto">
+                  <table className="w-full min-w-[560px] text-sm">
+                    <caption className="sr-only">
+                      Exclusive phase wall times. Boundaries without defensible evidence are Unavailable.
+                    </caption>
+                    <thead>
+                      <tr className="text-left text-xs uppercase tracking-wide text-white/40 border-b border-white/10">
+                        <th scope="col" className="px-4 py-2 font-medium">Phase</th>
+                        <th scope="col" className="px-3 py-2 font-medium">P50 / P95</th>
+                        <th scope="col" className="px-3 py-2 font-medium">Why</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {summary.phaseWallMs.map((p) => (
+                        <tr key={p.phase} className="tabular-nums">
+                          <th scope="row" className="px-4 py-2 text-left font-medium text-white/85">{p.phase}</th>
+                          <td className="px-3 py-2 text-white/75">{percentileCellText(p.stat, formatMs)}</td>
+                          <td className="px-3 py-2 text-xs text-white/45">{p.stat.reasons.join(", ")}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section aria-label="Comparisons" className="space-y-4">
+                <h3 className="text-sm font-medium text-white/80">
+                  Comparisons <span className="font-normal text-white/40">— sorted by name, never by cost</span>
+                </h3>
+                <CohortTable caption="By role" rows={report.byRole.map(toCohortDisplay)} />
+                <CohortTable caption="By runtime" rows={report.byRuntime.map(toCohortDisplay)} />
+                <CohortTable caption="By model" rows={report.byModel.map(toCohortDisplay)} />
+              </section>
+
+              <section aria-label="Primary failures">
+                <h3 className="text-sm font-medium text-white/80 mb-2">Primary failure distribution</h3>
+                <p className="text-xs text-white/40 mb-2">
+                  Primary failure per issue with a failed attempt — includes issues that later
+                  recovered. Share is over {formatCount(failedTotal)} failed{" "}
+                  {failedTotal === 1 ? "issue" : "issues"} in scope.
+                </p>
+                {failures.length === 0 ? (
+                  <p className="text-sm text-white/45">No failed attempts in this window.</p>
+                ) : (
+                  <div className="rounded border border-white/10 bg-panel-elevated/60 overflow-x-auto">
+                    <table className="w-full min-w-[560px] text-sm">
+                      <caption className="sr-only">
+                        Primary failure per issue with a failed attempt. Unknown is its own bucket and is never promoted.
+                      </caption>
+                      <thead>
+                        <tr className="text-left text-xs uppercase tracking-wide text-white/40 border-b border-white/10">
+                          <th scope="col" className="px-4 py-2 font-medium">Failure</th>
+                          <th scope="col" className="px-3 py-2 font-medium">Domain</th>
+                          <th scope="col" className="px-3 py-2 font-medium">Issues</th>
+                          <th scope="col" className="px-3 py-2 font-medium">Share</th>
+                          <th scope="col" className="px-3 py-2 font-medium">Example issues</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5">
+                        {failures.map((f) => (
+                          <tr
+                            key={f.code}
+                            className={f.isUnknown ? "bg-amber-400/5 tabular-nums" : "tabular-nums"}
+                          >
+                            <th scope="row" className="px-4 py-2 text-left font-medium text-white/85">
+                              {f.code}
+                              {f.isUnknown && (
+                                <span className="ml-2 text-xs font-normal text-amber-200/90">
+                                  needs evidence
+                                </span>
+                              )}
+                              <span className="block text-xs font-normal text-white/40">{f.blurb}</span>
+                            </th>
+                            <td className="px-3 py-2 text-white/75">{f.domain}</td>
+                            <td className="px-3 py-2 text-white/75">{f.countText}</td>
+                            <td className="px-3 py-2 text-white/75" title={f.shareTitle}>{f.shareText}</td>
+                            <td className="px-3 py-2">
+                              <span className="flex flex-wrap gap-x-3 gap-y-1">
+                                {f.issueIds.map((id) => (
+                                  <Link
+                                    key={id}
+                                    to={issueDetailHref(id)}
+                                    className="text-cyber-teal hover:underline font-mono text-xs"
+                                  >
+                                    {id.slice(0, 8)}
+                                  </Link>
+                                ))}
+                                {f.hiddenIssueCount > 0 && (
+                                  <span className="text-xs text-white/40">+{f.hiddenIssueCount} more</span>
+                                )}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+
+              <section aria-label="Issues">
+                <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+                  <h3 className="text-sm font-medium text-white/80">Issues</h3>
+                  <p className="text-xs text-white/40">{paginationText(report.pagination)}</p>
+                </div>
+                <div className="space-y-2">
+                  {report.issues.map((issue) => (
+                    <Link
+                      key={issue.id}
+                      to={issueDetailHref(issue.id)}
+                      className="block rounded border border-white/10 bg-panel-elevated/60 px-4 py-2.5 hover:border-cyber-teal/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyber-teal/45"
+                    >
+                      <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <IssueStatusBadge status={issue.status as IssueStatus} />
+                        <span className="text-sm text-white/85 flex-1 min-w-40">{issue.title}</span>
+                        <span className="text-xs text-white/40 tabular-nums">{issue.attempts} attempts</span>
+                      </span>
+                      <span className="mt-0.5 block text-xs text-white/35 font-mono truncate">
+                        {issue.repo} · {issue.id.slice(0, 8)}
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+                {report.pagination.totalPages > 1 && (
+                  <nav aria-label="Report pages" className="mt-3 flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="px-3 py-1.5 text-sm rounded border border-white/15 text-white/70 hover:text-white disabled:opacity-40"
+                      disabled={report.pagination.page <= 1}
+                      onClick={() => onPage(report.pagination.page - 1)}
+                    >
+                      Previous
+                    </button>
+                    <span className="text-xs text-white/45 tabular-nums">
+                      Page {report.pagination.page} of {report.pagination.totalPages}
+                    </span>
+                    <button
+                      type="button"
+                      className="px-3 py-1.5 text-sm rounded border border-white/15 text-white/70 hover:text-white disabled:opacity-40"
+                      disabled={report.pagination.page >= report.pagination.totalPages}
+                      onClick={() => onPage(report.pagination.page + 1)}
+                    >
+                      Next
+                    </button>
+                  </nav>
+                )}
+              </section>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ExecutionReportPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const search = searchParams.toString();
   const filters = useMemo(() => parseExecutionReportQuery(search), [search]);
-  const [form, setForm] = useState<ReportFormState>(() => filtersToForm(filters));
+  // Draft form state tracks the raw URL only: injected window defaults stay
+  // out, so Apply only sends dates the user chose.
+  const [form, setForm] = useState<ReportFormState>(() => searchToForm(search));
   const [report, setReport] = useState<ExecutionReportResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Retry must refetch even when the URL is unchanged (same query string
+  // would not retrigger the fetch effect), so it bumps a counter instead.
+  const [reloadTick, setReloadTick] = useState(0);
 
   // Filters live in the URL: reload and back/forward restore the same report.
   useEffect(() => {
-    setForm(filtersToForm(filters));
+    setForm(searchToForm(search));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
@@ -144,16 +440,21 @@ export default function ExecutionReportPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search]);
+  }, [search, reloadTick]);
 
   const apply = (next: ReportFormState, page?: number) => {
     const qs = serializeExecutionReportQuery(formToFilters(next, page));
     setSearchParams(qs ? Object.fromEntries(new URLSearchParams(qs)) : {});
   };
 
+  // Pagination navigates from the applied URL filters with only `page`
+  // changed — draft form edits are never smuggled in.
+  const gotoPage = (page: number) => {
+    const qs = setPageQuery(search, page);
+    setSearchParams(qs ? Object.fromEntries(new URLSearchParams(qs)) : {});
+  };
+
   const set = (patch: Partial<ReportFormState>) => setForm((f) => ({ ...f, ...patch }));
-  const summary = report?.summary ?? null;
-  const failures = useMemo(() => (report ? orderFailureDisplay(report.failures) : []), [report]);
 
   return (
     <div className="flex-1 min-h-0 px-6 py-4 w-full overflow-y-auto">
@@ -235,6 +536,9 @@ export default function ExecutionReportPage() {
               {RUNTIME_OPTIONS.map((r) => (
                 <option key={r} value={r}>{r}</option>
               ))}
+              {form.runtime && !(RUNTIME_OPTIONS as readonly string[]).includes(form.runtime) && (
+                <option value={form.runtime}>{form.runtime} (from URL)</option>
+              )}
             </select>
           </label>
           <label className="block text-sm">
@@ -276,250 +580,13 @@ export default function ExecutionReportPage() {
         </div>
       </form>
 
-      <div aria-live="polite">
-        {loading && (
-          <p role="status" className="text-sm text-white/50">Loading execution report…</p>
-        )}
-        {!loading && error && (
-          <div className="rounded border border-red-400/30 bg-red-500/10 px-4 py-3" role="alert">
-            <p className="text-sm text-red-200">Couldn’t load the execution report: {error}</p>
-            <button
-              type="button"
-              className="mt-2 px-3 py-1.5 text-sm rounded border border-red-300/40 text-red-100 hover:bg-red-500/20"
-              onClick={() => apply(form, filters.page)}
-            >
-              Retry
-            </button>
-          </div>
-        )}
-        {!loading && !error && report && summary && (
-          <div className="space-y-6">
-            {report.meta.partial && (
-              <div className="rounded border border-amber-300/30 bg-amber-400/10 px-4 py-3">
-                <p className="text-sm text-amber-100 font-medium">Partial metadata</p>
-                <ul className="mt-1 list-disc list-inside text-sm text-amber-100/80">
-                  {report.meta.partialReasons.map((r) => (
-                    <li key={r}>{r}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {summary.issues === 0 ? (
-              <p className="text-sm text-white/45">
-                No issues match these filters in this window. Widen the date range or clear filters.
-              </p>
-            ) : (
-              <>
-                <section aria-label="Summary">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
-                    <Card
-                      label="Issue success"
-                      value={formatRate(summary.issueSuccess)}
-                      title={`done / (done + closed), denominator ${summary.closedIssues}`}
-                      hint={`${formatCount(summary.issues)} issues · ${formatCount(summary.closedIssues)} closed`}
-                    />
-                    <Card
-                      label="Attempt success"
-                      value={formatRate(summary.attemptSuccess)}
-                      title={`done sessions / terminal sessions, denominator ${summary.terminalAttempts}`}
-                      hint={`${formatCount(summary.attempts)} attempts · ${formatCount(summary.terminalAttempts)} terminal`}
-                    />
-                    <Card
-                      label="Retry rate"
-                      value={formatRate(summary.retryRate)}
-                      title={`${summary.retryExtraAttempts} extra attempts beyond one per issue`}
-                      hint={`Reuse rate ${formatRate(summary.reuseRate)} over ${formatCount(summary.reuseDenominator)} reviewer sessions with input SHA`}
-                    />
-                    <Card
-                      label="Human wait"
-                      value={formatMs(summary.humanWaitMs)}
-                      hint={`${formatCount(summary.interventions)} interventions`}
-                    />
-                    <Card
-                      label="Session wall P50/P95"
-                      value={percentileCellText(summary.sessionWallMs, formatMs)}
-                      hint="Session bookkeeping proxy — never CLI runtime"
-                    />
-                    <Card
-                      label="Spawn envelope P50/P95"
-                      value={percentileCellText(summary.spawnEnvelopeMs, formatMs)}
-                      hint="Coordinator-measured; includes slot wait + post-exit work"
-                    />
-                    <Card
-                      label="Checkpoint latency P50/P95"
-                      value={percentileCellText(summary.checkpointMs, formatMs)}
-                      hint="Session start → first heartbeat"
-                    />
-                    <Card
-                      label="Reviewer rounds (avg)"
-                      value={summary.avgReviewerRounds === null ? "Unavailable" : summary.avgReviewerRounds.toFixed(1)}
-                      hint={`Change-request rate ${formatRate(summary.changeRequestRate)} over ${formatCount(summary.reviewedIssues)} reviewed`}
-                    />
-                  </div>
-                </section>
-
-                <section aria-label="Failed-attempt waste">
-                  <h3 className="text-sm font-medium text-white/80 mb-2">Failed-attempt waste (known values only)</h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <Card label="Failed cost" value={coverageCellText(summary.failedCostUsd, formatUsd)} />
-                    <Card
-                      label="Failed tokens"
-                      value={`${coverageCellText(summary.failedTokensIn, formatCount)} in · ${coverageCellText(summary.failedTokensOut, formatCount)} out`}
-                    />
-                    <Card label="Failed runtime" value={coverageCellText(summary.failedDurationMs, formatMs)} />
-                  </div>
-                </section>
-
-                <section aria-label="Phase wall time">
-                  <h3 className="text-sm font-medium text-white/80 mb-2">Phase wall time</h3>
-                  <div className="rounded border border-white/10 bg-panel-elevated/60 overflow-x-auto">
-                    <table className="w-full min-w-[560px] text-sm">
-                      <caption className="sr-only">
-                        Exclusive phase wall times. Boundaries without defensible evidence are Unavailable.
-                      </caption>
-                      <thead>
-                        <tr className="text-left text-xs uppercase tracking-wide text-white/40 border-b border-white/10">
-                          <th scope="col" className="px-4 py-2 font-medium">Phase</th>
-                          <th scope="col" className="px-3 py-2 font-medium">P50 / P95</th>
-                          <th scope="col" className="px-3 py-2 font-medium">Why</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/5">
-                        {summary.phaseWallMs.map((p) => (
-                          <tr key={p.phase} className="tabular-nums">
-                            <th scope="row" className="px-4 py-2 text-left font-medium text-white/85">{p.phase}</th>
-                            <td className="px-3 py-2 text-white/75">{percentileCellText(p.stat, formatMs)}</td>
-                            <td className="px-3 py-2 text-xs text-white/45">{p.stat.reasons.join(", ")}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </section>
-
-                <section aria-label="Comparisons" className="space-y-4">
-                  <h3 className="text-sm font-medium text-white/80">
-                    Comparisons <span className="font-normal text-white/40">— sorted by name, never by cost</span>
-                  </h3>
-                  <CohortTable caption="By role" rows={report.byRole.map(toCohortDisplay)} />
-                  <CohortTable caption="By runtime" rows={report.byRuntime.map(toCohortDisplay)} />
-                  <CohortTable caption="By model" rows={report.byModel.map(toCohortDisplay)} />
-                </section>
-
-                <section aria-label="Primary failures">
-                  <h3 className="text-sm font-medium text-white/80 mb-2">Primary failure distribution</h3>
-                  {failures.length === 0 ? (
-                    <p className="text-sm text-white/45">No failed attempts in this window.</p>
-                  ) : (
-                    <div className="rounded border border-white/10 bg-panel-elevated/60 overflow-x-auto">
-                      <table className="w-full min-w-[560px] text-sm">
-                        <caption className="sr-only">
-                          Primary failure per failed issue. Unknown is its own bucket and is never promoted.
-                        </caption>
-                        <thead>
-                          <tr className="text-left text-xs uppercase tracking-wide text-white/40 border-b border-white/10">
-                            <th scope="col" className="px-4 py-2 font-medium">Failure</th>
-                            <th scope="col" className="px-3 py-2 font-medium">Domain</th>
-                            <th scope="col" className="px-3 py-2 font-medium">Issues</th>
-                            <th scope="col" className="px-3 py-2 font-medium">Share</th>
-                            <th scope="col" className="px-3 py-2 font-medium">Example issues</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/5">
-                          {failures.map((f) => (
-                            <tr
-                              key={f.code}
-                              className={f.isUnknown ? "bg-amber-400/5 tabular-nums" : "tabular-nums"}
-                            >
-                              <th scope="row" className="px-4 py-2 text-left font-medium text-white/85">
-                                {f.code}
-                                {f.isUnknown && (
-                                  <span className="ml-2 text-xs font-normal text-amber-200/90">
-                                    needs evidence
-                                  </span>
-                                )}
-                                <span className="block text-xs font-normal text-white/40">{f.blurb}</span>
-                              </th>
-                              <td className="px-3 py-2 text-white/75">{f.domain}</td>
-                              <td className="px-3 py-2 text-white/75">{f.countText}</td>
-                              <td className="px-3 py-2 text-white/75">{f.shareText}</td>
-                              <td className="px-3 py-2">
-                                <span className="flex flex-wrap gap-x-3 gap-y-1">
-                                  {f.issueIds.map((id) => (
-                                    <Link
-                                      key={id}
-                                      to={issueDetailHref(id)}
-                                      className="text-cyber-teal hover:underline font-mono text-xs"
-                                    >
-                                      {id.slice(0, 8)}
-                                    </Link>
-                                  ))}
-                                  {f.hiddenIssueCount > 0 && (
-                                    <span className="text-xs text-white/40">+{f.hiddenIssueCount} more</span>
-                                  )}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </section>
-
-                <section aria-label="Issues">
-                  <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
-                    <h3 className="text-sm font-medium text-white/80">Issues</h3>
-                    <p className="text-xs text-white/40">{paginationText(report.pagination)}</p>
-                  </div>
-                  <div className="space-y-2">
-                    {report.issues.map((issue) => (
-                      <Link
-                        key={issue.id}
-                        to={issueDetailHref(issue.id)}
-                        className="block rounded border border-white/10 bg-panel-elevated/60 px-4 py-2.5 hover:border-cyber-teal/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyber-teal/45"
-                      >
-                        <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                          <IssueStatusBadge status={issue.status as IssueStatus} />
-                          <span className="text-sm text-white/85 flex-1 min-w-40">{issue.title}</span>
-                          <span className="text-xs text-white/40 tabular-nums">{issue.attempts} attempts</span>
-                        </span>
-                        <span className="mt-0.5 block text-xs text-white/35 font-mono truncate">
-                          {issue.repo} · {issue.id.slice(0, 8)}
-                        </span>
-                      </Link>
-                    ))}
-                  </div>
-                  {report.pagination.totalPages > 1 && (
-                    <nav aria-label="Report pages" className="mt-3 flex items-center gap-2">
-                      <button
-                        type="button"
-                        className="px-3 py-1.5 text-sm rounded border border-white/15 text-white/70 hover:text-white disabled:opacity-40"
-                        disabled={report.pagination.page <= 1}
-                        onClick={() => apply(form, report.pagination.page - 1)}
-                      >
-                        Previous
-                      </button>
-                      <span className="text-xs text-white/45 tabular-nums">
-                        Page {report.pagination.page} of {report.pagination.totalPages}
-                      </span>
-                      <button
-                        type="button"
-                        className="px-3 py-1.5 text-sm rounded border border-white/15 text-white/70 hover:text-white disabled:opacity-40"
-                        disabled={report.pagination.page >= report.pagination.totalPages}
-                        onClick={() => apply(form, report.pagination.page + 1)}
-                      >
-                        Next
-                      </button>
-                    </nav>
-                  )}
-                </section>
-              </>
-            )}
-          </div>
-        )}
-      </div>
+      <ReportContent
+        loading={loading}
+        error={error}
+        report={report}
+        onRetry={() => setReloadTick((t) => t + 1)}
+        onPage={gotoPage}
+      />
     </div>
   );
 }
