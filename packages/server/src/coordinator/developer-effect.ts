@@ -808,7 +808,7 @@ export async function runDeveloperEffect(
     const logPath = developerSessionLogPath(sessionId);
     patchRunningSession(sessionId, { logPath, worktreePath });
     setLiveIntent(issue.id, `Developer · session running (round ${round})`);
-    const sampler = startActivitySampler({ issueId: issue.id, role: "developer", round, logPath });
+    const sampler = startActivitySampler({ issueId: issue.id, role: "developer", round, logPath, workerSessionId: sessionId });
 
     const spawnStartedAt = Date.now();
     const agentModel = snapshot?.model ?? null;

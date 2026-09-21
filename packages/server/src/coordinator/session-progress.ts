@@ -13,6 +13,12 @@ import type { WorkflowEventType } from "@agent-dealer/shared";
 import { getIssue, transitionIssue } from "../repository/issues.js";
 import { appendWorkflowEvent } from "../repository/workflow-events.js";
 import { parseNdjson } from "../runners/stream-json.js";
+import {
+  getSessionActivityMaxCursor,
+  getSessionActivityMaxOffset,
+  insertSessionActivityEvent,
+} from "../repository/session-activity.js";
+import { scanNewActivityLines } from "./session-activity.js";
 
 export type SessionRole = "developer" | "reviewer";
 
@@ -362,24 +368,138 @@ export function deriveLiveProgressFromLog(
   return null;
 }
 
+/** Cap per-tick incremental log reads so one tick stays cheap on large logs. */
+const ACTIVITY_READ_MAX_BYTES = 256_000;
+
+function readLogChunk(logPath: string, fromOffset: number, maxBytes = ACTIVITY_READ_MAX_BYTES): string | null {
+  if (!logPath || !fs.existsSync(logPath)) return null;
+  try {
+    const size = fs.statSync(logPath).size;
+    if (size < fromOffset) return null; // truncated/rotated — caller resets
+    if (size === fromOffset) return "";
+    const end = Math.min(size, fromOffset + maxBytes);
+    const fd = fs.openSync(logPath, "r");
+    try {
+      const buf = Buffer.alloc(end - fromOffset);
+      fs.readSync(fd, buf, 0, buf.length, fromOffset);
+      return buf.toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+function summarizeActivityEvent(
+  e: Record<string, unknown>,
+  kind: string
+): string | null {
+  if (kind === "tool_started" || kind === "tool_completed") {
+    return formatToolProgress(e);
+  }
+  if (kind === "assistant_output") {
+    const text = assistantTextFromEvent(e);
+    if (!text) return null;
+    return truncateOneLine(text);
+  }
+  if (kind === "provider_wait") return "Provider wait/retry";
+  const type = typeof e.type === "string" ? e.type : "event";
+  return truncateOneLine(`Structured activity: ${type}`);
+}
+
 /**
  * While an agent CLI is running, periodically refresh currentIntent from the session log
  * without flooding the timeline. No-ops when the log has no new activity label.
+ *
+ * NOT-170: the same tick also persists new structured stream events (tool starts and
+ * completions, assistant output, provider wait/retry) into `session_activity_events` —
+ * no second polling loop. Ticks with no new log bytes persist nothing, and repeated
+ * ticks never duplicate rows: resume starts from the durable MAX(source_offset) and
+ * re-inserts are no-ops on UNIQUE(worker_session_id, source_offset). `workerSessionId`
+ * is required for persistence; without it the sampler only refreshes intent.
  */
 export function startActivitySampler(opts: {
   issueId: string;
   role: SessionRole;
   round: number;
   logPath: string;
+  workerSessionId?: string;
   intervalMs?: number;
 }): { stop: () => void } {
   const prefix = `${ROLE_LABEL[opts.role]} ·`;
   let lastLabel: string | null = null;
+  let lastOffset = 0;
+  let baseCursor = 0;
+  let resumeDone = false;
+  const ensureResumed = () => {
+    if (resumeDone || !opts.workerSessionId) return;
+    resumeDone = true;
+    try {
+      const maxOffset = getSessionActivityMaxOffset(opts.workerSessionId);
+      if (maxOffset !== null) lastOffset = maxOffset;
+      const maxCursor = getSessionActivityMaxCursor(opts.workerSessionId);
+      if (maxCursor !== null) baseCursor = maxCursor + 1;
+    } catch {
+      // persistence must never break the live strip
+    }
+  };
+  const sampleAndPersistActivity = () => {
+    if (!opts.workerSessionId) return;
+    ensureResumed();
+    let chunk: string | null;
+    try {
+      chunk = readLogChunk(opts.logPath, lastOffset);
+    } catch {
+      return;
+    }
+    if (chunk === null) {
+      // Log truncated/rotated or unreadable: restart from the beginning. Rows already
+      // persisted stay deduplicated by UNIQUE(worker_session_id, source_offset).
+      lastOffset = 0;
+      baseCursor = 0;
+      return;
+    }
+    if (!chunk) return;
+    let result: ReturnType<typeof scanNewActivityLines>;
+    try {
+      result = scanNewActivityLines(chunk, { baseCursor });
+    } catch {
+      return;
+    }
+    const { scanned, nextOffset, nextCursor } = result;
+    const observedAt = new Date().toISOString();
+    if (scanned.length > 0 && opts.workerSessionId) {
+      try {
+        for (const s of scanned) {
+          insertSessionActivityEvent({
+            issueId: opts.issueId,
+            workerSessionId: opts.workerSessionId,
+            observedAt,
+            sourceCursor: s.cursor,
+            // Exclusive end offset: restart resumes from MAX(source_offset) exactly.
+            sourceOffset: lastOffset + s.endOffset,
+            activityKind: s.normalized.kind,
+            state: s.normalized.state,
+            callId: s.normalized.callId,
+            summary: summarizeActivityEvent(s.event, s.normalized.kind),
+            rawEvidence: `${opts.logPath}#offset=${lastOffset + s.offset}`,
+          });
+        }
+      } catch {
+        // persistence must never break the live strip
+      }
+    }
+    lastOffset += nextOffset;
+    baseCursor = nextCursor;
+  };
   const tick = () => {
     const activity = deriveLiveProgressFromLog(opts.logPath);
-    if (!activity || activity === lastLabel) return;
-    lastLabel = activity;
-    setLiveIntent(opts.issueId, `${prefix} ${activity} (round ${opts.round})`);
+    if (activity && activity !== lastLabel) {
+      lastLabel = activity;
+      setLiveIntent(opts.issueId, `${prefix} ${activity} (round ${opts.round})`);
+    }
+    sampleAndPersistActivity();
   };
   const handle = setInterval(tick, opts.intervalMs ?? 10_000);
   // First sample soon so the strip moves off "session running" once tools appear.
@@ -388,6 +508,9 @@ export function startActivitySampler(opts: {
     stop() {
       clearInterval(handle);
       clearTimeout(first);
+      // Final flush: events written after the last tick (e.g. a trailing tool
+      // completion) must still close their flight before the process is gone.
+      sampleAndPersistActivity();
     },
   };
 }
