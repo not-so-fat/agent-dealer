@@ -4,6 +4,8 @@ import type { AgentWithHealth, HumanAction, LinearCandidate } from "@agent-deale
 import {
   createIssue,
   dequeueIssue,
+  executeIssue,
+  fetchIssueDetail,
   fetchIssues,
   fetchLinearInbox,
   fetchQueue,
@@ -11,13 +13,16 @@ import {
   fetchRecentRepos,
   lookupLinearIssue,
   moveQueueEntry,
+  patchIssue,
   resolveHumanAction,
+  startIssue,
   updateAdmissionSettings,
   type AdmissionStatus,
   type IssueListRow,
   type QueueEntryRow,
 } from "../api";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
+import AgentAssignmentEditor from "../components/issues/AgentAssignmentEditor";
 import NeedsAttentionPanel from "../components/issues/NeedsAttentionPanel";
 import AlertIcon from "../components/ui/AlertIcon";
 
@@ -74,6 +79,13 @@ export default function IssuesListPage({
   const [queue, setQueue] = useState<QueueEntryRow[]>([]);
   const [admission, setAdmission] = useState<AdmissionStatus | null>(null);
   const [limitBusy, setLimitBusy] = useState(false);
+  /** NOT-217 queued reassignment: the row being edited plus its live assignments. */
+  const [editTarget, setEditTarget] = useState<{
+    issueId: string;
+    developerAgentId: string | null;
+    reviewerAgentId: string | null;
+  } | null>(null);
+  const [rowBusyId, setRowBusyId] = useState<string | null>(null);
 
   const selectedLinear = candidates.find((c) => c.id === selectedLinearId) ?? null;
   const linearLocked = sourceMode === "linear" && selectedLinear != null;
@@ -100,6 +112,72 @@ export default function IssuesListPage({
       setError(String(e));
     } finally {
       setLimitBusy(false);
+    }
+  };
+
+  /** NOT-217: open the queued reassignment editor with the issue's live assignments. */
+  const openEditor = async (issueId: string) => {
+    setRowBusyId(issueId);
+    setError(null);
+    try {
+      const detail = await fetchIssueDetail(issueId);
+      setEditTarget({
+        issueId,
+        developerAgentId: detail.issue.developerAgentId,
+        reviewerAgentId: detail.issue.reviewerAgentId,
+      });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRowBusyId(null);
+    }
+  };
+
+  /** NOT-217: save via the issue PATCH contract — position kept, wait reason rechecked. */
+  const saveAgents = async (developerAgentId: string, reviewerAgentId: string) => {
+    if (!editTarget) return;
+    setRowBusyId(editTarget.issueId);
+    try {
+      await patchIssue(editTarget.issueId, { developerAgentId, reviewerAgentId });
+      setEditTarget(null);
+      refresh();
+    } catch (e) {
+      // A 409 means the issue started mid-edit: close the editor and show current
+      // state instead of a stale success.
+      setEditTarget(null);
+      setError(String(e));
+      refresh();
+    } finally {
+      setRowBusyId(null);
+    }
+  };
+
+  /** NOT-217 Run next: move to position 1 and admit if a slot is free. */
+  const runNext = async (issueId: string) => {
+    setRowBusyId(issueId);
+    setError(null);
+    try {
+      await startIssue(issueId);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRowBusyId(null);
+    }
+  };
+
+  /** NOT-217 Execute now: direct admission, never a queue move — refusal changes nothing. */
+  const executeNow = async (issueId: string) => {
+    setRowBusyId(issueId);
+    setError(null);
+    try {
+      await executeIssue(issueId);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+      refresh();
+    } finally {
+      setRowBusyId(null);
     }
   };
 
@@ -270,7 +348,8 @@ export default function IssuesListPage({
           </div>
           <div className="divide-y divide-white/5">
             {queue.map((entry, index) => (
-              <div key={entry.id} className="px-4 py-2 flex items-start gap-3">
+              <div key={entry.id}>
+                <div className="px-4 py-2 flex items-start gap-3">
                 <span className="text-xs text-white/35 w-5 shrink-0 pt-0.5">{entry.position}</span>
                 <Link
                   to={`/issues/${entry.issueId}`}
@@ -287,7 +366,34 @@ export default function IssuesListPage({
                     </span>
                   )}
                 </Link>
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                  <button
+                    type="button"
+                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={rowBusyId === entry.issueId}
+                    title="Change the developer/reviewer agents — keeps queue position and rechecks the wait reason"
+                    onClick={() => void openEditor(entry.issueId)}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={rowBusyId === entry.issueId}
+                    title="Run next — move to the front of the admission queue; runs now if a slot is free, otherwise waits first with a reason"
+                    onClick={() => void runNext(entry.issueId)}
+                  >
+                    Run next
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={rowBusyId === entry.issueId}
+                    title="Execute now — start immediately, skipping queue order; refuses (changing nothing) when capacity, readiness, blockers, or agent health prevents it"
+                    onClick={() => void executeNow(entry.issueId)}
+                  >
+                    Execute now
+                  </button>
                   <button
                     type="button"
                     className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
@@ -356,6 +462,19 @@ export default function IssuesListPage({
                     Remove
                   </button>
                 </div>
+                </div>
+                {editTarget?.issueId === entry.issueId && (
+                  <div className="px-4 pb-3 pl-12">
+                    <AgentAssignmentEditor
+                      agents={agents}
+                      initialDeveloperId={editTarget.developerAgentId}
+                      initialReviewerId={editTarget.reviewerAgentId}
+                      busy={rowBusyId === entry.issueId}
+                      onSave={(dev, rev) => void saveAgents(dev, rev)}
+                      onCancel={() => setEditTarget(null)}
+                    />
+                  </div>
+                )}
               </div>
             ))}
           </div>

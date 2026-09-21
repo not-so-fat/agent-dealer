@@ -5,6 +5,7 @@ import {
   abortIssue,
   dequeueIssue,
   enqueueIssue,
+  executeIssue,
   fetchIssueArtifactTrace,
   fetchIssueDetail,
   fetchIssueEvidence,
@@ -16,6 +17,7 @@ import {
   type IssueEvidence,
 } from "../api";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
+import AgentAssignmentEditor from "../components/issues/AgentAssignmentEditor";
 import IssueTimeline from "../components/issues/IssueTimeline";
 import HumanActionChoices from "../components/issues/HumanActionChoices";
 import { parseResponseOptions } from "../lib/humanActions";
@@ -128,6 +130,8 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
   const [busy, setBusy] = useState(false);
   /** Outcome of the last Start — admitted, or queued at a position with a reason. */
   const [startNotice, setStartNotice] = useState<string | null>(null);
+  /** NOT-217 queued reassignment editor (pre-start only). */
+  const [assignEditing, setAssignEditing] = useState(false);
 
   const refresh = () =>
     fetchIssueDetail(issueId)
@@ -163,6 +167,7 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
     setEditAcceptance("");
     setBusy(false);
     setStartNotice(null);
+    setAssignEditing(false);
     refresh();
     const poll = setInterval(refresh, 4000);
     return () => clearInterval(poll);
@@ -273,6 +278,43 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
       refresh();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doExecute = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      // NOT-217 Execute now: direct admission, bypassing queue order only. A refusal
+      // throws with the reason and changes nothing — the refreshed queue entry below
+      // still shows the untouched position.
+      await executeIssue(issueId);
+      setStartNotice(null);
+      setAssignEditing(false);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+      refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveAssign = async (developerAgentId: string, reviewerAgentId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await patchIssue(issueId, { developerAgentId, reviewerAgentId });
+      setAssignEditing(false);
+      refresh();
+    } catch (e) {
+      // A 409 means the issue started mid-edit: close the editor and show current
+      // state instead of a stale success.
+      setAssignEditing(false);
+      setError(String(e));
+      refresh();
     } finally {
       setBusy(false);
     }
@@ -557,17 +599,31 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
                 title={
                   developerBlocked
                     ? developerBlockReason
-                    : "Move to the front of the admission queue — runs now if a slot is free"
+                    : "Run next — move to the front of the admission queue; runs now if a slot is free, otherwise waits first with a reason"
                 }
                 onClick={doStart}
               >
                 Run next
+              </button>
+              <button
+                type="button"
+                className="px-4 py-2 text-sm border border-cyber-teal/40 rounded text-cyber-teal hover:bg-cyber-teal/10 disabled:opacity-50"
+                disabled={!readiness.ok || busy || !!developerBlocked}
+                title={
+                  developerBlocked
+                    ? developerBlockReason
+                    : "Execute now — start immediately, skipping queue order; refuses (changing nothing) when capacity, readiness, blockers, or agent health prevents it"
+                }
+                onClick={doExecute}
+              >
+                Execute now
               </button>
               {!queued ? (
                 <button
                   type="button"
                   className="px-4 py-2 text-sm border border-white/15 rounded text-white/80 hover:border-cyber-teal/50 hover:text-cyber-teal disabled:opacity-50"
                   disabled={busy || hasActiveWorkflow}
+                  title="Add to queue — append to the end of the admission queue; does not start anything now"
                   onClick={doEnqueue}
                 >
                   Add to queue
@@ -583,6 +639,26 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
                 </button>
               )}
             </div>
+            {queued && !hasActiveWorkflow && !assignEditing && (
+              <button
+                type="button"
+                className="text-xs text-cyber-teal hover:underline disabled:opacity-50"
+                disabled={busy}
+                onClick={() => setAssignEditing(true)}
+              >
+                Edit developer / reviewer agents
+              </button>
+            )}
+            {queued && assignEditing && (
+              <AgentAssignmentEditor
+                agents={agents}
+                initialDeveloperId={issue.developerAgentId}
+                initialReviewerId={issue.reviewerAgentId}
+                busy={busy}
+                onSave={(dev, rev) => void saveAssign(dev, rev)}
+                onCancel={() => setAssignEditing(false)}
+              />
+            )}
           </div>
         )}
 
