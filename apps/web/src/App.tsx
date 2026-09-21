@@ -48,6 +48,8 @@ function IssueDetailRoute({
 
 // NOT-227: pure shell header so tests can pin the wordmark and nav order
 // without running the App data polls. App owns the counts; this owns markup.
+// NOT-231: product copy is AgentDealer; Monaco is only the wordmark font
+// (font-mono token), not replacement copy.
 export function ShellHeader({
   openHumanActionCount,
   agentCount,
@@ -63,13 +65,13 @@ export function ShellHeader({
         <Link
           to="/issues"
           className="flex items-center gap-3 text-left rounded hover:opacity-90 transition-opacity focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyber-teal/45"
-          aria-label="Monaco — go to Issues"
-          title="Monaco — go to Issues"
+          aria-label="AgentDealer — go to Issues"
+          title="AgentDealer — go to Issues"
         >
           <Logo size={40} />
           <div>
             <h1
-              className="font-ui-display text-xl font-bold sm:text-2xl"
+              className="font-mono text-xl font-bold sm:text-2xl"
               style={{
                 background: "linear-gradient(to right, #C4B643, #D4C760)",
                 WebkitBackgroundClip: "text",
@@ -77,7 +79,7 @@ export function ShellHeader({
                 backgroundClip: "text",
               }}
             >
-              Monaco
+              AgentDealer
             </h1>
             <p className="text-sm text-cyber-teal">One issue, one durable coordination record</p>
           </div>

@@ -1,6 +1,8 @@
-// NOT-227: pins the shell identity (Monaco wordmark) and primary nav order
-// (Issues before Reports). ShellHeader is pure, so renderToStaticMarkup under
-// MemoryRouter pins the markup without a browser.
+// NOT-227: pins the shell identity and primary nav order (Issues before
+// Reports). NOT-231: product copy is AgentDealer; Monaco is only the
+// wordmark font (font-mono token), not replacement copy. ShellHeader is
+// pure, so renderToStaticMarkup under MemoryRouter pins the markup without
+// a browser.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -34,19 +36,38 @@ function render(
   );
 }
 
-test("wordmark is exactly Monaco and links to /issues", () => {
+function wordmarkClass(html: string): string {
+  const match = html.match(/<h1[^>]*class="([^"]*)"[^>]*>AgentDealer</);
+  assert.ok(match, "wordmark h1 renders AgentDealer with a class attribute");
+  return match[1];
+}
+
+test("wordmark is exactly AgentDealer and links to /issues", () => {
   const html = render();
-  assert.ok(html.includes(">Monaco<"), "visible wordmark reads Monaco");
-  assert.ok(!html.includes(">AgentDealer<"), "old wordmark is gone");
+  assert.ok(html.includes(">AgentDealer<"), "visible wordmark reads AgentDealer");
+  assert.ok(!html.includes(">Monaco<"), "Monaco is not product copy");
+  assert.ok(!html.includes("Monaco"), "Monaco appears nowhere in shell markup");
   assert.ok(
-    html.includes('aria-label="Monaco — go to Issues"'),
-    "header link accessible name uses Monaco"
+    html.includes('aria-label="AgentDealer — go to Issues"'),
+    "header link accessible name uses AgentDealer"
   );
   assert.ok(
-    html.includes('title="Monaco — go to Issues"'),
-    "header link title uses Monaco"
+    html.includes('title="AgentDealer — go to Issues"'),
+    "header link title uses AgentDealer"
   );
   assert.ok(html.includes('href="/issues"'), "wordmark still navigates to /issues");
+});
+
+test("wordmark renders through the Monaco-backed font-mono token", () => {
+  const html = render();
+  const cls = wordmarkClass(html);
+  assert.ok(
+    cls.split(/\s+/).includes("font-mono"),
+    `wordmark uses the Monaco-backed font-mono token (got: ${cls})`
+  );
+  assert.ok(!cls.includes("font-ui-display"), "wordmark does not use the Avenir-backed token");
+  const h1Tag = html.slice(html.lastIndexOf("<h1", html.indexOf(">AgentDealer<")), html.indexOf(">AgentDealer<"));
+  assert.ok(!/font-family/i.test(h1Tag), "wordmark does not hard-code a font family");
 });
 
 test("primary nav orders Issues before Reports, Agents stays separate", () => {
