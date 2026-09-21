@@ -45,6 +45,13 @@ export const WorkflowEventType = z.enum([
   "queue.wait_reason_changed",
   "queue.admitted",
   "queue.removed",
+  /** NOT-169: durable agent-process and host-sleep boundaries (see EXECUTION_ANALYSIS.md
+   * §2/§6). `agent.started` is emitted only after the CLI child exists (onSpawn);
+   * `agent.completed` exactly once per spawned process, before receipt/usage/validation;
+   * `host.suspended` is idempotent per session/jump and never drives recovery decisions. */
+  "agent.started",
+  "agent.completed",
+  "host.suspended",
   /** Migration-only — the NOT-66 cutover repoints a legacy `events` row under this type,
    * preserving the original type/payload inside `payloadJson` (see `role: "legacy"` on
    * `WorkerSessionRole` and `outcome: "migrated"` on `WorkflowInstanceOutcome` for the same

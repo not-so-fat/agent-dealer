@@ -645,6 +645,21 @@ function eventEmitter(
   };
 }
 
+/**
+ * NOT-169: a publishOnly work item runs the no-agent publish path (no CLI spawn, no
+ * agent.started/agent.completed). Its worker terminal event carries `publishOnly: true`
+ * so a publish-only recovery is distinguishable from an agent retry in the timeline
+ * and in interval derivation.
+ */
+function isPublishOnlyItem(item: WorkItem): boolean {
+  try {
+    if (!item.payloadJson) return false;
+    return (JSON.parse(item.payloadJson) as { publishOnly?: unknown }).publishOnly === true;
+  } catch {
+    return false;
+  }
+}
+
 function applyProjectionTransition(issue: Issue, projection: IssueProjection, patch: TransitionIssuePatch): void {
   transitionIssue(issue.id, projection.issueStatus, {
     currentOwner: projection.currentOwner,
@@ -700,6 +715,8 @@ function applyDeveloper(
           worktreePath: session?.worktreePath,
         }),
         outcome: outcome.kind,
+        // NOT-169: distinguish a no-agent publish-only recovery from an agent retry.
+        ...(isPublishOnlyItem(item) ? { publishOnly: true } : {}),
       };
       if (type === "worker.failed") {
         // Do not read session.errorJson here — worker-loop writes it only *after*
@@ -781,6 +798,9 @@ function applyReviewer(
           worktreePath: session?.worktreePath,
         }),
         outcome: outcome.kind,
+        // NOT-169: publishOnly items never reach the reviewer path today, but keep the
+        // marker symmetric so a future no-agent reviewer retry is distinguishable too.
+        ...(isPublishOnlyItem(item) ? { publishOnly: true } : {}),
       };
       if (type === "worker.failed") {
         // See applyDeveloper: session.errorJson is not written until after applyCompletion.

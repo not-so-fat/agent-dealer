@@ -200,6 +200,15 @@ export function appendWorkflowEvent(input: AppendWorkflowEventInput): WorkflowEv
   return rowToEvent(row);
 }
 
+/** NOT-169: events for one worker session in durable insertion order (rowid), so
+ * same-millisecond boundaries derive deterministically. */
+export function listWorkflowEventsForSessionOrdered(workerSessionId: string): Array<{ event: WorkflowEvent; rowid: number }> {
+  const rows = getDb()
+    .prepare("SELECT rowid AS rid, * FROM workflow_events WHERE worker_session_id = ? ORDER BY rowid ASC")
+    .all(workerSessionId) as Array<WorkflowEventRow & { rid: number }>;
+  return rows.map((row) => ({ event: rowToEvent(row), rowid: row.rid }));
+}
+
 export function listWorkflowEventsForIssue(issueId: string): WorkflowEvent[] {
   const rows = getDb()
     .prepare("SELECT * FROM workflow_events WHERE issue_id = ? ORDER BY ts ASC")
