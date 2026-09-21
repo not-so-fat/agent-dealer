@@ -155,6 +155,12 @@ export const ExecutionReportResponse = z.object({
     sessionWallMs: PercentileStat,
     spawnEnvelopeMs: PercentileStat,
     checkpointMs: PercentileStat,
+    /**
+     * Exclusive phase wall times (§2). Phases whose boundaries are not
+     * defensible today (§6 source matrix) are `unavailable` with n = 0 and a
+     * reason code — never zero, never a proxy dressed as exact.
+     */
+    phaseWallMs: z.array(z.object({ phase: z.string(), stat: PercentileStat })),
     failedDurationMs: CoverageSum,
     failedTokensIn: CoverageSum,
     failedTokensOut: CoverageSum,

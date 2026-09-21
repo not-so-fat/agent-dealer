@@ -12,6 +12,7 @@ import { registerIssueRoutes } from "./routes/issues.js";
 import { registerQueueRoutes } from "./routes/queue.js";
 import { registerHumanActionRoutes } from "./routes/human-actions.js";
 import { registerExecutionAnalysisRoutes } from "./routes/execution-analysis.js";
+import { registerExecutionReportRoutes } from "./routes/execution-report.js";
 import { recoverCoordinator } from "./coordinator/recovery.js";
 import { startCoordinatorLoop } from "./coordinator/worker-loop.js";
 import { startLinearUsageSummary } from "./adapters/linear-graphql.js";
@@ -74,6 +75,7 @@ async function main(): Promise<void> {
   await registerQueueRoutes(app);
   await registerHumanActionRoutes(app);
   await registerExecutionAnalysisRoutes(app);
+  await registerExecutionReportRoutes(app);
 
   const uiDist = await registerStaticUi(app);
 
