@@ -362,6 +362,14 @@ test("filterIssueEvidence keeps only matching attempts with exact waste semantic
   assert.equal(scoped.primaryFailure?.code, "agent_cli_crash");
 });
 
+test("composeIssueAnalysis passes per-attempt reuse kinds and preserved kinds through", () => {
+  // NOT-174: session b reused the prior commit; session a is the first attempt.
+  const full = composeIssueAnalysis(mixedRuntimeEvidence());
+  assert.deepEqual(full.attempts.find((a) => a.sessionId === "b")?.reuseKinds, ["commit"]);
+  assert.equal(full.attempts.find((a) => a.sessionId === "a")?.reuseKinds, undefined);
+  assert.deepEqual(full.retry.preservedKinds, ["commit"]);
+});
+
 test("composeCohortReport aggregates attempt-scoped metrics from filtered analyses", () => {
   const ev = mixedRuntimeEvidence();
   const full = composeIssueAnalysis(ev);
