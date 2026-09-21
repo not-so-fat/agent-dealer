@@ -1,9 +1,15 @@
 import { z } from "zod";
+// NOT-173 owns the shared percentile shape; the report reuses it so the two
+// fleet surfaces cannot drift (previously a duplicate local definition
+// collided at `export *` time).
+import { PercentileStat } from "./execution-analysis.js";
+type ReportPercentile = z.infer<typeof PercentileStat>;
 
 /**
  * NOT-175: fleet-level execution-comparison report contract.
  *
- * The report reads `GET /api/execution-analysis` (NOT-173 surface). Every
+ * The report is served by `GET /api/execution-report` (NOT-173 owns
+ * `GET /api/execution-analysis`; Fastify rejects duplicate routes). Every
  * aggregate follows docs/EXECUTION_ANALYSIS.md:
  * - missing cost/tokens/duration are excluded and counted in `known / total`,
  *   never coerced to zero;
@@ -62,16 +68,6 @@ export type ExecutionReportQuery = z.infer<typeof ExecutionReportQuery>;
 export const EvidenceQuality = z.enum(["exact", "inferred", "unavailable"]);
 export type EvidenceQuality = z.infer<typeof EvidenceQuality>;
 
-/** Nearest-rank percentile value with its sample count (§3 item 6). */
-export const PercentileStat = z.object({
-  p50: z.number().nullable(),
-  p95: z.number().nullable(),
-  n: z.number().int().min(0),
-  quality: EvidenceQuality,
-  reasons: z.array(z.string()),
-});
-export type PercentileStat = z.infer<typeof PercentileStat>;
-
 /** Sum over known values only, with completeness counts (§4). */
 export const CoverageSum = z.object({
   sum: z.number().nullable(),
@@ -100,6 +96,15 @@ export const CohortRow = z.object({
   tokensOut: CoverageSum,
   costUsd: CoverageSum,
   durationMs: CoverageSum,
+  /**
+   * Failed-attempt waste inside this cohort (usage of failed / timed_out /
+   * cancelled sessions, known values only). Coverage universe is the cohort's
+   * failed attempts, so a cohort with no failed attempts reads Unavailable.
+   */
+  failedDurationMs: CoverageSum,
+  failedTokensIn: CoverageSum,
+  failedTokensOut: CoverageSum,
+  failedCostUsd: CoverageSum,
 });
 export type CohortRow = z.infer<typeof CohortRow>;
 
@@ -242,7 +247,7 @@ export function nearestRankPercentiles(
   values: Array<number | null | undefined>,
   quality: EvidenceQuality = "exact",
   reasons: string[] = []
-): PercentileStat {
+): ReportPercentile {
   const sorted = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v)).sort((a, b) => a - b);
   const n = sorted.length;
   if (n === 0) return { p50: null, p95: null, n: 0, quality: "unavailable", reasons: ["no_observations"] };
@@ -296,7 +301,7 @@ export function isSparseSample(n: number): boolean {
 }
 
 /** Percentile cell: value + sample count, or "Unavailable" when n = 0. */
-export function percentileCellText(stat: Pick<PercentileStat, "p50" | "p95" | "n">, format: (n: number) => string): string {
+export function percentileCellText(stat: Pick<ReportPercentile, "p50" | "p95" | "n">, format: (n: number) => string): string {
   if (stat.n === 0 || (stat.p50 === null && stat.p95 === null)) return "Unavailable";
   const fmt = (v: number | null) => (v === null ? "–" : format(v));
   return `P50 ${fmt(stat.p50)} · P95 ${fmt(stat.p95)} (${sampleLabel(stat.n)})`;

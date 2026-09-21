@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  CohortRow,
   coverageCellText,
   coverageSum,
   defaultExecutionReportWindow,
@@ -100,4 +101,43 @@ test("sparse samples are explicit and percentiles always show n", () => {
 test("rates render Unavailable instead of zero when there is no denominator", () => {
   assert.equal(formatRate(null), "Unavailable");
   assert.equal(formatRate(0.5), "50.0%");
+});
+
+test("cohort rows carry per-cohort failed-attempt waste coverage", () => {
+  const unavailable = { sum: null, known: 0, total: 0, quality: "unavailable", reasons: ["no_observations"] };
+  const base = {
+    key: "claude_code",
+    issues: 1,
+    attempts: 2,
+    issueSuccess: null,
+    issueSuccessDenominator: 0,
+    attemptSuccess: 0.5,
+    attemptSuccessDenominator: 2,
+    sessionWallMs: { p50: 1000, p95: 1000, n: 1, quality: "inferred", reasons: [] },
+    spawnEnvelopeMs: { p50: 1100, p95: 1100, n: 1, quality: "inferred", reasons: [] },
+    retryRate: 0.5,
+    tokensIn: { sum: 100, known: 1, total: 2, quality: "exact", reasons: ["partial_sample"] },
+    tokensOut: { sum: 50, known: 1, total: 2, quality: "exact", reasons: ["partial_sample"] },
+    costUsd: { sum: 1.5, known: 1, total: 2, quality: "exact", reasons: ["partial_sample"] },
+    durationMs: { sum: 60000, known: 1, total: 2, quality: "inferred", reasons: ["partial_sample"] },
+    failedDurationMs: { sum: 60000, known: 1, total: 1, quality: "inferred", reasons: [] },
+    failedTokensIn: { sum: 100, known: 1, total: 1, quality: "exact", reasons: [] },
+    failedTokensOut: { sum: 50, known: 1, total: 1, quality: "exact", reasons: [] },
+    failedCostUsd: { sum: 1.5, known: 1, total: 1, quality: "exact", reasons: [] },
+  };
+  const parsed = CohortRow.safeParse(base);
+  assert.ok(parsed.success);
+  // Failed waste is required: a cohort without it is not a valid row.
+  const { failedCostUsd, ...withoutWaste } = base;
+  assert.equal(CohortRow.safeParse(withoutWaste).success, false);
+  // A cohort with no failed attempts reads Unavailable, never zero.
+  const noFailures = CohortRow.safeParse({
+    ...base,
+    failedDurationMs: unavailable,
+    failedTokensIn: unavailable,
+    failedTokensOut: unavailable,
+    failedCostUsd: unavailable,
+  });
+  assert.ok(noFailures.success);
+  assert.equal(coverageCellText(unavailable, String), "Unavailable");
 });
