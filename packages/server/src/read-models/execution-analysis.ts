@@ -7,7 +7,7 @@
 //
 // Pure helpers (union, nearest-rank, covered aggregates, reviewer derivation)
 // are exported for unit tests. DB composition is batched: one query per table
-// per issue (or per cohort page with IN), never one query per issue/session —
+// per issue (or per cohort chunk with IN), never one query per issue/session —
 // see the query helpers below and the EXPLAIN QUERY PLAN assertions in the
 // route tests.
 import type {
@@ -222,10 +222,11 @@ function toPhaseInterval(
 // Batched evidence loading — one query per table per issue set.
 //
 // Every loader takes an array of issue ids and returns rows grouped by issue
-// id, so the cohort path issues a constant number of queries per page no
-// matter how many issues or sessions the page holds. EXPLAIN QUERY PLAN for
-// each statement must show index use (asserted in the route tests); the
-// supporting indexes live in db/schema.sql.
+// id, so the cohort path issues a constant number of queries per chunk no
+// matter how many issues or sessions the cohort holds (see
+// loadEvidenceForCohort). EXPLAIN QUERY PLAN for each statement must show
+// index use (asserted in the route tests); the supporting indexes live in
+// db/schema.sql.
 // ---------------------------------------------------------------------------
 
 export interface IssueEventRow {
@@ -980,11 +981,13 @@ export interface CohortIssuePage {
 }
 
 /**
- * Issues whose execution started in the window (first workflow start; issues
- * with no instance yet fall back to created_at), in stable
+ * Every issue whose execution started in the window (first workflow start;
+ * issues with no instance yet fall back to created_at), in stable
  * (firstStart, id) order. Attempt-level filters (role/runtime/model/status)
- * are EXISTS-matched here so pagination counts issues that can contribute;
- * the same predicates filter attempts during aggregation.
+ * are EXISTS-matched here so the cohort counts issues that can contribute;
+ * the same predicates filter attempts during aggregation. Pagination slices
+ * `issueIds` in getCohortExecutionAnalysis — the aggregates always cover the
+ * whole filtered cohort, never just the page.
  */
 export function listCohortIssueIds(
   filters: CohortFilters,
@@ -1033,7 +1036,7 @@ export function listCohortIssueIds(
       firstStart: string;
     }>;
   return {
-    issueIds: rows.slice(filters.offset, filters.offset + filters.limit).map((r) => r.id),
+    issueIds: rows.map((r) => r.id),
     totalIssues: rows.length,
   };
 }
@@ -1044,6 +1047,52 @@ function attemptMatches(session: { role: string; runtime: string | null; model: 
   if (filters.model && (session.model ?? null) !== filters.model) return false;
   if (filters.status && session.status !== filters.status) return false;
   return true;
+}
+
+/** Whether any attempt-level filter is active. With none, the attempt-scoped
+ * cohort metrics trivially equal the whole-issue values. */
+export function hasAttemptFilter(filters: CohortFilters): boolean {
+  return filters.role !== null || filters.runtime !== null || filters.model !== null || filters.status !== null;
+}
+
+/** Evidence restricted to the attempts matching the cohort filters. Sessions
+ * (and the events, usages, activities, and failure causes attributable to
+ * them) that do not match are dropped; unattributable issue-level rows
+ * (null-session events and causes, human actions, queue rows, instances) are
+ * retained because they cannot be scoped to an attempt. Composing this
+ * filtered evidence with composeIssueAnalysis yields the attempt-scoped
+ * cohort metrics (failed waste, retry reuse, reviewer rounds, failure
+ * causes) through the exact per-issue derivation — no approximation, so a
+ * per-runtime or per-model waste comparison never mixes in other runtimes'
+ * failed attempts. */
+export function filterIssueEvidence(ev: IssueEvidence, filters: CohortFilters): IssueEvidence {
+  const keptSessions = new Set(
+    ev.sessions
+      .filter((s) => attemptMatches({ role: s.role, runtime: s.runtime, model: s.model, status: s.status }, filters))
+      .map((s) => s.id),
+  );
+  return {
+    ...ev,
+    sessions: ev.sessions.filter((s) => keptSessions.has(s.id)),
+    events: ev.events.filter((e) => e.sessionId === null || keptSessions.has(e.sessionId)),
+    usages: ev.usages.filter((u) => keptSessions.has(u.workerSessionId)),
+    activities: ev.activities.filter((a) => keptSessions.has(a.workerSessionId)),
+    failureCauses: ev.failureCauses.filter((c) => c.sessionId == null || keptSessions.has(c.sessionId)),
+  };
+}
+
+/** Batched evidence for a whole cohort, loaded in fixed-size chunks so the
+ * query count grows with chunks, never with issues or sessions. */
+export function loadEvidenceForCohort(issueIds: string[], nowMs = Date.now()): Map<string, IssueEvidence> {
+  const out = new Map<string, IssueEvidence>();
+  if (issueIds.length === 0) return out;
+  const CHUNK_SIZE = 100;
+  for (let i = 0; i < issueIds.length; i += CHUNK_SIZE) {
+    for (const [id, ev] of loadEvidenceForIssues(issueIds.slice(i, i + CHUNK_SIZE), nowMs)) {
+      out.set(id, ev);
+    }
+  }
+  return out;
 }
 
 function combineCovered(parts: CoveredTotal[], opts?: { missingReason?: string }): CoveredTotal {
@@ -1082,18 +1131,26 @@ function sliceStats(
     .sort((a, b) => (a.key < b.key ? -1 : 1));
 }
 
-/** Compose the cohort report over one page of issues. All evidence is loaded
- * with the batched loaders (constant queries per page). */
+/** Compose the cohort report over the whole filtered cohort. `analyses` holds
+ * every matching issue in stable order; `page` only selects the `issueIds`
+ * window returned to the caller, so every page reports identical aggregates.
+ * `filteredAnalyses` carries the same issues composed from filter-restricted
+ * evidence (see filterIssueEvidence); attempt-scoped metrics — failed waste,
+ * retry reuse, reviewer rounds, primary failures — aggregate from it, while
+ * issue-level metrics (queue wait, checkpoint latency, human wait) aggregate
+ * from the contributing full issues. All evidence is loaded with the batched
+ * loaders (constant queries per chunk, never per issue/session). */
 export function composeCohortReport(
   analyses: IssueExecutionAnalysis[],
   filters: CohortFilters,
   window: ResolvedCohortWindow,
   page: CohortIssuePage,
+  filteredAnalyses: IssueExecutionAnalysis[] | null = null,
 ): CohortExecutionReport {
-  const issueById = new Map(analyses.map((a) => [a.issueId, a]));
-  const ordered = page.issueIds.map((id) => issueById.get(id)).filter((a): a is IssueExecutionAnalysis => !!a);
+  const ordered = analyses;
+  const scoped = filteredAnalyses ?? ordered;
 
-  // Filtered attempts across the page (attempt denominator).
+  // Filtered attempts across the whole cohort (attempt denominator).
   const kept: Array<{ analysis: IssueExecutionAnalysis; attempt: AttemptAnalysis; retry: boolean }> = [];
   for (const analysis of ordered) {
     const matching = analysis.attempts.filter((a) =>
@@ -1101,6 +1158,12 @@ export function composeCohortReport(
     );
     matching.forEach((attempt, index) => kept.push({ analysis, attempt, retry: index > 0 }));
   }
+
+  // Issue-level metrics under attempt filters cover the contributing issues
+  // (those with at least one kept attempt); without filters every issue
+  // contributes, including ones with no sessions yet.
+  const keptIssueIds = new Set(kept.map((k) => k.analysis.issueId));
+  const level = filteredAnalyses !== null ? ordered.filter((a) => keptIssueIds.has(a.issueId)) : ordered;
 
   const phaseNames: Array<"queue_wait" | "coordinator_setup" | "agent_process" | "coordinator_validation_publish"> = [
     "queue_wait",
@@ -1113,7 +1176,7 @@ export function composeCohortReport(
   // unioned issue view so it is not multiplied by attempt count.
   const queueValues: number[] = [];
   const queueInputs: Array<{ quality: ExecutionQuality; reasons: string[] }> = [];
-  for (const analysis of ordered) {
+  for (const analysis of level) {
     const q = analysis.unionedDurations.find((u) => u.phase === "queue_wait");
     if (q?.durationMs !== null && q?.durationMs !== undefined) {
       queueValues.push(q.durationMs);
@@ -1137,17 +1200,19 @@ export function composeCohortReport(
   const doneAttempts = kept.filter((k) => k.attempt.status === "done").length;
   const attemptSuccess = rateStat(doneAttempts, kept.length, { unavailableReason: "missing_provider_metadata" });
   // Issue success has its own denominator: issues whose latest workflow
-  // completed done over all issues in the page — never the attempt count.
+  // completed done over all issues in the cohort — never the attempt count.
   const issueSuccess = rateStat(
     ordered.filter((a) => doneMarkerStore.get(a.issueId) === true).length,
     ordered.length,
     { unavailableReason: "missing_provider_metadata" },
   );
 
-  // Primary failure counts/rates over issues with a recorded primary.
+  // Primary failure counts/rates over filtered attempts: only causes
+  // attributable to a kept attempt (plus unattributable issue-level causes)
+  // are composed into the scoped analyses.
   const primaryCounts = new Map<string, number>();
   let primaryDenominator = 0;
-  for (const analysis of ordered) {
+  for (const analysis of scoped) {
     if (analysis.primaryFailure) {
       primaryDenominator += 1;
       primaryCounts.set(analysis.primaryFailure.code, (primaryCounts.get(analysis.primaryFailure.code) ?? 0) + 1);
@@ -1157,23 +1222,27 @@ export function composeCohortReport(
     .map(([code, count]) => ({ code, count, rate: primaryDenominator > 0 ? count / primaryDenominator : null }))
     .sort((a, b) => b.count - a.count || (a.code < b.code ? -1 : 1));
 
+  // Failed waste over the filtered attempts: each scoped analysis ran the
+  // exact per-issue waste derivation on filter-restricted evidence, so a
+  // per-runtime or per-model comparison never mixes in other runtimes'
+  // failed attempts.
   const waste = {
-    failedAttempts: ordered.reduce((a, x) => a + x.waste.failedAttempts, 0),
-    runtimeMs: combineCovered(ordered.map((x) => x.waste.runtimeMs), { missingReason: "no_defensible_boundary" }),
-    tokensIn: combineCovered(ordered.map((x) => x.waste.tokensIn)),
-    tokensOut: combineCovered(ordered.map((x) => x.waste.tokensOut)),
-    costUsd: combineCovered(ordered.map((x) => x.waste.costUsd)),
+    failedAttempts: scoped.reduce((a, x) => a + x.waste.failedAttempts, 0),
+    runtimeMs: combineCovered(scoped.map((x) => x.waste.runtimeMs), { missingReason: "no_defensible_boundary" }),
+    tokensIn: combineCovered(scoped.map((x) => x.waste.tokensIn)),
+    tokensOut: combineCovered(scoped.map((x) => x.waste.tokensOut)),
+    costUsd: combineCovered(scoped.map((x) => x.waste.costUsd)),
   };
 
-  const checkpointValues = ordered.map((a) => a.firstCheckpoint.msSinceWorkflowStart);
-  const checkpointInputs = ordered
+  const checkpointValues = level.map((a) => a.firstCheckpoint.msSinceWorkflowStart);
+  const checkpointInputs = level
     .filter((a) => a.firstCheckpoint.msSinceWorkflowStart !== null)
     .map((a) => ({ quality: a.firstCheckpoint.quality, reasons: a.firstCheckpoint.reasons }));
   const checkpointLatencyMs = percentileStat(checkpointValues, checkpointInputs);
 
-  const totalRetries = ordered.reduce((a, x) => a + x.retry.retries, 0);
-  const reusedRetries = ordered.reduce((a, x) => a + x.retry.reused, 0);
-  const unknownRetries = ordered.reduce((a, x) => a + x.retry.unknown, 0);
+  const totalRetries = scoped.reduce((a, x) => a + x.retry.retries, 0);
+  const reusedRetries = scoped.reduce((a, x) => a + x.retry.reused, 0);
+  const unknownRetries = scoped.reduce((a, x) => a + x.retry.unknown, 0);
   const knownRetries = totalRetries - unknownRetries;
   const retryReuse: RateStat = knownRetries > 0
     ? {
@@ -1185,17 +1254,17 @@ export function composeCohortReport(
       }
     : { numerator: 0, denominator: 0, rate: null, quality: "unavailable", reasons: ["missing_provider_metadata"] };
 
-  const reviewerRounds = ordered.reduce((a, x) => a + x.reviewer.rounds, 0);
-  const reviewerVerdicts = ordered.reduce((a, x) => a + x.reviewer.verdicts, 0);
-  const reviewerChangeRequests = ordered.reduce((a, x) => a + x.reviewer.changeRequests, 0);
+  const reviewerRounds = scoped.reduce((a, x) => a + x.reviewer.rounds, 0);
+  const reviewerVerdicts = scoped.reduce((a, x) => a + x.reviewer.verdicts, 0);
+  const reviewerChangeRequests = scoped.reduce((a, x) => a + x.reviewer.changeRequests, 0);
 
-  const humanWaits = ordered.map((a) => a.humanWaitMs);
-  const humanWaitInputs = ordered
+  const humanWaits = level.map((a) => a.humanWaitMs);
+  const humanWaitInputs = level
     .filter((a) => a.humanWaitMs !== null)
     .map((a) => ({ quality: a.humanWaitQuality, reasons: a.humanWaitReasons }));
   const humanInterventions = {
-    totalActions: ordered.reduce((a, x) => a + x.interventionCount, 0),
-    issuesWithIntervention: ordered.filter((a) => a.interventionCount > 0).length,
+    totalActions: level.reduce((a, x) => a + x.interventionCount, 0),
+    issuesWithIntervention: level.filter((a) => a.interventionCount > 0).length,
     humanWaitMs: percentileStat(humanWaits, humanWaitInputs),
   };
 
@@ -1274,19 +1343,29 @@ export function composeCohortReport(
  * the analyses rather than inside them. */
 export const doneMarkerStore = new Map<string, boolean>();
 
-/** Full cohort path: resolve window → page issues → batched evidence →
- * per-issue composition → aggregation. */
+/** Full cohort path: resolve window → all matching issues → chunked batched
+ * evidence → per-issue composition → aggregation over the whole cohort.
+ * Pagination only windows the returned `issueIds`; the aggregates always
+ * describe the full filtered cohort, so every page reports the same numbers
+ * and `totalIssues` agrees with the aggregate sample. */
 export function getCohortExecutionAnalysis(filters: CohortFilters, nowMs = Date.now()): CohortExecutionReport {
   const window = resolveCohortWindow(filters, nowMs);
-  const page = listCohortIssueIds(filters, window);
-  const evidence = loadEvidenceForIssues(page.issueIds, nowMs);
+  const full = listCohortIssueIds(filters, window);
+  const page: CohortIssuePage = {
+    issueIds: full.issueIds.slice(filters.offset, filters.offset + filters.limit),
+    totalIssues: full.totalIssues,
+  };
+  const evidence = loadEvidenceForCohort(full.issueIds, nowMs);
   doneMarkerStore.clear();
+  const filtered = hasAttemptFilter(filters) ? new Map<string, IssueEvidence>() : null;
   for (const [id, ev] of evidence) {
     const last = ev.instances.length > 0 ? ev.instances[ev.instances.length - 1]! : null;
     doneMarkerStore.set(id, last?.outcome === "done" && last.completedAt !== null);
+    if (filtered) filtered.set(id, filterIssueEvidence(ev, filters));
   }
-  const analyses = page.issueIds.map((id) => composeIssueAnalysis(evidence.get(id)!));
-  return composeCohortReport(analyses, filters, window, page);
+  const analyses = full.issueIds.map((id) => composeIssueAnalysis(evidence.get(id)!));
+  const filteredAnalyses = filtered ? full.issueIds.map((id) => composeIssueAnalysis(filtered.get(id)!)) : null;
+  return composeCohortReport(analyses, filters, window, page, filteredAnalyses);
 }
 
 /** Full issue path: batched evidence → composition. Null when unknown. */

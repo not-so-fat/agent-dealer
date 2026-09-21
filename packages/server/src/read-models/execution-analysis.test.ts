@@ -6,9 +6,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  composeCohortReport,
   composeIssueAnalysis,
   coveredTotal,
   deriveReviewerView,
+  doneMarkerStore,
+  filterIssueEvidence,
+  hasAttemptFilter,
   nearestRank,
   percentileStat,
   rateStat,
@@ -269,4 +273,114 @@ test("issues with no failure evidence report an unavailable primary, not unknown
   assert.equal(analysis.primaryFailureQuality, "unavailable");
   assert.ok(analysis.primaryFailureReasons.includes("missing_classification"));
   assert.equal(analysis.attempts.length, 0);
+});
+
+// ---------------------------------------------------------- cohort filter scoping
+
+const cursorOnly = {
+  from: null,
+  to: null,
+  role: null,
+  runtime: "cursor_local",
+  model: null,
+  status: null,
+  repo: null,
+  limit: 50,
+  offset: 0,
+};
+
+/** One issue with a failed claude_code attempt (session a) and a failed
+ * cursor_local attempt (session b, reused retry). */
+function mixedRuntimeEvidence(): IssueEvidence {
+  const cause = (overrides: Record<string, unknown>) => ({
+    issueId: "issue-1",
+    code: "unknown",
+    domain: "unknown",
+    primary: true,
+    confidence: "low",
+    evidenceSource: "workflow_event",
+    occurredAt: null,
+    eventCursor: null,
+    rawReason: "boom",
+    sessionId: null,
+    logPath: null,
+    eventId: null,
+    eventType: null,
+    quality: "exact",
+    ...overrides,
+  });
+  return baseEvidence({
+    sessions: [
+      { id: "a", issueId: "issue-1", role: "developer", round: 1, runtime: "claude_code", model: "m", status: "failed", errorJson: "{}", createdAt: iso(T0) },
+      { id: "b", issueId: "issue-1", role: "developer", round: 1, runtime: "cursor_local", model: "m", status: "failed", errorJson: "{}", createdAt: iso(T0) },
+    ],
+    events: [
+      { issueId: "issue-1", sessionId: "a", type: "worker.started", ts: iso(T0), cursor: 1, payloadJson: null },
+      { issueId: "issue-1", sessionId: "a", type: "agent.started", ts: iso(T0 + MIN), cursor: 2, payloadJson: null },
+      { issueId: "issue-1", sessionId: "a", type: "agent.completed", ts: iso(T0 + 11 * MIN), cursor: 3, payloadJson: null },
+      { issueId: "issue-1", sessionId: "a", type: "worker.failed", ts: iso(T0 + 12 * MIN), cursor: 4, payloadJson: null },
+      { issueId: "issue-1", sessionId: "b", type: "worker.started", ts: iso(T0 + 15 * MIN), cursor: 5, payloadJson: null },
+      { issueId: "issue-1", sessionId: "b", type: "agent.started", ts: iso(T0 + 16 * MIN), cursor: 6, payloadJson: null },
+      { issueId: "issue-1", sessionId: "b", type: "agent.completed", ts: iso(T0 + 26 * MIN), cursor: 7, payloadJson: null },
+      { issueId: "issue-1", sessionId: "b", type: "worker.failed", ts: iso(T0 + 27 * MIN), cursor: 8, payloadJson: null },
+      {
+        issueId: "issue-1", sessionId: "b", type: "retry.reused", ts: iso(T0 + 16 * MIN), cursor: 9,
+        payloadJson: JSON.stringify({ kinds: ["commit"], retryReason: "infra retry" }),
+      },
+    ],
+    usages: [
+      { issueId: "issue-1", workerSessionId: "a", tokensIn: 100, tokensOut: 50, costUsd: 1, durationMs: 10 * MIN, ts: iso(T0 + 11 * MIN) },
+      { issueId: "issue-1", workerSessionId: "b", tokensIn: 300, tokensOut: 150, costUsd: 3, durationMs: 10 * MIN, ts: iso(T0 + 26 * MIN) },
+    ],
+    failureCauses: [
+      cause({ sessionId: "a", occurredAt: iso(T0 + 12 * MIN), eventCursor: 4 }),
+      cause({ code: "agent_cli_crash", domain: "infrastructure", sessionId: "b", occurredAt: iso(T0 + 27 * MIN), eventCursor: 8 }),
+    ] as never,
+  });
+}
+
+test("filterIssueEvidence keeps only matching attempts with exact waste semantics", () => {
+  assert.equal(hasAttemptFilter(cursorOnly), true);
+  assert.equal(
+    hasAttemptFilter({ from: null, to: null, role: null, runtime: null, model: null, status: null, repo: null, limit: 50, offset: 0 }),
+    false,
+  );
+  const ev = mixedRuntimeEvidence();
+  const full = composeIssueAnalysis(ev);
+  assert.equal(full.waste.failedAttempts, 2);
+  assert.equal(full.waste.tokensIn.value, 400);
+  assert.equal(full.primaryFailure?.code, "unknown");
+
+  const scoped = composeIssueAnalysis(filterIssueEvidence(ev, cursorOnly));
+  // Only the cursor_local failed attempt contributes waste now.
+  assert.deepEqual(scoped.attempts.map((a) => a.sessionId), ["b"]);
+  assert.equal(scoped.waste.failedAttempts, 1);
+  assert.equal(scoped.waste.tokensIn.value, 300);
+  assert.equal(scoped.waste.costUsd.value, 3);
+  // Retry and primary failure follow the kept attempt as well.
+  assert.deepEqual([scoped.retry.attempts, scoped.retry.retries, scoped.retry.reused], [1, 0, 0]);
+  assert.equal(scoped.primaryFailure?.code, "agent_cli_crash");
+});
+
+test("composeCohortReport aggregates attempt-scoped metrics from filtered analyses", () => {
+  const ev = mixedRuntimeEvidence();
+  const full = composeIssueAnalysis(ev);
+  const scoped = composeIssueAnalysis(filterIssueEvidence(ev, cursorOnly));
+  const window = resolveCohortWindow(cursorOnly, T0 + 90 * MIN);
+  const page = { issueIds: ["issue-1"], totalIssues: 1 };
+  doneMarkerStore.clear();
+  doneMarkerStore.set("issue-1", true);
+  try {
+    const report = composeCohortReport([full], cursorOnly, window, page, [scoped]);
+    assert.equal(report.waste.failedAttempts, 1);
+    assert.equal(report.waste.tokensIn.value, 300);
+    assert.deepEqual(report.primaryFailures, [{ code: "agent_cli_crash", count: 1, rate: 1 }]);
+    assert.equal(report.primaryFailureDenominator, 1);
+    // Attempt success still uses the filtered attempt denominator (0 done of 1).
+    assert.deepEqual([report.attemptSuccess.numerator, report.attemptSuccess.denominator], [0, 1]);
+    // Issue success keeps its own denominator over all cohort issues.
+    assert.deepEqual([report.issueSuccess.numerator, report.issueSuccess.denominator], [1, 1]);
+  } finally {
+    doneMarkerStore.clear();
+  }
 });

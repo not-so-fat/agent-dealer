@@ -546,7 +546,7 @@ test("cohort endpoint paginates with a stable order and bounds", async () => {
   }
 });
 
-test("cohort query count is constant per page, not per issue/session", async () => {
+test("cohort query count is constant per chunk, not per issue/session", async () => {
   const app = await buildApp();
   try {
     seedRichIssue();
@@ -606,6 +606,88 @@ test("read-model loaders use indexes (EXPLAIN QUERY PLAN)", async () => {
   }
 });
 
+test("cohort aggregates cover the whole cohort, not the page", async () => {
+  const app = await buildApp();
+  try {
+    seedRichIssue();
+    seedSimpleIssue();
+
+    const strip = (body: Record<string, unknown>) => {
+      const { issueIds: _ids, pagination: _page, ...aggregates } = body;
+      return aggregates;
+    };
+    const get = async (qs: string) => {
+      const res = await app.inject({ method: "GET", url: `/api/execution-analysis?${WINDOW}&${qs}` });
+      assert.equal(res.statusCode, 200);
+      return res.json() as Record<string, unknown>;
+    };
+
+    const full = await get("");
+    const first = await get("limit=1&offset=0");
+    const second = await get("limit=1&offset=1");
+
+    // Pagination windows the issue ids only.
+    assert.equal((full.issueIds as string[]).length, 2);
+    assert.equal((first.issueIds as string[]).length, 1);
+    assert.equal((second.issueIds as string[]).length, 1);
+    assert.notDeepEqual(first.issueIds, second.issueIds);
+    assert.deepEqual(
+      [...(first.issueIds as string[]), ...(second.issueIds as string[])].sort(),
+      ((full.issueIds as string[]) ?? []).slice().sort(),
+    );
+    assert.equal((first.pagination as { totalIssues: number }).totalIssues, 2);
+
+    // Every page reports the aggregates for the whole filtered cohort.
+    assert.deepEqual(strip(first), strip(second));
+    assert.deepEqual(strip(first), strip(full));
+  } finally {
+    await app.close();
+  }
+});
+
+test("cohort waste and retry counts follow the runtime filter", async () => {
+  const app = await buildApp();
+  try {
+    seedMixedRuntimeIssue();
+
+    const get = async (qs: string) => {
+      const url = qs ? `/api/execution-analysis?${WINDOW}&${qs}` : `/api/execution-analysis?${WINDOW}`;
+      const res = await app.inject({ method: "GET", url });
+      assert.equal(res.statusCode, 200);
+      const parsed = CohortExecutionReport.safeParse(res.json());
+      assert.ok(parsed.success, `schema mismatch: ${JSON.stringify(parsed.error?.issues.slice(0, 3))}`);
+      return parsed.data;
+    };
+
+    const full = await get("");
+    assert.equal(full.waste.failedAttempts, 2);
+    assert.equal(full.waste.tokensIn.value, 400);
+    assert.equal(full.waste.costUsd.value, 4);
+    assert.deepEqual([full.retryReuse.numerator, full.retryReuse.denominator, full.retryReuse.rate], [2, 2, 1]);
+    assert.deepEqual(full.primaryFailures, [{ code: "unknown", count: 1, rate: 1 }]);
+
+    // The cursor_local failed attempt alone contributes waste, retries, and
+    // the primary failure — the claude_code failure must not leak in.
+    const cursor = await get("runtime=cursor_local");
+    assert.equal(cursor.waste.failedAttempts, 1);
+    assert.equal(cursor.waste.tokensIn.value, 300);
+    assert.equal(cursor.waste.tokensOut.value, 150);
+    assert.equal(cursor.waste.costUsd.value, 3);
+    assert.deepEqual([cursor.retryReuse.numerator, cursor.retryReuse.denominator, cursor.retryReuse.rate], [1, 1, 1]);
+    assert.deepEqual(cursor.primaryFailures, [{ code: "agent_cli_crash", count: 1, rate: 1 }]);
+    assert.equal(cursor.reviewer.rounds, 0);
+
+    const claude = await get("runtime=claude_code");
+    assert.equal(claude.waste.failedAttempts, 1);
+    assert.equal(claude.waste.tokensIn.value, 100);
+    assert.equal(claude.waste.costUsd.value, 1);
+    assert.deepEqual([claude.retryReuse.numerator, claude.retryReuse.denominator, claude.retryReuse.rate], [0, 0, null]);
+    assert.deepEqual(claude.primaryFailures, [{ code: "unknown", count: 1, rate: 1 }]);
+  } finally {
+    await app.close();
+  }
+});
+
 /** A second, simple issue for cohort filters/pagination/rates. */
 function seedSimpleIssue(): { id: string; repo: string } {
   const issue = createIssue({
@@ -630,4 +712,82 @@ function seedSimpleIssue(): { id: string; repo: string } {
     tokensIn: 10, tokensOut: 5, costUsd: 2.0, durationMs: 25 * MIN, model: "model-a",
   });
   return { id: issueId, repo: issue.repo };
+}
+
+/** One issue with failed developer attempts on two runtimes and a later
+ * successful cursor_local retry — proves runtime filters scope waste, retry
+ * reuse, and primary failures instead of mixing both runtimes. */
+function seedMixedRuntimeIssue(): string {
+  const issue = createIssue({
+    title: "Mixed runtime issue",
+    repo: "acme/app",
+    developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+    reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    baseBranch: "main",
+    maxReviewRounds: 3,
+    maxInfraAttempts: 3,
+    source: "manual",
+  });
+  const issueId = issue.id;
+  const instanceId = makeInstance(issueId, iso(T0), iso(T0 + 60 * MIN), "done");
+
+  // A: failed on claude_code with exact agent bounds and provider metadata.
+  const a = makeSession(issueId, { runtime: "claude_code", status: "failed" });
+  insertEvent({ issueId, instanceId, sessionId: a, type: "worker.started", ts: iso(T0) });
+  insertEvent({ issueId, instanceId, sessionId: a, type: "agent.started", ts: iso(T0 + MIN) });
+  insertEvent({ issueId, instanceId, sessionId: a, type: "agent.completed", ts: iso(T0 + 11 * MIN) });
+  const aFailed = insertEvent({ issueId, instanceId, sessionId: a, type: "worker.failed", ts: iso(T0 + 12 * MIN) });
+  recordUsageEvent({
+    issueId, workerSessionId: a, role: "developer", runtime: "claude_code",
+    tokensIn: 100, tokensOut: 50, costUsd: 1.0, durationMs: 10 * MIN, model: "model-a",
+  });
+  recordFailureCauses([{
+    issueId,
+    workflowInstanceId: instanceId,
+    cause: makeCause({ sessionId: a, occurredAt: iso(T0 + 12 * MIN), eventCursor: aFailed }) as never,
+  }]);
+
+  // B: failed on cursor_local, reusing the prior commit.
+  const b = makeSession(issueId, { runtime: "cursor_local", status: "failed" });
+  insertEvent({ issueId, instanceId, sessionId: b, type: "worker.started", ts: iso(T0 + 15 * MIN) });
+  insertEvent({ issueId, instanceId, sessionId: b, type: "agent.started", ts: iso(T0 + 16 * MIN) });
+  insertEvent({ issueId, instanceId, sessionId: b, type: "agent.completed", ts: iso(T0 + 26 * MIN) });
+  const bFailed = insertEvent({ issueId, instanceId, sessionId: b, type: "worker.failed", ts: iso(T0 + 27 * MIN) });
+  insertEvent({
+    issueId, instanceId, sessionId: b, type: "retry.reused", ts: iso(T0 + 16 * MIN),
+    payload: { kinds: ["commit"], retryReason: "infra retry" },
+  });
+  recordUsageEvent({
+    issueId, workerSessionId: b, role: "developer", runtime: "cursor_local",
+    tokensIn: 300, tokensOut: 150, costUsd: 3.0, durationMs: 10 * MIN, model: "model-a",
+  });
+  recordFailureCauses([{
+    issueId,
+    workflowInstanceId: instanceId,
+    cause: makeCause({
+      code: "agent_cli_crash", domain: "infrastructure", sessionId: b,
+      occurredAt: iso(T0 + 27 * MIN), eventCursor: bFailed,
+    }) as never,
+  }]);
+
+  // C: successful cursor_local retry, also reusing the commit.
+  const c = makeSession(issueId, { runtime: "cursor_local", status: "done" });
+  insertEvent({ issueId, instanceId, sessionId: c, type: "worker.started", ts: iso(T0 + 30 * MIN) });
+  insertEvent({ issueId, instanceId, sessionId: c, type: "agent.started", ts: iso(T0 + 31 * MIN) });
+  insertEvent({ issueId, instanceId, sessionId: c, type: "agent.completed", ts: iso(T0 + 41 * MIN) });
+  insertEvent({ issueId, instanceId, sessionId: c, type: "worker.completed", ts: iso(T0 + 42 * MIN) });
+  insertEvent({
+    issueId, instanceId, sessionId: c, type: "retry.reused", ts: iso(T0 + 31 * MIN),
+    payload: { kinds: ["commit"], retryReason: "infra retry" },
+  });
+  recordUsageEvent({
+    issueId, workerSessionId: c, role: "developer", runtime: "cursor_local",
+    tokensIn: 400, tokensOut: 200, costUsd: 4.0, durationMs: 10 * MIN, model: "model-a",
+  });
+  // Stagger creation times: retry order follows (created_at, id), and ties
+  // would break on random uuids.
+  getDb().prepare("UPDATE worker_sessions SET created_at = ? WHERE id = ?").run(iso(T0), a);
+  getDb().prepare("UPDATE worker_sessions SET created_at = ? WHERE id = ?").run(iso(T0 + 15 * MIN), b);
+  getDb().prepare("UPDATE worker_sessions SET created_at = ? WHERE id = ?").run(iso(T0 + 30 * MIN), c);
+  return issueId;
 }

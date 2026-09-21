@@ -268,7 +268,9 @@ export const CohortExecutionReport = z.object({
     offset: z.number().int(),
     totalIssues: z.number().int(),
   }),
-  /** Issues in this page that contributed to the aggregates. */
+  /** Issues in this pagination window. The aggregates always cover the whole
+   * filtered cohort (all `pagination.totalIssues` issues), never just this
+   * page — every page reports identical aggregate numbers. */
   issueIds: z.array(z.string()),
   /** P50/P95 + sample count for wall time by top-level phase. */
   phaseWallTime: z.record(z.string(), PercentileStat),
