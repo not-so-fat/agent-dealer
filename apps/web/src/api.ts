@@ -6,10 +6,7 @@ import type {
   CreateIssueInput,
   CreateIssueResult,
   DeckAccessErrorCode,
-<<<<<<< HEAD
   ExecuteIssueResponse,
-=======
->>>>>>> 3dfac8f (NOT-175: Execution report page with URL filters, coverage tables, failure buckets)
   ExecutionReportResponse,
   Finding,
   HumanAction,
