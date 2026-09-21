@@ -99,7 +99,7 @@ export default function App() {
               <Logo size={40} />
               <div>
                 <h1
-                  className="text-xl font-bold sm:text-2xl"
+                  className="font-ui-display text-xl font-bold sm:text-2xl"
                   style={{
                     background: "linear-gradient(to right, #C4B643, #D4C760)",
                     WebkitBackgroundClip: "text",
