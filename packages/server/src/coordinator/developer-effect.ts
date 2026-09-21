@@ -393,6 +393,10 @@ async function runPublishOnlyHandoff(
                   kind: "unpushed_commit",
                   reason: recovered.reason,
                   recoveryCommands: recovered.facts?.recoveryCommands,
+                  // NOT-221: the publish-only retry runs from the repo, not a worktree —
+                  // no worktreePath, so a later push_with_lease resolves from the checkout.
+                  branch: branchName,
+                  ...(recovered.facts ? { pushFacts: recovered.facts } : {}),
                 }
               : {
                   kind: "adapter_failure",
@@ -1145,12 +1149,17 @@ export async function runDeveloperEffect(
     });
     if (!pushed.ok) {
       // Local commits preserved either way — never discarded, never force-retried
-      // beyond the proven-equivalent lease recovery inside pushBranch.
+      // beyond the proven-equivalent lease recovery inside pushBranch. The worktree is
+      // deliberately NOT removed here: it is the preserved checkout a later
+      // push_with_lease resolution pushes from (NOT-221).
       return pushed.rejected
         ? {
             kind: "unpushed_commit",
             reason: pushed.reason,
             recoveryCommands: pushed.facts?.recoveryCommands,
+            branch: branchName,
+            ...(pushed.facts ? { pushFacts: pushed.facts } : {}),
+            worktreePath,
           }
         : { kind: "adapter_failure", reason: pushed.reason };
     }

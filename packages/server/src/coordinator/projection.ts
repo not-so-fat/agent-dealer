@@ -9,6 +9,7 @@
 import type { IssueOwner, IssueStatus, WorkflowEventType } from "@agent-dealer/shared";
 import type { DeveloperRouteResult, ReviewerRouteResult } from "./routing.js";
 import type { WorkItemKind } from "../repository/work-items.js";
+import type { PushDivergenceEvidence } from "./human-resolution.js";
 import { AUTO_MERGE_INTENT } from "./auto-merge.js";
 
 export interface IssueProjection {
@@ -38,6 +39,8 @@ export type NextEffect =
         | "product_scope_decision"
         | "final_review";
       reason: string;
+      /** NOT-221: diverged-push facts from the route — the action stores them as evidence. */
+      pushDivergence?: PushDivergenceEvidence;
     }
   /** NOT-102: merge the PR after approve, then complete or escalate — runs after the
    * routing transaction so `gh` never holds the SQLite write lock. */
@@ -110,7 +113,15 @@ export function projectDeveloperRoute(
           currentIntent: route.reason,
           events: ["worker.failed"],
         },
-        effect: { kind: "human_action", actionType: route.actionType, reason: route.reason },
+        effect: {
+          kind: "human_action",
+          actionType: route.actionType,
+          reason: route.reason,
+          // Only the developer unpushed_commit route sets this — the reviewer path never does.
+          ...("pushDivergence" in route && route.pushDivergence
+            ? { pushDivergence: route.pushDivergence }
+            : {}),
+        },
         advance: "none",
       };
     case "defer_work":

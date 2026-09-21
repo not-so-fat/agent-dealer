@@ -680,6 +680,50 @@ export async function pushBranchRef(opts: {
   }
 }
 
+/**
+ * NOT-221: publish already-finished commits over a diverged remote with a lease pinned
+ * to the exact remote tip the operator reviewed (`remoteSha`, stored in the
+ * push_with_lease action's evidence). The explicit `<localSha>:refs/heads/<branch>`
+ * refspec pushes the recorded local tip even when the checkout's HEAD has since moved
+ * (or the push runs from the repo rather than the preserved worktree).
+ *
+ * When origin no longer matches the pin the push fails and nothing is published — the
+ * caller leaves the action open and shows the freshly observed tip instead.
+ */
+export async function pushLeaseToSha(opts: {
+  cwd: string;
+  branch: string;
+  localSha: string;
+  remoteSha: string;
+}): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    await git(opts.cwd, [
+      "push",
+      `--force-with-lease=refs/heads/${opts.branch}:${opts.remoteSha}`,
+      "origin",
+      `${opts.localSha}:refs/heads/${opts.branch}`,
+    ]);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/**
+ * NOT-221: read origin's live tip for a branch without touching local refs — shown on
+ * the still-open action after a lease push fails, so the operator sees what moved.
+ * Null when the branch cannot be resolved remotely (deleted, renamed, or unreachable).
+ */
+export async function readRemoteTip(opts: { cwd: string; branch: string }): Promise<string | null> {
+  try {
+    const { stdout } = await git(opts.cwd, ["ls-remote", "origin", `refs/heads/${opts.branch}`]);
+    const sha = stdout.trim().split(/\s+/)[0];
+    return sha && /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Commits on HEAD not on `baseRef` — zero means the developer produced nothing to push/PR. */
 export async function commitsAhead(opts: { worktreePath: string; baseRef: string }): Promise<number> {
   const { stdout } = await git(opts.worktreePath, ["rev-list", "--count", `${opts.baseRef}..HEAD`]);
