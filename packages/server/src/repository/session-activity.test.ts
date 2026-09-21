@@ -1,8 +1,8 @@
 // packages/server/src/repository/session-activity.test.ts
 //
 // NOT-170: repository tests — append-only inserts, idempotent re-insert on
-// (session, source_offset), durable resume cursors, and the silence read model
-// assembled from rows + agent_process bounds + host-sleep evidence.
+// (session, source_offset, source_seq), durable resume cursors, and the silence
+// read model assembled from rows + agent_process bounds + host-sleep evidence.
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -96,6 +96,31 @@ test("re-inserting the same source offset is a no-op (sampler idempotency)", () 
   assert.equal(listSessionActivityEvents(sessionId).length, 1);
 });
 
+test("parallel entries from one line persist distinctly; same seq dedupes", () => {
+  const sessionId = makeSession();
+  const first = insertSessionActivityEvent({
+    issueId, workerSessionId: sessionId, sourceCursor: 5, sourceOffset: 900, sourceSeq: 0,
+    activityKind: "tool_started", state: "started", callId: "tu_a", summary: "Reading a",
+  });
+  const second = insertSessionActivityEvent({
+    issueId, workerSessionId: sessionId, sourceCursor: 5, sourceOffset: 900, sourceSeq: 1,
+    activityKind: "tool_started", state: "started", callId: "tu_b", summary: "Running b",
+  });
+  assert.notEqual(first.id, second.id);
+  // Re-inserting the same (session, offset, seq) returns the existing row.
+  const retry = insertSessionActivityEvent({
+    issueId, workerSessionId: sessionId, sourceCursor: 5, sourceOffset: 900, sourceSeq: 0,
+    activityKind: "tool_started", state: "started", callId: "tu_a", summary: "Reading a",
+  });
+  assert.equal(retry.id, first.id);
+  const rows = listSessionActivityEvents(sessionId);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.sourceSeq), [0, 1]);
+  assert.deepEqual(rows.map((r) => r.callId), ["tu_a", "tu_b"]);
+  // Resume still keys off the shared line offset.
+  assert.equal(getSessionActivityMaxOffset(sessionId), 900);
+});
+
 test("durable resume cursors track the farthest persisted offset", () => {
   const sessionId = makeSession();
   assert.equal(getSessionActivityMaxOffset(sessionId), null);
@@ -162,6 +187,80 @@ test("read model nests a tool flight inside agent bounds with inferred quality",
     assert.equal(iv.quality, "inferred");
     assert.ok(iv.reasons.includes("sampler_observed_time"));
   }
+});
+
+test("read model prefers unelapsedMs over wallGapMs for the sleep window", async () => {
+  const sessionId = makeSession();
+  const started = appendWorkflowEvent({
+    issueId, workerSessionId: sessionId, type: "agent.started",
+    actorType: "developer", stage: "develop", round: 1,
+  });
+  const t0 = Date.parse(started.ts);
+  insertSessionActivityEvent({
+    issueId, workerSessionId: sessionId,
+    observedAt: new Date(t0 + 5).toISOString(), sourceCursor: 0, sourceOffset: 60,
+    activityKind: "assistant_output", state: "observed",
+  });
+  // wallGapMs covers [t0+5, t0+100) — the whole awake gap — but only 10ms of it
+  // was actually suspended, so the override must be exactly [t0+90, t0+100).
+  appendWorkflowEvent({
+    issueId, workerSessionId: sessionId, type: "host.suspended",
+    actorType: "developer", stage: "develop", round: 1,
+    payload: {
+      sessionId,
+      detectedAt: new Date(t0 + 100).toISOString(),
+      wallGapMs: 95,
+      unelapsedMs: 10,
+      unobservedMs: 90,
+    },
+  });
+  await new Promise((r) => setTimeout(r, 150));
+  appendWorkflowEvent({
+    issueId, workerSessionId: sessionId, type: "agent.completed",
+    actorType: "developer", stage: "develop", round: 1,
+  });
+  const model = getSessionSilenceIntervals(sessionId, { thresholdMs: 1 });
+  const sleeps = model.intervals.filter((iv) => iv.category === "host_suspended");
+  assert.equal(sleeps.length, 1);
+  assert.equal(sleeps[0]!.startMs, t0 + 90);
+  assert.equal(sleeps[0]!.endMs, t0 + 100);
+  assert.ok(!model.reasons.includes("host_sleep_approximated"));
+});
+
+test("read model falls back to wallGapMs with an approximation reason", async () => {
+  const sessionId = makeSession();
+  const started = appendWorkflowEvent({
+    issueId, workerSessionId: sessionId, type: "agent.started",
+    actorType: "developer", stage: "develop", round: 1,
+  });
+  const t0 = Date.parse(started.ts);
+  insertSessionActivityEvent({
+    issueId, workerSessionId: sessionId,
+    observedAt: new Date(t0 + 5).toISOString(), sourceCursor: 0, sourceOffset: 60,
+    activityKind: "assistant_output", state: "observed",
+  });
+  // Legacy evidence without unelapsedMs: the whole wall gap is used, tagged.
+  appendWorkflowEvent({
+    issueId, workerSessionId: sessionId, type: "host.suspended",
+    actorType: "developer", stage: "develop", round: 1,
+    payload: {
+      sessionId,
+      detectedAt: new Date(t0 + 100).toISOString(),
+      wallGapMs: 50,
+    },
+  });
+  await new Promise((r) => setTimeout(r, 150));
+  appendWorkflowEvent({
+    issueId, workerSessionId: sessionId, type: "agent.completed",
+    actorType: "developer", stage: "develop", round: 1,
+  });
+  const model = getSessionSilenceIntervals(sessionId, { thresholdMs: 1 });
+  const sleeps = model.intervals.filter((iv) => iv.category === "host_suspended");
+  assert.equal(sleeps.length, 1);
+  assert.equal(sleeps[0]!.startMs, t0 + 50);
+  assert.equal(sleeps[0]!.endMs, t0 + 100);
+  assert.ok(model.reasons.includes("host_sleep_approximated"));
+  assert.ok(sleeps[0]!.reasons.includes("host_sleep_approximated"));
 });
 
 test("read model applies host.suspended as an override without double-counting", async () => {

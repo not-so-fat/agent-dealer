@@ -8,6 +8,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
+import { deriveAttemptIntervals } from "../coordinator/execution-intervals.js";
 import type {
   SessionActivityKind,
   SessionActivityState,
@@ -28,6 +29,8 @@ export interface SessionActivityEvent {
   observedAt: string;
   sourceCursor: number | null;
   sourceOffset: number | null;
+  /** 0-based index of this entry within its NDJSON line (parallel blocks share an offset). */
+  sourceSeq: number | null;
   activityKind: SessionActivityKind;
   state: SessionActivityState;
   callId: string | null;
@@ -42,6 +45,7 @@ interface SessionActivityRow {
   observed_at: string;
   source_cursor: number | null;
   source_offset: number | null;
+  source_seq: number | null;
   activity_kind: string;
   state: string;
   call_id: string | null;
@@ -70,6 +74,7 @@ function rowToEvent(row: SessionActivityRow): SessionActivityEvent {
     observedAt: row.observed_at,
     sourceCursor: row.source_cursor,
     sourceOffset: row.source_offset,
+    sourceSeq: row.source_seq,
     activityKind: kind,
     state,
     callId: row.call_id,
@@ -84,6 +89,8 @@ export interface InsertSessionActivityInput {
   observedAt?: string;
   sourceCursor?: number | null;
   sourceOffset?: number | null;
+  /** 0-based entry index within its NDJSON line; defaults to 0. */
+  sourceSeq?: number | null;
   activityKind: SessionActivityKind;
   state: SessionActivityState;
   callId?: string | null;
@@ -94,15 +101,17 @@ export interface InsertSessionActivityInput {
 }
 
 /**
- * Append one activity row. Re-inserting the same (session, source_offset) is a
- * no-op returning the existing row, so sampler re-reads and restarts are idempotent.
+ * Append one activity row. Re-inserting the same (session, source_offset, source_seq)
+ * is a no-op returning the existing row, so sampler re-reads and restarts are
+ * idempotent while parallel entries from one line persist as distinct rows.
  */
 export function insertSessionActivityEvent(input: InsertSessionActivityInput): SessionActivityEvent {
   const db = getDb();
+  const seq = input.sourceSeq ?? 0;
   if (input.sourceOffset !== undefined && input.sourceOffset !== null) {
     const existing = db
-      .prepare("SELECT * FROM session_activity_events WHERE worker_session_id = ? AND source_offset = ?")
-      .get(input.workerSessionId, input.sourceOffset) as SessionActivityRow | undefined;
+      .prepare("SELECT * FROM session_activity_events WHERE worker_session_id = ? AND source_offset = ? AND source_seq = ?")
+      .get(input.workerSessionId, input.sourceOffset, seq) as SessionActivityRow | undefined;
     if (existing) return rowToEvent(existing);
   }
   const row: SessionActivityRow = {
@@ -112,6 +121,7 @@ export function insertSessionActivityEvent(input: InsertSessionActivityInput): S
     observed_at: input.observedAt ?? new Date().toISOString(),
     source_cursor: input.sourceCursor ?? null,
     source_offset: input.sourceOffset ?? null,
+    source_seq: seq,
     activity_kind: input.activityKind,
     state: input.state,
     call_id: input.callId ?? null,
@@ -120,9 +130,9 @@ export function insertSessionActivityEvent(input: InsertSessionActivityInput): S
   };
   db.prepare(
     `INSERT INTO session_activity_events
-      (id, issue_id, worker_session_id, observed_at, source_cursor, source_offset,
+      (id, issue_id, worker_session_id, observed_at, source_cursor, source_offset, source_seq,
        activity_kind, state, call_id, summary, raw_evidence)
-     VALUES (@id, @issue_id, @worker_session_id, @observed_at, @source_cursor, @source_offset,
+     VALUES (@id, @issue_id, @worker_session_id, @observed_at, @source_cursor, @source_offset, @source_seq,
        @activity_kind, @state, @call_id, @summary, @raw_evidence)`
   ).run(row);
   return rowToEvent(row);
@@ -160,40 +170,49 @@ export interface SessionSilenceReadModel extends SilenceDerivation {
 
 /**
  * Assemble persisted activity rows, exact/inferred agent_process bounds, and durable
- * host-sleep evidence into silence intervals for one session. Bounds come from the
- * session's `agent.started` / `agent.completed` workflow events; a missing boundary
+ * host-sleep evidence into silence intervals for one session. Bounds reuse the shared
+ * NOT-169 derivation (deriveAttemptIntervals) over the session's workflow events so
+ * they stay consistent with the rest of the execution analysis; a missing boundary
  * yields `unavailable` (never fabricated). Sleep windows derive from `host.suspended`
- * payloads as [detectedAt − wallGapMs, detectedAt).
+ * payloads as [detectedAt − suspendedMs, detectedAt), where suspendedMs prefers the
+ * monotonic-clock `unelapsedMs` portion and falls back to the whole `wallGapMs` (tagged
+ * `host_sleep_approximated`) when unelapsedMs is absent — wallGapMs includes time the
+ * host was awake, so using it whole would overrun into other categories.
  */
 export function getSessionSilenceIntervals(
   workerSessionId: string,
   opts?: { thresholdMs?: number }
 ): SessionSilenceReadModel {
-  const events = listWorkflowEventsForSessionOrdered(workerSessionId);
-  let startedMs: number | null = null;
-  let completedMs: number | null = null;
+  const ordered = listWorkflowEventsForSessionOrdered(workerSessionId);
+  const bounds = deriveAttemptIntervals({
+    events: ordered.map(({ event, rowid }) => ({ type: event.type, ts: event.ts, rowid })),
+  }).agentProcess;
+  const startedMs = bounds.startMs;
+  const completedMs = bounds.endMs;
+
   const sleeps: SleepWindow[] = [];
-  for (const { event } of events) {
-    if (event.type === "agent.started" && startedMs === null) {
-      const ms = Date.parse(event.ts);
-      if (Number.isFinite(ms)) startedMs = ms;
-    } else if (event.type === "agent.completed" && completedMs === null) {
-      const ms = Date.parse(event.ts);
-      if (Number.isFinite(ms)) completedMs = ms;
-    } else if (event.type === "host.suspended") {
-      let payload: Record<string, unknown> = {};
-      try {
-        const parsed: unknown = event.payloadJson ? JSON.parse(event.payloadJson) : {};
-        if (parsed && typeof parsed === "object") payload = parsed as Record<string, unknown>;
-      } catch {
-        payload = {};
-      }
-      const detected = typeof payload.detectedAt === "string" ? Date.parse(payload.detectedAt) : NaN;
-      const gap = typeof payload.wallGapMs === "number" ? payload.wallGapMs : NaN;
-      if (Number.isFinite(detected) && Number.isFinite(gap) && gap > 0) {
-        sleeps.push({ startMs: detected - gap, endMs: detected });
-      }
+  let sleepApproximated = false;
+  for (const { event } of ordered) {
+    if (event.type !== "host.suspended") continue;
+    let payload: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = event.payloadJson ? JSON.parse(event.payloadJson) : {};
+      if (parsed && typeof parsed === "object") payload = parsed as Record<string, unknown>;
+    } catch {
+      payload = {};
     }
+    const detected = typeof payload.detectedAt === "string" ? Date.parse(payload.detectedAt) : NaN;
+    const unelapsed = typeof payload.unelapsedMs === "number" ? payload.unelapsedMs : NaN;
+    const wallGap = typeof payload.wallGapMs === "number" ? payload.wallGapMs : NaN;
+    const suspendedMs =
+      Number.isFinite(unelapsed) && unelapsed > 0
+        ? unelapsed
+        : Number.isFinite(wallGap) && wallGap > 0
+          ? wallGap
+          : NaN;
+    if (!Number.isFinite(detected) || !Number.isFinite(suspendedMs) || suspendedMs <= 0) continue;
+    if (!(Number.isFinite(unelapsed) && unelapsed > 0)) sleepApproximated = true;
+    sleeps.push({ startMs: detected - suspendedMs, endMs: detected });
   }
 
   const rows = listSessionActivityEvents(workerSessionId);
@@ -204,18 +223,26 @@ export function getSessionSilenceIntervals(
     activities.push({ observedMs: ms, kind: row.activityKind, callId: row.callId });
   }
 
-  const boundsAvailable = startedMs !== null && completedMs !== null;
   const derived = deriveSilenceIntervals({
     processStartMs: startedMs,
     processEndMs: completedMs,
-    processQuality: boundsAvailable ? "exact" : "unavailable",
-    processReasons: boundsAvailable ? [] : ["no_defensible_boundary"],
+    processQuality: bounds.quality,
+    processReasons: bounds.reasons,
     activities,
     sleepWindows: sleeps,
     thresholdMs: opts?.thresholdMs ?? silenceThresholdMs(),
   });
+  const reasons = sleepApproximated && derived.quality !== "unavailable"
+    ? [...new Set([...derived.reasons, "host_sleep_approximated"])]
+    : derived.reasons;
   return {
-    ...derived,
+    intervals: sleepApproximated
+      ? derived.intervals.map((iv) => iv.category === "host_suspended"
+          ? { ...iv, reasons: [...new Set([...iv.reasons, "host_sleep_approximated"])] }
+          : iv)
+      : derived.intervals,
+    quality: derived.quality,
+    reasons,
     workerSessionId,
     processStartMs: startedMs,
     processEndMs: completedMs,

@@ -278,9 +278,15 @@ export function normalizeStreamEvent(e: StreamEvent): NormalizedActivity[] | nul
 
 export interface ScannedActivity {
   cursor: number;
-  /** Absolute byte offset where this line starts; endOffset is exclusive. */
+  /**
+   * Byte offset where this line starts, relative to the scanned chunk start;
+   * endOffset is exclusive. Always bytes (Buffer.byteLength), never string
+   * character offsets, so multibyte log content resumes at the right position.
+   */
   offset: number;
   endOffset: number;
+  /** 0-based index of this entry within its line — the idempotency seq. */
+  seq: number;
   event: StreamEvent;
   normalized: NormalizedActivity;
 }
@@ -289,31 +295,36 @@ export interface ScannedActivity {
  * Scan bytes appended to a session log since `fromOffset`, parsing each new line.
  * Malformed/non-JSON lines are skipped (never fabricated into events). `cursor` is
  * the absolute 0-based line index so restarts can resume from the durable offset and
- * idempotency holds per (session, source_offset). Pure over the given bytes — reads
- * no files, writes nothing.
+ * idempotency holds per (session, source_offset, source_seq). All offsets are byte
+ * offsets. Pure over the given bytes — reads no files, writes nothing.
  */
 export function scanNewActivityLines(
   raw: string,
   opts: { fromOffset?: number; baseCursor?: number } = {}
 ): { scanned: ScannedActivity[]; nextOffset: number; nextCursor: number } {
+  // Work on the UTF-8 bytes throughout: string character offsets drift from file
+  // byte offsets as soon as any multibyte content appears, which would corrupt the
+  // persisted source_offset pointers and the restart resume position. 0x0A never
+  // occurs inside a multibyte sequence, so byte-splitting on newlines is safe.
+  const buf = Buffer.from(raw, "utf8");
   const fromOffset = opts.fromOffset ?? 0;
-  const slice = raw.length >= fromOffset ? raw.slice(fromOffset) : raw;
-  const base = raw.length >= fromOffset ? fromOffset : 0;
+  const start = fromOffset >= 0 && fromOffset <= buf.length ? fromOffset : 0;
   let cursor = opts.baseCursor ?? 0;
-  if (raw.length < fromOffset) cursor = 0;
+  if (start !== fromOffset) cursor = 0;
   const scanned: ScannedActivity[] = [];
-  let offset = base;
+  let lineStart = start;
+  const decode = (from: number, to: number): string => buf.subarray(from, to).toString("utf8");
   // Every "\n" terminates exactly one line; a trailing partial line (no newline yet)
   // is held back, and the phantom segment after a final newline is not a line.
-  const parts = slice.split("\n");
-  const complete = parts.length - 1;
-  for (let i = 0; i < complete; i++) {
-    const line = parts[i]!;
-    const lineStart = offset;
-    const lineEnd = offset + line.length + 1; // include the newline
+  for (let i = start; i < buf.length; i++) {
+    if (buf[i] !== 0x0a) continue;
+    const lineEnd = i + 1; // include the newline
     const lineCursor = cursor;
     cursor++;
-    offset = lineEnd;
+    const line = decode(lineStart, i);
+    const entryStart = lineStart;
+    const entryEnd = lineEnd;
+    lineStart = lineEnd;
     const t = line.trim();
     if (!t) continue;
     let parsed: unknown;
@@ -325,9 +336,9 @@ export function scanNewActivityLines(
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
     const normalized = normalizeStreamEvent(parsed as StreamEvent);
     if (!normalized) continue;
-    for (const n of normalized) {
-      scanned.push({ cursor: lineCursor, offset: lineStart, endOffset: lineEnd, event: parsed as StreamEvent, normalized: n });
-    }
+    normalized.forEach((n, seq) => {
+      scanned.push({ cursor: lineCursor, offset: entryStart, endOffset: entryEnd, seq, event: parsed as StreamEvent, normalized: n });
+    });
   }
-  return { scanned, nextOffset: offset, nextCursor: cursor };
+  return { scanned, nextOffset: lineStart, nextCursor: cursor };
 }

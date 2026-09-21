@@ -166,3 +166,47 @@ test("scanner holds back a trailing partial line until its newline arrives", () 
   const complete = scanNewActivityLines(`${good}\n`);
   assert.equal(complete.scanned.length, 1);
 });
+
+test("scanner gives parallel entries on one line distinct seqs sharing the offset", () => {
+  const line = JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [
+        { type: "tool_use", id: "tu_1", name: "Read" },
+        { type: "tool_use", id: "tu_2", name: "Bash" },
+      ],
+    },
+  });
+  const { scanned, nextOffset } = scanNewActivityLines(`${line}\n`);
+  assert.equal(scanned.length, 2);
+  assert.equal(scanned[0]!.offset, 0);
+  assert.equal(scanned[0]!.endOffset, scanned[1]!.endOffset);
+  assert.deepEqual(scanned.map((s) => s.seq), [0, 1]);
+  assert.deepEqual(scanned.map((s) => s.normalized.callId), ["tu_1", "tu_2"]);
+  assert.equal(nextOffset, Buffer.byteLength(line, "utf8") + 1);
+});
+
+test("scanner tracks byte (not character) offsets through multibyte lines", () => {
+  const multi = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "text", text: "日本語テスト 🎉 working through the plan" }] },
+  });
+  const tool = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "tu_9", name: "Bash" }] },
+  });
+  const raw = `${multi}\n${tool}\n`;
+  const { scanned, nextOffset } = scanNewActivityLines(raw);
+  assert.equal(scanned.length, 2);
+  const firstLineBytes = Buffer.byteLength(multi, "utf8") + 1;
+  assert.equal(scanned[0]!.offset, 0);
+  assert.equal(scanned[0]!.endOffset, firstLineBytes);
+  // A character-based offset would be smaller: the byte offset must exceed it.
+  assert.ok(firstLineBytes > multi.length + 1);
+  assert.equal(scanned[1]!.offset, firstLineBytes);
+  assert.equal(nextOffset, Buffer.byteLength(raw, "utf8"));
+  // Resuming from the byte offset lands exactly on the second line.
+  const resume = scanNewActivityLines(raw, { fromOffset: firstLineBytes, baseCursor: 1 });
+  assert.equal(resume.scanned.length, 1);
+  assert.equal(resume.scanned[0]!.normalized.callId, "tu_9");
+});

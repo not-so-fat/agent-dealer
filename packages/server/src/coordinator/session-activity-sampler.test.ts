@@ -2,8 +2,9 @@
 //
 // NOT-170: sampler persistence tests — the extended activity sampler writes one row per
 // new structured event on its existing tick (no second loop), repeated identical ticks
-// create no duplicates, restart resumes from the durable offset, and stop() flushes
-// events written after the last tick.
+// create no duplicates, restart resumes from the durable byte offset, and stop() flushes
+// events written after the last tick. Parallel blocks on one line share the offset with
+// distinct seqs; multibyte content tracks byte offsets; oversized lines are skipped.
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -104,14 +105,91 @@ test("stop() flushes events written after the last tick", () => {
 });
 
 test("sampler without a session id only refreshes intent and persists nothing", async () => {
+  const { getDb } = await import("../db/index.js");
+  const beforeCount = (getDb().prepare("SELECT COUNT(*) AS c FROM session_activity_events").get() as { c: number }).c;
   const logPath = makeLog();
   fs.writeFileSync(
     logPath,
-    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "hello" }] } }) + "\n"
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "hello world, this is long enough to persist" }] } }) + "\n"
   );
   const sampler = startActivitySampler({ issueId, role: "developer", round: 1, logPath, intervalMs: 30 });
   await sleep(100);
   sampler.stop();
-  // Nothing persisted anywhere for this log: no session rows exist at all.
-  assert.equal(listSessionActivityEvents("sess-never-created").length, 0);
+  // The sampler tick ran (the log holds a persistable event) but no row may exist
+  // for it: without a session id nothing is persisted anywhere in the table.
+  const afterCount = (getDb().prepare("SELECT COUNT(*) AS c FROM session_activity_events").get() as { c: number }).c;
+  assert.equal(afterCount, beforeCount);
+});
+
+test("parallel tool blocks on one line persist as distinct rows sharing the offset", async () => {
+  const logPath = makeLog();
+  const sessionId = `sess-${Date.now()}-d`;
+  const line = JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [
+        { type: "tool_use", id: "tu_p1", name: "Read" },
+        { type: "tool_use", id: "tu_p2", name: "Bash" },
+      ],
+    },
+  });
+  fs.writeFileSync(logPath, line + "\n");
+  const sampler = startActivitySampler({ issueId, role: "developer", round: 1, logPath, workerSessionId: sessionId, intervalMs: 30 });
+  await sleep(150);
+  sampler.stop();
+  const rows = listSessionActivityEvents(sessionId);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.callId), ["tu_p1", "tu_p2"]);
+  assert.deepEqual(rows.map((r) => r.sourceSeq), [0, 1]);
+  // Both entries share the line's end byte offset.
+  assert.equal(rows[0]!.sourceOffset, rows[1]!.sourceOffset);
+  assert.equal(rows[0]!.sourceOffset, Buffer.byteLength(line, "utf8") + 1);
+});
+
+test("multibyte content resumes restarts at byte offsets without duplicates", async () => {
+  const logPath = makeLog();
+  const sessionId = `sess-${Date.now()}-e`;
+  const line1 = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "text", text: "日本語の進捗メモ 🎉 working through the failing tests now" }] },
+  });
+  fs.writeFileSync(logPath, line1 + "\n");
+  const first = startActivitySampler({ issueId, role: "developer", round: 1, logPath, workerSessionId: sessionId, intervalMs: 30 });
+  await sleep(120);
+  first.stop();
+  let rows = listSessionActivityEvents(sessionId);
+  assert.equal(rows.length, 1);
+  const line1Bytes = Buffer.byteLength(line1, "utf8") + 1;
+  assert.ok(line1Bytes > line1.length + 1, "fixture must actually be multibyte");
+  assert.equal(rows[0]!.sourceOffset, line1Bytes);
+
+  // Append a completion after multibyte content: restart must resume mid-file by
+  // bytes, not characters, and persist exactly one new row.
+  const line2 = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "tu_m1", name: "Bash" }] } });
+  fs.appendFileSync(logPath, line2 + "\n");
+  const second = startActivitySampler({ issueId, role: "developer", round: 1, logPath, workerSessionId: sessionId, intervalMs: 30 });
+  await sleep(120);
+  second.stop();
+  rows = listSessionActivityEvents(sessionId);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[1]!.activityKind, "tool_started");
+  assert.equal(rows[1]!.sourceOffset, line1Bytes + Buffer.byteLength(line2, "utf8") + 1);
+});
+
+test("a single line over the read cap is skipped so later events still persist", async () => {
+  const logPath = makeLog();
+  const sessionId = `sess-${Date.now()}-f`;
+  const giant = JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "tu_big", content: "x".repeat(4_500_000) }] },
+  });
+  const after = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "tu_after", name: "Bash" }] } });
+  fs.writeFileSync(logPath, giant + "\n" + after + "\n");
+  const sampler = startActivitySampler({ issueId, role: "developer", round: 1, logPath, workerSessionId: sessionId, intervalMs: 30 });
+  await sleep(300);
+  sampler.stop();
+  const rows = listSessionActivityEvents(sessionId);
+  // The oversized line never stalls the offset: the event after it is persisted.
+  assert.ok(rows.some((r) => r.callId === "tu_after"), `expected tu_after among ${JSON.stringify(rows.map((r) => r.callId))}`);
+  assert.ok(!rows.some((r) => r.callId === "tu_big"), "oversized line must not be parsed or stored");
 });
