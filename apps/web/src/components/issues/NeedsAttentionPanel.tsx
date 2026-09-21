@@ -26,7 +26,7 @@ export default function NeedsAttentionPanel({ actions, busyActionId, onResolve }
     <div className="mb-4 rounded border border-red-400/30 bg-red-500/10">
       <div className="px-4 py-2 flex items-center gap-2 border-b border-red-400/20">
         <AlertIcon className="w-4 h-4 shrink-0 text-red-300" />
-        <span className="text-sm font-medium text-red-200">
+        <span className="font-ui-display text-sm font-medium text-red-200">
           {actions.length} {actions.length === 1 ? "item needs" : "items need"} your attention
         </span>
       </div>

@@ -176,7 +176,7 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
           <p className="text-sm text-white/55">
             No issue exists for this ID — it may have been deleted, or the link is wrong.
           </p>
-          <Link to="/issues" className="inline-block text-sm text-cyber-teal hover:underline">
+          <Link to="/issues" className="font-ui-display inline-block text-sm text-cyber-teal hover:underline">
             ← Back to Issues
           </Link>
         </div>
@@ -188,7 +188,7 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
     return (
       <div className="flex-1 min-h-0 overflow-y-auto px-6 py-6 space-y-3">
         <p className="text-red-300 text-sm">{error}</p>
-        <Link to="/issues" className="inline-block text-sm text-cyber-teal hover:underline">
+        <Link to="/issues" className="font-ui-display inline-block text-sm text-cyber-teal hover:underline">
           ← Back to Issues
         </Link>
       </div>
@@ -336,7 +336,7 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
       <div className="max-w-3xl">
-        <Link to="/issues" className="inline-block text-sm text-white/50 hover:text-white mb-3">
+        <Link to="/issues" className="font-ui-display inline-block text-sm text-white/50 hover:text-white mb-3">
           ← Issues
         </Link>
 
@@ -518,7 +518,7 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
         )}
 
         {canEdit && !editing && (
-          <button type="button" className="mb-4 text-xs text-cyber-teal hover:underline" onClick={beginEdit}>
+          <button type="button" className="font-ui-display mb-4 text-xs text-cyber-teal hover:underline" onClick={beginEdit}>
             Edit title / description / acceptance criteria
           </button>
         )}
@@ -529,7 +529,7 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
             <textarea className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm" rows={2} value={editAcceptance} onChange={(e) => setEditAcceptance(e.target.value)} placeholder="Acceptance criteria" />
             <div className="flex gap-2">
               <button type="button" className="btn-gold px-4 py-1.5 text-sm" disabled={busy} onClick={saveEdit}>Save</button>
-              <button type="button" className="px-4 py-1.5 text-sm text-white/60 hover:text-white" onClick={() => setEditing(false)}>Cancel</button>
+              <button type="button" className="font-ui-display px-4 py-1.5 text-sm text-white/60 hover:text-white" onClick={() => setEditing(false)}>Cancel</button>
             </div>
           </div>
         )}
@@ -566,7 +566,7 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
               {!queued ? (
                 <button
                   type="button"
-                  className="px-4 py-2 text-sm border border-white/15 rounded text-white/80 hover:border-cyber-teal/50 hover:text-cyber-teal disabled:opacity-50"
+                  className="font-ui-display px-4 py-2 text-sm border border-white/15 rounded text-white/80 hover:border-cyber-teal/50 hover:text-cyber-teal disabled:opacity-50"
                   disabled={busy || hasActiveWorkflow}
                   onClick={doEnqueue}
                 >
@@ -575,7 +575,7 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
               ) : (
                 <button
                   type="button"
-                  className="px-4 py-2 text-sm border border-white/15 rounded text-white/60 hover:text-white disabled:opacity-50"
+                  className="font-ui-display px-4 py-2 text-sm border border-white/15 rounded text-white/60 hover:text-white disabled:opacity-50"
                   disabled={busy}
                   onClick={doDequeue}
                 >

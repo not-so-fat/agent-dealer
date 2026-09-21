@@ -214,7 +214,7 @@ export default function IssuesListPage({
   return (
     <div className="flex-1 min-h-0 px-6 py-4 w-full overflow-y-auto">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold text-white/90">Issues</h2>
+        <h2 className="font-ui-display text-lg font-semibold text-white/90">Issues</h2>
         <button type="button" className="btn-gold px-4" onClick={() => setShowCreate((v) => !v)}>
           New issue
         </button>
@@ -225,7 +225,7 @@ export default function IssuesListPage({
       {(queue.length > 0 || admission) && (
         <div className="mb-4 rounded border border-cyber-teal/25 bg-cyber-teal/5">
           <div className="px-4 py-2 border-b border-cyber-teal/20 flex items-center justify-between gap-3">
-            <span className="text-sm font-medium text-cyber-teal">Admission queue</span>
+            <span className="font-ui-display text-sm font-medium text-cyber-teal">Admission queue</span>
             <span className="flex items-center gap-2 text-xs text-white/40">
               {admission ? (
                 <>
@@ -238,7 +238,7 @@ export default function IssuesListPage({
                     <label className="flex items-center gap-1">
                       <span className="text-white/35">limit</span>
                       <select
-                        className="bg-black/30 border border-white/10 rounded px-1.5 py-0.5 text-xs text-white/80 disabled:opacity-50"
+                        className="font-ui-display bg-black/30 border border-white/10 rounded px-1.5 py-0.5 text-xs text-white/80 disabled:opacity-50"
                         value={admission.options.includes(admission.maxActiveIssues) ? admission.maxActiveIssues : admission.limit}
                         disabled={limitBusy}
                         title={
@@ -290,7 +290,7 @@ export default function IssuesListPage({
                 <div className="flex items-center gap-2 shrink-0">
                   <button
                     type="button"
-                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
                     disabled={index === 0}
                     title="Move to top"
                     onClick={() => {
@@ -303,7 +303,7 @@ export default function IssuesListPage({
                   </button>
                   <button
                     type="button"
-                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
                     disabled={index === 0}
                     title="Move up"
                     onClick={() => {
@@ -318,7 +318,7 @@ export default function IssuesListPage({
                   </button>
                   <button
                     type="button"
-                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
                     disabled={index === queue.length - 1}
                     title="Move down"
                     onClick={() => {
@@ -333,7 +333,7 @@ export default function IssuesListPage({
                   </button>
                   <button
                     type="button"
-                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
                     disabled={index === queue.length - 1}
                     title="Move to bottom"
                     onClick={() => {
@@ -346,7 +346,7 @@ export default function IssuesListPage({
                   </button>
                   <button
                     type="button"
-                    className="text-xs text-white/40 hover:text-white"
+                    className="font-ui-display text-xs text-white/40 hover:text-white"
                     onClick={() => {
                       dequeueIssue(entry.issueId)
                         .then(refresh)
@@ -380,7 +380,7 @@ export default function IssuesListPage({
           <div className="flex gap-2 text-sm">
             <button
               type="button"
-              className={`px-3 py-1 rounded border ${sourceMode === "manual" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
+              className={`font-ui-display px-3 py-1 rounded border ${sourceMode === "manual" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
               onClick={() => {
                 setSourceMode("manual");
                 setSelectedLinearId("");
@@ -390,7 +390,7 @@ export default function IssuesListPage({
             </button>
             <button
               type="button"
-              className={`px-3 py-1 rounded border ${sourceMode === "linear" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
+              className={`font-ui-display px-3 py-1 rounded border ${sourceMode === "linear" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
               onClick={() => setSourceMode("linear")}
             >
               From Linear
@@ -414,7 +414,7 @@ export default function IssuesListPage({
                 />
                 <button
                   type="button"
-                  className="px-3 py-2 rounded border border-teal/40 text-teal text-sm disabled:opacity-50"
+                  className="font-ui-display px-3 py-2 rounded border border-teal/40 text-teal text-sm disabled:opacity-50"
                   disabled={linearLookupBusy || !linearRef.trim()}
                   onClick={() => void resolveLinearRef()}
                 >
@@ -422,7 +422,7 @@ export default function IssuesListPage({
                 </button>
               </div>
               <select
-                className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
                 value={selectedLinearId}
                 onChange={(e) => {
                   const id = e.target.value;
@@ -467,7 +467,7 @@ export default function IssuesListPage({
             <div className="flex-1 space-y-1">
               {recentRepos.length > 0 && (
                 <select
-                  className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                  className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
                   value={recentRepos.includes(repo) ? repo : ""}
                   onChange={(e) => {
                     if (e.target.value) setRepo(e.target.value);
@@ -497,7 +497,7 @@ export default function IssuesListPage({
             />
           </div>
           <select
-            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+            className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
             value={developerAgentId}
             onChange={(e) => setDeveloperAgentId(e.target.value)}
           >
@@ -509,7 +509,7 @@ export default function IssuesListPage({
             ))}
           </select>
           <select
-            className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+            className="font-ui-display w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
             value={reviewerAgentId}
             onChange={(e) => setReviewerAgentId(e.target.value)}
           >
@@ -535,7 +535,7 @@ export default function IssuesListPage({
             </button>
             <button
               type="button"
-              className="px-4 py-2 text-sm text-white/60 hover:text-white"
+              className="font-ui-display px-4 py-2 text-sm text-white/60 hover:text-white"
               onClick={() => {
                 setShowCreate(false);
                 resetForm();

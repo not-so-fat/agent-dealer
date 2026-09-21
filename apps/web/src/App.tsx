@@ -16,8 +16,10 @@ import Logo from "./components/ui/Logo";
 
 const POLL_MS = 5000;
 
+/* NOT-216: global navigation labels render through the display token. Count badges
+ * inside the nav stay Monaco (operational content) via explicit font-mono. */
 function navClass({ isActive }: { isActive: boolean }) {
-  return `px-3 py-2 text-base rounded ${
+  return `font-ui-display px-3 py-2 text-base rounded ${
     isActive ? "bg-cyber-teal/20 text-cyber-teal" : "text-white/60 hover:text-white"
   }`;
 }
@@ -115,7 +117,7 @@ export default function App() {
                 Issues
                 {openHumanActionCount > 0 && (
                   <span
-                    className="ml-1.5 inline-flex items-center gap-0.5 text-xs leading-none bg-red-500/20 text-red-300 px-1.5 py-0.5 rounded tabular-nums border border-red-400/30 align-middle"
+                    className="ml-1.5 inline-flex items-center gap-0.5 font-mono text-xs leading-none bg-red-500/20 text-red-300 px-1.5 py-0.5 rounded tabular-nums border border-red-400/30 align-middle"
                     title={`${openHumanActionCount} open human action${openHumanActionCount === 1 ? "" : "s"}`}
                   >
                     <AlertIcon className="w-3 h-3 shrink-0" />
@@ -137,7 +139,7 @@ export default function App() {
             <span>Agents</span>
             {agentCount > 0 && (
               <span
-                className="text-xs leading-none bg-white/10 text-white/55 px-1.5 py-0.5 rounded tabular-nums border border-white/10"
+                className="font-mono text-xs leading-none bg-white/10 text-white/55 px-1.5 py-0.5 rounded tabular-nums border border-white/10"
                 title={`${agentCount} configured agent${agentCount === 1 ? "" : "s"}`}
               >
                 {agentCount}
@@ -145,7 +147,7 @@ export default function App() {
             )}
             {agentIssueCount > 0 && (
               <span
-                className="inline-flex items-center gap-0.5 text-xs leading-none bg-red-500/20 text-red-300 px-1.5 py-0.5 rounded tabular-nums border border-red-400/30"
+                className="inline-flex items-center gap-0.5 font-mono text-xs leading-none bg-red-500/20 text-red-300 px-1.5 py-0.5 rounded tabular-nums border border-red-400/30"
                 title={`${agentIssueCount} need${agentIssueCount === 1 ? "s" : ""} attention`}
               >
                 <AlertIcon className="w-3 h-3 shrink-0" />

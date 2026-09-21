@@ -17,6 +17,14 @@
   --font-sans: Monaco, "Nunito Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: Monaco, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
+  /* NOT-216: single display-font token for navigational/interactive UI chrome.
+   * Defined ONLY here: Tailwind v4 emits this @theme variable into :root and
+   * generates the `font-ui-display` utility from it, so every opted-in label
+   * switches together by editing this one line. System faces only — Optima is
+   * the initial candidate, non-Apple platforms use the declared fallbacks.
+   * Operational content (titles, values, badges, logs) stays Monaco. */
+  --font-ui-display: Optima, Candara, "Segoe UI", system-ui, sans-serif;
+
   --color-cyber-gold: #c4b643;
   --color-cyber-teal: #92e4dd;
   --color-cyber-violet: #a78bfa;
@@ -32,10 +40,9 @@
   --glass-highlight: rgba(255, 255, 255, 0.04);
 }
 
-:root {
-  --font-sans: Monaco, "Nunito Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: Monaco, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-}
+/* NOT-216: no :root font-token duplicates here. @theme above is the single
+ * source — Tailwind v4 emits its variables into :root, and an unlayered :root
+ * rule would silently win over that layered emit and let the two diverge. */
 
 html {
   font-size: 17px;
@@ -131,9 +138,12 @@ body {
   box-shadow: inset 0 1px 0 var(--glass-highlight);
 }
 
+/* NOT-216: shared button/heading primitives render through the display token
+ * (reference, never a hard-coded face) so new call sites opt in automatically. */
 .btn-gold {
   @apply rounded py-2 text-base font-medium text-[#0A0A07];
   background: #c4b643;
+  font-family: var(--font-ui-display);
 }
 
 .btn-gold:hover {
@@ -142,10 +152,12 @@ body {
 
 .btn-ghost {
   @apply rounded py-2 text-base border border-white/20 text-[#E8F6F4];
+  font-family: var(--font-ui-display);
 }
 
 .btn-ghost-danger {
   @apply rounded py-2 text-base font-medium border border-red-500/75 text-red-400 bg-red-950/20;
+  font-family: var(--font-ui-display);
 }
 
 .btn-ghost-danger:hover:not(:disabled) {
@@ -154,10 +166,12 @@ body {
 
 .heading-page {
   @apply text-2xl font-semibold text-[#C4B643];
+  font-family: var(--font-ui-display);
 }
 
 .heading-panel {
   @apply text-lg font-semibold text-[#92E4DD];
+  font-family: var(--font-ui-display);
 }
 
 ::-webkit-scrollbar {
