@@ -7,7 +7,14 @@ export type HumanResolution =
   // `mergeFailure: true`. It offers retry_merge/repair/close (never resume — the work is
   // approved, nothing needs developing). Legacy merge-failure actions created before NOT-194
   // carry no such evidence and still resolve through resume.
-  | { actionType: "policy_escalation"; choice: "resume" | "retry_merge" | "repair" | "close" }
+  // NOT-221: a diverged-branch push rejection is a policy_escalation whose evidence
+  // carries `pushDivergence` (relationship "diverged"). It offers
+  // push_with_lease/resume/close — the lease-pinned push publishes the already-finished
+  // commits without a new developer round. Behind-only rejections keep resume/close.
+  | {
+      actionType: "policy_escalation";
+      choice: "resume" | "retry_merge" | "repair" | "close" | "push_with_lease";
+    }
   | { actionType: "product_scope_decision"; choice: "resume"; note?: string }
   | { actionType: "deck_interaction_required"; choice: "resume" | "close" };
 
@@ -24,6 +31,41 @@ export const MERGE_FAILURE_RESPONSE_OPTIONS: Array<{ choice: string; label: stri
 
 /** Evidence key marking a policy_escalation as a NOT-194 merge failure. */
 export const MERGE_FAILURE_EVIDENCE_KEY = "mergeFailure";
+
+/**
+ * NOT-221: divergence facts stored on a diverged `unpushed_commit` policy_escalation's
+ * evidence. `remoteSha` is the lease pin a push_with_lease resolution must use — it is
+ * never refreshed in place (a refreshed pin would publish over newer remote commits the
+ * operator never reviewed); a failed lease records the freshly observed tip separately.
+ */
+export interface PushDivergenceEvidence {
+  branch: string;
+  localSha: string;
+  remoteSha: string;
+  ahead: number;
+  behind: number;
+  relationship: "diverged" | "behind";
+  /** Preserved checkout holding the local commits, when the push ran from a worktree. */
+  worktreePath?: string | null;
+  /** Latest origin/<branch> tip observed by a failed lease attempt — informational only. */
+  observedRemoteSha?: string;
+  /** Raw git reason from the latest failed lease attempt. */
+  lastLeaseError?: string;
+}
+
+/** Evidence key marking a policy_escalation as a NOT-221 diverged-push escalation. */
+export const PUSH_DIVERGENCE_EVIDENCE_KEY = "pushDivergence";
+
+/**
+ * NOT-221: the stored response options for a diverged-push policy_escalation. The label
+ * names the recovery so the dashboard button is self-explanatory next to the SHAs the
+ * question and context lines show.
+ */
+export const PUSH_DIVERGENCE_RESPONSE_OPTIONS: Array<{ choice: string; label: string }> = [
+  { choice: "push_with_lease", label: "Push with lease" },
+  { choice: "resume", label: "Resume development" },
+  { choice: "close", label: "Close" },
+];
 
 export interface HumanResolutionResult {
   issueStatus: "done" | "repairing" | "closed" | "developing";
@@ -57,8 +99,9 @@ const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
   attempts_exhausted: ["retry", "close"],
   // "resume" stays valid so pre-NOT-194 open merge-failure actions still resolve;
   // commands.ts narrows per-action (merge-failure evidence → retry_merge/repair/close only,
+  // diverged-push evidence → push_with_lease/resume/close only,
   // everything else → resume/close only).
-  policy_escalation: ["resume", "retry_merge", "repair", "close"],
+  policy_escalation: ["resume", "retry_merge", "repair", "close", "push_with_lease"],
   product_scope_decision: ["resume"],
   deck_interaction_required: ["resume", "close"],
   reflection_interaction_required: ["retry", "dismiss"],
@@ -122,6 +165,9 @@ export function resolveHumanActionOutcome(resolution: HumanResolution): HumanRes
       if (resolution.choice === "close") return { issueStatus: "closed", workflowOutcome: "closed" };
       // retry_merge never reaches here: commands.ts parks it for undraft+merge (same
       // finalize as final_review:merge) before consulting this outcome map.
+      // push_with_lease never reaches here either: the async resolver runs the lease
+      // push first and only then finalizes through commands.ts's dedicated publish-only
+      // path (the action must stay open when the lease fails, which this map cannot do).
       throw new Error(`Unrecognized policy_escalation choice: ${resolution.choice}`);
     case "product_scope_decision":
       return { issueStatus: "developing", startNewRound: true, roundKind: "none" };

@@ -6,6 +6,7 @@
 // so a process crash at any point either applies the whole step or none of it, and a
 // duplicate delivery is a no-op. The effect *work* itself runs elsewhere, through a leased
 // worker whose structured result comes back into applyCompletion.
+import fs from "node:fs";
 import type {
   HumanAction,
   HumanActionType,
@@ -40,7 +41,10 @@ import {
   getHumanAction,
   listHumanActionsForIssue,
   resolveHumanAction,
+  updateOpenHumanAction,
 } from "../repository/human-actions.js";
+import { pushWithLease, readRemoteTip } from "../adapters/git-worktree.js";
+import { ensureIssueRepoCheckout } from "../adapters/managed-repo.js";
 import { reconcileFinding, resolveFindingsAbsentFromRound } from "../repository/findings.js";
 import { normalizeReviewerResult } from "./reviewer-result.js";
 import { getAgent } from "../repository/agents.js";
@@ -72,9 +76,12 @@ import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } fro
 import {
   MERGE_FAILURE_EVIDENCE_KEY,
   MERGE_FAILURE_RESPONSE_OPTIONS,
+  PUSH_DIVERGENCE_EVIDENCE_KEY,
+  PUSH_DIVERGENCE_RESPONSE_OPTIONS,
   parseHumanResolution,
   resolveHumanActionOutcome,
   type HumanResolution,
+  type PushDivergenceEvidence,
 } from "./human-resolution.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
 import { externalMergeStateForIssue, type ExternalMergeState } from "./external-merge.js";
@@ -990,16 +997,24 @@ function applyEffect(
       actionType === "policy_escalation" &&
       reviewerOutcome !== undefined &&
       reviewerOutcome.kind !== "verdict";
+    // NOT-221: a rejected push carries its divergence facts on the effect — stored as
+    // action evidence so push_with_lease can later push the exact recorded SHAs.
+    const pushDivergence =
+      actionType === "policy_escalation" && !resumeAsReviewer
+        ? (effect.pushDivergence ?? null)
+        : null;
     const action = createHumanAction({
       issueId: issue.id,
       workflowInstanceId: instance.id,
       actionType,
       reason: effect.reason,
-      question: questionFor(actionType, effect.reason, resumeAsReviewer),
+      question: questionFor(actionType, effect.reason, resumeAsReviewer, false, pushDivergence),
       evidence:
         reviewerOutcome?.kind === "verdict"
           ? { review: reviewerOutcome.result, ...(nonConvergence ? { nonConvergence } : {}) }
-          : undefined,
+          : pushDivergence
+            ? { [PUSH_DIVERGENCE_EVIDENCE_KEY]: pushDivergence }
+            : undefined,
       // issueNow.headSha, not issue.headSha: a stale outcome that itself exhausted the
       // infra budget already patched the newly observed head onto the issue above — the
       // pre-transition issue param would still carry the stale SHA a "resume" must not reuse.
@@ -1008,7 +1023,9 @@ function applyEffect(
         : nonConvergence
           ? { resumeRole: "developer", advanceRound: true }
           : undefined,
-      responseOptions: responseOptionsFor(actionType, resumeAsReviewer),
+      responseOptions: responseOptionsFor(actionType, resumeAsReviewer, {
+        pushDivergence: pushDivergence ?? undefined,
+      }),
     });
     if (actionType === "final_review") ev.emit("final_review.requested");
     ev.emit("human_action.requested", { payload: { actionType, actionId: action.id } });
@@ -1036,11 +1053,53 @@ export function isMergeFailureAction(action: { evidenceJson: string | null }): b
   }
 }
 
+/**
+ * NOT-221: parses the diverged-push facts off a policy_escalation's evidence. Null for
+ * every other action — including behind-only push evidence and legacy pre-NOT-221
+ * `unpushed_commit` escalations, which carry no structured facts at all.
+ */
+export function parsePushDivergenceEvidence(action: {
+  evidenceJson: string | null;
+}): PushDivergenceEvidence | null {
+  if (!action.evidenceJson) return null;
+  try {
+    const evidence = JSON.parse(action.evidenceJson) as Record<string, unknown>;
+    const facts = evidence[PUSH_DIVERGENCE_EVIDENCE_KEY] as PushDivergenceEvidence | undefined;
+    if (!facts || typeof facts !== "object") return null;
+    if (typeof facts.branch !== "string" || typeof facts.localSha !== "string") return null;
+    if (typeof facts.remoteSha !== "string") return null;
+    if (facts.relationship !== "diverged" && facts.relationship !== "behind") return null;
+    return facts;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * NOT-221: true when the action is a diverged-push escalation (evidence carries
+ * `pushDivergence` with relationship "diverged"). Pre-NOT-221 open unpushed_commit
+ * actions have no such evidence and read as ordinary policy_escalations — that is what
+ * keeps their `resume` path working.
+ */
+export function isPushDivergenceAction(action: { evidenceJson: string | null }): boolean {
+  return parsePushDivergenceEvidence(action)?.relationship === "diverged";
+}
+
+function shortPushSha(sha: string): string {
+  return sha.length > 12 ? sha.slice(0, 12) : sha;
+}
+
+/** NOT-221: true only for a diverged push — behind-only rejections keep resume/close. */
+function isDivergedPush(pushDivergence: PushDivergenceEvidence | null | undefined): boolean {
+  return pushDivergence?.relationship === "diverged";
+}
+
 function questionFor(
   actionType: HumanActionType,
   reason: string,
   resumeAsReviewer = false,
-  mergeFailure = false
+  mergeFailure = false,
+  pushDivergence: PushDivergenceEvidence | null = null
 ): string {
   switch (actionType) {
     case "final_review":
@@ -1049,6 +1108,17 @@ function questionFor(
       return "The review-round limit is reached. Retry with a fresh round, or close the issue?";
     case "policy_escalation":
       if (mergeFailure) return `${reason} Retry the merge, queue another repair round, or close the issue?`;
+      // NOT-221: the confirmation names the exact SHAs the lease-pinned push will use so
+      // the operator reviews the pin before one-clicking it.
+      if (isDivergedPush(pushDivergence)) {
+        const facts = pushDivergence!;
+        return (
+          `${reason} Push local ${shortPushSha(facts.localSha)} to origin/${facts.branch} ` +
+          `with a lease pinned at remote ${shortPushSha(facts.remoteSha)} ` +
+          `(local ${facts.ahead} commit(s) ahead, remote ${facts.behind} commit(s) ahead), ` +
+          `resume development, or close the issue?`
+        );
+      }
       return resumeAsReviewer
         ? `${reason} Retry the review, or close the issue?`
         : `${reason} Resume development, or close the issue?`;
@@ -1078,7 +1148,7 @@ function questionFor(
 export function responseOptionsFor(
   actionType: HumanActionType,
   resumeAsReviewer = false,
-  opts: { mergeFailure?: boolean } = {}
+  opts: { mergeFailure?: boolean; pushDivergence?: PushDivergenceEvidence | null } = {}
 ): Array<{ choice: string; label: string }> {
   switch (actionType) {
     case "final_review":
@@ -1095,6 +1165,9 @@ export function responseOptionsFor(
     case "policy_escalation":
       // NOT-194: a merge failure after approval offers retry/repair/close — never resume.
       if (opts.mergeFailure) return [...MERGE_FAILURE_RESPONSE_OPTIONS];
+      // NOT-221: a diverged push offers the lease-pinned push alongside resume/close;
+      // behind-only (and every other) escalation keeps resume/close only.
+      if (isDivergedPush(opts.pushDivergence)) return [...PUSH_DIVERGENCE_RESPONSE_OPTIONS];
       return [
         { choice: "resume", label: resumeAsReviewer ? "Retry review" : "Resume development" },
         { choice: "close", label: "Close" },
@@ -1181,14 +1254,31 @@ export function resolveHumanActionAndAdvance(
   // retry_merge/repair/close only (resume would re-run development on approved work);
   // every other policy_escalation keeps resume/close only. Pre-NOT-194 open merge-failure
   // actions carry no mergeFailure evidence, so they still accept resume here.
+  // NOT-221: same per-action narrowing for a diverged push — push_with_lease/resume/close
+  // only; behind-only and legacy unpushed_commit actions keep resume/close only.
   if (resolution.actionType === "policy_escalation") {
     const mergeFailure = isMergeFailureAction(action);
-    const allowed = mergeFailure ? ["retry_merge", "repair", "close"] : ["resume", "close"];
+    const divergedPush = !mergeFailure && isPushDivergenceAction(action);
+    const allowed = mergeFailure
+      ? ["retry_merge", "repair", "close"]
+      : divergedPush
+        ? ["push_with_lease", "resume", "close"]
+        : ["resume", "close"];
     if (!allowed.includes(resolution.choice)) {
       return {
         ok: false,
         code: 400,
-        error: `Invalid choice "${choice}" for ${mergeFailure ? "a merge-failure" : "this"} policy_escalation`,
+        error: `Invalid choice "${choice}" for ${mergeFailure ? "a merge-failure" : divergedPush ? "a diverged-push" : "this"} policy_escalation`,
+      };
+    }
+    // push_with_lease runs git before anything resolves (a failed lease must leave the
+    // action open), so it can only complete through resolveHumanActionAndAdvanceAsync —
+    // the sync entry point rejects it the way human-resolution's outcome map would.
+    if (resolution.choice === "push_with_lease") {
+      return {
+        ok: false,
+        code: 409,
+        error: "push_with_lease requires the async resolver: the lease push runs before the action resolves",
       };
     }
   }
@@ -1471,6 +1561,11 @@ export async function resolveHumanActionAndAdvanceAsync(
   resolvedBy: string,
   choice: string
 ): Promise<ResolveResult> {
+  // NOT-221: the lease push runs before anything resolves — a failed lease must leave
+  // the action open with the fresh tip, which the sync core below cannot do.
+  if (choice === "push_with_lease") {
+    return resolvePushWithLeaseAsync(actionId, resolvedBy);
+  }
   // NOT-196: the `gh` PR-state read runs here, outside any DB transaction — the sync
   // core below only consumes the pre-read state. Only close choices on issues with a
   // PR number pay for the call; anything unreadable resolves to "unknown" (or
@@ -1493,6 +1588,138 @@ export async function resolveHumanActionAndAdvanceAsync(
     restarted: false,
     triggerReflect: merged.triggerReflect,
   };
+}
+
+/**
+ * NOT-221: resolves a diverged-push `push_with_lease` choice. The lease-pinned push
+ * runs FIRST, from the preserved worktree (or the issue checkout when that is gone):
+ * the pin is the exact remote tip the operator reviewed, so a moved origin fails the
+ * push and nothing is published. Only a successful push resolves the action — then the
+ * workflow continues at PR/checks verification via a publish-only developer work item
+ * at the current round (no review round spent, no new agent round), exactly the path a
+ * post-push `adapter_failure` retry would have taken.
+ */
+async function resolvePushWithLeaseAsync(actionId: string, resolvedBy: string): Promise<ResolveResult> {
+  const action = getHumanAction(actionId);
+  if (!action) return { ok: false, code: 404, error: "Human action not found" };
+  if (action.status !== "open") return { ok: false, code: 409, error: "Human action already resolved" };
+  if (action.actionType !== "policy_escalation") {
+    return { ok: false, code: 400, error: `Invalid choice "push_with_lease" for ${action.actionType}` };
+  }
+  const facts = parsePushDivergenceEvidence(action);
+  if (!facts || facts.relationship !== "diverged") {
+    return {
+      ok: false,
+      code: 400,
+      error: 'Invalid choice "push_with_lease" for a non-diverged policy_escalation',
+    };
+  }
+  if (!action.issueId) return { ok: false, code: 500, error: "Human action has no issue" };
+  const issue = getIssue(action.issueId);
+  if (!issue) return { ok: false, code: 404, error: "Issue not found" };
+  const instance = getActiveWorkflowInstance(action.issueId);
+  if (!instance) return { ok: false, code: 409, error: "No active workflow for this action" };
+
+  // Prefer the preserved worktree the push originally ran from — its object store
+  // provably holds the recorded local SHA. Fall back to the issue checkout (which shares
+  // refs with coordinator worktrees) when the worktree is gone.
+  let cwd: string | null = facts.worktreePath && fs.existsSync(facts.worktreePath) ? facts.worktreePath : null;
+  if (!cwd) {
+    try {
+      cwd = (await ensureIssueRepoCheckout(issue.repo)).repoPath;
+    } catch (err) {
+      return {
+        ok: false,
+        code: 409,
+        error: `Push with lease could not run: the preserved worktree is gone and the issue checkout failed: ${(err as Error).message}`,
+      };
+    }
+  }
+
+  const pushed = await pushWithLease({
+    cwd,
+    branch: facts.branch,
+    localSha: facts.localSha,
+    remoteSha: facts.remoteSha,
+  });
+  if (!pushed.ok) {
+    // The pin no longer matches: origin moved (or is unreachable) and git published
+    // nothing. Keep the original pin — refreshing it would publish over remote commits
+    // the operator never reviewed — and surface the freshly observed tip on the
+    // still-open action instead.
+    const tip = await readRemoteTip({ cwd, branch: facts.branch });
+    const leaseError = pushed.reason.replace(/\s+/g, " ").trim().slice(0, 300);
+    const tipText =
+      tip && tip !== facts.remoteSha
+        ? `origin/${facts.branch} is now at ${tip}`
+        : tip
+          ? `origin/${facts.branch} is still at the recorded pin ${shortPushSha(facts.remoteSha)} (the remote may be unreachable)`
+          : `origin/${facts.branch} could not be resolved`;
+    const suffix =
+      ` Push with lease failed (${leaseError}). ${tipText}, so nothing was published — ` +
+      `re-check the remote tip, then retry, resume, or close.`;
+    updateOpenHumanAction(actionId, {
+      reason: `${action.reason}${suffix}`,
+      question: `${action.question}${suffix}`,
+      evidence: {
+        [PUSH_DIVERGENCE_EVIDENCE_KEY]: {
+          ...facts,
+          ...(tip && tip !== facts.remoteSha ? { observedRemoteSha: tip } : {}),
+          lastLeaseError: leaseError,
+        },
+      },
+    });
+    return {
+      ok: false,
+      code: 409,
+      error: `Push with lease failed: ${leaseError}. ${tipText}; the action stays open.`,
+    };
+  }
+
+  return getDb().transaction((): ResolveResult => {
+    resolveHumanAction(actionId, resolvedBy, { choice: "push_with_lease" });
+    const ev = eventEmitter(issue, instance, null, "developing", issue.currentRound);
+    ev.emit("human_action.resolved", {
+      actorType: "human",
+      payload: { actionType: action.actionType, choice: "push_with_lease" },
+    });
+    ev.emit("branch.pushed", {
+      actorType: "developer",
+      payload: {
+        branch: facts.branch,
+        localSha: facts.localSha,
+        leasePin: facts.remoteSha,
+        withLease: true,
+      },
+    });
+    transitionIssue(issue.id, "developing", {
+      currentOwner: "developer",
+      currentIntent: `Publishing ${facts.branch} with lease (no agent) — verifying PR/checks`,
+    });
+    // Publish-only continuation at the current round: the commits are already on the
+    // remote, so the work item redoes gh/PR/checks only — no repair round is consumed
+    // and no agent is spawned.
+    const next = enqueueWorkItem({
+      issueId: issue.id,
+      workflowInstanceId: instance.id,
+      kind: "developer",
+      round: issue.currentRound,
+      payload: {
+        publishOnly: true,
+        branch: facts.branch,
+        profileSnapshot: queuedProfileSnapshot(issue, "developer"),
+      },
+      idempotencyKey: `${instance.id}:developer:push-with-lease:${action.id}`,
+    });
+    return {
+      ok: true,
+      issueStatus: getIssue(issue.id)!.status,
+      nextWorkItemId: next.id,
+      instanceCompleted: false,
+      restarted: false,
+      triggerReflect: false,
+    };
+  })();
 }
 
 /**

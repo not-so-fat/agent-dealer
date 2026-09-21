@@ -1,5 +1,7 @@
 // packages/server/src/coordinator/routing.ts
 import { normalizeReviewerResult, type ReviewerResult } from "./reviewer-result.js";
+import type { PushDivergenceEvidence } from "./human-resolution.js";
+import type { PushRejectionFacts } from "../adapters/git-worktree.js";
 
 export type DeveloperOutcome =
   | { kind: "clean_handoff"; branch: string; headSha: string; baseSha: string; prNumber: number; prUrl: string }
@@ -10,8 +12,18 @@ export type DeveloperOutcome =
   | { kind: "dirty_worktree"; reason?: string; path?: string; recoveryCommands?: string[] }
   /** Local commits exist but the coordinator's own push was rejected (e.g. non-fast-forward).
    * `recoveryCommands` (NOT-137) mirrors worktree_conflict: divergence facts live in `reason`,
-   * and the concrete recovery steps are folded into the escalation text at route time. */
-  | { kind: "unpushed_commit"; reason: string; recoveryCommands?: string[] }
+   * and the concrete recovery steps are folded into the escalation text at route time.
+   * NOT-221: `branch` + `pushFacts` (NOT-137's structured rejection facts) + the preserved
+   * `worktreePath` travel with the outcome so the escalation can offer a one-click
+   * lease-pinned push instead of only resume/close. */
+  | {
+      kind: "unpushed_commit";
+      reason: string;
+      recoveryCommands?: string[];
+      branch?: string;
+      pushFacts?: PushRejectionFacts;
+      worktreePath?: string;
+    }
   /** A prior round's worktree still holds the issue branch and can't be safely reused/removed
    * (dirty/unpushed, or not coordinator-managed) — see git-worktree.ts's resolveDeveloperWorktree. */
   | { kind: "worktree_conflict"; path: string; reason: string; recoveryCommands: string[] }
@@ -131,6 +143,9 @@ export type DeveloperRouteResult =
       next: "human_action";
       actionType: "attempts_exhausted" | "policy_escalation";
       reason: string;
+      /** NOT-221: divergence facts for a rejected push — carried to the action's
+       * evidence so the operator gets a one-click lease-pinned push. */
+      pushDivergence?: PushDivergenceEvidence;
     }
   /** `until` is only known up front when the blocker reports its own reset time (a usage
    * cap). An unreachable Agent Deck gives no ETA, so its retry time comes from the deferral
@@ -167,7 +182,26 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
       const recovery = outcome.recoveryCommands?.length
         ? ` Recovery:\n${outcome.recoveryCommands.join("\n")}`
         : "";
-      return { next: "human_action", actionType: "policy_escalation", reason: `${prefix}${recovery}` };
+      // NOT-221: structured divergence facts ride along (not just the folded text) so the
+      // escalation can offer the exact lease-pinned push as a one-click resolution.
+      const pushDivergence =
+        outcome.branch && outcome.pushFacts
+          ? {
+              branch: outcome.branch,
+              localSha: outcome.pushFacts.localSha,
+              remoteSha: outcome.pushFacts.remoteSha,
+              ahead: outcome.pushFacts.ahead,
+              behind: outcome.pushFacts.behind,
+              relationship: outcome.pushFacts.relationship,
+              ...(outcome.worktreePath ? { worktreePath: outcome.worktreePath } : {}),
+            }
+          : undefined;
+      return {
+        next: "human_action",
+        actionType: "policy_escalation",
+        reason: `${prefix}${recovery}`,
+        ...(pushDivergence ? { pushDivergence } : {}),
+      };
     }
     case "worktree_conflict":
       // Never spends infra-attempt budget — the branch is provably still checked out

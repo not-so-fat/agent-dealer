@@ -389,6 +389,10 @@ async function runPublishOnlyHandoff(
                   kind: "unpushed_commit",
                   reason: recovered.reason,
                   recoveryCommands: recovered.facts?.recoveryCommands,
+                  // NOT-221: the publish-only retry runs from the repo, not a worktree —
+                  // no worktreePath, so a later push_with_lease resolves from the checkout.
+                  branch: branchName,
+                  ...(recovered.facts ? { pushFacts: recovered.facts } : {}),
                 }
               : {
                   kind: "adapter_failure",
@@ -1121,12 +1125,17 @@ export async function runDeveloperEffect(
     setLiveIntent(issue.id, `Developer · pushing branch (round ${round})`);
     const pushed = await pushBranch({ worktreePath, branch: branchName });
     if (!pushed.ok) {
-      // Local commits preserved either way — never discarded, never force-retried.
+      // Local commits preserved either way — never discarded, never force-retried. The
+      // worktree is deliberately NOT removed here: it is the preserved checkout a later
+      // push_with_lease resolution pushes from (NOT-221).
       return pushed.rejected
         ? {
             kind: "unpushed_commit",
             reason: pushed.reason,
             recoveryCommands: pushed.facts?.recoveryCommands,
+            branch: branchName,
+            ...(pushed.facts ? { pushFacts: pushed.facts } : {}),
+            worktreePath,
           }
         : { kind: "adapter_failure", reason: pushed.reason };
     }
