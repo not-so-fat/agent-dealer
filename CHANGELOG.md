@@ -2,6 +2,20 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.1.6 — 2026-09-21
+
+Patch over 1.1.5: a filterable, paginated Issues list, a more readable Execution report, and a tidier navigation shell.
+
+### Features
+
+- **Issues list filters and pagination (NOT-228)** — the Issues page history now has a filter bar (search across title and external label, status, exact repository, Needs attention) that applies on **Apply**, with applied filters and the page persisted in the `/issues` query string so views are linkable and survive reload. The list shows `Showing X–Y of N` with Previous/Next, and a filter-specific empty state with **Reset** (distinct from the first-run empty state). The New issue form, Admission queue and Needs-attention panel stay global and unfiltered.
+- **Paginated `GET /api/issues` (NOT-228)** — when `page`/`limit` are passed (default 25, max 100) the endpoint answers `{ issues, page, limit, total, totalPages }` with stable `updated_at DESC` ordering; without them it keeps returning the legacy unpaginated array, so existing API consumers are unaffected.
+
+### UI
+
+- **Readable Execution report (NOT-229)** — clearer metric hierarchy, structured percentile/coverage/failure presentation, compact token quantities (e.g. `1.2M`) and plainer failure wording. Presentation only; `GET /api/execution-report` gains no new required fields.
+- **Monaco header wordmark and Issues-first navigation (NOT-227)** — the dashboard header wordmark now reads **Monaco** (was "AgentDealer"); it links to Issues, which leads the nav. The CLI, npm package name and `agent-dealer` command are unchanged.
+
 ## 1.1.5 — 2026-09-21
 
 Patch over 1.1.4: execution analysis — see where time and retries go per issue and compare runtimes and models across a fleet — plus small UI and CLI polish.

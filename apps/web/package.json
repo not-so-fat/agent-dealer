@@ -1,6 +1,6 @@
 {
   "name": "@agent-dealer/web",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "type": "module",
   "scripts": {
     "predev": "node scripts/ensure-monaco-font.mjs",
@@ -12,7 +12,7 @@
     "test": "node --import tsx --test $(find src \\( -name '*.test.ts' -o -name '*.test.tsx' \\) -not -path '*/node_modules/*')"
   },
   "dependencies": {
-    "@agent-dealer/shared": "1.1.5",
+    "@agent-dealer/shared": "1.1.6",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-router-dom": "^7.18.4"
