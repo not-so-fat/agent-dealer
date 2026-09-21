@@ -50,7 +50,7 @@ import {
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
-import { getWorkerSession, patchRunningSession, recordSessionProcess } from "../repository/worker-sessions.js";
+import { getWorkerSession, patchRunningSession, recordSessionProcess, setSessionInputSha } from "../repository/worker-sessions.js";
 import { COORDINATOR_PROCESS_OWNER, readProcessStartTime } from "./process-liveness.js";
 import { checkDeveloperWorktreeOwnerLiveness } from "./worktree-owner-liveness.js";
 import { developerSessionTimeoutMs } from "./session-timeouts.js";
@@ -754,6 +754,28 @@ export async function runDeveloperEffect(
     worktreePath: shortWorktreePath(worktreePath),
   });
 
+  // NOT-172: capture the worktree HEAD as this session's input-SHA baseline before
+  // the agent spawns — developer work items are never enqueued with an input SHA,
+  // so without this the sampler's HEAD diff (and the session_end fallback) have
+  // nothing per-session to compare against. Read-only `rev-parse`; a retry on a
+  // reused branch baselines at the inherited tip, so only commits this session
+  // adds count as its evidence. Persisted set-once: a restart re-entrant into the
+  // same session keeps the original baseline.
+  let samplerInputSha: string | null = session?.inputSha ?? null;
+  try {
+    const baselineHead = await revParseHead(worktreePath).catch(() => null);
+    if (baselineHead && samplerInputSha === null) {
+      try {
+        setSessionInputSha(sessionId, baselineHead);
+      } catch {
+        // baseline persistence must never fail the attempt itself
+      }
+      samplerInputSha = baselineHead;
+    }
+  } catch {
+    // baseline capture must never fail the attempt itself
+  }
+
   // One resolution, two consumers: the materialized MCP config's tool surface below and
   // the spawn args' tool surface further down. They were resolved separately and had to
   // agree by inspection — the exact shape this stack exists to remove (NOT-134 review).
@@ -895,8 +917,8 @@ export async function runDeveloperEffect(
     }
 
     // NOT-172: the sampler also watches HEAD read-only and records the `commit`
-    // checkpoint once when HEAD first differs from the session input SHA.
-    const samplerInputSha = session?.inputSha ?? null;
+    // checkpoint once when HEAD first differs from the session input SHA
+    // (captured at worktree-ready above and persisted on the session).
     const sampler = startActivitySampler({
       issueId: issue.id,
       role: "developer",
@@ -1055,7 +1077,10 @@ export async function runDeveloperEffect(
         });
       }
       const endHead = await revParseHead(worktreePath).catch(() => null);
-      if (endHead && (endHead !== samplerInputSha || samplerInputSha === null)) {
+      // A null baseline means HEAD was unreadable at session start, so a commit
+      // here cannot be attributed to this session (it may be inherited from a
+      // reused branch) — skip rather than misattribute.
+      if (endHead && samplerInputSha && endHead !== samplerInputSha) {
         const endAhead = await commitsAhead({
           worktreePath,
           baseRef: `origin/${baseBranch}`,

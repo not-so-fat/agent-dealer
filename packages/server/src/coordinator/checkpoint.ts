@@ -38,10 +38,11 @@ export interface CheckpointEvidence {
 }
 
 /**
- * Record one checkpoint kind for a session — at most once per (session, kind).
- * The commit kind additionally distinguishes its origin (sampler / salvage /
- * session_end) in the payload while sharing the kind-level idempotency key, so
- * a salvage commit and a sampler observation never double-count "first commit".
+ * Record one checkpoint kind for a session — at most once per (session, kind),
+ * except the salvage-origin commit, which is keyed independently so an agent
+ * that commits and then crashes/times out dirty still leaves durable salvage
+ * evidence alongside the earlier observation. First-commit derivation still
+ * counts once: it orders all commit rows and takes the earliest.
  */
 export function emitCheckpointObserved(ev: CheckpointEvidence): void {
   appendWorkflowEvent({
@@ -62,7 +63,10 @@ export function emitCheckpointObserved(ev: CheckpointEvidence): void {
       samplingPrecisionMs: ev.samplingPrecisionMs ?? null,
       branch: ev.branch ?? null,
     },
-    idempotencyKey: `checkpoint:${ev.workerSessionId}:${ev.kind}`,
+    idempotencyKey:
+      ev.kind === "commit" && ev.origin === "salvage"
+        ? `checkpoint:${ev.workerSessionId}:commit:salvage`
+        : `checkpoint:${ev.workerSessionId}:${ev.kind}`,
   });
 }
 

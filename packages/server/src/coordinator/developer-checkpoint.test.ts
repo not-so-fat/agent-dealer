@@ -26,7 +26,7 @@ process.env.HEAD_RECONCILE_INTERVAL_MS = "10";
 const { migrate, getDb } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
 const { createIssue, getIssue } = await import("../repository/issues.js");
-const { createWorkerSession, startSession, listWorkerSessionsForIssue } = await import(
+const { createWorkerSession, startSession, getWorkerSession, listWorkerSessionsForIssue } = await import(
   "../repository/worker-sessions.js"
 );
 const { listWorkItemsForIssue, claimWorkItem, bindWorkItemSession } = await import(
@@ -282,6 +282,37 @@ test("NOT-172: salvage tip records a salvage-origin commit checkpoint", async ()
   assert.equal(commits[0]!.observedSha, tip, "the checkpoint vouches for the salvaged tip");
 });
 
+// An agent that commits, then crashes dirty, leaves both the sampler
+// observation and the salvage tip as distinct durable evidence.
+test("NOT-172: salvage after an observed commit keeps both commit evidences", async () => {
+  const issueId = await makeIssue();
+  const commitThenCrashDirtySpawn: SpawnFn = async (input) => {
+    commitFile(input.cwd, "feature.txt");
+    // Let the sampler observe the commit mid-session before the crash.
+    await new Promise((r) => setTimeout(r, 3500));
+    fs.writeFileSync(path.join(input.cwd, "half-done.txt"), "oops\n");
+    return { exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitThenCrashDirtySpawn, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  const commits = checkpointPayloads(issueId, "commit");
+  assert.equal(commits.length, 2, "first observation plus salvage tip");
+  assert.deepEqual(
+    commits.map((c) => c.origin).sort(),
+    ["salvage", "sampler"]
+  );
+  const branch = `issue-${issueId}`;
+  const tip = git(repo, "rev-parse", branch);
+  assert.ok(
+    commits.some((c) => c.origin === "salvage" && c.observedSha === tip),
+    "the salvage checkpoint vouches for the salvaged tip"
+  );
+});
+
 // A clean handoff records commit, verification receipt, and push checkpoints.
 test("NOT-172: clean handoff records commit, receipt, and branch-pushed checkpoints", async () => {
   const issueId = await makeIssue();
@@ -315,6 +346,40 @@ test("NOT-172: clean handoff records commit, receipt, and branch-pushed checkpoi
 
   // The sampling/read model is read-only: no stray files, no extra commits.
   assert.equal(git(repo, "rev-parse", `issue-${issueId}`), issue.headSha);
+});
+
+// The 10-second sampler observes the first commit mid-session: the session
+// carries a real input-SHA baseline (captured read-only at session start), the
+// sampler tick fires while the agent is still running, and the later
+// session_end re-emit is a no-op — one commit checkpoint, sampler origin.
+test("NOT-172: sampler observes the first commit mid-session with sampling precision", async () => {
+  const issueId = await makeIssue();
+  const mainTip = git(repo, "rev-parse", "main");
+  const slowSpawn: SpawnFn = async (input) => {
+    commitFile(input.cwd, "feature.txt");
+    // Hold the session open past the sampler's first tick (2s) so the
+    // coordinator-observed checkpoint lands mid-session, not at session end.
+    await new Promise((r) => setTimeout(r, 3500));
+    return { exitCode: 0, transcript: "Implementation conclusion: added the widget.", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: slowSpawn, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  const dev = listWorkerSessionsForIssue(issueId).filter((s) => s.role === "developer");
+  assert.equal(dev.length, 1);
+  const stored = getWorkerSession(dev[0]!.id)!;
+  assert.equal(stored.inputSha, mainTip, "the session baselines at the pre-spawn worktree HEAD");
+
+  const commits = checkpointPayloads(issueId, "commit");
+  assert.equal(commits.length, 1, "sampler + session_end collapse to one first-commit observation");
+  assert.equal(commits[0]!.origin, "sampler", "the mid-session observation wins");
+  assert.equal(commits[0]!.samplingPrecisionMs, 10_000, "sampling precision is reported, not an invented Git time");
+  assert.equal(commits[0]!.inputSha, mainTip);
+  assert.notEqual(commits[0]!.observedSha, mainTip, "the observed SHA is the new tip");
+  assert.ok(Date.parse(String(commits[0]!.observedAt)) > 0);
 });
 
 // A retry with nothing to reuse is an explicit cold retry.

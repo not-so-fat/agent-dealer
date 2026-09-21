@@ -88,20 +88,38 @@ test("duplicate ticks and restarts do not duplicate checkpoint evidence; the fir
   };
   emitCheckpointObserved({ ...base, kind: "commit", observedSha: COMMIT_SHA, origin: "sampler", inputSha: INPUT_SHA, samplingPrecisionMs: 10_000 });
   const firstTs = checkpointsOf(issueId, "commit")[0]!.ts;
-  // A duplicate sampler tick, a salvage emit, and a post-restart re-emit all no-op.
+  // Duplicate sampler ticks, a session_end re-emit, and post-restart re-emits
+  // all no-op against the shared (session, commit) key.
   emitCheckpointObserved({ ...base, kind: "commit", observedSha: COMMIT_SHA, origin: "sampler", inputSha: INPUT_SHA, samplingPrecisionMs: 10_000 });
-  emitCheckpointObserved({ ...base, kind: "commit", observedSha: "c".repeat(40), origin: "salvage", branch: `issue-${issueId}` });
   emitCheckpointObserved({ ...base, kind: "commit", observedSha: COMMIT_SHA, origin: "session_end", inputSha: INPUT_SHA });
-  const rows = checkpointsOf(issueId, "commit");
-  assert.equal(rows.length, 1, "one commit checkpoint per session across origins and restarts");
-  assert.equal(rows[0]!.ts, firstTs, "the first coordinator observation is preserved");
+  emitCheckpointObserved({ ...base, kind: "commit", observedSha: COMMIT_SHA, origin: "sampler", inputSha: INPUT_SHA, samplingPrecisionMs: 10_000 });
+  assert.equal(checkpointsOf(issueId, "commit").length, 1, "one first-commit observation per session across restarts");
+  assert.equal(checkpointsOf(issueId, "commit")[0]!.ts, firstTs, "the first coordinator observation is preserved");
+
+  // A salvage commit after an earlier observation is independent durable
+  // evidence (separate idempotency key) — an agent that commits then crashes
+  // dirty leaves both. Duplicate salvage ticks still no-op.
+  emitCheckpointObserved({ ...base, kind: "commit", observedSha: "c".repeat(40), origin: "salvage", branch: `issue-${issueId}` });
+  emitCheckpointObserved({ ...base, kind: "commit", observedSha: "c".repeat(40), origin: "salvage", branch: `issue-${issueId}` });
+  const commits = checkpointsOf(issueId, "commit");
+  assert.equal(commits.length, 2, "salvage evidence survives alongside the first-commit observation");
+  assert.deepEqual(
+    commits.map((c) => c.payload.origin).sort(),
+    ["salvage", "sampler"]
+  );
+
+  // First-commit derivation still counts once — it takes the earliest commit row.
+  const { deriveFirstCheckpoint } = await import("./attempt-waste.js");
+  const first = deriveFirstCheckpoint({ workflowStartedAt: new Date(Date.parse(commits[0]!.ts) - 1000).toISOString(), checkpoints: listCheckpointsForIssue(issueId) });
+  assert.equal(first.quality, "exact");
+  assert.equal(first.observedSha, COMMIT_SHA);
 
   // Other kinds are independent evidence, not duplicates.
   emitCheckpointObserved({ ...base, kind: "verification_receipt", observedSha: COMMIT_SHA });
   emitCheckpointObserved({ ...base, kind: "branch_pushed", observedSha: COMMIT_SHA, branch: `issue-${issueId}` });
   assert.equal(checkpointsOf(issueId, "verification_receipt").length, 1);
   assert.equal(checkpointsOf(issueId, "branch_pushed").length, 1);
-  assert.equal(listCheckpointsForIssue(issueId).length, 3);
+  assert.equal(listCheckpointsForIssue(issueId).length, 4);
 });
 
 test("retry reuse records reused kinds, and a cold retry as empty kinds", async () => {
