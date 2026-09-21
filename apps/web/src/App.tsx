@@ -3,6 +3,7 @@ import { Link, NavLink, Navigate, Route, Routes, useParams } from "react-router-
 import type { AgentWithHealth, HumanAction } from "@agent-dealer/shared";
 import AgentsPage from "./pages/AgentsPage";
 import IssuesListPage from "./pages/IssuesListPage";
+import ExecutionReportPage from "./pages/ExecutionReportPage";
 import IssueDetailPage from "./pages/IssueDetailPage";
 import NotFoundPage from "./pages/NotFoundPage";
 import { fetchAgentDeckStatus, fetchAgents, fetchHumanActions } from "./api";
@@ -113,6 +114,9 @@ export default function App() {
               </div>
             </Link>
             <nav className="flex gap-1">
+              <NavLink to="/reports/execution" className={navClass}>
+                Reports
+              </NavLink>
               <NavLink to="/issues" className={navClass}>
                 Issues
                 {openHumanActionCount > 0 && (
@@ -182,6 +186,7 @@ export default function App() {
                 <AgentsPage agents={agents} agentDeckOnline={agentDeckOnline} onRefresh={refreshAgents} />
               }
             />
+            <Route path="/reports/execution" element={<ExecutionReportPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Routes>
         </main>

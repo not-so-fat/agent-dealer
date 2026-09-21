@@ -7,6 +7,7 @@ import type {
   CreateIssueResult,
   DeckAccessErrorCode,
   ExecuteIssueResponse,
+  ExecutionReportResponse,
   Finding,
   HumanAction,
   Issue,
@@ -14,6 +15,7 @@ import type {
   IssueStatus,
   LinearCandidate,
   QueueMoveTarget,
+  ReportFilterState,
   RuntimeModelsResponse,
   StartIssueResponse,
   UpdateAgentInput,
@@ -23,6 +25,7 @@ import type {
   WorkflowEvent,
   WorkflowInstance,
 } from "@agent-dealer/shared";
+import { ExecutionReportResponse as ExecutionReportSchema, serializeExecutionReportQuery } from "@agent-dealer/shared";
 import { clearCachedRuntimeModels, fetchRuntimeModelsDeduped } from "./lib/runtimeModelsCache";
 
 const API = "";
@@ -386,6 +389,18 @@ export async function guideIssue(id: string, markdown: string): Promise<Workflow
   });
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
+}
+
+/** NOT-175: fleet execution-comparison report. Filters serialize with shared
+ * defaults — an empty filter object requests the API's conservative window. */
+export async function fetchExecutionAnalysis(filters: ReportFilterState): Promise<ExecutionReportResponse> {
+  const qs = serializeExecutionReportQuery(filters);
+  const res = await fetch(`${API}/api/execution-analysis${qs ? `?${qs}` : ""}`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  const json = await res.json();
+  const parsed = ExecutionReportSchema.safeParse(json);
+  if (!parsed.success) throw new Error(`Unexpected report shape: ${parsed.error.message}`);
+  return parsed.data;
 }
 
 export async function fetchHumanActions(): Promise<HumanAction[]> {
