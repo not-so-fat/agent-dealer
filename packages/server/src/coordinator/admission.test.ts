@@ -193,7 +193,8 @@ test("capacity gate: no evaluation while an occupying issue is active", async ()
   assert.equal(result, null);
   assert.equal(getIssue(waiting.id)!.status, "ready");
   assert.equal(getQueuedEntryForIssue(waiting.id)?.state, "queued");
-  assert.equal(getQueuedEntryForIssue(waiting.id)?.waitReason, null);
+  // NOT-168: capacity-full time is persisted (once per transition), not just a read overlay.
+  assert.match(getQueuedEntryForIssue(waiting.id)?.waitReason ?? "", /waiting for slot/);
 });
 
 test("slot release: needs_human frees capacity so next entry admits on the next tick", async () => {

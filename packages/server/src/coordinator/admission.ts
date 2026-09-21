@@ -294,7 +294,18 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
     }
   }
 
-  if (freeSlots <= 0) return null;
+  // NOT-168: capacity-full time is durable evidence, not just a read-time overlay.
+  // Persist the slot reason only where it differs — setQueueWaitReason no-ops on
+  // repeats, so a full system writes once per entry per transition, never per tick.
+  if (freeSlots <= 0) {
+    const slotReason = slotWaitReason();
+    if (slotReason) {
+      for (const entry of listQueuedEntries()) {
+        setQueueWaitReason(entry.id, slotReason);
+      }
+    }
+    return null;
+  }
 
   // Re-list after housekeeping so admitted/removed rows are gone.
   const remaining = listQueuedEntries();

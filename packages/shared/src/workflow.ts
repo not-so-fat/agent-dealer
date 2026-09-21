@@ -39,6 +39,12 @@ export const WorkflowEventType = z.enum([
   "final_review.requested",
   "issue.completed",
   "issue.closed",
+  /** NOT-168: durable queue/admission wait evidence. Emitted transactionally with the
+   * queue_entries mutation they describe; see EXECUTION_ANALYSIS.md §2/§6. */
+  "queue.enqueued",
+  "queue.wait_reason_changed",
+  "queue.admitted",
+  "queue.removed",
   /** Migration-only — the NOT-66 cutover repoints a legacy `events` row under this type,
    * preserving the original type/payload inside `payloadJson` (see `role: "legacy"` on
    * `WorkerSessionRole` and `outcome: "migrated"` on `WorkflowInstanceOutcome` for the same
