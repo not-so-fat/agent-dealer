@@ -17,6 +17,7 @@ const { createWorkerSession, completeSession, startSession } = await import("../
 const { recordUsageEvent } = await import("../repository/usage-events.js");
 const { appendWorkflowEvent } = await import("../repository/workflow-events.js");
 const { buildExecutionReport, classifyFailureReason, matchesSessionValue } = await import("./execution-report.js");
+const { getCohortExecutionAnalysis } = await import("../read-models/execution-analysis.js");
 
 before(() => {
   migrate();
@@ -293,4 +294,57 @@ test("filters narrow the report and pagination pages the issue list", () => {
 
 test("invalid date range is a 400-class error, not a silent empty report", () => {
   assert.throws(() => buildExecutionReport({ from: "not-a-date" }), /Invalid date range/);
+});
+
+test("phase stats equal getCohortExecutionAnalysis for the same filters", () => {
+  const now = Date.now();
+  const base = {
+    from: null, to: null, role: null, runtime: null, model: null,
+    status: null, repo: null, limit: 50, offset: 0,
+  };
+  const cases = [
+    { report: {}, cohort: { ...base } },
+    { report: { runtime: "cursor_local" }, cohort: { ...base, runtime: "cursor_local" } },
+    { report: { role: "developer" }, cohort: { ...base, role: "developer" } },
+    { report: { status: ["done"] }, cohort: { ...base, status: "done" } },
+    { report: { runtime: "no_such_runtime" }, cohort: { ...base, runtime: "no_such_runtime" } },
+  ];
+  for (const c of cases) {
+    const report = buildExecutionReport(c.report, now);
+    const cohort = getCohortExecutionAnalysis(c.cohort, now);
+    // Same shared window (conservative default + 365-day cap).
+    assert.equal(report.window.from, cohort.window.from);
+    assert.equal(report.window.to, cohort.window.to);
+    for (const { phase, stat } of report.summary.phaseWallMs) {
+      assert.deepEqual(stat, cohort.phaseWallTime[phase], `phase ${phase} with ${JSON.stringify(c.report)}`);
+    }
+  }
+});
+
+test("window over 365 days is capped like the shared cohort window", () => {
+  const now = Date.now();
+  const from = new Date(now - 400 * 86_400_000).toISOString();
+  const report = buildExecutionReport({ from }, now);
+  const cohort = getCohortExecutionAnalysis({
+    from, to: null, role: null, runtime: null, model: null,
+    status: null, repo: null, limit: 50, offset: 0,
+  }, now);
+  assert.equal(report.window.from, cohort.window.from);
+  assert.equal(report.window.to, cohort.window.to);
+  assert.ok(Date.parse(report.window.from) > Date.parse(from), "span is capped, not unbounded");
+  assert.equal(report.summary.issues, 2);
+});
+
+test("status filter matches session status, not just issue status", () => {
+  // B's issue status is closed but its session timed_out: visible by session status.
+  const bySession = buildExecutionReport({ status: ["timed_out"] });
+  assert.equal(bySession.summary.issues, 1);
+  assert.equal(bySession.issues[0]!.id, seeded.b.id);
+  // A matches done via its issue status and its done sessions.
+  const byDone = buildExecutionReport({ status: ["done"] });
+  assert.equal(byDone.summary.issues, 1);
+  assert.equal(byDone.issues[0]!.id, seeded.a.id);
+  // Several statuses union with OR semantics.
+  const both = buildExecutionReport({ status: ["done", "closed"] });
+  assert.equal(both.summary.issues, 2);
 });

@@ -3,14 +3,19 @@
 // NOT-175: fleet-level execution-comparison report behind GET /api/execution-report.
 // (NOT-173 owns GET /api/execution-analysis; Fastify rejects duplicate routes.)
 //
-// Cohort scope, success denominators, retry/reuse, coverage, and issue links
-// are this endpoint's own (per-cohort coverage the NOT-173 cohort report does
-// not carry). Phase wall time, however, is composed from the NOT-173 read
-// model (read-models/execution-analysis.ts) over the same in-scope issues, so
-// P50/P95 follow GET /api/execution-analysis values exactly instead of a
-// parallel derivation: exact boundaries when agent.started/agent.completed are
-// recorded, inferred usage-envelope backfill otherwise, unavailable with
-// reasons when neither exists — never zero, never a guess.
+// Cohort scope comes from the shared NOT-173 predicates
+// (resolveCohortWindow + listCohortIssueIds in
+// read-models/execution-analysis.ts): issues whose execution started in the
+// window (first workflow start, falling back to created_at) with the 365-day
+// cap, and a status filter that matches issue status, session status, or
+// workflow outcome. Success denominators, retry/reuse, coverage, and issue
+// links are this endpoint's own (per-cohort coverage the NOT-173 cohort
+// report does not carry). Phase wall time, however, is composed from the
+// NOT-173 read model over the same in-scope issues, so P50/P95 follow GET
+// /api/execution-analysis values exactly instead of a parallel derivation:
+// exact boundaries when agent.started/agent.completed are recorded, inferred
+// usage-envelope backfill otherwise, unavailable with reasons when neither
+// exists — never zero, never a guess.
 //
 // Other inputs come only from sources the EXECUTION_ANALYSIS.md source matrix
 // (§6) marks derivable today:
@@ -23,7 +28,6 @@
 //   (inferred, includes_spawn_slot_wait + includes_post_exit_work).
 import {
   coverageSum,
-  defaultExecutionReportWindow,
   EXECUTION_REPORT_DEFAULT_LIMIT,
   EXECUTION_REPORT_MAX_LIMIT,
   nearestRankPercentiles,
@@ -41,10 +45,12 @@ import { computeHumanWaitMs } from "./metrics.js";
 import { parseErrorJsonReason } from "./failure-reason.js";
 import {
   composeIssueAnalysis,
+  listCohortIssueIds,
   loadEvidenceForCohort,
   percentileStat as not173PercentileStat,
+  resolveCohortWindow,
 } from "../read-models/execution-analysis.js";
-import type { AttemptAnalysis } from "@agent-dealer/shared";
+import type { AttemptAnalysis, CohortFilters } from "@agent-dealer/shared";
 
 export const TERMINAL_SESSION_STATUSES = ["done", "failed", "timed_out", "cancelled"] as const;
 
@@ -68,13 +74,14 @@ export function matchesSessionValue(value: string | null | undefined, filter: st
 }
 
 function attemptInScope(
-  a: Pick<AttemptAnalysis, "role" | "runtime" | "model">,
-  scope: { role: string | null; runtime: string | null; model: string | null }
+  a: Pick<AttemptAnalysis, "role" | "runtime" | "model" | "status">,
+  scope: { role: string | null; runtime: string | null; model: string | null; statuses: string[] }
 ): boolean {
   return (
     matchesSessionValue(a.role || null, scope.role) &&
     matchesSessionValue(a.runtime, scope.runtime) &&
-    matchesSessionValue(a.model, scope.model)
+    matchesSessionValue(a.model, scope.model) &&
+    (scope.statuses.length === 0 || scope.statuses.includes(a.status ?? ""))
   );
 }
 
@@ -88,22 +95,24 @@ function attemptInScope(
  */
 export function buildPhaseWallMs(
   issueIds: string[],
-  scope: { role: string | null; runtime: string | null; model: string | null },
-  hasSessionFilter: boolean,
+  scope: { role: string | null; runtime: string | null; model: string | null; statuses: string[] },
+  hasAttemptFilter: boolean,
   now: number
 ): Array<{ phase: string; stat: PercentileStat }> {
   if (issueIds.length === 0) {
-    return REPORT_PHASES.map((phase) => ({ phase, stat: unavailableStat(["no_observations"]) }));
+    // Same empty-cohort value the NOT-173 cohort report composes
+    // (percentileStat over no observations), so the two agree exactly.
+    return REPORT_PHASES.map((phase) => ({ phase, stat: not173PercentileStat([], []) }));
   }
   const evidence = loadEvidenceForCohort(issueIds, now);
   const analyses = issueIds.flatMap((id) => {
     const ev = evidence.get(id);
     return ev ? [composeIssueAnalysis(ev)] : [];
   });
-  // Contributing issues: those with at least one kept attempt when a
-  // session-level filter is set, else every in-scope issue (mirrors the
-  // NOT-173 cohort report's level/kept split).
-  const level = hasSessionFilter ? analyses.filter((a) => a.attempts.some((att) => attemptInScope(att, scope))) : analyses;
+  // Contributing issues: those with at least one kept attempt when any
+  // attempt-level filter (role/runtime/model/status) is set, else every
+  // in-scope issue (mirrors the NOT-173 cohort report's level/kept split).
+  const level = hasAttemptFilter ? analyses.filter((a) => a.attempts.some((att) => attemptInScope(att, scope))) : analyses;
   const keptIssueIds = new Set(level.map((a) => a.issueId));
   const keptAttempts = level.flatMap((a) => a.attempts.filter((att) => attemptInScope(att, scope)));
 
@@ -401,12 +410,12 @@ function emptyCohortRow(key: string): CohortRow {
 const QUALITY_EXACT: EvidenceQuality = "exact";
 
 export function buildExecutionReport(filters: ExecutionReportFilters, now: number = Date.now()): ExecutionReportResponse {
-  const win = defaultExecutionReportWindow(now);
-  const from = filters.from?.trim() || win.from;
-  const to = filters.to?.trim() || win.to;
-  const fromMs = Date.parse(from);
-  const toMs = Date.parse(to);
-  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs) {
+  const rawFrom = filters.from?.trim() || null;
+  const rawTo = filters.to?.trim() || null;
+  const rawFromMs = rawFrom === null ? NaN : Date.parse(rawFrom);
+  const rawToMs = rawTo === null ? NaN : Date.parse(rawTo);
+  if ((rawFrom !== null && !Number.isFinite(rawFromMs)) || (rawTo !== null && !Number.isFinite(rawToMs)) ||
+    (rawFrom !== null && rawTo !== null && rawToMs < rawFromMs)) {
     throw new Error("Invalid date range: `from` and `to` must be ISO-8601 strings with from <= to");
   }
   const page = filters.page && filters.page >= 1 ? Math.floor(filters.page) : 1;
@@ -421,20 +430,56 @@ export function buildExecutionReport(filters: ExecutionReportFilters, now: numbe
   const sessionRuntime = filters.runtime?.trim() || null;
   const sessionModel = filters.model?.trim() || null;
   const hasSessionFilter = sessionRole !== null || sessionRuntime !== null || sessionModel !== null;
+  const repoFilter = filters.repo?.trim() || null;
 
-  // Issues active in the window: updated inside [from, to]. Repo/status narrow further.
-  const issueRows = db
-    .prepare(
-      `SELECT id, title, status, repo, updated_at, current_round
-       FROM issues WHERE updated_at >= ? AND updated_at <= ?
-       ORDER BY updated_at DESC`
-    )
-    .all(from, to) as IssueRow[];
-  const windowIssues = issueRows.filter(
-    (i) =>
-      (!filters.repo?.trim() || i.repo === filters.repo.trim()) &&
-      (statusSet.size === 0 || statusSet.has(i.status))
+  // Issue scope reuses the shared NOT-173 predicates: the conservative
+  // default window with its 365-day cap (resolveCohortWindow), and cohort
+  // membership by first workflow start with the status filter matching issue
+  // status, session status, or workflow outcome (listCohortIssueIds). The
+  // report accepts several statuses, so one shared call runs per status and
+  // the results union — the same OR semantics as a single-status cohort call.
+  // The literal "unknown" runtime/model filter matches NULL/empty sessions
+  // (see matchesSessionValue), which the shared EXISTS predicate cannot
+  // express, so it is stripped here and applied when sessions load below.
+  const window = resolveCohortWindow(
+    { from: rawFrom, to: rawTo, role: null, runtime: null, model: null, status: null, repo: null, limit: 50, offset: 0 },
+    now
   );
+  const from = window.fromIso;
+  const to = window.toIso;
+  const cohortFilterFor = (status: string | null): CohortFilters => ({
+    from: null,
+    to: null,
+    role: sessionRole,
+    runtime: sessionRuntime && sessionRuntime !== "unknown" ? sessionRuntime : null,
+    model: sessionModel && sessionModel !== "unknown" ? sessionModel : null,
+    status,
+    repo: repoFilter,
+    limit: 50,
+    offset: 0,
+  });
+  const scopeIssueIds = new Set<string>();
+  const scopeStatuses = statusSet.size === 0 ? [null] : [...statusSet];
+  for (const status of scopeStatuses) {
+    for (const id of listCohortIssueIds(cohortFilterFor(status), window).issueIds) {
+      scopeIssueIds.add(id);
+    }
+  }
+
+  // Display order stays newest-first by updated_at; the scope (population)
+  // above is what feeds the phase percentiles.
+  let windowIssues: IssueRow[] = [];
+  if (scopeIssueIds.size > 0) {
+    const ids = [...scopeIssueIds];
+    const placeholders = ids.map(() => "?").join(",");
+    windowIssues = (db
+      .prepare(
+        `SELECT id, title, status, repo, updated_at, current_round
+         FROM issues WHERE id IN (${placeholders})
+         ORDER BY updated_at DESC`
+      )
+      .all(...ids) as IssueRow[]);
+  }
   const windowIssueIds = windowIssues.map((i) => i.id);
 
   // Sessions of those issues, narrowed by role/runtime/model.
@@ -672,12 +717,13 @@ export function buildExecutionReport(filters: ExecutionReportFilters, now: numbe
   byRole.sort((a, b) => (a.key < b.key ? -1 : 1));
 
   // Phase wall time is composed from the NOT-173 read model over the same
-  // in-scope issues (see buildPhaseWallMs), so P50/P95 follow GET
-  // /api/execution-analysis values exactly.
+  // in-scope issues with the same attempt predicate (role/runtime/model plus
+  // the status filter, which NOT-173 also applies per attempt), so P50/P95
+  // follow GET /api/execution-analysis values exactly.
   const phaseWallMs = buildPhaseWallMs(
     issueIds,
-    { role: sessionRole, runtime: sessionRuntime, model: sessionModel },
-    hasSessionFilter,
+    { role: sessionRole, runtime: sessionRuntime, model: sessionModel, statuses: [...statusSet] },
+    hasSessionFilter || statusSet.size > 0,
     now
   );
 
