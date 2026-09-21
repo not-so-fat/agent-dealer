@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { PermissionPolicyOverride, ReasoningEffort, Runtime } from "@agent-dealer/shared";
-import { CURSOR_DEFAULT_MODEL } from "@agent-dealer/shared";
+import { CURSOR_DEFAULT_MODEL, MUSE_CODE_CONTRIBUTOR_MODEL } from "@agent-dealer/shared";
 import { fetchDecks } from "./api";
 import ModelSelect from "./components/agents/ModelSelect";
 import { type BudgetFormValue } from "./lib/budgetForm";
@@ -76,7 +76,7 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
 
   return (
     <div className="space-y-2">
-      <div className="text-base uppercase tracking-wide text-[#92E4DD]">Agent</div>
+      <div className="font-ui-display text-base uppercase tracking-wide text-[#92E4DD]">Agent</div>
       <label className="text-xs text-[#A8C4C0] uppercase">Runtime (required)</label>
       <select
         className="field"
@@ -86,15 +86,22 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
           const runtime = e.target.value as Runtime;
           set({
             runtime,
-            defaultModel: runtime === "cursor_local" ? CURSOR_DEFAULT_MODEL : "",
-            // Cursor has no separate effort CLI flag — clear so we don't persist a no-op.
-            defaultEffort: runtime === "cursor_local" ? "" : value.defaultEffort,
+            defaultModel:
+              runtime === "cursor_local"
+                ? CURSOR_DEFAULT_MODEL
+                : runtime === "muse_code"
+                  ? MUSE_CODE_CONTRIBUTOR_MODEL
+                  : "",
+            // Cursor and Muse Code have no separate effort CLI flag — clear so we don't persist a no-op.
+            defaultEffort:
+              runtime === "cursor_local" || runtime === "muse_code" ? "" : value.defaultEffort,
           });
         }}
       >
         <option value="claude_code">Claude Code (claude -p)</option>
         <option value="cursor_local">Cursor local (cursor-agent -p)</option>
         <option value="codex_local">Codex local (codex exec)</option>
+        <option value="muse_code">Muse Code (muse exec) — developer only, trial</option>
       </select>
       <label className="text-xs text-[#A8C4C0] uppercase">Agent Deck (required)</label>
       <select
@@ -122,7 +129,7 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
       )}
 
       <div className="pt-2 mt-2 border-t border-white/10 space-y-2">
-        <div className="text-xs uppercase tracking-wide text-white/40">
+        <div className="font-ui-display text-xs uppercase tracking-wide text-white/40">
           Issue-centric session defaults
         </div>
         <label className="block space-y-1">
@@ -163,6 +170,12 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
             </label>
           )}
         </div>
+        {value.runtime === "muse_code" && (
+          <p className="text-xs text-white/40">
+            Developer role only — keep a Claude or Codex agent as the reviewer. Contributor-tier
+            content may be used for product improvement; use it on non-sensitive tickets.
+          </p>
+        )}
         {value.runtime === "cursor_local" && (
           <p className="text-xs text-white/40">
             Cursor has no separate effort flag — put effort in the model id if needed (e.g.

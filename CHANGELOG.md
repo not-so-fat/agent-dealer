@@ -2,6 +2,101 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.1.5 — 2026-09-21
+
+Patch over 1.1.4: execution analysis — see where time and retries go per issue and compare runtimes and models across a fleet — plus small UI and CLI polish.
+
+### Features
+
+- **Per-issue execution analysis (NOT-173, NOT-174)** — Issue Detail now shows execution phases, failure state, observational silence intervals, and failed-attempt/retry waste with per-attempt reuse badges. Backed by new issue and cohort execution-analysis APIs that carry quality/coverage metadata; cohort aggregates cover the full matching window (not just the current page), and attempt filters (role/runtime/model/status) scope waste, retry, reviewer and failure metrics too.
+- **Runtime and model execution-comparison report (NOT-175)** — a new Execution report page under **Reports** in the nav (`/reports/execution`, backed by `GET /api/execution-report`) compares runtimes and models with URL-persisted filters, coverage tables, failure buckets, per-row waste/retry columns and cohort deep links.
+- **Version on `start` (NOT-224)** — `agent-dealer start` now prints `Agent Dealer version X` (not in supervisor mode), and `agent-dealer status` labels its existing version line the same way instead of `CLI package X`.
+
+### UI
+
+- **New issue panel placement (NOT-223)** — the New issue form now renders directly below the header, above the admission queue. Presentation order only.
+- **Avenir for UI chrome, Monaco for values (NOT-222)** — the `--font-ui-display` token now resolves to an Avenir-first system stack for navigation, headings and buttons; form fields and value-bearing selects stay in Monaco.
+
+### Internal
+
+- **Activity and checkpoint evidence (NOT-170, NOT-172)** — structured session activity is persisted (new `session_activity_events` table, migrated automatically on start) and silence intervals are derived from it. First-checkpoint and retry-reuse evidence is emitted from developer sessions, with the worktree HEAD captured at session start as the sampler baseline. This is the evidence the analysis above reads. It is observational only: the new emitters are best-effort and never fail or alter an attempt.
+
+## 1.1.4 — 2026-09-21
+
+Patch over 1.1.3: queue controls (configurable concurrency, Execute now, queued agent reassignment), safer push/repair recovery, and durable failure-cause and timing evidence.
+
+### Features
+
+- **Configurable active-issue concurrency (NOT-215)** — the Issues page header now sets how many issues run at once (1–2, default 1, persisted across restarts and clamped to the worker/spawn ceiling). At most one active issue per repository; same-repo waiters stay queued with a concrete reason. Lowering the limit never preempts running issues. Adds `GET /api/queue/status` and `PUT /api/queue/settings`.
+- **Execute now and queued agent reassignment (NOT-217)** — a queued issue can be started immediately (`POST /api/issues/:id/execute`, `issue execute` in the CLI, and a UI action) with the same eligibility and capacity checks as normal admission; it only bypasses queue order. A queued issue's agent can be changed in the UI without losing its queue position, with an `issue.reassigned` audit event.
+- **Push with lease on diverged pushes (NOT-221)** — when an `unpushed_commit` escalation has a diverged branch, the dashboard shows the diverging SHAs and offers **Push with lease** alongside Resume and Close.
+- **System display font for navigation and headings (NOT-216)** — navigation, headings, buttons, selects and links now use a single `--font-ui-display` design token (a system font); Monaco is kept for operational content. It is a design token, not a user setting.
+
+### Fixes
+
+- **Repair rounds start from the pushed tip (NOT-219)** — a repair round is now cut from the fetched `origin/<branch>` tip rather than the clone's stale local issue branch, and the local ref is fast-forwarded (best-effort) after push. A fetch failure defers the round instead of starting from stale state.
+- **Diverged push auto-recovery (NOT-220)** — when the remote tip is Dealer's last-known head and the local branch is patch-equivalent, the push is recovered automatically with a lease pinned to that SHA (auditable `branch.pushed` event, no escalation).
+
+### Internal
+
+- **Normalized failure causes (NOT-171)** — a shared failure-cause contract and classifier is applied to observed failures and recovery reclaims, persisted append-only in `failure_causes` with raw error/reason/log/events untouched. Legacy rows are backfilled as inferred on read.
+- **Durable timing evidence (NOT-168, NOT-169)** — queue and admission wait history is now recorded as `queue.*` events. New `agent.started`, `agent.completed` and `host.suspended` events let setup, agent-process, validation and host-sleep intervals be derived exactly.
+
+## 1.1.3 — 2026-09-20
+
+Patch over 1.1.2: three review-loop and queue fixes so a stale base or a hand-merged PR no longer stalls issues or their dependents.
+
+### Fixes
+
+- **Issue branches start from the latest base (NOT-197)** — a fresh developer branch is now cut from a freshly fetched `origin/<base>` instead of the cached clone's possibly stale local base, so PRs no longer conflict with work merged while the issue was queued. The fetched SHA is recorded as the issue's `base_sha`. If the fetch fails or times out, no branch is created and the issue is deferred and retried automatically, without spending an infra attempt or a review round. Reusing an existing branch is unchanged.
+- **Merge failure after approval offers Retry merge (NOT-194)** — when auto-merge fails after the review is approved, the parked action now offers **Retry merge**, **Another repair round** and **Close** instead of only Resume development or Close. The failure text is shown verbatim.
+- **Closing an issue whose PR was already merged (NOT-196)** — when a human action is resolved with `close` (or an issue is aborted) and the issue's PR is `MERGED` on GitHub, the issue now ends `done` with an event recording the external merge, so its dependents are released. If the PR is open, closed unmerged, or absent, the issue is `closed` as before; if the PR state cannot be read, it is `closed` and the event records that the merge state was unknown, never `done`. `blockerVerdict` is unchanged, and an abort from a status with no route to `done` still ends `closed`.
+
+## 1.1.2 — 2026-09-20
+
+Patch over 1.1.1: internal groundwork for Muse Code isolation; no change to how existing runs behave.
+
+### Internal
+
+- **Muse Code per-attempt config (NOT-180)** — adds a module that builds the isolated config for one Muse Code attempt (single Agent Deck MCP server, sandbox on, approvals never, filtered env, reviewer write/shell disabled) and refuses restrictions that cannot yet be enforced. It is not yet wired into the Muse runner, so Muse runs are unchanged.
+
+## 1.1.1 — 2026-09-20
+
+Patch over 1.1.0: stop/start safety fixes (`stop` for isolated homes, `start --force` port check) and a false usage-cap deferral fix.
+
+### Fixes
+
+- **`agent-dealer stop` with an isolated home** — with an explicit `AGENT_DEALER_HOME` and no `run.json`, `stop` no longer falls back to the default port and terminates whatever listens there (previously it could stop your real install). It now only stops the pids recorded in that home's own `run.json`.
+- **`start --force` port check** — exits with an error whenever an agent-dealer is still listening on the port after the forced stop (for example one owned by a different home), instead of launching a second server onto an occupied port.
+- **False Claude usage-cap deferral** — for Claude rate-limit events, only a rejected plan-window `status` now defers an issue; a rejected `overageStatus` alone (orgs with pay-as-you-go disabled, `status` still allowed) is ignored. Other usage-cap signals (billing errors, cap error text) are unchanged.
+
+### Internal
+
+- `install:smoke` only runs its cleanup `stop` while its temp `run.json` still exists, so a release smoke can no longer take down the developer's running instance.
+
+## 1.1.0 — 2026-09-20
+
+Minor over 1.0.5: an opt-in trial of native Muse Code as the developer agent, plus review-loop, retry and Linear-error refinements.
+
+### Features
+
+- **Muse Code developer trial (opt-in per issue)** — supervised trial only: the PoC recommended “retry later”, and contributor-tier content may be used for product improvement, so pick non-sensitive tickets. Choose a Muse Code developer profile (pinned model) and the issue runs the normal Dev-review workflow, with Codex/Claude as reviewer (Muse cannot review). Muse gets no MCP and no Agent Deck, so a deck outage never parks it; token counts are recorded when Muse reports them, and cost is always empty (NOT-178, NOT-179, NOT-181).
+- **Muse health checks** — tells a missing CLI from missing credentials from an unexplained probe failure (NOT-178).
+- **Muse failure handling** — auth failures retry as infra without spending a review round, usage caps defer the issue, and a session that used Muse’s `cron_*` tools is failed and escalated to you with no retry. That last check runs after the fact and cannot prevent a job from firing (NOT-181).
+- **`usage_events.model`** — developer usage records now store the model (the confirmed model for Muse, the profile’s model otherwise); reviewer rows stay empty. An automatic migration adds the column and older rows stay empty (NOT-181).
+
+### Improvements
+
+- **Early escalation on repeated blockers** — a file with a blocking review finding in each of the last 3 rounds raises a policy escalation naming the file(s) instead of queuing another developer round; resuming spends the skipped repair round, and three fresh rounds are needed before it can fire again (NOT-184).
+- **Edit, then retry** — an issue parked at `attempts_exhausted` now lets you edit its title, description and acceptance criteria (`PATCH /api/issues/:id`); retrying re-freezes the task snapshot if any changed and records a `task_snapshot.refreshed` event (NOT-185).
+- **Findings resolve themselves** — a later completed review that no longer reports a finding marks it resolved (NOT-186).
+- **Clearer Linear blocker errors** — names the cause, and the rate-limit reset ETA, when blocker state is unavailable (NOT-158).
+
+### Internal
+
+- **Muse evaluation** — budget-first evaluation contract, headless/orchestration spike, PoC results, and the committed PoC harness in `scripts/muse-poc/` (NOT-176, NOT-177, NOT-183, NOT-187). Opt-in paid real-CLI check: `MUSE_SMOKE=1 npm run smoke:muse`.
+- **Execution analysis** — contract and evidence-quality rules for analysing runs (NOT-167).
+
 ## 1.0.5 — 2026-09-19
 
 Patch over 1.0.4: Agents list shows the effective model for profiles saved before NOT-71.

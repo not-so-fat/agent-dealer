@@ -1,6 +1,6 @@
 {
   "name": "agent-dealer",
-  "version": "1.0.5",
+  "version": "1.1.5",
   "private": true,
   "description": "Issue queue and execution control plane for coding agents — admission, developer/reviewer workflow, audit treasure",
   "workspaces": [
@@ -19,7 +19,8 @@
     "db:migrate:prod": "AGENT_DEALER_ENV=production npm run db:migrate -w @agent-dealer/server",
     "db:migrate-to-issues": "npm run db:migrate-to-issues -w @agent-dealer/server --",
     "p0": "tsx scripts/p0-linear-batch.ts",
-    "test:unit": "AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 tsx --test $(find packages -name '*.test.ts' -not -path '*/node_modules/*' -not -path '*/dist/*')",
+    "smoke:muse": "tsx scripts/muse-smoke.mts",
+    "test:unit": "AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 tsx --test $(find packages -name '*.test.ts' -not -path '*/node_modules/*' -not -path '*/dist/*') && npm run test -w @agent-dealer/web",
     "test:ci": "npm run test:unit",
     "poc:integration": "tsx scripts/poc/run-all.ts",
     "poc:deep": "tsx scripts/poc/claude-runner-probe.ts && tsx scripts/poc/cursor-agent-probe.ts",

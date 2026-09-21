@@ -8,7 +8,19 @@
 // slot is free — it never bypasses the queue. The single ungated exception is a human
 // action resolving into startWorkflowCore (commands.ts).
 
-import type { AgentProfile, Issue, IssueStatus, WorkflowInstance } from "@agent-dealer/shared";
+import type {
+  AdmissionStatus,
+  AgentProfile,
+  Issue,
+  IssueStatus,
+  WorkflowInstance,
+} from "@agent-dealer/shared";
+import {
+  admissionLimitOptions,
+  getEffectiveMaxActiveIssues,
+  getMaxActiveIssues,
+  workerSpawnCeiling,
+} from "../repository/admission-settings.js";
 import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
 import { healthForAgent } from "../adapters/agent-health.js";
 import { getDb } from "../db/index.js";
@@ -63,11 +75,14 @@ export function isStartable(issue: Issue): boolean {
   return startableStatuses.has(issue.status) && !getActiveWorkflowInstance(issue.id);
 }
 
-export type ActiveIssueRef = { id: string; status: IssueStatus };
+export type ActiveIssueRef = { id: string; status: IssueStatus; repo?: string };
 
 /**
- * Single swappable capacity function. Only `sequential` is wired (freeSlots = 1 − occupying).
- * Parallel `fixed(N)` / per-repo limits plug in here later — no other capacity code paths.
+ * Single swappable capacity function: global free slots = limit − occupying.
+ * `sequential` is fixed(1); the shipping default is fixed(N) where N is the
+ * persisted NOT-215 operator setting clamped to the worker/spawn ceiling.
+ * Per-repository exclusion (max one active issue per repo) is enforced in the
+ * `admitNext` walk, not here — it needs the candidate's repo, not just a count.
  */
 export type CapacityPolicy = (activeIssues: ActiveIssueRef[]) => number;
 
@@ -76,15 +91,33 @@ export const sequentialCapacityPolicy: CapacityPolicy = (activeIssues) => {
   return Math.max(0, 1 - occupying);
 };
 
-let capacityPolicy: CapacityPolicy = sequentialCapacityPolicy;
+/** NOT-215: global fixed capacity N. Lowering N never preempts — free slots just go to 0. */
+export function fixedCapacityPolicy(limit: number): CapacityPolicy {
+  return (activeIssues) => {
+    const occupying = activeIssues.filter((i) => occupyingStatuses.has(i.status)).length;
+    return Math.max(0, limit - occupying);
+  };
+}
 
-/** Test / future parallel wiring — swap the single CapacityPolicy function. */
+/**
+ * Shipping policy: fixed(N) where N is read fresh from the persisted operator
+ * setting on every call, so a setting change (or a restart) takes effect on the
+ * very next tick with no reload. Equals sequential when the setting is 1.
+ */
+export const defaultCapacityPolicy: CapacityPolicy = (activeIssues) => {
+  const occupying = activeIssues.filter((i) => occupyingStatuses.has(i.status)).length;
+  return Math.max(0, getEffectiveMaxActiveIssues() - occupying);
+};
+
+let capacityPolicy: CapacityPolicy = defaultCapacityPolicy;
+
+/** Test wiring — swap the single CapacityPolicy function. */
 export function setCapacityPolicyForTests(policy: CapacityPolicy): void {
   capacityPolicy = policy;
 }
 
 export function resetCapacityPolicyForTests(): void {
-  capacityPolicy = sequentialCapacityPolicy;
+  capacityPolicy = defaultCapacityPolicy;
 }
 
 export function countOccupyingIssues(): number {
@@ -92,7 +125,44 @@ export function countOccupyingIssues(): number {
 }
 
 function listOccupyingIssues(): ActiveIssueRef[] {
-  return listIssues([...occupyingStatuses]).map((i) => ({ id: i.id, status: i.status }));
+  return listIssues([...occupyingStatuses]).map((i) => ({ id: i.id, status: i.status, repo: i.repo }));
+}
+
+/** Occupying repos with the active issue's id/title, for the per-repo exclusion reason. */
+function occupyingRepoSlots(): Map<string, { issueId: string; title: string }> {
+  const slots = new Map<string, { issueId: string; title: string }>();
+  for (const issue of listIssues([...occupyingStatuses])) {
+    if (issue.repo) slots.set(issue.repo, { issueId: issue.id, title: issue.title });
+  }
+  return slots;
+}
+
+/** NOT-215: concrete same-repository wait reason naming the active conflict. */
+export function repositorySlotReason(repo: string, activeTitle: string): string {
+  return `waiting for repository slot — ${repo} already active (${activeTitle})`;
+}
+
+/**
+ * NOT-215 read model for the Admission queue header: truthful active / waiting /
+ * limit counts, the persisted setting, the worker/spawn ceiling, the offerable
+ * values, and whether occupancy currently exceeds the limit (a human-action
+ * resume may briefly push it over — admission then stays paused, never preempts).
+ */
+export function getAdmissionStatus(): AdmissionStatus {
+  const active = countOccupyingIssues();
+  const waiting = listQueuedEntries().length;
+  const maxActiveIssues = getMaxActiveIssues();
+  const ceiling = workerSpawnCeiling();
+  const limit = Math.min(maxActiveIssues, ceiling);
+  return {
+    active,
+    waiting,
+    limit,
+    maxActiveIssues,
+    ceiling,
+    options: admissionLimitOptions(),
+    overCap: active > limit,
+  };
 }
 
 export type EligibilityResult = { ok: true } | { ok: false; reason: string };
@@ -132,6 +202,13 @@ async function defaultAgentHealth(
   role: AgentRole,
   deckOnline: boolean
 ): Promise<EligibilityResult> {
+  // NOT-178: Muse Code is a developer-only trial runtime — the reviewer stays Codex/Claude.
+  if (role === "reviewer" && agent.runtime === "muse_code") {
+    return {
+      ok: false,
+      reason: `reviewer unhealthy: ${agent.name} — Muse Code cannot be a reviewer (developer role only)`,
+    };
+  }
   // Unit/CI tests must not call real CLIs / Agent Deck — runners usually have no deck MCP.
   // Production leaves this unset. NOT-133 clears it so the real auth classifier still runs.
   if (process.env.AGENT_DEALER_SKIP_AGENT_HEALTH === "1") {
@@ -262,9 +339,18 @@ async function evaluateEligibility(issue: Issue, ctx: EligibilityContext): Promi
 }
 
 /**
- * Level-triggered admission: if a free slot exists, walk queued entries in position order,
- * record wait_reason on ineligible ones (skip-ahead), and admit the first eligible via
- * startWorkflowCore (which force-admits the queue entry in the same transaction).
+ * Level-triggered admission: while free slots exist, walk queued entries in position
+ * order, record wait_reason on ineligible ones (skip-ahead), and admit every eligible
+ * entry via startWorkflowCore (which force-admits the queue entry in the same
+ * transaction) — one tick fills every newly free slot, not just one.
+ *
+ * NOT-215 per-repository exclusion: at most one active issue per repository. A
+ * candidate whose repo already has an occupying issue (or one admitted earlier in
+ * this same tick) stays queued with a concrete reason naming the active conflict,
+ * and never consumes a slot another repository could use.
+ *
+ * Returns the first issue admitted this tick (null when none). Lowering the limit
+ * only drives free slots to 0 — running work is never interrupted or preempted.
  *
  * Queue housekeeping (closed / already-running → leave queued) always runs, even when
  * capacity is full — otherwise a start that bypassed admitNext could leave a stale row.
@@ -287,7 +373,18 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
     }
   }
 
-  if (freeSlots <= 0) return null;
+  // NOT-168: capacity-full time is durable evidence, not just a read-time overlay.
+  // Persist the slot reason only where it differs — setQueueWaitReason no-ops on
+  // repeats, so a full system writes once per entry per transition, never per tick.
+  if (freeSlots <= 0) {
+    const slotReason = slotWaitReason();
+    if (slotReason) {
+      for (const entry of listQueuedEntries()) {
+        setQueueWaitReason(entry.id, slotReason);
+      }
+    }
+    return null;
+  }
 
   // Re-list after housekeeping so admitted/removed rows are gone.
   const remaining = listQueuedEntries();
@@ -314,11 +411,30 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
     blockersUnavailableReason: blockerUnavailableReason(),
   };
 
+  const admitted: AdmittedIssue[] = [];
+  // Repos taken by occupying issues, plus issues admitted earlier in this tick.
+  const repoSlots = occupyingRepoSlots();
+
   for (const entry of remaining) {
+    // Slots filled mid-walk — stop. The read-time slot overlay
+    // (listQueuedEntriesForRead) already reports the full state; persisting a slot
+    // reason here would overwrite more informative per-entry reasons.
+    if (admitted.length >= freeSlots) break;
+
     const issue = getIssue(entry.issueId);
     if (!issue) {
       markQueueEntryRemoved(entry.issueId);
       continue;
+    }
+
+    // Same-repository exclusion first (cheap, deterministic): never burn async
+    // eligibility work on an entry that cannot take a slot anyway.
+    if (issue.repo) {
+      const slot = repoSlots.get(issue.repo);
+      if (slot && slot.issueId !== issue.id) {
+        setQueueWaitReason(entry.id, repositorySlotReason(issue.repo, slot.title));
+        continue;
+      }
     }
 
     const eligibility = await evaluateEligibility(issue, ctx);
@@ -333,14 +449,37 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
         if (!getQueuedEntryForIssue(entry.issueId)) {
           throw new StartPreconditionError(409, "queue entry no longer queued");
         }
-        // Re-check capacity inside the txn so a concurrent Manual Start cannot double-admit.
+        // Re-check capacity inside the txn so a concurrent Manual Start cannot
+        // double-admit. This tick's own admissions are already committed to the DB
+        // by startWorkflowCore, so the live occupying count includes them.
         if (capacityPolicy(listOccupyingIssues()) <= 0) {
           throw new StartPreconditionError(409, "no free admission slots");
+        }
+        // Re-check the repo slot inside the txn for the same race.
+        if (issue.repo) {
+          const fresh = occupyingRepoSlots();
+          for (const a of admitted) {
+            const admittedIssue = getIssue(a.issueId);
+            if (admittedIssue?.repo) {
+              fresh.set(admittedIssue.repo, {
+                issueId: admittedIssue.id,
+                title: admittedIssue.title,
+              });
+            }
+          }
+          const conflict = fresh.get(issue.repo);
+          if (conflict && conflict.issueId !== issue.id) {
+            throw new StartPreconditionError(
+              409,
+              repositorySlotReason(issue.repo, conflict.title)
+            );
+          }
         }
         // Force-admit lives inside startWorkflowCore — single owner for start-path-queue-sync.
         return startWorkflowCore(entry.issueId);
       })();
-      return { issueId: entry.issueId, ...started };
+      admitted.push({ issueId: entry.issueId, ...started });
+      if (issue.repo) repoSlots.set(issue.repo, { issueId: issue.id, title: issue.title });
     } catch (err) {
       const message =
         err instanceof StartPreconditionError
@@ -351,11 +490,11 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
       // Entry was dequeued — nothing to record; try the next entry.
       if (message.includes("no longer queued")) continue;
       // Capacity exhausted mid-walk (concurrent Manual Start) — stop; do not write wait reasons.
-      if (message.includes("no free admission slots")) return null;
+      if (message.includes("no free admission slots")) break;
       setQueueWaitReason(entry.id, message);
     }
   }
-  return null;
+  return admitted[0] ?? null;
 }
 
 /**
@@ -396,6 +535,11 @@ export function queueStatusForIssue(
 export type StartIssueOutcome =
   | { state: "admitted"; instance: WorkflowInstance; workItem: WorkItem }
   | { state: "queued"; position: number; waitReason: string | null }
+  | { state: "error"; code: number; error: string };
+
+export type ExecuteIssueOutcome =
+  | { state: "admitted"; instance: WorkflowInstance; workItem: WorkItem }
+  | { state: "refused"; reason: string }
   | { state: "error"; code: number; error: string };
 
 /** The round-1 developer item an admitted start enqueued, for a start that raced a tick. */
@@ -451,4 +595,125 @@ export async function startIssueViaQueue(issueId: string): Promise<StartIssueOut
   const workItem = instance ? developerWorkItemFor(issueId, instance.id) : null;
   if (instance && workItem) return { state: "admitted", instance, workItem };
   return { state: "error", code: 409, error: "Issue left the queue before it could start" };
+}
+
+/**
+ * NOT-217 strict direct execution: attempt immediate admission for one issue without
+ * touching the queue — no enqueue, no move-to-front, no reorder. It bypasses queue
+ * *order* only: capacity (global + per-repository), readiness, Linear blockers, agent
+ * health, runtime caps, and the active-workflow/frozen-snapshot guard all still refuse.
+ *
+ * The eligibility + capacity checks are the same ones `admitNext` walks (same rules,
+ * same policy, same persisted NOT-215 limit); the check, workflow start, and
+ * queued-entry transition happen in one transaction via startWorkflowCore (which
+ * force-admits an existing queued entry through the existing start path), so two
+ * concurrent Execute-now requests cannot double-start an issue or exceed capacity.
+ *
+ * A refusal writes nothing — a queued issue keeps its exact position and state, and a
+ * non-queued issue stays unqueued. Capacity/dependency failure never degrades into a
+ * Run next (no enqueue, no move).
+ */
+export async function executeIssueNow(issueId: string): Promise<ExecuteIssueOutcome> {
+  const issue = getIssue(issueId);
+  if (!issue) return { state: "error", code: 404, error: "Issue not found" };
+  if (getActiveWorkflowInstance(issueId)) {
+    return { state: "error", code: 409, error: activeWorkflowConflictMessage(issueId) };
+  }
+  if (!startableStatuses.has(issue.status)) {
+    return { state: "error", code: 409, error: `Issue is ${issue.status} — not startable` };
+  }
+
+  // Fail-closed pre-checks, same order as the admitNext walk: global capacity, then the
+  // per-repository exclusion, then the shared eligibility rules. Read-only — the queue
+  // is never written on any path below except startWorkflowCore's own force-admit.
+  if (capacityPolicy(listOccupyingIssues()) <= 0) {
+    return { state: "refused", reason: slotWaitReason() ?? "waiting for slot" };
+  }
+  if (issue.repo) {
+    const slot = occupyingRepoSlots().get(issue.repo);
+    if (slot && slot.issueId !== issue.id) {
+      return { state: "refused", reason: repositorySlotReason(issue.repo, slot.title) };
+    }
+  }
+  const [deckOnline, blockers] = await Promise.all([
+    checkAgentDeckHealth(),
+    blockerSnapshotFor([issue]),
+  ]);
+  const eligibility = await evaluateEligibility(issue, {
+    deckOnline,
+    blockers,
+    blockersUnavailableReason: blockerUnavailableReason(),
+  });
+  if (!eligibility.ok) return { state: "refused", reason: eligibility.reason };
+
+  // Atomic check + start + queue transition. Async eligibility above cannot run inside
+  // the sync transaction, so re-verify everything a concurrent start could have changed
+  // (occupancy, repo slot, active workflow, readiness via startWorkflowCore) before
+  // writing. A refusal here rolls the transaction back — still no queue mutation.
+  try {
+    const started = getDb().transaction(() => {
+      const fresh = getIssue(issueId);
+      if (!fresh) throw new StartPreconditionError(404, "Issue not found");
+      if (getActiveWorkflowInstance(issueId)) {
+        throw new StartPreconditionError(409, activeWorkflowConflictMessage(issueId));
+      }
+      if (capacityPolicy(listOccupyingIssues()) <= 0) {
+        throw new StartPreconditionError(409, slotWaitReason() ?? "waiting for slot");
+      }
+      if (fresh.repo) {
+        const slot = occupyingRepoSlots().get(fresh.repo);
+        if (slot && slot.issueId !== fresh.id) {
+          throw new StartPreconditionError(409, repositorySlotReason(fresh.repo, slot.title));
+        }
+      }
+      return startWorkflowCore(issueId);
+    })();
+    return { state: "admitted", ...started };
+  } catch (err) {
+    if (err instanceof StartPreconditionError) {
+      // A 404 here means the row vanished mid-flight — report it as an error, not a
+      // refusal, so the caller does not read it as "still waiting".
+      if (err.code === 404) return { state: "error", code: err.code, error: err.message };
+      return { state: "refused", reason: err.message };
+    }
+    throw err;
+  }
+}
+
+/**
+ * NOT-217: re-derive one queued entry's persisted wait reason after an operator edit
+ * changed what admission sees (e.g. a new developer agent). Same rule order as the
+ * admitNext walk — capacity, repository slot, shared eligibility — cleared (null) when
+ * the issue is currently admittable so the row reads "next up". No reorder, no admit.
+ */
+export async function refreshQueueWaitReasonForIssue(
+  issueId: string
+): Promise<{ position: number; waitReason: string | null } | null> {
+  const entry = getQueuedEntryForIssue(issueId);
+  if (!entry) return null;
+  const issue = getIssue(issueId);
+  if (!issue) return null;
+  if (capacityPolicy(listOccupyingIssues()) <= 0) {
+    const slotReason = slotWaitReason();
+    if (slotReason) setQueueWaitReason(entry.id, slotReason);
+    return queueStatusForIssue(issueId);
+  }
+  if (issue.repo) {
+    const slot = occupyingRepoSlots().get(issue.repo);
+    if (slot && slot.issueId !== issue.id) {
+      setQueueWaitReason(entry.id, repositorySlotReason(issue.repo, slot.title));
+      return queueStatusForIssue(issueId);
+    }
+  }
+  const [deckOnline, blockers] = await Promise.all([
+    checkAgentDeckHealth(),
+    blockerSnapshotFor([issue]),
+  ]);
+  const eligibility = await evaluateEligibility(issue, {
+    deckOnline,
+    blockers,
+    blockersUnavailableReason: blockerUnavailableReason(),
+  });
+  setQueueWaitReason(entry.id, eligibility.ok ? null : eligibility.reason);
+  return queueStatusForIssue(issueId);
 }

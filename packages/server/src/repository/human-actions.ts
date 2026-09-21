@@ -179,6 +179,35 @@ export function listHumanActionsForIssue(issueId: string): HumanAction[] {
   return rows.map(rowToAction);
 }
 
+/**
+ * NOT-221: refresh an open action's operator-facing text after a failed lease push —
+ * the action stays open (nothing resolved) but must show the freshly observed remote
+ * tip instead of the stale pin. Only touches open rows; returns null when the action is
+ * already resolved or missing so the caller never rewrites history.
+ */
+export function updateOpenHumanAction(
+  id: string,
+  patch: { reason?: string; question?: string; evidence?: unknown }
+): HumanAction | null {
+  const current = getHumanAction(id);
+  if (!current || current.status !== "open") return null;
+  getDb()
+    .prepare(
+      `UPDATE human_actions SET
+        reason = COALESCE(?, reason),
+        question = COALESCE(?, question),
+        evidence_json = COALESCE(?, evidence_json)
+      WHERE id = ? AND status = 'open'`
+    )
+    .run(
+      patch.reason ?? null,
+      patch.question ?? null,
+      patch.evidence !== undefined ? JSON.stringify(patch.evidence) : null,
+      id
+    );
+  return getHumanAction(id);
+}
+
 /** Run-scoped equivalent of `findOpenHumanAction` (NOT-95 — outbound-draft delivery
  * parking has no Issue). */
 export function findOpenHumanActionForRun(runId: string, actionType: HumanActionType): HumanAction | null {

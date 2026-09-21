@@ -15,6 +15,9 @@ export type WorkflowInstance = z.infer<typeof WorkflowInstance>;
 
 export const WorkflowEventType = z.enum([
   "issue.created",
+  /** NOT-217: operator changed the queued pre-start developer/reviewer assignment.
+   * Payload carries before/after agent ids. Emitted transactionally with the PATCH. */
+  "issue.reassigned",
   "workflow.started",
   "worker.started",
   "worker.completed",
@@ -32,11 +35,34 @@ export const WorkflowEventType = z.enum([
   "review.submitted",
   "repair.started",
   "guidance.added",
+  /** A retry after an `attempts_exhausted` park re-froze the task snapshot (NOT-185). */
+  "task_snapshot.refreshed",
   "human_action.requested",
   "human_action.resolved",
   "final_review.requested",
   "issue.completed",
   "issue.closed",
+  /** NOT-168: durable queue/admission wait evidence. Emitted transactionally with the
+   * queue_entries mutation they describe; see EXECUTION_ANALYSIS.md §2/§6. */
+  "queue.enqueued",
+  "queue.wait_reason_changed",
+  "queue.admitted",
+  "queue.removed",
+  /** NOT-169: durable agent-process and host-sleep boundaries (see EXECUTION_ANALYSIS.md
+   * §2/§6). `agent.started` is emitted only after the CLI child exists (onSpawn);
+   * `agent.completed` exactly once per spawned process, before receipt/usage/validation;
+   * `host.suspended` is idempotent per session/jump and never drives recovery decisions. */
+  "agent.started",
+  "agent.completed",
+  "host.suspended",
+  /** NOT-172: append-only checkpoint/reuse evidence (see EXECUTION_ANALYSIS.md).
+   * `checkpoint.observed` records durable work surviving an attempt (kinds
+   * commit / verification_receipt / branch_pushed in the payload); `retry.reused`
+   * records which prior work a retry actually reused (kinds worktree / commit /
+   * verification_receipt / publish_only; empty = cold retry). Both are idempotent
+   * per session via idempotency keys and never drive retry/routing decisions. */
+  "checkpoint.observed",
+  "retry.reused",
   /** Migration-only — the NOT-66 cutover repoints a legacy `events` row under this type,
    * preserving the original type/payload inside `payloadJson` (see `role: "legacy"` on
    * `WorkerSessionRole` and `outcome: "migrated"` on `WorkflowInstanceOutcome` for the same

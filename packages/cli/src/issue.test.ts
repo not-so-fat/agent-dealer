@@ -47,6 +47,13 @@ test("parseIssueArgs: start requires an id", () => {
   assert.throws(() => parseIssueArgs(["start"]));
 });
 
+test("parseIssueArgs: execute requires an id", () => {
+  const parsed = parseIssueArgs(["execute", "issue-123"]);
+  assert.equal(parsed.subcommand, "execute");
+  assert.equal((parsed as { id: string }).id, "issue-123");
+  assert.throws(() => parseIssueArgs(["execute"]));
+});
+
 test("issue list calls GET /api/issues and exits 0", async () => {
   const stub = stubFetch("/api/issues", "GET", [{ id: "i1", status: "ready" }]);
   try {
@@ -251,6 +258,49 @@ test("issue start returns nonzero on API failure", async () => {
     const code = await runIssueCommand(["start", "issue-123"]);
     assert.equal(code, 1);
   } finally {
+    stub.restore();
+  }
+});
+
+test("issue execute prints the admitted response shape and exits 0", async () => {
+  const stub = stubFetch("/api/issues/issue-123/execute", "POST", {
+    state: "admitted",
+    instance: { id: "wf-1" },
+    workItem: { id: "work-1", kind: "developer" },
+  });
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (message?: unknown) => logs.push(String(message));
+  try {
+    const code = await runIssueCommand(["execute", "issue-123"]);
+    assert.equal(code, 0);
+    stub.assertCalled();
+    const printed = JSON.parse(logs.join("\n")) as { state: string; instance: { id: string } };
+    assert.equal(printed.state, "admitted");
+    assert.equal(printed.instance.id, "wf-1");
+  } finally {
+    console.log = originalLog;
+    stub.restore();
+  }
+});
+
+test("issue execute returns nonzero on refusal without claiming a queue action", async () => {
+  const stub = stubFetch(
+    "/api/issues/issue-123/execute",
+    "POST",
+    { error: "waiting for slot — running: Other issue" },
+    409
+  );
+  const errs: string[] = [];
+  const originalError = console.error;
+  console.error = (message?: unknown) => errs.push(String(message));
+  try {
+    const code = await runIssueCommand(["execute", "issue-123"]);
+    assert.equal(code, 1);
+    assert.match(errs.join("\n"), /waiting for slot/);
+    assert.doesNotMatch(errs.join("\n"), /Queued at position/);
+  } finally {
+    console.error = originalError;
     stub.restore();
   }
 });

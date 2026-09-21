@@ -196,6 +196,12 @@ CREATE TABLE IF NOT EXISTS workflow_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_workflow_events_issue ON workflow_events(issue_id, ts);
+-- NOT-173: the execution-analysis read model loads one issue set's events with
+-- `WHERE issue_id IN (...) ORDER BY ts, rowid`, and the cohort listing filters
+-- sessions/instances per issue via EXISTS. EXPLAIN QUERY PLAN for those
+-- statements must show index use (asserted in the route tests).
+CREATE INDEX IF NOT EXISTS idx_workflow_events_issue_type ON workflow_events(issue_id, type);
+CREATE INDEX IF NOT EXISTS idx_workflow_events_session ON workflow_events(worker_session_id, type);
 -- Provider-native idempotency key is unique: re-ingesting the same delivery must not
 -- create a duplicate event (PRD §9.3).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_events_idempotency ON workflow_events(idempotency_key)
@@ -264,10 +270,14 @@ CREATE TABLE IF NOT EXISTS usage_events (
   tokens_out INTEGER,
   cost_usd REAL,
   duration_ms INTEGER,
-  ts TEXT NOT NULL
+  ts TEXT NOT NULL,
+  model TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_events_issue ON usage_events(issue_id);
+-- NOT-173: usage evidence joins to its session (`worker_session_id`) in the
+-- read-model loaders.
+CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(worker_session_id);
 
 -- NOT-59: the coordinator kernel's durable work-item / outbox. Each applied coordinator
 -- command records the state transition, the workflow event, and exactly one next work
@@ -379,6 +389,83 @@ CREATE TABLE IF NOT EXISTS runtime_availability (
   observed_at TEXT NOT NULL
 );
 
+-- NOT-171: append-only normalized failure-cause evidence. A derived view over
+-- worker_sessions.error_json, spawn logs, and workflow events — writers INSERT
+-- only, nothing UPDATEs or DELETEs, and the raw sources stay authoritative.
+-- Deliberately no REFERENCES clauses: as derived evidence it must never block
+-- bulk cleanup of the source tables it points at; integrity is maintained at
+-- insert time (every row carries the ids of the event/session it was built from).
+CREATE TABLE IF NOT EXISTS failure_causes (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL,
+  worker_session_id TEXT,
+  workflow_instance_id TEXT,
+  workflow_event_id TEXT,
+  event_cursor INTEGER,
+  code TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  primary_flag INTEGER NOT NULL DEFAULT 0,
+  confidence TEXT NOT NULL,
+  evidence_source TEXT NOT NULL,
+  occurred_at TEXT,
+  raw_reason TEXT NOT NULL,
+  log_path TEXT,
+  quality TEXT NOT NULL DEFAULT 'exact',
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_failure_causes_session ON failure_causes(worker_session_id);
+CREATE INDEX IF NOT EXISTS idx_failure_causes_issue ON failure_causes(issue_id);
+
+-- NOT-170: append-only structured activity evidence for observational silence analysis.
+-- One row per new structured stream event (assistant/model output, provider wait/retry,
+-- tool/subprocess start/completion, unknown structured activity) observed by the live
+-- activity sampler — never one row per sampler tick. Sampler ticks with no new log lines
+-- persist nothing.
+--
+-- Retention/size notes:
+-- - Rows are small by construction: `summary` is the existing ≤120-char operator line
+--   (formatToolProgress / assistant excerpt); no transcript bodies, file contents, or
+--   tool arguments are copied into SQLite. `raw_evidence` is a pointer
+--   (`<log_path>#offset=<n>`), never payload.
+-- - Expected volume is one row per tool call / assistant turn / retry signal — tens to
+--   low hundreds per session. Dedupe is structural: UNIQUE(worker_session_id,
+--   source_offset, source_seq) makes sampler re-reads and restarts idempotent, and
+--   restart resumes from MAX(source_offset) for the session. source_seq is the 0-based
+--   index of the entry within its NDJSON line, so parallel tool blocks on one line
+--   (e.g. two Claude tool_use blocks in one assistant message) persist as distinct
+--   rows instead of colliding on the shared line offset. All offsets are byte offsets
+--   into the log file, never string character offsets.
+-- - Retention follows the session log: rows are derived evidence for a worker session
+--   and may be removed together with that session's log; they are never inputs to
+--   admission, leases, recovery, routing, retry, termination, or scheduling.
+-- - `observed_at` is the sampler's read time, not the event's occurrence time: after a
+--   restart, backlogged lines are stamped at restart time. Derived silence over these
+--   rows is therefore always quality `inferred` (reason `sampler_observed_time`), even
+--   when the enclosing agent_process bounds are `exact`.
+CREATE TABLE IF NOT EXISTS session_activity_events (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL,
+  worker_session_id TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  source_cursor INTEGER,
+  source_offset INTEGER,
+  source_seq INTEGER NOT NULL DEFAULT 0,
+  activity_kind TEXT NOT NULL,
+  state TEXT NOT NULL,
+  call_id TEXT,
+  summary TEXT,
+  raw_evidence TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_activity_session_time
+  ON session_activity_events(worker_session_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_session_activity_issue
+  ON session_activity_events(issue_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_activity_idempotency
+  ON session_activity_events(worker_session_id, source_offset, source_seq)
+  WHERE source_offset IS NOT NULL;
+
 -- NOT-103: operator-owned sequential issue admission queue (order / wait_reason).
 CREATE TABLE IF NOT EXISTS queue_entries (
   id TEXT PRIMARY KEY,
@@ -394,3 +481,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_entries_queued_issue
   ON queue_entries(issue_id) WHERE state = 'queued';
 CREATE INDEX IF NOT EXISTS idx_queue_entries_queued_position
   ON queue_entries(position) WHERE state = 'queued';
+-- NOT-173: the read model loads every queue-entry row for an issue set.
+CREATE INDEX IF NOT EXISTS idx_queue_entries_issue ON queue_entries(issue_id);

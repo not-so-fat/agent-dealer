@@ -52,6 +52,12 @@ function buildArgs(
   mcpConfigPath?: string,
   effort?: ReasoningEffort | null
 ): string[] {
+  if (runtime === "muse_code") {
+    // Muse's developer argv is built by runners/muse-code-args.ts inside coordinator/muse-spawn.ts
+    // (NOT-181); it needs a per-attempt session id and XDG dirs this pure builder has no place
+    // for. Falling through to the Claude arm below would spawn `muse` with Claude flags.
+    throw new Error("muse_code is not wired through the shared arg builder — its developer argv is built in coordinator/muse-spawn.ts");
+  }
   if (runtime === "codex_local") {
     const args = ["exec", "--json", "-s", policy.worktreeWrite ? "workspace-write" : "read-only"];
     // codex's read-only sandbox constrains shell/files but NOT configured MCP/plugin

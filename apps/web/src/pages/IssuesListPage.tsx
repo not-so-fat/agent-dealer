@@ -5,13 +5,21 @@ import {
   createIssue,
   dequeueIssue,
   fetchIssuesPage,
+  executeIssue,
+  fetchIssueDetail,
   fetchLinearInbox,
   fetchQueue,
+  fetchQueueStatus,
   fetchRecentRepos,
   lookupLinearIssue,
   moveQueueEntry,
+  patchIssue,
   resolveHumanAction,
   type IssuesListPageResult,
+  startIssue,
+  updateAdmissionSettings,
+  type AdmissionStatus,
+  type IssueListRow,
   type QueueEntryRow,
 } from "../api";
 import {
@@ -28,6 +36,7 @@ import {
   type IssuesFilterForm,
 } from "../lib/issuesList";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
+import AgentAssignmentEditor from "../components/issues/AgentAssignmentEditor";
 import NeedsAttentionPanel from "../components/issues/NeedsAttentionPanel";
 import AlertIcon from "../components/ui/AlertIcon";
 
@@ -91,6 +100,15 @@ export default function IssuesListPage({
   const [autoMerge, setAutoMerge] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [queue, setQueue] = useState<QueueEntryRow[]>([]);
+  const [admission, setAdmission] = useState<AdmissionStatus | null>(null);
+  const [limitBusy, setLimitBusy] = useState(false);
+  /** NOT-217 queued reassignment: the row being edited plus its live assignments. */
+  const [editTarget, setEditTarget] = useState<{
+    issueId: string;
+    developerAgentId: string | null;
+    reviewerAgentId: string | null;
+  } | null>(null);
+  const [rowBusyId, setRowBusyId] = useState<string | null>(null);
 
   const selectedLinear = candidates.find((c) => c.id === selectedLinearId) ?? null;
   const linearLocked = sourceMode === "linear" && selectedLinear != null;
@@ -107,6 +125,90 @@ export default function IssuesListPage({
     fetchQueue()
       .then(setQueue)
       .catch(() => undefined);
+    fetchQueueStatus()
+      .then(setAdmission)
+      .catch(() => undefined);
+  };
+
+  /** NOT-215: operator-chosen active-issue limit (persisted server-side). */
+  const changeLimit = async (value: number) => {
+    setLimitBusy(true);
+    setError(null);
+    try {
+      const status = await updateAdmissionSettings(value);
+      setAdmission(status);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLimitBusy(false);
+    }
+  };
+
+  /** NOT-217: open the queued reassignment editor with the issue's live assignments. */
+  const openEditor = async (issueId: string) => {
+    setRowBusyId(issueId);
+    setError(null);
+    try {
+      const detail = await fetchIssueDetail(issueId);
+      setEditTarget({
+        issueId,
+        developerAgentId: detail.issue.developerAgentId,
+        reviewerAgentId: detail.issue.reviewerAgentId,
+      });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRowBusyId(null);
+    }
+  };
+
+  /** NOT-217: save via the issue PATCH contract — position kept, wait reason rechecked. */
+  const saveAgents = async (developerAgentId: string, reviewerAgentId: string) => {
+    if (!editTarget) return;
+    setRowBusyId(editTarget.issueId);
+    try {
+      await patchIssue(editTarget.issueId, { developerAgentId, reviewerAgentId });
+      setEditTarget(null);
+      refresh();
+    } catch (e) {
+      // A 409 means the issue started mid-edit: close the editor and show current
+      // state instead of a stale success.
+      setEditTarget(null);
+      setError(String(e));
+      refresh();
+    } finally {
+      setRowBusyId(null);
+    }
+  };
+
+  /** NOT-217 Run next: move to position 1 and admit if a slot is free. */
+  const runNext = async (issueId: string) => {
+    setRowBusyId(issueId);
+    setError(null);
+    try {
+      await startIssue(issueId);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRowBusyId(null);
+    }
+  };
+
+  /** NOT-217 Execute now: direct admission, never a queue move — refusal changes nothing. */
+  const executeNow = async (issueId: string) => {
+    setRowBusyId(issueId);
+    setError(null);
+    try {
+      await executeIssue(issueId);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+      refresh();
+    } finally {
+      setRowBusyId(null);
+    }
   };
 
   /** Apply writes the draft to the URL and returns to page 1. */
@@ -255,119 +357,13 @@ export default function IssuesListPage({
   return (
     <div className="flex-1 min-h-0 px-6 py-4 w-full overflow-y-auto">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold text-white/90">Issues</h2>
+        <h2 className="font-ui-display text-lg font-semibold text-white/90">Issues</h2>
         <button type="button" className="btn-gold px-4" onClick={() => setShowCreate((v) => !v)}>
           New issue
         </button>
       </div>
 
       {error && <p className="text-sm text-red-300 mb-3">{error}</p>}
-
-      {queue.length > 0 && (
-        <div className="mb-4 rounded border border-cyber-teal/25 bg-cyber-teal/5">
-          <div className="px-4 py-2 border-b border-cyber-teal/20 flex items-center justify-between">
-            <span className="text-sm font-medium text-cyber-teal">Admission queue</span>
-            <span className="text-xs text-white/40">{queue.length} waiting · sequential</span>
-          </div>
-          <div className="divide-y divide-white/5">
-            {queue.map((entry, index) => (
-              <div key={entry.id} className="px-4 py-2 flex items-start gap-3">
-                <span className="text-xs text-white/35 w-5 shrink-0 pt-0.5">{entry.position}</span>
-                <Link
-                  to={`/issues/${entry.issueId}`}
-                  className="flex-1 min-w-0 text-left hover:text-cyber-teal"
-                >
-                  <span className="text-sm text-white/85 truncate block">
-                    {entry.title ?? entry.issueId.slice(0, 8)}
-                  </span>
-                  {entry.waitReason ? (
-                    <span className="text-xs text-amber-200/80 block mt-0.5">{entry.waitReason}</span>
-                  ) : (
-                    <span className="text-xs text-white/35 block mt-0.5">
-                      {entry.issueStatus ?? "queued"} · next up
-                    </span>
-                  )}
-                </Link>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
-                    disabled={index === 0}
-                    title="Move to top"
-                    onClick={() => {
-                      moveQueueEntry(entry.issueId, "top")
-                        .then(refresh)
-                        .catch((e) => setError(String(e)));
-                    }}
-                  >
-                    Top
-                  </button>
-                  <button
-                    type="button"
-                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
-                    disabled={index === 0}
-                    title="Move up"
-                    onClick={() => {
-                      const prev = queue[index - 1];
-                      if (!prev) return;
-                      moveQueueEntry(entry.issueId, { before: prev.issueId })
-                        .then(refresh)
-                        .catch((e) => setError(String(e)));
-                    }}
-                  >
-                    ↑
-                  </button>
-                  <button
-                    type="button"
-                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
-                    disabled={index === queue.length - 1}
-                    title="Move down"
-                    onClick={() => {
-                      const next = queue[index + 1];
-                      if (!next) return;
-                      moveQueueEntry(entry.issueId, { after: next.issueId })
-                        .then(refresh)
-                        .catch((e) => setError(String(e)));
-                    }}
-                  >
-                    ↓
-                  </button>
-                  <button
-                    type="button"
-                    className="text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
-                    disabled={index === queue.length - 1}
-                    title="Move to bottom"
-                    onClick={() => {
-                      moveQueueEntry(entry.issueId, "bottom")
-                        .then(refresh)
-                        .catch((e) => setError(String(e)));
-                    }}
-                  >
-                    Bottom
-                  </button>
-                  <button
-                    type="button"
-                    className="text-xs text-white/40 hover:text-white"
-                    onClick={() => {
-                      dequeueIssue(entry.issueId)
-                        .then(refresh)
-                        .catch((e) => setError(String(e)));
-                    }}
-                  >
-                    Remove
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <NeedsAttentionPanel
-        actions={humanActions}
-        busyActionId={busyActionId}
-        onResolve={(actionId, choice) => void resolveAction(actionId, choice)}
-      />
 
       {showCreate && (
         <div className="mb-4 p-4 rounded border border-white/10 bg-panel-elevated/60 space-y-2">
@@ -381,7 +377,7 @@ export default function IssuesListPage({
           <div className="flex gap-2 text-sm">
             <button
               type="button"
-              className={`px-3 py-1 rounded border ${sourceMode === "manual" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
+              className={`font-ui-display px-3 py-1 rounded border ${sourceMode === "manual" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
               onClick={() => {
                 setSourceMode("manual");
                 setSelectedLinearId("");
@@ -391,7 +387,7 @@ export default function IssuesListPage({
             </button>
             <button
               type="button"
-              className={`px-3 py-1 rounded border ${sourceMode === "linear" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
+              className={`font-ui-display px-3 py-1 rounded border ${sourceMode === "linear" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
               onClick={() => setSourceMode("linear")}
             >
               From Linear
@@ -415,7 +411,7 @@ export default function IssuesListPage({
                 />
                 <button
                   type="button"
-                  className="px-3 py-2 rounded border border-teal/40 text-teal text-sm disabled:opacity-50"
+                  className="font-ui-display px-3 py-2 rounded border border-teal/40 text-teal text-sm disabled:opacity-50"
                   disabled={linearLookupBusy || !linearRef.trim()}
                   onClick={() => void resolveLinearRef()}
                 >
@@ -536,7 +532,7 @@ export default function IssuesListPage({
             </button>
             <button
               type="button"
-              className="px-4 py-2 text-sm text-white/60 hover:text-white"
+              className="font-ui-display px-4 py-2 text-sm text-white/60 hover:text-white"
               onClick={() => {
                 setShowCreate(false);
                 resetForm();
@@ -547,6 +543,193 @@ export default function IssuesListPage({
           </div>
         </div>
       )}
+
+      {(queue.length > 0 || admission) && (
+        <div className="mb-4 rounded border border-cyber-teal/25 bg-cyber-teal/5">
+          <div className="px-4 py-2 border-b border-cyber-teal/20 flex items-center justify-between gap-3">
+            <span className="font-ui-display text-sm font-medium text-cyber-teal">Admission queue</span>
+            <span className="flex items-center gap-2 text-xs text-white/40">
+              {admission ? (
+                <>
+                  <span>
+                    {admission.active} active · {admission.waiting} waiting · limit{" "}
+                    {admission.limit}
+                    {admission.overCap ? " · over capacity" : ""}
+                  </span>
+                  {admission.options.length > 0 ? (
+                    <label className="flex items-center gap-1">
+                      <span className="text-white/35">limit</span>
+                      <select
+                        className="bg-black/30 border border-white/10 rounded px-1.5 py-0.5 text-xs text-white/80 disabled:opacity-50"
+                        value={admission.options.includes(admission.maxActiveIssues) ? admission.maxActiveIssues : admission.limit}
+                        disabled={limitBusy}
+                        title={
+                          admission.ceiling < 2
+                            ? `Capped by the worker/spawn ceiling (${admission.ceiling})`
+                            : "How many issues may execute in parallel (max one per repository)"
+                        }
+                        onChange={(e) => void changeLimit(Number(e.target.value))}
+                      >
+                        {admission.options.map((o) => (
+                          <option key={o} value={o}>
+                            {o}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <span title={`Capped by the worker/spawn ceiling (${admission.ceiling})`}>
+                      max {admission.ceiling}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span>
+                  {queue.length} waiting · sequential
+                </span>
+              )}
+            </span>
+          </div>
+          <div className="divide-y divide-white/5">
+            {queue.map((entry, index) => (
+              <div key={entry.id}>
+                <div className="px-4 py-2 flex items-start gap-3">
+                <span className="text-xs text-white/35 w-5 shrink-0 pt-0.5">{entry.position}</span>
+                <Link
+                  to={`/issues/${entry.issueId}`}
+                  className="flex-1 min-w-0 text-left hover:text-cyber-teal"
+                >
+                  <span className="text-sm text-white/85 truncate block">
+                    {entry.title ?? entry.issueId.slice(0, 8)}
+                  </span>
+                  {entry.waitReason ? (
+                    <span className="text-xs text-amber-200/80 block mt-0.5">{entry.waitReason}</span>
+                  ) : (
+                    <span className="text-xs text-white/35 block mt-0.5">
+                      {entry.issueStatus ?? "queued"} · next up
+                    </span>
+                  )}
+                </Link>
+                <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                  <button
+                    type="button"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={rowBusyId === entry.issueId}
+                    title="Change the developer/reviewer agents — keeps queue position and rechecks the wait reason"
+                    onClick={() => void openEditor(entry.issueId)}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={rowBusyId === entry.issueId}
+                    title="Run next — move to the front of the admission queue; runs now if a slot is free, otherwise waits first with a reason"
+                    onClick={() => void runNext(entry.issueId)}
+                  >
+                    Run next
+                  </button>
+                  <button
+                    type="button"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={rowBusyId === entry.issueId}
+                    title="Execute now — start immediately, skipping queue order; refuses (changing nothing) when capacity, readiness, blockers, or agent health prevents it"
+                    onClick={() => void executeNow(entry.issueId)}
+                  >
+                    Execute now
+                  </button>
+                  <button
+                    type="button"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={index === 0}
+                    title="Move to top"
+                    onClick={() => {
+                      moveQueueEntry(entry.issueId, "top")
+                        .then(refresh)
+                        .catch((e) => setError(String(e)));
+                    }}
+                  >
+                    Top
+                  </button>
+                  <button
+                    type="button"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={index === 0}
+                    title="Move up"
+                    onClick={() => {
+                      const prev = queue[index - 1];
+                      if (!prev) return;
+                      moveQueueEntry(entry.issueId, { before: prev.issueId })
+                        .then(refresh)
+                        .catch((e) => setError(String(e)));
+                    }}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={index === queue.length - 1}
+                    title="Move down"
+                    onClick={() => {
+                      const next = queue[index + 1];
+                      if (!next) return;
+                      moveQueueEntry(entry.issueId, { after: next.issueId })
+                        .then(refresh)
+                        .catch((e) => setError(String(e)));
+                    }}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    className="font-ui-display text-xs text-white/40 hover:text-cyber-teal disabled:opacity-30"
+                    disabled={index === queue.length - 1}
+                    title="Move to bottom"
+                    onClick={() => {
+                      moveQueueEntry(entry.issueId, "bottom")
+                        .then(refresh)
+                        .catch((e) => setError(String(e)));
+                    }}
+                  >
+                    Bottom
+                  </button>
+                  <button
+                    type="button"
+                    className="font-ui-display text-xs text-white/40 hover:text-white"
+                    onClick={() => {
+                      dequeueIssue(entry.issueId)
+                        .then(refresh)
+                        .catch((e) => setError(String(e)));
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+                </div>
+                {editTarget?.issueId === entry.issueId && (
+                  <div className="px-4 pb-3 pl-12">
+                    <AgentAssignmentEditor
+                      agents={agents}
+                      initialDeveloperId={editTarget.developerAgentId}
+                      initialReviewerId={editTarget.reviewerAgentId}
+                      busy={rowBusyId === entry.issueId}
+                      onSave={(dev, rev) => void saveAgents(dev, rev)}
+                      onCancel={() => setEditTarget(null)}
+                    />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <NeedsAttentionPanel
+        actions={humanActions}
+        busyActionId={busyActionId}
+        onResolve={(actionId, choice) => void resolveAction(actionId, choice)}
+      />
 
       <form
         aria-label="Issues filters"

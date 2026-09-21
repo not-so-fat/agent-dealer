@@ -231,4 +231,10 @@ test("a deck that is reachable but answers with an error still fails the attempt
   const events = listWorkflowEventsForIssue(issueId);
   assert.ok(events.some((e) => e.type === "worker.failed"));
   assert.equal(events.some((e) => e.type === "worker.deferred"), false);
+
+  // NOT-171: the same classifier records an Agent Deck cause for the attempt.
+  const { listFailureCausesForIssue } = await import("../repository/failure-causes.js");
+  const causes = listFailureCausesForIssue(issueId);
+  assert.ok(causes.length >= 1);
+  assert.equal(causes.find((c) => c.primary)?.code, "agent_deck_unavailable");
 });

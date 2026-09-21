@@ -1,16 +1,21 @@
 import type {
+  AdmissionStatus,
   AgentDeckStatus,
   AgentWithHealth,
   CreateAgentInput,
   CreateIssueInput,
   CreateIssueResult,
   DeckAccessErrorCode,
+  ExecuteIssueResponse,
+  ExecutionReportResponse,
   Finding,
   HumanAction,
   Issue,
+  IssueExecutionAnalysis,
   IssueStatus,
   LinearCandidate,
   QueueMoveTarget,
+  ReportFilterState,
   RuntimeModelsResponse,
   StartIssueResponse,
   UpdateAgentInput,
@@ -20,6 +25,7 @@ import type {
   WorkflowEvent,
   WorkflowInstance,
 } from "@agent-dealer/shared";
+import { ExecutionReportResponse as ExecutionReportSchema, serializeExecutionReportQuery } from "@agent-dealer/shared";
 import { clearCachedRuntimeModels, fetchRuntimeModelsDeduped } from "./lib/runtimeModelsCache";
 
 const API = "";
@@ -248,6 +254,12 @@ export async function fetchIssueDetail(id: string): Promise<IssueDetail> {
   return res.json();
 }
 
+export async function fetchIssueExecutionAnalysis(id: string): Promise<IssueExecutionAnalysis> {
+  const res = await fetch(`${API}/api/issues/${id}/execution-analysis`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 export async function fetchIssueEvidence(id: string): Promise<IssueEvidence> {
   const res = await fetch(`${API}/api/issues/${id}/evidence`);
   if (!res.ok) throw new Error(await readApiError(res));
@@ -295,6 +307,19 @@ export type StartIssueResult = StartIssueResponse;
 
 export async function startIssue(id: string): Promise<StartIssueResult> {
   const res = await fetch(`${API}/api/issues/${id}/start`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+/**
+ * NOT-217 Execute now: strict direct admission — bypasses queue order only. Resolves
+ * when the workflow starts immediately; throws the server's refusal reason (capacity,
+ * readiness, blockers, agent health) when it cannot run — the queue is never touched.
+ */
+export type ExecuteIssueResult = ExecuteIssueResponse;
+
+export async function executeIssue(id: string): Promise<ExecuteIssueResult> {
+  const res = await fetch(`${API}/api/issues/${id}/execute`, { method: "POST" });
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
 }
@@ -368,6 +393,26 @@ export async function fetchQueue(): Promise<QueueEntryRow[]> {
   return res.json();
 }
 
+/** NOT-215: truthful Admission read model — `N active · M waiting · limit X`. */
+export type { AdmissionStatus };
+
+export async function fetchQueueStatus(): Promise<AdmissionStatus> {
+  const res = await fetch(`${API}/api/queue/status`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+/** NOT-215: operator-chosen active-issue limit (persisted server-side). */
+export async function updateAdmissionSettings(maxActiveIssues: number): Promise<AdmissionStatus> {
+  const res = await fetch(`${API}/api/queue/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ maxActiveIssues }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 export async function guideIssue(id: string, markdown: string): Promise<WorkflowEvent> {
   const res = await fetch(`${API}/api/issues/${id}/guidance`, {
     method: "POST",
@@ -376,6 +421,19 @@ export async function guideIssue(id: string, markdown: string): Promise<Workflow
   });
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
+}
+
+/** NOT-175: fleet execution-comparison report. Filters serialize with shared
+ * defaults — an empty filter object requests the API's conservative window.
+ * Served by GET /api/execution-report (NOT-173 owns /api/execution-analysis). */
+export async function fetchExecutionAnalysis(filters: ReportFilterState): Promise<ExecutionReportResponse> {
+  const qs = serializeExecutionReportQuery(filters);
+  const res = await fetch(`${API}/api/execution-report${qs ? `?${qs}` : ""}`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  const json = await res.json();
+  const parsed = ExecutionReportSchema.safeParse(json);
+  if (!parsed.success) throw new Error(`Unexpected report shape: ${parsed.error.message}`);
+  return parsed.data;
 }
 
 export async function fetchHumanActions(): Promise<HumanAction[]> {

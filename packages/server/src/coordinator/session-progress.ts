@@ -13,6 +13,12 @@ import type { WorkflowEventType } from "@agent-dealer/shared";
 import { getIssue, transitionIssue } from "../repository/issues.js";
 import { appendWorkflowEvent } from "../repository/workflow-events.js";
 import { parseNdjson } from "../runners/stream-json.js";
+import {
+  getSessionActivityMaxCursor,
+  getSessionActivityMaxOffset,
+  insertSessionActivityEvent,
+} from "../repository/session-activity.js";
+import { scanNewActivityLines } from "./session-activity.js";
 
 export type SessionRole = "developer" | "reviewer";
 
@@ -362,24 +368,272 @@ export function deriveLiveProgressFromLog(
   return null;
 }
 
+/** Cap per-tick incremental log reads so one tick stays cheap on large logs. */
+const ACTIVITY_READ_MAX_BYTES = 256_000;
+
+/**
+ * A single NDJSON line longer than this is skipped past explicitly: without a skip
+ * the scanner would hold the unterminated line back forever, the offset would never
+ * advance, and no later event would persist. 4MB holds any realistic tool_result
+ * while bounding per-tick work.
+ */
+const ACTIVITY_LINE_SKIP_CAP_BYTES = 4_000_000;
+
+function readBytesSync(fd: number, from: number, len: number): Buffer {
+  const buf = Buffer.alloc(len);
+  fs.readSync(fd, buf, 0, len, from);
+  return buf;
+}
+
+function findNextNewlineEnd(fd: number, from: number, size: number): number {
+  // Byte offset just past the next "\n" at or after `from`, or `size` when the
+  // remainder has no newline. Bounded windows keep a garbage log from pinning a tick.
+  const WINDOW = 64_000;
+  let cursor = from;
+  while (cursor < size) {
+    const len = Math.min(WINDOW, size - cursor);
+    const buf = readBytesSync(fd, cursor, len);
+    const idx = buf.indexOf(0x0a);
+    if (idx >= 0) return cursor + idx + 1;
+    cursor += len;
+    if (cursor - from > 64 * 1024 * 1024) return size;
+  }
+  return size;
+}
+
+interface ActivityChunk {
+  /** Decoded text to scan. Empty when an oversized line was skipped or at EOF. */
+  text: string;
+  /** Total bytes consumed from the log, including any skipped oversized line. */
+  bytesRead: number;
+}
+
+/**
+ * Read the next scannable bytes from `fromOffset` (a byte offset). Extends the read
+ * window past ACTIVITY_READ_MAX_BYTES until a newline is found so a long-but-valid
+ * line still scans; skips explicitly past a single line longer than
+ * ACTIVITY_LINE_SKIP_CAP_BYTES so the offset always advances. Returns null when the
+ * log is truncated/rotated or unreadable — the caller resets to 0.
+ */
+function readActivityChunk(logPath: string, fromOffset: number): ActivityChunk | null {
+  if (!logPath || !fs.existsSync(logPath)) return null;
+  try {
+    const size = fs.statSync(logPath).size;
+    if (size < fromOffset) return null; // truncated/rotated — caller resets
+    if (size === fromOffset) return { text: "", bytesRead: 0 };
+    const fd = fs.openSync(logPath, "r");
+    try {
+      let end = Math.min(size, fromOffset + ACTIVITY_READ_MAX_BYTES);
+      let buf = readBytesSync(fd, fromOffset, end - fromOffset);
+      while (buf.indexOf(0x0a) < 0 && end < size && buf.length < ACTIVITY_LINE_SKIP_CAP_BYTES) {
+        const nextEnd = Math.min(size, end + ACTIVITY_READ_MAX_BYTES);
+        buf = Buffer.concat([buf, readBytesSync(fd, end, nextEnd - end)]);
+        end = nextEnd;
+      }
+      if (buf.indexOf(0x0a) < 0) {
+        if (end >= size) {
+          // One partial line, still under the cap, at EOF — hold it back; the
+          // writer may still complete it, and the scanner drops it from nextOffset.
+          return { text: buf.toString("utf8"), bytesRead: buf.length };
+        }
+        // Oversized line with more log after it: skip past its newline so later
+        // events persist. The giant line itself is never parsed or stored.
+        const skipEnd = findNextNewlineEnd(fd, fromOffset + buf.length, size);
+        return { text: "", bytesRead: skipEnd - fromOffset };
+      }
+      return { text: buf.toString("utf8"), bytesRead: buf.length };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+function summarizeActivityEvent(
+  e: Record<string, unknown>,
+  kind: string
+): string | null {
+  if (kind === "tool_started" || kind === "tool_completed") {
+    return formatToolProgress(e);
+  }
+  if (kind === "assistant_output") {
+    const text = assistantTextFromEvent(e);
+    if (!text) return null;
+    return truncateOneLine(text);
+  }
+  if (kind === "provider_wait") return "Provider wait/retry";
+  const type = typeof e.type === "string" ? e.type : "event";
+  return truncateOneLine(`Structured activity: ${type}`);
+}
+
+/**
+ * Read-only HEAD observer for a developer session's worktree. Injected (rather
+ * than a direct git call) so the sampler stays side-effect free and testable;
+ * implementations must be read-only (`git rev-parse HEAD`).
+ */
+export type HeadReader = () => Promise<string | null>;
+
+/**
+ * NOT-172 first-commit detection: pure decision over a HEAD read. Returns the
+ * observed SHA when it is the first durable commit evidence for the session —
+ * HEAD resolves and differs from the session input SHA — and null otherwise
+ * (unresolvable HEAD, no input SHA to diff against, or already recorded).
+ */
+export function firstCommitFromHead(
+  headSha: string | null | undefined,
+  inputSha: string | null | undefined,
+  alreadyRecorded: boolean
+): string | null {
+  if (alreadyRecorded) return null;
+  if (!headSha || !inputSha) return null;
+  if (headSha === inputSha) return null;
+  return headSha;
+}
+
 /**
  * While an agent CLI is running, periodically refresh currentIntent from the session log
  * without flooding the timeline. No-ops when the log has no new activity label.
+ *
+ * NOT-172: with `headCheck`, the same tick also performs a read-only HEAD check
+ * for developer sessions and records the `commit` checkpoint once when HEAD
+ * first differs from the session `inputSha` — "coordinator-observed checkpoint
+ * time" at sampling precision, never an invented Git author/commit time. The
+ * check never writes to the worktree and never affects spawn/routing behavior.
+ * The caller owns the durable `onCommit` emit (idempotent per session, so a
+ * restart re-emit is a no-op); tests may substitute an in-memory recorder.
+ *
+ * NOT-170: the same tick also persists new structured stream events (tool starts and
+ * completions, assistant output, provider wait/retry) into `session_activity_events` —
+ * no second polling loop. Ticks with no new log bytes persist nothing, and repeated
+ * ticks never duplicate rows: resume starts from the durable MAX(source_offset) and
+ * re-inserts are no-ops on UNIQUE(worker_session_id, source_offset, source_seq), where
+ * source_seq distinguishes parallel entries from one NDJSON line. All offsets are
+ * file byte offsets. `workerSessionId` is required for persistence; without it the
+ * sampler only refreshes intent.
  */
 export function startActivitySampler(opts: {
   issueId: string;
   role: SessionRole;
   round: number;
   logPath: string;
+  workerSessionId?: string;
   intervalMs?: number;
+  headCheck?: {
+    inputSha: string | null;
+    readHead: HeadReader;
+    onCommit: (evidence: { observedSha: string; observedAt: string }) => void;
+  };
 }): { stop: () => void } {
   const prefix = `${ROLE_LABEL[opts.role]} ·`;
   let lastLabel: string | null = null;
+  let commitRecorded = false;
+  let headInFlight = false;
+  let lastOffset = 0;
+  let baseCursor = 0;
+  let resumeDone = false;
+  const ensureResumed = () => {
+    if (resumeDone || !opts.workerSessionId) return;
+    resumeDone = true;
+    try {
+      const maxOffset = getSessionActivityMaxOffset(opts.workerSessionId);
+      if (maxOffset !== null) lastOffset = maxOffset;
+      const maxCursor = getSessionActivityMaxCursor(opts.workerSessionId);
+      if (maxCursor !== null) baseCursor = maxCursor + 1;
+    } catch {
+      // persistence must never break the live strip
+    }
+  };
+  /**
+   * One incremental persist pass. Returns true when the offset advanced (more log
+   * may remain); the final flush loops on it until EOF.
+   */
+  const sampleAndPersistActivity = (): boolean => {
+    if (!opts.workerSessionId) return false;
+    ensureResumed();
+    let read: ActivityChunk | null;
+    try {
+      read = readActivityChunk(opts.logPath, lastOffset);
+    } catch {
+      return false;
+    }
+    if (read === null) {
+      // Log truncated/rotated or unreadable: restart from the beginning. Rows already
+      // persisted stay deduplicated by UNIQUE(worker_session_id, source_offset, source_seq).
+      lastOffset = 0;
+      baseCursor = 0;
+      return false;
+    }
+    if (!read.text) {
+      // EOF, or an oversized line was skipped past: advance past consumed bytes.
+      if (read.bytesRead > 0) {
+        lastOffset += read.bytesRead;
+        return true;
+      }
+      return false;
+    }
+    let result: ReturnType<typeof scanNewActivityLines>;
+    try {
+      result = scanNewActivityLines(read.text, { baseCursor });
+    } catch {
+      return false;
+    }
+    const { scanned, nextOffset, nextCursor } = result;
+    const observedAt = new Date().toISOString();
+    if (scanned.length > 0 && opts.workerSessionId) {
+      try {
+        for (const s of scanned) {
+          insertSessionActivityEvent({
+            issueId: opts.issueId,
+            workerSessionId: opts.workerSessionId,
+            observedAt,
+            sourceCursor: s.cursor,
+            // Exclusive end byte offset: restart resumes from MAX(source_offset).
+            sourceOffset: lastOffset + s.endOffset,
+            sourceSeq: s.seq,
+            activityKind: s.normalized.kind,
+            state: s.normalized.state,
+            callId: s.normalized.callId,
+            summary: summarizeActivityEvent(s.event, s.normalized.kind),
+            rawEvidence: `${opts.logPath}#offset=${lastOffset + s.offset}`,
+          });
+        }
+      } catch {
+        // persistence must never break the live strip
+      }
+    }
+    lastOffset += nextOffset;
+    baseCursor = nextCursor;
+    // Progress when complete lines were consumed; a held-back-only chunk leaves the
+    // offset untouched. bytesRead beyond nextOffset is the held-back partial tail.
+    return nextOffset > 0;
+  };
   const tick = () => {
     const activity = deriveLiveProgressFromLog(opts.logPath);
-    if (!activity || activity === lastLabel) return;
-    lastLabel = activity;
-    setLiveIntent(opts.issueId, `${prefix} ${activity} (round ${opts.round})`);
+    if (activity && activity !== lastLabel) {
+      lastLabel = activity;
+      setLiveIntent(opts.issueId, `${prefix} ${activity} (round ${opts.round})`);
+    }
+    sampleAndPersistActivity();
+    const headCheck = opts.headCheck;
+    if (!headCheck || commitRecorded || headInFlight) return;
+    headInFlight = true;
+    headCheck.readHead().then(
+      (headSha) => {
+        headInFlight = false;
+        const first = firstCommitFromHead(headSha, headCheck.inputSha, commitRecorded);
+        if (!first) return;
+        commitRecorded = true;
+        try {
+          headCheck.onCommit({ observedSha: first, observedAt: new Date().toISOString() });
+        } catch {
+          // checkpoint evidence must never fail the attempt itself
+        }
+      },
+      () => {
+        headInFlight = false;
+      }
+    );
   };
   const handle = setInterval(tick, opts.intervalMs ?? 10_000);
   // First sample soon so the strip moves off "session running" once tools appear.
@@ -388,6 +642,13 @@ export function startActivitySampler(opts: {
     stop() {
       clearInterval(handle);
       clearTimeout(first);
+      // Final flush: events written after the last tick (e.g. a trailing tool
+      // completion) must still close their flight before the process is gone.
+      // Loop until EOF so a large backlog spanning several read windows still
+      // persists; bounded so a pathological log cannot hang process exit.
+      for (let i = 0; i < 64; i++) {
+        if (!sampleAndPersistActivity()) break;
+      }
     },
   };
 }

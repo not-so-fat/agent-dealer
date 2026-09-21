@@ -63,6 +63,7 @@ import { createIssueArtifact, latestIssueArtifact } from "../repository/artifact
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
 import { classifyRunnerLogFailure } from "./failure-reason.js";
+import { emitAgentCompleted, emitAgentStarted } from "./agent-boundaries.js";
 import { recordUsageCapFromLog } from "../runners/usage-cap.js";
 import {
   emitSessionMilestone,
@@ -415,16 +416,18 @@ export async function runReviewerEffect(
     const logPath = reviewerSessionLogPath(sessionId);
     patchRunningSession(sessionId, { logPath, worktreePath });
     setLiveIntent(issue.id, `Reviewer · session running (round ${round})`);
-    const sampler = startActivitySampler({ issueId: issue.id, role: "reviewer", round, logPath });
+    const sampler = startActivitySampler({ issueId: issue.id, role: "reviewer", round, logPath, workerSessionId: sessionId });
 
     const spawnStartedAt = Date.now();
+    const agentModel = snapshot?.model ?? null;
+    let agentPid: number | null = null;
     let spawned;
     try {
       spawned = await deps.spawn({
         sessionId,
         runtime,
         policy,
-        model: snapshot?.model ?? null,
+        model: agentModel,
         effort: snapshot?.effort ?? null,
         prompt,
         cwd: worktreePath,
@@ -439,11 +442,78 @@ export async function runReviewerEffect(
         // gone before presuming it dead on an expired lease.
         // NOT-131: the start time is read here, while the process is known to be this
         // spawn's child, so a successor coordinator can still identify it after a restart.
-        onSpawn: (pid) =>
-          recordSessionProcess(sessionId, pid, COORDINATOR_PROCESS_OWNER, readProcessStartTime(pid)),
+        // NOT-169: the onSpawn callback is the source of truth for agent.started — it
+        // fires only after the CLI child actually exists, never before slot acquisition.
+        onSpawn: (pid) => {
+          agentPid = pid;
+          recordSessionProcess(sessionId, pid, COORDINATOR_PROCESS_OWNER, readProcessStartTime(pid));
+          try {
+            emitAgentStarted({
+              issueId: issue.id,
+              workflowInstanceId: instance.id,
+              workerSessionId: sessionId,
+              role: "reviewer",
+              stage,
+              round,
+              runtime,
+              model: agentModel,
+              pid,
+            });
+          } catch {
+            // boundary evidence must never fail the attempt itself
+          }
+        },
       });
+    } catch (err) {
+      // NOT-169: a spawn that threw after process creation still closes the agent
+      // interval; a throw before onSpawn leaves setup evidence only (no fake agent).
+      if (agentPid !== null) {
+        try {
+          emitAgentCompleted({
+            issueId: issue.id,
+            workflowInstanceId: instance.id,
+            workerSessionId: sessionId,
+            role: "reviewer",
+            stage,
+            round,
+            runtime,
+            model: agentModel,
+            pid: agentPid,
+            exitCode: null,
+            timedOut: false,
+            aborted: Boolean(ctx.signal.aborted),
+            thrown: true,
+          });
+        } catch {
+          // ignore
+        }
+      }
+      throw err;
     } finally {
       sampler.stop();
+    }
+    // NOT-169: exactly one agent.completed per spawned process, at child exit and before
+    // any usage extraction or validation. Raw outcome only — no failure classification.
+    if (agentPid !== null) {
+      try {
+        emitAgentCompleted({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          workerSessionId: sessionId,
+          role: "reviewer",
+          stage,
+          round,
+          runtime,
+          model: agentModel,
+          pid: agentPid,
+          exitCode: spawned.exitCode,
+          timedOut: spawned.timedOut,
+          aborted: Boolean(ctx.signal.aborted),
+          thrown: false,
+        });
+      } catch {
+        // ignore
+      }
     }
 
     // See developer-effect.ts's identical call: recorded before any early return so a

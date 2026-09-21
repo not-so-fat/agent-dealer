@@ -91,7 +91,12 @@ export function activeAttemptCount(): number {
 }
 
 function isFailureOutcome(outcome: DeveloperOutcome | ReviewerOutcome): boolean {
-  return outcome.kind === "session_failed" || outcome.kind === "publish_failed" || outcome.kind === "deck_failure";
+  return (
+    outcome.kind === "session_failed" ||
+    outcome.kind === "publish_failed" ||
+    outcome.kind === "deck_failure" ||
+    outcome.kind === "muse_cron_used"
+  );
 }
 
 /** `timed_out` is the only outcome meaning the agent process itself hit its wall clock —
@@ -313,7 +318,8 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
   }
   // NOT-136: a deck-unavailable session never spawned anything — `cancelled`, not `failed`
   // (which would read as a worker crash) and not `done` (which would claim it ran).
-  if (outcome.kind === "deck_unavailable") {
+  // NOT-197: a base-fetch failure likewise never spawned (and created no branch).
+  if (outcome.kind === "deck_unavailable" || outcome.kind === "base_fetch_failed") {
     safeCompleteSession(session.id, "cancelled", { reason: outcome.reason });
     return;
   }

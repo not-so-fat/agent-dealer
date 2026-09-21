@@ -320,3 +320,25 @@ test("reasonForWorkerFailedEvent uses session errorJson for presumed dead", () =
     PRESUMED_DEAD_REASON
   );
 });
+
+test("NOT-171: normalized classification leaves operator prose at least as actionable", async () => {
+  // The classifier references the same evidence the prose was built from; the
+  // remediation the operator sees must not regress when a cause is recorded.
+  const { classifyAttemptFailure } = await import("./failure-cause.js");
+  const logPath = writeAuthDeathLog();
+  const prose = reasonForWorkerFailedEvent({
+    outcome: { kind: "session_failed" },
+    routeReason: "Developer session failed or crashed.",
+    logPath,
+    runtime: "cursor_local",
+  });
+  assert.match(prose, /Cursor auth required mid-run/);
+  assert.match(prose, /cursor-agent login/);
+  const causes = classifyAttemptFailure({
+    outcomeKind: "session_failed",
+    routeReason: "Developer session failed or crashed.",
+    logPath,
+    runtime: "cursor_local",
+  });
+  assert.equal(causes.find((c) => c.primary)?.code, "authentication_configuration");
+});

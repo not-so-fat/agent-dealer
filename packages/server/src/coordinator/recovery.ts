@@ -43,10 +43,12 @@ import { infraAttemptsRemain } from "./routing.js";
 import { activeClockJumpGrace, type ClockJump } from "./clock-jump.js";
 import { inspectWorkerProcess, terminateWorkerProcess } from "./process-liveness.js";
 import { maxAliveHoldMsFor } from "./session-timeouts.js";
+import { emitHostSuspended } from "./agent-boundaries.js";
 import { routeAppliedOutcome } from "./commands.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { PRESUMED_DEAD_REASON, presumedDeadReclaimReason } from "./failure-reason.js";
+import { recordCausesForWorkerFailedEvent } from "./failure-cause.js";
 import {
   baseRefCandidates,
   developerBranchName,
@@ -146,7 +148,7 @@ function emitPresumedDeadFailed(item: WorkItem, republish: PublishableBranch | n
   const role = item.kind === "developer" ? "developer" : "reviewer";
   const alreadyPushed = republish?.state === "published";
   const commits = republishCommits(republish);
-  appendWorkflowEvent({
+  const event = appendWorkflowEvent({
     issueId: issue.id,
     workflowInstanceId: instance.id,
     workerSessionId: item.workerSessionId,
@@ -166,6 +168,15 @@ function emitPresumedDeadFailed(item: WorkItem, republish: PublishableBranch | n
       recovery: republish ? "republish" : "rerun",
       ...(republish ? { branchState: republish.state, branch: republish.branch, commits } : {}),
     },
+  });
+  // NOT-171: the same classifier as observed failures. Append-only; errorJson untouched.
+  recordCausesForWorkerFailedEvent({
+    issueId: issue.id,
+    workflowInstanceId: instance.id,
+    event,
+    outcomeKind: "session_failed",
+    outcomeReason: reason,
+    recovery: republish ? "republish" : "rerun",
   });
 
   // The live intent is cosmetic; the reclaim is not. Only stages with a legal self-loop are
@@ -391,6 +402,31 @@ export async function recoverCoordinator(opts?: {
     // resumed heartbeat to renew the lease and drop the item from the candidate set.
     if (protectedByClockJump(item, grace)) {
       heldAcrossClockJump.push(item.id);
+      // NOT-169: durable sleep evidence, one idempotent host.suspended per affected
+      // session/jump. Observational only — the hold decision above is unchanged, and a
+      // failure here never fails, retries, or reassigns the item.
+      try {
+        const issue = getIssue(item.issueId);
+        const instance = getActiveWorkflowInstance(item.issueId);
+        if (issue && instance && instance.id === item.workflowInstanceId && item.workerSessionId && grace) {
+          const role = item.kind === "developer" ? "developer" : "reviewer";
+          emitHostSuspended({
+            issueId: issue.id,
+            workflowInstanceId: instance.id,
+            workerSessionId: item.workerSessionId,
+            role,
+            stage: issue.status,
+            round: item.round,
+            detectedAt: grace.detectedAt,
+            graceUntil: grace.graceUntil,
+            wallGapMs: grace.wallGapMs,
+            unelapsedMs: grace.unelapsedMs,
+            unobservedMs: grace.unobservedMs,
+          });
+        }
+      } catch {
+        // evidence must never change recovery decisions
+      }
       continue;
     }
 

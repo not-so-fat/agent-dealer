@@ -13,6 +13,8 @@ export * from "./playbook-reflect.js";
 export * from "./issues.js";
 export * from "./github-repo.js";
 export * from "./worker-sessions.js";
+export * from "./failure-cause.js";
+export * from "./attempt-waste.js";
 export * from "./profile-snapshot.js";
 export * from "./workflow.js";
 export * from "./human-actions.js";
@@ -20,6 +22,8 @@ export * from "./findings.js";
 export * from "./usage-events.js";
 export * from "./runtime-availability.js";
 export * from "./queue-entries.js";
+export * from "./execution-analysis.js";
+export * from "./execution-report.js";
 
 export const RunStatus = z.enum([
   "queued",

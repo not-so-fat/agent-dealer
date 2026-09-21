@@ -142,4 +142,31 @@ After execute, server reads that file and stores `document` artifact. The file i
 
 Phase boundaries, overlap/aggregation rules, evidence quality, silence and failure vocabularies, and the source matrix for execution-time metrics are defined in [EXECUTION_ANALYSIS.md](EXECUTION_ANALYSIS.md). That contract is authoritative; this document does not restate it.
 
+### `session_activity_events` (NOT-170)
+
+Append-only structured activity evidence backing observational silence analysis. One row
+per new structured stream event observed by the live activity sampler — never one row
+per sampler tick. Columns: `issue_id`, `worker_session_id`, `observed_at` (sampler read
+time), `source_cursor` / `source_offset` (log line index / exclusive end byte offset),
+`activity_kind` (`assistant_output` \| `provider_wait` \| `tool_started` \|
+`tool_completed` \| `unknown_activity`), `state` (`started` \| `completed` \|
+`observed`), `call_id` (pairs starts with completions across runtimes), `summary`
+(the existing ≤120-char operator line), `raw_evidence` (a `<log_path>#offset=<n>`
+pointer, never payload).
+
+- Index: `(worker_session_id, observed_at)`; idempotency:
+  `UNIQUE(worker_session_id, source_offset)` — sampler re-reads and restarts resume
+  from `MAX(source_offset)` and re-inserts are no-ops.
+- Retention/size: rows are small by construction (no transcript bodies, file contents,
+  or tool arguments are copied into SQLite); volume is roughly one row per tool call /
+  assistant turn / retry signal. Retention follows the session log. Rows are
+  observational only and are never inputs to admission, leases, recovery, routing,
+  retry, termination, or scheduling.
+- Timing caveat: `observed_at` is approximate (shared per tick; backlog stamped at
+  restart time), so silence derived from these rows is always quality `inferred`
+  (reason `sampler_observed_time`), even inside `exact` agent-process bounds. Read
+  model: `getSessionSilenceIntervals()` in
+  `packages/server/src/repository/session-activity.ts` (silence categories per
+  [EXECUTION_ANALYSIS.md](EXECUTION_ANALYSIS.md) §5).
+
 See also: `docs/AGENT_PROFILES.md`, `docs/LINEAR_INTEGRATION.md`.

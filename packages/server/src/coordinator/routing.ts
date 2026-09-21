@@ -1,5 +1,7 @@
 // packages/server/src/coordinator/routing.ts
 import { normalizeReviewerResult, type ReviewerResult } from "./reviewer-result.js";
+import type { PushDivergenceEvidence } from "./human-resolution.js";
+import type { PushRejectionFacts } from "../adapters/git-worktree.js";
 
 export type DeveloperOutcome =
   | { kind: "clean_handoff"; branch: string; headSha: string; baseSha: string; prNumber: number; prUrl: string }
@@ -10,13 +12,28 @@ export type DeveloperOutcome =
   | { kind: "dirty_worktree"; reason?: string; path?: string; recoveryCommands?: string[] }
   /** Local commits exist but the coordinator's own push was rejected (e.g. non-fast-forward).
    * `recoveryCommands` (NOT-137) mirrors worktree_conflict: divergence facts live in `reason`,
-   * and the concrete recovery steps are folded into the escalation text at route time. */
-  | { kind: "unpushed_commit"; reason: string; recoveryCommands?: string[] }
+   * and the concrete recovery steps are folded into the escalation text at route time.
+   * NOT-221: `branch` + `pushFacts` (NOT-137's structured rejection facts) + the preserved
+   * `worktreePath` travel with the outcome so the escalation can offer a one-click
+   * lease-pinned push instead of only resume/close. */
+  | {
+      kind: "unpushed_commit";
+      reason: string;
+      recoveryCommands?: string[];
+      branch?: string;
+      pushFacts?: PushRejectionFacts;
+      worktreePath?: string;
+    }
   /** A prior round's worktree still holds the issue branch and can't be safely reused/removed
    * (dirty/unpushed, or not coordinator-managed) — see git-worktree.ts's resolveDeveloperWorktree. */
   | { kind: "worktree_conflict"; path: string; reason: string; recoveryCommands: string[] }
   /** NOT-127: leftover worktree still has a live owning process — do not adopt or treat as conflict. */
   | { kind: "live_owner"; path: string; ownerSessionId: string; reason: string }
+  /** NOT-181: a Muse session's tool activity included `cron_create`/`cron_list`/`cron_delete`, which
+   * Muse cannot disable (NOT-177). Detected after the fact; the session is failed and the operator
+   * decides — never an infra retry, since a retry would hand the same model the same tool.
+   * The worktree is left as it was (`path`) and `logPath` points at the normalized session log. */
+  | { kind: "muse_cron_used"; reason: string; path?: string; logPath?: string }
   | { kind: "checks_failed"; details?: string }
   /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll.
    * NOT-147: `commitsAhead` (when known) feeds the empty-tip no-progress gate; optional
@@ -41,6 +58,11 @@ export type DeveloperOutcome =
    * Deferred like a usage cap (no infra attempt, exponential backoff), never routed as a
    * worker failure. `until` is computed by the deferral, not by the effect. */
   | { kind: "deck_unavailable"; reason: string }
+  /** NOT-197: the pre-branch `git fetch origin <base>` failed or timed out — nothing
+   * spawned, nothing attempted, no branch created. Deferred like an unreachable deck
+   * (no infra attempt, exponential backoff), never routed as a worker failure and never
+   * retried against the stale local base. `until` is computed by the deferral. */
+  | { kind: "base_fetch_failed"; reason: string }
   /** Optional progress fields — see `timed_out` (NOT-147). */
   | {
       kind: "session_failed";
@@ -121,6 +143,9 @@ export type DeveloperRouteResult =
       next: "human_action";
       actionType: "attempts_exhausted" | "policy_escalation";
       reason: string;
+      /** NOT-221: divergence facts for a rejected push — carried to the action's
+       * evidence so the operator gets a one-click lease-pinned push. */
+      pushDivergence?: PushDivergenceEvidence;
     }
   /** `until` is only known up front when the blocker reports its own reset time (a usage
    * cap). An unreachable Agent Deck gives no ETA, so its retry time comes from the deferral
@@ -157,7 +182,26 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
       const recovery = outcome.recoveryCommands?.length
         ? ` Recovery:\n${outcome.recoveryCommands.join("\n")}`
         : "";
-      return { next: "human_action", actionType: "policy_escalation", reason: `${prefix}${recovery}` };
+      // NOT-221: structured divergence facts ride along (not just the folded text) so the
+      // escalation can offer the exact lease-pinned push as a one-click resolution.
+      const pushDivergence =
+        outcome.branch && outcome.pushFacts
+          ? {
+              branch: outcome.branch,
+              localSha: outcome.pushFacts.localSha,
+              remoteSha: outcome.pushFacts.remoteSha,
+              ahead: outcome.pushFacts.ahead,
+              behind: outcome.pushFacts.behind,
+              relationship: outcome.pushFacts.relationship,
+              ...(outcome.worktreePath ? { worktreePath: outcome.worktreePath } : {}),
+            }
+          : undefined;
+      return {
+        next: "human_action",
+        actionType: "policy_escalation",
+        reason: `${prefix}${recovery}`,
+        ...(pushDivergence ? { pushDivergence } : {}),
+      };
     }
     case "worktree_conflict":
       // Never spends infra-attempt budget — the branch is provably still checked out
@@ -170,6 +214,10 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
         actionType: "policy_escalation",
         reason: `${outcome.reason} Recovery:\n${outcome.recoveryCommands.join("\n")}`,
       };
+    case "muse_cron_used":
+      // Spends no budget and never retries: a policy breach the operator must look at, like a
+      // preserved dirty worktree.
+      return { next: "human_action", actionType: "policy_escalation", reason: outcome.reason };
     case "live_owner":
       // NOT-127: predecessor CLI is still running in this worktree. Never escalate as a
       // worktree_conflict (that mislabels live WIP as abandoned dirt) and never adopt the
@@ -226,6 +274,10 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
     case "deck_unavailable":
       // NOT-136: a hard-down dependency is not retryable on the infra-attempt timescale, and
       // nothing was spawned, so there is no attempt to charge. Wait for the deck instead.
+      return { next: "defer_work", reason: outcome.reason };
+    case "base_fetch_failed":
+      // NOT-197: a hard-down network is not retryable on the infra-attempt timescale, and
+      // nothing was spawned, so there is no attempt to charge. Wait for the network instead.
       return { next: "defer_work", reason: outcome.reason };
   }
 }

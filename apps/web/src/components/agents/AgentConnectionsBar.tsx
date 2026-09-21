@@ -14,7 +14,11 @@ function runtimeCliStatus(
   const sample = agents.find((a) => a.runtime === runtime);
   if (!sample) return { ok: false, detail: "no agent" };
   const blocker = sample.issues.find(
-    (i) => i.code === "cli_missing" || i.code === "runtime_auth" || i.code === "cursor_keychain"
+    (i) =>
+      i.code === "cli_missing" ||
+      i.code === "runtime_auth" ||
+      i.code === "runtime_unknown" ||
+      i.code === "cursor_keychain"
   );
   if (blocker) return { ok: false, detail: blocker.message };
   return { ok: true, detail: "CLI ready" };
@@ -51,6 +55,11 @@ export default function AgentConnectionsBar({ agents, agentDeckOnline }: Props) 
   const claude = runtimeCliStatus(agents, "claude_code");
   const cursor = runtimeCliStatus(agents, "cursor_local");
   const codex = runtimeCliStatus(agents, "codex_local");
+  // Muse Code is an opt-in trial runtime: no dot at all until a Muse agent exists, rather than a
+  // permanent "no agent" warning for everyone who never enabled it.
+  const muse = agents.some((a) => a.runtime === "muse_code")
+    ? runtimeCliStatus(agents, "muse_code")
+    : null;
   const github = githubCliStatus(agents);
   const mcpIssue = agents
     .flatMap((a) => a.issues)
@@ -71,6 +80,12 @@ export default function AgentConnectionsBar({ agents, agentDeckOnline }: Props) 
         <StatusDot ok={codex.ok} />
         <span className={codex.ok ? "text-white/55" : "text-amber-200/90"}>Codex</span>
       </span>
+      {muse && (
+        <span className="inline-flex items-center gap-1.5" title={muse.detail}>
+          <StatusDot ok={muse.ok} />
+          <span className={muse.ok ? "text-white/55" : "text-amber-200/90"}>Muse Code</span>
+        </span>
+      )}
       <span className="inline-flex items-center gap-1.5" title={github.detail}>
         <StatusDot ok={github.ok} />
         <span className={github.ok ? "text-white/55" : "text-amber-200/90"}>GitHub</span>

@@ -46,6 +46,36 @@ export const MoveQueueEntryInput = z.object({
 export type MoveQueueEntryInput = z.infer<typeof MoveQueueEntryInput>;
 
 /**
+ * NOT-215: operator-chosen active-issue admission limit. First slice allows 1–2;
+ * the server additionally caps the accepted value at the effective
+ * worker/spawn ceiling so a selected value is always real executable concurrency.
+ */
+export const MAX_ACTIVE_ISSUES_HARD_MAX = 2;
+export const DEFAULT_MAX_ACTIVE_ISSUES = 1;
+
+export const AdmissionSettingsInput = z.object({
+  maxActiveIssues: z.number().int().min(1).max(MAX_ACTIVE_ISSUES_HARD_MAX),
+});
+export type AdmissionSettingsInput = z.infer<typeof AdmissionSettingsInput>;
+
+/** Read model for the Admission queue header: truthful active/waiting/limit counts. */
+export const AdmissionStatus = z.object({
+  active: z.number().int().min(0),
+  waiting: z.number().int().min(0),
+  /** Effective admission limit (persisted setting clamped to the worker/spawn ceiling). */
+  limit: z.number().int().min(0),
+  /** Persisted operator setting (may exceed `limit` when the ceiling dropped below it). */
+  maxActiveIssues: z.number().int().min(1),
+  /** Effective internal worker/spawn ceiling: min(coordinator, spawn). */
+  ceiling: z.number().int().min(0),
+  /** Values the UI may offer — never above the ceiling. */
+  options: z.array(z.number().int().min(1)),
+  /** True when occupancy exceeds the limit (e.g. a human resume over capacity). */
+  overCap: z.boolean(),
+});
+export type AdmissionStatus = z.infer<typeof AdmissionStatus>;
+
+/**
  * NOT-118 `POST /api/issues/:id/start` response. Start has no queue bypass: it moves the
  * issue to the front and admits it when a slot is free, otherwise it waits at the top with
  * a reason. `workItem` is the round-1 developer item the admitted start enqueued.
@@ -57,3 +87,23 @@ export type StartIssueResponse =
       workItem: { id: string; kind: string };
     }
   | { state: "queued"; position: number; waitReason: string | null };
+
+/**
+ * NOT-217 `POST /api/issues/:id/execute` response. Execute now bypasses queue order
+ * only: it admits immediately when eligible with free capacity, and otherwise refuses
+ * with the reason — never enqueuing, moving, or reordering. `queued`/`position` report
+ * the untouched queue state so the caller can show where the issue still waits.
+ */
+export type ExecuteIssueResponse =
+  | {
+      state: "admitted";
+      instance: WorkflowInstance;
+      workItem: { id: string; kind: string };
+    }
+  | {
+      state: "refused";
+      reason: string;
+      queued: boolean;
+      position: number | null;
+      waitReason: string | null;
+    };

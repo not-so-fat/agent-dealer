@@ -46,10 +46,11 @@ function capReason(runtime: Runtime, detail: string): string {
   return `${runtime} usage capped — ${detail}`;
 }
 
+// `status` is the verdict on the plan window. `overageStatus` only says whether pay-as-you-go
+// overage is available: orgs with overage disabled report "rejected" on every event of a healthy
+// session (status "allowed", isUsingOverage false), so it must not open a deferral by itself.
 function isHardCapRateLimitInfo(info: Record<string, unknown>): boolean {
-  if (info.status === "rejected") return true;
-  if (info.overageStatus === "rejected") return true;
-  return false;
+  return info.status === "rejected";
 }
 
 function signalFromRateLimitInfo(
@@ -262,6 +263,30 @@ export function recordUsageCapFromEvents(
   if (!cap) return null;
   recordRuntimeAvailability({
     runtime,
+    unavailableUntil: cap.unavailableUntil,
+    reason: cap.reason,
+    evidence: cap.evidence,
+  });
+  return cap;
+}
+
+/**
+ * NOT-181: Muse's usage-cap signal is the parsed failure kind (runners/muse-code-jsonl.ts), not a
+ * Claude-shaped log event. Muse reports no reset time (NOT-177: real cap payload never observed),
+ * so the deferral uses the fallback cooldown.
+ */
+export function recordMuseUsageCap(
+  failure: { kind: string; message: string } | null,
+  nowMs = Date.now()
+): UsageCapDetection | null {
+  if (failure?.kind !== "usage_cap") return null;
+  const cap: UsageCapDetection = {
+    unavailableUntil: fallbackUntil(nowMs),
+    reason: capReason("muse_code", failure.message.slice(0, 120) || "usage cap"),
+    evidence: { muse_failure: failure },
+  };
+  recordRuntimeAvailability({
+    runtime: "muse_code",
     unavailableUntil: cap.unavailableUntil,
     reason: cap.reason,
     evidence: cap.evidence,

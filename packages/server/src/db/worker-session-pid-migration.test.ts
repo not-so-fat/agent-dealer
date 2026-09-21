@@ -135,3 +135,14 @@ test("migrate() is idempotent once every column is present", () => {
   assert.deepStrictEqual(pidCols(), LIVENESS_COLS);
   assertSessionInsertWorks();
 });
+
+// NOT-181: usage_events.model is added to databases created before it existed, and stays NULL there.
+test("usage_events.model is added on migrate() to a table that lacks it", () => {
+  const cols = () =>
+    (getDb().prepare("PRAGMA table_info(usage_events)").all() as Array<{ name: string }>).map((c) => c.name);
+  assert.ok(cols().includes("model"));
+  getDb().exec("ALTER TABLE usage_events DROP COLUMN model");
+  assert.equal(cols().includes("model"), false);
+  migrate();
+  assert.ok(cols().includes("model"));
+});

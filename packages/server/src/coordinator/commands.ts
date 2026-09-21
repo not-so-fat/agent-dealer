@@ -6,13 +6,16 @@
 // so a process crash at any point either applies the whole step or none of it, and a
 // duplicate delivery is a no-op. The effect *work* itself runs elsewhere, through a leased
 // worker whose structured result comes back into applyCompletion.
+import fs from "node:fs";
 import type {
   HumanAction,
   HumanActionType,
   Issue,
+  WorkflowEvent,
   WorkflowInstance,
   WorkflowEventType,
 } from "@agent-dealer/shared";
+import { canTransitionIssue } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 import {
   getIssue,
@@ -38,7 +41,10 @@ import {
   getHumanAction,
   listHumanActionsForIssue,
   resolveHumanAction,
+  updateOpenHumanAction,
 } from "../repository/human-actions.js";
+import { pushLeaseToSha, readRemoteTip } from "../adapters/git-worktree.js";
+import { ensureIssueRepoCheckout } from "../adapters/managed-repo.js";
 import { reconcileFinding, resolveFindingsAbsentFromRound } from "../repository/findings.js";
 import { normalizeReviewerResult } from "./reviewer-result.js";
 import { getAgent } from "../repository/agents.js";
@@ -58,6 +64,7 @@ import { killRunProcess } from "../runners/spawn-cli.js";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { reasonForWorkerFailedEvent } from "./failure-reason.js";
+import { recordCausesForWorkerFailedEvent } from "./failure-cause.js";
 import {
   routeDeveloperOutcome,
   routeReviewerOutcome,
@@ -66,8 +73,18 @@ import {
 } from "./routing.js";
 import type { ReviewerResult } from "./reviewer-result.js";
 import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } from "./projection.js";
-import { parseHumanResolution, resolveHumanActionOutcome, type HumanResolution } from "./human-resolution.js";
+import {
+  MERGE_FAILURE_EVIDENCE_KEY,
+  MERGE_FAILURE_RESPONSE_OPTIONS,
+  PUSH_DIVERGENCE_EVIDENCE_KEY,
+  PUSH_DIVERGENCE_RESPONSE_OPTIONS,
+  parseHumanResolution,
+  resolveHumanActionOutcome,
+  type HumanResolution,
+  type PushDivergenceEvidence,
+} from "./human-resolution.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
+import { externalMergeStateForIssue, type ExternalMergeState } from "./external-merge.js";
 import {
   detectNonConvergence,
   formatNonConvergenceReason,
@@ -76,10 +93,12 @@ import {
 } from "./non-convergence.js";
 import {
   capEscalationEvents,
+  deferLeasedWorkItemForBaseFetch,
   deferLeasedWorkItemForDeckOutage,
   deferLeasedWorkItemForUsageCap,
   formatCapEscalationReason,
   usageCapDeferralStartedAt,
+  type BaseFetchFailedOutcome,
   type DeckUnavailableOutcome,
   type DeferralOutcome,
   type DeferWorkItemResult,
@@ -130,6 +149,30 @@ export function getTaskSnapshot(issue: Issue): TaskSnapshotContent {
     baseBranch: issue.baseBranch,
     workflowVersion: WORKFLOW_VERSION,
   };
+}
+
+/**
+ * NOT-185: an issue parked at `attempts_exhausted` may be re-scoped (PATCH) before it is
+ * retried. True only while the workflow is active, the issue is `needs_human` with that
+ * action open, and no work item is pending or leased — so no session can be reading the
+ * snapshot an edit would supersede.
+ */
+export function canEditParkedIssue(issue: Issue): boolean {
+  if (issue.status !== "needs_human") return false;
+  if (!getActiveWorkflowInstance(issue.id)) return false;
+  if (!findOpenHumanAction(issue.id, "attempts_exhausted")) return false;
+  return !listWorkItemsForIssue(issue.id).some((w) => w.status === "pending" || w.status === "leased");
+}
+
+/** Re-freezes the snapshot when the operator edited title/description/criteria; returns the changed fields (empty = no-op). */
+function refreshTaskSnapshotIfEdited(issue: Issue): string[] {
+  const frozen = getTaskSnapshot(issue);
+  const changed: string[] = [];
+  if (frozen.title !== issue.title) changed.push("title");
+  if (frozen.description !== (issue.description ?? "")) changed.push("description");
+  if (frozen.acceptanceCriteria !== (issue.acceptanceCriteria ?? "")) changed.push("acceptanceCriteria");
+  if (changed.length > 0) freezeTaskSnapshot(issue);
+  return changed;
 }
 
 function freezeTaskSnapshot(issue: Issue): void {
@@ -369,6 +412,11 @@ export async function applyCompletion(
   if (outcome.kind === "deck_unavailable") {
     return applyDeckOutageCompletion(workItemId, leaseToken, outcome);
   }
+  // NOT-197: same shape as a deck outage — the start never happened (no branch, no
+  // spawn), so the work item waits for the network instead of spending an attempt.
+  if (outcome.kind === "base_fetch_failed") {
+    return applyBaseFetchDeferralCompletion(workItemId, leaseToken, outcome);
+  }
 
   const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
@@ -479,6 +527,17 @@ function applyDeckOutageCompletion(
   );
 }
 
+/** NOT-197: no escalation arm — the item waits for the network for as long as it takes. */
+function applyBaseFetchDeferralCompletion(
+  workItemId: string,
+  leaseToken: string,
+  failure: BaseFetchFailedOutcome
+): ApplyResult {
+  return applyDeferralCompletion(workItemId, leaseToken, failure, (item, issue, instance) =>
+    deferLeasedWorkItemForBaseFetch(item, leaseToken, failure, issue, instance)
+  );
+}
+
 /**
  * Deferral ceiling exceeded — escalate with cap evidence without spending infra attempts.
  * Used when applyCompletion or the worker loop cannot defer any longer.
@@ -560,7 +619,7 @@ export function routeAppliedOutcome(
 }
 
 interface EventEmitter {
-  emit: (type: WorkflowEventType, opts?: EmitOpts) => void;
+  emit: (type: WorkflowEventType, opts?: EmitOpts) => WorkflowEvent;
 }
 interface EmitOpts {
   actorType?: "system" | "developer" | "reviewer" | "human";
@@ -591,8 +650,24 @@ function eventEmitter(
         causationEventId: causation,
       });
       causation = evt.id;
+      return evt;
     },
   };
+}
+
+/**
+ * NOT-169: a publishOnly work item runs the no-agent publish path (no CLI spawn, no
+ * agent.started/agent.completed). Its worker terminal event carries `publishOnly: true`
+ * so a publish-only recovery is distinguishable from an agent retry in the timeline
+ * and in interval derivation.
+ */
+function isPublishOnlyItem(item: WorkItem): boolean {
+  try {
+    if (!item.payloadJson) return false;
+    return (JSON.parse(item.payloadJson) as { publishOnly?: unknown }).publishOnly === true;
+  } catch {
+    return false;
+  }
 }
 
 function applyProjectionTransition(issue: Issue, projection: IssueProjection, patch: TransitionIssuePatch): void {
@@ -650,6 +725,8 @@ function applyDeveloper(
           worktreePath: session?.worktreePath,
         }),
         outcome: outcome.kind,
+        // NOT-169: distinguish a no-agent publish-only recovery from an agent retry.
+        ...(isPublishOnlyItem(item) ? { publishOnly: true } : {}),
       };
       if (type === "worker.failed") {
         // Do not read session.errorJson here — worker-loop writes it only *after*
@@ -662,10 +739,29 @@ function applyDeveloper(
           runtime: session?.runtime ?? undefined,
         });
       }
-      ev.emit(type, {
+      const emitted = ev.emit(type, {
         actorType: "developer",
         payload,
       });
+      if (type === "worker.failed") {
+        // NOT-171: normalized cause evidence, same classifier as recovery. Append-only;
+        // the event payload reason and session errorJson stay untouched.
+        recordCausesForWorkerFailedEvent({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          event: emitted,
+          outcomeKind: outcome.kind,
+          outcomeReason: "reason" in outcome ? (outcome.reason ?? null) : null,
+          routeReason: "reason" in route ? route.reason : null,
+          // NOT-171: observed failures are never presumed-dead reclaims — not even
+          // for publish-only items. The recovery flag (and its coordinator_crash /
+          // host_sleep signal) comes only from the recovery path
+          // (recovery.ts emitPresumedDeadFailed), which always carries the
+          // presumed-dead marker. Passing "republish" here demoted real
+          // publish/auth/provider causes to consequences.
+          recovery: null,
+        });
+      }
     } else {
       ev.emit(type);
     }
@@ -731,6 +827,9 @@ function applyReviewer(
           worktreePath: session?.worktreePath,
         }),
         outcome: outcome.kind,
+        // NOT-169: publishOnly items never reach the reviewer path today, but keep the
+        // marker symmetric so a future no-agent reviewer retry is distinguishable too.
+        ...(isPublishOnlyItem(item) ? { publishOnly: true } : {}),
       };
       if (type === "worker.failed") {
         // See applyDeveloper: session.errorJson is not written until after applyCompletion.
@@ -741,10 +840,22 @@ function applyReviewer(
           runtime: session?.runtime ?? undefined,
         });
       }
-      ev.emit(type, {
+      const emitted = ev.emit(type, {
         actorType: "reviewer",
         payload,
       });
+      if (type === "worker.failed") {
+        // NOT-171: see applyDeveloper — observed failures never carry the recovery flag.
+        recordCausesForWorkerFailedEvent({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          event: emitted,
+          outcomeKind: outcome.kind,
+          outcomeReason: "reason" in outcome ? (outcome.reason ?? null) : null,
+          routeReason: "reason" in route ? route.reason : null,
+          recovery: null,
+        });
+      }
     } else {
       ev.emit(type);
     }
@@ -886,16 +997,24 @@ function applyEffect(
       actionType === "policy_escalation" &&
       reviewerOutcome !== undefined &&
       reviewerOutcome.kind !== "verdict";
+    // NOT-221: a rejected push carries its divergence facts on the effect — stored as
+    // action evidence so push_with_lease can later push the exact recorded SHAs.
+    const pushDivergence =
+      actionType === "policy_escalation" && !resumeAsReviewer
+        ? (effect.pushDivergence ?? null)
+        : null;
     const action = createHumanAction({
       issueId: issue.id,
       workflowInstanceId: instance.id,
       actionType,
       reason: effect.reason,
-      question: questionFor(actionType, effect.reason, resumeAsReviewer),
+      question: questionFor(actionType, effect.reason, resumeAsReviewer, false, pushDivergence),
       evidence:
         reviewerOutcome?.kind === "verdict"
           ? { review: reviewerOutcome.result, ...(nonConvergence ? { nonConvergence } : {}) }
-          : undefined,
+          : pushDivergence
+            ? { [PUSH_DIVERGENCE_EVIDENCE_KEY]: pushDivergence }
+            : undefined,
       // issueNow.headSha, not issue.headSha: a stale outcome that itself exhausted the
       // infra budget already patched the newly observed head onto the issue above — the
       // pre-transition issue param would still carry the stale SHA a "resume" must not reuse.
@@ -904,7 +1023,9 @@ function applyEffect(
         : nonConvergence
           ? { resumeRole: "developer", advanceRound: true }
           : undefined,
-      responseOptions: responseOptionsFor(actionType, resumeAsReviewer),
+      responseOptions: responseOptionsFor(actionType, resumeAsReviewer, {
+        pushDivergence: pushDivergence ?? undefined,
+      }),
     });
     if (actionType === "final_review") ev.emit("final_review.requested");
     ev.emit("human_action.requested", { payload: { actionType, actionId: action.id } });
@@ -918,13 +1039,86 @@ function applyEffect(
   return base;
 }
 
-function questionFor(actionType: HumanActionType, reason: string, resumeAsReviewer = false): string {
+/**
+ * NOT-194: true when the action is a merge-failure escalation (evidence carries
+ * `mergeFailure: true`). Pre-NOT-194 open merge-failure actions have no such evidence and
+ * read as ordinary policy_escalations — that is what keeps their `resume` path working.
+ */
+export function isMergeFailureAction(action: { evidenceJson: string | null }): boolean {
+  if (!action.evidenceJson) return false;
+  try {
+    return (JSON.parse(action.evidenceJson) as Record<string, unknown>)[MERGE_FAILURE_EVIDENCE_KEY] === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * NOT-221: parses the diverged-push facts off a policy_escalation's evidence. Null for
+ * every other action — including behind-only push evidence and legacy pre-NOT-221
+ * `unpushed_commit` escalations, which carry no structured facts at all.
+ */
+export function parsePushDivergenceEvidence(action: {
+  evidenceJson: string | null;
+}): PushDivergenceEvidence | null {
+  if (!action.evidenceJson) return null;
+  try {
+    const evidence = JSON.parse(action.evidenceJson) as Record<string, unknown>;
+    const facts = evidence[PUSH_DIVERGENCE_EVIDENCE_KEY] as PushDivergenceEvidence | undefined;
+    if (!facts || typeof facts !== "object") return null;
+    if (typeof facts.branch !== "string" || typeof facts.localSha !== "string") return null;
+    if (typeof facts.remoteSha !== "string") return null;
+    if (facts.relationship !== "diverged" && facts.relationship !== "behind") return null;
+    return facts;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * NOT-221: true when the action is a diverged-push escalation (evidence carries
+ * `pushDivergence` with relationship "diverged"). Pre-NOT-221 open unpushed_commit
+ * actions have no such evidence and read as ordinary policy_escalations — that is what
+ * keeps their `resume` path working.
+ */
+export function isPushDivergenceAction(action: { evidenceJson: string | null }): boolean {
+  return parsePushDivergenceEvidence(action)?.relationship === "diverged";
+}
+
+function shortPushSha(sha: string): string {
+  return sha.length > 12 ? sha.slice(0, 12) : sha;
+}
+
+/** NOT-221: true only for a diverged push — behind-only rejections keep resume/close. */
+function isDivergedPush(pushDivergence: PushDivergenceEvidence | null | undefined): boolean {
+  return pushDivergence?.relationship === "diverged";
+}
+
+function questionFor(
+  actionType: HumanActionType,
+  reason: string,
+  resumeAsReviewer = false,
+  mergeFailure = false,
+  pushDivergence: PushDivergenceEvidence | null = null
+): string {
   switch (actionType) {
     case "final_review":
       return "Merge this work, send it back for another repair round, or close it?";
     case "attempts_exhausted":
       return "The review-round limit is reached. Retry with a fresh round, or close the issue?";
     case "policy_escalation":
+      if (mergeFailure) return `${reason} Retry the merge, queue another repair round, or close the issue?`;
+      // NOT-221: the confirmation names the exact SHAs the lease-pinned push will use so
+      // the operator reviews the pin before one-clicking it.
+      if (isDivergedPush(pushDivergence)) {
+        const facts = pushDivergence!;
+        return (
+          `${reason} Push local ${shortPushSha(facts.localSha)} to origin/${facts.branch} ` +
+          `with a lease pinned at remote ${shortPushSha(facts.remoteSha)} ` +
+          `(local ${facts.ahead} commit(s) ahead, remote ${facts.behind} commit(s) ahead), ` +
+          `resume development, or close the issue?`
+        );
+      }
       return resumeAsReviewer
         ? `${reason} Retry the review, or close the issue?`
         : `${reason} Resume development, or close the issue?`;
@@ -953,7 +1147,8 @@ function questionFor(actionType: HumanActionType, reason: string, resumeAsReview
  * response_options_json as no options and renders nothing to resolve it with. */
 export function responseOptionsFor(
   actionType: HumanActionType,
-  resumeAsReviewer = false
+  resumeAsReviewer = false,
+  opts: { mergeFailure?: boolean; pushDivergence?: PushDivergenceEvidence | null } = {}
 ): Array<{ choice: string; label: string }> {
   switch (actionType) {
     case "final_review":
@@ -968,6 +1163,11 @@ export function responseOptionsFor(
         { choice: "close", label: "Close" },
       ];
     case "policy_escalation":
+      // NOT-194: a merge failure after approval offers retry/repair/close — never resume.
+      if (opts.mergeFailure) return [...MERGE_FAILURE_RESPONSE_OPTIONS];
+      // NOT-221: a diverged push offers the lease-pinned push alongside resume/close;
+      // behind-only (and every other) escalation keeps resume/close only.
+      if (isDivergedPush(opts.pushDivergence)) return [...PUSH_DIVERGENCE_RESPONSE_OPTIONS];
       return [
         { choice: "resume", label: resumeAsReviewer ? "Retry review" : "Resume development" },
         { choice: "close", label: "Close" },
@@ -1029,11 +1229,18 @@ export type ResolveResult =
  * `final_review:complete` parks for undraft+merge (same finalize as auto-merge) and
  * returns `pendingMerge: true` — callers that need the merge to finish must use
  * `resolveHumanActionAndAdvanceAsync` (HTTP/CLI) rather than this sync entry point alone.
+ *
+ * NOT-196: a `close` choice finishes as `done` instead of `closed` when
+ * `opts.externalMergeState` is "merged" — the PR landed outside Dealer, so the work is
+ * landed and dependents must be released. Any other state (or no pre-read at all)
+ * keeps today's `closed`. The `gh` read itself lives in the async wrapper
+ * (`resolveHumanActionAndAdvanceAsync`), never inside this transaction.
  */
 export function resolveHumanActionAndAdvance(
   actionId: string,
   resolvedBy: string,
-  choice: string
+  choice: string,
+  opts?: { externalMergeState?: ExternalMergeState }
 ): ResolveResult {
   const action = getHumanAction(actionId);
   if (!action) return { ok: false, code: 404, error: "Human action not found" };
@@ -1042,6 +1249,38 @@ export function resolveHumanActionAndAdvance(
   const resolution = parseHumanResolution(action.actionType, choice);
   if (!resolution) {
     return { ok: false, code: 400, error: `Invalid choice "${choice}" for ${action.actionType}` };
+  }
+  // NOT-194: narrow policy_escalation choices per action. A merge-failure action offers
+  // retry_merge/repair/close only (resume would re-run development on approved work);
+  // every other policy_escalation keeps resume/close only. Pre-NOT-194 open merge-failure
+  // actions carry no mergeFailure evidence, so they still accept resume here.
+  // NOT-221: same per-action narrowing for a diverged push — push_with_lease/resume/close
+  // only; behind-only and legacy unpushed_commit actions keep resume/close only.
+  if (resolution.actionType === "policy_escalation") {
+    const mergeFailure = isMergeFailureAction(action);
+    const divergedPush = !mergeFailure && isPushDivergenceAction(action);
+    const allowed = mergeFailure
+      ? ["retry_merge", "repair", "close"]
+      : divergedPush
+        ? ["push_with_lease", "resume", "close"]
+        : ["resume", "close"];
+    if (!allowed.includes(resolution.choice)) {
+      return {
+        ok: false,
+        code: 400,
+        error: `Invalid choice "${choice}" for ${mergeFailure ? "a merge-failure" : divergedPush ? "a diverged-push" : "this"} policy_escalation`,
+      };
+    }
+    // push_with_lease runs git before anything resolves (a failed lease must leave the
+    // action open), so it can only complete through resolveHumanActionAndAdvanceAsync —
+    // the sync entry point rejects it the way human-resolution's outcome map would.
+    if (resolution.choice === "push_with_lease") {
+      return {
+        ok: false,
+        code: 409,
+        error: "push_with_lease requires the async resolver: the lease push runs before the action resolves",
+      };
+    }
   }
   // parseHumanResolution already rejects every Run-scoped action type (NOT-95) above, so
   // every action reaching here is Issue-scoped — this narrows action.issueId for TS.
@@ -1053,10 +1292,13 @@ export function resolveHumanActionAndAdvance(
 
   // NOT-102 / NOT-150: human Merge (or legacy "complete") must undraft+merge.
   // Park like auto-merge, then the async wrapper runs finalizeAutoMerge outside this txn.
+  // NOT-194: a merge-failure retry_merge parks the same way — the old action is resolved
+  // first, so a second failure escalates exactly one fresh action with the new reason.
   if (
     instance &&
-    resolution.actionType === "final_review" &&
-    (resolution.choice === "merge" || resolution.choice === "complete")
+    ((resolution.actionType === "final_review" &&
+      (resolution.choice === "merge" || resolution.choice === "complete")) ||
+      (resolution.actionType === "policy_escalation" && resolution.choice === "retry_merge"))
   ) {
     return getDb().transaction((): ResolveResult => {
       resolveHumanAction(actionId, resolvedBy, { choice });
@@ -1066,9 +1308,9 @@ export function resolveHumanActionAndAdvance(
         type: "human_action.resolved",
         actorType: "human",
         actorRef: resolvedBy,
-        stage: "final_review",
+        stage: resolution.actionType === "final_review" ? "final_review" : issue.status,
         round: issue.currentRound,
-        payload: { actionType: "final_review", choice: resolution.choice, pendingMerge: true },
+        payload: { actionType: action.actionType, choice: resolution.choice, pendingMerge: true },
       });
       transitionIssue(issue.id, "final_review", {
         currentOwner: "system",
@@ -1160,25 +1402,55 @@ export function resolveHumanActionAndAdvance(
       : issue.currentRound;
   const resumeStatus = resumeAsReviewer ? "reviewing" : outcome.issueStatus;
 
+  // NOT-196: a close on an issue whose PR is MERGED on GitHub lands as done — the
+  // code is on the base branch, so dependents must be released. Only a confirmed merge
+  // upgrades; open / closed-unmerged / unreadable ("unknown") / no pre-read all stay
+  // closed. The PR number gates the upgrade so a merged state can never apply to an
+  // issue that never had a PR, and the status-machine gate keeps it to statuses with
+  // a →done edge (close actions park at needs_human/final_review, both of which have
+  // one) so the upgrade can never throw inside the transaction.
+  const prMerged =
+    outcome.workflowOutcome === "closed" && opts?.externalMergeState === "merged" && issue.prNumber != null;
+  const externallyMerged = prMerged && canTransitionIssue(issue.status, "done");
+  const closeHasPr = outcome.workflowOutcome === "closed" && issue.prNumber != null;
+  // Extra audit keys on the close resolution only — every other outcome keeps today's
+  // exact payload.
+  const closeResolutionExtra: Record<string, unknown> = !closeHasPr
+    ? {}
+    : externallyMerged
+      ? { prNumber: issue.prNumber, prState: "MERGED", externalMerge: true }
+      : opts?.externalMergeState === "unknown"
+        ? { prNumber: issue.prNumber, prMergeStateUnknown: true }
+        : prMerged
+          ? {
+              prNumber: issue.prNumber,
+              prState: "MERGED",
+              doneTransitionBlocked: `no ${issue.status} → done edge`,
+            }
+          : {};
+
   return getDb().transaction((): ResolveResult => {
     resolveHumanAction(actionId, resolvedBy, { choice });
-    // stage must be the status this resolution actually lands on (resumeStatus), not the
+    // stage must be the status this resolution actually lands on (finalStatus), not the
     // generic developer-resume outcome.issueStatus — otherwise a reviewer resume's own
     // human_action.resolved/repair.started events would be recorded under "developing"
     // even though the issue transitions to "reviewing".
-    const ev = eventEmitter(issue, instance, null, resumeStatus, issue.currentRound);
+    const finalStatus = externallyMerged ? "done" : resumeStatus;
+    const ev = eventEmitter(issue, instance, null, finalStatus, issue.currentRound);
     ev.emit("human_action.resolved", {
       actorType: "human",
-      payload: { actionType: action.actionType, choice },
+      payload: { actionType: action.actionType, choice, ...closeResolutionExtra },
     });
 
-    transitionIssue(issue.id, resumeStatus, {
+    transitionIssue(issue.id, finalStatus, {
       currentOwner:
-        resumeStatus === "done" || resumeStatus === "closed" ? "system" : resumeAsReviewer ? "reviewer" : "developer",
+        finalStatus === "done" || finalStatus === "closed" ? "system" : resumeAsReviewer ? "reviewer" : "developer",
       currentIntent:
-        resumeStatus === "done"
-          ? "Complete"
-          : resumeStatus === "closed"
+        finalStatus === "done"
+          ? externallyMerged
+            ? "Merged outside Dealer"
+            : "Complete"
+          : finalStatus === "closed"
             ? "Closed"
             : resumeAsReviewer
               ? `Reviewer re-evaluating at ${continuation!.resumeHeadSha!.slice(0, 8)}`
@@ -1186,15 +1458,36 @@ export function resolveHumanActionAndAdvance(
     });
 
     if (outcome.workflowOutcome) {
-      completeWorkflowInstance(instance.id, outcome.workflowOutcome);
-      ev.emit(outcome.workflowOutcome === "done" ? "issue.completed" : "issue.closed");
+      const finalOutcome = externallyMerged ? "done" : outcome.workflowOutcome;
+      completeWorkflowInstance(instance.id, finalOutcome);
+      if (externallyMerged) {
+        ev.emit("issue.completed", {
+          payload: { externalMerge: true, prNumber: issue.prNumber, prState: "MERGED" },
+        });
+      } else if (finalOutcome === "done") {
+        ev.emit("issue.completed");
+      } else if (opts?.externalMergeState === "unknown" && issue.prNumber != null) {
+        ev.emit("issue.closed", {
+          payload: { prNumber: issue.prNumber, prMergeStateUnknown: true },
+        });
+      } else if (prMerged) {
+        ev.emit("issue.closed", {
+          payload: {
+            prNumber: issue.prNumber,
+            prState: "MERGED",
+            doneTransitionBlocked: `no ${issue.status} → done edge`,
+          },
+        });
+      } else {
+        ev.emit("issue.closed");
+      }
       return {
         ok: true,
         issueStatus: getIssue(issue.id)!.status,
         nextWorkItemId: null,
         instanceCompleted: true,
         restarted: false,
-        triggerReflect: outcome.triggerReflect === true,
+        triggerReflect: outcome.triggerReflect === true || externallyMerged,
       };
     }
 
@@ -1217,6 +1510,14 @@ export function resolveHumanActionAndAdvance(
         break;
     }
     const issueNow = getIssue(issue.id)!;
+    // NOT-185: freeze before queuing so the next developer prompt and the reviewer both
+    // read the re-scoped task. An unedited issue writes nothing.
+    if (action.actionType === "attempts_exhausted" && resolution.choice === "retry") {
+      const changedFields = refreshTaskSnapshotIfEdited(issueNow);
+      if (changedFields.length > 0) {
+        ev.emit("task_snapshot.refreshed", { actorType: "human", payload: { actionId: action.id, changedFields } });
+      }
+    }
     // A reviewer resume is a retry of the review, not a repair round — mirrors
     // projection.ts's own retry_reviewer, which likewise emits no "started" marker.
     if (!resumeAsReviewer) ev.emit("repair.started");
@@ -1260,7 +1561,17 @@ export async function resolveHumanActionAndAdvanceAsync(
   resolvedBy: string,
   choice: string
 ): Promise<ResolveResult> {
-  const result = resolveHumanActionAndAdvance(actionId, resolvedBy, choice);
+  // NOT-221: the lease push runs before anything resolves — a failed lease must leave
+  // the action open with the fresh tip, which the sync core below cannot do.
+  if (choice === "push_with_lease") {
+    return resolvePushWithLeaseAsync(actionId, resolvedBy);
+  }
+  // NOT-196: the `gh` PR-state read runs here, outside any DB transaction — the sync
+  // core below only consumes the pre-read state. Only close choices on issues with a
+  // PR number pay for the call; anything unreadable resolves to "unknown" (or
+  // undefined when there is nothing to check), both of which keep today's `closed`.
+  const externalMergeState = await preReadExternalMergeState(actionId, choice);
+  const result = resolveHumanActionAndAdvance(actionId, resolvedBy, choice, { externalMergeState });
   if (!result.ok || !result.pendingMerge) return result;
 
   const action = getHumanAction(actionId);
@@ -1277,6 +1588,138 @@ export async function resolveHumanActionAndAdvanceAsync(
     restarted: false,
     triggerReflect: merged.triggerReflect,
   };
+}
+
+/**
+ * NOT-221: resolves a diverged-push `push_with_lease` choice. The lease-pinned push
+ * runs FIRST, from the preserved worktree (or the issue checkout when that is gone):
+ * the pin is the exact remote tip the operator reviewed, so a moved origin fails the
+ * push and nothing is published. Only a successful push resolves the action — then the
+ * workflow continues at PR/checks verification via a publish-only developer work item
+ * at the current round (no review round spent, no new agent round), exactly the path a
+ * post-push `adapter_failure` retry would have taken.
+ */
+async function resolvePushWithLeaseAsync(actionId: string, resolvedBy: string): Promise<ResolveResult> {
+  const action = getHumanAction(actionId);
+  if (!action) return { ok: false, code: 404, error: "Human action not found" };
+  if (action.status !== "open") return { ok: false, code: 409, error: "Human action already resolved" };
+  if (action.actionType !== "policy_escalation") {
+    return { ok: false, code: 400, error: `Invalid choice "push_with_lease" for ${action.actionType}` };
+  }
+  const facts = parsePushDivergenceEvidence(action);
+  if (!facts || facts.relationship !== "diverged") {
+    return {
+      ok: false,
+      code: 400,
+      error: 'Invalid choice "push_with_lease" for a non-diverged policy_escalation',
+    };
+  }
+  if (!action.issueId) return { ok: false, code: 500, error: "Human action has no issue" };
+  const issue = getIssue(action.issueId);
+  if (!issue) return { ok: false, code: 404, error: "Issue not found" };
+  const instance = getActiveWorkflowInstance(action.issueId);
+  if (!instance) return { ok: false, code: 409, error: "No active workflow for this action" };
+
+  // Prefer the preserved worktree the push originally ran from — its object store
+  // provably holds the recorded local SHA. Fall back to the issue checkout (which shares
+  // refs with coordinator worktrees) when the worktree is gone.
+  let cwd: string | null = facts.worktreePath && fs.existsSync(facts.worktreePath) ? facts.worktreePath : null;
+  if (!cwd) {
+    try {
+      cwd = (await ensureIssueRepoCheckout(issue.repo)).repoPath;
+    } catch (err) {
+      return {
+        ok: false,
+        code: 409,
+        error: `Push with lease could not run: the preserved worktree is gone and the issue checkout failed: ${(err as Error).message}`,
+      };
+    }
+  }
+
+  const pushed = await pushLeaseToSha({
+    cwd,
+    branch: facts.branch,
+    localSha: facts.localSha,
+    remoteSha: facts.remoteSha,
+  });
+  if (!pushed.ok) {
+    // The pin no longer matches: origin moved (or is unreachable) and git published
+    // nothing. Keep the original pin — refreshing it would publish over remote commits
+    // the operator never reviewed — and surface the freshly observed tip on the
+    // still-open action instead.
+    const tip = await readRemoteTip({ cwd, branch: facts.branch });
+    const leaseError = pushed.reason.replace(/\s+/g, " ").trim().slice(0, 300);
+    const tipText =
+      tip && tip !== facts.remoteSha
+        ? `origin/${facts.branch} is now at ${tip}`
+        : tip
+          ? `origin/${facts.branch} is still at the recorded pin ${shortPushSha(facts.remoteSha)} (the remote may be unreachable)`
+          : `origin/${facts.branch} could not be resolved`;
+    const suffix =
+      ` Push with lease failed (${leaseError}). ${tipText}, so nothing was published — ` +
+      `re-check the remote tip, then retry, resume, or close.`;
+    updateOpenHumanAction(actionId, {
+      reason: `${action.reason}${suffix}`,
+      question: `${action.question}${suffix}`,
+      evidence: {
+        [PUSH_DIVERGENCE_EVIDENCE_KEY]: {
+          ...facts,
+          ...(tip && tip !== facts.remoteSha ? { observedRemoteSha: tip } : {}),
+          lastLeaseError: leaseError,
+        },
+      },
+    });
+    return {
+      ok: false,
+      code: 409,
+      error: `Push with lease failed: ${leaseError}. ${tipText}; the action stays open.`,
+    };
+  }
+
+  return getDb().transaction((): ResolveResult => {
+    resolveHumanAction(actionId, resolvedBy, { choice: "push_with_lease" });
+    const ev = eventEmitter(issue, instance, null, "developing", issue.currentRound);
+    ev.emit("human_action.resolved", {
+      actorType: "human",
+      payload: { actionType: action.actionType, choice: "push_with_lease" },
+    });
+    ev.emit("branch.pushed", {
+      actorType: "developer",
+      payload: {
+        branch: facts.branch,
+        localSha: facts.localSha,
+        leasePin: facts.remoteSha,
+        withLease: true,
+      },
+    });
+    transitionIssue(issue.id, "developing", {
+      currentOwner: "developer",
+      currentIntent: `Publishing ${facts.branch} with lease (no agent) — verifying PR/checks`,
+    });
+    // Publish-only continuation at the current round: the commits are already on the
+    // remote, so the work item redoes gh/PR/checks only — no repair round is consumed
+    // and no agent is spawned.
+    const next = enqueueWorkItem({
+      issueId: issue.id,
+      workflowInstanceId: instance.id,
+      kind: "developer",
+      round: issue.currentRound,
+      payload: {
+        publishOnly: true,
+        branch: facts.branch,
+        profileSnapshot: queuedProfileSnapshot(issue, "developer"),
+      },
+      idempotencyKey: `${instance.id}:developer:push-with-lease:${action.id}`,
+    });
+    return {
+      ok: true,
+      issueStatus: getIssue(issue.id)!.status,
+      nextWorkItemId: next.id,
+      instanceCompleted: false,
+      restarted: false,
+      triggerReflect: false,
+    };
+  })();
 }
 
 /**
@@ -1390,7 +1833,12 @@ interface AbortTxResult {
  * own lease-token-fenced finishWorkItem CAS simply stops matching when it eventually calls
  * applyCompletion.
  */
-export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssueDeps = defaultAbortDeps): AbortResult {
+export function abortIssue(
+  issueId: string,
+  resolvedBy: string,
+  deps: AbortIssueDeps = defaultAbortDeps,
+  opts?: { externalMergeState?: ExternalMergeState }
+): AbortResult {
   if (!getIssue(issueId)) return { ok: false, code: 404, error: "Issue not found" };
 
   const tx = getDb().transaction((): AbortTxResult => {
@@ -1424,19 +1872,44 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
       }
     }
 
-    transitionIssue(issueId, "closed", { currentOwner: "system", currentIntent: "Aborted by operator" });
-    if (instance) completeWorkflowInstance(instance.id, "closed");
+    // NOT-196: aborting an issue whose PR already merged outside Dealer lands it as
+    // done so dependents are released. Only a confirmed merge upgrades — an unreadable
+    // state ("unknown") or no PR keeps today's `closed`, with the unknown case noted
+    // in the event. The PR number gates the upgrade, as in the resolve path, and the
+    // status-machine gate keeps it to statuses with a →done edge (abort, unlike the
+    // resolve path, can fire from any status — e.g. developing — where no such edge
+    // exists; there the abort stays closed but the event still names the merged PR so
+    // the operator can see why, and a follow-up could add the edge).
+    const prMerged = opts?.externalMergeState === "merged" && issue.prNumber != null;
+    const externallyMerged = prMerged && canTransitionIssue(issue.status, "done");
+    const finalStatus = externallyMerged ? "done" : "closed";
+    transitionIssue(issueId, finalStatus, {
+      currentOwner: "system",
+      currentIntent: externallyMerged ? "Merged outside Dealer" : "Aborted by operator",
+    });
+    if (instance) completeWorkflowInstance(instance.id, externallyMerged ? "done" : "closed");
     appendWorkflowEvent({
       issueId,
       workflowInstanceId: instance?.id ?? null,
-      type: "issue.closed",
+      type: externallyMerged ? "issue.completed" : "issue.closed",
       actorType: "human",
       actorRef: resolvedBy,
-      stage: "closed",
-      payload: { reason: "aborted_by_user" },
+      stage: finalStatus,
+      payload: externallyMerged
+        ? { reason: "aborted_by_user", externalMerge: true, prNumber: issue.prNumber, prState: "MERGED" }
+        : prMerged
+          ? {
+              reason: "aborted_by_user",
+              prNumber: issue.prNumber,
+              prState: "MERGED",
+              doneTransitionBlocked: `no ${issue.status} → done edge`,
+            }
+          : opts?.externalMergeState === "unknown" && issue.prNumber != null
+            ? { reason: "aborted_by_user", prNumber: issue.prNumber, prMergeStateUnknown: true }
+            : { reason: "aborted_by_user" },
     });
 
-    return { alreadyClosed: false, issueStatus: "closed", runningSessionIds: running };
+    return { alreadyClosed: false, issueStatus: finalStatus, runningSessionIds: running };
   })();
 
   // Outside the transaction, per the ticket contract: terminating a child process is not
@@ -1444,4 +1917,49 @@ export function abortIssue(issueId: string, resolvedBy: string, deps: AbortIssue
   for (const sessionId of tx.runningSessionIds) deps.killProcess(sessionId);
 
   return { ok: true, issueStatus: tx.issueStatus, alreadyClosed: tx.alreadyClosed };
+}
+
+/**
+ * NOT-196 HTTP/CLI entry for abort: same as `abortIssue`, but pre-reads the PR merge
+ * state outside the transaction first so an externally-merged PR lands the issue as
+ * `done`. Issues without a PR number skip the `gh` call entirely.
+ */
+export async function abortIssueAsync(
+  issueId: string,
+  resolvedBy: string,
+  deps: AbortIssueDeps = defaultAbortDeps
+): Promise<AbortResult> {
+  let externalMergeState: ExternalMergeState | undefined;
+  try {
+    const issue = getIssue(issueId);
+    if (issue && issue.prNumber != null) {
+      externalMergeState = await externalMergeStateForIssue(issue);
+    }
+  } catch {
+    externalMergeState = undefined;
+  }
+  return abortIssue(issueId, resolvedBy, deps, { externalMergeState });
+}
+
+/**
+ * NOT-196 pre-read for the async close entry: returns a PR merge state only when this
+ * resolution is a `close` choice on an issue that actually has a PR number — otherwise
+ * undefined, which keeps the sync core on today's behavior with no `gh` call. Never
+ * throws: lookup failures mean "nothing to check".
+ */
+async function preReadExternalMergeState(
+  actionId: string,
+  choice: string
+): Promise<ExternalMergeState | undefined> {
+  try {
+    const action = getHumanAction(actionId);
+    if (!action || action.status !== "open" || !action.issueId) return undefined;
+    const resolution = parseHumanResolution(action.actionType, choice);
+    if (!resolution || resolution.choice !== "close") return undefined;
+    const issue = getIssue(action.issueId);
+    if (!issue || issue.prNumber == null) return undefined;
+    return await externalMergeStateForIssue(issue);
+  } catch {
+    return undefined;
+  }
 }
