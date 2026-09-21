@@ -23,6 +23,7 @@ export * from "./usage-events.js";
 export * from "./runtime-availability.js";
 export * from "./queue-entries.js";
 export * from "./execution-analysis.js";
+export * from "./execution-report.js";
 
 export const RunStatus = z.enum([
   "queued",
