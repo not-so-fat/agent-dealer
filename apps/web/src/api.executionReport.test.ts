@@ -8,6 +8,11 @@ import { fixtureReport } from "./lib/executionReport.fixture.js";
 
 let lastUrl: string | null = null;
 
+function seen(): string {
+  assert.ok(lastUrl !== null, "fetch was called");
+  return lastUrl;
+}
+
 type StubMode =
   | { kind: "ok"; body: unknown }
   | { kind: "error"; status: number; body: unknown };
@@ -42,23 +47,22 @@ beforeEach(() => {
 
 test("filters serialize into the report URL; defaults stay out", async () => {
   await fetchExecutionAnalysis({ runtime: "cursor_local", role: "reviewer", page: 1 });
-  assert.ok(lastUrl !== null);
-  assert.ok(lastUrl.startsWith("/api/execution-report"), lastUrl);
-  assert.ok(lastUrl.includes("runtime=cursor_local"), lastUrl);
-  assert.ok(lastUrl.includes("role=reviewer"), lastUrl);
-  assert.ok(!lastUrl.includes("page="), lastUrl);
+  assert.ok(seen().startsWith("/api/execution-report"), seen());
+  assert.ok(seen().includes("runtime=cursor_local"), seen());
+  assert.ok(seen().includes("role=reviewer"), seen());
+  assert.ok(!seen().includes("page="), seen());
 });
 
 test("empty filters request the bare report path (API default window)", async () => {
   await fetchExecutionAnalysis({});
-  assert.equal(lastUrl, "/api/execution-report");
+  assert.equal(seen(), "/api/execution-report");
 });
 
 test("explicit dates and pagination survive into the query string", async () => {
   await fetchExecutionAnalysis({ from: "2026-09-01T00:00:00.000Z", repo: "github.com/acme/app", page: 3 });
-  assert.ok(lastUrl!.includes("from=2026-09-01T00%3A00%3A00.000Z"), lastUrl);
-  assert.ok(lastUrl!.includes("repo=github.com%2Facme%2Fapp"), lastUrl);
-  assert.ok(lastUrl!.includes("page=3"), lastUrl);
+  assert.ok(seen().includes("from=2026-09-01T00%3A00%3A00.000Z"), seen());
+  assert.ok(seen().includes("repo=github.com%2Facme%2Fapp"), seen());
+  assert.ok(seen().includes("page=3"), seen());
 });
 
 test("server error status throws the server message", async () => {
@@ -73,7 +77,7 @@ test("unexpected shapes throw instead of rendering garbage", async () => {
 
 test("valid payloads pass through with values intact", async () => {
   const report = await fetchExecutionAnalysis({ model: "opus" });
-  assert.ok(lastUrl!.includes("model=opus"), lastUrl);
+  assert.ok(seen().includes("model=opus"), seen());
   assert.equal(report.summary.issues, 2);
   assert.equal(report.byRuntime[0]!.failedCostUsd.sum, 1.5);
 });
