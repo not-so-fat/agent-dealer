@@ -17,13 +17,13 @@
   --font-sans: Monaco, "Nunito Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: Monaco, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
-  /* NOT-216: single display-font token for navigational/interactive UI chrome.
-   * Defined ONLY here: Tailwind v4 emits this @theme variable into :root and
-   * generates the `font-ui-display` utility from it, so every opted-in label
-   * switches together by editing this one line. System faces only — Optima is
-   * the initial candidate, non-Apple platforms use the declared fallbacks.
+  /* NOT-216 / NOT-222: single display-font token for navigational/interactive
+   * UI chrome only. Defined ONLY here: Tailwind v4 emits this @theme variable
+   * into :root and generates the `font-ui-display` utility from it, so every
+   * opted-in label switches together by editing this one line. System faces
+   * only — Avenir-first stack, non-Apple platforms use the declared fallbacks.
    * Operational content (titles, values, badges, logs) stays Monaco. */
-  --font-ui-display: Optima, Candara, "Segoe UI", system-ui, sans-serif;
+  --font-ui-display: "Avenir Next", Avenir, "Helvetica Neue", system-ui, sans-serif;
 
   --color-cyber-gold: #c4b643;
   --color-cyber-teal: #92e4dd;
@@ -124,9 +124,25 @@ body {
   -webkit-backdrop-filter: blur(12px);
 }
 
-/* agent-deck field primitives */
+/* agent-deck field primitives.
+ * NOT-222: form values and operational choices stay Monaco — every
+ * input/select/textarea (and the shared .field primitive) renders through
+ * the mono token, never the display token. */
 .field {
   @apply w-full rounded border border-white/10 bg-white/[0.03] text-[#E8F6F4] px-3 py-2 text-base backdrop-blur-sm;
+  font-family: var(--font-mono);
+}
+
+input,
+select,
+textarea {
+  font-family: var(--font-mono);
+}
+
+/* NOT-222: button labels are UI chrome — render through the display token
+ * (reference, never a hard-coded face). */
+button {
+  font-family: var(--font-ui-display);
 }
 
 .panel {
