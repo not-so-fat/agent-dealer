@@ -49,6 +49,16 @@ export function actionContextLines(action: HumanAction): string[] {
     review?: { verdict?: string; findings?: unknown[] };
     serviceId?: string;
     toolName?: string;
+    pushDivergence?: {
+      branch?: string;
+      localSha?: string;
+      remoteSha?: string;
+      ahead?: number;
+      behind?: number;
+      relationship?: string;
+      observedRemoteSha?: string;
+      lastLeaseError?: string;
+    };
   }>(action.evidenceJson);
   const continuation = parseJson<{ resumeRole?: string; resumeHeadSha?: string | null }>(
     action.continuationPreviewJson
@@ -62,6 +72,22 @@ export function actionContextLines(action: HumanAction): string[] {
   }
   if (evidence?.serviceId || evidence?.toolName) {
     lines.push(`Delivery: ${[evidence.serviceId, evidence.toolName].filter(Boolean).join(" · ")}`);
+  }
+  // NOT-221: diverged-push escalations show the exact SHAs the Push-with-lease button
+  // would publish (local) and pin against (remote), plus the freshest observed tip
+  // after a failed lease — so the operator never has to leave the list to judge it.
+  const push = evidence?.pushDivergence;
+  if (push && typeof push.localSha === "string" && typeof push.remoteSha === "string") {
+    const branch = typeof push.branch === "string" ? push.branch : "the branch";
+    const ahead = typeof push.ahead === "number" ? ` (+${push.ahead})` : "";
+    const behind = typeof push.behind === "number" ? ` (+${push.behind})` : "";
+    lines.push(`Push: local ${push.localSha}${ahead} · origin/${branch} ${push.remoteSha}${behind}`);
+    if (typeof push.observedRemoteSha === "string" && push.observedRemoteSha !== push.remoteSha) {
+      lines.push(`Remote moved: origin/${branch} is now at ${push.observedRemoteSha}`);
+    }
+    if (typeof push.lastLeaseError === "string" && push.lastLeaseError) {
+      lines.push(`Last lease attempt: ${push.lastLeaseError}`);
+    }
   }
   if (continuation?.resumeRole) {
     lines.push(
