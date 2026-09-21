@@ -88,6 +88,9 @@ export async function runCli(argv: string[]): Promise<number> {
       else if (arg === "--force") force = true;
       else if (arg === "--_supervisor") supervisor = true;
       else {
+        if (!supervisor && !args.includes("--_supervisor") && process.env.AGENT_DEALER_SUPERVISOR !== "1") {
+          console.log(`Agent Dealer version ${getVersion()}`);
+        }
         console.error(`Unknown start option: ${arg}`);
         return 1;
       }
