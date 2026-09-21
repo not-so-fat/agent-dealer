@@ -19,6 +19,7 @@ import {
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
 import AgentAssignmentEditor from "../components/issues/AgentAssignmentEditor";
 import IssueTimeline from "../components/issues/IssueTimeline";
+import ExecutionAnalysisSection from "../components/issues/ExecutionAnalysisSection";
 import HumanActionChoices from "../components/issues/HumanActionChoices";
 import { parseResponseOptions } from "../lib/humanActions";
 
@@ -661,6 +662,11 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
             )}
           </div>
         )}
+
+        {/* NOT-174: operator-facing where-time-went explanation; the live strip,
+            failure strip, branch tip, actions, evidence, and timeline above/below
+            are unchanged. */}
+        <ExecutionAnalysisSection issueId={issueId} />
 
         <div className="border-t border-white/10 pt-3">
           <IssueTimeline events={timeline} />

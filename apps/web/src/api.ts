@@ -10,6 +10,7 @@ import type {
   Finding,
   HumanAction,
   Issue,
+  IssueExecutionAnalysis,
   IssueStatus,
   LinearCandidate,
   QueueMoveTarget,
@@ -214,6 +215,12 @@ export async function fetchRecentRepos(): Promise<string[]> {
 
 export async function fetchIssueDetail(id: string): Promise<IssueDetail> {
   const res = await fetch(`${API}/api/issues/${id}`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
+export async function fetchIssueExecutionAnalysis(id: string): Promise<IssueExecutionAnalysis> {
+  const res = await fetch(`${API}/api/issues/${id}/execution-analysis`);
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
 }
