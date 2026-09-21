@@ -2,6 +2,14 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.1.7 — 2026-09-21
+
+Patch over 1.1.6: restores the AgentDealer name in the dashboard header.
+
+### UI
+
+- **AgentDealer header name restored (NOT-231)** — the dashboard header shows **AgentDealer** again (link name and title "AgentDealer — go to Issues", still linking to `/issues`), reverting the 1.1.6 header display name "Monaco". The wordmark uses the existing Monaco-backed `font-mono` token, so it stays in the Monaco typeface. Issues still comes before Reports in the nav, and Agents placement is unchanged.
+
 ## 1.1.6 — 2026-09-21
 
 Patch over 1.1.5: a filterable, paginated Issues list, a more readable Execution report, and a tidier navigation shell.
