@@ -87,3 +87,23 @@ export type StartIssueResponse =
       workItem: { id: string; kind: string };
     }
   | { state: "queued"; position: number; waitReason: string | null };
+
+/**
+ * NOT-217 `POST /api/issues/:id/execute` response. Execute now bypasses queue order
+ * only: it admits immediately when eligible with free capacity, and otherwise refuses
+ * with the reason — never enqueuing, moving, or reordering. `queued`/`position` report
+ * the untouched queue state so the caller can show where the issue still waits.
+ */
+export type ExecuteIssueResponse =
+  | {
+      state: "admitted";
+      instance: WorkflowInstance;
+      workItem: { id: string; kind: string };
+    }
+  | {
+      state: "refused";
+      reason: string;
+      queued: boolean;
+      position: number | null;
+      waitReason: string | null;
+    };

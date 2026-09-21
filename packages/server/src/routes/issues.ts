@@ -4,10 +4,13 @@ import type { FastifyInstance } from "fastify";
 import {
   CreateIssueInput,
   type CreateIssueResult,
+  type ExecuteIssueResponse,
   type ExistingIssueConflict,
+  type Issue,
   IssueStatus,
   UpdateIssueInput,
 } from "@agent-dealer/shared";
+import { getDb } from "../db/index.js";
 import { createIssue, getIssue, listIssues, findActiveIssueByExternalId, listIssuesByExternalId, updateIssue, listRecentRepos } from "../repository/issues.js";
 import { listWorkerSessionsForIssue, getActiveWorkerSessionForIssue } from "../repository/worker-sessions.js";
 import { getIssueArtifact, listArtifactsForIssue } from "../repository/artifacts-for-issue.js";
@@ -21,7 +24,13 @@ import {
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { abortIssueAsync, canEditParkedIssue, checkIssueReadiness } from "../coordinator/commands.js";
-import { isStartable, queueStatusForIssue, startIssueViaQueue } from "../coordinator/admission.js";
+import {
+  executeIssueNow,
+  isStartable,
+  queueStatusForIssue,
+  refreshQueueWaitReasonForIssue,
+  startIssueViaQueue,
+} from "../coordinator/admission.js";
 import { computeHumanWaitMs } from "../coordinator/metrics.js";
 import { enqueueIssue, enqueueIssueWithOutcome, getQueuedEntryForIssue } from "../repository/queue-entries.js";
 import { latestSessionFailureForIssue } from "../coordinator/latest-failure.js";
@@ -221,25 +230,76 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     // what a queued/running session already saw — and "no active instance" alone isn't
     // enough to allow it: a completed/closed issue also has none, but its history must
     // stay immutable too.
-    if (issue.status !== "ready" && issue.status !== "needs_human") {
-      return reply.status(409).send({ error: `Cannot edit an issue that is ${issue.status}` });
-    }
-    // NOT-185: the one active-workflow exception — parked at an open attempts_exhausted
-    // action with nothing pending/leased. Retry re-freezes the snapshot from these fields.
-    if (getActiveWorkflowInstance(id)) {
-      if (!canEditParkedIssue(issue)) {
-        return reply.status(409).send({ error: "Cannot edit an issue with an active workflow" });
+    //
+    // NOT-217: the guard runs twice — once here for the fast path, once inside the
+    // write transaction below. An admission between the two (the editor open while the
+    // issue starts elsewhere) must answer 409 and never mutate the frozen snapshot.
+    const guardConflict = (fresh: Issue): string | null => {
+      if (fresh.status !== "ready" && fresh.status !== "needs_human") {
+        return `Cannot edit an issue that is ${fresh.status}`;
       }
-      // Only the fields the snapshot is frozen from may change at the park: the review budget,
-      // repo/base branch, agents and autoMerge stay as the running workflow saw them.
-      const blocked = Object.keys(parsed.data).filter((k) => !PARKED_EDITABLE_FIELDS.has(k));
-      if (blocked.length > 0) {
-        return reply.status(409).send({
-          error: `Only title, description and acceptanceCriteria can be edited while parked at attempts_exhausted (got: ${blocked.join(", ")})`,
-        });
+      // NOT-185: the one active-workflow exception — parked at an open attempts_exhausted
+      // action with nothing pending/leased. Retry re-freezes the snapshot from these fields.
+      if (getActiveWorkflowInstance(id)) {
+        if (!canEditParkedIssue(fresh)) {
+          return "Cannot edit an issue with an active workflow";
+        }
+        // Only the fields the snapshot is frozen from may change at the park: the review budget,
+        // repo/base branch, agents and autoMerge stay as the running workflow saw them.
+        const blocked = Object.keys(parsed.data).filter((k) => !PARKED_EDITABLE_FIELDS.has(k));
+        if (blocked.length > 0) {
+          return `Only title, description and acceptanceCriteria can be edited while parked at attempts_exhausted (got: ${blocked.join(", ")})`;
+        }
       }
+      return null;
+    };
+    const fastPath = guardConflict(issue);
+    if (fastPath) return reply.status(409).send({ error: fastPath });
+
+    // Guard re-check + row write + `issue.reassigned` audit in one transaction, so an
+    // edit that races admission fails closed instead of landing on a live snapshot.
+    // Queue order is untouched (updateIssue never writes queue_entries) — position is
+    // preserved by construction.
+    let updated: Issue;
+    try {
+      updated = getDb().transaction((): Issue => {
+        const fresh = getIssue(id);
+        if (!fresh) throw Object.assign(new Error("Not found"), { code: 404 });
+        const conflict = guardConflict(fresh);
+        if (conflict) throw Object.assign(new Error(conflict), { code: 409 });
+        const next = updateIssue(id, parsed.data);
+        // NOT-217: durable reassignment audit — only when an assignment actually changed,
+        // comparing against the freshly read row so a concurrent edit is attributed exactly.
+        if (
+          fresh.developerAgentId !== next.developerAgentId ||
+          fresh.reviewerAgentId !== next.reviewerAgentId
+        ) {
+          appendWorkflowEvent({
+            issueId: id,
+            type: "issue.reassigned",
+            actorType: "human",
+            stage: next.status,
+            payload: {
+              fromDeveloperAgentId: fresh.developerAgentId,
+              toDeveloperAgentId: next.developerAgentId,
+              fromReviewerAgentId: fresh.reviewerAgentId,
+              toReviewerAgentId: next.reviewerAgentId,
+            },
+          });
+        }
+        return next;
+      })();
+    } catch (err) {
+      const code = (err as { code?: number }).code;
+      const message = err instanceof Error ? err.message : String(err);
+      if (code === 404) return reply.status(404).send({ error: message });
+      if (code === 409) return reply.status(409).send({ error: message });
+      throw err;
     }
-    return updateIssue(id, parsed.data);
+    // NOT-217: a queued issue keeps its position; re-derive the visible wait reason now
+    // that admission may see a different (e.g. healthy) agent.
+    await refreshQueueWaitReasonForIssue(id);
+    return updated;
   });
 
   /**
@@ -252,6 +312,34 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     const result = await startIssueViaQueue(id);
     if (result.state === "error") return reply.status(result.code).send({ error: result.error });
     return result;
+  });
+
+  /**
+   * NOT-217 Execute now: strict direct admission — bypasses queue order only, never
+   * capacity, readiness, blockers, agent health, or the frozen-snapshot guard. Refuses
+   * with the reason (and the untouched queue state) instead of degrading into Run next:
+   * no enqueue, no move, no reorder on any failure path.
+   */
+  app.post("/api/issues/:id/execute", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const result = await executeIssueNow(id);
+    if (result.state === "error") return reply.status(result.code).send({ error: result.error });
+    if (result.state === "admitted") {
+      return {
+        state: "admitted",
+        instance: result.instance,
+        workItem: result.workItem,
+      } satisfies ExecuteIssueResponse;
+    }
+    const queued = queueStatusForIssue(id);
+    return reply.status(409).send({
+      error: result.reason,
+      state: "refused",
+      reason: result.reason,
+      queued: queued != null,
+      position: queued?.position ?? null,
+      waitReason: queued?.waitReason ?? null,
+    } satisfies ExecuteIssueResponse & { error: string });
   });
 
   app.post("/api/issues/:id/abort", async (req, reply) => {
