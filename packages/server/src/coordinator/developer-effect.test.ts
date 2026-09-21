@@ -1442,6 +1442,163 @@ test("NOT-130: receipt is dropped from the retry prompt when HEAD moved after it
   assert.doesNotMatch(prompts[1]!, /Prior verification receipt/);
 });
 
+test("NOT-219: a repair round after a side-branch round 1 starts at the pushed tip and pushes fast-forward", async () => {
+  // The NOT-171 incident end to end: round 1's worker commits on a side branch, so the
+  // clone's local issue branch never advances — Dealer pushes HEAD to origin/<branch>.
+  // A repair round must then start at that pushed tip (not the stale base) so its own
+  // push is a fast-forward instead of a false-diverged `unpushed_commit` escalation.
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  const base = git(repo, "rev-parse", "main");
+
+  const sideBranchSpawn: SpawnFn = async (input) => {
+    git(input.cwd, "checkout", "-qb", "feat/side-work");
+    fs.writeFileSync(path.join(input.cwd, "feature.txt"), "implemented\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "implement");
+    return { exitCode: 0, transcript: "Implementation conclusion: added the widget.", logPath: "/dev/null", timedOut: false };
+  };
+
+  let checksPass = false;
+  const github = fakeGithub();
+  github.checksSnapshot = async () => (checksPass ? "success" : "failure");
+
+  let spawnCalls = 0;
+  let repairStartHead = "";
+  let repairStartBranch = "";
+  let repairStartRemoteAhead = -1;
+  const alternatingSpawn: SpawnFn = async (input) => {
+    spawnCalls++;
+    if (spawnCalls === 1) return sideBranchSpawn(input);
+    // Repair round: observe the start BEFORE committing anything.
+    repairStartHead = git(input.cwd, "rev-parse", "HEAD");
+    repairStartBranch = git(input.cwd, "rev-parse", "--abbrev-ref", "HEAD");
+    repairStartRemoteAhead = Number(git(input.cwd, "rev-list", "--count", `origin/${branch}..HEAD`));
+    // One new commit on top, on the checked-out issue branch like a normal worker.
+    fs.writeFileSync(path.join(input.cwd, "repair.txt"), "repair\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "repair");
+    return { exitCode: 0, transcript: "Implementation conclusion: repaired.", logPath: "/dev/null", timedOut: false };
+  };
+
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: alternatingSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1); // round 1: the push lands, checks fail → infra retry queued
+
+  assert.equal(getIssue(issueId)!.status, "developing");
+  const pushedX = git(remote, "rev-parse", branch);
+  assert.notEqual(pushedX, base, "round 1 must have published a tip beyond base");
+  assert.equal(
+    git(repo, "rev-parse", branch),
+    pushedX,
+    "the post-push fast-forward keeps the clone's local ref at the pushed SHA even though the worker committed on a side branch"
+  );
+
+  // Re-create the pre-fix staleness: the local ref falls back to base while the remote
+  // still holds exactly what round 1 pushed.
+  git(repo, "branch", "-f", branch, base);
+  assert.equal(git(repo, "rev-parse", branch), base);
+
+  checksPass = true;
+  await pump(1); // repair round
+
+  assert.equal(spawnCalls, 2);
+  assert.equal(repairStartBranch, branch);
+  assert.equal(repairStartHead, pushedX, "the repair worktree must start at the pushed tip, not the stale base");
+  assert.equal(repairStartRemoteAhead, 0, "git rev-list --count origin/<branch>..HEAD must be 0 at repair start");
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "the repair push must fast-forward, never escalate as unpushed_commit");
+  assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
+  const repairHead = git(remote, "rev-parse", branch);
+  assert.notEqual(repairHead, pushedX, "the repair round must have published its own commit");
+  assert.equal(issue.headSha, repairHead);
+  assert.equal(git(repo, "rev-parse", branch), repairHead);
+  assert.equal(git(repo, "merge-base", pushedX, repairHead), pushedX, "the repair tip builds on the round-1 tip");
+});
+
+test("NOT-219: a repair round whose origin/<branch> fetch fails defers without spawning or spending an attempt", async () => {
+  // Like NOT-197's pre-branch deferral, but on the reuse path: the branch already exists
+  // locally (round 1 pushed it), then the network breaks — the repair start must defer
+  // as base_fetch_failed instead of starting from the stale local ref.
+  const isoRepo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-219fail-repo-"));
+  const isoRemote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-219fail-remote-"));
+  try {
+    git(isoRepo, "init", "-q", "-b", "main");
+    git(isoRepo, "config", "user.email", "test@example.com");
+    git(isoRepo, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(isoRepo, "README.md"), "hello\n");
+    git(isoRepo, "add", ".");
+    git(isoRepo, "commit", "-q", "-m", "init");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", isoRemote]);
+    git(isoRepo, "remote", "add", "origin", isoRemote);
+    git(isoRepo, "push", "-q", "origin", "main");
+
+    const dev = createAgent({ name: `dev-219f-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const rev = createAgent({ name: `rev-219f-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const issueId = createIssue({
+      title: "Repair fetch fails",
+      acceptanceCriteria: "works",
+      repo: isoRepo,
+      baseBranch: "main",
+      developerAgentId: dev.id,
+      reviewerAgentId: rev.id,
+      maxReviewRounds: 3,
+      maxInfraAttempts: 3,
+      source: "manual"}).id;
+    const branch = issueBranchName(issueId);
+
+    let checksPass = false;
+    const github = fakeGithub();
+    github.checksSnapshot = async () => (checksPass ? "success" : "failure");
+    let spawnCalls = 0;
+    const countingSpawn: SpawnFn = async (input) => {
+      spawnCalls++;
+      return commitingSpawn(input);
+    };
+    registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: countingSpawn, github }));
+    startWorkflow(issueId);
+    await pump(1); // round 1: pushed, checks fail → repair retry queued
+
+    assert.equal(spawnCalls, 1);
+    assert.equal(getIssue(issueId)!.status, "developing");
+    assert.equal(await branchExists(isoRepo, branch), true, "round 1 must have left the local branch behind");
+    assert.ok(git(isoRepo, "ls-remote", "origin", `refs/heads/${branch}`).length > 0, "round 1 must have pushed the branch");
+    const infraAfterRound1 = getIssue(issueId)!.infraAttempts;
+
+    // Break the network only now, so round 1 proves the setup while the repair starves.
+    git(isoRepo, "remote", "set-url", "origin", path.join(isoRemote, "does-not-exist.git"));
+    await pump(1); // repair start: the origin/<branch> fetch fails → defer
+
+    assert.equal(spawnCalls, 1, "nothing may spawn when the repair branch could not be fetched");
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.infraAttempts, infraAfterRound1, "a deferred start spends no infra attempt");
+    assert.equal(issue.currentRound, 1);
+    assert.notEqual(issue.status, "needs_human");
+    assert.match(issue.currentIntent ?? "", /Waiting for network/);
+
+    const { listWorkItemsForIssue: listItems } = await import("../repository/work-items.js");
+    const items = listItems(issueId);
+    assert.equal(items.filter((i) => i.kind === "developer" && i.status === "pending").length, 1);
+    const pending = items.find((i) => i.kind === "developer" && i.status === "pending")!;
+    assert.equal(pending.attemptCount, 0, "the claim-time attempt bump is reverted");
+    assert.ok(Date.parse(pending.availableAt) > Date.parse(pending.updatedAt), "the next start is gated behind a wait");
+
+    const events = listWorkflowEventsForIssue(issueId);
+    const deferrals = events.filter((e) => e.type === "worker.deferred");
+    assert.ok(deferrals.length > 0);
+    assert.equal(JSON.parse(deferrals[deferrals.length - 1]!.payloadJson ?? "{}").outcome, "base_fetch_failed");
+
+    const { listWorkerSessionsForIssue: listSessions } = await import("../repository/worker-sessions.js");
+    const sessions = listSessions(issueId).filter((s) => s.role === "developer");
+    assert.equal(sessions.length, 2, "round 1 ran; the repair attempt never spawned");
+    assert.equal(sessions[sessions.length - 1]!.status, "cancelled", "the unfired repair session is cancelled, not failed");
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
 test("NOT-130: a green suite on a dirty worktree is not persisted as tip evidence", async () => {
   const issueId = await makeIssue();
   const logPath = writeVerificationLog({
