@@ -33,10 +33,21 @@ const {
   countOccupyingIssues,
   admitNext,
   checkRoleAgentHealthy,
+  getAdmissionStatus,
   setAdmissionHealthCheckerForTests,
   setCapacityPolicyForTests,
   resetCapacityPolicyForTests,
   resetEligibilityRulesForTests} = await import("./admission.js");
+const {
+  getMaxActiveIssues,
+  setMaxActiveIssues,
+  getEffectiveMaxActiveIssues,
+  admissionLimitOptions,
+  workerSpawnCeiling,
+} = await import("../repository/admission-settings.js");
+const { setBlockersProviderForTests, resetDependenciesForTests } = await import(
+  "./dependencies.js"
+);
 
 before(() => migrate());
 
@@ -55,16 +66,21 @@ beforeEach(() => {
     DELETE FROM issues;
     DELETE FROM runtime_availability;
   `);
+  // NOT-215: the persisted concurrency setting must not leak between tests.
+  getDb().prepare("DELETE FROM intake_settings WHERE key = 'admission.maxActiveIssues'").run();
   clearAllRuntimeAvailability();
   setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
   resetCapacityPolicyForTests();
   resetEligibilityRulesForTests();
+  resetDependenciesForTests();
 });
 
 afterEach(() => {
   setAdmissionHealthCheckerForTests(null);
   resetCapacityPolicyForTests();
   resetEligibilityRulesForTests();
+  resetDependenciesForTests();
+  getDb().prepare("DELETE FROM intake_settings WHERE key = 'admission.maxActiveIssues'").run();
 });
 
 function seedAgents(
@@ -538,6 +554,274 @@ test("NOT-156: developer unhealthy + reviewer healthy parks with a developer-nam
   assert.equal(entry.state, "queued");
   assert.match(entry.waitReason ?? "", /developer unhealthy/);
   assert.doesNotMatch(entry.waitReason ?? "", /reviewer unhealthy/);
+});
+
+// ---------------------------------------------------------------------------
+// NOT-215: configurable active-issue admission concurrency (fixed-N + per-repo).
+// ---------------------------------------------------------------------------
+
+/** Two ready issues sharing one repository path (seedAgents makes a fresh repo per call). */
+function readyIssueInRepo(suffix: string, repo: string) {
+  const { dev, rev } = seedAgents(`repo-${suffix}`);
+  return createIssue({
+    title: `Issue ${suffix}`,
+    description: "d",
+    acceptanceCriteria: "It works",
+    repo,
+    baseBranch: "main",
+    developerAgentId: dev.id,
+    reviewerAgentId: rev.id,
+    maxReviewRounds: 2,
+    maxInfraAttempts: 2,
+    source: "manual"});
+}
+
+function linearIssue(
+  suffix: string,
+  externalId: string,
+  runtimes: {
+    dev: "claude_code" | "codex_local" | "cursor_local" | "muse_code";
+    rev: "claude_code" | "codex_local" | "cursor_local" | "muse_code";
+  } = { dev: "codex_local", rev: "codex_local" }
+) {
+  const { repo, dev, rev } = seedAgents(`lin-${suffix}`, runtimes);
+  return createIssue({
+    title: `Linear ${suffix}`,
+    description: "d",
+    acceptanceCriteria: "It works",
+    repo,
+    baseBranch: "main",
+    developerAgentId: dev.id,
+    reviewerAgentId: rev.id,
+    maxReviewRounds: 2,
+    maxInfraAttempts: 2,
+    source: "linear",
+    externalId,
+    externalLabel: `NOT-${suffix}`});
+}
+
+function instanceCount(issueId: string): number {
+  return (
+    getDb().prepare("SELECT COUNT(*) AS n FROM workflow_instances WHERE issue_id = ?").get(issueId) as {
+      n: number;
+    }
+  ).n;
+}
+
+function releaseToNeedsHuman(issueId: string): void {
+  getDb().prepare("UPDATE issues SET status = ? WHERE id = ?").run("needs_human", issueId);
+  getDb()
+    .prepare(
+      "UPDATE workflow_instances SET completed_at = ? WHERE issue_id = ? AND completed_at IS NULL"
+    )
+    .run(new Date().toISOString(), issueId);
+}
+
+test("NOT-215: default is sequential (limit 1); raising to 2 fills the new slot on the next tick", async () => {
+  assert.equal(getMaxActiveIssues(), 1);
+  const a = readyIssue("raise-a");
+  const b = readyIssue("raise-b");
+  enqueueIssue(a.id);
+  enqueueIssue(b.id);
+
+  assert.equal((await admitNext())?.issueId, a.id);
+  assert.equal(getIssue(b.id)!.status, "ready", "limit 1 still admits one per tick");
+
+  assert.equal(setMaxActiveIssues(2), 2);
+  assert.equal((await admitNext())?.issueId, b.id);
+  assert.equal(getIssue(b.id)!.status, "developing");
+  assert.equal(listQueuedEntries().length, 0);
+});
+
+test("NOT-215: fixed capacity 2 admits two eligible different-repository issues in one tick", async () => {
+  setMaxActiveIssues(2);
+  const a = readyIssue("par-a");
+  const b = readyIssue("par-b");
+  enqueueIssue(a.id);
+  enqueueIssue(b.id);
+
+  const first = await admitNext();
+  assert.equal(first?.issueId, a.id);
+  assert.equal(getIssue(a.id)!.status, "developing");
+  assert.equal(getIssue(b.id)!.status, "developing");
+  assert.equal(listQueuedEntries().length, 0);
+  assert.equal(instanceCount(a.id), 1);
+  assert.equal(instanceCount(b.id), 1);
+
+  // Second tick admits nothing new and duplicates nothing.
+  assert.equal(await admitNext(), null);
+  assert.equal(instanceCount(a.id), 1);
+  assert.equal(instanceCount(b.id), 1);
+
+  assert.deepEqual(getAdmissionStatus(), {
+    active: 2,
+    waiting: 0,
+    limit: 2,
+    maxActiveIssues: 2,
+    ceiling: workerSpawnCeiling(),
+    options: admissionLimitOptions(),
+    overCap: false,
+  });
+});
+
+test("NOT-215: same-repository issues never run concurrently; the waiter names the conflict", async () => {
+  setMaxActiveIssues(2);
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-admit-samerepo-"));
+  const a = readyIssueInRepo("same-a", repo);
+  const b = readyIssueInRepo("same-b", repo);
+  enqueueIssue(a.id);
+  enqueueIssue(b.id);
+
+  assert.equal((await admitNext())?.issueId, a.id);
+  assert.equal(getIssue(a.id)!.status, "developing");
+  assert.equal(getIssue(b.id)!.status, "ready");
+  assert.equal(getActiveWorkflowInstance(b.id), null);
+  assert.equal(instanceCount(b.id), 0);
+
+  const entry = getQueuedEntryForIssue(b.id)!;
+  assert.equal(entry.state, "queued");
+  assert.match(entry.waitReason ?? "", /repository slot/);
+  assert.ok(
+    (entry.waitReason ?? "").includes(repo),
+    `reason names the conflicting repo: ${entry.waitReason}`
+  );
+  assert.ok(
+    (entry.waitReason ?? "").includes(a.title),
+    `reason names the active issue: ${entry.waitReason}`
+  );
+
+  // The repo slot frees when the first issue leaves occupying states — then the waiter admits.
+  releaseToNeedsHuman(a.id);
+  assert.equal((await admitNext())?.issueId, b.id);
+  assert.equal(getIssue(b.id)!.status, "developing");
+});
+
+test("NOT-215: blocked/capped entries stay queued while later eligible different-repo entries fill both slots", async () => {
+  setMaxActiveIssues(2);
+  const blocked = linearIssue("blk", "lin-blk");
+  setBlockersProviderForTests(
+    async (issues) =>
+      new Map(
+        issues.map((i) => [
+          i.externalId!,
+          i.externalId === "lin-blk"
+            ? [{ id: "", identifier: "NOT-1", stateName: "In Progress", stateType: "started" }]
+            : [],
+        ])
+      )
+  );
+  const capped = readyIssue("sk-cap", { runtimes: { dev: "claude_code", rev: "claude_code" } });
+  recordRuntimeAvailability({
+    runtime: "claude_code",
+    unavailableUntil: new Date(Date.now() + 3600_000).toISOString(),
+    reason: "claude_code usage capped"});
+  const okA = readyIssue("sk-a", { runtimes: { dev: "codex_local", rev: "codex_local" } });
+  const okB = readyIssue("sk-b", { runtimes: { dev: "codex_local", rev: "codex_local" } });
+  enqueueIssue(blocked.id);
+  enqueueIssue(capped.id);
+  enqueueIssue(okA.id);
+  enqueueIssue(okB.id);
+
+  assert.equal((await admitNext())?.issueId, okA.id);
+  assert.equal(getIssue(okA.id)!.status, "developing");
+  assert.equal(getIssue(okB.id)!.status, "developing");
+  assert.equal(getIssue(blocked.id)!.status, "ready");
+  assert.equal(getIssue(capped.id)!.status, "ready");
+  assert.match(getQueuedEntryForIssue(blocked.id)?.waitReason ?? "", /waiting on NOT-1/);
+  assert.match(getQueuedEntryForIssue(capped.id)?.waitReason ?? "", /capped/i);
+});
+
+test("NOT-215: lowering 2 → 1 never preempts; admission pauses until occupancy drops below 1", async () => {
+  setMaxActiveIssues(2);
+  const a = readyIssue("low-a");
+  const b = readyIssue("low-b");
+  enqueueIssue(a.id);
+  enqueueIssue(b.id);
+  await admitNext();
+  assert.equal(getIssue(a.id)!.status, "developing");
+  assert.equal(getIssue(b.id)!.status, "developing");
+
+  setMaxActiveIssues(1);
+  const c = readyIssue("low-c");
+  enqueueIssue(c.id);
+  assert.equal(await admitNext(), null);
+  assert.equal(getIssue(a.id)!.status, "developing", "lowering never stops running work");
+  assert.equal(getIssue(b.id)!.status, "developing", "lowering never stops running work");
+  assert.equal(getIssue(c.id)!.status, "ready");
+  assert.match(getQueuedEntryForIssue(c.id)?.waitReason ?? "", /waiting for slot/);
+
+  const over = getAdmissionStatus();
+  assert.equal(over.active, 2);
+  assert.equal(over.limit, 1);
+  assert.equal(over.overCap, true);
+
+  // One release is not enough — occupancy must fall *below* the new limit.
+  releaseToNeedsHuman(a.id);
+  assert.equal(await admitNext(), null);
+  assert.equal(getIssue(c.id)!.status, "ready");
+  assert.equal(getAdmissionStatus().overCap, false);
+
+  releaseToNeedsHuman(b.id);
+  assert.equal((await admitNext())?.issueId, c.id);
+  assert.equal(getIssue(c.id)!.status, "developing");
+});
+
+test("NOT-215: restart recovery observes the persisted setting without duplicate admission", async () => {
+  setMaxActiveIssues(2);
+  const a = readyIssue("rs-a");
+  enqueueIssue(a.id);
+  await admitNext();
+  assert.equal(getIssue(a.id)!.status, "developing");
+
+  const b = readyIssue("rs-b");
+  enqueueIssue(b.id);
+
+  // A restart re-reads everything from the DB: the persisted setting, the occupying
+  // issues, and the queue. There is no in-memory admission state to go stale.
+  assert.equal(getMaxActiveIssues(), 2);
+  assert.equal(getEffectiveMaxActiveIssues(), 2);
+  assert.equal((await admitNext())?.issueId, b.id);
+  assert.equal(getIssue(b.id)!.status, "developing");
+  assert.equal(instanceCount(a.id), 1, "no duplicate admission of the pre-restart issue");
+  assert.equal(instanceCount(b.id), 1);
+});
+
+test("NOT-215: ungated human resume may exceed the limit; status reports over-cap, admission pauses", async () => {
+  const { createHumanAction } = await import("../repository/human-actions.js");
+  const { resolveHumanActionAndAdvance } = await import("./commands.js");
+
+  assert.equal(getMaxActiveIssues(), 1);
+  const a = readyIssue("oc-a");
+  enqueueIssue(a.id);
+  await admitNext();
+  assert.equal(getIssue(a.id)!.status, "developing");
+
+  const b = readyIssue("oc-b", { acceptanceCriteria: null });
+  enqueueIssue(b.id);
+  const action = createHumanAction({
+    issueId: b.id,
+    actionType: "product_scope_decision",
+    reason: "no AC",
+    question: "Add AC",
+    responseOptions: [{ choice: "resume", label: "Start" }]});
+  updateIssue(b.id, { acceptanceCriteria: "now has AC" });
+  const resolved = resolveHumanActionAndAdvance(action.id, "test", "resume");
+  assert.equal(resolved.ok, true);
+  assert.equal(getIssue(b.id)!.status, "developing");
+
+  const status = getAdmissionStatus();
+  assert.equal(status.active, 2);
+  assert.equal(status.limit, 1);
+  assert.equal(status.maxActiveIssues, 1);
+  assert.equal(status.overCap, true);
+
+  const c = readyIssue("oc-c");
+  enqueueIssue(c.id);
+  assert.equal(await admitNext(), null);
+  assert.equal(getIssue(c.id)!.status, "ready");
+  assert.match(getQueuedEntryForIssue(c.id)?.waitReason ?? "", /waiting for slot/);
+  assert.equal(getIssue(a.id)!.status, "developing", "over-cap never preempts running work");
+  assert.equal(getIssue(b.id)!.status, "developing", "over-cap never preempts running work");
 });
 
 // NOT-157: soft probe failure wait_reason must name the probe, not "not authenticated".

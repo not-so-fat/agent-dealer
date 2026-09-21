@@ -25,6 +25,8 @@ beforeEach(() => {
     DELETE FROM artifacts;
     DELETE FROM issues;
   `);
+  // NOT-215: the persisted concurrency setting must not leak between tests.
+  getDb().prepare("DELETE FROM intake_settings WHERE key = 'admission.maxActiveIssues'").run();
 });
 
 async function app() {
@@ -85,5 +87,74 @@ test("POST /api/queue is idempotent when already queued", async () => {
   assert.equal(first.statusCode, 200);
   assert.equal(second.statusCode, 200);
   assert.equal(first.json().id, second.json().id);
+  await f.close();
+});
+
+test("NOT-215: GET /api/queue/status reports the truthful admission read model", async () => {
+  const f = await app();
+  const res = await f.inject({ method: "GET", url: "/api/queue/status" });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), {
+    active: 0,
+    waiting: 0,
+    limit: 1,
+    maxActiveIssues: 1,
+    ceiling: 2,
+    options: [1, 2],
+    overCap: false,
+  });
+  await f.close();
+});
+
+test("NOT-215: PUT /api/queue/settings persists 1..2 and the status reflects it", async () => {
+  const f = await app();
+  const put = await f.inject({
+    method: "PUT",
+    url: "/api/queue/settings",
+    payload: { maxActiveIssues: 2 },
+  });
+  assert.equal(put.statusCode, 200);
+  const body = put.json();
+  assert.equal(body.maxActiveIssues, 2);
+  assert.equal(body.limit, 2);
+
+  const status = await f.inject({ method: "GET", url: "/api/queue/status" });
+  assert.equal(status.json().maxActiveIssues, 2);
+  assert.equal(status.json().limit, 2);
+  await f.close();
+});
+
+test("NOT-215: the persisted limit survives a server restart (fresh app, same DB)", async () => {
+  const f = await app();
+  const put = await f.inject({
+    method: "PUT",
+    url: "/api/queue/settings",
+    payload: { maxActiveIssues: 2 },
+  });
+  assert.equal(put.statusCode, 200);
+  await f.close();
+
+  const restarted = await app();
+  const status = await restarted.inject({ method: "GET", url: "/api/queue/status" });
+  assert.equal(status.json().maxActiveIssues, 2);
+  assert.equal(status.json().limit, 2);
+  await restarted.close();
+});
+
+test("NOT-215: PUT /api/queue/settings rejects values outside 1..2", async () => {
+  const f = await app();
+  for (const payload of [
+    { maxActiveIssues: 0 },
+    { maxActiveIssues: 3 },
+    { maxActiveIssues: 1.5 },
+    { maxActiveIssues: "x" },
+    {},
+  ]) {
+    const res = await f.inject({ method: "PUT", url: "/api/queue/settings", payload });
+    assert.equal(res.statusCode, 400, `rejects ${JSON.stringify(payload)}`);
+  }
+  // A rejected write leaves the stored value alone.
+  const status = await f.inject({ method: "GET", url: "/api/queue/status" });
+  assert.equal(status.json().maxActiveIssues, 1);
   await f.close();
 });
