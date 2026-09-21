@@ -8,7 +8,7 @@ Patch over 1.1.6: restores the AgentDealer name in the dashboard header.
 
 ### UI
 
-- **AgentDealer header name restored (NOT-231)** — the dashboard header shows **AgentDealer** again (link name and title "AgentDealer — go to Issues", still linking to `/issues`), reverting the 1.1.6 header display name "Monaco". The wordmark uses the existing Monaco-backed `font-mono` token, so it stays in the Monaco typeface. Issues still comes before Reports in the nav, and Agents placement is unchanged.
+- **AgentDealer header name restored (NOT-231)** — the dashboard header shows **AgentDealer** again (link name and title "AgentDealer — go to Issues", still linking to `/issues`), reverting the 1.1.6 display name "Monaco". The wordmark is set in the monospace `font-mono` token again, instead of 1.1.6's Avenir-first `font-ui-display`.
 
 ## 1.1.6 — 2026-09-21
 
