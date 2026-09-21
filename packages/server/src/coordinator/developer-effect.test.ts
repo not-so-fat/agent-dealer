@@ -45,7 +45,9 @@ type SpawnFn = typeof realDeveloperSpawn;
 type GithubFn = typeof realGithubAdapter;
 
 before(() => migrate());
-beforeEach(() => getDb().exec("DELETE FROM work_items"));
+// NOT-220's test runs reviewer effects, which record review_publications rows keyed
+// by work item — they must go before work_items or the FK blocks every later test.
+beforeEach(() => getDb().exec("DELETE FROM review_publications; DELETE FROM work_items"));
 after(() => resetEffectHandlers());
 
 let repo: string;
@@ -730,6 +732,122 @@ test("unpushed_commit: the coordinator's own push is rejected by a diverged remo
   assert.doesNotMatch(action.reason, /use 'git pull'/i);
 
   execFileSync("git", ["push", "-q", remote, `:${branch}`], { cwd: repo }).toString();
+});
+
+test("NOT-220: a repair round whose rebuild is patch-equivalent to the last pushed head recovers via the lease pin — no human action, auditable branch.pushed", async () => {
+  const { runReviewerEffect } = await import("./reviewer-effect.js");
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+
+  // Round 1 implements the widget for real; round 2 rebuilds the identical patch under
+  // a different message (same diff, always a different SHA) plus follow-up work — the
+  // diverged-but-proven-equivalent shape NOT-220 auto-recovers.
+  let devCalls = 0;
+  const rebuildSpawn: SpawnFn = async (input) => {
+    devCalls++;
+    if (devCalls === 1) return commitingSpawn(input);
+    git(input.cwd, "reset", "--hard", "origin/main");
+    fs.writeFileSync(path.join(input.cwd, "feature.txt"), "implemented\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "implement (rebuilt)");
+    fs.writeFileSync(path.join(input.cwd, "feature2.txt"), "follow-up\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "follow-up work");
+    return { exitCode: 0, transcript: "Implementation conclusion: rebuilt the widget and added follow-up work.", logPath: "/dev/null", timedOut: false };
+  };
+
+  // Round 1 requests changes; round 2 approves — reviewer transcripts must carry the
+  // coordinator-verified SHAs from the prompt or the verdict is rejected.
+  const shasFromPrompt = (prompt: string) => {
+    const baseSha = prompt.match(/"baseSha" to exactly "([0-9a-f]+)"/)?.[1];
+    const headSha = prompt.match(/"headSha" to exactly "([0-9a-f]+)"/)?.[1];
+    if (!baseSha || !headSha) throw new Error("could not extract SHAs from reviewer prompt");
+    return { baseSha, headSha };
+  };
+  let revCalls = 0;
+  const reviewerSpawn = async (input: { prompt: string }) => {
+    revCalls++;
+    const { baseSha, headSha } = shasFromPrompt(input.prompt);
+    const verdict = revCalls === 1 ? "changes_requested" : "approved";
+    const body = {
+      verdict,
+      baseSha,
+      headSha,
+      acceptanceCriteriaAssessment: verdict === "approved" ? "Met." : "Not yet — missing coverage.",
+      evidenceAssessment: "Evidence checked.",
+      findings:
+        verdict === "changes_requested"
+          ? [{ fingerprint: "missing-test", severity: "blocking", title: "No test", rationale: "Add a test." }]
+          : [],
+      risks: [],
+    };
+    return { exitCode: 0, transcript: "```json\n" + JSON.stringify(body) + "\n```\n", logPath: "/dev/null", timedOut: false };
+  };
+
+  // One PR store shared by both handlers: the developer selects by branch, the
+  // reviewer by PR number, and the head always comes from the bare remote.
+  const prsByBranch = new Map<string, { number: number; url: string; base: string }>();
+  const branchByNumber = new Map<number, string>();
+  let nextNumber = 300;
+  const remoteHead = (b: string) => git(remote, "rev-parse", b);
+  const sharedGithub = (): GithubFn => ({
+    async viewPr({ branch: b, number, cwd }) {
+      const name = b ?? (number != null ? branchByNumber.get(number) : undefined) ?? (cwd ? git(cwd, "rev-parse", "--abbrev-ref", "HEAD") : undefined);
+      if (!name) return null;
+      const pr = prsByBranch.get(name);
+      if (!pr) return null;
+      if (number != null && number !== pr.number) return null;
+      return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: name, headRefOid: remoteHead(name), isDraft: true };
+    },
+    async createDraftPr({ base, head }) {
+      if (!head) throw new Error("fakeGithub.createDraftPr requires an explicit --head");
+      const number = nextNumber++;
+      const url = `https://github.com/o/r/pull/${number}`;
+      prsByBranch.set(head, { number, url, base });
+      branchByNumber.set(number, head);
+      return { ok: true, number, url };
+    },
+    async checksSnapshot() {
+      return "success";
+    },
+    async publishReview({ event }) {
+      return { ok: true, event, usedCommentFallback: false };
+    },
+  });
+  const github = sharedGithub();
+
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: rebuildSpawn, github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: reviewerSpawn as never, github: github as never }));
+  startWorkflow(issueId);
+  await pump(20);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(devCalls, 2, "exactly two developer rounds must run");
+  assert.equal(issue.status, "final_review", "the lease-recovered round must complete, not escalate");
+  assert.equal(issue.currentRound, 2);
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.actionType === "policy_escalation").length,
+    0,
+    "a proven-equivalent divergence must not create a human escalation"
+  );
+
+  // Audit: the round-2 branch.pushed carries the lease pin's old and new SHA.
+  const pushedEvents = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "branch.pushed");
+  assert.equal(pushedEvents.length, 2, "both rounds push exactly once");
+  const [first, second] = pushedEvents;
+  assert.ok(!JSON.parse(first.payloadJson!).viaLeasePush, "round 1 is a plain push");
+  const leasePayload = JSON.parse(second.payloadJson!);
+  assert.equal(leasePayload.viaLeasePush, true);
+  assert.ok(leasePayload.oldSha, "audit event must contain the old (pre-rewrite) SHA");
+  assert.ok(leasePayload.newSha, "audit event must contain the new (published) SHA");
+  assert.notEqual(leasePayload.oldSha, leasePayload.newSha);
+  assert.equal(issue.headSha, leasePayload.newSha);
+  assert.equal(git(remote, "rev-parse", branch), leasePayload.newSha, "the remote carries the rebuilt tip");
+
+  // This is the only test in the file that registers a reviewer handler — restore the
+  // placeholders so later tests keep the no-reviewer-handler assumption they were
+  // written against (each re-registers its own developer handler).
+  resetEffectHandlers();
 });
 
 test("NOT-88: a leftover clean worktree from a resolved unpushed_commit escalation is reused on Resume, not a worktree-add collision", async () => {
