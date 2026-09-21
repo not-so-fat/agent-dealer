@@ -25,6 +25,7 @@ import { guidanceForNextSession } from "./guidance.js";
 import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn } from "./spawn.js";
 import {
   DEFAULT_BASE_FETCH_TIMEOUT_MS,
+  fastForwardLocalBranchToSha,
   resolveDeveloperWorktree,
   safeRemoveWorktree,
   isWorktreeClean,
@@ -1133,6 +1134,16 @@ export async function runDeveloperEffect(
       branch: branchName,
       commitsAhead: ahead,
     });
+    // NOT-219: the worker may have committed on a side branch while this push just
+    // published HEAD to the issue branch — the managed clone's local issue-branch ref
+    // is then still at its pre-session tip. Fast-forward it to the pushed SHA so a
+    // leftover worktree or later reuse never sees a stale ref. Strictly a
+    // fast-forward: local-only commits are never discarded (and the next repair
+    // round's fetch heals a ref this missed anyway), so this stays best-effort.
+    const pushedHead = await revParseHead(worktreePath).catch(() => null);
+    if (pushedHead) {
+      await fastForwardLocalBranchToSha({ repo: repoPath, branch: branchName, sha: pushedHead }).catch(() => false);
+    }
     // From here on the branch is safely on the remote — a worktree removal on any
     // subsequent failure path loses nothing (bestEffortRemove is safe to call).
 

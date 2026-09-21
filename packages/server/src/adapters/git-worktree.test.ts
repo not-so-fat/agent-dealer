@@ -664,28 +664,35 @@ test("NOT-197: a failed pre-branch fetch returns base_unavailable and creates no
   }
 });
 
-test("NOT-197: the reuse path checks out the existing branch without fetching", async () => {
+test("NOT-219: the reuse path fetches origin/<branch> first — a failed fetch defers instead of checking out the stale local branch", async () => {
+  // Supersedes the NOT-197 expectation that reuse never fetches: starting a repair
+  // round from the stale local ref is exactly the false-divergence bug (NOT-219), so
+  // a failed fetch returns base_unavailable like the fresh-branch path does.
   const { isoRepo, isoRemote } = makeIsoRepoPair("reuse");
   try {
-    git(isoRepo, "branch", "issue-reuse-197");
-    // Break origin so thoroughly that any fetch attempt would fail — reuse must not care.
+    git(isoRepo, "branch", "issue-reuse-219");
+    // Break origin so thoroughly that any fetch attempt would fail.
     git(isoRepo, "remote", "set-url", "origin", path.join(isoRemote, "does-not-exist.git"));
     const broken = await fetchFreshBase(isoRepo, "main");
     assert.equal(broken.ok, false, "sanity: a fetch against this origin really does fail");
 
-    const leftover = await createRoleWorktree({ repo: isoRepo, role: "developer", sessionId: "s-reuse-left", ref: "issue-reuse-197" });
+    const before = git(isoRepo, "rev-parse", "issue-reuse-219");
+    const leftover = await createRoleWorktree({ repo: isoRepo, role: "developer", sessionId: "s-reuse-left", ref: "issue-reuse-219" });
     const resolved = await resolveDeveloperWorktree({
       repo: isoRepo,
       sessionId: "s-reuse-new",
-      branchName: "issue-reuse-197",
+      branchName: "issue-reuse-219",
       baseBranch: "main",
       reuseBranch: true,
     });
-    assert.equal(resolved.kind, "reused");
-    if (resolved.kind === "reused") assert.equal(resolved.path, leftover.path);
+    assert.equal(resolved.kind, "base_unavailable");
+    if (resolved.kind === "base_unavailable") assert.match(resolved.reason, /fetch/i);
+    assert.equal(git(isoRepo, "rev-parse", "issue-reuse-219"), before, "a deferred start must not move the local branch");
+    assert.ok(fs.existsSync(leftover.path), "a deferred start must not touch the leftover worktree");
+    assert.ok(!fs.existsSync(path.join(worktreesRoot(isoRepo), "s-reuse-new-developer")), "no worktree may be created for a deferred start");
     fs.rmSync(leftover.path, { recursive: true, force: true });
     await withRepoLock(isoRepo, async () => execFileSync("git", ["worktree", "prune"], { cwd: isoRepo }));
-    execFileSync("git", ["branch", "-D", "issue-reuse-197"], { cwd: isoRepo });
+    execFileSync("git", ["branch", "-D", "issue-reuse-219"], { cwd: isoRepo });
   } finally {
     fs.rmSync(isoRepo, { recursive: true, force: true });
     fs.rmSync(isoRemote, { recursive: true, force: true });
@@ -709,6 +716,246 @@ test("NOT-197: fetchFreshBase bounds a hanging fetch with a timeout instead of h
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.reason, /timed out/);
     assert.ok(elapsedMs < 20_000, `the fetch must be bounded (took ${elapsedMs}ms)`);
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- NOT-219: repair from the pushed tip
+
+/** Push commit(s) to origin/<branch> from a separate clone, leaving the repo's own
+ * local branch ref stale — the NOT-219 round-1 shape (Dealer pushed HEAD to
+ * origin/<branch> while the clone's local ref stayed at its creation point). */
+function advanceOriginBranch(isoRemote: string, branch: string, files: string[]): string {
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt219-other-"));
+  try {
+    execFileSync("git", ["clone", "-q", isoRemote, other]);
+    git(other, "config", "user.email", "test@example.com");
+    git(other, "config", "user.name", "Test");
+    git(other, "checkout", "-q", branch);
+    for (const file of files) {
+      fs.writeFileSync(path.join(other, file), "remote work\n");
+    }
+    git(other, "add", ".");
+    git(other, "commit", "-q", "-m", "round-1 work");
+    git(other, "push", "-q", "origin", branch);
+    return git(other, "rev-parse", "HEAD");
+  } finally {
+    fs.rmSync(other, { recursive: true, force: true });
+  }
+}
+
+/** Commit on the repo's own local branch without pushing — a local-only tip. */
+function commitLocally(isoRepo: string, branch: string, file: string): string {
+  const wt = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt219-local-"));
+  try {
+    execFileSync("git", ["worktree", "add", "-q", wt, branch], { cwd: isoRepo });
+    fs.writeFileSync(path.join(wt, file), "local work\n");
+    git(wt, "add", ".");
+    git(wt, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-q", "-m", "local work");
+    return git(wt, "rev-parse", "HEAD");
+  } finally {
+    execFileSync("git", ["worktree", "remove", "--force", wt], { cwd: isoRepo });
+  }
+}
+
+test("NOT-219: a repair round starts at the pushed origin/<branch> tip, not the stale local branch", async () => {
+  const { isoRepo, isoRemote } = makeIsoRepoPair("219repair");
+  try {
+    const base = git(isoRepo, "rev-parse", "main");
+    git(isoRepo, "branch", "issue-219-repair", base);
+    git(isoRepo, "push", "-q", "origin", "issue-219-repair");
+    // Round 1's commits land on the remote while the clone's local ref stays at base.
+    const pushedTip = advanceOriginBranch(isoRemote, "issue-219-repair", ["round1-a.txt", "round1-b.txt"]);
+    assert.equal(git(isoRepo, "rev-parse", "issue-219-repair"), base, "the local ref must stay stale for this test to mean anything");
+
+    const resolved = await resolveDeveloperWorktree({
+      repo: isoRepo,
+      sessionId: "s-219-repair",
+      branchName: "issue-219-repair",
+      baseBranch: "main",
+      reuseBranch: true,
+    });
+    assert.equal(resolved.kind, "created");
+    if (resolved.kind !== "created") return;
+    const head = git(resolved.path, "rev-parse", "HEAD");
+    assert.equal(head, pushedTip, "the repair worktree must start at the pushed tip, not the stale base");
+    assert.equal(
+      git(resolved.path, "rev-list", "--count", "origin/issue-219-repair..HEAD"),
+      "0"
+    );
+    assert.equal(
+      git(isoRepo, "rev-parse", "issue-219-repair"),
+      pushedTip,
+      "the stale local ref is advanced to the pushed tip"
+    );
+    await removeIsoWorktree(isoRepo, resolved.path, "issue-219-repair");
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-219: a repair round cuts the local branch at the pushed tip when the clone has no local ref for it", async () => {
+  // The exact incident shape: round 1 committed on a side branch, so the local
+  // issue branch was never even created — only origin/<branch> (what Dealer pushed)
+  // knows the tip.
+  const { isoRepo, isoRemote } = makeIsoRepoPair("219nolocal");
+  try {
+    const base = git(isoRepo, "rev-parse", "main");
+    const seeder = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt219-seed-"));
+    let pushedTip: string;
+    try {
+      execFileSync("git", ["clone", "-q", isoRemote, seeder]);
+      git(seeder, "config", "user.email", "test@example.com");
+      git(seeder, "config", "user.name", "Test");
+      git(seeder, "checkout", "-q", "-b", "issue-219-nolocal", base);
+      fs.writeFileSync(path.join(seeder, "round1.txt"), "round-1 work\n");
+      git(seeder, "add", ".");
+      git(seeder, "commit", "-q", "-m", "round-1 work");
+      git(seeder, "push", "-q", "origin", "issue-219-nolocal");
+      pushedTip = git(seeder, "rev-parse", "HEAD");
+    } finally {
+      fs.rmSync(seeder, { recursive: true, force: true });
+    }
+    await withRepoLock(isoRepo, async () => execFileSync("git", ["fetch", "-q", "origin"], { cwd: isoRepo }));
+    assert.equal(await branchExists(isoRepo, "issue-219-nolocal"), false);
+
+    const resolved = await resolveDeveloperWorktree({
+      repo: isoRepo,
+      sessionId: "s-219-nolocal",
+      branchName: "issue-219-nolocal",
+      baseBranch: "main",
+      reuseBranch: true,
+    });
+    assert.equal(resolved.kind, "created");
+    if (resolved.kind !== "created") return;
+    assert.equal(git(resolved.path, "rev-parse", "HEAD"), pushedTip);
+    assert.equal(git(resolved.path, "rev-list", "--count", "origin/issue-219-nolocal..HEAD"), "0");
+    assert.equal(git(isoRepo, "rev-parse", "issue-219-nolocal"), pushedTip);
+    await removeIsoWorktree(isoRepo, resolved.path, "issue-219-nolocal");
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-219: local commits the remote lacks are preserved, never reset away", async () => {
+  const { isoRepo, isoRemote } = makeIsoRepoPair("219diverged");
+  try {
+    const base = git(isoRepo, "rev-parse", "main");
+    git(isoRepo, "branch", "issue-219-diverged", base);
+    git(isoRepo, "push", "-q", "origin", "issue-219-diverged");
+    // Diverge: the remote advances (round-1 push) AND the local ref carries a commit
+    // the remote lacks.
+    const remoteTip = advanceOriginBranch(isoRemote, "issue-219-diverged", ["remote-only.txt"]);
+    const localTip = commitLocally(isoRepo, "issue-219-diverged", "local-only.txt");
+    assert.notEqual(localTip, remoteTip);
+
+    const resolved = await resolveDeveloperWorktree({
+      repo: isoRepo,
+      sessionId: "s-219-diverged",
+      branchName: "issue-219-diverged",
+      baseBranch: "main",
+      reuseBranch: true,
+    });
+    assert.equal(resolved.kind, "created");
+    if (resolved.kind !== "created") return;
+    assert.equal(
+      git(resolved.path, "rev-parse", "HEAD"),
+      localTip,
+      "the worktree must keep the local tip — its unique commits are never discarded"
+    );
+    assert.equal(git(isoRepo, "rev-parse", "issue-219-diverged"), localTip, "the local ref itself is untouched");
+    await removeIsoWorktree(isoRepo, resolved.path, "issue-219-diverged");
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-219: reuse with no remote branch yet checks out the local branch without deferring", async () => {
+  // A same-round retry whose branch was never pushed: `git fetch origin <branch>`
+  // reports "couldn't find remote ref" — that is not a network failure, so the local
+  // branch is used as-is instead of deferring.
+  const { isoRepo, isoRemote } = makeIsoRepoPair("219unpushed");
+  try {
+    git(isoRepo, "branch", "issue-219-unpushed");
+    const localTip = commitLocally(isoRepo, "issue-219-unpushed", "retry-work.txt");
+
+    const resolved = await resolveDeveloperWorktree({
+      repo: isoRepo,
+      sessionId: "s-219-unpushed",
+      branchName: "issue-219-unpushed",
+      baseBranch: "main",
+      reuseBranch: true,
+    });
+    assert.equal(resolved.kind, "created");
+    if (resolved.kind !== "created") return;
+    assert.equal(git(resolved.path, "rev-parse", "HEAD"), localTip);
+    await removeIsoWorktree(isoRepo, resolved.path, "issue-219-unpushed");
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-219: a clean leftover holding the stale local branch is reused at the pushed tip", async () => {
+  const { isoRepo, isoRemote } = makeIsoRepoPair("219leftover");
+  try {
+    const base = git(isoRepo, "rev-parse", "main");
+    git(isoRepo, "branch", "issue-219-leftover", base);
+    git(isoRepo, "push", "-q", "origin", "issue-219-leftover");
+    const leftover = await createRoleWorktree({ repo: isoRepo, role: "developer", sessionId: "s-219-left", ref: "issue-219-leftover" });
+    const pushedTip = advanceOriginBranch(isoRemote, "issue-219-leftover", ["round1.txt"]);
+    assert.equal(git(leftover.path, "rev-parse", "HEAD"), base);
+
+    const resolved = await resolveDeveloperWorktree({
+      repo: isoRepo,
+      sessionId: "s-219-left-new",
+      branchName: "issue-219-leftover",
+      baseBranch: "main",
+      reuseBranch: true,
+    });
+    assert.equal(resolved.kind, "reused");
+    if (resolved.kind !== "reused") return;
+    assert.equal(resolved.path, leftover.path);
+    assert.equal(git(leftover.path, "rev-parse", "HEAD"), pushedTip, "the reused leftover advances to the pushed tip");
+    fs.rmSync(leftover.path, { recursive: true, force: true });
+    await withRepoLock(isoRepo, async () => execFileSync("git", ["worktree", "prune"], { cwd: isoRepo }));
+    execFileSync("git", ["branch", "-D", "issue-219-leftover"], { cwd: isoRepo });
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-219: fastForwardLocalBranchToSha advances a stale ref, creates a missing one, and never discards local-only commits", async () => {
+  const { fastForwardLocalBranchToSha } = await import("./git-worktree.js");
+  const { isoRepo, isoRemote } = makeIsoRepoPair("219ff");
+  try {
+    const base = git(isoRepo, "rev-parse", "main");
+    git(isoRepo, "branch", "issue-219-ff", base);
+    git(isoRepo, "push", "-q", "origin", "issue-219-ff");
+    const remoteTip = advanceOriginBranch(isoRemote, "issue-219-ff", ["remote.txt"]);
+    // The helper classifies ancestry locally, so the pushed objects must be present
+    // (in production the reuse-path fetch / the pushing worktree guarantees this).
+    git(isoRepo, "fetch", "-q", "origin", "issue-219-ff");
+
+    assert.equal(await fastForwardLocalBranchToSha({ repo: isoRepo, branch: "issue-219-ff", sha: remoteTip }), true);
+    assert.equal(git(isoRepo, "rev-parse", "issue-219-ff"), remoteTip);
+
+    // Missing local ref is created at the pushed SHA.
+    execFileSync("git", ["branch", "-D", "issue-219-ff"], { cwd: isoRepo });
+    assert.equal(await fastForwardLocalBranchToSha({ repo: isoRepo, branch: "issue-219-ff", sha: remoteTip }), true);
+    assert.equal(git(isoRepo, "rev-parse", "issue-219-ff"), remoteTip);
+
+    // Diverged: the local ref carries a commit the pushed SHA lacks — preserved.
+    const localTip = commitLocally(isoRepo, "issue-219-ff", "local.txt");
+    assert.equal(await fastForwardLocalBranchToSha({ repo: isoRepo, branch: "issue-219-ff", sha: remoteTip }), false);
+    assert.equal(git(isoRepo, "rev-parse", "issue-219-ff"), localTip);
+    execFileSync("git", ["branch", "-D", "issue-219-ff"], { cwd: isoRepo });
   } finally {
     fs.rmSync(isoRepo, { recursive: true, force: true });
     fs.rmSync(isoRemote, { recursive: true, force: true });

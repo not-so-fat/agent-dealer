@@ -101,6 +101,111 @@ export async function fetchFreshBase(
   }
 }
 
+/**
+ * NOT-219: what a `git fetch origin <branch>` on the reuse path found.
+ * `remoteSha` is the fetched `origin/<branch>` tip, or null when the remote has no
+ * such branch yet (or the repo has no origin at all) — in both cases there is nothing
+ * to catch up to and the local branch is used as-is.
+ */
+export type ReusedBranchFetch =
+  | { ok: true; remoteSha: string | null }
+  | { ok: false; reason: string };
+
+/** `git fetch origin <branch>` output when the remote simply has no such branch. */
+const NO_REMOTE_REF_PATTERNS = /couldn't find remote ref|remote ref .* does not exist/i;
+
+function fetchErrorDetail(err: unknown): string {
+  const e = err as { message?: string; stderr?: string; killed?: boolean };
+  return typeof e?.stderr === "string" && e.stderr.trim() ? e.stderr.trim() : (e?.message ?? String(err));
+}
+
+/**
+ * NOT-219: fetch `origin/<branch>` before reusing an existing issue branch for a
+ * repair round, so the worktree starts at exactly what Dealer pushed (and the
+ * reviewer reviewed) — never the managed clone's possibly-stale local ref. The
+ * stale-local case is real: a round-1 worker that commits on a side branch leaves
+ * the local issue branch at its creation point while Dealer pushes HEAD to
+ * `origin/<branch>`, and reusing the local ref then cherry-picks/push-rejects.
+ *
+ * A fetch that fails (network down, timeout) is returned — never silently replaced
+ * with the stale local branch: the caller defers the start like NOT-197's
+ * `base_unavailable`. The one fetch failure that is NOT a deferral is a remote with
+ * no such branch yet (a same-round retry whose branch was never pushed): there is
+ * nothing to catch up to, so the local branch is used as-is.
+ */
+export async function fetchReusedBranch(
+  repo: string,
+  branch: string,
+  timeoutMs?: number
+): Promise<ReusedBranchFetch> {
+  const boundMs = clampFetchTimeoutMs(timeoutMs);
+  if (!(await hasOriginRemote(repo))) {
+    return { ok: true, remoteSha: null };
+  }
+  try {
+    await run("git", ["fetch", "origin", branch], { cwd: repo, timeout: boundMs });
+  } catch (err) {
+    const e = err as { killed?: boolean };
+    const detail = fetchErrorDetail(err);
+    if (NO_REMOTE_REF_PATTERNS.test(detail)) {
+      return { ok: true, remoteSha: null };
+    }
+    const timedOut = e?.killed === true;
+    return {
+      ok: false,
+      reason: timedOut
+        ? `git fetch origin ${branch} timed out after ${boundMs}ms — network or VPN may be down`
+        : `git fetch origin ${branch} failed: ${detail}`,
+    };
+  }
+  try {
+    const { stdout } = await git(repo, ["rev-parse", `origin/${branch}`]);
+    return { ok: true, remoteSha: stdout.trim() };
+  } catch (err) {
+    return { ok: false, reason: `fetched origin ${branch} but origin/${branch} does not resolve: ${(err as Error).message}` };
+  }
+}
+
+/** Whether `ancestor` is an ancestor of (or equal to) `descendant`. */
+export async function isAncestor(repo: string, ancestor: string, descendant: string): Promise<boolean> {
+  try {
+    await git(repo, ["merge-base", "--is-ancestor", ancestor, descendant]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * NOT-219: fast-forward the managed clone's local `branch` ref to `sha` (the SHA a
+ * developer push just published). Strictly a fast-forward — when the local ref has
+ * commits the pushed SHA lacks (diverged or ahead), it is preserved untouched and
+ * this returns false. Best-effort: returns false instead of throwing, so a caller
+ * can safely ignore bookkeeping it cannot complete — the next repair round's fetch
+ * heals a ref this missed anyway.
+ */
+export async function fastForwardLocalBranchToSha(opts: {
+  repo: string;
+  branch: string;
+  sha: string;
+}): Promise<boolean> {
+  return withRepoLock(opts.repo, async () => {
+    try {
+      if (!(await branchExists(opts.repo, opts.branch))) {
+        await git(opts.repo, ["branch", opts.branch, opts.sha]);
+        return true;
+      }
+      const localSha = await revParseRef(opts.repo, `refs/heads/${opts.branch}`);
+      if (localSha === opts.sha) return true;
+      if (!(await isAncestor(opts.repo, localSha, opts.sha))) return false;
+      await git(opts.repo, ["update-ref", `refs/heads/${opts.branch}`, opts.sha, localSha]);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 export async function addWorktree(opts: {
   repo: string;
   path: string;
@@ -609,8 +714,10 @@ export type DeveloperWorktreeResolution =
   /**
    * NOT-197: the pre-branch `git fetch origin <base>` failed or timed out, so no fresh
    * branch could be cut from a known-current base — and no branch was created. The
-   * caller defers the start instead of falling back to the stale local base. The
-   * reuse path never produces this: checking out an existing branch needs no fetch.
+   * caller defers the start instead of falling back to the stale local base.
+   * NOT-219: the reuse path produces this too, when its pre-checkout
+   * `git fetch origin <branch>` fails — starting from the stale local branch is
+   * exactly the false-divergence bug, so the start is deferred the same way.
    */
   | { kind: "base_unavailable"; reason: string };
 
@@ -659,12 +766,26 @@ export async function resolveDeveloperWorktree(opts: {
   ownerLiveness?: (worktreePath: string) => WorktreeOwnerLiveness | Promise<WorktreeOwnerLiveness>;
   /**
    * NOT-197: bound for the pre-branch `git fetch origin <baseBranch>` on the
-   * fresh-branch path. Defaults to {@link DEFAULT_BASE_FETCH_TIMEOUT_MS}.
+   * fresh-branch path (and NOT-219: for the pre-checkout
+   * `git fetch origin <branchName>` on the reuse path).
+   * Defaults to {@link DEFAULT_BASE_FETCH_TIMEOUT_MS}.
    */
   fetchTimeoutMs?: number;
 }): Promise<DeveloperWorktreeResolution> {
   return withRepoLock(opts.repo, async () => {
     await pruneWorktrees(opts.repo);
+    // NOT-219: a repair round reuses an existing issue branch, so first fetch
+    // `origin/<branch>` — the worktree must start at exactly what Dealer pushed,
+    // never the managed clone's possibly-stale local ref. A failed fetch defers the
+    // start (`base_unavailable`) instead of falling back to the stale local branch.
+    let reuseRemoteSha: string | null = null;
+    if (opts.reuseBranch) {
+      const reused = await fetchReusedBranch(opts.repo, opts.branchName, opts.fetchTimeoutMs);
+      if (!reused.ok) {
+        return { kind: "base_unavailable", reason: reused.reason };
+      }
+      reuseRemoteSha = reused.remoteSha;
+    }
     const existing = await findWorktreeForBranch(opts.repo, opts.branchName);
     if (existing) {
       const managedRoot = opts.worktreePath
@@ -691,6 +812,20 @@ export async function resolveDeveloperWorktree(opts: {
       }
       const state = await inspectLeftoverWorktree(existing);
       if (state === "clean") {
+        // NOT-219: a clean leftover holding a stale local branch advances to the
+        // fetched remote tip when that is a strict fast-forward (nothing unique to
+        // lose — the local tip is already an ancestor of the remote one). Any other
+        // relationship (ahead, diverged) keeps the leftover exactly as-is.
+        if (reuseRemoteSha !== null) {
+          const localSha = await revParseRef(opts.repo, `refs/heads/${opts.branchName}`).catch(() => null);
+          if (
+            localSha !== null &&
+            localSha !== reuseRemoteSha &&
+            (await isAncestor(opts.repo, localSha, reuseRemoteSha))
+          ) {
+            await git(existing, ["merge", "--ff-only", "-q", `origin/${opts.branchName}`]).catch(() => null);
+          }
+        }
         return { kind: "reused", path: tryRealpath(existing) };
       }
       if (state === "dirty_or_unpushed") {
@@ -729,8 +864,7 @@ export async function resolveDeveloperWorktree(opts: {
     // NOT-197: a fresh issue branch starts from the freshly fetched
     // `origin/<baseBranch>` tip — never the cached clone's possibly-stale local base.
     // A failed fetch returns `base_unavailable` (no branch is created) instead of
-    // silently falling back to the stale local branch. The reuse path below needs no
-    // fetch — it checks out a branch that already exists — and is unchanged.
+    // silently falling back to the stale local branch.
     let ref: string;
     let newBranch: string | undefined;
     let baseSha: string | null = null;
@@ -744,7 +878,24 @@ export async function resolveDeveloperWorktree(opts: {
       newBranch = opts.branchName;
       baseSha = fresh.sha;
       baseRef = fresh.ref;
+    } else if (reuseRemoteSha !== null && !(await branchExists(opts.repo, opts.branchName))) {
+      // NOT-219: the remote has the issue branch but the clone has no local ref for
+      // it (e.g. round 1 committed on a side branch and never created the local
+      // issue branch) — cut it at the fetched `origin/<branch>` tip.
+      ref = `origin/${opts.branchName}`;
+      newBranch = opts.branchName;
     } else {
+      // NOT-219: when the remote tip is known and the local ref is strictly behind
+      // it (an ancestor of it), advance the local ref to the pushed tip before
+      // checking it out — the repair worktree then starts at HEAD == origin/<branch>.
+      // A local ref with commits the remote lacks (ahead or diverged) is preserved
+      // untouched: it is checked out as-is, exactly like the pre-NOT-219 behavior.
+      if (reuseRemoteSha !== null && (await branchExists(opts.repo, opts.branchName))) {
+        const localSha = await revParseRef(opts.repo, `refs/heads/${opts.branchName}`);
+        if (localSha !== reuseRemoteSha && (await isAncestor(opts.repo, localSha, reuseRemoteSha))) {
+          await git(opts.repo, ["update-ref", `refs/heads/${opts.branchName}`, reuseRemoteSha, localSha]);
+        }
+      }
       ref = opts.branchName;
       newBranch = undefined;
     }
