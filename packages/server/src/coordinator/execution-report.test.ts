@@ -1,4 +1,4 @@
-// NOT-175: builder tests for GET /api/execution-analysis — separate
+// NOT-175: builder tests for GET /api/execution-report — separate
 // attempt/issue denominators, exact percentile passthrough, coverage that never
 // coerces missing Cursor/provider data to zero, the visible unknown bucket,
 // sparse samples, and pagination.
@@ -95,6 +95,18 @@ test("classifier keeps ambiguous timeouts unknown", () => {
   assert.equal(classifyFailureReason("").code, "unknown");
 });
 
+test("classifier anchors keep author/release/unrelated spawn out of buckets", () => {
+  // `auth` must not match "author"; `lease` must not match "release"/"please".
+  assert.equal(classifyFailureReason("the author released a fix").code, "unknown");
+  assert.equal(classifyFailureReason("please release a hotfix").code, "unknown");
+  // Standalone words still classify.
+  assert.equal(classifyFailureReason("lease expired on worker").code, "coordinator_crash");
+  assert.equal(classifyFailureReason("could not spawn worker process").code, "agent_cli_crash");
+  assert.equal(classifyFailureReason("failed to push to origin").code, "publish_git_failure");
+  assert.equal(classifyFailureReason("authentication failed").code, "authentication_configuration");
+  assert.equal(classifyFailureReason("auth failure").code, "authentication_configuration");
+});
+
 test("attempt and issue denominators stay separate", () => {
   const report = buildExecutionReport({ status: [] });
   assert.equal(report.summary.issues, 2);
@@ -104,9 +116,18 @@ test("attempt and issue denominators stay separate", () => {
   assert.equal(report.summary.attempts, 4);
   assert.equal(report.summary.terminalAttempts, 4);
   assert.equal(report.summary.attemptSuccess, 0.5);
-  // 4 sessions over 2 issues → 50% retry waste.
-  assert.equal(report.summary.retryRate, 0.5);
-  assert.equal(report.summary.retryExtraAttempts, 2);
+  // Retry waste is extra attempts after a terminal attempt in the same
+  // (issue, role, round): only A's second developer attempt. The reviewer
+  // session alongside developer sessions is normal workflow, not waste.
+  assert.equal(report.summary.retryExtraAttempts, 1);
+  assert.equal(report.summary.retryRate, 0.25);
+  // Per-cohort retry follows the same definition.
+  const dev = report.byRole.find((r) => r.key === "developer")!;
+  assert.equal(dev.retryRate, 1 / 3);
+  const reviewer = report.byRole.find((r) => r.key === "reviewer")!;
+  assert.equal(reviewer.retryRate, 0);
+  const claude = report.byRuntime.find((r) => r.key === "claude_code")!;
+  assert.equal(claude.retryRate, 0.5);
 });
 
 test("missing cost/token data is Unavailable with known/total, never zero", () => {
@@ -157,6 +178,59 @@ test("failed-attempt waste sums known values only", () => {
   assert.ok(Math.abs(report.summary.failedCostUsd.sum! - 1.5) < 1e-9);
   assert.equal(report.summary.failedCostUsd.known, 1);
   assert.equal(report.summary.failedDurationMs.known, 1);
+});
+
+test("per-cohort failed waste is scoped to the cohort's failed attempts", () => {
+  const report = buildExecutionReport({});
+  const claude = report.byRuntime.find((r) => r.key === "claude_code")!;
+  // Only A's failed developer session carries usage: 1/1 known, never zero-filled.
+  assert.ok(Math.abs(claude.failedCostUsd.sum! - 1.5) < 1e-9);
+  assert.equal(claude.failedCostUsd.known, 1);
+  assert.equal(claude.failedCostUsd.total, 1);
+  assert.equal(claude.failedTokensIn.sum, 100);
+  assert.equal(claude.failedTokensOut.sum, 50);
+  assert.equal(claude.failedDurationMs.sum, 60_000);
+  // Cursor cohort has no failed attempts: Unavailable, never $0.
+  const cursor = report.byRuntime.find((r) => r.key === "cursor_local")!;
+  assert.equal(cursor.failedCostUsd.sum, null);
+  assert.equal(cursor.failedCostUsd.quality, "unavailable");
+  assert.equal(cursor.failedCostUsd.known, 0);
+  assert.equal(cursor.failedCostUsd.total, 0);
+});
+
+test("role/runtime filters scope issues, success, failures, and pagination", () => {
+  const filtered = buildExecutionReport({ runtime: "cursor_local" });
+  // Only issue A has a cursor_local session; B (and its unknown failure)
+  // drops out of every issue-level aggregate.
+  assert.equal(filtered.summary.issues, 1);
+  assert.equal(filtered.summary.closedIssues, 1);
+  assert.equal(filtered.summary.issueSuccess, 1);
+  assert.equal(filtered.summary.attempts, 1);
+  assert.equal(filtered.summary.terminalAttempts, 1);
+  assert.equal(filtered.summary.attemptSuccess, 1);
+  assert.equal(filtered.pagination.total, 1);
+  assert.equal(filtered.issues.length, 1);
+  assert.equal(filtered.issues[0]!.id, seeded.a.id);
+  assert.equal(filtered.issues[0]!.attempts, 1);
+  assert.equal(filtered.summary.retryExtraAttempts, 0);
+  assert.equal(filtered.summary.retryRate, 0);
+  assert.equal(filtered.failures.length, 1);
+  assert.equal(filtered.failures[0]!.code, "provider_capacity_rate_limit");
+  assert.deepEqual(filtered.failures[0]!.issueIds, [seeded.a.id]);
+
+  const reviewers = buildExecutionReport({ role: "reviewer" });
+  assert.equal(reviewers.summary.issues, 1);
+  assert.equal(reviewers.pagination.total, 1);
+  assert.ok(!reviewers.failures.some((f) => f.code === "unknown"));
+
+  const empty = buildExecutionReport({ runtime: "no_such_runtime" });
+  assert.equal(empty.summary.issues, 0);
+  assert.equal(empty.summary.attempts, 0);
+  assert.equal(empty.summary.retryRate, null);
+  assert.equal(empty.summary.issueSuccess, null);
+  assert.deepEqual(empty.failures, []);
+  assert.equal(empty.pagination.total, 0);
+  assert.deepEqual(empty.issues, []);
 });
 
 test("filters narrow the report and pagination pages the issue list", () => {

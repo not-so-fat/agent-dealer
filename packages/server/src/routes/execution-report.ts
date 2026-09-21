@@ -1,14 +1,15 @@
 // packages/server/src/routes/execution-report.ts
 //
-// NOT-175: GET /api/execution-analysis — the fleet-level execution-comparison
-// report (NOT-173 surface). Bounded filters; the conservative 30-day window is
-// the default when `from`/`to` are omitted (see shared defaultExecutionReportWindow).
+// NOT-175: GET /api/execution-report — the fleet-level execution-comparison
+// report. (NOT-173 owns GET /api/execution-analysis; Fastify rejects duplicate
+// routes.) Bounded filters; the conservative 30-day window is the default when
+// `from`/`to` are omitted (see shared defaultExecutionReportWindow).
 import type { FastifyInstance } from "fastify";
 import { ExecutionReportQuery } from "@agent-dealer/shared";
 import { buildExecutionReport } from "../coordinator/execution-report.js";
 
 export async function registerExecutionReportRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/api/execution-analysis", async (req, reply) => {
+  app.get("/api/execution-report", async (req, reply) => {
     const parsed = ExecutionReportQuery.safeParse(req.query);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.message });
