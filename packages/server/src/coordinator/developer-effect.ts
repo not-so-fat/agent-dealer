@@ -50,7 +50,7 @@ import {
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
-import { getWorkerSession, patchRunningSession, recordSessionProcess } from "../repository/worker-sessions.js";
+import { getWorkerSession, patchRunningSession, recordSessionProcess, setSessionInputSha } from "../repository/worker-sessions.js";
 import { COORDINATOR_PROCESS_OWNER, readProcessStartTime } from "./process-liveness.js";
 import { checkDeveloperWorktreeOwnerLiveness } from "./worktree-owner-liveness.js";
 import { developerSessionTimeoutMs } from "./session-timeouts.js";
@@ -59,6 +59,7 @@ import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
+import { emitCheckpointObserved, emitRetryReuse } from "./checkpoint.js";
 import { syncIssueBaseBranch } from "./sync-issue-base-branch.js";
 import { emitAgentCompleted, emitAgentStarted } from "./agent-boundaries.js";
 import { recordMuseUsageCap, recordUsageCapFromLog } from "../runners/usage-cap.js";
@@ -185,18 +186,19 @@ function extractConclusion(transcript: string): string {
 
 /** NOT-130: mine + persist a SHA-scoped suite receipt while the worktree still exists.
  * Tip-tree equivalence: only vouch for HEAD when the tree is clean — a green suite on a
- * dirty checkout must not be reloaded as tip evidence after a later clean/revert. */
+ * dirty checkout must not be reloaded as tip evidence after a later clean/revert.
+ * Returns the persisted receipt so the caller can record its checkpoint. */
 async function persistVerificationReceiptIfAny(opts: {
   issueId: string;
   sessionId: string;
   logPath: string;
   worktreePath: string;
-}): Promise<void> {
+}): Promise<VerificationReceipt | null> {
   const clean = await isWorktreeClean(opts.worktreePath).catch(() => false);
-  if (!clean) return;
+  if (!clean) return null;
   const headShaHint = await revParseHead(opts.worktreePath).catch(() => null);
   const receipt = extractVerificationReceiptFromLog(opts.logPath, { headShaHint });
-  if (!receipt) return;
+  if (!receipt) return null;
   createIssueArtifact({
     issueId: opts.issueId,
     workerSessionId: opts.sessionId,
@@ -204,6 +206,7 @@ async function persistVerificationReceiptIfAny(opts: {
     author: "system",
     content: receipt,
   });
+  return receipt;
 }
 
 function loadPriorVerificationReceipt(
@@ -350,6 +353,33 @@ async function runPublishOnlyHandoff(
   try {
     setLiveIntent(issue.id, `Developer · retrying GitHub publish (round ${round})`);
 
+    // NOT-172: a publish-only run is inherently a retry over prior work — record the
+    // reuse once per session (durable + idempotent, so a repeated run is a no-op).
+    // Coordinator-only: no agent process, so this attempt adds zero agent waste.
+    try {
+      let publishRetryReason: string | null = null;
+      try {
+        if (workItem.payloadJson) {
+          const parsed = JSON.parse(workItem.payloadJson) as { retryReason?: unknown };
+          if (typeof parsed.retryReason === "string") publishRetryReason = parsed.retryReason;
+        }
+      } catch {
+        // keep null
+      }
+      emitRetryReuse({
+        issueId: issue.id,
+        workflowInstanceId: instance.id,
+        workerSessionId: sessionId,
+        role: "developer",
+        stage,
+        round,
+        kinds: ["publish_only"],
+        retryReason: publishRetryReason,
+      });
+    } catch {
+      // reuse evidence must never fail the attempt itself
+    }
+
     // Serialize fetch/push against the shared managed clone (same withRepoLock as
     // ensureIssueRepoCheckout / createRoleWorktree) so concurrent issues on one repo
     // cannot race repo-root git metadata.
@@ -422,6 +452,24 @@ async function runPublishOnlyHandoff(
               : {}),
           }
         );
+        // NOT-172: durable branch-pushed checkpoint at the existing success point.
+        // Read-only: the push just updated the remote-tracking ref.
+        try {
+          const pushedSha = await revParseRef(cwd, `origin/${branchName}`).catch(() => null);
+          emitCheckpointObserved({
+            issueId: issue.id,
+            workflowInstanceId: instance.id,
+            workerSessionId: sessionId,
+            role: "developer",
+            stage,
+            round,
+            kind: "branch_pushed",
+            observedSha: pushedSha,
+            branch: branchName,
+          });
+        } catch {
+          // checkpoint evidence must never fail the attempt itself
+        }
       }
 
       await fetchRef(cwd, branchName);
@@ -651,6 +699,9 @@ export async function runDeveloperEffect(
   const reuseBranch = issue.branch != null || (await branchExists(repoPath, branchName));
 
   let worktreePath: string;
+  // NOT-172: whether the retry-resolution reused an existing checkout (source for
+  // the retry-reuse record emitted once the retry begins).
+  let worktreeReused = false;
   try {
     // Detects a leftover worktree from an earlier round/escalation that still holds this
     // branch (a plain `git worktree add` would collide with it and surface as an opaque
@@ -686,6 +737,7 @@ export async function runDeveloperEffect(
       };
     }
     worktreePath = resolved.path;
+    worktreeReused = resolved.kind === "reused";
     if (resolved.kind === "created" && resolved.baseSha) {
       // NOT-197: record the true branch point while it is known — the verified handoff
       // re-checks it via merge-base, but crash/timeout progress inspection below already
@@ -701,6 +753,28 @@ export async function runDeveloperEffect(
   milestone("worktree.ready", `Developer · worktree ready (round ${round})`, {
     worktreePath: shortWorktreePath(worktreePath),
   });
+
+  // NOT-172: capture the worktree HEAD as this session's input-SHA baseline before
+  // the agent spawns — developer work items are never enqueued with an input SHA,
+  // so without this the sampler's HEAD diff (and the session_end fallback) have
+  // nothing per-session to compare against. Read-only `rev-parse`; a retry on a
+  // reused branch baselines at the inherited tip, so only commits this session
+  // adds count as its evidence. Persisted set-once: a restart re-entrant into the
+  // same session keeps the original baseline.
+  let samplerInputSha: string | null = session?.inputSha ?? null;
+  try {
+    const baselineHead = await revParseHead(worktreePath).catch(() => null);
+    if (baselineHead && samplerInputSha === null) {
+      try {
+        setSessionInputSha(sessionId, baselineHead);
+      } catch {
+        // baseline persistence must never fail the attempt itself
+      }
+      samplerInputSha = baselineHead;
+    }
+  } catch {
+    // baseline capture must never fail the attempt itself
+  }
 
   // One resolution, two consumers: the materialized MCP config's tool surface below and
   // the spawn args' tool surface further down. They were resolved separately and had to
@@ -808,7 +882,74 @@ export async function runDeveloperEffect(
     const logPath = developerSessionLogPath(sessionId);
     patchRunningSession(sessionId, { logPath, worktreePath });
     setLiveIntent(issue.id, `Developer · session running (round ${round})`);
-    const sampler = startActivitySampler({ issueId: issue.id, role: "developer", round, logPath, workerSessionId: sessionId });
+
+    // NOT-172: when a retry/recovery begins, record which prior work it actually
+    // reuses — existing resolution/recovery paths are the sources (reused
+    // checkout, existing commit/branch, carried SHA-scoped receipt). A retry
+    // with none of these is recorded with empty kinds: an explicit cold retry.
+    if (retryReason) {
+      try {
+        const reuseKinds: Array<"worktree" | "commit" | "verification_receipt"> = [];
+        if (worktreeReused) reuseKinds.push("worktree");
+        if (priorVerificationReceipt) reuseKinds.push("verification_receipt");
+        if (reuseBranch) {
+          const ahead = await commitsAhead({
+            worktreePath,
+            baseRef: `origin/${baseBranch}`,
+          }).catch(() => null);
+          if ((ahead !== null && ahead > 0) || (ahead === null && issue.branch != null)) {
+            reuseKinds.push("commit");
+          }
+        }
+        emitRetryReuse({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          workerSessionId: sessionId,
+          role: "developer",
+          stage,
+          round,
+          kinds: reuseKinds,
+          retryReason,
+        });
+      } catch {
+        // reuse evidence must never fail the attempt itself
+      }
+    }
+
+    // NOT-172: the sampler also watches HEAD read-only and records the `commit`
+    // checkpoint once when HEAD first differs from the session input SHA
+    // (captured at worktree-ready above and persisted on the session).
+    const sampler = startActivitySampler({
+      issueId: issue.id,
+      role: "developer",
+      round,
+      logPath,
+      workerSessionId: sessionId,
+      headCheck: {
+        inputSha: samplerInputSha,
+        readHead: () => revParseHead(worktreePath).catch(() => null),
+        onCommit: ({ observedSha, observedAt }) => {
+          try {
+            emitCheckpointObserved({
+              issueId: issue.id,
+              workflowInstanceId: instance.id,
+              workerSessionId: sessionId,
+              role: "developer",
+              stage,
+              round,
+              kind: "commit",
+              observedSha,
+              observedAt,
+              origin: "sampler",
+              inputSha: samplerInputSha,
+              samplingPrecisionMs: 10_000,
+            });
+          } catch {
+            // checkpoint evidence must never fail the attempt itself
+          }
+        },
+      },
+    });
 
     const spawnStartedAt = Date.now();
     const agentModel = snapshot?.model ?? null;
@@ -913,12 +1054,56 @@ export async function runDeveloperEffect(
 
     // NOT-130: record suite evidence even when the session later fails/times out — an
     // interrupted-but-verified tip must carry the receipt into the retry prompt.
-    await persistVerificationReceiptIfAny({
+    const verificationReceipt = await persistVerificationReceiptIfAny({
       issueId: issue.id,
       sessionId,
       logPath: spawned.logPath,
       worktreePath,
     });
+
+    // NOT-172: durable checkpoints at the existing post-session success points.
+    // All read-only and idempotent per (session, kind): when the sampler already
+    // recorded the commit, the session_end re-emit is a no-op.
+    try {
+      if (verificationReceipt) {
+        emitCheckpointObserved({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          workerSessionId: sessionId,
+          role: "developer",
+          stage,
+          round,
+          kind: "verification_receipt",
+          observedSha: verificationReceipt.headSha,
+        });
+      }
+      const endHead = await revParseHead(worktreePath).catch(() => null);
+      // A null baseline means HEAD was unreadable at session start, so a commit
+      // here cannot be attributed to this session (it may be inherited from a
+      // reused branch) — skip rather than misattribute.
+      if (endHead && samplerInputSha && endHead !== samplerInputSha) {
+        const endAhead = await commitsAhead({
+          worktreePath,
+          baseRef: `origin/${baseBranch}`,
+        }).catch(() => null);
+        if ((endAhead !== null && endAhead > 0) || (endAhead === null && issue.branch != null)) {
+          emitCheckpointObserved({
+            issueId: issue.id,
+            workflowInstanceId: instance.id,
+            workerSessionId: sessionId,
+            role: "developer",
+            stage,
+            round,
+            kind: "commit",
+            observedSha: endHead,
+            origin: "session_end",
+            inputSha: samplerInputSha,
+          });
+        }
+      }
+    } catch {
+      // checkpoint evidence must never fail the attempt itself
+    }
 
     // Recorded unconditionally, before any early return below: cost is incurred the
     // moment the process runs, whether or not the session subsequently timed out,
@@ -1033,6 +1218,24 @@ export async function runDeveloperEffect(
         const salvageKind = spawned.timedOut ? "timeout" : "crash";
         const salvaged = await salvageDirtyWorktree(worktreePath, salvageKind);
         if (salvaged.ok) {
+          // NOT-172: durable salvage-commit checkpoint at the existing success point.
+          try {
+            emitCheckpointObserved({
+              issueId: issue.id,
+              workflowInstanceId: instance.id,
+              workerSessionId: sessionId,
+              role: "developer",
+              stage,
+              round,
+              kind: "commit",
+              observedSha: salvaged.commitSha,
+              origin: "salvage",
+              inputSha: samplerInputSha,
+              branch: branchName,
+            });
+          } catch {
+            // checkpoint evidence must never fail the attempt itself
+          }
           // Measure progress while the worktree still exists (same rule as the clean
           // timeout/crash path below), then remove. Salvage always lands ≥1 tip commit.
           const crashReason = reasonForSessionCrash({
@@ -1180,6 +1383,22 @@ export async function runDeveloperEffect(
     const pushedHead = await revParseHead(worktreePath).catch(() => null);
     if (pushedHead) {
       await fastForwardLocalBranchToSha({ repo: repoPath, branch: branchName, sha: pushedHead }).catch(() => false);
+    }
+    // NOT-172: durable branch-pushed checkpoint at the existing success point.
+    try {
+      emitCheckpointObserved({
+        issueId: issue.id,
+        workflowInstanceId: instance.id,
+        workerSessionId: sessionId,
+        role: "developer",
+        stage,
+        round,
+        kind: "branch_pushed",
+        observedSha: pushedHead,
+        branch: branchName,
+      });
+    } catch {
+      // checkpoint evidence must never fail the attempt itself
     }
     // From here on the branch is safely on the remote — a worktree removal on any
     // subsequent failure path loses nothing (bestEffortRemove is safe to call).

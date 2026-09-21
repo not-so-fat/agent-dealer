@@ -16,7 +16,9 @@ const {
   deriveActivityFromLog,
   deriveLiveProgressFromLog,
   emitSessionMilestone,
+  firstCommitFromHead,
   shortWorktreePath,
+  startActivitySampler,
   taskBriefIsComplete,
   workerSessionPayload} = await import("./session-progress.js");
 
@@ -208,4 +210,81 @@ test("emitSessionMilestone appends a role-attributed event and refreshes current
   assert.ok(milestone);
   assert.equal(milestone!.actorType, "developer");
   assert.equal(getIssue(issue.id)!.currentIntent, "Developer · worktree ready (round 1)");
+});
+
+test("firstCommitFromHead fires only on a first HEAD difference from the input SHA", () => {
+  const sha = "a".repeat(40);
+  assert.equal(firstCommitFromHead(sha, "b".repeat(40), false), sha);
+  assert.equal(firstCommitFromHead(sha, sha, false), null, "unchanged HEAD is not a commit");
+  assert.equal(firstCommitFromHead(sha, null, false), null, "no input SHA to diff against");
+  assert.equal(firstCommitFromHead(null, "b".repeat(40), false), null, "unresolvable HEAD");
+  assert.equal(firstCommitFromHead(sha, "b".repeat(40), true), null, "already recorded fires once");
+});
+
+test("NOT-172: the sampler records the first commit once across ticks (read-only check)", async () => {
+  const seen: Array<{ observedSha: string; observedAt: string }> = [];
+  let head = "b".repeat(40);
+  let reads = 0;
+  const sampler = startActivitySampler({
+    issueId: "11111111-1111-1111-1111-111111111111",
+    role: "developer",
+    round: 1,
+    logPath: path.join(os.tmpdir(), "dealer-progress-no-such-log.ndjson"),
+    intervalMs: 15,
+    headCheck: {
+      inputSha: "b".repeat(40),
+      readHead: async () => {
+        reads++;
+        return head;
+      },
+      onCommit: (evidence) => {
+        seen.push(evidence);
+      },
+    },
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(seen.length, 0, "unchanged HEAD records nothing");
+    head = "a".repeat(40);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(seen.length, 1, "first difference records once across ticks");
+    assert.equal(seen[0]!.observedSha, "a".repeat(40));
+    assert.ok(Date.parse(seen[0]!.observedAt) > 0, "observation timestamp is a real time");
+    head = "c".repeat(40);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(seen.length, 1, "later commits do not re-fire");
+    assert.ok(reads >= 3, "the read-only check keeps sampling");
+  } finally {
+    sampler.stop();
+  }
+});
+
+test("NOT-172: the sampler head check never fires without an input SHA and survives read failures", async () => {
+  const seen: Array<{ observedSha: string; observedAt: string }> = [];
+  let calls = 0;
+  const sampler = startActivitySampler({
+    issueId: "11111111-1111-1111-1111-111111111111",
+    role: "developer",
+    round: 1,
+    logPath: path.join(os.tmpdir(), "dealer-progress-no-such-log.ndjson"),
+    intervalMs: 15,
+    headCheck: {
+      inputSha: null,
+      readHead: async () => {
+        calls++;
+        if (calls === 1) throw new Error("git unavailable");
+        return "a".repeat(40);
+      },
+      onCommit: (evidence) => {
+        seen.push(evidence);
+      },
+    },
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    assert.equal(seen.length, 0, "no input SHA means no diff is defensible");
+    assert.ok(calls >= 2, "a failed read retries on the next tick without throwing");
+  } finally {
+    sampler.stop();
+  }
 });

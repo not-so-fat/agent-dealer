@@ -154,6 +154,25 @@ export interface PatchRunningSessionInput {
   sessionRef?: string | null;
 }
 
+/**
+ * NOT-172: persist the worktree HEAD observed at session start as the session's
+ * input SHA — the baseline the 10-second sampler diffs HEAD against for the
+ * first-commit checkpoint. Developer work items are never enqueued with an
+ * input SHA (only reviewer enqueues set one), so without this the sampler has
+ * nothing to diff against and never fires. Set-once (only when currently NULL)
+ * so a coordinator restart re-entrant into the same session keeps the original
+ * baseline instead of moving it, and queued reviewer SHAs are never overwritten.
+ */
+export function setSessionInputSha(id: string, sha: string): WorkerSession | null {
+  getDb()
+    .prepare(
+      `UPDATE worker_sessions SET input_sha = ?, updated_at = ?
+       WHERE id = ? AND input_sha IS NULL`
+    )
+    .run(sha, new Date().toISOString(), id);
+  return getWorkerSession(id);
+}
+
 /** Mid-session bookkeeping for the live strip (worktree / log path) — running only. */
 export function patchRunningSession(id: string, patch: PatchRunningSessionInput): WorkerSession | null {
   const current = getWorkerSession(id);

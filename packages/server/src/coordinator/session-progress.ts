@@ -468,8 +468,40 @@ function summarizeActivityEvent(
 }
 
 /**
+ * Read-only HEAD observer for a developer session's worktree. Injected (rather
+ * than a direct git call) so the sampler stays side-effect free and testable;
+ * implementations must be read-only (`git rev-parse HEAD`).
+ */
+export type HeadReader = () => Promise<string | null>;
+
+/**
+ * NOT-172 first-commit detection: pure decision over a HEAD read. Returns the
+ * observed SHA when it is the first durable commit evidence for the session —
+ * HEAD resolves and differs from the session input SHA — and null otherwise
+ * (unresolvable HEAD, no input SHA to diff against, or already recorded).
+ */
+export function firstCommitFromHead(
+  headSha: string | null | undefined,
+  inputSha: string | null | undefined,
+  alreadyRecorded: boolean
+): string | null {
+  if (alreadyRecorded) return null;
+  if (!headSha || !inputSha) return null;
+  if (headSha === inputSha) return null;
+  return headSha;
+}
+
+/**
  * While an agent CLI is running, periodically refresh currentIntent from the session log
  * without flooding the timeline. No-ops when the log has no new activity label.
+ *
+ * NOT-172: with `headCheck`, the same tick also performs a read-only HEAD check
+ * for developer sessions and records the `commit` checkpoint once when HEAD
+ * first differs from the session `inputSha` — "coordinator-observed checkpoint
+ * time" at sampling precision, never an invented Git author/commit time. The
+ * check never writes to the worktree and never affects spawn/routing behavior.
+ * The caller owns the durable `onCommit` emit (idempotent per session, so a
+ * restart re-emit is a no-op); tests may substitute an in-memory recorder.
  *
  * NOT-170: the same tick also persists new structured stream events (tool starts and
  * completions, assistant output, provider wait/retry) into `session_activity_events` —
@@ -487,9 +519,16 @@ export function startActivitySampler(opts: {
   logPath: string;
   workerSessionId?: string;
   intervalMs?: number;
+  headCheck?: {
+    inputSha: string | null;
+    readHead: HeadReader;
+    onCommit: (evidence: { observedSha: string; observedAt: string }) => void;
+  };
 }): { stop: () => void } {
   const prefix = `${ROLE_LABEL[opts.role]} ·`;
   let lastLabel: string | null = null;
+  let commitRecorded = false;
+  let headInFlight = false;
   let lastOffset = 0;
   let baseCursor = 0;
   let resumeDone = false;
@@ -576,6 +615,25 @@ export function startActivitySampler(opts: {
       setLiveIntent(opts.issueId, `${prefix} ${activity} (round ${opts.round})`);
     }
     sampleAndPersistActivity();
+    const headCheck = opts.headCheck;
+    if (!headCheck || commitRecorded || headInFlight) return;
+    headInFlight = true;
+    headCheck.readHead().then(
+      (headSha) => {
+        headInFlight = false;
+        const first = firstCommitFromHead(headSha, headCheck.inputSha, commitRecorded);
+        if (!first) return;
+        commitRecorded = true;
+        try {
+          headCheck.onCommit({ observedSha: first, observedAt: new Date().toISOString() });
+        } catch {
+          // checkpoint evidence must never fail the attempt itself
+        }
+      },
+      () => {
+        headInFlight = false;
+      }
+    );
   };
   const handle = setInterval(tick, opts.intervalMs ?? 10_000);
   // First sample soon so the strip moves off "session running" once tools appear.

@@ -41,6 +41,8 @@ test("WorkflowEventType accepts every PRD §9.2 event type", () => {
     "queue.wait_reason_changed",
     "queue.admitted",
     "queue.removed",
+    "checkpoint.observed",
+    "retry.reused",
   ];
   for (const t of types) {
     assert.equal(WorkflowEventType.parse(t), t);
