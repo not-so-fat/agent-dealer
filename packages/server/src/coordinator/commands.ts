@@ -10,6 +10,7 @@ import type {
   HumanAction,
   HumanActionType,
   Issue,
+  WorkflowEvent,
   WorkflowInstance,
   WorkflowEventType,
 } from "@agent-dealer/shared";
@@ -59,6 +60,7 @@ import { killRunProcess } from "../runners/spawn-cli.js";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { reasonForWorkerFailedEvent } from "./failure-reason.js";
+import { recordCausesForWorkerFailedEvent } from "./failure-cause.js";
 import {
   routeDeveloperOutcome,
   routeReviewerOutcome,
@@ -610,7 +612,7 @@ export function routeAppliedOutcome(
 }
 
 interface EventEmitter {
-  emit: (type: WorkflowEventType, opts?: EmitOpts) => void;
+  emit: (type: WorkflowEventType, opts?: EmitOpts) => WorkflowEvent;
 }
 interface EmitOpts {
   actorType?: "system" | "developer" | "reviewer" | "human";
@@ -641,6 +643,7 @@ function eventEmitter(
         causationEventId: causation,
       });
       causation = evt.id;
+      return evt;
     },
   };
 }
@@ -729,10 +732,23 @@ function applyDeveloper(
           runtime: session?.runtime ?? undefined,
         });
       }
-      ev.emit(type, {
+      const emitted = ev.emit(type, {
         actorType: "developer",
         payload,
       });
+      if (type === "worker.failed") {
+        // NOT-171: normalized cause evidence, same classifier as recovery. Append-only;
+        // the event payload reason and session errorJson stay untouched.
+        recordCausesForWorkerFailedEvent({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          event: emitted,
+          outcomeKind: outcome.kind,
+          outcomeReason: "reason" in outcome ? (outcome.reason ?? null) : null,
+          routeReason: "reason" in route ? route.reason : null,
+          recovery: isPublishOnlyItem(item) ? "republish" : null,
+        });
+      }
     } else {
       ev.emit(type);
     }
@@ -811,10 +827,22 @@ function applyReviewer(
           runtime: session?.runtime ?? undefined,
         });
       }
-      ev.emit(type, {
+      const emitted = ev.emit(type, {
         actorType: "reviewer",
         payload,
       });
+      if (type === "worker.failed") {
+        // NOT-171: see applyDeveloper.
+        recordCausesForWorkerFailedEvent({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          event: emitted,
+          outcomeKind: outcome.kind,
+          outcomeReason: "reason" in outcome ? (outcome.reason ?? null) : null,
+          routeReason: "reason" in route ? route.reason : null,
+          recovery: isPublishOnlyItem(item) ? "republish" : null,
+        });
+      }
     } else {
       ev.emit(type);
     }

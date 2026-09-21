@@ -48,6 +48,7 @@ import { routeAppliedOutcome } from "./commands.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { PRESUMED_DEAD_REASON, presumedDeadReclaimReason } from "./failure-reason.js";
+import { recordCausesForWorkerFailedEvent } from "./failure-cause.js";
 import {
   baseRefCandidates,
   developerBranchName,
@@ -147,7 +148,7 @@ function emitPresumedDeadFailed(item: WorkItem, republish: PublishableBranch | n
   const role = item.kind === "developer" ? "developer" : "reviewer";
   const alreadyPushed = republish?.state === "published";
   const commits = republishCommits(republish);
-  appendWorkflowEvent({
+  const event = appendWorkflowEvent({
     issueId: issue.id,
     workflowInstanceId: instance.id,
     workerSessionId: item.workerSessionId,
@@ -167,6 +168,15 @@ function emitPresumedDeadFailed(item: WorkItem, republish: PublishableBranch | n
       recovery: republish ? "republish" : "rerun",
       ...(republish ? { branchState: republish.state, branch: republish.branch, commits } : {}),
     },
+  });
+  // NOT-171: the same classifier as observed failures. Append-only; errorJson untouched.
+  recordCausesForWorkerFailedEvent({
+    issueId: issue.id,
+    workflowInstanceId: instance.id,
+    event,
+    outcomeKind: "session_failed",
+    outcomeReason: reason,
+    recovery: republish ? "republish" : "rerun",
   });
 
   // The live intent is cosmetic; the reclaim is not. Only stages with a legal self-loop are

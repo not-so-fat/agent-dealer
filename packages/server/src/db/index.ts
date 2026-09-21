@@ -409,6 +409,37 @@ export function migrate(): void {
     `);
   }
 
+  // NOT-171: append-only failure-cause evidence for databases created before
+  // schema.sql declared it. schema.sql's CREATE TABLE IF NOT EXISTS covers fresh
+  // databases; this guards the upgrade path the same way queue_entries does.
+  const failureCauses = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'failure_causes'")
+    .get() as { name: string } | undefined;
+  if (!failureCauses) {
+    db.exec(`
+      CREATE TABLE failure_causes (
+        id TEXT PRIMARY KEY,
+        issue_id TEXT NOT NULL,
+        worker_session_id TEXT,
+        workflow_instance_id TEXT,
+        workflow_event_id TEXT,
+        event_cursor INTEGER,
+        code TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        primary_flag INTEGER NOT NULL DEFAULT 0,
+        confidence TEXT NOT NULL,
+        evidence_source TEXT NOT NULL,
+        occurred_at TEXT,
+        raw_reason TEXT NOT NULL,
+        log_path TEXT,
+        quality TEXT NOT NULL DEFAULT 'exact',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_failure_causes_session ON failure_causes(worker_session_id);
+      CREATE INDEX idx_failure_causes_issue ON failure_causes(issue_id);
+    `);
+  }
+
   seedBuiltinAgents(db);
   seedIntakeSettings(db);
   migrateLegacyAgentDeckPort(db);
