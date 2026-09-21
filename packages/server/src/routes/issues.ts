@@ -11,7 +11,7 @@ import {
   UpdateIssueInput,
 } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
-import { createIssue, getIssue, listIssues, findActiveIssueByExternalId, listIssuesByExternalId, updateIssue, listRecentRepos } from "../repository/issues.js";
+import { createIssue, getIssue, listIssues, findActiveIssueByExternalId, listIssuesByExternalId, queryIssues, updateIssue, listRecentRepos } from "../repository/issues.js";
 import { listWorkerSessionsForIssue, getActiveWorkerSessionForIssue } from "../repository/worker-sessions.js";
 import { getIssueArtifact, listArtifactsForIssue } from "../repository/artifacts-for-issue.js";
 import { listUsageEventsForIssue, summarizeIssueUsage } from "../repository/usage-events.js";
@@ -73,10 +73,22 @@ function readTraceTail(filePath: string, maxChars: number): string {
 
 export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/issues", async (req) => {
-    const status = (req.query as { status?: string }).status;
-    const issues = status ? listIssues(status.split(",") as IssueStatus[]) : listIssues();
-    const openActionIssueIds = new Set(listOpenHumanActions().map((a) => a.issueId));
-    return issues.map((issue) => ({
+    const query = req.query as {
+      status?: string;
+      q?: string;
+      repo?: string;
+      needsAttention?: string;
+      page?: string;
+      limit?: string;
+    };
+    const toRow = (openActionIssueIds: Set<string | null>) => (issue: {
+      id: string;
+      title: string;
+      status: IssueStatus;
+      currentOwner: string;
+      currentIntent: string | null;
+      updatedAt: string;
+    }) => ({
       id: issue.id,
       title: issue.title,
       status: issue.status,
@@ -84,7 +96,35 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       currentIntent: issue.currentIntent,
       updatedAt: issue.updatedAt,
       hasOpenHumanAction: openActionIssueIds.has(issue.id),
-    }));
+    });
+    // NOT-228: paginated web requests pass `page` and/or `limit` and get rows
+    // plus `{ page, limit, total, totalPages }`. Legacy callers (notably the
+    // CLI status query) omit both and keep the existing unpaginated array.
+    if (query.page !== undefined || query.limit !== undefined) {
+      const statuses = query.status
+        ? query.status.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+      const result = queryIssues({
+        search: query.q,
+        status: statuses as IssueStatus[] | undefined,
+        repo: query.repo,
+        needsAttention: query.needsAttention === "1" || query.needsAttention === "true",
+        page: query.page !== undefined ? Number(query.page) : undefined,
+        limit: query.limit !== undefined ? Number(query.limit) : undefined,
+      });
+      const openActionIssueIds = new Set(listOpenHumanActions().map((a) => a.issueId));
+      return {
+        issues: result.rows.map(toRow(openActionIssueIds)),
+        page: result.page,
+        limit: result.limit,
+        total: result.total,
+        totalPages: result.totalPages,
+      };
+    }
+    const status = query.status;
+    const issues = status ? listIssues(status.split(",") as IssueStatus[]) : listIssues();
+    const openActionIssueIds = new Set(listOpenHumanActions().map((a) => a.issueId));
+    return issues.map(toRow(openActionIssueIds));
   });
 
   /** Recent portable GitHub repo identities (legacy local paths excluded from create UI). */

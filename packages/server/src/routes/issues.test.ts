@@ -19,6 +19,7 @@ const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { registerIssueRoutes } = await import("./issues.js");
 const { transitionIssue, listIssuesByExternalId, getIssue } = await import("../repository/issues.js");
+const { createHumanAction } = await import("../repository/human-actions.js");
 const { createIssueArtifact } = await import("../repository/artifacts.js");
 const { claimWorkItem } = await import("../repository/work-items.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
@@ -691,6 +692,53 @@ test("NOT-148: GET /api/issues/:id surfaces branchTipStatus with restart risk af
   await app.close();
 });
 
+// NOT-228: helpers + focused tests for Issues list filtering/pagination. Every
+// test wipes `issues` in beforeEach, so the `R228` title marker scopes each
+// cohort without cross-test interference.
+const R228_PAYLOAD = {
+  repo: "acme/app",
+  baseBranch: "main",
+  developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+  reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+};
+
+async function r228Seed(app: Awaited<ReturnType<typeof buildApp>>, title: string, extra: Record<string, unknown> = {}) {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/issues",
+    payload: { ...R228_PAYLOAD, ...extra, title },
+  });
+  assert.equal(res.statusCode, 200);
+  return res.json() as { id: string };
+}
+
+interface R228Page {
+  issues: Array<{ id: string; title: string; status: string; hasOpenHumanAction: boolean }>;
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+async function r228Get(app: Awaited<ReturnType<typeof buildApp>>, qs: string) {
+  const res = await app.inject({ method: "GET", url: `/api/issues${qs}` });
+  assert.equal(res.statusCode, 200);
+  return res.json() as R228Page;
+}
+
+test("NOT-228: omitting page/limit keeps the legacy unpaginated array (CLI contract)", async () => {
+  const app = await buildApp();
+  const created = await r228Seed(app, "R228 legacy contract");
+  for (const url of ["/api/issues", "/api/issues?status=ready", "/api/issues?q=R228&repo=github.com%2Facme%2Fapp"]) {
+    const res = await app.inject({ method: "GET", url });
+    assert.equal(res.statusCode, 200);
+    const body = res.json() as unknown;
+    assert.ok(Array.isArray(body), `${url} still answers an array`);
+    assert.ok((body as Array<{ id: string }>).some((i) => i.id === created.id));
+  }
+  await app.close();
+});
+
 test("NOT-217: PATCH agent assignments on a queued issue preserves position, refreshes the wait reason, and records issue.reassigned", async () => {
   const app = await buildApp();
   try {
@@ -768,6 +816,82 @@ test("NOT-217: PATCH agent assignments on a queued issue preserves position, ref
   } finally {
     setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
   }
+  await app.close();
+});
+
+test("NOT-228: page/limit paginate with a default of 25 and totals for the full cohort", async () => {
+  const app = await buildApp();
+  for (let n = 0; n < 30; n++) await r228Seed(app, `R228 pageable ${n}`);
+  const q = encodeURIComponent("R228 pageable");
+  const first = await r228Get(app, `?q=${q}&limit=25`);
+  assert.equal(first.issues.length, 25);
+  assert.equal(first.page, 1);
+  assert.equal(first.limit, 25);
+  assert.equal(first.total, 30);
+  assert.equal(first.totalPages, 2);
+  const second = await r228Get(app, `?q=${q}&limit=25&page=2`);
+  assert.equal(second.issues.length, 5);
+  assert.equal(second.total, 30);
+  assert.deepEqual(
+    new Set([...first.issues, ...second.issues].map((i) => i.id)).size,
+    30,
+    "pages neither duplicate nor skip rows"
+  );
+  // `page` alone still paginates (default limit); `limit` alone starts at page 1.
+  const defaulted = await r228Get(app, `?q=${q}&page=2`);
+  assert.equal(defaulted.limit, 25);
+  assert.equal(defaulted.issues.length, 5);
+  await app.close();
+});
+
+test("NOT-228: search, status, repo, and attention filters apply before pagination", async () => {
+  const app = await buildApp();
+  const repo = "github.com/r228/filtered";
+  const keep = await r228Seed(app, "R228 filter keep me", { repo });
+  const moved = await r228Seed(app, "R228 filter moved on", { repo });
+  await r228Seed(app, "R228 filter other repo", { repo: "github.com/r228/elsewhere" });
+  transitionIssue(moved.id, "developing");
+  createHumanAction({
+    issueId: moved.id,
+    actionType: "final_review",
+    reason: "Reviewer approved",
+    question: "Accept?",
+    responseOptions: ["complete"],
+  });
+  const q = encodeURIComponent("R228 filter");
+  const byStatus = await r228Get(app, `?q=${q}&status=developing&page=1&limit=10`);
+  assert.equal(byStatus.total, 1);
+  assert.deepEqual(byStatus.issues.map((i) => i.id), [moved.id]);
+  const byRepo = await r228Get(app, `?q=${q}&repo=${encodeURIComponent(repo)}&page=1&limit=10`);
+  assert.equal(byRepo.total, 2);
+  const attention = await r228Get(app, `?q=${q}&needsAttention=1&page=1&limit=10`);
+  assert.equal(attention.total, 1);
+  assert.deepEqual(attention.issues.map((i) => i.id), [moved.id]);
+  assert.equal(attention.issues[0]!.hasOpenHumanAction, true);
+  // Search matches the external label, not just the title: no "R228 filter"
+  // title contains "not-228", so only the labeled row matches.
+  const labeled = await r228Seed(app, "R228 filter label-only title", {
+    source: "linear",
+    externalId: "R228-LBL-1",
+    externalLabel: "NOT-228",
+  });
+  const byLabel = await r228Get(app, `?q=${encodeURIComponent("not-228")}&page=1&limit=10`);
+  assert.equal(byLabel.total, 1);
+  assert.deepEqual(byLabel.issues.map((i) => i.id), [labeled.id]);
+  void keep;
+  await app.close();
+});
+
+test("NOT-228: limit clamps to 100 and out-of-range pages keep totals", async () => {
+  const app = await buildApp();
+  await r228Seed(app, "R228 bounds one");
+  const capped = await r228Get(app, `?q=${encodeURIComponent("R228 bounds")}&page=1&limit=500`);
+  assert.equal(capped.limit, 100);
+  assert.equal(capped.total, 1);
+  const pastEnd = await r228Get(app, `?q=${encodeURIComponent("R228 bounds")}&page=9&limit=10`);
+  assert.deepEqual(pastEnd.issues, []);
+  assert.equal(pastEnd.total, 1);
+  assert.equal(pastEnd.page, 9);
   await app.close();
 });
 
