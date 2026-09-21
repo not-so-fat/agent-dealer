@@ -14,6 +14,7 @@ export * from "./issues.js";
 export * from "./github-repo.js";
 export * from "./worker-sessions.js";
 export * from "./failure-cause.js";
+export * from "./attempt-waste.js";
 export * from "./profile-snapshot.js";
 export * from "./workflow.js";
 export * from "./human-actions.js";

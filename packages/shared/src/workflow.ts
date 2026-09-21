@@ -55,6 +55,14 @@ export const WorkflowEventType = z.enum([
   "agent.started",
   "agent.completed",
   "host.suspended",
+  /** NOT-172: append-only checkpoint/reuse evidence (see EXECUTION_ANALYSIS.md).
+   * `checkpoint.observed` records durable work surviving an attempt (kinds
+   * commit / verification_receipt / branch_pushed in the payload); `retry.reused`
+   * records which prior work a retry actually reused (kinds worktree / commit /
+   * verification_receipt / publish_only; empty = cold retry). Both are idempotent
+   * per session via idempotency keys and never drive retry/routing decisions. */
+  "checkpoint.observed",
+  "retry.reused",
   /** Migration-only — the NOT-66 cutover repoints a legacy `events` row under this type,
    * preserving the original type/payload inside `payloadJson` (see `role: "legacy"` on
    * `WorkerSessionRole` and `outcome: "migrated"` on `WorkflowInstanceOutcome` for the same
