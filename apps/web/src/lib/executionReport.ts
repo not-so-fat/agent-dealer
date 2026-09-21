@@ -4,6 +4,7 @@
 // flags, unknown-bucket emphasis) lives here so tests pin it without a browser.
 import {
   coverageCellText,
+  EXECUTION_REPORT_MAX_LIMIT,
   formatCount,
   formatMs,
   formatRate,
@@ -216,6 +217,47 @@ export function setPageQuery(search: string, page: number): string {
   else qs.set("page", String(Math.floor(page)));
   qs.sort();
   return qs.toString();
+}
+
+/**
+ * Fetch filters from the raw URL search only — no injected window defaults.
+ * The page must request exactly what the URL says so an empty query hits the
+ * API's conservative default window (client-clock from/to would skew it and
+ * go stale on Retry). Only params present in the URL are sent.
+ */
+export function searchToFilters(search: string): ReportFilterState {
+  const qs = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const pick = (k: string): string | undefined => {
+    const v = qs.get(k)?.trim();
+    return v ? v : undefined;
+  };
+  const out: ReportFilterState = {};
+  for (const k of ["from", "to", "repo", "role", "runtime", "model", "status"] as const) {
+    const v = pick(k);
+    if (v !== undefined) out[k] = v;
+  }
+  const page = Number(qs.get("page"));
+  if (Number.isInteger(page) && page >= 1) out.page = page;
+  const limit = Number(qs.get("limit"));
+  if (Number.isInteger(limit) && limit >= 1) out.limit = Math.min(limit, EXECUTION_REPORT_MAX_LIMIT);
+  return out;
+}
+
+/**
+ * Cohort-row deep link: the report filtered by that role/runtime/model,
+ * keeping the other applied filters and resetting to page 1.
+ */
+export function cohortHref(
+  search: string,
+  dimension: "role" | "runtime" | "model",
+  key: string
+): string {
+  const qs = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  qs.set(dimension, key);
+  qs.delete("page");
+  qs.sort();
+  const s = qs.toString();
+  return `/reports/execution${s ? `?${s}` : ""}`;
 }
 
 export function formToFilters(form: ReportFormState, page?: number): ReportFilterState {

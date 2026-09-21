@@ -6,7 +6,6 @@ import {
   formatMs,
   formatRate,
   formatUsd,
-  parseExecutionReportQuery,
   percentileCellText,
   serializeExecutionReportQuery,
   type ExecutionReportResponse,
@@ -16,10 +15,12 @@ import {
   RUNTIME_OPTIONS,
   ROLE_OPTIONS,
   STATUS_OPTIONS,
+  cohortHref,
   formToFilters,
   issueDetailHref,
   orderFailureDisplay,
   paginationText,
+  searchToFilters,
   searchToForm,
   setPageQuery,
   toCohortDisplay,
@@ -41,7 +42,19 @@ function Card({ label, value, title, hint }: { label: string; value: string; tit
   );
 }
 
-function CohortTable({ caption, rows }: { caption: string; rows: CohortDisplayRow[] }) {
+export type CohortDimension = "role" | "runtime" | "model";
+
+function CohortTable({
+  caption,
+  dimension,
+  rows,
+  cohortLink,
+}: {
+  caption: string;
+  dimension: CohortDimension;
+  rows: CohortDisplayRow[];
+  cohortLink?: (dimension: CohortDimension, key: string) => string;
+}) {
   if (rows.length === 0) {
     return (
       <div className="rounded border border-white/10 bg-panel-elevated/60 px-4 py-3">
@@ -76,7 +89,17 @@ function CohortTable({ caption, rows }: { caption: string; rows: CohortDisplayRo
           {rows.map((r) => (
             <tr key={r.key} className="tabular-nums">
               <th scope="row" className="px-4 py-2 text-left font-medium text-white/85">
-                {r.key}
+                {cohortLink ? (
+                  <Link
+                    to={cohortLink(dimension, r.key)}
+                    className="text-cyber-teal hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyber-teal/45"
+                    title={`Filter the report to ${dimension} ${r.key}`}
+                  >
+                    {r.key}
+                  </Link>
+                ) : (
+                  r.key
+                )}
                 {r.sparse && (
                   <span className="ml-2 text-xs font-normal text-amber-200/80" title="Fewer than 5 attempts — compare with care">
                     sparse
@@ -130,6 +153,8 @@ export interface ReportContentProps {
   report: ExecutionReportResponse | null;
   onRetry: () => void;
   onPage: (page: number) => void;
+  /** Deep link for cohort rows (role/runtime/model filtered report views). */
+  cohortLink?: (dimension: CohortDimension, key: string) => string;
 }
 
 /**
@@ -137,7 +162,7 @@ export interface ReportContentProps {
  * partial, pagination). No hooks or fetching — renderable to static markup in
  * tests without a browser.
  */
-export function ReportContent({ loading, error, report, onRetry, onPage }: ReportContentProps) {
+export function ReportContent({ loading, error, report, onRetry, onPage, cohortLink }: ReportContentProps) {
   const summary = report?.summary ?? null;
   const failures = useMemo(() => (report ? orderFailureDisplay(report.failures) : []), [report]);
   const failedTotal = useMemo(
@@ -241,7 +266,9 @@ export function ReportContent({ loading, error, report, onRetry, onPage }: Repor
               <section aria-label="Phase wall time">
                 <h3 className="text-sm font-medium text-white/80 mb-2">Phase wall time</h3>
                 <p className="text-xs text-white/40 mb-2">
-                  Exclusive phase boundaries have no defensible evidence today, so every row reads
+                  Composed from the execution-analysis read model over the same issues:
+                  exact when agent start/complete events are recorded, inferred
+                  usage-envelope backfill otherwise. Rows without evidence read
                   Unavailable — never a guess. See per-row reasons.
                 </p>
                 <div className="rounded border border-white/10 bg-panel-elevated/60 overflow-x-auto">
@@ -273,9 +300,9 @@ export function ReportContent({ loading, error, report, onRetry, onPage }: Repor
                 <h3 className="text-sm font-medium text-white/80">
                   Comparisons <span className="font-normal text-white/40">— sorted by name, never by cost</span>
                 </h3>
-                <CohortTable caption="By role" rows={report.byRole.map(toCohortDisplay)} />
-                <CohortTable caption="By runtime" rows={report.byRuntime.map(toCohortDisplay)} />
-                <CohortTable caption="By model" rows={report.byModel.map(toCohortDisplay)} />
+                <CohortTable caption="By role" dimension="role" rows={report.byRole.map(toCohortDisplay)} cohortLink={cohortLink} />
+                <CohortTable caption="By runtime" dimension="runtime" rows={report.byRuntime.map(toCohortDisplay)} cohortLink={cohortLink} />
+                <CohortTable caption="By model" dimension="model" rows={report.byModel.map(toCohortDisplay)} cohortLink={cohortLink} />
               </section>
 
               <section aria-label="Primary failures">
@@ -402,7 +429,10 @@ export function ReportContent({ loading, error, report, onRetry, onPage }: Repor
 export default function ExecutionReportPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const search = searchParams.toString();
-  const filters = useMemo(() => parseExecutionReportQuery(search), [search]);
+  // Fetch exactly what the URL says: no injected window defaults, so an
+  // empty query hits the API's conservative window and Retry never reuses a
+  // stale client-clock `to`.
+  const fetchFilters = useMemo(() => searchToFilters(search), [search]);
   // Draft form state tracks the raw URL only: injected window defaults stay
   // out, so Apply only sends dates the user chose.
   const [form, setForm] = useState<ReportFormState>(() => searchToForm(search));
@@ -423,7 +453,7 @@ export default function ExecutionReportPage() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetchExecutionAnalysis(filters)
+    fetchExecutionAnalysis(fetchFilters)
       .then((r) => {
         if (!cancelled) {
           setReport(r);
@@ -536,6 +566,7 @@ export default function ExecutionReportPage() {
               {RUNTIME_OPTIONS.map((r) => (
                 <option key={r} value={r}>{r}</option>
               ))}
+              <option value="unknown">unknown (missing metadata)</option>
               {form.runtime && !(RUNTIME_OPTIONS as readonly string[]).includes(form.runtime) && (
                 <option value={form.runtime}>{form.runtime} (from URL)</option>
               )}
@@ -586,6 +617,7 @@ export default function ExecutionReportPage() {
         report={report}
         onRetry={() => setReloadTick((t) => t + 1)}
         onPage={gotoPage}
+        cohortLink={(dimension, key) => cohortHref(search, dimension, key)}
       />
     </div>
   );

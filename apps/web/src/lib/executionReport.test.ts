@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { CohortRow, FailureDistributionEntry } from "@agent-dealer/shared";
 import {
+  cohortHref,
   dateInputToIso,
   filtersToForm,
   formToFilters,
@@ -12,6 +13,7 @@ import {
   issueDetailHref,
   orderFailureDisplay,
   paginationText,
+  searchToFilters,
   searchToForm,
   setPageQuery,
   successText,
@@ -157,4 +159,29 @@ test("filter form round-trips through date inputs", () => {
   assert.equal(back.from, "2026-09-01T00:00:00.000Z");
   assert.equal(back.to, undefined);
   assert.equal(back.role, undefined);
+});
+
+test("fetch filters carry only URL params: no client-clock dates, no stale to", () => {
+  assert.deepEqual(searchToFilters(""), {});
+  assert.deepEqual(searchToFilters("?role=developer&runtime=cursor_local"), {
+    role: "developer",
+    runtime: "cursor_local",
+  });
+  const dated = searchToFilters("?from=2026-09-01T00:00:00.000Z&to=2026-09-30T23:59:59.999Z&page=2&limit=10");
+  assert.equal(dated.from, "2026-09-01T00:00:00.000Z");
+  assert.equal(dated.to, "2026-09-30T23:59:59.999Z");
+  assert.equal(dated.page, 2);
+  assert.equal(dated.limit, 10);
+  // Invalid page/limit are dropped; oversized limits clamp to the API max.
+  assert.deepEqual(searchToFilters("?page=abc&limit=9999"), { limit: 100 });
+});
+
+test("cohort rows link to the report filtered by that dimension", () => {
+  const href = cohortHref("repo=github.com%2Facme%2Fapp&page=3", "runtime", "cursor_local");
+  assert.ok(href.startsWith("/reports/execution?"));
+  assert.ok(href.includes("runtime=cursor_local"));
+  assert.ok(href.includes("repo="));
+  assert.ok(!href.includes("page="), "drilling in resets pagination");
+  const bare = cohortHref("", "model", "unknown");
+  assert.equal(bare, "/reports/execution?model=unknown");
 });

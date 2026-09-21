@@ -142,3 +142,26 @@ test("interactive elements use keyboard-accessible semantics", () => {
   const err = render({ loading: false, error: "x", report: null, onRetry: noop, onPage: noop });
   assert.ok(err.includes('type="button"'), "retry button is keyboard-operable");
 });
+
+test("cohort rows link to filtered report views when a link builder is given", () => {
+  const html = render({
+    loading: false,
+    error: null,
+    report: fixtureReport(),
+    onRetry: noop,
+    onPage: noop,
+    cohortLink: (dimension, key) => `/reports/execution?${dimension}=${key}`,
+  });
+  assert.ok(
+    html.includes('href="/reports/execution?runtime=claude_code"') ||
+      html.includes('href="/reports/execution?runtime=cursor_local"'),
+    "runtime cohort rows deep-link to a filtered report"
+  );
+  assert.ok(html.includes('title="Filter the report to runtime'), "links name their target");
+});
+
+test("phase section describes the shared read-model derivation", () => {
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
+  assert.ok(html.includes("execution-analysis read model"));
+  assert.ok(!html.includes("no defensible evidence today"));
+});
