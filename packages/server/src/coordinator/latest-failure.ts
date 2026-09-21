@@ -1,16 +1,25 @@
 // packages/server/src/coordinator/latest-failure.ts
 //
 // Issue-detail failure strip payload (NOT-113): reason + when + infra n/max + log path.
-import type { Issue, WorkerSession, WorkflowEvent } from "@agent-dealer/shared";
+// NOT-171: also surfaces per-attempt cause history and the per-issue first cause.
+// Raw evidence (error_json, reason, log path, workflow events) stays accessible;
+// persisted causes are preferred, legacy rows backfill on read as inferred.
+import type { FailureCause, Issue, WorkerSession, WorkflowEvent } from "@agent-dealer/shared";
 import {
   getLatestFailedWorkerSessionForIssue,
   getWorkerSession,
+  listWorkerSessionsForIssue,
 } from "../repository/worker-sessions.js";
 import {
   eventCursor,
   listWorkflowEventsForIssue,
   workerStartedEventCursor,
 } from "../repository/workflow-events.js";
+import {
+  firstFailureCauseForIssue,
+  listFailureCausesForSession,
+} from "../repository/failure-causes.js";
+import { backfillCausesForSession, orderAttemptCauses } from "./failure-cause.js";
 import { parseErrorJsonReason } from "./failure-reason.js";
 
 export interface LatestSessionFailure {
@@ -22,6 +31,10 @@ export interface LatestSessionFailure {
   logPath: string | null;
   infraAttempts: number;
   maxInfraAttempts: number;
+  /** Per-attempt cause history for the surfaced session (persisted or backfilled). */
+  causes: FailureCause[];
+  /** Per-issue first cause across attempts, for the later API ticket. */
+  firstCause: FailureCause | null;
 }
 
 function parsePayload(json: string | null): {
@@ -35,6 +48,42 @@ function parsePayload(json: string | null): {
   } catch {
     return null;
   }
+}
+
+/** Persisted causes win; legacy rows backfill from session error/log/event evidence. */
+function causesForSession(
+  session: WorkerSession | null,
+  opts: { outcome?: string | null; occurredAt: string; eventCursor?: number | null; eventId?: string | null }
+): FailureCause[] {
+  if (!session) return [];
+  const persisted = listFailureCausesForSession(session.id);
+  if (persisted.length > 0) return persisted;
+  return backfillCausesForSession(session, {
+    outcomeKind: opts.outcome,
+    occurredAt: opts.occurredAt,
+    eventCursor: opts.eventCursor,
+    eventId: opts.eventId,
+    eventType: "worker.failed",
+  });
+}
+
+/**
+ * Per-issue first cause: the earliest persisted primary, else the earliest
+ * backfilled primary across the issue's failed sessions. Never writes.
+ */
+function firstCauseForIssue(issue: Issue): FailureCause | null {
+  const persisted = firstFailureCauseForIssue(issue.id);
+  if (persisted) return persisted;
+  const sessions = listWorkerSessionsForIssue(issue.id).filter((s) => s.errorJson);
+  if (sessions.length === 0) return null;
+  const primaries: FailureCause[] = [];
+  for (const session of sessions) {
+    for (const cause of backfillCausesForSession(session)) {
+      if (cause.primary) primaries.push(cause);
+    }
+  }
+  if (primaries.length === 0) return null;
+  return orderAttemptCauses(primaries.map((c) => ({ ...c, primary: false })))[0] ?? null;
 }
 
 function fromFailedEvent(
@@ -57,6 +106,13 @@ function fromFailedEvent(
     logPath: session?.logPath ?? null,
     infraAttempts: issue.infraAttempts,
     maxInfraAttempts: issue.maxInfraAttempts,
+    causes: causesForSession(session, {
+      outcome: payload?.outcome,
+      occurredAt: event.ts,
+      eventCursor: eventCursor(event.id),
+      eventId: event.id,
+    }),
+    firstCause: firstCauseForIssue(issue),
   };
 }
 
@@ -72,6 +128,10 @@ function fromSession(session: WorkerSession, issue: Issue): LatestSessionFailure
     logPath: session.logPath,
     infraAttempts: issue.infraAttempts,
     maxInfraAttempts: issue.maxInfraAttempts,
+    causes: causesForSession(session, {
+      occurredAt: session.completedAt ?? session.updatedAt,
+    }),
+    firstCause: firstCauseForIssue(issue),
   };
 }
 

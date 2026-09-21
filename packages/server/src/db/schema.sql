@@ -380,6 +380,34 @@ CREATE TABLE IF NOT EXISTS runtime_availability (
   observed_at TEXT NOT NULL
 );
 
+-- NOT-171: append-only normalized failure-cause evidence. A derived view over
+-- worker_sessions.error_json, spawn logs, and workflow events — writers INSERT
+-- only, nothing UPDATEs or DELETEs, and the raw sources stay authoritative.
+-- Deliberately no REFERENCES clauses: as derived evidence it must never block
+-- bulk cleanup of the source tables it points at; integrity is maintained at
+-- insert time (every row carries the ids of the event/session it was built from).
+CREATE TABLE IF NOT EXISTS failure_causes (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL,
+  worker_session_id TEXT,
+  workflow_instance_id TEXT,
+  workflow_event_id TEXT,
+  event_cursor INTEGER,
+  code TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  primary_flag INTEGER NOT NULL DEFAULT 0,
+  confidence TEXT NOT NULL,
+  evidence_source TEXT NOT NULL,
+  occurred_at TEXT,
+  raw_reason TEXT NOT NULL,
+  log_path TEXT,
+  quality TEXT NOT NULL DEFAULT 'exact',
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_failure_causes_session ON failure_causes(worker_session_id);
+CREATE INDEX IF NOT EXISTS idx_failure_causes_issue ON failure_causes(issue_id);
+
 -- NOT-103: operator-owned sequential issue admission queue (order / wait_reason).
 CREATE TABLE IF NOT EXISTS queue_entries (
   id TEXT PRIMARY KEY,

@@ -76,6 +76,74 @@ test("recovery requeues an expired orphaned lease and fails its running session"
   assert.match(listWorkerSessionsForIssue(issueId)[0].errorJson ?? "", /presumed dead/);
 });
 
+test("NOT-171: a reclaim records a coordinator_crash cause without touching errorJson", async () => {
+  const { listFailureCausesForSession } = await import("../repository/failure-causes.js");
+  const { PRESUMED_DEAD_REASON } = await import("./failure-reason.js");
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const devItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "developer")!;
+
+  const claimed = claimWorkItem("crashed", { leaseMs: 60_000 })!;
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: null});
+  startSession(session.id);
+  assert.equal(bindWorkItemSession(devItem.id, session.id, claimed.leaseToken!), true);
+
+  const res = await recoverCoordinator({ now: FUTURE() });
+  assert.deepEqual(res.reclaimed, [devItem.id]);
+
+  // Raw evidence untouched: same presumed-dead errorJson recovery always wrote.
+  assert.equal(listWorkerSessionsForIssue(issueId)[0].errorJson, JSON.stringify({ reason: PRESUMED_DEAD_REASON }));
+  const causes = listFailureCausesForSession(session.id);
+  assert.ok(causes.length >= 1);
+  const prime = causes.find((c) => c.primary)!;
+  assert.equal(prime.code, "coordinator_crash");
+  assert.equal(prime.domain, "infrastructure");
+  assert.equal(prime.quality, "exact");
+  assert.match(prime.rawReason, /presumed dead/);
+});
+
+test("NOT-171: a reclaim over a host-sleep window records host_sleep_liveness", async () => {
+  const { listFailureCausesForSession } = await import("../repository/failure-causes.js");
+  const { appendWorkflowEvent, getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const devItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "developer")!;
+
+  const claimed = claimWorkItem("crashed", { leaseMs: 60_000 })!;
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: null});
+  startSession(session.id);
+  assert.equal(bindWorkItemSession(devItem.id, session.id, claimed.leaseToken!), true);
+
+  // Suspend evidence predates the reclaim; clockJump null forces plain reclaim.
+  const instance = getActiveWorkflowInstance(issueId)!;
+  assert.ok(instance);
+  appendWorkflowEvent({
+    issueId,
+    workflowInstanceId: instance.id,
+    workerSessionId: session.id,
+    type: "host.suspended",
+    actorType: "developer",
+    stage: "developing",
+    round: 1,
+    payload: {}});
+
+  const res = await recoverCoordinator({ now: FUTURE(), clockJump: null });
+  assert.deepEqual(res.reclaimed, [devItem.id]);
+  const prime = listFailureCausesForSession(session.id).find((c) => c.primary)!;
+  assert.equal(prime.code, "host_sleep_liveness");
+  assert.equal(prime.domain, "infrastructure");
+});
+
 test("recovery ignores a lease that has not expired", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
