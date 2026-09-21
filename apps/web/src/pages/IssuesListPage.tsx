@@ -7,10 +7,13 @@ import {
   fetchIssues,
   fetchLinearInbox,
   fetchQueue,
+  fetchQueueStatus,
   fetchRecentRepos,
   lookupLinearIssue,
   moveQueueEntry,
   resolveHumanAction,
+  updateAdmissionSettings,
+  type AdmissionStatus,
   type IssueListRow,
   type QueueEntryRow,
 } from "../api";
@@ -69,6 +72,8 @@ export default function IssuesListPage({
   const [autoMerge, setAutoMerge] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [queue, setQueue] = useState<QueueEntryRow[]>([]);
+  const [admission, setAdmission] = useState<AdmissionStatus | null>(null);
+  const [limitBusy, setLimitBusy] = useState(false);
 
   const selectedLinear = candidates.find((c) => c.id === selectedLinearId) ?? null;
   const linearLocked = sourceMode === "linear" && selectedLinear != null;
@@ -78,6 +83,24 @@ export default function IssuesListPage({
     fetchQueue()
       .then(setQueue)
       .catch(() => undefined);
+    fetchQueueStatus()
+      .then(setAdmission)
+      .catch(() => undefined);
+  };
+
+  /** NOT-215: operator-chosen active-issue limit (persisted server-side). */
+  const changeLimit = async (value: number) => {
+    setLimitBusy(true);
+    setError(null);
+    try {
+      const status = await updateAdmissionSettings(value);
+      setAdmission(status);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLimitBusy(false);
+    }
   };
 
   /** Resolve an action inline (run-scoped items have no issue page to resolve them on). */
@@ -199,11 +222,51 @@ export default function IssuesListPage({
 
       {error && <p className="text-sm text-red-300 mb-3">{error}</p>}
 
-      {queue.length > 0 && (
+      {(queue.length > 0 || admission) && (
         <div className="mb-4 rounded border border-cyber-teal/25 bg-cyber-teal/5">
-          <div className="px-4 py-2 border-b border-cyber-teal/20 flex items-center justify-between">
+          <div className="px-4 py-2 border-b border-cyber-teal/20 flex items-center justify-between gap-3">
             <span className="text-sm font-medium text-cyber-teal">Admission queue</span>
-            <span className="text-xs text-white/40">{queue.length} waiting · sequential</span>
+            <span className="flex items-center gap-2 text-xs text-white/40">
+              {admission ? (
+                <>
+                  <span>
+                    {admission.active} active · {admission.waiting} waiting · limit{" "}
+                    {admission.limit}
+                    {admission.overCap ? " · over capacity" : ""}
+                  </span>
+                  {admission.options.length > 0 ? (
+                    <label className="flex items-center gap-1">
+                      <span className="text-white/35">limit</span>
+                      <select
+                        className="bg-black/30 border border-white/10 rounded px-1.5 py-0.5 text-xs text-white/80 disabled:opacity-50"
+                        value={admission.options.includes(admission.maxActiveIssues) ? admission.maxActiveIssues : admission.limit}
+                        disabled={limitBusy}
+                        title={
+                          admission.ceiling < 2
+                            ? `Capped by the worker/spawn ceiling (${admission.ceiling})`
+                            : "How many issues may execute in parallel (max one per repository)"
+                        }
+                        onChange={(e) => void changeLimit(Number(e.target.value))}
+                      >
+                        {admission.options.map((o) => (
+                          <option key={o} value={o}>
+                            {o}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <span title={`Capped by the worker/spawn ceiling (${admission.ceiling})`}>
+                      max {admission.ceiling}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span>
+                  {queue.length} waiting · sequential
+                </span>
+              )}
+            </span>
           </div>
           <div className="divide-y divide-white/5">
             {queue.map((entry, index) => (

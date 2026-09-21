@@ -8,7 +8,19 @@
 // slot is free — it never bypasses the queue. The single ungated exception is a human
 // action resolving into startWorkflowCore (commands.ts).
 
-import type { AgentProfile, Issue, IssueStatus, WorkflowInstance } from "@agent-dealer/shared";
+import type {
+  AdmissionStatus,
+  AgentProfile,
+  Issue,
+  IssueStatus,
+  WorkflowInstance,
+} from "@agent-dealer/shared";
+import {
+  admissionLimitOptions,
+  getEffectiveMaxActiveIssues,
+  getMaxActiveIssues,
+  workerSpawnCeiling,
+} from "../repository/admission-settings.js";
 import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
 import { healthForAgent } from "../adapters/agent-health.js";
 import { getDb } from "../db/index.js";
@@ -63,11 +75,14 @@ export function isStartable(issue: Issue): boolean {
   return startableStatuses.has(issue.status) && !getActiveWorkflowInstance(issue.id);
 }
 
-export type ActiveIssueRef = { id: string; status: IssueStatus };
+export type ActiveIssueRef = { id: string; status: IssueStatus; repo?: string };
 
 /**
- * Single swappable capacity function. Only `sequential` is wired (freeSlots = 1 − occupying).
- * Parallel `fixed(N)` / per-repo limits plug in here later — no other capacity code paths.
+ * Single swappable capacity function: global free slots = limit − occupying.
+ * `sequential` is fixed(1); the shipping default is fixed(N) where N is the
+ * persisted NOT-215 operator setting clamped to the worker/spawn ceiling.
+ * Per-repository exclusion (max one active issue per repo) is enforced in the
+ * `admitNext` walk, not here — it needs the candidate's repo, not just a count.
  */
 export type CapacityPolicy = (activeIssues: ActiveIssueRef[]) => number;
 
@@ -76,15 +91,33 @@ export const sequentialCapacityPolicy: CapacityPolicy = (activeIssues) => {
   return Math.max(0, 1 - occupying);
 };
 
-let capacityPolicy: CapacityPolicy = sequentialCapacityPolicy;
+/** NOT-215: global fixed capacity N. Lowering N never preempts — free slots just go to 0. */
+export function fixedCapacityPolicy(limit: number): CapacityPolicy {
+  return (activeIssues) => {
+    const occupying = activeIssues.filter((i) => occupyingStatuses.has(i.status)).length;
+    return Math.max(0, limit - occupying);
+  };
+}
 
-/** Test / future parallel wiring — swap the single CapacityPolicy function. */
+/**
+ * Shipping policy: fixed(N) where N is read fresh from the persisted operator
+ * setting on every call, so a setting change (or a restart) takes effect on the
+ * very next tick with no reload. Equals sequential when the setting is 1.
+ */
+export const defaultCapacityPolicy: CapacityPolicy = (activeIssues) => {
+  const occupying = activeIssues.filter((i) => occupyingStatuses.has(i.status)).length;
+  return Math.max(0, getEffectiveMaxActiveIssues() - occupying);
+};
+
+let capacityPolicy: CapacityPolicy = defaultCapacityPolicy;
+
+/** Test wiring — swap the single CapacityPolicy function. */
 export function setCapacityPolicyForTests(policy: CapacityPolicy): void {
   capacityPolicy = policy;
 }
 
 export function resetCapacityPolicyForTests(): void {
-  capacityPolicy = sequentialCapacityPolicy;
+  capacityPolicy = defaultCapacityPolicy;
 }
 
 export function countOccupyingIssues(): number {
@@ -92,7 +125,44 @@ export function countOccupyingIssues(): number {
 }
 
 function listOccupyingIssues(): ActiveIssueRef[] {
-  return listIssues([...occupyingStatuses]).map((i) => ({ id: i.id, status: i.status }));
+  return listIssues([...occupyingStatuses]).map((i) => ({ id: i.id, status: i.status, repo: i.repo }));
+}
+
+/** Occupying repos with the active issue's id/title, for the per-repo exclusion reason. */
+function occupyingRepoSlots(): Map<string, { issueId: string; title: string }> {
+  const slots = new Map<string, { issueId: string; title: string }>();
+  for (const issue of listIssues([...occupyingStatuses])) {
+    if (issue.repo) slots.set(issue.repo, { issueId: issue.id, title: issue.title });
+  }
+  return slots;
+}
+
+/** NOT-215: concrete same-repository wait reason naming the active conflict. */
+export function repositorySlotReason(repo: string, activeTitle: string): string {
+  return `waiting for repository slot — ${repo} already active (${activeTitle})`;
+}
+
+/**
+ * NOT-215 read model for the Admission queue header: truthful active / waiting /
+ * limit counts, the persisted setting, the worker/spawn ceiling, the offerable
+ * values, and whether occupancy currently exceeds the limit (a human-action
+ * resume may briefly push it over — admission then stays paused, never preempts).
+ */
+export function getAdmissionStatus(): AdmissionStatus {
+  const active = countOccupyingIssues();
+  const waiting = listQueuedEntries().length;
+  const maxActiveIssues = getMaxActiveIssues();
+  const ceiling = workerSpawnCeiling();
+  const limit = Math.min(maxActiveIssues, ceiling);
+  return {
+    active,
+    waiting,
+    limit,
+    maxActiveIssues,
+    ceiling,
+    options: admissionLimitOptions(),
+    overCap: active > limit,
+  };
 }
 
 export type EligibilityResult = { ok: true } | { ok: false; reason: string };
@@ -269,9 +339,18 @@ async function evaluateEligibility(issue: Issue, ctx: EligibilityContext): Promi
 }
 
 /**
- * Level-triggered admission: if a free slot exists, walk queued entries in position order,
- * record wait_reason on ineligible ones (skip-ahead), and admit the first eligible via
- * startWorkflowCore (which force-admits the queue entry in the same transaction).
+ * Level-triggered admission: while free slots exist, walk queued entries in position
+ * order, record wait_reason on ineligible ones (skip-ahead), and admit every eligible
+ * entry via startWorkflowCore (which force-admits the queue entry in the same
+ * transaction) — one tick fills every newly free slot, not just one.
+ *
+ * NOT-215 per-repository exclusion: at most one active issue per repository. A
+ * candidate whose repo already has an occupying issue (or one admitted earlier in
+ * this same tick) stays queued with a concrete reason naming the active conflict,
+ * and never consumes a slot another repository could use.
+ *
+ * Returns the first issue admitted this tick (null when none). Lowering the limit
+ * only drives free slots to 0 — running work is never interrupted or preempted.
  *
  * Queue housekeeping (closed / already-running → leave queued) always runs, even when
  * capacity is full — otherwise a start that bypassed admitNext could leave a stale row.
@@ -332,11 +411,30 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
     blockersUnavailableReason: blockerUnavailableReason(),
   };
 
+  const admitted: AdmittedIssue[] = [];
+  // Repos taken by occupying issues, plus issues admitted earlier in this tick.
+  const repoSlots = occupyingRepoSlots();
+
   for (const entry of remaining) {
+    // Slots filled mid-walk — stop. The read-time slot overlay
+    // (listQueuedEntriesForRead) already reports the full state; persisting a slot
+    // reason here would overwrite more informative per-entry reasons.
+    if (admitted.length >= freeSlots) break;
+
     const issue = getIssue(entry.issueId);
     if (!issue) {
       markQueueEntryRemoved(entry.issueId);
       continue;
+    }
+
+    // Same-repository exclusion first (cheap, deterministic): never burn async
+    // eligibility work on an entry that cannot take a slot anyway.
+    if (issue.repo) {
+      const slot = repoSlots.get(issue.repo);
+      if (slot && slot.issueId !== issue.id) {
+        setQueueWaitReason(entry.id, repositorySlotReason(issue.repo, slot.title));
+        continue;
+      }
     }
 
     const eligibility = await evaluateEligibility(issue, ctx);
@@ -351,14 +449,37 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
         if (!getQueuedEntryForIssue(entry.issueId)) {
           throw new StartPreconditionError(409, "queue entry no longer queued");
         }
-        // Re-check capacity inside the txn so a concurrent Manual Start cannot double-admit.
+        // Re-check capacity inside the txn so a concurrent Manual Start cannot
+        // double-admit. This tick's own admissions are already committed to the DB
+        // by startWorkflowCore, so the live occupying count includes them.
         if (capacityPolicy(listOccupyingIssues()) <= 0) {
           throw new StartPreconditionError(409, "no free admission slots");
+        }
+        // Re-check the repo slot inside the txn for the same race.
+        if (issue.repo) {
+          const fresh = occupyingRepoSlots();
+          for (const a of admitted) {
+            const admittedIssue = getIssue(a.issueId);
+            if (admittedIssue?.repo) {
+              fresh.set(admittedIssue.repo, {
+                issueId: admittedIssue.id,
+                title: admittedIssue.title,
+              });
+            }
+          }
+          const conflict = fresh.get(issue.repo);
+          if (conflict && conflict.issueId !== issue.id) {
+            throw new StartPreconditionError(
+              409,
+              repositorySlotReason(issue.repo, conflict.title)
+            );
+          }
         }
         // Force-admit lives inside startWorkflowCore — single owner for start-path-queue-sync.
         return startWorkflowCore(entry.issueId);
       })();
-      return { issueId: entry.issueId, ...started };
+      admitted.push({ issueId: entry.issueId, ...started });
+      if (issue.repo) repoSlots.set(issue.repo, { issueId: issue.id, title: issue.title });
     } catch (err) {
       const message =
         err instanceof StartPreconditionError
@@ -369,11 +490,11 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
       // Entry was dequeued — nothing to record; try the next entry.
       if (message.includes("no longer queued")) continue;
       // Capacity exhausted mid-walk (concurrent Manual Start) — stop; do not write wait reasons.
-      if (message.includes("no free admission slots")) return null;
+      if (message.includes("no free admission slots")) break;
       setQueueWaitReason(entry.id, message);
     }
   }
-  return null;
+  return admitted[0] ?? null;
 }
 
 /**
