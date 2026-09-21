@@ -294,7 +294,7 @@ function isFailedStatus(status: string): boolean {
 export function countRetryExtras(sessions: SessionRow[]): number {
   const byGroup = new Map<string, SessionRow[]>();
   for (const s of sessions) {
-    const key = `${s.issue_id} ${s.role} ${s.round}`;
+    const key = `${s.issue_id}\u0000${s.role}\u0000${s.round}`;
     const list = byGroup.get(key) ?? [];
     list.push(s);
     byGroup.set(key, list);
