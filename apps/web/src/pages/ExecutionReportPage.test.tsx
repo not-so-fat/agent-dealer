@@ -1,6 +1,8 @@
 // NOT-175: page-level tests for the Execution report — loading, error,
-// empty, partial, pagination, unknown-failure, sparse, coverage, responsive,
-// and keyboard-affordance states. ReportContent is pure (no hooks/fetch), so
+// empty, partial, unknown-failure, sparse, coverage, responsive, and
+// keyboard-affordance states. NOT-238 removed the duplicate bottom issue list
+// and its pagination, so these tests also pin that absence while keeping the
+// analytical issue links. ReportContent is pure (no hooks/fetch), so
 // renderToStaticMarkup under MemoryRouter pins the markup without a browser,
 // following the ExecutionAnalysisSection.test.tsx pattern.
 import { test } from "node:test";
@@ -27,14 +29,14 @@ function render(props: Parameters<typeof ReportContent>[0]): string {
 const noop = () => {};
 
 test("loading state announces itself and shows no report", () => {
-  const html = render({ loading: true, error: null, report: null, onRetry: noop, onPage: noop });
+  const html = render({ loading: true, error: null, report: null, onRetry: noop });
   assert.ok(html.includes('role="status"'), "role=status for screen readers");
   assert.ok(html.includes("Loading execution report"));
   assert.ok(!html.includes("Issue success"));
 });
 
 test("API errors render an alert with a working Retry button", () => {
-  const html = render({ loading: false, error: "boom", report: null, onRetry: noop, onPage: noop });
+  const html = render({ loading: false, error: "boom", report: null, onRetry: noop });
   assert.ok(html.includes('role="alert"'), "role=alert for screen readers");
   assert.ok(html.includes("boom"));
   assert.ok(html.includes("<button"), "retry is a real button, not a div");
@@ -53,35 +55,41 @@ test("empty cohorts explain themselves without devtools", () => {
       pagination: { page: 1, limit: 25, total: 0, totalPages: 0 },
     }),
     onRetry: noop,
-    onPage: noop,
   });
   assert.ok(html.includes("No issues match these filters"));
 });
 
 test("partial metadata is visible with reasons", () => {
-  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
   assert.ok(html.includes("Partial metadata"));
   assert.ok(html.includes("partial_sample"));
 });
 
-test("pagination renders labelled nav only across pages", () => {
+// NOT-238: Reports must not render a general-purpose issue list. The page
+// ends after report analysis even when the payload still carries a multi-page
+// issue slice; analytical issue links (failure evidence) stay available.
+test("no generic Issues section or report pagination, even across pages", () => {
   const multi = render({
     loading: false,
     error: null,
     report: fixtureReport({ pagination: { page: 1, limit: 25, total: 60, totalPages: 3 } }),
     onRetry: noop,
-    onPage: noop,
   });
-  assert.ok(multi.includes('aria-label="Report pages"'));
-  assert.ok(multi.includes("Page 1 of 3"));
-  assert.ok(multi.includes("Previous") && multi.includes("Next"));
-  assert.ok(multi.includes("<button"), "pagination controls are keyboard-focusable buttons");
-  const single = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
+  assert.ok(!multi.includes('aria-label="Issues"'), "no generic issue list section");
+  assert.ok(!multi.includes('aria-label="Report pages"'), "no report pagination nav");
+  assert.ok(!multi.includes("Previous") && !multi.includes("Next"), "no page controls");
+  assert.ok(!multi.includes("Report issue A"), "no issue cards from the payload slice");
+  assert.ok(!multi.includes("Page 1 of 3"), "no page counter");
+  // Analysis still renders and evidence links still reach Issue Detail.
+  assert.ok(multi.includes("Why attempts failed"), "failure analysis renders");
+  assert.ok(multi.includes('href="/issues/issue-b"'), "failure rows deep-link to issue detail");
+  const single = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
+  assert.ok(!single.includes('aria-label="Issues"'));
   assert.ok(!single.includes('aria-label="Report pages"'));
 });
 
 test("failures read as plain language with the raw code preserved", () => {
-  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
   assert.ok(html.includes("Why attempts failed"), "operator heading, not statistical wording");
   assert.ok(!html.includes("Primary failure distribution"), "internal wording retired");
   assert.ok(html.includes("counted once using its primary"), "counting rule explained");
@@ -94,7 +102,7 @@ test("failures read as plain language with the raw code preserved", () => {
 });
 
 test("comparison rows expose retry, duration coverage, and failed waste", () => {
-  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
   for (const header of ["Retry rate", "Duration", "Failed cost", "Failed tokens", "Failed runtime"]) {
     assert.ok(html.includes(header), `column: ${header}`);
   }
@@ -109,7 +117,6 @@ test("missing failed waste reads Unavailable, never zero", () => {
     error: null,
     report: fixtureReport({ byRole: [], byRuntime: [fixtureCohort({ key: "cursor_local", ...unavailableSums() })], byModel: [] }),
     onRetry: noop,
-    onPage: noop,
   });
   assert.ok(html.includes("Unavailable"));
   assert.ok(!html.includes("$0.00"));
@@ -121,17 +128,15 @@ test("sparse cohorts are flagged, not hidden", () => {
     error: null,
     report: fixtureReport({ byRole: [], byRuntime: [fixtureCohort({ attempts: 2 })], byModel: [] }),
     onRetry: noop,
-    onPage: noop,
   });
   assert.ok(html.includes("sparse"));
 });
 
 test("narrow widths scroll instead of clipping: responsive primitives present", () => {
-  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
   assert.ok(html.includes("overflow-x-auto"), "wide tables scroll horizontally");
   assert.ok(html.includes("grid-cols-1"), "cards stack to one column at narrow widths");
-  assert.ok(html.includes("flex-wrap"), "headers and issue rows wrap");
-  assert.ok(html.includes("min-w-40"), "issue titles keep a readable minimum");
+  assert.ok(html.includes("flex-wrap"), "headers and evidence rows wrap");
 });
 
 test("interactive elements use keyboard-accessible semantics", () => {
@@ -140,12 +145,18 @@ test("interactive elements use keyboard-accessible semantics", () => {
     error: null,
     report: fixtureReport({ pagination: { page: 2, limit: 25, total: 60, totalPages: 3 } }),
     onRetry: noop,
-    onPage: noop,
   });
-  assert.ok(html.includes("<button"), "pagination uses real buttons");
-  assert.ok(html.includes("<a "), "issues and failures link with real anchors");
-  assert.ok(html.includes("focus-visible:"), "issue links show a focus ring");
-  const err = render({ loading: false, error: "x", report: null, onRetry: noop, onPage: noop });
+  assert.ok(!html.includes("<button"), "no report pagination buttons remain");
+  assert.ok(html.includes("<a "), "failure evidence links with real anchors");
+  const linked = render({
+    loading: false,
+    error: null,
+    report: fixtureReport(),
+    onRetry: noop,
+    cohortLink: (dimension, key) => `/reports/execution?${dimension}=${key}`,
+  });
+  assert.ok(linked.includes("focus-visible:"), "cohort links show a focus ring");
+  const err = render({ loading: false, error: "x", report: null, onRetry: noop });
   assert.ok(err.includes('type="button"'), "retry button is keyboard-operable");
 });
 
@@ -155,7 +166,6 @@ test("cohort rows link to filtered report views when a link builder is given", (
     error: null,
     report: fixtureReport(),
     onRetry: noop,
-    onPage: noop,
     cohortLink: (dimension, key) => `/reports/execution?${dimension}=${key}`,
   });
   assert.ok(
@@ -167,14 +177,14 @@ test("cohort rows link to filtered report views when a link builder is given", (
 });
 
 test("phase section describes the shared read-model derivation", () => {
-  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
   assert.ok(html.includes("execution-analysis read model"));
   assert.ok(!html.includes("no defensible evidence today"));
 });
 
 // NOT-229: metric hierarchy — chrome on the shared display token, values on Monaco.
 test("report chrome uses font-ui-display while values stay Monaco", () => {
-  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
   assert.ok(html.includes("font-ui-display"), "labels, headings, headers, and notes opt into the token");
   assert.ok(html.includes("Why attempts failed"), "section heading renders");
   assert.ok(html.includes("font-mono"), "metric values and identifiers stay Monaco");
@@ -183,7 +193,7 @@ test("report chrome uses font-ui-display while values stay Monaco", () => {
 });
 
 test("percentiles label P50/P95 separately with sample size as supporting text", () => {
-  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop, onPage: noop });
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
   assert.ok(html.includes(">P50</span>"), "P50 label distinct from its value");
   assert.ok(html.includes(">P95</span>"), "P95 label distinct from its value");
   assert.ok(html.includes("n=2 (sparse)"), "sample size/sparse stays visible as a note");
@@ -210,7 +220,6 @@ test("missing percentiles render one Unavailable state with no P50/P95 numbers",
       byModel: [],
     }),
     onRetry: noop,
-    onPage: noop,
   });
   assert.ok(html.includes("No attempts in this dimension"), "empty cohorts still explain themselves");
   assert.ok(html.includes(">Unavailable</span>"), "missing percentiles read Unavailable");
@@ -231,7 +240,6 @@ test("large token totals render compact with the exact count accessible", () => 
       byModel: [],
     }),
     onRetry: noop,
-    onPage: noop,
   });
   assert.ok(html.includes(">1.2M</span>"), "visible token total is compact");
   assert.ok(html.includes('title="1,234,567"'), "exact comma-formatted value in title text");
@@ -253,7 +261,6 @@ test("partial coverage keeps the known value primary with a separate note", () =
       byModel: [],
     }),
     onRetry: noop,
-    onPage: noop,
   });
   assert.ok(html.includes(">110</span>"), "known aggregate is the primary value");
   assert.ok(html.includes(">2/3 known</span>"), "coverage denominator is a separate note");

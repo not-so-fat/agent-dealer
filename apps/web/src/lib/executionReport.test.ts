@@ -1,6 +1,7 @@
 // NOT-175: view-model tests for the Execution report page — coverage/missing
-// values, sparse samples, the unknown failure bucket, pagination text, and
-// filter form round-trips. Pure logic (no React/DOM); run via tsc + node:test.
+// values, sparse samples, the unknown failure bucket, and filter form
+// round-trips. NOT-238 removed list-only pagination state. Pure logic
+// (no React/DOM); run via tsc + node:test.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { CohortRow, FailureDistributionEntry } from "@agent-dealer/shared";
@@ -12,10 +13,8 @@ import {
   isoToDateInput,
   issueDetailHref,
   orderFailureDisplay,
-  paginationText,
   searchToFilters,
   searchToForm,
-  setPageQuery,
   successText,
   toCohortDisplay,
   toCoverageDisplay,
@@ -88,11 +87,6 @@ test("unknown failures stay a visible bucket with issue links", () => {
   assert.equal(issueDetailHref("u1"), "/issues/u1");
 });
 
-test("pagination text and empty states read without devtools", () => {
-  assert.equal(paginationText({ page: 2, limit: 25, total: 60, totalPages: 3 }), "Showing 26–50 of 60 issues · page 2 of 3");
-  assert.equal(paginationText({ page: 1, limit: 25, total: 0, totalPages: 0 }), "No issues match these filters");
-});
-
 test("cohort rows render duration coverage, retry, and per-cohort failed waste", () => {
   const row = toCohortDisplay(cohort({}));
   assert.equal(row.durationText, "1m 5s (2/3 known)");
@@ -125,19 +119,6 @@ test("failure share names its denominator", () => {
   assert.deepEqual(orderFailureDisplay([]), []);
 });
 
-test("pagination changes only the page, never draft form edits", () => {
-  const search = "repo=github.com%2Facme%2Fapp&role=developer&page=2";
-  const next = setPageQuery(search, 3);
-  assert.ok(next.includes("page=3"));
-  assert.ok(next.includes("role=developer"));
-  assert.ok(next.includes("repo="));
-  const back = setPageQuery(`${search}&extra=draft`, 1);
-  assert.ok(!back.includes("page="));
-  assert.ok(back.includes("extra=draft"));
-  // Untouched params survive byte-for-byte; other params are never added.
-  assert.equal(setPageQuery("", 2), "page=2");
-});
-
 test("form state keeps defaults out: only explicit dates appear", () => {
   const blank = searchToForm("");
   assert.equal(blank.fromDate, "");
@@ -163,6 +144,8 @@ test("filter form round-trips through date inputs", () => {
   assert.equal(back.role, undefined);
 });
 
+// NOT-238: list-only page/limit URL state is ignored — Reports no longer
+// renders an issue list, so legacy params never reach the request.
 test("fetch filters carry only URL params: no client-clock dates, no stale to", () => {
   assert.deepEqual(searchToFilters(""), {});
   assert.deepEqual(searchToFilters("?role=developer&runtime=cursor_local"), {
@@ -172,10 +155,9 @@ test("fetch filters carry only URL params: no client-clock dates, no stale to", 
   const dated = searchToFilters("?from=2026-09-01T00:00:00.000Z&to=2026-09-30T23:59:59.999Z&page=2&limit=10");
   assert.equal(dated.from, "2026-09-01T00:00:00.000Z");
   assert.equal(dated.to, "2026-09-30T23:59:59.999Z");
-  assert.equal(dated.page, 2);
-  assert.equal(dated.limit, 10);
-  // Invalid page/limit are dropped; oversized limits clamp to the API max.
-  assert.deepEqual(searchToFilters("?page=abc&limit=9999"), { limit: 100 });
+  assert.equal(dated.page, undefined, "legacy page param is not sent");
+  assert.equal(dated.limit, undefined, "legacy limit param is not sent");
+  assert.deepEqual(searchToFilters("?page=abc&limit=9999"), {});
 });
 
 // NOT-229: structured percentile/coverage readouts keep values separate from
@@ -229,11 +211,12 @@ test("unknown failures display operator wording while keeping the raw code", () 
 });
 
 test("cohort rows link to the report filtered by that dimension", () => {
-  const href = cohortHref("repo=github.com%2Facme%2Fapp&page=3", "runtime", "cursor_local");
+  const href = cohortHref("repo=github.com%2Facme%2Fapp&page=3&limit=10", "runtime", "cursor_local");
   assert.ok(href.startsWith("/reports/execution?"));
   assert.ok(href.includes("runtime=cursor_local"));
   assert.ok(href.includes("repo="));
-  assert.ok(!href.includes("page="), "drilling in resets pagination");
+  assert.ok(!href.includes("page="), "drilling in drops legacy list pagination");
+  assert.ok(!href.includes("limit="), "drilling in drops legacy list limit");
   const bare = cohortHref("", "model", "unknown");
   assert.equal(bare, "/reports/execution?model=unknown");
 });

@@ -4,7 +4,6 @@
 // flags, unknown-bucket emphasis) lives here so tests pin it without a browser.
 import {
   coverageCellText,
-  EXECUTION_REPORT_MAX_LIMIT,
   formatCompactCount,
   formatCount,
   formatMs,
@@ -252,13 +251,6 @@ export function orderFailureDisplay(entries: FailureDistributionEntry[]): Failur
   return entries.map((e) => toFailureDisplay(e, failedTotal));
 }
 
-export function paginationText(p: { page: number; limit: number; total: number; totalPages: number }): string {
-  if (p.total === 0) return "No issues match these filters";
-  const start = (p.page - 1) * p.limit + 1;
-  const end = Math.min(p.total, p.page * p.limit);
-  return `Showing ${start}–${end} of ${formatCount(p.total)} issues · page ${p.page} of ${p.totalPages}`;
-}
-
 export function issueDetailHref(issueId: string): string {
   return `/issues/${issueId}`;
 }
@@ -320,23 +312,12 @@ export function searchToForm(search: string): ReportFormState {
 }
 
 /**
- * Pagination from the applied URL query with only `page` changed: draft form
- * edits are never applied by Previous/Next, and no other param is touched.
- * Page 1 is canonicalized away (omitted) to match filter serialization.
- */
-export function setPageQuery(search: string, page: number): string {
-  const qs = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
-  if (page <= 1) qs.delete("page");
-  else qs.set("page", String(Math.floor(page)));
-  qs.sort();
-  return qs.toString();
-}
-
-/**
  * Fetch filters from the raw URL search only — no injected window defaults.
  * The page must request exactly what the URL says so an empty query hits the
  * API's conservative default window (client-clock from/to would skew it and
- * go stale on Retry). Only params present in the URL are sent.
+ * go stale on Retry). Only filter params present in the URL are sent:
+ * legacy list-only `page`/`limit` params are ignored now that Reports no
+ * longer renders an issue list.
  */
 export function searchToFilters(search: string): ReportFilterState {
   const qs = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
@@ -349,16 +330,13 @@ export function searchToFilters(search: string): ReportFilterState {
     const v = pick(k);
     if (v !== undefined) out[k] = v;
   }
-  const page = Number(qs.get("page"));
-  if (Number.isInteger(page) && page >= 1) out.page = page;
-  const limit = Number(qs.get("limit"));
-  if (Number.isInteger(limit) && limit >= 1) out.limit = Math.min(limit, EXECUTION_REPORT_MAX_LIMIT);
   return out;
 }
 
 /**
  * Cohort-row deep link: the report filtered by that role/runtime/model,
- * keeping the other applied filters and resetting to page 1.
+ * keeping the other applied filters and dropping legacy list-only
+ * `page`/`limit` params.
  */
 export function cohortHref(
   search: string,
@@ -368,12 +346,13 @@ export function cohortHref(
   const qs = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   qs.set(dimension, key);
   qs.delete("page");
+  qs.delete("limit");
   qs.sort();
   const s = qs.toString();
   return `/reports/execution${s ? `?${s}` : ""}`;
 }
 
-export function formToFilters(form: ReportFormState, page?: number): ReportFilterState {
+export function formToFilters(form: ReportFormState): ReportFilterState {
   return {
     from: dateInputToIso(form.fromDate, false),
     to: dateInputToIso(form.toDate, true),
@@ -382,7 +361,6 @@ export function formToFilters(form: ReportFormState, page?: number): ReportFilte
     runtime: form.runtime.trim() || undefined,
     model: form.model.trim() || undefined,
     status: form.status.trim() || undefined,
-    ...(page && page > 1 ? { page } : {}),
   };
 }
 

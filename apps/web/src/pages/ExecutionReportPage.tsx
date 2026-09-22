@@ -17,10 +17,8 @@ import {
   formToFilters,
   issueDetailHref,
   orderFailureDisplay,
-  paginationText,
   searchToFilters,
   searchToForm,
-  setPageQuery,
   toCohortDisplay,
   toCoverageDisplay,
   toPercentileDisplay,
@@ -29,8 +27,6 @@ import {
   type PercentileDisplay,
   type ReportFormState,
 } from "../lib/executionReport";
-import IssueStatusBadge from "../components/issues/IssueStatusBadge";
-import type { IssueStatus } from "@agent-dealer/shared";
 
 /**
  * NOT-229 metric hierarchy: the label and supporting notes render through the
@@ -218,17 +214,16 @@ export interface ReportContentProps {
   error: string | null;
   report: ExecutionReportResponse | null;
   onRetry: () => void;
-  onPage: (page: number) => void;
   /** Deep link for cohort rows (role/runtime/model filtered report views). */
   cohortLink?: (dimension: CohortDimension, key: string) => string;
 }
 
 /**
  * Pure presentational view of the report states (loading, error, empty,
- * partial, pagination). No hooks or fetching — renderable to static markup in
+ * partial). No hooks or fetching — renderable to static markup in
  * tests without a browser.
  */
-export function ReportContent({ loading, error, report, onRetry, onPage, cohortLink }: ReportContentProps) {
+export function ReportContent({ loading, error, report, onRetry, cohortLink }: ReportContentProps) {
   const summary = report?.summary ?? null;
   const failures = useMemo(() => (report ? orderFailureDisplay(report.failures) : []), [report]);
   const failedTotal = useMemo(
@@ -443,54 +438,6 @@ export function ReportContent({ loading, error, report, onRetry, onPage, cohortL
                   </div>
                 )}
               </section>
-
-              <section aria-label="Issues">
-                <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
-                  <h3 className="font-ui-display text-sm font-medium text-white/80">Issues</h3>
-                  <p className="font-ui-display text-xs text-white/40">{paginationText(report.pagination)}</p>
-                </div>
-                <div className="space-y-2">
-                  {report.issues.map((issue) => (
-                    <Link
-                      key={issue.id}
-                      to={issueDetailHref(issue.id)}
-                      className="block rounded border border-white/10 bg-panel-elevated/60 px-4 py-2.5 hover:border-cyber-teal/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyber-teal/45"
-                    >
-                      <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                        <IssueStatusBadge status={issue.status as IssueStatus} />
-                        <span className="text-sm text-white/85 flex-1 min-w-40">{issue.title}</span>
-                        <span className="font-mono text-xs text-white/40 tabular-nums">{issue.attempts} attempts</span>
-                      </span>
-                      <span className="mt-0.5 block text-xs text-white/35 font-mono truncate">
-                        {issue.repo} · {issue.id.slice(0, 8)}
-                      </span>
-                    </Link>
-                  ))}
-                </div>
-                {report.pagination.totalPages > 1 && (
-                  <nav aria-label="Report pages" className="mt-3 flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="font-ui-display px-3 py-1.5 text-sm rounded border border-white/15 text-white/70 hover:text-white disabled:opacity-40"
-                      disabled={report.pagination.page <= 1}
-                      onClick={() => onPage(report.pagination.page - 1)}
-                    >
-                      Previous
-                    </button>
-                    <span className="font-ui-display text-xs text-white/45 tabular-nums">
-                      Page {report.pagination.page} of {report.pagination.totalPages}
-                    </span>
-                    <button
-                      type="button"
-                      className="font-ui-display px-3 py-1.5 text-sm rounded border border-white/15 text-white/70 hover:text-white disabled:opacity-40"
-                      disabled={report.pagination.page >= report.pagination.totalPages}
-                      onClick={() => onPage(report.pagination.page + 1)}
-                    >
-                      Next
-                    </button>
-                  </nav>
-                )}
-              </section>
             </>
           )}
         </div>
@@ -545,15 +492,8 @@ export default function ExecutionReportPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, reloadTick]);
 
-  const apply = (next: ReportFormState, page?: number) => {
-    const qs = serializeExecutionReportQuery(formToFilters(next, page));
-    setSearchParams(qs ? Object.fromEntries(new URLSearchParams(qs)) : {});
-  };
-
-  // Pagination navigates from the applied URL filters with only `page`
-  // changed — draft form edits are never smuggled in.
-  const gotoPage = (page: number) => {
-    const qs = setPageQuery(search, page);
+  const apply = (next: ReportFormState) => {
+    const qs = serializeExecutionReportQuery(formToFilters(next));
     setSearchParams(qs ? Object.fromEntries(new URLSearchParams(qs)) : {});
   };
 
@@ -689,7 +629,6 @@ export default function ExecutionReportPage() {
         error={error}
         report={report}
         onRetry={() => setReloadTick((t) => t + 1)}
-        onPage={gotoPage}
         cohortLink={(dimension, key) => cohortHref(search, dimension, key)}
       />
     </div>
