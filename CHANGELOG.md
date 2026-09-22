@@ -2,6 +2,12 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## Unreleased
+
+### Fixes
+
+- **Reviewer resume re-pins to the PR live head** — resolving `resume` on a reviewer-origin escalation now re-checks the PR's live head (`gh pr view`) when the issue has a PR: if the branch moved while parked, the reviewer is queued at the live head, `issues.head_sha` moves with it, and the intent reads `Reviewer re-evaluating at <live8> (was <pinned8>)`. A matching head, a missing PR, or a failed lookup keeps the previous pinned-head behavior (NOT-226).
+
 ## 1.0.5 — 2026-09-19
 
 Patch over 1.0.4: Agents list shows the effective model for profiles saved before NOT-71.
