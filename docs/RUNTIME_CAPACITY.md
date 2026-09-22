@@ -145,12 +145,12 @@ distinct from the local Cursor CLI login — no session token is read, no
 undocumented dashboard API is called, and individual accounts are unsupported
 (team scope only).
 
-Reads (bounded: 15 s overall per endpoint,
+Reads (bounded: 15 s per request,
 `AGENT_DEALER_CURSOR_TEAM_CAPACITY_TIMEOUT_MS` override; documented HTTP
 Basic auth — API key as the username, empty password — header-only):
 
-- `POST /teams/spend` (`{ page }`, paged via `totalPages`, capped at 100
-  pages) → per-member `teamMemberSpend` rows (`spendCents`,
+- `POST /teams/spend` (`{ page }` 1-based, paged via `totalPages`, capped at
+  100 pages) → per-member `teamMemberSpend` rows (`spendCents`,
   `hardLimitOverrideDollars`, …), `subscriptionCycleStart` (epoch ms),
   `totalMembers`, `totalPages`. Team spend is the exact sum of the reported
   `spendCents` (unit `cents`, never converted); `totalMembers` is stored as
@@ -184,6 +184,7 @@ Failure semantics (shared enum only, never thrown, never health rows):
 | network error / 5xx / timeout / 429 (rate limited) | `missing` (stored snapshot still serves as stale/expired) |
 | 2xx without a usable billing value | `unparsable` |
 | documented path absent (404/405 on both endpoints) | `missing` |
+| daily-usage failure with a successful spend read | spend serves, usage period `null` |
 
 The exact cause is logged server-side as a static string; the key, URLs
 carrying secrets, and raw payloads never reach the browser, the API, or the
@@ -191,8 +192,8 @@ logs, and evidence refs are static (`cursor-admin-api:…`).
 
 `GET /api/cursor-team-billing` triggers `refreshCursorTeamBillingIfStale()`:
 with a key configured and a missing/stale stored snapshot, the read performs
-one bounded poll (single-flight, still under the overall timeout) and then
-serves the result — fresh snapshots short-circuit with no HTTP, and a failed
+one bounded poll (single-flight, each request under the per-request timeout)
+and then serves the result — fresh snapshots short-circuit with no HTTP, and a failed
 poll backs off for 60 s before polling again (no per-request retry storm
 after a 429/5xx). `AGENT_DEALER_CURSOR_TEAM_CAPACITY_REFRESH=off` disables
 the refresh. The Agents page renders team billing in its own labeled section

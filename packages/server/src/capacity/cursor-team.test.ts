@@ -165,18 +165,23 @@ test("spend + usage endpoints normalize with real units and source", async () =>
     assert.ok(!c.headers.Authorization.includes("test-key"), "raw key in header");
   }
   const spendCall = calls.find((c) => c.url.endsWith("/teams/spend"))!;
-  assert.deepEqual(JSON.parse(spendCall.body!), { page: 0 });
+  assert.deepEqual(JSON.parse(spendCall.body!), { page: 1 });
   const usageCall = calls.find((c) => c.url.endsWith("/teams/daily-usage-data"))!;
   const body = JSON.parse(usageCall.body!) as { startDate: number; endDate: number };
   assert.ok(body.endDate - body.startDate === 30 * 24 * 3600_000);
 });
 
-test("spend pagination sums every page and counts overrides", async () => {
+test("spend pagination is 1-based, sums every page, counts overrides", async () => {
   const calls: RecordedCall[] = [];
   const routes: Record<string, RouteValue> = {
     "/teams/spend": (reqBody) => {
       const page = (reqBody as { page: number }).page;
+      // The Admin API page parameter starts at 1: page 0 is rejected so a
+      // regression that requests it fails loudly instead of double-reading.
       if (page === 0) {
+        return { status: 400, body: { error: "invalid page" } };
+      }
+      if (page === 1) {
         return {
           status: 200,
           body: spendPage(
@@ -185,16 +190,19 @@ test("spend pagination sums every page and counts overrides", async () => {
           ),
         };
       }
-      return {
-        status: 200,
-        body: spendPage(
-          [
-            { userId: "u2", spendCents: 250, fastPremiumRequests: 1 },
-            { userId: "u3", spendCents: 500, fastPremiumRequests: 9, hardLimitOverrideDollars: 20 },
-          ],
-          { totalMembers: 3, totalPages: 2 }
-        ),
-      };
+      if (page === 2) {
+        return {
+          status: 200,
+          body: spendPage(
+            [
+              { userId: "u2", spendCents: 250, fastPremiumRequests: 1 },
+              { userId: "u3", spendCents: 500, fastPremiumRequests: 9, hardLimitOverrideDollars: 20 },
+            ],
+            { totalMembers: 3, totalPages: 2 }
+          ),
+        };
+      }
+      return { status: 400, body: { error: `unexpected page ${page}` } };
     },
     "/teams/daily-usage-data": { status: 200, body: { data: [] } },
   };
@@ -212,7 +220,7 @@ test("spend pagination sums every page and counts overrides", async () => {
   const spendPages = calls
     .filter((c) => c.url.endsWith("/teams/spend"))
     .map((c) => (JSON.parse(c.body!) as { page: number }).page);
-  assert.deepEqual(spendPages, [0, 1]);
+  assert.deepEqual(spendPages, [1, 2]);
 });
 
 test("pagination stays bounded when totalPages lies", async () => {
@@ -371,6 +379,32 @@ test("failure modes return explicit N/A without affecting runtime health", async
   );
   // Spend path absent and usage silent: missing, not a parse verdict.
   await expectMissing({}, "unavailable");
+});
+
+test("a daily-usage failure keeps a successful spend read (period unknown)", async () => {
+  for (const usage of [
+    { status: 403, body: {} },
+    { status: 429, body: {} },
+    { status: 500, body: {} },
+  ]) {
+    const obs = await readCursorTeamBilling({
+      key: "test-key",
+      baseUrl: MOCK_BASE,
+      fetchImpl: mockFetch({
+        "/teams/spend": {
+          status: 200,
+          body: spendPage([{ userId: "u1", spendCents: 1000 }]),
+        },
+        "/teams/daily-usage-data": usage,
+      }),
+    });
+    assert.equal(obs.failure, null);
+    assert.equal(obs.billing.spendValue, 1000);
+    assert.equal(obs.billing.spendUnit, "cents");
+    assert.equal(obs.billing.usagePeriodStart, null);
+    assert.equal(obs.billing.usagePeriodEnd, null);
+    assert.equal(obs.billing.source, "supported_protocol");
+  }
 });
 
 test("malformed payloads read unparsable and persist as N/A", async () => {

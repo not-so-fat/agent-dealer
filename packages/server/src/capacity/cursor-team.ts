@@ -11,7 +11,7 @@
 //
 // Reads (bounded, non-billable metadata only, HTTP Basic auth with the API
 // key as the username and an empty password):
-// - `POST {base}/teams/spend` (`{page}`, paged via `totalPages`) → per-member
+// - `POST {base}/teams/spend` (`{page}` 1-based, paged via `totalPages`) → per-member
 //   `teamMemberSpend` rows (`spendCents`, `hardLimitOverrideDollars`, ...),
 //   `subscriptionCycleStart` (epoch ms), `totalMembers`, `totalPages`. Team
 //   spend is the exact sum of reported `spendCents` (unit `cents`); per-member
@@ -28,9 +28,11 @@
 //
 // Failure semantics (shared CapacityUnavailableReason enum only):
 // - absent key -> `missing` (`configured: false`), no HTTP at all.
-// - 401/403 (bad key or missing admin permission), network/5xx/timeout, 429
-//   (rate limited) -> `missing` when nothing is stored; a stored snapshot
-//   keeps serving under read-time freshness (`stale`/`expired`).
+// - spend-endpoint 401/403 (bad key or missing admin permission),
+//   network/5xx/timeout, 429 (rate limited) -> `missing` when nothing is
+//   stored; a stored snapshot keeps serving under read-time freshness
+//   (`stale`/`expired`). A daily-usage failure alone never fails the read —
+//   the spend values still serve with the usage period unknown.
 // - 2xx without a usable field -> `unparsable`.
 // Failures never throw out of read(), never touch `runtime_availability`
 // (NOT-111 health stays separate), and never log the key, URLs carrying
@@ -95,6 +97,7 @@ export function cursorTeamBaseUrl(): string {
   return raw ? raw.replace(/\/+$/, "") : CURSOR_ADMIN_API_BASE_URL;
 }
 
+/** Per-request timeout (each Admin API fetch gets this budget). */
 export function cursorTeamTimeoutMs(): number {
   const raw = process.env[CURSOR_TEAM_TIMEOUT_ENV];
   if (raw !== undefined && raw !== "") {
@@ -377,10 +380,11 @@ function emptyBilling(observedAt: string): CursorTeamObservation["billing"] {
 }
 
 /**
- * One bounded, paginated read of `POST /teams/spend` (`{page}`, following
- * `totalPages` up to `CURSOR_TEAM_MAX_SPEND_PAGES`). Returns the folded pages
- * plus the first transport-level outcome: auth/rate-limit/transport failures
- * dominate over page data, while 404/405 marks the endpoint absent.
+ * One bounded, paginated read of `POST /teams/spend` (`{page}` 1-based per
+ * the Admin API — `page` defaults to 1 — following `totalPages` up to
+ * `CURSOR_TEAM_MAX_SPEND_PAGES`). Returns the folded pages plus the first
+ * transport-level outcome: auth/rate-limit/transport failures dominate over
+ * page data, while 404/405 marks the endpoint absent.
  */
 async function readSpendPages(
   fetchImpl: FetchImpl,
@@ -393,7 +397,7 @@ async function readSpendPages(
   | { absent: true }
 > {
   const pages: CursorTeamSpendPage[] = [];
-  let page = 0;
+  let page = 1;
   for (;;) {
     const res = await fetchJson(
       fetchImpl,
@@ -414,13 +418,15 @@ async function readSpendPages(
     if (parsed === null) return { failure: "malformed" };
     pages.push(parsed);
     const totalPages = parsed.totalPages;
+    // `totalPages` is a 1-based page count; pages run 1..totalPages. An
+    // absent/invalid count means a single page — never an unbounded crawl.
     const lastPage =
       totalPages === null || !Number.isInteger(totalPages) || totalPages <= 0
-        ? 0
-        : totalPages - 1;
+        ? 1
+        : Math.min(totalPages, CURSOR_TEAM_MAX_SPEND_PAGES);
     if (page >= lastPage) break;
     page += 1;
-    if (page >= CURSOR_TEAM_MAX_SPEND_PAGES) break;
+    if (page > CURSOR_TEAM_MAX_SPEND_PAGES) break;
   }
   return { pages };
 }
@@ -459,15 +465,21 @@ export async function readCursorTeamBilling(
     ),
   ]);
 
-  // Auth / rate-limit / transport failures dominate: without usable auth the
-  // read has no trustworthy values, even if one endpoint answered.
-  const kinds = [spendRes, usageRes]
-    .filter((r): r is { failure: FailureKind } => "failure" in r)
-    .map((r) => r.failure);
-  const fatal = kinds.find((k) => k === "forbidden" || k === "rate-limited" || k === "unavailable");
-  if (fatal) {
-    logFailure(fatal);
-    return { billing: emptyBilling(observedAt), failure: { kind: fatal }, evidenceRef: null };
+  // Spend decides the outcome: auth / rate-limit / transport failures on the
+  // spend endpoint dominate (without usable spend the read has no
+  // trustworthy billing values). Daily-usage only contributes the queried
+  // period, so a usage failure degrades to "period unknown" instead of
+  // throwing away a successful spend read.
+  const spendFatal =
+    "failure" in spendRes &&
+    (spendRes.failure === "forbidden" ||
+      spendRes.failure === "rate-limited" ||
+      spendRes.failure === "unavailable")
+      ? spendRes.failure
+      : null;
+  if (spendFatal) {
+    logFailure(spendFatal);
+    return { billing: emptyBilling(observedAt), failure: { kind: spendFatal }, evidenceRef: null };
   }
 
   const spendReadings =
