@@ -132,3 +132,67 @@ subprocess, and `AGENT_DEALER_CODEX_CAPACITY_REFRESH=off` disables the
 refresh. Tests use the committed fake JSONL server
 (`packages/server/src/capacity/fixtures/fake-codex-app-server.mjs`); CI
 performs no live provider request.
+
+## Provider: Cursor Team Admin API (NOT-249)
+
+Source: the official Admin API
+(`https://docs.cursor.com/en/account/teams/admin-api`), base URL
+`https://api.cursor.com` (`CURSOR_ADMIN_API_BASE_URL` override exists for
+tests only). Optional: the adapter runs only when the operator explicitly
+configures `CURSOR_ADMIN_API_KEY` (server env / `.env`, same secret mechanism
+as `LINEAR_API_KEY`; see `scripts/templates/*.env.example`). It stays
+distinct from the local Cursor CLI login — no session token is read, no
+undocumented dashboard API is called, and individual accounts are unsupported
+(team scope only).
+
+Reads (bounded: 15 s overall per endpoint,
+`AGENT_DEALER_CURSOR_TEAM_CAPACITY_TIMEOUT_MS` override; key travels
+`Authorization: Bearer` header-only):
+
+- `GET /teams/spend` → subscription-cycle start/end, team spend, and spend
+  hard limit. Every value keeps the unit the API reported (e.g. spend `12.5`
+  in `USD`); a value without a reported currency keeps a null unit rather
+  than an assumed one, and a hard limit is never relabeled as a token
+  percentage.
+- `POST /teams/daily-usage-data` (`{ startDate, endDate }` epoch ms, trailing
+  30 days) → per-day rows summed to a usage-period spend only when every
+  spend-carrying row agrees on one currency; mixed currencies or spend-less
+  rows yield a null spend rather than a mixed-unit total.
+
+Field parsing is tolerant (camelCase/snake_case aliases, epoch seconds/ms or
+ISO dates) because only the canonical concepts — cycle start/end, spend +
+currency, hard limit + currency — are contractual. No `5H`/`1W`-style windows
+are invented: this surface has no durations at all.
+
+Normalized snapshots persist in `cursor_team_billing_snapshots` (single row),
+independent of `runtime_capacity_snapshots` and `runtime_availability`.
+`GET /api/cursor-team-billing` → `CursorTeamBilling` serves the stored
+snapshot with freshness applied (15-min stale / 60-min expiry, same horizons
+as quota windows); a `cycleEnd` in the past reads `expired` — a finished
+cycle is never current billing. Transient auth/transport/rate-limit failures
+do not overwrite a stored snapshot (last-known values keep serving as
+stale/expired); without stored data they read `missing`.
+
+Failure semantics (shared enum only, never thrown, never health rows):
+
+| Admin API outcome | N/A reason |
+|---|---|
+| key absent (`configured: false`, no HTTP) | `missing` |
+| 401/403 (bad key or missing admin permission) | `missing` |
+| network error / 5xx / timeout / 429 (rate limited) | `missing` (stored snapshot still serves as stale/expired) |
+| 2xx without a usable billing value | `unparsable` |
+| documented path absent (404/405 on both endpoints) | `missing` |
+
+The exact cause is logged server-side as a static string; the key, URLs
+carrying secrets, and raw payloads never reach the browser, the API, or the
+logs, and evidence refs are static (`cursor-admin-api:…`).
+
+`GET /api/cursor-team-billing` triggers `refreshCursorTeamBillingIfStale()`:
+with a key configured and a missing/stale stored snapshot, the read performs
+one bounded poll (single-flight, still under the overall timeout) and then
+serves the result — fresh snapshots short-circuit with no HTTP, and
+`AGENT_DEALER_CURSOR_TEAM_CAPACITY_REFRESH=off` disables the refresh. The
+Agents page renders team billing in its own labeled section
+(`CursorTeamBillingCard`, "Cursor team billing · Admin API") below the
+per-runtime quota strip, in monetary units with cycle dates — never as
+percent chips. Tests inject a mock fetch; CI performs no live Cursor request.
