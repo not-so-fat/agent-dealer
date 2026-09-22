@@ -46,6 +46,13 @@ export const AgentHealthIssue = z.object({
     "github_cli_missing",
     /** `gh auth status` failed / token invalid — PR create will burn a developer round. */
     "github_auth",
+    /**
+     * `gh` cannot reach GitHub (spawn timeout, ETIMEDOUT, or output naming a
+     * timeout / TLS / DNS / connection failure, e.g. the keyring-login timeout
+     * when the VPN is down). Transient — deferred and retried, never read as a
+     * missing CLI or a logged-out account (NOT-195).
+     */
+    "github_unreachable",
   ]),
   message: z.string(),
 });

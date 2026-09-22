@@ -1,0 +1,2 @@
+github.com
+  X Timeout trying to log in to github.com account not-so-fat (keyring)

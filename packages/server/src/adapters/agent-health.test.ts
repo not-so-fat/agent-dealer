@@ -23,6 +23,8 @@ const {
   healthForAgent,
   runtimeIssuesUncached,
   githubIssuesUncached,
+  githubIssuesSync,
+  classifyGithubAuthStatus,
   clearAgentHealthCaches,
   setCursorProbeTimingForTests,
   setRunCommandForTests,
@@ -594,6 +596,179 @@ test("claude MCP endpoint mismatch surfaces a distinct message, not the generic 
   assert.match(issue!.message, /points at 127\.0\.0\.1:9999/);
   assert.match(issue!.message, /expected 127\.0\.0\.1:1110/);
   assert.equal(issue!.message.includes("Run agent-deck setup"), false);
+});
+
+// ---------------------------------------------------------------------------
+// NOT-195: a `gh` timeout is a transient network problem (`github_unreachable`),
+// not "gh CLI not found" or "Run `gh auth login`". Fixtures in
+// packages/shared/src/fixtures/runtime-auth/gh-auth-status-*.txt.
+// ---------------------------------------------------------------------------
+
+const GH_FIXTURE = (name: string): string =>
+  fs.readFileSync(path.join(FIXTURES, name), "utf8");
+
+async function uncachedWithGhOutput(output: string, ok: boolean): Promise<AgentHealthIssue[]> {
+  setRunCommandForTests(async () => ({ ok, output, timedOut: false }));
+  clearAgentHealthCaches();
+  try {
+    return await githubIssuesUncached();
+  } finally {
+    setRunCommandForTests(null);
+    clearAgentHealthCaches();
+  }
+}
+
+test("NOT-195: keyring-timeout capture reports github_unreachable, not github_auth", async () => {
+  const issues = await uncachedWithGhOutput(GH_FIXTURE("gh-auth-status-keyring-timeout.txt"), false);
+  assert.deepEqual(issues.map((i) => i.code), ["github_unreachable"]);
+  assert.match(issues[0]!.message, /Can't reach GitHub/);
+  assert.match(issues[0]!.message, /VPN/);
+  assert.doesNotMatch(issues[0]!.message, /gh auth login/);
+});
+
+test("NOT-195: logged-out capture still reports github_auth with the gh auth login message", async () => {
+  const issues = await uncachedWithGhOutput(GH_FIXTURE("gh-auth-status-logged-out.txt"), false);
+  assert.deepEqual(issues.map((i) => i.code), ["github_auth"]);
+  assert.match(issues[0]!.message, /gh auth login/);
+});
+
+test("NOT-195: invalid-token capture still reports github_auth with the gh auth login message", async () => {
+  const issues = await uncachedWithGhOutput(GH_FIXTURE("gh-auth-status-invalid-token.txt"), false);
+  assert.deepEqual(issues.map((i) => i.code), ["github_auth"]);
+  assert.match(issues[0]!.message, /gh auth login/);
+});
+
+test("NOT-195: logged-in capture leaves github health empty", async () => {
+  const issues = await uncachedWithGhOutput(GH_FIXTURE("gh-auth-status-logged-in.txt"), true);
+  assert.deepEqual(issues, []);
+});
+
+test("NOT-195: an async probe timeout reports github_unreachable, not github_cli_missing", async () => {
+  setRunCommandForTests(async () => ({ ok: false, output: "timeout", timedOut: true }));
+  clearAgentHealthCaches();
+  try {
+    const issues = await githubIssuesUncached();
+    assert.deepEqual(issues.map((i) => i.code), ["github_unreachable"]);
+  } finally {
+    setRunCommandForTests(null);
+    clearAgentHealthCaches();
+  }
+});
+
+test("NOT-195: ETIMEDOUT reports github_unreachable; only ENOENT reports github_cli_missing", async () => {
+  // Sync spawnSync shapes: a timeout sets error.code ETIMEDOUT, a missing binary ENOENT.
+  const timedOut = classifyGithubAuthStatus({
+    ok: false,
+    output: "spawnSync gh ETIMEDOUT",
+    timedOut: true,
+    spawnErrorCode: "ETIMEDOUT",
+  });
+  assert.deepEqual(timedOut.map((i) => i.code), ["github_unreachable"]);
+
+  const etimedoutOutput = classifyGithubAuthStatus({
+    ok: false,
+    output: "spawnSync gh ETIMEDOUT",
+    timedOut: false,
+    spawnErrorCode: "ETIMEDOUT",
+  });
+  assert.deepEqual(etimedoutOutput.map((i) => i.code), ["github_unreachable"]);
+
+  const missing = classifyGithubAuthStatus({
+    ok: false,
+    output: "spawnSync gh ENOENT",
+    timedOut: false,
+    spawnErrorCode: "ENOENT",
+  });
+  assert.deepEqual(missing.map((i) => i.code), ["github_cli_missing"]);
+
+  // A non-ENOENT spawn failure must not read as a missing CLI (fail-closed as auth).
+  const otherSpawnError = classifyGithubAuthStatus({
+    ok: false,
+    output: "spawnSync gh EACCES",
+    timedOut: false,
+    spawnErrorCode: "EACCES",
+  });
+  assert.deepEqual(otherSpawnError.map((i) => i.code), ["github_auth"]);
+
+  // gh's sibling token-path timeout variant (format verified in the gh 2.78.0 binary:
+  // "%s Timeout trying to log in to %s using token (%s)") is unreachable too.
+  const tokenTimeout = classifyGithubAuthStatus({
+    ok: false,
+    output: "ghe.example.com\n  X Timeout trying to log in to ghe.example.com using token (GH_TOKEN)",
+    timedOut: false,
+  });
+  assert.deepEqual(tokenTimeout.map((i) => i.code), ["github_unreachable"]);
+});
+
+/** A `gh` stub on PATH that prints a captured fixture verbatim and exits with the captured code. */
+function stubGhOnPath(fixture: string, exitCode: number): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-gh-stub-"));
+  const bin = path.join(dir, "gh");
+  fs.writeFileSync(
+    bin,
+    `#!/bin/sh\ncat ${JSON.stringify(path.join(FIXTURES, fixture))}\nexit ${exitCode}\n`
+  );
+  fs.chmodSync(bin, 0o755);
+  const prevPath = process.env.PATH ?? "";
+  process.env.PATH = `${dir}${path.delimiter}${prevPath}`;
+  return prevPath;
+}
+
+/**
+ * The sync entry point, through the real spawnSync plumbing. `test:unit` sets
+ * AGENT_DEALER_SKIP_GITHUB_HEALTH=1, which would short-circuit to [] — clear it so
+ * the classifier actually runs.
+ */
+function syncWithStubGh(fixture: string, exitCode: number): AgentHealthIssue[] {
+  const prevPath = stubGhOnPath(fixture, exitCode);
+  const prevSkip = process.env.AGENT_DEALER_SKIP_GITHUB_HEALTH;
+  delete process.env.AGENT_DEALER_SKIP_GITHUB_HEALTH;
+  clearAgentHealthCaches();
+  try {
+    return githubIssuesSync();
+  } finally {
+    process.env.PATH = prevPath;
+    if (prevSkip === undefined) delete process.env.AGENT_DEALER_SKIP_GITHUB_HEALTH;
+    else process.env.AGENT_DEALER_SKIP_GITHUB_HEALTH = prevSkip;
+    clearAgentHealthCaches();
+  }
+}
+
+test("NOT-195: githubIssuesSync follows the same classification over the three fixtures", async () => {
+  const unreachable = syncWithStubGh("gh-auth-status-keyring-timeout.txt", 1);
+  assert.deepEqual(unreachable.map((i) => i.code), ["github_unreachable"]);
+  assert.match(unreachable[0]!.message, /Can't reach GitHub/);
+
+  const loggedOut = syncWithStubGh("gh-auth-status-logged-out.txt", 1);
+  assert.deepEqual(loggedOut.map((i) => i.code), ["github_auth"]);
+  assert.match(loggedOut[0]!.message, /gh auth login/);
+
+  const invalidToken = syncWithStubGh("gh-auth-status-invalid-token.txt", 1);
+  assert.deepEqual(invalidToken.map((i) => i.code), ["github_auth"]);
+
+  const healthy = syncWithStubGh("gh-auth-status-logged-in.txt", 0);
+  assert.deepEqual(healthy, []);
+});
+
+test("NOT-195: github_unreachable marks the agent unhealthy so admission/review defers without spending an attempt", async () => {
+  // Any nonCap health issue fails checkRoleAgentHealthy, and the worker loop routes
+  // that through the existing deferLeasedWorkItemForAgentUnhealthy infra-defer path
+  // (agent_unhealthy outcome — no infra attempt, no review round spent), exactly as
+  // github_auth already behaves. No new wiring: the code IS the defer path.
+  const agent = createAgent({
+    name: "gh-down",
+    runtime: "claude_code",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
+  const gh = classifyGithubAuthStatus({
+    ok: false,
+    output: GH_FIXTURE("gh-auth-status-keyring-timeout.txt"),
+    timedOut: false,
+  });
+  assert.deepEqual(gh.map((i) => i.code), ["github_unreachable"]);
+  const result = await healthForAgent(agent, true, new Map(), true, null, gh);
+  assert.equal(result.healthy, false);
+  assert.equal(result.issues.some((i) => i.code === "github_unreachable"), true);
 });
 
 }); // describe agent-health (serial)
