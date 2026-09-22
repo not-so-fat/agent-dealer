@@ -17,6 +17,7 @@ import {
 import { getLinearUsageSnapshot } from "../adapters/linear-graphql.js";
 import { listRuntimeModels } from "../runners/models.js";
 import { getRuntimeCapacitySnapshot } from "../capacity/service.js";
+import { refreshCodexCapacityIfStale } from "../capacity/codex-app-server.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
   if (!deckId) return null;
@@ -73,7 +74,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // NOT-245: provider-neutral capacity read model — one entry per configured
   // runtime account with its windows, freshness, and explicit unavailable
   // reasons. Normalized snapshots only; evidence stays server-side.
-  app.get("/api/runtime-capacity", async () => getRuntimeCapacitySnapshot());
+  // NOT-246: on-demand Codex refresh — when the stored Codex snapshot is
+  // stale the read triggers one bounded, non-billable App Server poll
+  // (single-flight, never health rows, never throws); fresh snapshots and
+  // runtimes without a configured Codex account serve stored data with no
+  // subprocess.
+  app.get("/api/runtime-capacity", async () => {
+    try {
+      await refreshCodexCapacityIfStale();
+    } catch {
+      // A refresh failure must never break the read — stored snapshots still
+      // served below with their explicit N/A reasons.
+    }
+    return getRuntimeCapacitySnapshot();
+  });
 
   app.get("/api/agents", async () => {
     const agents = await listAgentsWithHealth(listAgents());

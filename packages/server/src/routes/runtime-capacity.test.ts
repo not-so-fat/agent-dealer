@@ -13,6 +13,9 @@ import Fastify from "fastify";
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cap-route-"));
 process.env.AGENT_DEALER_SKIP_GITHUB_HEALTH = "1";
 process.env.AGENT_DEALER_SKIP_AGENT_HEALTH = "1";
+// Never spawn a real provider from route tests: the on-demand Codex refresh is
+// covered against the fake App Server in codex-app-server.test.ts.
+process.env.AGENT_DEALER_CODEX_CAPACITY_REFRESH = "off";
 
 const { migrate } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
@@ -55,5 +58,23 @@ test("GET /api/runtime-capacity returns normalized entries without evidence", as
   assert.ok(claude[0].windows.every((w) => w.unavailableReason === null));
   const raw = JSON.stringify(res.json());
   assert.ok(!raw.includes("evidence"), "no evidence pointers leak to the browser");
+  await app.close();
+});
+
+test("GET /api/runtime-capacity serves a configured Codex account without spawning", async () => {
+  clearAllCapacitySnapshots();
+  createAgent({
+    name: "route-codex",
+    runtime: "codex_local",
+    deckId: "44444444-4444-4434-8444-444444444444",
+  });
+  const app = await buildApp();
+  const res = await app.inject({ method: "GET", url: "/api/runtime-capacity" });
+  assert.equal(res.statusCode, 200);
+  const body = RuntimeCapacityResponse.parse(res.json());
+  const codex = body.runtimes.filter((r) => r.runtime === "codex_local");
+  assert.equal(codex.length, 1);
+  // Refresh is off in route tests, so a snapshot-less account reads `missing`.
+  assert.equal(codex[0].unavailableReason, "missing");
   await app.close();
 });
