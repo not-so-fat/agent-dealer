@@ -284,7 +284,7 @@ it itself.
 | Dealer requirement | Dealer-owned (today) | Muse-owned (`-w create`/`existing`) |
 |---|---|---|
 | Exact developer tip (path + SHA) | Dealer sets `cwd`, reads git directly | Reported via `session.workspace_branch.observed`, plus the on-disk reservation file — works, but Dealer still has to capture and store it itself (same DB write it already does) |
-| Push verification | Dealer's own git calls | Unaffected either way — `grep -o '"command":"[^"]*"' attempts/*.jsonl \| grep -i push` across every captured transcript (probes 1-2 through 5) returns no match: no session ran a push |
+| Push verification | Dealer's own git calls | Unaffected either way — `grep -o '"command":"[^"]*"' attempts/*.jsonl | grep -i push` across every captured transcript (probes 1-2 through 5) returns no match: no session ran a push |
 | Reviewer checkout at that SHA | Dealer builds the reviewer's own worktree/checkout | **No change, and no option to change**: probe 5.2 shows a second session (the reviewer) cannot attach to the developer's Muse-owned worktree via `-w existing` — ownership is single-session by design. Dealer must keep building the reviewer's checkout independently regardless of which side owns the developer worktree. |
 | Dirty-work salvage | Dealer's timeout/crash salvage commit | Same mechanism, same trigger conditions (probe 4) — nothing Muse-owned changes here |
 | Safe cleanup | `git worktree remove --force` | Same command, same result (probe 4) — plus a new, Muse-only cruft surface (`.session-worktree-reservations/`) that plain `git worktree remove` doesn't clean up |
