@@ -1,0 +1,603 @@
+// packages/server/src/capacity/cursor-individual.test.ts
+//
+// NOT-250: experimental Cursor Individual dashboard adapter — mocked-HTTP
+// coverage only, never the real local login nor the live dashboard. Every
+// test injects a mock fetch (all asserted URLs target the allowlisted mock
+// host `https://www.cursor.com`, which the mock intercepts) and temporary
+// fixture credential files. Fixture payloads follow the brief's
+// usage-summary/current-period shape; nothing here assumes those routes are
+// a supported contract.
+import { test, before, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cursor-indiv-"));
+
+import {
+  CURSOR_INDIVIDUAL_MAX_BODY_BYTES,
+  CURSOR_INDIVIDUAL_OPT_IN_ENV,
+  CURSOR_INDIVIDUAL_OPT_IN_VALUE,
+  CURSOR_INDIVIDUAL_USAGE_PATHS,
+  cursorIndividualCapacityAdapter,
+  cursorIndividualFailureReason,
+  cursorIndividualPayloadToReadings,
+  getCursorIndividualBillingSnapshot,
+  ingestCursorIndividualObservation,
+  isCursorIndividualExperimentalEnabled,
+  readCursorIndividualBilling,
+  refreshCursorIndividualBilling,
+  refreshCursorIndividualBillingIfStale,
+  refreshCursorIndividualCapacityIfStale,
+  resetCursorIndividualPollStateForTests,
+  type FetchImpl,
+} from "./cursor-individual.js";
+import { CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV } from "./cursor-individual-credentials.js";
+
+const { migrate } = await import("../db/index.js");
+const {
+  clearCursorIndividualBilling,
+  readCursorIndividualBillingRow,
+} = await import("../repository/cursor-individual-billing.js");
+const { clearAllCapacitySnapshots } = await import("../repository/runtime-capacity.js");
+const {
+  clearAllRuntimeAvailability,
+  runtimeAvailability,
+} = await import("../repository/runtime-availability.js");
+const { getRuntimeCapacitySnapshot } = await import("./service.js");
+const { normalizeAdapterWindow } = await import("./adapter.js");
+
+const MOCK_BASE = "https://www.cursor.com";
+const SECRET = "fixture-individual-secret-xyz789";
+
+let credDir: string;
+let savedOptIn: string | undefined;
+let savedCredFile: string | undefined;
+let savedRefresh: string | undefined;
+
+before(() => {
+  migrate();
+});
+
+beforeEach(() => {
+  credDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cursor-indiv-creds-"));
+  savedOptIn = process.env[CURSOR_INDIVIDUAL_OPT_IN_ENV];
+  savedCredFile = process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV];
+  savedRefresh = process.env.AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH;
+  delete process.env[CURSOR_INDIVIDUAL_OPT_IN_ENV];
+  delete process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV];
+  delete process.env.AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH;
+  clearCursorIndividualBilling();
+  clearAllCapacitySnapshots();
+  clearAllRuntimeAvailability();
+  resetCursorIndividualPollStateForTests();
+});
+
+afterEach(() => {
+  if (savedOptIn === undefined) delete process.env[CURSOR_INDIVIDUAL_OPT_IN_ENV];
+  else process.env[CURSOR_INDIVIDUAL_OPT_IN_ENV] = savedOptIn;
+  if (savedCredFile === undefined) delete process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV];
+  else process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV] = savedCredFile;
+  if (savedRefresh === undefined) delete process.env.AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH;
+  else process.env.AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH = savedRefresh;
+  fs.rmSync(credDir, { recursive: true, force: true });
+});
+
+function enable(): void {
+  process.env[CURSOR_INDIVIDUAL_OPT_IN_ENV] = CURSOR_INDIVIDUAL_OPT_IN_VALUE;
+}
+
+function fixtureCredential(body: unknown = { token: SECRET }): void {
+  const file = path.join(credDir, "auth.json");
+  fs.writeFileSync(file, typeof body === "string" ? body : JSON.stringify(body));
+  process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV] = file;
+}
+
+interface MockRoute {
+  status: number;
+  headers?: Record<string, string>;
+  body?: unknown;
+}
+
+type RouteValue = MockRoute | Error | ((callCount: number) => MockRoute | Error);
+
+interface RecordedCall {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+}
+
+/** Mock fetch keyed by path; records every call for assertion. */
+function mockFetch(routes: Record<string, RouteValue>, calls: RecordedCall[] = []): FetchImpl {
+  let count = 0;
+  return async (url, init) => {
+    count += 1;
+    if (init.signal.aborted) throw new Error("aborted");
+    calls.push({ url, method: init.method, headers: init.headers });
+    const u = new URL(url);
+    const route = routes[u.pathname];
+    const resolved = typeof route === "function" ? route(count) : route;
+    if (resolved instanceof Error) throw resolved;
+    if (!resolved) return { status: 404, headers: {}, text: async () => "not found" };
+    const text =
+      typeof resolved.body === "string" ? resolved.body : JSON.stringify(resolved.body ?? {});
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(resolved.headers ?? {})) headers[k.toLowerCase()] = v;
+    return { status: resolved.status, headers, text: async () => text };
+  };
+}
+
+function usagePayload(nowMs: number, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    cycleLabel: "September 2026",
+    cycleStart: "2026-09-01T00:00:00.000Z",
+    cycleEnd: new Date(nowMs + 8 * 24 * 3600_000).toISOString(),
+    usageValue: 7.5,
+    usageUnit: "USD",
+    usedPercent: 37.5,
+    ...over,
+  };
+}
+
+function okRoutes(nowMs: number): Record<string, RouteValue> {
+  return { [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 200, body: usagePayload(nowMs) } };
+}
+
+test("disabled reads N/A with no credential or endpoint access", async () => {
+  delete process.env[CURSOR_INDIVIDUAL_OPT_IN_ENV];
+  assert.equal(isCursorIndividualExperimentalEnabled(), false);
+  fixtureCredential();
+  const calls: RecordedCall[] = [];
+  const loadCredential = () => {
+    throw new Error("credential must not be read while disabled");
+  };
+  const fetchImpl: FetchImpl = async () => {
+    throw new Error("HTTP must not be attempted while disabled");
+  };
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl,
+    loadCredential,
+  });
+  assert.equal(obs.failure?.kind, "disabled");
+  assert.equal(obs.enabled, false);
+  assert.equal(obs.configured, false);
+  assert.equal(obs.billing.source, "unavailable");
+  assert.equal(obs.billing.unavailableReason, "missing");
+  void calls;
+  // The adapter degrades to an explicit unavailable reading, same conditions.
+  const result = await cursorIndividualCapacityAdapter({
+    baseUrl: MOCK_BASE,
+    fetchImpl,
+    loadCredential,
+  }).read();
+  assert.equal(result.windows.length, 0);
+  assert.equal(result.unavailable.length, 1);
+  assert.equal(result.unavailable[0].windowKey, "billing_cycle");
+  assert.equal(result.unavailable[0].reason, "missing");
+  // Stale refreshes are strict no-ops while disabled.
+  await refreshCursorIndividualBillingIfStale();
+  await refreshCursorIndividualCapacityIfStale();
+  assert.equal(readCursorIndividualBillingRow(), null);
+  // And the serve path reads disabled without touching the database.
+  const snap = await getCursorIndividualBillingSnapshot();
+  assert.equal(snap.enabled, false);
+  assert.equal(snap.configured, false);
+  assert.equal(snap.unavailableReason, "missing");
+});
+
+test("opt-in with fixture credential/response reports cycle label/reset/remaining", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const calls: RecordedCall[] = [];
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(now), calls),
+    nowMs: now,
+  });
+  assert.equal(obs.failure, null);
+  assert.equal(obs.enabled, true);
+  assert.equal(obs.configured, true);
+  assert.equal(obs.viaSupportedApi, false);
+  assert.equal(obs.billing.cycleLabel, "September 2026");
+  assert.equal(obs.billing.cycleStart, "2026-09-01T00:00:00.000Z");
+  assert.equal(obs.billing.cycleEnd, new Date(now + 8 * 24 * 3600_000).toISOString());
+  assert.equal(obs.billing.usageValue, 7.5);
+  assert.equal(obs.billing.usageUnit, "USD");
+  // 37.5% used → 62.5 remaining — no unsupported windows guessed.
+  assert.equal(obs.billing.remainingPercent, 62.5);
+  assert.equal(obs.billing.source, "experimental_api");
+  assert.equal(obs.billing.unavailableReason, null);
+  assert.equal(obs.evidenceRef, "cursor-dashboard:usage-summary/current-period");
+  // Allowlisted origin, GET, credential header-only (never in URL/body).
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.startsWith(MOCK_BASE), `mock host only, got ${calls[0].url}`);
+  assert.equal(calls[0].method, "GET");
+  assert.equal(calls[0].headers.Authorization, `Bearer ${SECRET}`);
+  const url = new URL(calls[0].url);
+  assert.ok(!url.search.includes(SECRET) && !url.pathname.includes(SECRET));
+  // The raw token appears nowhere outside the in-memory auth header.
+  const serialized = JSON.stringify({ billing: obs.billing, failure: obs.failure });
+  assert.ok(!serialized.includes(SECRET), "raw token must not appear in the observation");
+});
+
+test("adapter maps billing to one billing-cycle window without invented durations", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const result = await cursorIndividualCapacityAdapter({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(now)),
+    nowMs: now,
+  }).read(now);
+  assert.equal(result.runtime, "cursor_local");
+  assert.equal(result.unavailable.length, 0);
+  assert.equal(result.windows.length, 1);
+  const w = result.windows[0];
+  assert.equal(w.windowKey, "billing_cycle");
+  assert.equal(w.providerBucket, "individual");
+  assert.equal(w.durationMinutes, null);
+  assert.equal(w.source, "experimental_api");
+  assert.equal(w.resetAt, new Date(now + 8 * 24 * 3600_000).toISOString());
+  // Normalization keeps the provider label (no 5H/1W invention) and recovers
+  // the remaining percent through the shared used scale.
+  const normalized = normalizeAdapterWindow("cursor_local", w, now);
+  assert.equal(normalized.displayLabel, "billing cycle");
+  assert.equal(normalized.remainingPercent, 62.5);
+  assert.equal(normalized.unavailableReason, null);
+});
+
+test("supported surface is preferred and skips credential + dashboard", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const fetchImpl: FetchImpl = async () => {
+    throw new Error("dashboard must not be touched when a supported API answers");
+  };
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl,
+    loadCredential: () => {
+      throw new Error("credential must not be read when a supported API answers");
+    },
+    supportedReader: () => ({
+      cycleLabel: "September 2026",
+      cycleEnd: new Date(now + 8 * 24 * 3600_000).toISOString(),
+      remainingPercent: 80,
+    }),
+    nowMs: now,
+  });
+  assert.equal(obs.failure, null);
+  assert.equal(obs.viaSupportedApi, true);
+  assert.equal(obs.billing.source, "supported_protocol");
+  assert.equal(obs.billing.cycleLabel, "September 2026");
+  assert.equal(obs.billing.remainingPercent, 80);
+});
+
+test("absent credential performs no HTTP and reads missing/unconfigured", async () => {
+  enable();
+  process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV] = path.join(credDir, "does-not-exist.json");
+  const calls: RecordedCall[] = [];
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(Date.now()), calls),
+  });
+  assert.equal(obs.failure?.kind, "absent-credential");
+  assert.equal(obs.configured, false);
+  assert.equal(calls.length, 0);
+  await ingestCursorIndividualObservation(obs);
+  assert.equal(readCursorIndividualBillingRow(), null);
+  const snap = await getCursorIndividualBillingSnapshot();
+  assert.equal(snap.enabled, true);
+  assert.equal(snap.configured, false);
+  assert.equal(snap.unavailableReason, "missing");
+});
+
+test("changed credential format reads unparsable", async () => {
+  enable();
+  fixtureCredential({ brandNewShape: true });
+  const calls: RecordedCall[] = [];
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(Date.now()), calls),
+  });
+  assert.equal(obs.failure?.kind, "bad-credential");
+  assert.equal(obs.billing.unavailableReason, "unparsable");
+  assert.equal(calls.length, 0);
+  assert.equal(cursorIndividualFailureReason("bad-credential"), "unparsable");
+});
+
+test("endpoint drift falls through to the next candidate path", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const calls: RecordedCall[] = [];
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(
+      {
+        [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 404, body: {} },
+        [CURSOR_INDIVIDUAL_USAGE_PATHS[1]]: { status: 200, body: usagePayload(now) },
+      },
+      calls
+    ),
+    nowMs: now,
+  });
+  assert.equal(obs.failure, null);
+  assert.equal(obs.billing.cycleLabel, "September 2026");
+  assert.equal(obs.billing.remainingPercent, 62.5);
+  assert.equal(calls.length, 2);
+});
+
+test("failure modes return explicit N/A without affecting runtime health", async () => {
+  enable();
+  fixtureCredential();
+  async function expectOutcome(
+    routes: Record<string, RouteValue>,
+    kind: string,
+    reason: "missing" | "unparsable"
+  ): Promise<void> {
+    clearCursorIndividualBilling();
+    clearAllRuntimeAvailability();
+    const obs = await readCursorIndividualBilling({
+      baseUrl: MOCK_BASE,
+      fetchImpl: mockFetch(routes),
+    });
+    assert.equal(obs.failure?.kind, kind);
+    assert.equal(obs.billing.unavailableReason, reason);
+    await ingestCursorIndividualObservation(obs);
+    assert.equal(runtimeAvailability("cursor_local", Date.now()).available, true);
+  }
+  const ep = CURSOR_INDIVIDUAL_USAGE_PATHS[0];
+  await expectOutcome({ [ep]: { status: 401, body: {} } }, "forbidden", "missing");
+  await expectOutcome({ [ep]: { status: 403, body: {} } }, "forbidden", "missing");
+  await expectOutcome({ [ep]: { status: 429, body: {} } }, "rate-limited", "missing");
+  await expectOutcome({ [ep]: { status: 500, body: {} } }, "unavailable", "missing");
+  await expectOutcome({ [ep]: new Error("socket hang up") }, "unavailable", "missing");
+  // Both candidate paths absent: endpoint drift reads missing, not a parse verdict.
+  await expectOutcome({}, "unavailable", "missing");
+  // Malformed data reads unparsable.
+  await expectOutcome({ [ep]: { status: 200, body: { nonsense: true } } }, "malformed", "unparsable");
+  await expectOutcome({ [ep]: { status: 200, body: "not-json{{{" } }, "malformed", "unparsable");
+  await expectOutcome(
+    { [ep]: { status: 200, body: "x".repeat(CURSOR_INDIVIDUAL_MAX_BODY_BYTES + 1) } },
+    "malformed",
+    "unparsable"
+  );
+});
+
+test("timeout degrades to an explicit unavailable reason", async () => {
+  enable();
+  fixtureCredential();
+  const hanging: FetchImpl = async (_url, init) =>
+    new Promise((_resolve, reject) => {
+      if (init.signal.aborted) {
+        reject(new Error("aborted"));
+        return;
+      }
+      init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: hanging,
+    timeoutMs: 20,
+  });
+  assert.equal(obs.failure?.kind, "unavailable");
+  assert.equal(obs.billing.unavailableReason, "missing");
+});
+
+test("unsafe redirects are rejected before the credential travels", async () => {
+  enable();
+  fixtureCredential();
+  const calls: RecordedCall[] = [];
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(
+      {
+        [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: {
+          status: 302,
+          headers: { location: "https://evil.example/capture" },
+          body: {},
+        },
+      },
+      calls
+    ),
+  });
+  assert.equal(obs.failure?.kind, "unsafe-redirect");
+  assert.equal(obs.billing.unavailableReason, "missing");
+  // Exactly one request left the client — nothing followed the evil Location.
+  assert.equal(calls.length, 1);
+  assert.ok(!calls.some((c) => c.url.includes("evil.example")));
+});
+
+test("same-allowlist redirects are followed", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const calls: RecordedCall[] = [];
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(
+      {
+        [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: {
+          status: 302,
+          headers: { location: "https://api.cursor.com/api/usage-summary/current-period" },
+          body: {},
+        },
+        "/api/usage-summary/current-period": { status: 200, body: usagePayload(now) },
+      },
+      calls
+    ),
+    nowMs: now,
+  });
+  // The redirect target answers under the other allowlisted origin.
+  assert.equal(obs.failure, null);
+  assert.equal(obs.billing.cycleLabel, "September 2026");
+});
+
+test("non-allowlisted base URLs are rejected without any HTTP", async () => {
+  enable();
+  fixtureCredential();
+  const calls: RecordedCall[] = [];
+  const obs = await readCursorIndividualBilling({
+    baseUrl: "https://evil.example",
+    fetchImpl: mockFetch({}, calls),
+  });
+  assert.equal(obs.failure?.kind, "unsafe-redirect");
+  assert.equal(calls.length, 0);
+});
+
+test("malformed payloads persist as N/A; transient failures keep last-known values", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const good = {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(now)),
+    nowMs: now,
+  };
+  await refreshCursorIndividualBilling(good);
+  const stored = readCursorIndividualBillingRow();
+  assert.equal(stored?.cycleLabel, "September 2026");
+  assert.equal(stored?.remainingPercent, 62.5);
+  assert.equal(stored?.source, "experimental_api");
+  assert.ok(!JSON.stringify(stored).includes(SECRET), "stored row must not carry the token");
+  let snap = await getCursorIndividualBillingSnapshot(now);
+  assert.equal(snap.enabled, true);
+  assert.equal(snap.configured, true);
+  assert.equal(snap.unavailableReason, null);
+  assert.equal(snap.remainingPercent, 62.5);
+  assert.ok(!JSON.stringify(snap).includes(SECRET), "browser response must not carry the token");
+  // A later 500 keeps last-known values serving.
+  await refreshCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({ [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 500, body: {} } }),
+    nowMs: now + 60_000,
+  });
+  snap = await getCursorIndividualBillingSnapshot(now + 60_000);
+  assert.equal(snap.unavailableReason, null);
+  assert.equal(snap.remainingPercent, 62.5);
+  // Malformed data overwrites with an explicit unparsable N/A.
+  await refreshCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({ [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 200, body: { nope: 1 } } }),
+    nowMs: now + 120_000,
+  });
+  snap = await getCursorIndividualBillingSnapshot(now + 120_000);
+  assert.equal(snap.unavailableReason, "unparsable");
+  assert.equal(snap.remainingPercent, null);
+});
+
+test("stale, expired, and past-cycle snapshots read N/A with distinct reasons", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const { writeCursorIndividualBillingRow } = await import(
+    "../repository/cursor-individual-billing.js"
+  );
+  const fresh = {
+    cycleLabel: "September 2026",
+    cycleStart: "2026-09-01T00:00:00.000Z",
+    cycleEnd: new Date(now + 8 * 24 * 3600_000).toISOString(),
+    usageValue: 7.5,
+    usageUnit: "USD",
+    remainingPercent: 62.5,
+    source: "experimental_api" as const,
+    unavailableReason: null,
+    evidenceRef: "cursor-dashboard:usage-summary/current-period",
+  };
+  clearCursorIndividualBilling();
+  writeCursorIndividualBillingRow({
+    ...fresh,
+    observedAt: new Date(now - 30 * 60_000).toISOString(),
+    freshUntil: new Date(now - 15 * 60_000).toISOString(),
+    expiresAt: new Date(now + 30 * 60_000).toISOString(),
+  });
+  let snap = await getCursorIndividualBillingSnapshot(now);
+  assert.equal(snap.remainingPercent, null);
+  assert.equal(snap.unavailableReason, "stale");
+  writeCursorIndividualBillingRow({
+    ...fresh,
+    observedAt: new Date(now - 2 * 3600_000).toISOString(),
+    freshUntil: new Date(now - 3600_000).toISOString(),
+    expiresAt: new Date(now - 1000).toISOString(),
+  });
+  snap = await getCursorIndividualBillingSnapshot(now);
+  assert.equal(snap.unavailableReason, "expired");
+  // A finished billing cycle is never presented as current capacity.
+  writeCursorIndividualBillingRow({
+    ...fresh,
+    cycleEnd: new Date(now - 1000).toISOString(),
+    observedAt: new Date(now - 60_000).toISOString(),
+    freshUntil: new Date(now + 600_000).toISOString(),
+    expiresAt: new Date(now + 3600_000).toISOString(),
+  });
+  snap = await getCursorIndividualBillingSnapshot(now);
+  assert.equal(snap.remainingPercent, null);
+  assert.equal(snap.unavailableReason, "expired");
+});
+
+test("capacity-strip refresh ingests the billing-cycle window; disabled writes nothing", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  await refreshCursorIndividualCapacityIfStale(now, {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(now)),
+    nowMs: now,
+  });
+  let snap = getRuntimeCapacitySnapshot(now);
+  const cursor = snap.runtimes.find((r) => r.runtime === "cursor_local")!;
+  assert.ok(cursor, "cursor_local entry exists from the stored window");
+  assert.equal(cursor.windows.length, 1);
+  assert.equal(cursor.windows[0].windowKey, "billing_cycle");
+  assert.equal(cursor.windows[0].displayLabel, "billing cycle");
+  assert.equal(cursor.windows[0].remainingPercent, 62.5);
+  assert.equal(cursor.windows[0].source, "experimental_api");
+  assert.equal(cursor.unavailableReason, null);
+  assert.ok(!JSON.stringify(snap).includes(SECRET));
+  // Disabled: strict no-op, existing rows untouched.
+  delete process.env[CURSOR_INDIVIDUAL_OPT_IN_ENV];
+  clearAllCapacitySnapshots();
+  await refreshCursorIndividualCapacityIfStale(now, {
+    baseUrl: MOCK_BASE,
+    fetchImpl: async () => {
+      throw new Error("no HTTP while disabled");
+    },
+    nowMs: now,
+  });
+  snap = getRuntimeCapacitySnapshot(now);
+  assert.ok(
+    !snap.runtimes.some((r) => r.runtime === "cursor_local" && r.windows.length > 0),
+    "no individual window is written while disabled"
+  );
+});
+
+test("payload parsing keeps reported values and rejects empty shapes", () => {
+  const now = Date.now();
+  const readings = cursorIndividualPayloadToReadings(usagePayload(now));
+  assert.ok(readings);
+  assert.equal(readings.cycleLabel, "September 2026");
+  assert.equal(readings.remainingPercent, 62.5);
+  // Remaining-direct and fraction scales normalize without guessing.
+  assert.equal(cursorIndividualPayloadToReadings({ remainingPercent: 80 })?.remainingPercent, 80);
+  assert.equal(cursorIndividualPayloadToReadings({ usedFraction: 0.2 })?.remainingPercent, 80);
+  assert.equal(cursorIndividualPayloadToReadings({ remaining_fraction: 0.5 })?.remainingPercent, 50);
+  // Out-of-range percents clamp instead of leaking impossible values.
+  assert.equal(cursorIndividualPayloadToReadings({ remainingPercent: 140 })?.remainingPercent, 100);
+  // Snake_case aliases tolerated; empty shapes read null (unparsable).
+  const snake = cursorIndividualPayloadToReadings({
+    cycle_label: "September 2026",
+    reset_at: new Date(now + 3600_000).toISOString(),
+    used_percent: 10,
+  });
+  assert.ok(snake);
+  assert.equal(snake.cycleLabel, "September 2026");
+  assert.equal(snake.remainingPercent, 90);
+  assert.equal(cursorIndividualPayloadToReadings(null), null);
+  assert.equal(cursorIndividualPayloadToReadings("nope"), null);
+  assert.equal(cursorIndividualPayloadToReadings({ nonsense: true }), null);
+  assert.equal(cursorIndividualPayloadToReadings({ usageUnit: "USD" }), null);
+});

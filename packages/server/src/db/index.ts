@@ -482,6 +482,32 @@ export function migrate(): void {
     }
   }
 
+  // NOT-250: normalized Cursor-individual billing snapshot for databases
+  // created before schema.sql declared the table (same upgrade-path pattern
+  // as cursor_team_billing_snapshots above).
+  const cursorIndividualBilling = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cursor_individual_billing_snapshots'")
+    .get() as { name: string } | undefined;
+  if (!cursorIndividualBilling) {
+    db.exec(`
+      CREATE TABLE cursor_individual_billing_snapshots (
+        id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+        cycle_label TEXT,
+        cycle_start TEXT,
+        cycle_end TEXT,
+        usage_value REAL,
+        usage_unit TEXT,
+        remaining_percent REAL,
+        source TEXT NOT NULL,
+        unavailable_reason TEXT,
+        observed_at TEXT NOT NULL,
+        fresh_until TEXT,
+        expires_at TEXT,
+        evidence_ref TEXT
+      );
+    `);
+  }
+
   // NOT-103: sequential issue admission queue.
   const queueEntries = db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'queue_entries'")
