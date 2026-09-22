@@ -17,6 +17,7 @@ import {
   searchToForm,
   successText,
   toCohortDisplay,
+  toSuccessDisplay,
   toCoverageDisplay,
   toPercentileDisplay,
 } from "./executionReport.js";
@@ -69,8 +70,40 @@ test("full coverage shows the bare sum and sparse flags small cohorts", () => {
 
 test("success text keeps denominators separate and names the missing one", () => {
   assert.equal(successText(0.5, 2, "closed").text, "50.0% (1/2 closed)");
-  assert.equal(successText(null, 0, "closed").text, "Unavailable");
+  assert.equal(successText(null, 0, "closed").text, "N/A");
   assert.equal(successText(null, 0, "terminal attempts").title, "No terminal attempts in this cohort");
+});
+
+// NOT-244: success as structured parts — percentage separate from evidence,
+// N/A when missing.
+test("success display splits the percentage from its denominator evidence", () => {
+  const shown = toSuccessDisplay(74 / 86, 86, "closed");
+  assert.equal(shown.available, true);
+  assert.equal(shown.valueText, "86.0%");
+  assert.equal(shown.evidenceCounts, "74/86");
+  assert.equal(shown.evidenceNoun, "closed");
+  assert.ok(shown.title.includes("86 closed"));
+  const attempt = toSuccessDisplay(0.5, 4, "terminal");
+  assert.equal(attempt.valueText, "50.0%");
+  assert.equal(attempt.evidenceCounts, "2/4");
+  assert.equal(attempt.evidenceNoun, "terminal");
+  const missing = toSuccessDisplay(null, 0, "closed");
+  assert.equal(missing.available, false);
+  assert.equal(missing.valueText, "N/A");
+  assert.equal(missing.evidenceCounts, null);
+  assert.equal(missing.evidenceNoun, null);
+  const zeroDenominator = toSuccessDisplay(0.5, 0, "closed");
+  assert.equal(zeroDenominator.available, false);
+  assert.equal(zeroDenominator.valueText, "N/A");
+});
+
+test("null retry and share rates read N/A, never 0%", () => {
+  const noRetry = toCohortDisplay(cohort({ retryRate: null }));
+  assert.equal(noRetry.retryText, "N/A");
+  const [noShare] = orderFailureDisplay([
+    { code: "validation_failure", domain: "task", count: 5, share: null, issueIds: ["a"], issueTotal: 5 },
+  ]);
+  assert.equal(noShare!.shareText, "N/A");
 });
 
 test("unknown failures stay a visible bucket with issue links", () => {
@@ -186,7 +219,7 @@ test("coverage display keeps the known aggregate primary with a separate note", 
   assert.equal(full.noteText, null);
   const missing = toCoverageDisplay({ sum: null, known: 0, total: 3 }, String);
   assert.equal(missing.available, false);
-  assert.equal(missing.valueText, "Unavailable");
+  assert.equal(missing.valueText, "N/A");
 });
 
 test("compact token coverage shows a short value with the exact count alongside", () => {

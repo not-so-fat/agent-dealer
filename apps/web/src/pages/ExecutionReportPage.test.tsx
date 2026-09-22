@@ -111,14 +111,15 @@ test("comparison rows expose retry, duration coverage, and failed waste", () => 
   assert.ok(html.includes(">in</span>") && html.includes(">out</span>"), "in/out stay separate labels");
 });
 
-test("missing failed waste reads Unavailable, never zero", () => {
+test("missing failed waste reads N/A, never zero", () => {
   const html = render({
     loading: false,
     error: null,
     report: fixtureReport({ byRole: [], byRuntime: [fixtureCohort({ key: "cursor_local", ...unavailableSums() })], byModel: [] }),
     onRetry: noop,
   });
-  assert.ok(html.includes("Unavailable"));
+  assert.ok(html.includes(">N/A</span>"));
+  assert.ok(!html.includes("Unavailable"));
   assert.ok(!html.includes("$0.00"));
 });
 
@@ -200,7 +201,7 @@ test("percentiles label P50/P95 separately with sample size as supporting text",
   assert.ok(html.includes("Sample size 2"), "sample note explains itself to assistive tech via title");
 });
 
-test("missing percentiles render one Unavailable state with no P50/P95 numbers", () => {
+test("missing percentiles render one N/A state with no P50/P95 numbers", () => {
   const noEvidence: { p50: null; p95: null; n: number; quality: "unavailable"; reasons: string[] } = {
     p50: null, p95: null, n: 0, quality: "unavailable", reasons: ["no_observations"],
   };
@@ -222,7 +223,8 @@ test("missing percentiles render one Unavailable state with no P50/P95 numbers",
     onRetry: noop,
   });
   assert.ok(html.includes("No attempts in this dimension"), "empty cohorts still explain themselves");
-  assert.ok(html.includes(">Unavailable</span>"), "missing percentiles read Unavailable");
+  assert.ok(html.includes(">N/A</span>"), "missing percentiles read N/A");
+  assert.ok(!html.includes("Unavailable"), "no Unavailable copy remains on the Reports page");
 });
 
 test("large token totals render compact with the exact count accessible", () => {
@@ -244,6 +246,126 @@ test("large token totals render compact with the exact count accessible", () => 
   assert.ok(html.includes(">1.2M</span>"), "visible token total is compact");
   assert.ok(html.includes('title="1,234,567"'), "exact comma-formatted value in title text");
   assert.ok(html.includes('aria-label="1,234,567"'), "exact value available to assistive technology");
+});
+
+// NOT-244: success percentages scan first with denominator evidence secondary.
+test("issue success splits the percentage from its closed evidence", () => {
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
+  assert.ok(html.includes(">50.0%</span>"), "percentage is its own element");
+  assert.ok(html.includes(">1/2</span>"), "evidence counts are a separate element");
+  assert.ok(html.includes("closed)"), "evidence names the closed denominator");
+  assert.ok(!html.includes("50.0% (1/2 closed)"), "percentage and evidence are never one same-style string");
+  assert.ok(
+    html.includes("title=\"done / (done + closed), denominator 2\""),
+    "exact card definition stays in the title text"
+  );
+});
+
+test("attempt success splits the percentage from its terminal evidence", () => {
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
+  assert.ok(html.includes(">50.0%</span>"), "percentage is its own element");
+  assert.ok(html.includes(">2/4</span>"), "evidence uses the actual terminal-attempt counts");
+  assert.ok(html.includes("terminal)"), "evidence names the terminal denominator");
+  assert.ok(!html.includes("50.0% (2/4 terminal)"), "percentage and evidence are never one same-style string");
+  assert.ok(
+    html.includes("title=\"done sessions / terminal sessions, denominator 4\""),
+    "exact card definition stays in the title text"
+  );
+});
+
+test("success evidence uses the display token while values stay Monaco", () => {
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
+  assert.ok(html.includes("font-ui-display min-w-0 break-words"), "supporting count text on the shared display token");
+  assert.ok(html.includes("font-mono tabular-nums\">1/2</span>"), "evidence counts keep the operational monospace treatment");
+  assert.ok(
+    html.includes("font-mono text-base sm:text-lg font-semibold") &&
+      html.includes("whitespace-nowrap"),
+    "primary percentage is bounded, responsive, and never wraps mid-number"
+  );
+  assert.ok(html.includes("inline-flex flex-wrap items-baseline gap-x-2"), "evidence may wrap independently");
+});
+
+test("cohort success cells split the percentage from its evidence", () => {
+  const html = render({ loading: false, error: null, report: fixtureReport(), onRetry: noop });
+  assert.ok(!html.includes("50.0% (1/2 closed)"), "cohort cells never render one interpolated same-style string");
+  assert.ok(html.includes('title="Exact share over 2 closed"'), "cohort tooltips keep the exact definition");
+  assert.ok(html.includes('title="Exact share over 2 terminal attempts"'), "attempt tooltips keep the exact definition");
+  assert.ok(html.includes("font-mono text-sm font-medium"), "cohort percentages stay compact Monaco");
+});
+
+test("every missing metric state on the Reports page reads N/A", () => {
+  const noEvidence: { p50: null; p95: null; n: number; quality: "unavailable"; reasons: string[] } = {
+    p50: null, p95: null, n: 0, quality: "unavailable", reasons: ["no_observations"],
+  };
+  const noSum: { sum: null; known: number; total: number; quality: "unavailable"; reasons: string[] } = {
+    sum: null, known: 0, total: 1, quality: "unavailable", reasons: ["missing_provider_metadata"],
+  };
+  const base = fixtureReport();
+  const html = render({
+    loading: false,
+    error: null,
+    report: fixtureReport({
+      summary: {
+        ...base.summary,
+        closedIssues: 0,
+        issueSuccess: null,
+        terminalAttempts: 0,
+        attemptSuccess: null,
+        retryRate: null,
+        reuseRate: null,
+        avgReviewerRounds: null,
+        changeRequestRate: null,
+        sessionWallMs: { ...noEvidence },
+        spawnEnvelopeMs: { ...noEvidence },
+        checkpointMs: { ...noEvidence },
+        failedDurationMs: { ...noSum },
+        failedTokensIn: { ...noSum },
+        failedTokensOut: { ...noSum },
+        failedCostUsd: { ...noSum },
+      },
+      byRole: [],
+      byRuntime: [
+        fixtureCohort({
+          key: "cursor_local",
+          issueSuccess: null,
+          issueSuccessDenominator: 0,
+          attemptSuccess: null,
+          attemptSuccessDenominator: 0,
+          retryRate: null,
+          sessionWallMs: { ...noEvidence },
+          spawnEnvelopeMs: { ...noEvidence },
+          ...unavailableSums(),
+        }),
+      ],
+      byModel: [],
+      failures: [
+        { code: "unknown", domain: "unknown", count: 1, share: null, issueIds: ["issue-b"], issueTotal: 1 },
+      ],
+    }),
+    onRetry: noop,
+  });
+  assert.ok(html.includes(">N/A</span>"), "missing states read N/A");
+  assert.ok(!html.includes("Unavailable"), "no Unavailable copy remains");
+  assert.ok(!html.includes(">–</span>"), "no em dash stands in for a number");
+  assert.ok(!html.includes("$0.00"), "missing money never renders as zero");
+  assert.ok(html.includes("Rows without evidence read"), "phase section still explains N/A semantics");
+});
+
+test("a null P50 beside a real P95 reads N/A, not a dash", () => {
+  const base = fixtureReport();
+  const html = render({
+    loading: false,
+    error: null,
+    report: fixtureReport({
+      summary: {
+        ...base.summary,
+        spawnEnvelopeMs: { p50: null, p95: 2000, n: 2, quality: "inferred", reasons: [] },
+      },
+    }),
+    onRetry: noop,
+  });
+  assert.ok(html.includes(">N/A</span>"), "missing P50 reads N/A");
+  assert.ok(!html.includes(">–</span>"), "no em dash stands in for a number");
 });
 
 test("partial coverage keeps the known value primary with a separate note", () => {
