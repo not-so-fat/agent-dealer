@@ -16,7 +16,7 @@ import {
   type IssueEvidence,
 } from "../../api";
 import IssueStatusBadge from "./IssueStatusBadge";
-import AgentAssignmentEditor from "./AgentAssignmentEditor";
+import IssueConfigurationSection from "./IssueConfiguration";
 import IssueTimeline from "./IssueTimeline";
 import ExecutionAnalysisSection from "./ExecutionAnalysisSection";
 import HumanActionChoices from "./HumanActionChoices";
@@ -139,8 +139,8 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   const [busy, setBusy] = useState(false);
   /** Outcome of the last Start — admitted, or queued at a position with a reason. */
   const [startNotice, setStartNotice] = useState<string | null>(null);
-  /** NOT-217 queued reassignment editor (pre-start only). */
-  const [assignEditing, setAssignEditing] = useState(false);
+  /** NOT-240 pre-execution configuration editor (ready, no active workflow). */
+  const [configEditing, setConfigEditing] = useState(false);
 
   const fail = (e: unknown) => onError(String(e));
 
@@ -154,6 +154,9 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   const openActions = humanActions.filter((a) => a.status === "open");
   const canEdit = readiness.ok === false || openActions.some((a) => a.actionType === "product_scope_decision");
   const hasActiveWorkflow = latestWorkflowInstance != null && latestWorkflowInstance.completedAt === null;
+  // NOT-240: every `ready` issue with no active workflow is still pre-execution and
+  // has no frozen task snapshot — queue membership never decides repairability.
+  const canConfigEdit = issue.status === "ready" && !hasActiveWorkflow;
   const sessionLive =
     activeWorkerSession &&
     activeWorkerSession.status === "running" &&
@@ -235,7 +238,7 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
       // still shows the untouched position.
       await executeIssue(issueId);
       setStartNotice(null);
-      setAssignEditing(false);
+      setConfigEditing(false);
       refresh();
     } catch (e) {
       fail(e);
@@ -245,17 +248,20 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
     }
   };
 
-  const saveAssign = async (developerAgentId: string, reviewerAgentId: string) => {
+  const saveConfig = async (repo: string, developerAgentId: string, reviewerAgentId: string) => {
     setBusy(true);
     onError(null);
     try {
-      await patchIssue(issueId, { developerAgentId, reviewerAgentId });
-      setAssignEditing(false);
+      // One PATCH for all three execution inputs: the server normalizes/validates
+      // the repository like issue creation, keeps queue position, rechecks
+      // readiness and the wait reason, and records the before/after on the timeline.
+      await patchIssue(issueId, { repo, developerAgentId, reviewerAgentId });
+      setConfigEditing(false);
       refresh();
     } catch (e) {
-      // A 409 means the issue started mid-edit: close the editor and show current
-      // state instead of a stale success.
-      setAssignEditing(false);
+      // A 409 means admission won the race: close the editor and refresh to the
+      // now-read-only configuration instead of a stale success.
+      setConfigEditing(false);
       fail(e);
       refresh();
     } finally {
@@ -345,6 +351,20 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
           </div>
           <IssueStatusBadge status={issue.status} />
         </div>
+
+        {/* NOT-240: execution configuration — repository, developer, reviewer — always
+            visible near the top. Editable only while `ready` with no active workflow;
+            after workflow start the frozen inputs stay read-only. */}
+        <IssueConfigurationSection
+          issue={issue}
+          agents={agents}
+          canEdit={canConfigEdit}
+          editing={configEditing}
+          busy={busy}
+          onBeginEdit={() => setConfigEditing(true)}
+          onSave={(repo, dev, rev) => void saveConfig(repo, dev, rev)}
+          onCancel={() => setConfigEditing(false)}
+        />
 
         {/* Workflow rail: current node/owner is above; next allowed action here. */}
         <div className="mb-4 p-3 rounded border border-white/10 bg-panel-elevated/40 flex items-start justify-between gap-3">
@@ -582,25 +602,10 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
                 </button>
               )}
             </div>
-            {queued && !hasActiveWorkflow && !assignEditing && (
-              <button
-                type="button"
-                className="text-xs text-cyber-teal hover:underline disabled:opacity-50"
-                disabled={busy}
-                onClick={() => setAssignEditing(true)}
-              >
-                Edit developer / reviewer agents
-              </button>
-            )}
-            {queued && assignEditing && (
-              <AgentAssignmentEditor
-                agents={agents}
-                initialDeveloperId={issue.developerAgentId}
-                initialReviewerId={issue.reviewerAgentId}
-                busy={busy}
-                onSave={(dev, rev) => void saveAssign(dev, rev)}
-                onCancel={() => setAssignEditing(false)}
-              />
+            {queued && canConfigEdit && !configEditing && (
+              <p className="text-xs text-white/40">
+                Queued — edit repository / agents from the Configuration section above; position is kept.
+              </p>
             )}
           </div>
         )}

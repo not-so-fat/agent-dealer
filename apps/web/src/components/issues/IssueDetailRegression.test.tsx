@@ -9,6 +9,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type {
+  AgentWithHealth,
   HumanAction,
   Issue,
   WorkflowEvent,
@@ -19,6 +20,7 @@ import type { IssueDetail as WebIssueDetail } from "../../api.js";
 import IssueTimeline from "./IssueTimeline.js";
 import IssueStatusBadge from "./IssueStatusBadge.js";
 import IssueDetailBody from "./IssueDetailBody.js";
+import IssueConfigurationSection, { IssueConfigurationEditor } from "./IssueConfiguration.js";
 
 function event(extra: Partial<WorkflowEvent>): WorkflowEvent {
   return {
@@ -171,13 +173,13 @@ function detailFixture(extra: Partial<WebIssueDetail> = {}): WebIssueDetail {
   };
 }
 
-function renderBody(detail: WebIssueDetail): string {
+function renderBody(detail: WebIssueDetail, agents: AgentWithHealth[] = []): string {
   return renderToStaticMarkup(
     <MemoryRouter>
       <IssueDetailBody
         issueId="11111111-1111-4111-8111-111111111111"
         detail={detail}
-        agents={[]}
+        agents={agents}
         onHumanActionsChanged={() => {}}
         refresh={() => {}}
         onError={() => {}}
@@ -343,4 +345,203 @@ test("status badges keep every status label", () => {
     const html = renderToStaticMarkup(<IssueStatusBadge status={status} />);
     assert.match(html, new RegExp(label), `badge for ${status}`);
   }
+});
+
+// NOT-240: execution configuration fixtures.
+const DEV_ID = "55555555-5555-4555-8555-555555555555";
+const REV_ID = "66666666-6666-4666-8666-666666666666";
+
+function agentFixture(extra: Partial<AgentWithHealth> = {}): AgentWithHealth {
+  return {
+    id: DEV_ID,
+    name: "Cursor Dev",
+    runtime: "cursor_local",
+    workspaceRoot: null,
+    deckId: null,
+    deckName: null,
+    playbookId: null,
+    defaultPlanModel: null,
+    defaultExecuteModel: null,
+    defaultPlanBudgetJson: null,
+    defaultExecuteBudgetJson: null,
+    defaultModel: null,
+    defaultEffort: null,
+    defaultBudgetJson: null,
+    purpose: null,
+    playbookIdsJson: null,
+    externalMemoryRefsJson: null,
+    permissionPolicyJson: null,
+    isBuiltin: false,
+    createdAt: "2026-09-20T09:00:00.000Z",
+    updatedAt: "2026-09-20T10:00:00.000Z",
+    healthy: true,
+    issues: [],
+    ...extra,
+  };
+}
+
+const DEV = agentFixture();
+const REV = agentFixture({ id: REV_ID, name: "Codex Rev", runtime: "codex_local" });
+
+function configuredIssue(extra: Partial<Issue> = {}): Issue {
+  return issueFixture({
+    repo: "github.com/owner/repo",
+    developerAgentId: DEV_ID,
+    reviewerAgentId: REV_ID,
+    ...extra,
+  });
+}
+
+test("configuration section shows repository, developer, and reviewer without expansion", () => {
+  const html = renderBody(detailFixture({ issue: configuredIssue() }), [DEV, REV]);
+  assert.match(html, /Configuration/);
+  assert.match(html, /github\.com\/owner\/repo/);
+  assert.match(html, /Cursor Dev/);
+  assert.match(html, /Cursor/);
+  assert.match(html, /Codex Rev/);
+  assert.match(html, /Codex/);
+});
+
+test("missing agent profiles render an explicit unavailable state", () => {
+  const html = renderBody(detailFixture({ issue: configuredIssue() }), []);
+  assert.match(html, /Configuration/);
+  assert.match(html, /Unavailable/);
+});
+
+test("unqueued ready issue can open the configuration editor", () => {
+  const html = renderBody(
+    detailFixture({ issue: configuredIssue({ status: "ready" }), queued: false, queueEntry: null }),
+    [DEV, REV],
+  );
+  assert.match(html, /Edit configuration/);
+});
+
+test("queued ready issue can open the configuration editor without losing its wait reason", () => {
+  const html = renderBody(
+    detailFixture({
+      issue: configuredIssue({ status: "ready" }),
+      queued: true,
+      queueEntry: { position: 2, waitReason: "waiting for slot" },
+    }),
+    [DEV, REV],
+  );
+  assert.match(html, /Edit configuration/);
+  assert.match(html, /position 2/);
+  assert.match(html, /waiting for slot/);
+});
+
+test("in-flight and terminal issues render configuration read-only", () => {
+  const activeInstance: WorkflowInstance = {
+    id: "33333333-3333-4333-8333-333333333333",
+    issueId: "11111111-1111-4111-8111-111111111111",
+    workflowVersion: "v1",
+    startedAt: "2026-09-20T09:30:00.000Z",
+    completedAt: null,
+    outcome: null,
+  };
+  const cases: Array<{ status: Issue["status"]; active: boolean }> = [
+    { status: "developing", active: true },
+    { status: "reviewing", active: true },
+    { status: "repairing", active: true },
+    { status: "done", active: false },
+    { status: "closed", active: false },
+  ];
+  for (const { status, active } of cases) {
+    const html = renderBody(
+      detailFixture({
+        issue: configuredIssue({ status }),
+        latestWorkflowInstance: active ? activeInstance : null,
+      }),
+      [DEV, REV],
+    );
+    assert.match(html, /Configuration/, `config visible for ${status}`);
+    assert.match(html, /github\.com\/owner\/repo/, `repo visible for ${status}`);
+    assert.doesNotMatch(html, /Edit configuration/, `no edit affordance for ${status}`);
+  }
+});
+
+test("configuration editor edits repository and both agents together", () => {
+  const html = renderToStaticMarkup(
+    <IssueConfigurationEditor
+      agents={[DEV, REV]}
+      initialRepo="github.com/owner/repo"
+      initialDeveloperId={DEV_ID}
+      initialReviewerId={REV_ID}
+      busy={false}
+      onSave={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+  assert.match(html, /github\.com\/owner\/repo/);
+  assert.match(html, /Cursor Dev/);
+  assert.match(html, /Codex Rev/);
+  assert.match(html, /Save configuration/);
+});
+
+test("refreshed detail after admission wins the race renders configuration read-only", () => {
+  // The editor was open on a `ready` issue; admission started the workflow elsewhere.
+  // Save answers 409 and refresh() lands here: same configuration, no edit affordance,
+  // and the frozen workflow snapshot is what the operator now sees.
+  const html = renderBody(
+    detailFixture({
+      issue: configuredIssue({ status: "developing" }),
+      latestWorkflowInstance: {
+        id: "33333333-3333-4333-8333-333333333333",
+        issueId: "11111111-1111-4111-8111-111111111111",
+        workflowVersion: "v1",
+        startedAt: "2026-09-20T09:30:00.000Z",
+        completedAt: null,
+        outcome: null,
+      },
+      queued: false,
+      queueEntry: null,
+    }),
+    [DEV, REV],
+  );
+  assert.match(html, /Configuration/);
+  assert.match(html, /github\.com\/owner\/repo/);
+  assert.match(html, /Cursor Dev/);
+  assert.doesNotMatch(html, /Edit configuration/);
+});
+
+test("configuration section stays read-only without an edit affordance after workflow start", () => {
+  const html = renderToStaticMarkup(
+    <IssueConfigurationSection
+      issue={configuredIssue({ status: "developing" })}
+      agents={[DEV, REV]}
+      canEdit={false}
+      editing={false}
+      busy={false}
+      onBeginEdit={() => {}}
+      onSave={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+  assert.match(html, /Configuration/);
+  assert.match(html, /Cursor Dev/);
+  assert.doesNotMatch(html, /Edit configuration/);
+});
+
+test("timeline renders configuration updates with their label", () => {
+  const html = renderToStaticMarkup(
+    <IssueTimeline
+      events={[
+        event({
+          id: "cfg",
+          type: "issue.reassigned",
+          actorType: "human",
+          stage: "ready",
+          payloadJson: JSON.stringify({
+            fromRepo: "github.com/owner/old",
+            toRepo: "github.com/owner/repo",
+            fromDeveloperAgentId: DEV_ID,
+            toDeveloperAgentId: DEV_ID,
+            fromReviewerAgentId: REV_ID,
+            toReviewerAgentId: REV_ID,
+          }),
+        }),
+      ]}
+    />,
+  );
+  assert.match(html, /Configuration updated/);
 });
