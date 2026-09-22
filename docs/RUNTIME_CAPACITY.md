@@ -39,7 +39,9 @@ Normalization (`normalizeAdapterWindow`) derives the snapshot:
 
 Provider live reads (auth, subprocess protocol) land in sibling tickets.
 Until then, `fixtureMultiWindowAdapter` / `fixtureUnsupportedAdapter` /
-`fixtureStaleAdapter` stand in deterministically.
+`fixtureStaleAdapter` stand in deterministically. The first live provider is
+Codex (NOT-246, `packages/server/src/capacity/codex-app-server.ts`) — see
+"Provider: Codex App Server" below.
 
 ## Freshness rules
 
@@ -73,3 +75,43 @@ still-valid sibling window. Independent of `runtime_availability` (NOT-111
 hard caps): capacity snapshots neither read nor clear hard-cap rows, and
 connection health stays a separate state — green health never implies known
 capacity.
+
+## Provider: Codex App Server (NOT-246)
+
+Source: the official App Server interface
+(`https://developers.openai.com/codex/app-server`). The adapter speaks the App
+Server JSONL protocol over a managed `codex app-server` subprocess: the
+`initialize` handshake, then a single `account/rateLimits/read`, then shutdown.
+`account/rateLimits/updated` notifications received while the connection is
+alive are recorded. The client enforces a read-only allowlist (`initialize`,
+`initialized`, `account/rateLimits/read`) — any other method throws before it
+is written, so polling can never create a thread, submit a turn, or run a
+model prompt. It is bounded (default 15 s overall,
+`AGENT_DEALER_CODEX_CAPACITY_TIMEOUT_MS` override) and never billed.
+
+Normalization keeps both maps:
+
+- `rateLimits` entries → window keys `codex_rate_limit_<name>`
+  (`primary`/`secondary` keep their provider identity as `providerBucket`).
+- `rateLimitsByLimitId` entries → window keys `codex_limit_<limitId>`, so
+  per-limit buckets stay distinguishable and can never overwrite each other.
+- Each window keeps `usedPercent`, `windowDurationMins` → `durationMinutes`,
+  and `resetsAt` (epoch seconds/ms or ISO-8601 → ISO).
+
+Failure semantics (shared enum only, never thrown, never health rows):
+
+| App Server outcome | N/A reason |
+|---|---|
+| binary missing / spawn error / exit / timeout / unauthenticated | `missing` |
+| malformed payload | `unparsable` |
+| server without the method (`-32601`) | `unsupported` |
+
+The exact cause is logged server-side as a static string; no access token or
+raw account payload reaches the browser, the API, or the logs — the adapter
+passes no credentials (the subprocess uses its ambient session) and evidence
+refs are static (`codex-app-server:account/rateLimits/read`).
+
+Refresh via `refreshCodexCapacityFromAppServer()` (bounded ingest through the
+shared service path). Tests use the committed fake JSONL server
+(`packages/server/src/capacity/fixtures/fake-codex-app-server.mjs`); CI
+performs no live provider request.

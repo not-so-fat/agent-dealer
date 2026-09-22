@@ -14,15 +14,15 @@ import path from "node:path";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-codex-cap-"));
 
-const {
+import {
   assertReadOnlyMethod,
   codexRateLimitsToReadings,
   createCodexAppServerAdapter,
   normalizeCodexResetsAt,
   readCodexAppServerCapacity,
   readCodexRateLimits,
-} = await import("./codex-app-server.js");
-const { normalizeAdapterWindow } = await import("./adapter.js");
+} from "./codex-app-server.js";
+import { normalizeAdapterWindow } from "./adapter.js";
 const { migrate } = await import("../db/index.js");
 const { clearAllCapacitySnapshots } = await import("../repository/runtime-capacity.js");
 const {
