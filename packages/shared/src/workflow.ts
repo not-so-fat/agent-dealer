@@ -15,8 +15,9 @@ export type WorkflowInstance = z.infer<typeof WorkflowInstance>;
 
 export const WorkflowEventType = z.enum([
   "issue.created",
-  /** NOT-217: operator changed the queued pre-start developer/reviewer assignment.
-   * Payload carries before/after agent ids. Emitted transactionally with the PATCH. */
+  /** NOT-217/NOT-240: operator changed a pre-start execution input (repository,
+   * developer/reviewer assignment). Payload carries before/after repo + agent ids.
+   * Emitted transactionally with the PATCH. */
   "issue.reassigned",
   "workflow.started",
   "worker.started",

@@ -318,9 +318,13 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
         const conflict = guardConflict(fresh);
         if (conflict) throw Object.assign(new Error(conflict), { code: 409 });
         const next = updateIssue(id, parsed.data);
-        // NOT-217: durable reassignment audit — only when an assignment actually changed,
-        // comparing against the freshly read row so a concurrent edit is attributed exactly.
+        // NOT-217/NOT-240: durable configuration audit — only when an execution input
+        // actually changed, comparing against the freshly read row so a concurrent edit
+        // is attributed exactly. Repository changes ride the same `issue.reassigned`
+        // event (extended with from/to repo) rather than silently changing where the
+        // issue will run.
         if (
+          fresh.repo !== next.repo ||
           fresh.developerAgentId !== next.developerAgentId ||
           fresh.reviewerAgentId !== next.reviewerAgentId
         ) {
@@ -330,6 +334,8 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
             actorType: "human",
             stage: next.status,
             payload: {
+              fromRepo: fresh.repo,
+              toRepo: next.repo,
               fromDeveloperAgentId: fresh.developerAgentId,
               toDeveloperAgentId: next.developerAgentId,
               fromReviewerAgentId: fresh.reviewerAgentId,
