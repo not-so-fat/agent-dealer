@@ -15,6 +15,7 @@ import {
 } from "./daemon-logs.js";
 import { formatPortConflict, isTcpPortOpen, probeAgentDealer } from "./ports.js";
 import { resolveServerEntry, resolveUiDist } from "./paths.js";
+import { formatBrowserOpenFailure, openUrlInSystemBrowser } from "./open-browser.js";
 import { clearRunState, writeRunState } from "./runtime-state.js";
 import { runStop } from "./stop.js";
 import { getVersion } from "./version.js";
@@ -334,8 +335,15 @@ export async function runStart(options: StartOptions = {}): Promise<number> {
   }
 
   if (options.open && uiDist) {
-    const openCmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-    spawn(openCmd, [base], { stdio: "ignore", shell: process.platform === "win32" });
+    const opened = await openUrlInSystemBrowser(base);
+    if (!opened.ok) {
+      const openFailMsg = formatBrowserOpenFailure(opened);
+      if (ioMode === "file") {
+        appendDaemonLogLine("supervisor", openFailMsg);
+      } else {
+        console.error(openFailMsg);
+      }
+    }
   }
 
   process.on("SIGINT", () => void shutdown(0));
