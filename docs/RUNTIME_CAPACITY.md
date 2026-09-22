@@ -132,3 +132,54 @@ subprocess, and `AGENT_DEALER_CODEX_CAPACITY_REFRESH=off` disables the
 refresh. Tests use the committed fake JSONL server
 (`packages/server/src/capacity/fixtures/fake-codex-app-server.mjs`); CI
 performs no live provider request.
+
+## Provider: Claude unified windows (NOT-248, observed events only)
+
+`packages/server/src/capacity/claude-events.ts`. Claude Code already emits
+`rate_limit_event` with `rate_limit_info.unifiedWindows` during real
+Dealer-managed sessions; the developer/reviewer session effects persist those
+windows best-effort via `recordClaudeCapacityFromLog` right after the NOT-111
+cap check. There is deliberately **no** live refresh path for `claude_code`:
+
+- No synthetic probe — never `claude -p`, `/usage`, or another model call
+  merely to refresh capacity.
+- No dependency on Anthropic's undocumented OAuth usage endpoint.
+- No prediction from plan name, token totals, or session cost.
+
+Parsing (`claudeUnifiedWindowsToReadings`):
+
+- Accepts `unifiedWindows` as an array of window objects or a map of
+  bucket-name → window object. Array entries name their bucket via `window`,
+  `bucket`, `name`, `id`, `key`, `limitType`/`rateLimitType` (either case),
+  or `type`.
+- `utilization`/`used`/`usedFraction` read as a 0–1 fraction; an explicit
+  0–100 `usedPercent` (or `*_percent` spelling) takes precedence. Entries
+  with no usable scale are skipped — never fabricated.
+- Resets accept epoch seconds, epoch milliseconds, or ISO-8601; missing
+  resets persist as null.
+- Duration is inferred from well-known bucket names only (`five_hour` →
+  300 min, `seven_day*`/`weekly` → 10,080 min); unknown buckets keep duration
+  null and their provider label verbatim.
+- Identity is never collapsed: `providerBucket` is the raw bucket string and
+  `windowKey` is namespaced from it (`claude_unified_<bucket>`), so
+  five-hour, seven-day, and model/overage-specific seven-day buckets persist
+  as independent per-window rows. Partial re-observations upsert only the
+  windows present and leave siblings untouched.
+
+Observed-at semantics (a session-end stamp would lie for a long session, so
+each event keeps its own time):
+
+- An event timestamp on the `rate_limit_event` wins when present (ISO-8601,
+  epoch seconds, or epoch milliseconds; clamped to session end).
+- Otherwise the session's spawn start applies — the event happened no
+  earlier than spawn, so freshness is understated, never overstated.
+- A reading never overwrites a stored row whose `observed_at` is newer, so a
+  later-finishing long session cannot clobber a concurrent session's fresher
+  reading.
+
+Snapshots persist with source `observed_event`, so the Agents strip and API
+present them as passive observations under the shared 15-min freshness /
+60-min expiry rules — never as live polling. Capacity ingestion never reads
+or writes `runtime_availability`: rejected events still drive NOT-111
+defer/admission exactly as before, and allowed events persist capacity
+without opening a cap.
