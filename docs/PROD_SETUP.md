@@ -77,6 +77,52 @@ mv .env ~/.agent-dealer-dev/.env   # or copy and merge with dev.env.example
 
 No automatic DB migration is provided in v0.
 
+## Automate repository selection from Linear
+
+Dealer's New issue form has one ordinary repository input. A Linear ticket
+can pre-fill it automatically when the ticket carries a repository label —
+one-time Linear setup, no Dealer-side mapping or sync action.
+
+**1. Agree on the label convention.** The label name carries the canonical
+repository identity directly:
+
+```text
+repo:github.com/<owner>/<repo>
+```
+
+`repo:github.com/not-so-fat/agent-dealer`, for example. One repository per
+label, exactly one such label per issue. Dealer reads only labels whose name
+starts with `repo:` (case-insensitive) and validates the remainder as a
+GitHub repository; it never infers a repository from ticket text, team, or
+product labels.
+
+**2. Create the label once in Linear.** Settings → Labels → New label, named
+e.g. `repo:github.com/not-so-fat/agent-dealer`. Repeat for each repository
+you kick work for. This is an ordinary reusable workspace label — nothing
+Dealer-specific about it.
+
+**3. Attach it by default with an issue template (per repository).**
+Linear issue templates can carry default labels: create one template per
+repository (e.g. "Backend work" with `repo:github.com/<owner>/<repo>`
+pre-applied) so every ticket filed from that template already declares where
+it runs. Alternatively set a team-level default template whose labels the
+author adjusts per issue.
+
+**4. Optionally enforce it with a Triage Rule.** Linear's Triage automation
+(Settings → Teams → Triage) can auto-apply a `repo:` label to incoming
+issues — e.g. label everything entering a team's triage queue with that
+team's repository, leaving exotic cases for the author to correct.
+
+**What Dealer does with the label:** when you pick the ticket under New
+issue → From Linear, Dealer fetches its labels, and exactly one valid
+`repo:` label silently pre-fills the repository input — submission then
+needs just the normal required fields (title, repository, developer,
+reviewer). With no usable label the input is preserved as-is (type or pick
+a recent repository directly); with conflicting or invalid labels Dealer
+keeps your value and shows a compact inline warning. Dealer only
+reads/validates the label — it needs no special Dealer operation and never
+writes the label back.
+
 ## Overrides
 
 Shell exports and values in the loaded `.env` override defaults. `AGENT_DEALER_HOME`, `PORT`, `WEB_PORT`, `AGENT_DEALER_API`, and `AGENT_DEALER_WEB_URL` can be set explicitly in either env file.

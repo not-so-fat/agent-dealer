@@ -72,7 +72,7 @@ These are read from SQLite (and overridden by env where noted). NOT-71 removed t
 
 Re-importing a Linear issue that is already present is idempotent: rather than creating a duplicate, it re-enqueues the existing issue when that issue is in a state admission can start.
 
-### Repository labels (NOT-242)
+### Repository labels (NOT-251; replaces the NOT-242 confirmation flow)
 
 A Linear issue declares its GitHub repository with an explicit reusable label
 that carries the canonical identity directly:
@@ -89,23 +89,30 @@ ordinary product labels (even one like `agent-dealer`), ticket text, team,
 title, recent history, or an Agent profile — those shortcuts are exactly the
 mistake this flow prevents.
 
+The New issue form has exactly one ordinary repository input — required and
+editable like every other field. There is no confirmation button, summary
+row, or override mode. The label acts as an auto-fill hint:
+
 | Labels on the issue | What the New issue form does |
 |---------------------|------------------------------|
-| Exactly one valid `repo:` label | Auto-fills the canonical repository and names the source label |
-| No `repo:` label | Leaves the repository unresolved — add the label in Linear or choose manually; no guessed default |
-| More than one `repo:` label | Blocks auto-resolution and shows every conflicting label; never picks first |
-| Invalid / non-GitHub value | Shows the invalid label and the reason; fix the label or choose manually |
+| Exactly one valid `repo:` label | Silently pre-fills the input with the normalized repository — no banner, no extra UI |
+| No `repo:` label | Preserves the repository already in the input; if empty, type or pick a recent repository in the same control |
+| More than one `repo:` label | Keeps the current repository and shows a compact inline warning naming every conflicting label; never picks first |
+| Invalid / non-GitHub value | Keeps the current repository and shows a compact inline warning with the bad label and the reason |
 
-The form shows the exact canonical repository in a dedicated **Repository**
-confirmation row with its provenance (`From Linear label \`repo:…\``) and a
-Change action back to the recent-repository / custom-entry control. **Kick
-from Linear** (and manual Create) stays disabled until the operator confirms
-the exact repository shown. Changing the selected ticket, the repository, or
-the source mode clears the confirmation, and a manual override must be
-confirmed again under its own canonical identity.
+Fallback, plainly: no usable label preserves the ordinary repository input,
+and you overwrite it directly when needed. Switching tickets or switching
+between Manual and From Linear never clears a valid repository — only a new
+ticket with exactly one valid `repo:` label intentionally replaces it. A
+valid manually entered repository is always submittable; a label problem is
+never a second gate. **Kick from Linear** (and manual Create) submit as soon
+as title, a valid repository, developer, and reviewer are present.
 
-Dealer never creates or mutates Linear labels. There is no friendly
-label-to-repository mapping — the label itself is the mapping.
+Dealer never creates or mutates Linear labels — it only reads and validates
+them, and never writes them back. There is no friendly label-to-repository
+mapping and no Dealer-side sync action — the label itself is the mapping. See
+[Production setup](PROD_SETUP.md) for the one-time Linear label, template,
+and Triage Rule setup that automates the input.
 
 ### Status write-back
 
