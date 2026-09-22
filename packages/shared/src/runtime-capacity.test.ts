@@ -62,6 +62,22 @@ test("a past reset time is never current capacity", () => {
   assert.equal(isWindowKnown(window({ resetAt: "not-a-date" })), false);
 });
 
+test("a window past its freshness horizon is not known (stale)", () => {
+  const now = Date.now();
+  assert.equal(
+    isWindowKnown(
+      window({
+        observedAt: new Date(now - 30 * 60_000).toISOString(),
+        freshUntil: new Date(now - 15 * 60_000).toISOString(),
+        expiresAt: new Date(now + 30 * 60_000).toISOString(),
+      }),
+      now
+    ),
+    false
+  );
+  assert.equal(isWindowKnown(window({ freshUntil: "not-a-date" })), false);
+});
+
 test("expired snapshots and unavailable sources are not known", () => {
   assert.equal(
     isWindowKnown(window({ expiresAt: new Date(Date.now() - 1000).toISOString() })),

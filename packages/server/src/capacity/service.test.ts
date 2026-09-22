@@ -104,6 +104,82 @@ test("stale, unsupported, and missing render N/A with distinct reasons", async (
   assert.equal(claude.unavailableReason, "missing");
 });
 
+test("a window past freshness but inside expiry reads N/A (stale)", async () => {
+  clearAllCapacitySnapshots();
+  const now = Date.now();
+  const { recordCapacitySnapshots } = await import("../repository/runtime-capacity.js");
+  const { normalizeAdapterWindow } = await import("./adapter.js");
+  const normalized = normalizeAdapterWindow(
+    "claude_code",
+    {
+      windowKey: "weekly",
+      providerBucket: "all_models",
+      durationMinutes: 10080,
+      providerLabel: "weekly",
+      usedValue: 10,
+      usedUnit: "percent",
+      usedPercent: 10,
+      resetAt: new Date(now + 24 * 3600_000).toISOString(),
+      // Observed 30 min ago: past the default 15-min freshness horizon but
+      // inside the default 60-min expiry.
+      observedAt: new Date(now - 30 * 60_000).toISOString(),
+      source: "supported_protocol",
+    },
+    now - 30 * 60_000
+  );
+  assert.equal(normalized.remainingPercent, 90);
+  assert.equal(normalized.unavailableReason, null);
+  recordCapacitySnapshots("claude_code", [
+    {
+      windowKey: normalized.windowKey,
+      providerBucket: normalized.providerBucket,
+      durationMinutes: normalized.durationMinutes,
+      displayLabel: normalized.displayLabel,
+      usedValue: normalized.usedValue,
+      usedUnit: normalized.usedUnit,
+      remainingPercent: normalized.remainingPercent,
+      resetAt: normalized.resetAt,
+      observedAt: normalized.observedAt,
+      freshUntil: normalized.freshUntil,
+      expiresAt: normalized.expiresAt,
+      source: normalized.source,
+      unavailableReason: normalized.unavailableReason,
+    },
+  ]);
+  const snap = getRuntimeCapacitySnapshot(now);
+  const claude = snap.runtimes.find((r) => r.runtime === "claude_code")!;
+  assert.equal(claude.windows[0].remainingPercent, null);
+  assert.equal(claude.windows[0].unavailableReason, "stale");
+  assert.equal(claude.unavailableReason, "stale");
+});
+
+test("NaN provider numbers read N/A (unparsable), not 0% remaining", async () => {
+  const now = Date.now();
+  const { normalizeAdapterWindow } = await import("./adapter.js");
+  for (const reading of [
+    {
+      windowKey: "weekly",
+      providerBucket: "all_models",
+      durationMinutes: 10080,
+      providerLabel: "weekly",
+      usedPercent: NaN,
+      source: "supported_protocol" as const,
+    },
+    {
+      windowKey: "weekly",
+      providerBucket: "all_models",
+      durationMinutes: 10080,
+      providerLabel: "weekly",
+      usedFraction: NaN,
+      source: "supported_protocol" as const,
+    },
+  ]) {
+    const normalized = normalizeAdapterWindow("claude_code", reading, now);
+    assert.equal(normalized.remainingPercent, null);
+    assert.equal(normalized.unavailableReason, "unparsable");
+  }
+});
+
 test("a payload without a usable scale reads N/A (unparsable)", async () => {
   clearAllCapacitySnapshots();
   const now = Date.now();

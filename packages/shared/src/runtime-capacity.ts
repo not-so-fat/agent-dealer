@@ -131,6 +131,10 @@ export function isWindowKnown(w: CapacityWindowSnapshot, nowMs = Date.now()): bo
     const resetMs = Date.parse(w.resetAt);
     if (!Number.isFinite(resetMs) || resetMs <= nowMs) return false;
   }
+  if (w.freshUntil !== null) {
+    const freshMs = Date.parse(w.freshUntil);
+    if (!Number.isFinite(freshMs) || freshMs <= nowMs) return false;
+  }
   if (w.expiresAt !== null) {
     const expMs = Date.parse(w.expiresAt);
     if (!Number.isFinite(expMs) || expMs <= nowMs) return false;

@@ -111,9 +111,9 @@ export function normalizeAdapterWindow(
   const observedAt = reading.observedAt ?? new Date(nowMs).toISOString();
   let remainingPercent: number | null = null;
   let unavailableReason: CapacityUnavailableReason | null = null;
-  if (typeof reading.usedPercent === "number") {
+  if (typeof reading.usedPercent === "number" && Number.isFinite(reading.usedPercent)) {
     remainingPercent = remainingPercentFromUsedPercent(reading.usedPercent);
-  } else if (typeof reading.usedFraction === "number") {
+  } else if (typeof reading.usedFraction === "number" && Number.isFinite(reading.usedFraction)) {
     remainingPercent = remainingPercentFromFraction(reading.usedFraction);
   } else {
     unavailableReason = "unparsable";
