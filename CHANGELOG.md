@@ -4,9 +4,22 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.1.9 — 2026-09-22
+
+Patch over 1.1.8: confirmed-repository Linear intake, clearer execution-report evidence, and a distinguished GitHub-timeout health state.
+
+### Features
+
+- **Linear intake requires an explicit repository confirmation (NOT-242)** — when a Linear ticket carries a `repo:<owner/name>` label, intake resolves it via case-insensitive prefix matching and surfaces a `RepositoryConfirmRow` on the New issue form: the label's canonical repository, its provenance ("From Linear label …"), a **Change** link back to the repository control, and an explicit **Confirm** action. Kick/Create stays disabled until the confirmation matches the canonical identity exactly; changing the ticket, repository, or source mode clears any prior confirmation. Unresolved, conflicting, or invalid labels block with copy naming the problem instead of guessing a repository.
+
+### UI
+
+- **Execution report splits success evidence from the percentage (NOT-244)** — summary and cohort success cells on the Execution report now show the percentage as the primary figure with its evidence count (e.g. `(74/86 closed)`, `(74/86 terminal)`) rendered separately so it wraps independently. Missing coverage/success values, null P50/P95, null cohort retry rates, and null failure shares all read **N/A** instead of a blank or misleading zero. Presentation only — `GET /api/execution-report` is unchanged.
+
 ### Fixes
 
-- **Reviewer resume re-pins to the PR live head** — resolving `resume` on a reviewer-origin escalation now re-checks the PR's live head (`gh pr view`) when the issue has a PR: if the branch moved while parked, the reviewer is queued at the live head, `issues.head_sha` moves with it, and the intent reads `Reviewer re-evaluating at <live8> (was <pinned8>)`. A matching head, a missing PR, or a failed lookup keeps the previous pinned-head behavior (NOT-226).
+- **GitHub timeout reported as a network problem, not "gh CLI not found" or "Run gh auth login" (NOT-195)** — the GitHub health check now tells a `gh` timeout apart from a missing CLI or a logged-out account: missing CLI stays `ENOENT`/not-found only, a spawn timeout or connection/DNS/TLS failure now reports the new `github_unreachable` code ("Can't reach GitHub (network or keyring timeout) — check your VPN; Dealer will retry"), and everything else keeps the existing logged-out/invalid-token behavior. The dashboard's GitHub status dot and the worker's health-gated defer path both treat `github_unreachable` as a blocker, same as `github_auth`.
+- **Reviewer resume re-pins to the PR live head (NOT-226)** — resolving `resume` on a reviewer-origin escalation now re-checks the PR's live head (`gh pr view`) when the issue has a PR: if the branch moved while parked, the reviewer is queued at the live head, `issues.head_sha` moves with it, and the intent reads `Reviewer re-evaluating at <live8> (was <pinned8>)`. A matching head, a missing PR, or a failed lookup keeps the previous pinned-head behavior.
 - **NUL-safe runner args and surfaced setup errors (NOT-225)** — `spawnCli` sanitizes every argv entry before `spawn()`, replacing each NUL byte with the visible text `\u0000`, so a reviewer prompt embedding a PR diff with a raw NUL starts instead of throwing `ERR_INVALID_ARG_VALUE` with no pid and no log. Setup/spawn failures in the reviewer and developer effects now return `session_failed` with a `could not start: <error>` reason (logged with issue, session, and round) instead of a reason-less failure; post-spawn verification failures keep their existing `adapter_failure` behavior.
 
 ## 1.1.8 — 2026-09-22
