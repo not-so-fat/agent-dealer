@@ -101,13 +101,10 @@ cursor_local  21     1           0
 muse_code     110    37          10
 ```
 
-The diverged-history pattern (exact text: `"local and origin/<branch> have diverged: local <sha>
-is N commit(s) ahead, remote <sha> is M commit(s) ahead. Do not git pull — that integrates the
-wrong history for a rewritten branch."`) is the only worktree/git-identity-shaped signal in the
+The diverged-history pattern (exact text: `"local and origin/<branch> have diverged: local <sha> is N commit(s) ahead, remote <sha> is M commit(s) ahead. Do not git pull — that integrates the wrong history for a rewritten branch."`) is the only worktree/git-identity-shaped signal in the
 data, and it's 100% concentrated on `muse_code` (10/10), zero on the other three runtimes across
 255 combined sessions (143 + 91 + 21, from the per-runtime table above) — on a code path that never touches `-w`/`--worktree`. Both local and
-remote hold commits the other doesn't (not just "behind"), which is what forces "do not `git
-pull`" rather than a plain fast-forward. This report does not know the round-by-round mechanism
+remote hold commits the other doesn't (not just "behind"), which is what forces "do not `git pull`" rather than a plain fast-forward. This report does not know the round-by-round mechanism
 that produces that divergence — no push-timing or per-round transcript data was pulled, only the
 final stored `error_json.reason` string per session — so no causal claim is made here beyond "it's
 muse-specific and it's a real, recurring, already-encountered cost of the current design, not a
@@ -122,8 +119,7 @@ this one divergence pattern.
 
 Same posture as NOT-177/NOT-183: Muse Code `1.3.0 (1.3.0-R3401.1)`, `MUSE_NO_AUTO_UPDATE=1`,
 model `muse-spark-1.3-contributor`, per-attempt `XDG_CONFIG_HOME`/`XDG_DATA_HOME` (`0700`) with
-`auth.json` symlinked in (never read), sandbox on, `--approval-mode never --approval-judge off
---disable-web-tools --no-foreign-personal-context`, no MCP servers, no Agent Deck. Target: a
+`auth.json` symlinked in (never read), sandbox on, `--approval-mode never --approval-judge off --disable-web-tools --no-foreign-personal-context`, no MCP servers, no Agent Deck. Target: a
 disposable local repo at `$SCRATCH/not198/sandbox-repo` (one commit, `main`), never the operator's
 real repositories.
 
@@ -152,8 +148,7 @@ field, not assistant text):
 ```
 
 This is a real machine-readable event, not the model's final text (the final text also happens to
-mention the path in a markdown link — the two agree here, but only the `payload_type:
-"session.workspace_branch.observed"` event is a contract Dealer could parse). It gives absolute
+mention the path in a markdown link — the two agree here, but only the `payload_type: "session.workspace_branch.observed"` event is a contract Dealer could parse). It gives absolute
 path, branch name, VCS kind, and commit SHA at both the start and end of the run.
 
 Findings:
@@ -185,9 +180,7 @@ Findings:
 
 ## Probe 3: resume determinism
 
-Four variants, same target worktree/session (`--session-id aabcea85-...`, prompt: `"Run 'pwd &&
-git log --oneline -3 && git branch --show-current' and report the output verbatim. Do not edit any
-files."`):
+Four variants, same target worktree/session (`--session-id aabcea85-...`, prompt: `"Run 'pwd && git log --oneline -3 && git branch --show-current' and report the output verbatim. Do not edit any files."`):
 
 | # | Command | XDG state | Verdict |
 |---|---|---|---|
@@ -201,17 +194,14 @@ files."`):
    `.../20260921-2d1b`, `ca399e9 probe-a: bump value`, `f4b43e7 initial commit`,
    `muse/session-aabcea85-...`. Resumed the *same* worktree/branch — but only because the on-disk
    reservation file was visible from that XDG state.
-2. Fresh XDG state, same command otherwise: stderr `muse: workspace root: .../sandbox-repo (cwd
-   default)`. Final answer: `.../sandbox-repo`, `f4b43e7 initial commit`, `main`. **Silently ran in
+2. Fresh XDG state, same command otherwise: stderr `muse: workspace root: .../sandbox-repo (cwd default)`. Final answer: `.../sandbox-repo`, `f4b43e7 initial commit`, `main`. **Silently ran in
    `cwd` (the main checkout) on `main`, ignoring the prior worktree entirely** — same command, same
    `--session-id`, only the XDG state differs, and the `(cwd default)` vs. `(explicit)` stderr tag
    is the only distinguishing signal, not an error or warning.
 3. Exit 2: `--worktree existing requires --worktree-existing`. Fails loud and fast.
-4. Exit 0. Reattached correctly: stderr `session worktree retained at <path> (caller-owned
-   worktree retained)`, new commit landed on the existing branch (`84f3a68` on top of `ca399e9`).
+4. Exit 0. Reattached correctly: stderr `session worktree retained at <path> (caller-owned worktree retained)`, new commit landed on the existing branch (`84f3a68` on top of `ca399e9`).
 
-Resume is deterministic **only** when the caller explicitly re-supplies `-w existing
---worktree-existing <path>` with the original `--session-id`. Session-id alone is not sufficient
+Resume is deterministic **only** when the caller explicitly re-supplies `-w existing --worktree-existing <path>` with the original `--session-id`. Session-id alone is not sufficient
 across the per-attempt isolated `XDG_DATA_HOME`/`XDG_CONFIG_HOME` that NOT-177's own recommended
 posture requires — and the failure mode when it's insufficient is silent misattachment to `cwd`,
 not an error. Any adapter that assumed "pass the same `--session-id` and Muse remembers" would be
@@ -237,8 +227,7 @@ Result: the worktree directory and its `git worktree` registration both survive 
 git worktree remove --force .muse/worktrees/20260921-8e5f   # exit 0, cleanly deregistered
 ```
 
-The branch (`muse/session-7f9f1f49-...`) survives the removal, as normal for `git worktree
-remove`. What does **not** get cleaned up by that command: the
+The branch (`muse/session-7f9f1f49-...`) survives the removal, as normal for `git worktree remove`. What does **not** get cleaned up by that command: the
 `.session-worktree-reservations/v1/by-session/*.json` and `by-leaf/*.json` files — those are a
 Muse-internal bookkeeping layer inside the repo tree that plain `git worktree remove` doesn't know
 about. Checked directly against this same removed leaf, after the `git worktree remove --force`
@@ -265,8 +254,7 @@ asked for that exact write in this session... Finishing a task without that requ
 authorization, so leave your work uncommitted for review."* So a normal exit with no explicit
 commit instruction leaves the tree dirty, same as today. Dealer's existing timeout-salvage path
 already handles exactly this case for Dealer-owned worktrees — of the 3 `timed_out` `muse_code`
-sessions in Production evidence above, 2 carry `error_json.reason` `"Developer session timed out.
-Salvaged uncommitted work as wip: timeout salvage (<sha>)."` (session ids `e4499b9f-...` and
+sessions in Production evidence above, 2 carry `error_json.reason` `"Developer session timed out. Salvaged uncommitted work as wip: timeout salvage (<sha>)."` (session ids `e4499b9f-...` and
 `4b97c9c8-...`); the third (`4946f385-...`) has no salvage suffix, i.e. nothing uncommitted was
 left to salvage.
 
@@ -276,19 +264,16 @@ Three variants, all against the leaf created in probe 1-2 (owned by session `aab
 
 1. **Re-run `-w create --worktree-base main` with the same `--session-id`** (sequential, not
    concurrent): exit 0, stderr `muse: workspace root: .../20260921-2d1b (cwd default)`, and the
-   `session.workspace_branch.observed` event reports `{"workspace_root": ".../20260921-2d1b",
-   "reference": {"name": "muse/session-aabcea85-..."}, "commit": "84f3a6890ccf"}` — `84f3a68` is
+   `session.workspace_branch.observed` event reports `{"workspace_root": ".../20260921-2d1b", "reference": {"name": "muse/session-aabcea85-..."}, "commit": "84f3a6890ccf"}` — `84f3a68` is
    the same commit probe 3's row 4 had already landed there, not a new one. Reused the existing
    worktree unchanged — `-w create` is idempotent per session-id, not "always make a new one." No
    duplicate leaf, no error.
 2. **`-w existing --worktree-existing <path>` with a *different* `--session-id`** (the leaf's
-   owner is `aabcea85-...`; tried `a1a2388c-...`): exit 1, `session worktree requires a Git source
-   repository: <path>`. Ownership is enforced by session-id, not just by path — a session cannot
+   owner is `aabcea85-...`; tried `a1a2388c-...`): exit 1, `session worktree requires a Git source repository: <path>`. Ownership is enforced by session-id, not just by path — a session cannot
    attach to a worktree it didn't create. The error text is misleading (it reads like a missing-repo
    error, not an ownership-mismatch error), which would make this failure mode hard to diagnose
    from logs alone.
-3. **Two processes, the *same*, correctly-owning `--session-id`, both `-w existing
-   --worktree-existing <same path>`, launched concurrently:**
+3. **Two processes, the *same*, correctly-owning `--session-id`, both `-w existing --worktree-existing <same path>`, launched concurrently:**
 
    ```
    ( muse exec ... --session-id aabcea85-... -w existing --worktree-existing <path> "...append + commit g1" ) &
