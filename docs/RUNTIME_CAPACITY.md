@@ -146,23 +146,25 @@ undocumented dashboard API is called, and individual accounts are unsupported
 (team scope only).
 
 Reads (bounded: 15 s overall per endpoint,
-`AGENT_DEALER_CURSOR_TEAM_CAPACITY_TIMEOUT_MS` override; key travels
-`Authorization: Bearer` header-only):
+`AGENT_DEALER_CURSOR_TEAM_CAPACITY_TIMEOUT_MS` override; documented HTTP
+Basic auth — API key as the username, empty password — header-only):
 
-- `GET /teams/spend` → subscription-cycle start/end, team spend, and spend
-  hard limit. Every value keeps the unit the API reported (e.g. spend `12.5`
-  in `USD`); a value without a reported currency keeps a null unit rather
-  than an assumed one, and a hard limit is never relabeled as a token
-  percentage.
+- `POST /teams/spend` (`{ page }`, paged via `totalPages`, capped at 100
+  pages) → per-member `teamMemberSpend` rows (`spendCents`,
+  `hardLimitOverrideDollars`, …), `subscriptionCycleStart` (epoch ms),
+  `totalMembers`, `totalPages`. Team spend is the exact sum of the reported
+  `spendCents` (unit `cents`, never converted); `totalMembers` is stored as
+  the team size; members reporting a `hardLimitOverrideDollars` are counted
+  as per-member overrides — never relabeled as a team hard limit. The API
+  reports no team-level hard limit and no cycle end, so both stay null.
 - `POST /teams/daily-usage-data` (`{ startDate, endDate }` epoch ms, trailing
-  30 days) → per-day rows summed to a usage-period spend only when every
-  spend-carrying row agrees on one currency; mixed currencies or spend-less
-  rows yield a null spend rather than a mixed-unit total.
+  30 days) → activity/request-count rows, not spend: a 2xx records the
+  queried usage period and nothing monetary.
 
-Field parsing is tolerant (camelCase/snake_case aliases, epoch seconds/ms or
-ISO dates) because only the canonical concepts — cycle start/end, spend +
-currency, hard limit + currency — are contractual. No `5H`/`1W`-style windows
-are invented: this surface has no durations at all.
+Only the documented fields above are contractual (camelCase/snake_case
+aliases and epoch-ms/ISO dates tolerated). No `5H`/`1W`-style windows are
+invented: this surface has no durations at all, and money is never rendered
+as a token percentage.
 
 Normalized snapshots persist in `cursor_team_billing_snapshots` (single row),
 independent of `runtime_capacity_snapshots` and `runtime_availability`.
@@ -190,9 +192,11 @@ logs, and evidence refs are static (`cursor-admin-api:…`).
 `GET /api/cursor-team-billing` triggers `refreshCursorTeamBillingIfStale()`:
 with a key configured and a missing/stale stored snapshot, the read performs
 one bounded poll (single-flight, still under the overall timeout) and then
-serves the result — fresh snapshots short-circuit with no HTTP, and
-`AGENT_DEALER_CURSOR_TEAM_CAPACITY_REFRESH=off` disables the refresh. The
-Agents page renders team billing in its own labeled section
+serves the result — fresh snapshots short-circuit with no HTTP, and a failed
+poll backs off for 60 s before polling again (no per-request retry storm
+after a 429/5xx). `AGENT_DEALER_CURSOR_TEAM_CAPACITY_REFRESH=off` disables
+the refresh. The Agents page renders team billing in its own labeled section
 (`CursorTeamBillingCard`, "Cursor team billing · Admin API") below the
-per-runtime quota strip, in monetary units with cycle dates — never as
-percent chips. Tests inject a mock fetch; CI performs no live Cursor request.
+per-runtime quota strip: summed spend in cents, cycle start, team size, and
+per-member override counts — never as percent chips. Tests inject a mock
+fetch; CI performs no live Cursor request.

@@ -14,15 +14,17 @@ function billing(over: Record<string, unknown> = {}): CursorTeamBilling {
   return {
     configured: true,
     cycleStart: "2026-09-01T00:00:00.000Z",
-    cycleEnd: "2026-10-01T00:00:00.000Z",
-    spendValue: 12.5,
-    spendUnit: "USD",
-    hardLimitValue: 100,
-    hardLimitUnit: "USD",
+    cycleEnd: null,
+    spendValue: 1250,
+    spendUnit: "cents",
+    hardLimitValue: null,
+    hardLimitUnit: null,
+    memberCount: 2,
+    memberLimitOverrideCount: 1,
     usagePeriodStart: "2026-08-23T00:00:00.000Z",
     usagePeriodEnd: "2026-09-22T00:00:00.000Z",
-    usageSpendValue: 3.5,
-    usageSpendUnit: "USD",
+    usageSpendValue: null,
+    usageSpendUnit: null,
     source: "supported_protocol",
     unavailableReason: null,
     observedAt: new Date().toISOString(),
@@ -39,11 +41,14 @@ test("known team billing shows monetary values with the Admin API label", () => 
   assert.match(knownHtml, /cursor-team-billing/);
   assert.match(knownHtml, /Cursor team billing/);
   assert.match(knownHtml, /Admin API/);
-  assert.match(knownHtml, /12\.5 USD/);
-  assert.match(knownHtml, /100 USD/);
-  assert.match(knownHtml, /hard limit/);
+  assert.match(knownHtml, /1250 cents/);
   assert.match(knownHtml, /cursor-team-cycle/);
-  assert.match(knownHtml, /cursor-team-usage/);
+  assert.match(knownHtml, /cursor-team-members/);
+  // Team size and per-member overrides render as what they are — never as a
+  // team hard limit and never as quota percents.
+  assert.match(knownHtml, /2 members/);
+  assert.match(knownHtml, /per-member limit override/);
+  assert.ok(!knownHtml.includes("hard limit"), "no team hard limit is reported");
   // Monetary billing is never rendered as a quota percent chip.
   assert.ok(!knownHtml.includes("%"), "team billing must not render percents");
 });
