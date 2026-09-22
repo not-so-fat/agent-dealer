@@ -104,6 +104,52 @@ test("stale, unsupported, and missing render N/A with distinct reasons", async (
   assert.equal(claude.unavailableReason, "missing");
 });
 
+test("a payload without a usable scale reads N/A (unparsable)", async () => {
+  clearAllCapacitySnapshots();
+  const now = Date.now();
+  const { recordCapacitySnapshots } = await import("../repository/runtime-capacity.js");
+  const { normalizeAdapterWindow } = await import("./adapter.js");
+  const normalized = normalizeAdapterWindow(
+    "claude_code",
+    {
+      windowKey: "weekly",
+      providerBucket: "all_models",
+      durationMinutes: 10080,
+      providerLabel: "weekly",
+      usedValue: 12,
+      usedUnit: "credits",
+      resetAt: new Date(now + 3600_000).toISOString(),
+      observedAt: new Date(now - 60_000).toISOString(),
+      source: "experimental_api",
+    },
+    now
+  );
+  assert.equal(normalized.remainingPercent, null);
+  assert.equal(normalized.unavailableReason, "unparsable");
+  recordCapacitySnapshots("claude_code", [
+    {
+      windowKey: normalized.windowKey,
+      providerBucket: normalized.providerBucket,
+      durationMinutes: normalized.durationMinutes,
+      displayLabel: normalized.displayLabel,
+      usedValue: normalized.usedValue,
+      usedUnit: normalized.usedUnit,
+      remainingPercent: normalized.remainingPercent,
+      resetAt: normalized.resetAt,
+      observedAt: normalized.observedAt,
+      freshUntil: normalized.freshUntil,
+      expiresAt: normalized.expiresAt,
+      source: normalized.source,
+      unavailableReason: normalized.unavailableReason,
+    },
+  ]);
+  const snap = getRuntimeCapacitySnapshot(now);
+  const claude = snap.runtimes.find((r) => r.runtime === "claude_code")!;
+  assert.equal(claude.windows[0].remainingPercent, null);
+  assert.equal(claude.windows[0].unavailableReason, "unparsable");
+  assert.equal(claude.unavailableReason, "unparsable");
+});
+
 test("a past reset time is never presented as current capacity", async () => {
   clearAllCapacitySnapshots();
   const now = Date.now();
