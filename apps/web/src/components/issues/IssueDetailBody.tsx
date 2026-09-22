@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import type { AgentWithHealth } from "@agent-dealer/shared";
 import {
   abortIssue,
+  closeIssue,
   dequeueIssue,
   enqueueIssue,
   executeIssue,
@@ -104,6 +105,51 @@ function intentDuplicatesLiveProgress(intent: string | null | undefined, progres
   return intent.includes(progress);
 }
 
+/**
+ * NOT-239: the low-prominence pre-execution Close confirmation. Rendered only
+ * inside Issue Detail's secondary "More actions" area (never on list/queue
+ * rows or bulk surfaces) after the operator asks to close. The copy must name
+ * every consequence: no execution, queue removal, and retained history with
+ * where to find it. Exported so regression tests can assert the copy without
+ * driving the two-step interaction.
+ */
+export function CloseIssueConfirmation({
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="mt-2 p-3 rounded border border-red-400/30 bg-red-500/10 space-y-2">
+      <p className="text-sm text-white/90 font-medium">Close this issue?</p>
+      <p className="text-sm text-white/70">
+        It will not execute. Any queue entry will be removed. History is retained and can be
+        found as closed work — filter the Issues list by status closed or open this page directly.
+      </p>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          className="px-4 py-1.5 text-sm rounded border border-red-400/50 text-red-200 hover:bg-red-500/20 disabled:opacity-50"
+          disabled={busy}
+          onClick={onConfirm}
+        >
+          Close issue
+        </button>
+        <button
+          type="button"
+          className="font-ui-display px-4 py-1.5 text-sm text-white/60 hover:text-white"
+          onClick={onCancel}
+        >
+          Keep issue
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** The next allowed action, per the ticket's workflow rail: an open human action's own
  * response options when one exists, otherwise a derived "waiting on X" from currentOwner. */
 function nextActionLabel(detail: IssueDetail): string {
@@ -141,6 +187,10 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   const [startNotice, setStartNotice] = useState<string | null>(null);
   /** NOT-240 pre-execution configuration editor (ready, no active workflow). */
   const [configEditing, setConfigEditing] = useState(false);
+  /** NOT-239 pre-execution close: two-step inside the low-prominence area below. */
+  const [closeConfirming, setCloseConfirming] = useState(false);
+  /** NOT-239 unambiguous result banner after a successful close. */
+  const [closeNotice, setCloseNotice] = useState<string | null>(null);
 
   const fail = (e: unknown) => onError(String(e));
 
@@ -154,6 +204,9 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   const openActions = humanActions.filter((a) => a.status === "open");
   const canEdit = readiness.ok === false || openActions.some((a) => a.actionType === "product_scope_decision");
   const hasActiveWorkflow = latestWorkflowInstance != null && latestWorkflowInstance.completedAt === null;
+  // NOT-239: pre-execution Close is for `ready` with no active workflow only — it
+  // must never alias Abort on running work, and terminal issues have nothing to close.
+  const canClose = issue.status === "ready" && !hasActiveWorkflow;
   // NOT-240: every `ready` issue with no active workflow is still pre-execution and
   // has no frozen task snapshot — queue membership never decides repairability.
   const canConfigEdit = issue.status === "ready" && !hasActiveWorkflow;
@@ -282,6 +335,23 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
     }
   };
 
+  const doClose = async () => {
+    setBusy(true);
+    onError(null);
+    try {
+      await closeIssue(issueId);
+      setCloseConfirming(false);
+      setCloseNotice(
+        "Issue closed — it will not execute. History is retained and can be found as closed work."
+      );
+      refresh();
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const doAbort = async () => {
     if (!confirm("Abort this workflow? The current worker will stop and the issue will close. History and evidence are kept.")) {
       return;
@@ -351,6 +421,14 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
           </div>
           <IssueStatusBadge status={issue.status} />
         </div>
+
+        {/* NOT-239: unambiguous closed result — the refreshed detail shows the Closed
+            badge, and this banner confirms no execution will happen. */}
+        {closeNotice && (
+          <div className="mb-4 p-3 rounded border border-white/15 bg-white/[0.04]">
+            <p className="text-sm text-white/85">{closeNotice}</p>
+          </div>
+        )}
 
         {/* NOT-240: execution configuration — repository, developer, reviewer — always
             visible near the top. Editable only while `ready` with no active workflow;
@@ -629,6 +707,40 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
           />
           <button type="button" className="btn-gold px-4" onClick={submitGuidance}>Send</button>
         </div>
+
+        {/* NOT-239: low-prominence secondary actions. Close issue lives here — and
+            only here — so an operator opens the issue and reads its context first.
+            Remove from queue (above) means "do not run yet" and keeps the issue
+            ready; Close issue means "this work is no longer needed" and it will
+            never execute. Never on list rows, queue rows, or bulk surfaces. */}
+        {canClose && (
+          <details className="mt-6">
+            <summary className="text-xs text-white/45 cursor-pointer hover:text-white/70">More actions</summary>
+            <div className="mt-2 space-y-2">
+              <p className="text-xs text-white/45">
+                Remove from queue means do not run yet — the issue stays ready and can run
+                later. Close issue means this work is no longer needed — it will never execute.
+              </p>
+              {!closeConfirming ? (
+                <button
+                  type="button"
+                  className="font-ui-display text-xs text-white/50 hover:text-red-300 underline underline-offset-2 disabled:opacity-50"
+                  disabled={busy}
+                  title="Retire this issue without running it — removes any queue entry, keeps history as closed work"
+                  onClick={() => setCloseConfirming(true)}
+                >
+                  Close issue
+                </button>
+              ) : (
+                <CloseIssueConfirmation
+                  busy={busy}
+                  onConfirm={() => void doClose()}
+                  onCancel={() => setCloseConfirming(false)}
+                />
+              )}
+            </div>
+          </details>
+        )}
 
         {/* Evidence: closed by default — artifact-first with expandable detail, not
             implementation noise shown up front. */}

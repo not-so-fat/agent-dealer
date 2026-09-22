@@ -19,7 +19,7 @@ import type {
 import type { IssueDetail as WebIssueDetail } from "../../api.js";
 import IssueTimeline from "./IssueTimeline.js";
 import IssueStatusBadge from "./IssueStatusBadge.js";
-import IssueDetailBody from "./IssueDetailBody.js";
+import IssueDetailBody, { CloseIssueConfirmation } from "./IssueDetailBody.js";
 import IssueConfigurationSection, { IssueConfigurationEditor } from "./IssueConfiguration.js";
 
 function event(extra: Partial<WorkflowEvent>): WorkflowEvent {
@@ -520,6 +520,103 @@ test("configuration section stays read-only without an edit affordance after wor
   assert.match(html, /Configuration/);
   assert.match(html, /Cursor Dev/);
   assert.doesNotMatch(html, /Edit configuration/);
+});
+
+test("NOT-239: ready unqueued issue shows a low-prominence Close issue action, never Abort", () => {
+  const html = renderBody(
+    detailFixture({ issue: issueFixture({ status: "ready" }), queued: false, queueEntry: null }),
+  );
+  assert.match(html, /More actions/);
+  assert.match(html, /Close issue/);
+  assert.doesNotMatch(html, /Abort workflow/);
+});
+
+test("NOT-239: ready queued issue shows both Remove from queue and Close issue with distinct copy", () => {
+  const html = renderBody(
+    detailFixture({
+      issue: issueFixture({ status: "ready" }),
+      queued: true,
+      queueEntry: { position: 2, waitReason: "waiting for slot" },
+    }),
+  );
+  assert.match(html, /Remove from queue/);
+  assert.match(html, /Close issue/);
+  // Distinct explanatory copy: "do not run yet" keeps it ready, Close retires it.
+  assert.match(html, /do not run yet/);
+  assert.match(html, /no longer needed/);
+  assert.match(html, /will never execute/);
+  assert.doesNotMatch(html, /Abort workflow/);
+});
+
+test("NOT-239: close confirmation names every consequence and offers confirm and cancel", () => {
+  const html = renderToStaticMarkup(
+    <CloseIssueConfirmation busy={false} onConfirm={() => {}} onCancel={() => {}} />,
+  );
+  assert.match(html, /Close this issue\?/);
+  assert.match(html, /will not execute/);
+  assert.match(html, /queue entry will be removed/);
+  assert.match(html, /History is retained/);
+  assert.match(html, /closed work/);
+  assert.match(html, /Close issue/);
+  // Cancel keeps the issue: a distinct affordance that sends no request.
+  assert.match(html, /Keep issue/);
+});
+
+test("NOT-239: terminal issues show neither Close issue nor Abort workflow", () => {
+  for (const status of ["done", "closed"] as const) {
+    const html = renderBody(detailFixture({ issue: issueFixture({ status }) }));
+    assert.doesNotMatch(html, /Close issue/, `no Close for ${status}`);
+    assert.doesNotMatch(html, /Abort workflow/, `no Abort for ${status}`);
+    assert.doesNotMatch(html, /More actions/, `no overflow for ${status}`);
+  }
+});
+
+test("NOT-239: in-flight issues keep Abort workflow and never show the pre-execution Close", () => {
+  const activeInstance: WorkflowInstance = {
+    id: "33333333-3333-4333-8333-333333333333",
+    issueId: "11111111-1111-4111-8111-111111111111",
+    workflowVersion: "v1",
+    startedAt: "2026-09-20T09:30:00.000Z",
+    completedAt: null,
+    outcome: null,
+  };
+  for (const status of ["developing", "reviewing", "repairing", "final_review", "needs_human"] as const) {
+    const html = renderBody(
+      detailFixture({
+        issue: issueFixture({ status }),
+        latestWorkflowInstance: status === "needs_human" ? null : activeInstance,
+      }),
+    );
+    assert.doesNotMatch(html, /Close issue/, `no pre-execution Close for ${status}`);
+    assert.doesNotMatch(html, /More actions/, `no overflow for ${status}`);
+    if (status !== "needs_human") {
+      assert.match(html, /Abort workflow/, `Abort kept for ${status}`);
+    }
+  }
+});
+
+test("NOT-239: close has no shortcut on list, queue, or bulk surfaces", async () => {
+  // Structural guard: the only non-test web source allowed to surface the Close
+  // action is the Issue Detail body (secondary area) — the API client exposes
+  // `closeIssue` (no space) for it, and list/queue/bulk surfaces name nothing.
+  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { join, relative } = await import("node:path");
+  const srcDir = fileURLToPath(new URL("../../", import.meta.url));
+  const hits: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!/\.(ts|tsx)$/.test(name) || /\.test\./.test(name)) continue;
+      if (readFileSync(full, "utf8").includes("Close issue")) hits.push(relative(srcDir, full));
+    }
+  };
+  walk(srcDir);
+  assert.deepEqual(hits.sort(), ["components/issues/IssueDetailBody.tsx"]);
 });
 
 test("timeline renders configuration updates with their label", () => {
