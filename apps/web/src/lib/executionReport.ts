@@ -1,6 +1,6 @@
 // NOT-175: pure view-model for the Execution report page (no React/DOM —
 // tested with node:test via tsc, see executionReport.test.ts). The page renders
-// these display rows; every string decision (Unavailable vs N/M known, sparse
+// these display rows; every string decision (N/A vs N/M known, sparse
 // flags, unknown-bucket emphasis) lives here so tests pin it without a browser.
 import {
   coverageCellText,
@@ -39,6 +39,9 @@ export interface CohortDisplayRow {
   issueSuccessTitle: string;
   attemptSuccessText: string;
   attemptSuccessTitle: string;
+  /** NOT-244 structured success readouts: percentage separate from evidence. */
+  issueSuccessDisplay: SuccessDisplay;
+  attemptSuccessDisplay: SuccessDisplay;
   wallText: string;
   envelopeText: string;
   retryText: string;
@@ -69,7 +72,7 @@ export interface CohortDisplayRow {
 /**
  * NOT-229: percentile as structured parts — P50/P95 values separate from
  * their labels, sample size/sparse as supporting text. `available === false`
- * renders one `Unavailable` state with no P50/P95 numbers.
+ * renders one `N/A` state with no P50/P95 numbers.
  */
 export interface PercentileDisplay {
   available: boolean;
@@ -84,7 +87,7 @@ export interface PercentileDisplay {
 /**
  * NOT-229: coverage sum as structured parts — the known aggregate stays the
  * primary value while `known/total` evidence is a separate note. Missing
- * metadata is Unavailable, never zero. With `compact`, the visible value is
+ * metadata is N/A, never zero. With `compact`, the visible value is
  * shortened (tokens) and `exactText` carries the full comma-formatted value
  * for accessible/title text.
  */
@@ -128,8 +131,9 @@ export function toCoverageDisplay(
 ): CoverageDisplay {
   if (stat.sum === null || stat.known === 0) {
     return {
+      // NOT-244: Reports-page missing copy is `N/A` — never zero, 0%, or a dash.
       available: false,
-      valueText: "Unavailable",
+      valueText: "N/A",
       exactText: null,
       noteText: null,
       noteTitle: null,
@@ -149,17 +153,58 @@ export function toCoverageDisplay(
   };
 }
 
-/** "50.0% (1/2 closed)" or an explicit Unavailable with the missing denominator. */
+/**
+ * NOT-244: success as structured parts — the percentage stays the primary
+ * value while the denominator evidence (`74/86` + noun) is a separate
+ * fragment. Missing data reads `N/A`, never zero, 0%, or a dash.
+ */
+export interface SuccessDisplay {
+  available: boolean;
+  /** Primary percentage, e.g. `86.0%`; `N/A` when missing. */
+  valueText: string;
+  /** Denominator counts, e.g. `74/86`; null when missing. */
+  evidenceCounts: string | null;
+  /** Denominator noun, e.g. `closed` / `terminal`; null when missing. */
+  evidenceNoun: string | null;
+  /** Exact definition for title/accessibility text. */
+  title: string;
+}
+
+export function toSuccessDisplay(
+  value: number | null,
+  denominator: number,
+  closedNoun: string
+): SuccessDisplay {
+  if (value === null || denominator === 0) {
+    return {
+      available: false,
+      valueText: "N/A",
+      evidenceCounts: null,
+      evidenceNoun: null,
+      title: `No ${closedNoun} in this cohort`,
+    };
+  }
+  return {
+    available: true,
+    valueText: formatRate(value),
+    evidenceCounts: `${formatCount(Math.round(value * denominator))}/${formatCount(denominator)}`,
+    evidenceNoun: closedNoun,
+    title: `Exact share over ${denominator} ${closedNoun}`,
+  };
+}
+
+/** "50.0% (1/2 closed)" or an explicit N/A with the missing denominator. */
 export function successText(value: number | null, denominator: number, closedNoun: string): {
   text: string;
   title: string;
 } {
-  if (value === null || denominator === 0) {
-    return { text: "Unavailable", title: `No ${closedNoun} in this cohort` };
+  const display = toSuccessDisplay(value, denominator, closedNoun);
+  if (!display.available) {
+    return { text: display.valueText, title: display.title };
   }
   return {
-    text: `${formatRate(value)} (${formatCount(Math.round(value * denominator))}/${formatCount(denominator)} ${closedNoun})`,
-    title: `Exact share over ${denominator} ${closedNoun}`,
+    text: `${display.valueText} (${display.evidenceCounts} ${display.evidenceNoun})`,
+    title: display.title,
   };
 }
 
@@ -174,9 +219,12 @@ export function toCohortDisplay(row: CohortRow): CohortDisplayRow {
     issueSuccessTitle: issue.title,
     attemptSuccessText: attempt.text,
     attemptSuccessTitle: attempt.title,
+    issueSuccessDisplay: toSuccessDisplay(row.issueSuccess, row.issueSuccessDenominator, "closed"),
+    attemptSuccessDisplay: toSuccessDisplay(row.attemptSuccess, row.attemptSuccessDenominator, "terminal attempts"),
     wallText: percentileCellText(row.sessionWallMs, formatMs),
     envelopeText: percentileCellText(row.spawnEnvelopeMs, formatMs),
-    retryText: formatRate(row.retryRate),
+    // NOT-244: a null retry rate is missing, never 0% — Reports copy reads N/A.
+    retryText: row.retryRate === null ? "N/A" : formatRate(row.retryRate),
     retryTitle: "Extra attempts after a terminal attempt in the same issue/role/round ÷ attempts",
     tokensInText: coverageCellText(row.tokensIn, formatCount),
     tokensOutText: coverageCellText(row.tokensOut, formatCount),
@@ -228,7 +276,8 @@ export function toFailureDisplay(entry: FailureDistributionEntry, failedTotal: n
     code: entry.code,
     domain: entry.domain,
     countText: formatCount(entry.count),
-    shareText: formatRate(entry.share),
+    // NOT-244: a null share is missing, never 0% — Reports copy reads N/A.
+    shareText: entry.share === null ? "N/A" : formatRate(entry.share),
     shareTitle:
       failedTotal > 0
         ? `${formatCount(entry.count)} of ${formatCount(failedTotal)} issues with a failed attempt`
