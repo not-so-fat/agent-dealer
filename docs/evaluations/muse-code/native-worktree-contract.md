@@ -168,12 +168,26 @@ Four variants, same target worktree/session (`--session-id aabcea85-...`, prompt
 git log --oneline -3 && git branch --show-current' and report the output verbatim. Do not edit any
 files."`):
 
-| Command | XDG state | Result |
-|---|---|---|
-| No `-w` flag, same `--session-id` | **same** attempt dir as probe 1-2 | stderr: `muse: workspace root: .../20260921-2d1b (explicit)` ... `session worktree retained at .../20260921-2d1b (caller-owned worktree retained)`. Final answer: `.../20260921-2d1b`, `ca399e9 probe-a: bump value`, `f4b43e7 initial commit`, `muse/session-aabcea85-...`. Resumed the *same* worktree/branch — but only because the on-disk reservation file was visible from that XDG state. |
-| No `-w` flag, same `--session-id` | **fresh** attempt dir | stderr: `muse: workspace root: .../sandbox-repo (cwd default)`. Final answer: `.../sandbox-repo`, `f4b43e7 initial commit`, `main`. **Silently ran in `cwd` (the main checkout) on `main`, ignoring the prior worktree entirely** — same command, same `--session-id`, only the XDG state differs, and the `(cwd default)` vs. `(explicit)` stderr tag is the only distinguishing signal, not an error or warning. |
-| `-w existing`, **no** `--worktree-existing` | fresh attempt dir | Exit 2: `--worktree existing requires --worktree-existing`. Fails loud and fast. |
-| `-w existing --worktree-existing <path>`, same `--session-id` | fresh attempt dir | Exit 0. Reattached correctly: stderr `session worktree retained at <path> (caller-owned worktree retained)`, new commit landed on the existing branch (`84f3a68` on top of `ca399e9`). |
+| # | Command | XDG state | Verdict |
+|---|---|---|---|
+| 1 | No `-w` flag, same `--session-id` | same attempt dir as probe 1-2 | Resumed correctly |
+| 2 | No `-w` flag, same `--session-id` | fresh attempt dir | **Silently wrong** — ran in `cwd` on `main` |
+| 3 | `-w existing`, no `--worktree-existing` | fresh attempt dir | Exit 2, fails loud |
+| 4 | `-w existing --worktree-existing <path>`, same `--session-id` | fresh attempt dir | Reattached correctly |
+
+1. Same XDG state as probe 1-2: stderr `muse: workspace root: .../20260921-2d1b (explicit)` ...
+   `session worktree retained at .../20260921-2d1b (caller-owned worktree retained)`. Final answer:
+   `.../20260921-2d1b`, `ca399e9 probe-a: bump value`, `f4b43e7 initial commit`,
+   `muse/session-aabcea85-...`. Resumed the *same* worktree/branch — but only because the on-disk
+   reservation file was visible from that XDG state.
+2. Fresh XDG state, same command otherwise: stderr `muse: workspace root: .../sandbox-repo (cwd
+   default)`. Final answer: `.../sandbox-repo`, `f4b43e7 initial commit`, `main`. **Silently ran in
+   `cwd` (the main checkout) on `main`, ignoring the prior worktree entirely** — same command, same
+   `--session-id`, only the XDG state differs, and the `(cwd default)` vs. `(explicit)` stderr tag
+   is the only distinguishing signal, not an error or warning.
+3. Exit 2: `--worktree existing requires --worktree-existing`. Fails loud and fast.
+4. Exit 0. Reattached correctly: stderr `session worktree retained at <path> (caller-owned
+   worktree retained)`, new commit landed on the existing branch (`84f3a68` on top of `ca399e9`).
 
 Resume is deterministic **only** when the caller explicitly re-supplies `-w existing
 --worktree-existing <path>` with the original `--session-id`. Session-id alone is not sufficient
@@ -281,13 +295,16 @@ it itself.
 
 ## Probe 6: mapping to Dealer's required handoff
 
-| Dealer requirement | Dealer-owned (today) | Muse-owned (`-w create`/`existing`) |
-|---|---|---|
-| Exact developer tip (path + SHA) | Dealer sets `cwd`, reads git directly | Reported via `session.workspace_branch.observed`, plus the on-disk reservation file — works, but Dealer still has to capture and store it itself (same DB write it already does) |
-| Push verification | Dealer's own git calls | Unaffected either way — `grep -o '"command":"[^"]*"' attempts/*.jsonl | grep -i push` across every captured transcript (probes 1-2 through 5) returns no match: no session ran a push |
-| Reviewer checkout at that SHA | Dealer builds the reviewer's own worktree/checkout | **No change, and no option to change**: probe 5.2 shows a second session (the reviewer) cannot attach to the developer's Muse-owned worktree via `-w existing` — ownership is single-session by design. Dealer must keep building the reviewer's checkout independently regardless of which side owns the developer worktree. |
-| Dirty-work salvage | Dealer's timeout/crash salvage commit | Same mechanism, same trigger conditions (probe 4) — nothing Muse-owned changes here |
-| Safe cleanup | `git worktree remove --force` | Same command, same result (probe 4) — plus a new, Muse-only cruft surface (`.session-worktree-reservations/`) that plain `git worktree remove` doesn't clean up |
+| Dealer requirement | Dealer-owned (today) | Muse-owned (`-w create`/`existing`) | Changes? |
+|---|---|---|---|
+| Exact developer tip (path + SHA) | Reads git directly | Reported via `session.workspace_branch.observed` + reservation file | No — Dealer still stores it itself |
+| Push verification | Dealer's own git calls | Muse never pushes (grep, below) | No |
+| Reviewer checkout at that SHA | Dealer builds it | Can't reuse dev's worktree — cross-session attach is rejected (probe 5.2) | No — still Dealer's job |
+| Dirty-work salvage | Timeout/crash salvage commit | Same trigger conditions (probe 4) | No |
+| Safe cleanup | `git worktree remove --force` | Same command + new `.session-worktree-reservations/` cruft (probe 4) | **Worse** |
+
+Push verification: `grep -o '"command":"[^"]*"' attempts/*.jsonl | grep -i push` across every
+captured transcript (probes 1-2 through 5) returns no match — no session ran a push.
 
 No line in this table is something Dealer could delete from its worktree lifecycle code if it
 adopted `-w`/`--worktree`. Every Dealer responsibility today stays a Dealer responsibility; the
