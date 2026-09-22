@@ -29,6 +29,13 @@ This is not one of the six CLI probes below; it's the "do we already have data" 
 before this ticket started, answered from the live `worker_sessions` table (read-only queries,
 paths/branch names only — no prompt or code content extracted).
 
+```sql
+SELECT COUNT(*), COUNT(DISTINCT issue_id) FROM worker_sessions WHERE runtime='muse_code';
+```
+```
+110|56
+```
+
 110 `muse_code` worker sessions have run across 56 issues since NOT-181 shipped (queried
 2026-09-22 against `~/.agent-dealer/dealer.db`, read-only, paths/branch names only — no prompt or
 code content extracted). Dealer never passes `-w`/`--worktree` in production
@@ -77,7 +84,7 @@ The diverged-history pattern (exact text: `"local and origin/<branch> have diver
 is N commit(s) ahead, remote <sha> is M commit(s) ahead. Do not git pull — that integrates the
 wrong history for a rewritten branch."`) is the only worktree/git-identity-shaped signal in the
 data, and it's 100% concentrated on `muse_code` (10/10), zero on the other three runtimes across
-254 combined sessions — on a code path that never touches `-w`/`--worktree`. Both local and
+255 combined sessions (143 + 91 + 21, from the per-runtime table above) — on a code path that never touches `-w`/`--worktree`. Both local and
 remote hold commits the other doesn't (not just "behind"), which is what forces "do not `git
 pull`" rather than a plain fast-forward. This report does not know the round-by-round mechanism
 that produces that divergence — no push-timing or per-round transcript data was pulled, only the
