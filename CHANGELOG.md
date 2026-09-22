@@ -10,7 +10,7 @@ Patch over 1.1.8: confirmed-repository Linear intake, clearer execution-report e
 
 ### Features
 
-- **Linear intake requires an explicit repository confirmation (NOT-242)** — when a Linear ticket carries a `repo:<owner/name>` label, intake resolves it via case-insensitive prefix matching and surfaces a `RepositoryConfirmRow` on the New issue form: the label's canonical repository, its provenance ("From Linear label …"), a **Change** link back to the repository control, and an explicit **Confirm** action. Kick/Create stays disabled until the confirmation matches the canonical identity exactly; changing the ticket, repository, or source mode clears any prior confirmation. Unresolved, conflicting, or invalid labels block with copy naming the problem instead of guessing a repository.
+- **Linear intake requires an explicit repository confirmation (NOT-242)** — when a Linear ticket carries a `repo:github.com/<owner>/<repo>` label, intake resolves it via case-insensitive prefix matching and surfaces a `RepositoryConfirmRow` on the New issue form: the label's canonical repository, its provenance ("From Linear label …"), a **Change** link back to the repository control, and an explicit **Confirm** action. Kick/Create stays disabled until the confirmation matches the canonical identity exactly; changing the ticket, repository, or source mode clears any prior confirmation. Unresolved, conflicting, or invalid labels block with copy naming the problem instead of guessing a repository.
 
 ### UI
 
