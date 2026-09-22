@@ -17,6 +17,7 @@ import { formatPortConflict, isTcpPortOpen, probeAgentDealer } from "./ports.js"
 import { resolveServerEntry, resolveUiDist } from "./paths.js";
 import { clearRunState, writeRunState } from "./runtime-state.js";
 import { runStop } from "./stop.js";
+import { getVersion } from "./version.js";
 
 export interface StartOptions {
   port?: number;
@@ -173,7 +174,29 @@ async function ensurePortAvailable(host: string, port: number, probe: AgentDeale
 
 type AgentDealerProbe = Awaited<ReturnType<typeof probeAgentDealer>>;
 
+/**
+ * `--force` restart: stop the existing instance, then require the port to actually be free.
+ * `runStop()` can return 0 while a listener survives (an explicit AGENT_DEALER_HOME without run.json
+ * refuses to sweep the port), and `ensurePortAvailable` treats a healthy agent-dealer as available —
+ * so without this check the replacement server would launch onto an occupied port.
+ */
+async function stopForForcedRestart(host: string, port: number): Promise<number | null> {
+  console.log("[agent-dealer] Restarting existing instance (--force) ...");
+  await runStop();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  if ((await probeAgentDealer(host, port)).up) {
+    console.error(`[agent-dealer] --force could not stop the agent-dealer still listening on ${host}:${port}.`);
+    console.error("[agent-dealer] It is not owned by this AGENT_DEALER_HOME, so it was left running.");
+    console.error(`[agent-dealer] Stop it from its own home, or kill it manually: lsof -ti :${port} -sTCP:LISTEN | xargs kill`);
+    return 1;
+  }
+  return null;
+}
+
 export async function runStart(options: StartOptions = {}): Promise<number> {
+  if (!isSupervisorMode(options)) {
+    console.log(`Agent Dealer version ${getVersion()}`);
+  }
   const envFile = loadProdEnvFile();
   const home = prodHomeDir();
   const uiDist = resolveUiDist();
@@ -193,9 +216,10 @@ export async function runStart(options: StartOptions = {}): Promise<number> {
     const probe = await probeAgentDealer(host, port);
     if (probe.up) {
       if (options.force) {
-        console.log("[agent-dealer] Restarting existing instance (--force) ...");
-        await runStop();
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        const stopError = await stopForForcedRestart(host, port);
+        if (stopError !== null) {
+          return stopError;
+        }
       } else {
         printRunningEndpoints(base, uiDist);
         console.log("Already running. Use `agent-dealer stop` or `agent-dealer start --daemon --force` to restart.");
@@ -203,8 +227,7 @@ export async function runStart(options: StartOptions = {}): Promise<number> {
       }
     }
 
-    const refreshedProbe = options.force ? await probeAgentDealer(host, port) : probe;
-    const portError = await ensurePortAvailable(host, port, refreshedProbe);
+    const portError = await ensurePortAvailable(host, port, options.force ? await probeAgentDealer(host, port) : probe);
     if (portError !== null) {
       return portError;
     }
@@ -217,9 +240,10 @@ export async function runStart(options: StartOptions = {}): Promise<number> {
   const probe = await probeAgentDealer(host, port);
   if (probe.up) {
     if (options.force) {
-      console.log("[agent-dealer] Restarting existing instance (--force) ...");
-      await runStop();
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      const stopError = await stopForForcedRestart(host, port);
+      if (stopError !== null) {
+        return stopError;
+      }
     } else {
       printRunningEndpoints(base, uiDist);
       console.log("Already running. Use `agent-dealer stop` or `agent-dealer start --force` to restart.");
@@ -227,8 +251,7 @@ export async function runStart(options: StartOptions = {}): Promise<number> {
     }
   }
 
-  const refreshedProbe = options.force ? await probeAgentDealer(host, port) : probe;
-  const portError = await ensurePortAvailable(host, port, refreshedProbe);
+  const portError = await ensurePortAvailable(host, port, options.force ? await probeAgentDealer(host, port) : probe);
   if (portError !== null) {
     return portError;
   }

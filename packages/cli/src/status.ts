@@ -11,7 +11,7 @@ export async function runStatus(): Promise<number> {
 
   const probe = await probeAgentDealer(host, port);
 
-  console.log(`CLI package ${getVersion()}`);
+  console.log(`Agent Dealer version ${getVersion()}`);
   console.log(`Configured host ${host}  port :${port}`);
   console.log("");
 

@@ -152,15 +152,108 @@ export function getIssue(id: string): Issue | null {
 export function listIssues(status?: IssueStatus | IssueStatus[]): Issue[] {
   const db = getDb();
   if (!status) {
-    const rows = db.prepare("SELECT * FROM issues ORDER BY updated_at DESC").all() as IssueRow[];
+    const rows = db
+      .prepare("SELECT * FROM issues ORDER BY updated_at DESC, rowid DESC")
+      .all() as IssueRow[];
     return rows.map(rowToIssue);
   }
   const statuses = Array.isArray(status) ? status : [status];
   const placeholders = statuses.map(() => "?").join(",");
   const rows = db
-    .prepare(`SELECT * FROM issues WHERE status IN (${placeholders}) ORDER BY updated_at DESC`)
+    .prepare(`SELECT * FROM issues WHERE status IN (${placeholders}) ORDER BY updated_at DESC, rowid DESC`)
     .all(...statuses) as IssueRow[];
   return rows.map(rowToIssue);
+}
+
+/** NOT-228: page-size bounds for the Issues list (matches the report default/max). */
+export const ISSUES_LIST_DEFAULT_LIMIT = 25;
+export const ISSUES_LIST_MAX_LIMIT = 100;
+
+export interface IssuesListQuery {
+  /** Free text matched case-insensitively against title and external label. */
+  search?: string;
+  status?: IssueStatus | IssueStatus[];
+  /** Exact repository identity (the stored canonical `github.com/owner/repo`). */
+  repo?: string;
+  /** Only issues with at least one open human action. */
+  needsAttention?: boolean;
+  /** 1-based; values below 1 clamp to 1. */
+  page?: number;
+  /** Values outside 1..100 fall back to the default / clamp to the max. */
+  limit?: number;
+}
+
+export interface IssuesListResult {
+  rows: Issue[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+/** Escape the LIKE metacharacters in a user query so `%`/`_` match literally. */
+function escapeLikePattern(raw: string): string {
+  return raw.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+/**
+ * NOT-228: server-side filtering + stable pagination for the Issues list.
+ * Ordering is `updated_at DESC, rowid DESC` so pages are repeatable when many
+ * rows share a timestamp; the filter applies before pagination so `total` and
+ * `totalPages` describe the full matching cohort.
+ */
+export function queryIssues(query: IssuesListQuery = {}): IssuesListResult {
+  const db = getDb();
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  const rawStatuses = query.status === undefined ? [] : Array.isArray(query.status) ? query.status : [query.status];
+  const statuses = rawStatuses.map((s) => String(s).trim()).filter(Boolean);
+  if (statuses.length > 0) {
+    conditions.push(`status IN (${statuses.map(() => "?").join(",")})`);
+    params.push(...statuses);
+  }
+
+  const search = query.search?.trim();
+  if (search) {
+    const pattern = `%${escapeLikePattern(search).toLowerCase()}%`;
+    conditions.push(
+      `(LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(external_label, '')) LIKE ? ESCAPE '\\')`
+    );
+    params.push(pattern, pattern);
+  }
+
+  const repo = query.repo?.trim();
+  if (repo) {
+    conditions.push(`repo = ?`);
+    params.push(repo);
+  }
+
+  if (query.needsAttention) {
+    conditions.push(
+      `EXISTS (SELECT 1 FROM human_actions ha WHERE ha.issue_id = issues.id AND ha.status = 'open')`
+    );
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const rawLimit = query.limit === undefined ? ISSUES_LIST_DEFAULT_LIMIT : Math.floor(query.limit);
+  const limit =
+    !Number.isFinite(rawLimit) || rawLimit < 1
+      ? ISSUES_LIST_DEFAULT_LIMIT
+      : Math.min(rawLimit, ISSUES_LIST_MAX_LIMIT);
+  const rawPage = query.page === undefined ? 1 : Math.floor(query.page);
+  const page = !Number.isFinite(rawPage) || rawPage < 1 ? 1 : rawPage;
+
+  const { total } = db
+    .prepare(`SELECT COUNT(*) AS total FROM issues ${where}`)
+    .get(...params) as { total: number };
+  const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
+  const offset = (page - 1) * limit;
+  const rows = db
+    .prepare(`SELECT * FROM issues ${where} ORDER BY updated_at DESC, rowid DESC LIMIT ? OFFSET ?`)
+    .all(...params, limit, offset) as IssueRow[];
+  return { rows: rows.map(rowToIssue), page, limit, total, totalPages };
 }
 
 /**
@@ -239,6 +332,24 @@ export function transitionIssue(id: string, to: IssueStatus, patch?: TransitionI
       pr_url: patch?.prUrl !== undefined ? patch.prUrl : current.prUrl,
       updated_at: now,
     });
+  const updated = getIssue(id);
+  if (!updated) throw new Error(`Issue vanished: ${id}`);
+  return updated;
+}
+
+/**
+ * NOT-197: record the commit a freshly created issue branch was cut from (the fetched
+ * `origin/<base>` tip). Coordinator-owned like the handoff-time base_sha write in
+ * transitionIssue — but that path requires a status transition while the branch is cut
+ * before any transition happens, so this bare update exists for the creation moment.
+ * The verified handoff later overwrites it with the merge-base.
+ */
+export function recordIssueBaseSha(id: string, baseSha: string): Issue {
+  const current = getIssue(id);
+  if (!current) throw new Error(`Issue not found: ${id}`);
+  getDb()
+    .prepare(`UPDATE issues SET base_sha = @base_sha, updated_at = @updated_at WHERE id = @id`)
+    .run({ id, base_sha: baseSha, updated_at: new Date().toISOString() });
   const updated = getIssue(id);
   if (!updated) throw new Error(`Issue vanished: ${id}`);
   return updated;

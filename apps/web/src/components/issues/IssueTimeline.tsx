@@ -8,6 +8,9 @@ function roleNoun(actorType: WorkflowEvent["actorType"]): string {
 
 const LABELS: Record<string, (e: WorkflowEvent) => string> = {
   "issue.created": () => "Issue created",
+  // NOT-240: pre-execution configuration change (repository and/or agents) with
+  // before/after values in the payload — the durable evidence for the edit.
+  "issue.reassigned": () => "Configuration updated",
   "workflow.started": () => "Workflow started",
   "worker.started": (e) => `${roleNoun(e.actorType)} started${e.round ? ` (round ${e.round})` : ""}`,
   "worker.completed": (e) => `${roleNoun(e.actorType)} finished${e.round ? ` (round ${e.round})` : ""}`,
@@ -28,6 +31,7 @@ const LABELS: Record<string, (e: WorkflowEvent) => string> = {
   "review.submitted": () => "Reviewer submitted a review",
   "repair.started": (e) => `Repair round ${e.round ?? "?"} started`,
   "guidance.added": () => "Guidance added",
+  "task_snapshot.refreshed": () => "Task snapshot refreshed",
   "human_action.requested": () => "Human action requested",
   "human_action.resolved": () => "Human action resolved",
   "final_review.requested": () => "Final review requested",

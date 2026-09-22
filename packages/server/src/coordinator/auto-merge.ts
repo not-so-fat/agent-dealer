@@ -37,6 +37,7 @@ import {
   findOpenHumanAction,
   resolveHumanAction,
 } from "../repository/human-actions.js";
+import { MERGE_FAILURE_EVIDENCE_KEY, MERGE_FAILURE_RESPONSE_OPTIONS } from "./human-resolution.js";
 
 const run = promisify(execFile);
 
@@ -337,16 +338,20 @@ function escalateMergeFailure(
       currentOwner: "human",
       currentIntent: reason,
     });
+    // NOT-194: the work is approved, so "Resume development" is wrong. Offer a merge
+    // retry on the current PR head, another repair round (same as final_review:repair),
+    // or close. The reason keeps the underlying failure text verbatim so the operator can
+    // pick retry vs repair. Evidence marks this as a merge failure for per-action choice
+    // narrowing in resolveHumanActionAndAdvance (pre-NOT-194 open actions have no such
+    // evidence and still resolve through resume).
     const action = createHumanAction({
       issueId: issue.id,
       workflowInstanceId,
       actionType: "policy_escalation",
       reason,
-      question: `${reason} Resume development, or close the issue?`,
-      responseOptions: [
-        { choice: "resume", label: "Resume development" },
-        { choice: "close", label: "Close" },
-      ],
+      question: `${reason} Retry the merge, queue another repair round, or close the issue?`,
+      evidence: { [MERGE_FAILURE_EVIDENCE_KEY]: true },
+      responseOptions: [...MERGE_FAILURE_RESPONSE_OPTIONS],
     });
     appendWorkflowEvent({
       issueId: issue.id,

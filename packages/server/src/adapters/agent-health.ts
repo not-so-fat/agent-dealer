@@ -1,7 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
 import type { AgentHealthIssue, AgentProfile, AgentWithHealth, Runtime } from "@agent-dealer/shared";
 import {
   CODEX_AUTH_REMEDIATION,
+  MUSE_AUTH_REMEDIATION,
   cursorAuthIssueFromOutput,
   runtimeAuthIssueFromOutput,
 } from "@agent-dealer/shared";
@@ -13,6 +15,10 @@ import {
   resolveCursorBin,
   resolveCodexBin,
   codexBinExists,
+  resolveMuseBin,
+  museBinExists,
+  resolveMuseAuthFile,
+  MUSE_CLI_ENV,
 } from "../cli-env.js";
 import {
   checkAgentDeckHealth,
@@ -27,6 +33,7 @@ const RUNTIME_LABEL: Record<Runtime, string> = {
   claude_code: "Claude",
   cursor_local: "Cursor",
   codex_local: "Codex",
+  muse_code: "Muse Code",
 };
 
 function capHealthIssues(runtime: Runtime): AgentHealthIssue[] {
@@ -99,17 +106,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-type RunCommandFn = (cmd: string, args: string[], timeoutMs?: number) => Promise<CommandResult>;
+type RunCommandFn = (
+  cmd: string,
+  args: string[],
+  timeoutMs?: number,
+  env?: NodeJS.ProcessEnv
+) => Promise<CommandResult>;
 
 function defaultRunCommand(
   cmd: string,
   args: string[],
-  timeoutMs = DEFAULT_PROBE_TIMEOUT_MS
+  timeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
+  env: NodeJS.ProcessEnv = process.env
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env,
     });
     let output = "";
     let settled = false;
@@ -152,9 +165,10 @@ export function setRunCommandForTests(fn: RunCommandFn | null): void {
 function runCommand(
   cmd: string,
   args: string[],
-  timeoutMs = DEFAULT_PROBE_TIMEOUT_MS
+  timeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
+  env?: NodeJS.ProcessEnv
 ): Promise<CommandResult> {
-  return runCommandImpl(cmd, args, timeoutMs);
+  return runCommandImpl(cmd, args, timeoutMs, env);
 }
 
 /** Exported for tests — clears the shared github + runtime health caches and soft-fail streak. */
@@ -254,6 +268,49 @@ async function cursorRuntimeIssues(): Promise<AgentHealthIssue[]> {
   return [softIssue];
 }
 
+/**
+ * Muse Code health (NOT-178). Three outcomes, nothing guessed:
+ *  - `cli_missing`: the spawn itself failed with ENOENT (or the resolved path does not exist);
+ *  - `runtime_auth`: no credential to run with — `META_API_KEY` unset and no saved login file
+ *    (the state whose `muse exec` stderr is captured in muse-exec-missing-credentials.txt);
+ *  - `runtime_unknown`: the version probe failed or timed out for any other reason.
+ *
+ * Muse has no offline `auth status` (NOT-177), and its only credential-validating call is a
+ * billed `muse exec`, so a *present* but expired login is not detectable here — it surfaces at
+ * the first run, which the same classifier reads from stderr. `auth.json` is tested for
+ * existence only, never read.
+ */
+async function museRuntimeIssues(): Promise<AgentHealthIssue[]> {
+  const bin = resolveMuseBin();
+  const ver = await runCommand(bin, ["--version"], probeTimeoutMs(), {
+    ...process.env,
+    ...MUSE_CLI_ENV,
+  });
+  if (!ver.ok && (/\bENOENT\b/.test(ver.output) || (!ver.output.trim() && !museBinExists()))) {
+    return [
+      {
+        code: "cli_missing",
+        message: "Muse Code CLI not found — install Muse Code (`muse`) or set MUSE_CLI",
+      },
+    ];
+  }
+  if (!ver.ok) {
+    const detail = ver.timedOut
+      ? "timed out"
+      : (ver.output.trim().split("\n").slice(-1)[0] ?? "no output");
+    return [
+      {
+        code: "runtime_unknown",
+        message: `Could not determine Muse Code health — \`muse --version\` failed (${detail})`,
+      },
+    ];
+  }
+  if (!process.env.META_API_KEY && !fs.existsSync(resolveMuseAuthFile())) {
+    return [{ code: "runtime_auth", message: MUSE_AUTH_REMEDIATION }];
+  }
+  return [];
+}
+
 /** Exported for direct testing — bypasses the 60s cache in runtimeIssues(). */
 export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHealthIssue[]> {
   const issues: AgentHealthIssue[] = [];
@@ -308,6 +365,8 @@ export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHeal
     }
     return issues;
   }
+
+  if (runtime === "muse_code") return museRuntimeIssues();
 
   // NOT-157: Cursor auth probe distinguishes hard (classified logged-out / keychain) from
   // soft (timeout / unclassified probe flake). Soft path retries with backoff and holds a
@@ -453,6 +512,9 @@ function agentSpecificIssues(
   deckAccessResult: DeckAccessResult | null
 ): AgentHealthIssue[] {
   const issues: AgentHealthIssue[] = [];
+  // NOT-181: a Muse Code worker gets no MCP servers and no Agent Deck, so a missing, offline or
+  // deleted deck cannot stop it. (The profile form still asks for one; Muse ignores it.)
+  if (agent.runtime === "muse_code") return issues;
   if (!agent.deckId) {
     issues.push({
       code: "deck_missing",

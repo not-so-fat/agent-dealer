@@ -235,12 +235,16 @@ function fallbackReasonForKind(outcome: DeveloperOutcome | ReviewerOutcome): str
       return "Developer worktree conflict.";
     case "live_owner":
       return "Developer worktree still owned by a live predecessor session.";
+    case "muse_cron_used":
+      return "muse_cron_used: the Muse session called a cron_* tool, which Muse cannot disable.";
     case "adapter_failure":
       return "Git/GitHub verification failed.";
     case "deck_failure":
       return "Agent Deck preflight failed.";
     case "deck_unavailable":
       return "Agent Deck is unreachable.";
+    case "base_fetch_failed":
+      return "Could not fetch the base branch before creating the issue branch.";
     case "stale":
       return "PR head moved before the reviewer could evaluate it.";
     case "usage_capped":
@@ -300,6 +304,7 @@ export function outcomeShouldRecordError(outcome: DeveloperOutcome | ReviewerOut
     outcome.kind === "deck_failure" ||
     outcome.kind === "unpushed_commit" ||
     outcome.kind === "worktree_conflict" ||
-    outcome.kind === "live_owner"
+    outcome.kind === "live_owner" ||
+    outcome.kind === "muse_cron_used"
   );
 }

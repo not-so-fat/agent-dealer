@@ -83,6 +83,58 @@ test("session-fallback strip clears when worker.completed shares the same ms tim
   assert.equal(latestSessionFailureForIssue(fresh), null);
 });
 
+test("NOT-171: the strip carries per-attempt causes and the per-issue first cause", async () => {
+  const { listFailureCausesForSession } = await import("../repository/failure-causes.js");
+  const issue = makeIssue();
+  const instance = startWorkflowInstance(issue.id, "dev_reviewer_v1");
+  const session = createWorkerSession({
+    issueId: issue.id,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "cursor_local"});
+  startSession(session.id);
+  appendWorkflowEvent({
+    issueId: issue.id,
+    workflowInstanceId: instance.id,
+    workerSessionId: session.id,
+    type: "worker.started",
+    actorType: "developer",
+    stage: "developing",
+    round: 1,
+    payload: {}});
+  completeSession(session.id, {
+    status: "failed",
+    errorJson: JSON.stringify({ reason: PRESUMED_DEAD_REASON }),
+    logPath: "/tmp/stale-strip.log"});
+  appendWorkflowEvent({
+    issueId: issue.id,
+    workflowInstanceId: instance.id,
+    workerSessionId: session.id,
+    type: "worker.failed",
+    actorType: "developer",
+    stage: "developing",
+    round: 1,
+    payload: {
+      sessionId: session.id,
+      outcome: "session_failed",
+      reason: PRESUMED_DEAD_REASON}});
+
+  const strip = latestSessionFailureForIssue(getIssue(issue.id)!)!;
+  // Raw evidence stays accessible.
+  assert.match(strip.reason, /presumed dead/);
+  assert.equal(strip.logPath, "/tmp/stale-strip.log");
+  assert.equal(strip.sessionId, session.id);
+  // No persisted rows (the event was appended directly, not routed) → backfill
+  // on read from session error evidence, marked inferred.
+  assert.equal(listFailureCausesForSession(session.id).length, 0);
+  assert.ok(strip.causes.length >= 1);
+  assert.equal(strip.causes.find((c) => c.primary)?.code, "coordinator_crash");
+  assert.ok(strip.causes.every((c) => c.quality === "inferred"));
+  assert.equal(strip.firstCause?.code, "coordinator_crash");
+  assert.equal(strip.firstCause?.domain, "infrastructure");
+});
+
 test("worker.failed strip clears via rowid when a later completed shares the same ts", () => {
   const issue = makeIssue();
   const instance = startWorkflowInstance(issue.id, "dev_reviewer_v1");

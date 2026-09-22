@@ -18,10 +18,22 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-is
 const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { registerIssueRoutes } = await import("./issues.js");
-const { transitionIssue, listIssuesByExternalId } = await import("../repository/issues.js");
+const { transitionIssue, listIssuesByExternalId, getIssue } = await import("../repository/issues.js");
+const { createHumanAction } = await import("../repository/human-actions.js");
 const { createIssueArtifact } = await import("../repository/artifacts.js");
+const { claimWorkItem } = await import("../repository/work-items.js");
+const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
+const { applyCompletion, resolveHumanActionAndAdvance, getTaskSnapshot } = await import("../coordinator/commands.js");
+const { ReviewerResult } = await import("../coordinator/reviewer-result.js");
 const { getQueuedEntryForIssue, listQueuedEntries } = await import("../repository/queue-entries.js");
-const { setAdmissionHealthCheckerForTests } = await import("../coordinator/admission.js");
+const { admitNext, setAdmissionHealthCheckerForTests, queueStatusForIssue } = await import(
+  "../coordinator/admission.js"
+);
+const { listWorkflowInstancesForIssue } = await import("../repository/workflow-events.js");
+const { listWorkItemsForIssue } = await import("../repository/work-items.js");
+const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
+const { createAgent } = await import("../repository/agents.js");
+const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
 
 before(() => {
   migrate();
@@ -269,6 +281,79 @@ test("PATCH /api/issues/:id rejects an edit to a terminal (done) issue even thou
 
   const patchRes = await app.inject({ method: "PATCH", url: `/api/issues/${created.id}`, payload: { title: "Renamed" } });
   assert.equal(patchRes.statusCode, 409);
+  await app.close();
+});
+
+test("NOT-185: PATCH /api/issues/:id succeeds while parked at attempts_exhausted, and retry re-freezes the snapshot", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Parked",
+        description: "old",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        maxReviewRounds: 1,
+        acceptanceCriteria: "Old criteria"}})
+  ).json() as { id: string };
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` })).statusCode, 200);
+
+  const complete = async (outcome: Parameters<typeof applyCompletion>[2]) => {
+    const item = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+    await applyCompletion(item.id, item.leaseToken!, outcome);
+  };
+  const patch = (payload: object) => app.inject({ method: "PATCH", url: `/api/issues/${created.id}`, payload });
+
+  // Developer work item pending → still 409.
+  assert.equal((await patch({ title: "Nope" })).statusCode, 409);
+
+  await complete({ kind: "clean_handoff", branch: "b", headSha: "abc", baseSha: "base", prNumber: 1, prUrl: "https://gh/pr/1" });
+  // Reviewer work item pending → still 409.
+  assert.equal((await patch({ title: "Nope" })).statusCode, 409);
+  await complete({
+    kind: "verdict",
+    result: ReviewerResult.parse({
+      verdict: "changes_requested",
+      baseSha: "b",
+      headSha: "h",
+      acceptanceCriteriaAssessment: "ok",
+      evidenceAssessment: "ok",
+      findings: [],
+      risks: []})});
+
+  // Non-task fields stay frozen at the park — notably the review budget (a non-goal).
+  for (const payload of [
+    { maxReviewRounds: 5 },
+    { maxInfraAttempts: 3 },
+    { repo: "acme/other" },
+    { baseBranch: "develop" },
+    { developerAgentId: BUILTIN_AGENT_CURSOR_ID },
+    { reviewerAgentId: BUILTIN_AGENT_CLAUDE_ID },
+    { autoMerge: true },
+    { title: "Mixed", maxReviewRounds: 5 },
+  ]) {
+    assert.equal((await patch(payload)).statusCode, 409, JSON.stringify(payload));
+  }
+  const untouched = getIssue(created.id)!;
+  assert.equal(untouched.maxReviewRounds, 1);
+  assert.equal(untouched.title, "Parked");
+
+  const parked = await patch({ description: "new", acceptanceCriteria: "New criteria" });
+  assert.equal(parked.statusCode, 200);
+  assert.equal((parked.json() as { acceptanceCriteria: string }).acceptanceCriteria, "New criteria");
+
+  const action = listHumanActionsForIssue(created.id).find((a) => a.actionType === "attempts_exhausted")!;
+  assert.equal(resolveHumanActionAndAdvance(action.id, "yusuke", "retry").ok, true);
+  const frozen = getTaskSnapshot(getIssue(created.id)!);
+  assert.equal(frozen.acceptanceCriteria, "New criteria");
+  assert.equal(frozen.description, "new");
+
+  // The retry round is queued → running again → 409 again.
+  assert.equal((await patch({ title: "Nope" })).statusCode, 409);
   await app.close();
 });
 
@@ -607,5 +692,739 @@ test("NOT-148: GET /api/issues/:id surfaces branchTipStatus with restart risk af
   const idle = await app.inject({ method: "GET", url: `/api/issues/${readyCreated.id}` });
   assert.equal((idle.json() as { branchTipStatus: unknown }).branchTipStatus, null);
 
+  await app.close();
+});
+
+// NOT-228: helpers + focused tests for Issues list filtering/pagination. Every
+// test wipes `issues` in beforeEach, so the `R228` title marker scopes each
+// cohort without cross-test interference.
+const R228_PAYLOAD = {
+  repo: "acme/app",
+  baseBranch: "main",
+  developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+  reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+};
+
+async function r228Seed(app: Awaited<ReturnType<typeof buildApp>>, title: string, extra: Record<string, unknown> = {}) {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/issues",
+    payload: { ...R228_PAYLOAD, ...extra, title },
+  });
+  assert.equal(res.statusCode, 200);
+  return res.json() as { id: string };
+}
+
+interface R228Page {
+  issues: Array<{ id: string; title: string; status: string; hasOpenHumanAction: boolean }>;
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+async function r228Get(app: Awaited<ReturnType<typeof buildApp>>, qs: string) {
+  const res = await app.inject({ method: "GET", url: `/api/issues${qs}` });
+  assert.equal(res.statusCode, 200);
+  return res.json() as R228Page;
+}
+
+test("NOT-228: omitting page/limit keeps the legacy unpaginated array (CLI contract)", async () => {
+  const app = await buildApp();
+  const created = await r228Seed(app, "R228 legacy contract");
+  for (const url of ["/api/issues", "/api/issues?status=ready", "/api/issues?q=R228&repo=github.com%2Facme%2Fapp"]) {
+    const res = await app.inject({ method: "GET", url });
+    assert.equal(res.statusCode, 200);
+    const body = res.json() as unknown;
+    assert.ok(Array.isArray(body), `${url} still answers an array`);
+    assert.ok((body as Array<{ id: string }>).some((i) => i.id === created.id));
+  }
+  await app.close();
+});
+
+test("NOT-217: PATCH agent assignments on a queued issue preserves position, refreshes the wait reason, and records issue.reassigned", async () => {
+  const app = await buildApp();
+  try {
+    // Only the builtin Claude developer is unhealthy — everything else admits.
+    setAdmissionHealthCheckerForTests(async (agent, role) =>
+      role === "developer" && agent.id === BUILTIN_AGENT_CLAUDE_ID
+        ? { ok: false, reason: `developer unhealthy: ${agent.name} — CLI missing` }
+        : { ok: true }
+    );
+    const mk = async (title: string): Promise<string> =>
+      (
+        (
+          await app.inject({
+            method: "POST",
+            url: "/api/issues",
+            payload: {
+              title,
+              repo: "acme/app",
+              baseBranch: "main",
+              developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+              reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+              acceptanceCriteria: "It works",
+            },
+          })
+        ).json() as { id: string }
+      ).id;
+    const a = await mk("Queued A");
+    const b = await mk("Queued B");
+    assert.equal(queueStatusForIssue(a)?.position, 1);
+    assert.equal(queueStatusForIssue(b)?.position, 2);
+
+    // Switch A onto the capped/unhealthy developer: same position, new wait reason, audit.
+    const bad = await app.inject({
+      method: "PATCH",
+      url: `/api/issues/${a}`,
+      payload: { developerAgentId: BUILTIN_AGENT_CLAUDE_ID },
+    });
+    assert.equal(bad.statusCode, 200);
+    assert.equal((bad.json() as { developerAgentId: string }).developerAgentId, BUILTIN_AGENT_CLAUDE_ID);
+    assert.deepEqual(
+      listQueuedEntries().map((e) => e.issueId),
+      [a, b],
+      "reassignment must not reorder the queue"
+    );
+    assert.equal(queueStatusForIssue(a)?.position, 1);
+    assert.match(queueStatusForIssue(a)?.waitReason ?? "", /developer unhealthy/);
+
+    const events = listWorkflowEventsForIssue(a).filter((e) => e.type === "issue.reassigned");
+    assert.equal(events.length, 1);
+    assert.deepEqual(JSON.parse(events[0]!.payloadJson!), {
+      fromRepo: "github.com/acme/app",
+      toRepo: "github.com/acme/app",
+      fromDeveloperAgentId: BUILTIN_AGENT_CURSOR_ID,
+      toDeveloperAgentId: BUILTIN_AGENT_CLAUDE_ID,
+      fromReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+      toReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    });
+
+    // Switch back to the healthy developer: position unchanged, wait reason clears.
+    const good = await app.inject({
+      method: "PATCH",
+      url: `/api/issues/${a}`,
+      payload: { developerAgentId: BUILTIN_AGENT_CURSOR_ID },
+    });
+    assert.equal(good.statusCode, 200);
+    assert.deepEqual(
+      listQueuedEntries().map((e) => e.issueId),
+      [a, b]
+    );
+    assert.equal(queueStatusForIssue(a)?.position, 1);
+    assert.equal(queueStatusForIssue(a)?.waitReason, null);
+    assert.equal(
+      listWorkflowEventsForIssue(a).filter((e) => e.type === "issue.reassigned").length,
+      2,
+      "each assignment change is its own audit event"
+    );
+  } finally {
+    setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
+  }
+  await app.close();
+});
+
+test("NOT-228: page/limit paginate with a default of 25 and totals for the full cohort", async () => {
+  const app = await buildApp();
+  for (let n = 0; n < 30; n++) await r228Seed(app, `R228 pageable ${n}`);
+  const q = encodeURIComponent("R228 pageable");
+  const first = await r228Get(app, `?q=${q}&limit=25`);
+  assert.equal(first.issues.length, 25);
+  assert.equal(first.page, 1);
+  assert.equal(first.limit, 25);
+  assert.equal(first.total, 30);
+  assert.equal(first.totalPages, 2);
+  const second = await r228Get(app, `?q=${q}&limit=25&page=2`);
+  assert.equal(second.issues.length, 5);
+  assert.equal(second.total, 30);
+  assert.deepEqual(
+    new Set([...first.issues, ...second.issues].map((i) => i.id)).size,
+    30,
+    "pages neither duplicate nor skip rows"
+  );
+  // `page` alone still paginates (default limit); `limit` alone starts at page 1.
+  const defaulted = await r228Get(app, `?q=${q}&page=2`);
+  assert.equal(defaulted.limit, 25);
+  assert.equal(defaulted.issues.length, 5);
+  await app.close();
+});
+
+test("NOT-228: search, status, repo, and attention filters apply before pagination", async () => {
+  const app = await buildApp();
+  const repo = "github.com/r228/filtered";
+  const keep = await r228Seed(app, "R228 filter keep me", { repo });
+  const moved = await r228Seed(app, "R228 filter moved on", { repo });
+  await r228Seed(app, "R228 filter other repo", { repo: "github.com/r228/elsewhere" });
+  transitionIssue(moved.id, "developing");
+  createHumanAction({
+    issueId: moved.id,
+    actionType: "final_review",
+    reason: "Reviewer approved",
+    question: "Accept?",
+    responseOptions: ["complete"],
+  });
+  const q = encodeURIComponent("R228 filter");
+  const byStatus = await r228Get(app, `?q=${q}&status=developing&page=1&limit=10`);
+  assert.equal(byStatus.total, 1);
+  assert.deepEqual(byStatus.issues.map((i) => i.id), [moved.id]);
+  const byRepo = await r228Get(app, `?q=${q}&repo=${encodeURIComponent(repo)}&page=1&limit=10`);
+  assert.equal(byRepo.total, 2);
+  const attention = await r228Get(app, `?q=${q}&needsAttention=1&page=1&limit=10`);
+  assert.equal(attention.total, 1);
+  assert.deepEqual(attention.issues.map((i) => i.id), [moved.id]);
+  assert.equal(attention.issues[0]!.hasOpenHumanAction, true);
+  // Search matches the external label, not just the title: no "R228 filter"
+  // title contains "not-228", so only the labeled row matches.
+  const labeled = await r228Seed(app, "R228 filter label-only title", {
+    source: "linear",
+    externalId: "R228-LBL-1",
+    externalLabel: "NOT-228",
+  });
+  const byLabel = await r228Get(app, `?q=${encodeURIComponent("not-228")}&page=1&limit=10`);
+  assert.equal(byLabel.total, 1);
+  assert.deepEqual(byLabel.issues.map((i) => i.id), [labeled.id]);
+  void keep;
+  await app.close();
+});
+
+test("NOT-228: limit clamps to 100 and out-of-range pages keep totals", async () => {
+  const app = await buildApp();
+  await r228Seed(app, "R228 bounds one");
+  const capped = await r228Get(app, `?q=${encodeURIComponent("R228 bounds")}&page=1&limit=500`);
+  assert.equal(capped.limit, 100);
+  assert.equal(capped.total, 1);
+  const pastEnd = await r228Get(app, `?q=${encodeURIComponent("R228 bounds")}&page=9&limit=10`);
+  assert.deepEqual(pastEnd.issues, []);
+  assert.equal(pastEnd.total, 1);
+  assert.equal(pastEnd.page, 9);
+  await app.close();
+});
+
+test("NOT-217: PATCH reviewer-only edit records before/after reviewers without touching the developer", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Reviewer swap",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+
+  const res = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${created.id}`,
+    payload: { reviewerAgentId: BUILTIN_AGENT_CLAUDE_ID },
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { developerAgentId: string; reviewerAgentId: string };
+  assert.equal(body.developerAgentId, BUILTIN_AGENT_CURSOR_ID);
+  assert.equal(body.reviewerAgentId, BUILTIN_AGENT_CLAUDE_ID);
+
+  const events = listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned");
+  assert.equal(events.length, 1);
+  assert.deepEqual(JSON.parse(events[0]!.payloadJson!), {
+    fromRepo: "github.com/acme/app",
+    toRepo: "github.com/acme/app",
+    fromDeveloperAgentId: BUILTIN_AGENT_CURSOR_ID,
+    toDeveloperAgentId: BUILTIN_AGENT_CURSOR_ID,
+    fromReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    toReviewerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+  });
+  // No-op rewrites (same assignment) emit no audit event.
+  assert.equal(
+    (await app.inject({ method: "PATCH", url: `/api/issues/${created.id}`, payload: { reviewerAgentId: BUILTIN_AGENT_CLAUDE_ID } })).statusCode,
+    200
+  );
+  assert.equal(
+    listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned").length,
+    1
+  );
+  await app.close();
+});
+
+test("NOT-217: PATCH title-only edit on a queued issue emits no reassignment event", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Title tweak",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+
+  const res = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${created.id}`,
+    payload: { title: "Title tweaked" },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(
+    listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned").length,
+    0
+  );
+  await app.close();
+});
+
+test("NOT-217: PATCH that races admission answers 409 and never mutates the frozen workflow snapshot", async () => {
+  const app = await buildApp();
+  const healthyDev = createAgent({
+    name: `not217-dev-${Math.random()}`,
+    runtime: "claude_code",
+    deckId: "00000000-0000-4000-a000-000000002217",
+  });
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Raced edit",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+  // The editor is open; another request admits the issue first.
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` })).statusCode, 200);
+  assert.equal(getQueuedEntryForIssue(created.id), null);
+
+  // Save now conflicts instead of displaying stale success.
+  const save = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${created.id}`,
+    payload: { developerAgentId: healthyDev.id, reviewerAgentId: healthyDev.id },
+  });
+  assert.equal(save.statusCode, 409);
+  // Admitted issues read as their live status; parked-needs_human ones name the workflow.
+  // Either way the save conflicts instead of displaying stale success.
+  assert.match(String((save.json() as { error: string }).error), /developing|active workflow/);
+
+  const issue = getIssue(created.id)!;
+  assert.equal(issue.developerAgentId, BUILTIN_AGENT_CURSOR_ID, "frozen assignment untouched");
+  assert.equal(issue.reviewerAgentId, BUILTIN_AGENT_CURSOR_ID, "frozen assignment untouched");
+  assert.equal(
+    listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned").length,
+    0,
+    "a conflicted edit leaves no audit event"
+  );
+  await app.close();
+});
+
+test("NOT-240: PATCH repository plus agents on an unqueued ready issue succeeds, stays unqueued, and audits before/after", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Unqueued reconfig",
+        repo: "acme/old-repo",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+        enqueue: false,
+      },
+    })
+  ).json() as { id: string };
+  assert.equal(getQueuedEntryForIssue(created.id), null);
+
+  const res = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${created.id}`,
+    payload: {
+      repo: "https://github.com/acme/new-repo.git",
+      developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+      reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    },
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  const body = res.json() as { repo: string; developerAgentId: string; reviewerAgentId: string };
+  assert.equal(body.repo, "github.com/acme/new-repo", "repo is normalized like issue creation");
+  assert.equal(body.developerAgentId, BUILTIN_AGENT_CLAUDE_ID);
+  assert.equal(body.reviewerAgentId, BUILTIN_AGENT_CURSOR_ID);
+  assert.equal(getQueuedEntryForIssue(created.id), null, "an unqueued save stays unqueued");
+
+  const events = listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned");
+  assert.equal(events.length, 1);
+  assert.deepEqual(JSON.parse(events[0]!.payloadJson!), {
+    fromRepo: "github.com/acme/old-repo",
+    toRepo: "github.com/acme/new-repo",
+    fromDeveloperAgentId: BUILTIN_AGENT_CURSOR_ID,
+    toDeveloperAgentId: BUILTIN_AGENT_CLAUDE_ID,
+    fromReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    toReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+  });
+  await app.close();
+});
+
+test("NOT-240: PATCH repository on a queued ready issue preserves position and recomputes the repository wait reason", async () => {
+  const { setMaxActiveIssues } = await import("../repository/admission-settings.js");
+  const app = await buildApp();
+  try {
+    // Two global slots: one admitted issue never blocks on capacity, so the
+    // per-repository exclusion is the reason under test.
+    setMaxActiveIssues(2);
+    const mk = (title: string, repo: string) =>
+      app.inject({
+        method: "POST",
+        url: "/api/issues",
+        payload: {
+          title,
+          repo,
+          baseBranch: "main",
+          developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+          reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+          acceptanceCriteria: "It works",
+        },
+      });
+    const holderId = ((await mk("Repo holder", "acme/hot-repo")).json() as { id: string }).id;
+    assert.equal((await app.inject({ method: "POST", url: `/api/issues/${holderId}/execute` })).statusCode, 200);
+    const queuedId = ((await mk("Queued mover", "acme/cold-repo")).json() as { id: string }).id;
+    assert.equal(queueStatusForIssue(queuedId)?.position, 1);
+    assert.equal(queueStatusForIssue(queuedId)?.waitReason, null);
+
+    // Move onto the occupied repository: same position, repository-slot wait reason.
+    const clash = await app.inject({
+      method: "PATCH",
+      url: `/api/issues/${queuedId}`,
+      payload: { repo: "acme/hot-repo" },
+    });
+    assert.equal(clash.statusCode, 200, clash.body);
+    assert.equal((clash.json() as { repo: string }).repo, "github.com/acme/hot-repo");
+    assert.equal(queueStatusForIssue(queuedId)?.position, 1, "a repository change must not reorder");
+    assert.match(queueStatusForIssue(queuedId)?.waitReason ?? "", /repository slot/);
+
+    // Move off to a free repository: stale wait text is cleared, position kept.
+    const free = await app.inject({
+      method: "PATCH",
+      url: `/api/issues/${queuedId}`,
+      payload: { repo: "acme/free-repo" },
+    });
+    assert.equal(free.statusCode, 200, free.body);
+    assert.equal(queueStatusForIssue(queuedId)?.position, 1);
+    assert.equal(queueStatusForIssue(queuedId)?.waitReason, null);
+
+    const events = listWorkflowEventsForIssue(queuedId).filter((e) => e.type === "issue.reassigned");
+    assert.equal(events.length, 2, "each repository change is its own audit event");
+    assert.deepEqual(JSON.parse(events[0]!.payloadJson!), {
+      fromRepo: "github.com/acme/cold-repo",
+      toRepo: "github.com/acme/hot-repo",
+      fromDeveloperAgentId: BUILTIN_AGENT_CURSOR_ID,
+      toDeveloperAgentId: BUILTIN_AGENT_CURSOR_ID,
+      fromReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+      toReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    });
+  } finally {
+    setMaxActiveIssues(1);
+  }
+  await app.close();
+});
+
+test("NOT-240: PATCH rejects an invalid repository and leaves the row and audit untouched", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Repo validation",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+        enqueue: false,
+      },
+    })
+  ).json() as { id: string };
+
+  const bad = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${created.id}`,
+    payload: { repo: "/tmp/local-path" },
+  });
+  assert.equal(bad.statusCode, 400);
+  assert.equal(getIssue(created.id)!.repo, "github.com/acme/app");
+  assert.equal(
+    listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned").length,
+    0
+  );
+
+  // A same-value repository rewrite is a no-op: 200 with no audit event.
+  const same = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${created.id}`,
+    payload: { repo: "acme/app" },
+  });
+  assert.equal(same.statusCode, 200, same.body);
+  assert.equal(
+    listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned").length,
+    0
+  );
+  await app.close();
+});
+
+test("NOT-240: PATCH repository that races admission answers 409 and never mutates the frozen snapshot", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Raced repo edit",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` })).statusCode, 200);
+
+  const save = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${created.id}`,
+    payload: { repo: "acme/other", developerAgentId: BUILTIN_AGENT_CLAUDE_ID },
+  });
+  assert.equal(save.statusCode, 409);
+  assert.match(String((save.json() as { error: string }).error), /developing|active workflow/);
+
+  const issue = getIssue(created.id)!;
+  assert.equal(issue.repo, "github.com/acme/app", "frozen repository untouched");
+  assert.equal(issue.developerAgentId, BUILTIN_AGENT_CURSOR_ID, "frozen assignment untouched");
+  assert.equal(
+    listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned").length,
+    0,
+    "a conflicted edit leaves no audit event"
+  );
+  await app.close();
+});
+
+// ---------------------------------------------------------------------------
+// NOT-239: Close issue — retire a `ready` issue that should never run.
+// ---------------------------------------------------------------------------
+
+/** A startable `ready` issue through the same HTTP create the UI uses. */
+async function createClosableIssue(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  title: string,
+  extra: Record<string, unknown> = {}
+): Promise<string> {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/issues",
+    payload: {
+      title,
+      repo: "acme/app",
+      baseBranch: "main",
+      developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+      reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+      acceptanceCriteria: "It works",
+      ...extra,
+    },
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  return (res.json() as { id: string }).id;
+}
+
+function closeEvents(issueId: string) {
+  return listWorkflowEventsForIssue(issueId).filter((e) => e.type === "issue.closed");
+}
+
+test("NOT-239: close retires an unqueued ready issue with no execution records", async () => {
+  const app = await buildApp();
+  const id = await createClosableIssue(app, "Obsolete draft", { enqueue: false });
+  const before = getIssue(id)!;
+
+  const res = await app.inject({
+    method: "POST",
+    url: `/api/issues/${id}/close`,
+    payload: { closedBy: "yusuke" },
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  assert.deepEqual(res.json(), { issueStatus: "closed", alreadyClosed: false });
+
+  const detail = (await app.inject({ method: "GET", url: `/api/issues/${id}` })).json() as {
+    issue: { status: string; branch: string | null; prNumber: number | null };
+    timeline: Array<{
+      type: string;
+      actorType: string;
+      actorRef: string | null;
+      ts: string;
+      payloadJson: string | null;
+    }>;
+    queued: boolean;
+    queueEntry: { position: number; waitReason: string | null } | null;
+  };
+  assert.equal(detail.issue.status, "closed");
+  assert.equal(detail.issue.branch, before.branch, "close creates no branch");
+  assert.equal(detail.issue.prNumber, null, "close creates no PR");
+  assert.equal(detail.queued, false);
+  assert.equal(detail.queueEntry, null);
+
+  // Exactly one durable human-authored close event naming who closed and when.
+  const closed = detail.timeline.filter((e) => e.type === "issue.closed");
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0]!.actorType, "human");
+  assert.equal(closed[0]!.actorRef, "yusuke");
+  assert.ok(closed[0]!.ts, "close event carries its timestamp");
+  const payload = JSON.parse(closed[0]!.payloadJson!) as Record<string, unknown>;
+  assert.equal(payload.reason, "closed_by_operator");
+  assert.equal(payload.closedBy, "yusuke");
+  assert.equal(typeof payload.closedAt, "string");
+  assert.equal(payload.wasQueued, false);
+  assert.equal(payload.resolvedActions, 0);
+
+  // No execution records of any kind.
+  assert.equal(listWorkflowInstancesForIssue(id).length, 0);
+  assert.equal(listWorkItemsForIssue(id).length, 0);
+  assert.equal(listWorkerSessionsForIssue(id).length, 0);
+  await app.close();
+});
+
+test("NOT-239: close on a queued ready issue atomically removes the entry and advances the next issue", async () => {
+  const app = await buildApp();
+  const first = await createClosableIssue(app, "First in line");
+  const second = await createClosableIssue(app, "Second in line");
+  assert.equal(queueStatusForIssue(first)?.position, 1);
+  assert.equal(queueStatusForIssue(second)?.position, 2);
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${first}/close` });
+  assert.equal(res.statusCode, 200, res.body);
+  assert.deepEqual(res.json(), { issueStatus: "closed", alreadyClosed: false });
+
+  assert.equal(getIssue(first)!.status, "closed");
+  assert.equal(getQueuedEntryForIssue(first), null, "queue entry removed with the close");
+  assert.equal(queueStatusForIssue(second)?.position, 1, "next issue advances normally");
+
+  const payload = JSON.parse(closeEvents(first)[0]!.payloadJson!);
+  assert.equal(payload.wasQueued, true);
+  await app.close();
+});
+
+test("NOT-239: close is idempotent — a repeat on closed writes no new event", async () => {
+  const app = await buildApp();
+  const id = await createClosableIssue(app, "Twice closed", { enqueue: false });
+
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${id}/close` })).statusCode, 200);
+  const second = await app.inject({ method: "POST", url: `/api/issues/${id}/close` });
+  assert.equal(second.statusCode, 200);
+  assert.deepEqual(second.json(), { issueStatus: "closed", alreadyClosed: true });
+  assert.equal(closeEvents(id).length, 1, "a repeated close must not append another event");
+  await app.close();
+});
+
+test("NOT-239: close 404s for an unknown issue", async () => {
+  const app = await buildApp();
+  const res = await app.inject({ method: "POST", url: "/api/issues/does-not-exist/close" });
+  assert.equal(res.statusCode, 404);
+  await app.close();
+});
+
+test("NOT-239: close refuses once execution started — exactly one terminal outcome, Abort stays the stop", async () => {
+  const app = await buildApp();
+  const id = await createClosableIssue(app, "Already running");
+  const started = await app.inject({ method: "POST", url: `/api/issues/${id}/start` });
+  assert.equal(started.statusCode, 200);
+  assert.equal((started.json() as { state: string }).state, "admitted");
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/close` });
+  assert.equal(res.statusCode, 409);
+  assert.match((res.json() as { error: string }).error, /active workflow|Abort/);
+
+  // Execution won: still developing, one instance, and no close event.
+  assert.equal(getIssue(id)!.status, "developing");
+  assert.equal(listWorkflowInstancesForIssue(id).length, 1);
+  assert.equal(closeEvents(id).length, 0);
+  await app.close();
+});
+
+test("NOT-239: close needs no readiness — an underspecified ready issue still closes", async () => {
+  const app = await buildApp();
+  // No acceptance criteria: unstartable, still `ready`, queued with a wait reason.
+  const id = await createClosableIssue(app, "Misconfigured", { acceptanceCriteria: undefined });
+  const cleared = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${id}`,
+    payload: { acceptanceCriteria: null },
+  });
+  assert.equal(cleared.statusCode, 200, cleared.body);
+  assert.ok(getQueuedEntryForIssue(id), "still queued before close");
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/close` });
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(getIssue(id)!.status, "closed");
+  assert.equal(getQueuedEntryForIssue(id), null);
+  await app.close();
+});
+
+test("NOT-239: a closed issue can never be admitted afterwards", async () => {
+  const app = await buildApp();
+  const id = await createClosableIssue(app, "Never run");
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${id}/close` })).statusCode, 200);
+
+  const start = await app.inject({ method: "POST", url: `/api/issues/${id}/start` });
+  assert.equal(start.statusCode, 409);
+
+  const execute = await app.inject({ method: "POST", url: `/api/issues/${id}/execute` });
+  assert.equal(execute.statusCode, 409);
+
+  // (The queue router is not mounted on this issues-only app — enqueue is
+  // asserted at the repository level, which is what the route calls.)
+  const { enqueueIssue } = await import("../repository/queue-entries.js");
+  assert.throws(() => enqueueIssue(id), (err: unknown) => {
+    assert.equal((err as { code?: number }).code, 409);
+    assert.match(err instanceof Error ? err.message : String(err), /cannot enqueue/);
+    return true;
+  });
+
+  // A coordinator tick racing the close finds nothing to start.
+  assert.equal(await admitNext(), null);
+  assert.equal(listWorkflowInstancesForIssue(id).length, 0);
+  await app.close();
+});
+
+test("NOT-239: closed issues leave the default paginated list but stay findable by status filter and direct URL", async () => {
+  const app = await buildApp();
+  const closedId = await createClosableIssue(app, "Retired work");
+  const activeId = await createClosableIssue(app, "Live work");
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${closedId}/close` })).statusCode, 200);
+
+  const def = (await app.inject({ method: "GET", url: "/api/issues?page=1" })).json() as {
+    issues: Array<{ id: string }>;
+  };
+  assert.ok(def.issues.some((i) => i.id === activeId), "active issue stays in the default view");
+  assert.ok(!def.issues.some((i) => i.id === closedId), "closed issue leaves the default view");
+
+  const filtered = (await app.inject({ method: "GET", url: "/api/issues?status=closed&page=1" })).json() as {
+    issues: Array<{ id: string }>;
+  };
+  assert.ok(filtered.issues.some((i) => i.id === closedId), "status filter still finds closed work");
+
+  const direct = await app.inject({ method: "GET", url: `/api/issues/${closedId}` });
+  assert.equal(direct.statusCode, 200);
+  assert.equal((direct.json() as { issue: { status: string } }).issue.status, "closed");
+
+  // Legacy unpaginated list (CLI contract) is untouched.
+  const legacy = (await app.inject({ method: "GET", url: "/api/issues" })).json() as Array<{ id: string }>;
+  assert.ok(legacy.some((i) => i.id === closedId));
   await app.close();
 });

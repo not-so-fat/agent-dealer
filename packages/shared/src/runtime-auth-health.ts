@@ -49,6 +49,14 @@ export const AMBIGUOUS_AUTH_REMEDIATION =
   "A runtime CLI reported it is not authenticated, but the log does not say which one — " +
   "check the agent's runtime login: `cursor-agent login`, `codex login`, or `claude auth login`";
 
+/**
+ * Muse Code has no offline `auth status`, so the remediation covers both routes its own
+ * missing-credentials line offers (muse-exec-missing-credentials.txt): `muse login` or
+ * `META_API_KEY`.
+ */
+export const MUSE_AUTH_REMEDIATION =
+  "Muse Code is not authenticated — run `muse login`, or set META_API_KEY for automation";
+
 const KEYCHAIN_STUCK_PATTERNS: RegExp[] = [
   /errsecduplicateitem/i,
   /security exit code 45/i,
@@ -90,6 +98,19 @@ const CODEX_AUTH_PATTERNS: RegExp[] = [
   /missing bearer or basic authentication/i,
 ];
 
+const MUSE_AUTH_PATTERNS: RegExp[] = [
+  // `muse exec` with no credentials (muse-exec-missing-credentials.txt) — exits 1, stdout empty.
+  /missing meta credentials/i,
+  // `muse exec` when the catalog fetch is refused (muse-exec-bad-api-key.txt and
+  // muse-exec-saved-login-invalid.txt) — exits 1. Both captures carry this full prefix; the tails
+  // differ (rejected META_API_KEY vs. an expired saved login), the remedy does not. The bare
+  // phrase `authentication failed` is not Muse's voice — other CLIs and tools print it too.
+  /failed to fetch model catalog: authentication failed/i,
+  // The expired-login tail on its own (also a `run.terminal.failed` reason in the JSONL
+  // stream, 10-auth-rejected-401-mock.jsonl, where the prefix above is absent).
+  /saved login is no longer valid/i,
+];
+
 const CLAUDE_AUTH_PATTERNS: RegExp[] = [
   // `claude -p` when logged out (claude-print-logged-out.txt): "Not logged in · Please run /login".
   /not logged in/i,
@@ -120,20 +141,24 @@ const RUNTIME_VENDOR_ANCHORS: Record<Runtime, RegExp[]> = {
   // deliberately *not* an anchor: Cursor and Codex both name Claude models (`--model
   // claude-...`), so it identifies a model, not the CLI that printed the line.
   claude_code: [/anthropic/i, /please run \/login/i, /claude\s+(?:auth\s+)?login/i],
+  // "run `muse login` or set META_API_KEY". `META_API_KEY` is Meta's, no other runtime prints it.
+  muse_code: [/meta_api_key/i, /\bmuse\s+login\b/i],
 };
 
 const AUTH_PATTERNS_BY_RUNTIME: Record<Runtime, RegExp[]> = {
   cursor_local: CURSOR_AUTH_PATTERNS,
   codex_local: CODEX_AUTH_PATTERNS,
   claude_code: CLAUDE_AUTH_PATTERNS,
+  muse_code: MUSE_AUTH_PATTERNS,
 };
 
-const ALL_RUNTIMES = ["cursor_local", "codex_local", "claude_code"] as const;
+const ALL_RUNTIMES = ["cursor_local", "codex_local", "claude_code", "muse_code"] as const;
 
 const REMEDIATION_BY_RUNTIME: Record<Runtime, string> = {
   cursor_local: CURSOR_AUTH_REMEDIATION,
   codex_local: CODEX_AUTH_REMEDIATION,
   claude_code: CLAUDE_AUTH_REMEDIATION,
+  muse_code: MUSE_AUTH_REMEDIATION,
 };
 
 /** Operator-facing runtime names for prose built out of a classification. */
@@ -141,6 +166,7 @@ export const RUNTIME_AUTH_LABEL: Record<Runtime, string> = {
   cursor_local: "Cursor",
   codex_local: "Codex",
   claude_code: "Claude Code",
+  muse_code: "Muse Code",
 };
 
 /** True when Cursor status/login/stderr indicates a stuck macOS keychain item. */

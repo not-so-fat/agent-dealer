@@ -21,6 +21,7 @@ const {
   detectUsageCapFromRawLog,
   detectUsageCapFromLog,
   extractUsageCapFromEvents,
+  recordMuseUsageCap,
 } = await import("./usage-cap.js");
 const { parseNdjson } = await import("./stream-json.js");
 const {
@@ -43,6 +44,16 @@ test("Claude rate_limit_event rejected writes runtime_availability with resetsAt
   if (!avail.available) {
     assert.equal(avail.until, cap!.unavailableUntil);
   }
+});
+
+test("allowed rate_limit_event with overage rejected (org disabled overage) is not a cap", () => {
+  const raw = [
+    '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1784283600,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled_until","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.17,"resetsAt":1784283600}}}}',
+    '{"type":"result","is_error":false,"result":"done"}',
+  ].join("\n");
+  assert.equal(detectUsageCapFromNdjson(raw, "claude_code"), null);
+  assert.equal(recordUsageCapFromEvents(parseNdjson(raw), "claude_code"), null);
+  assert.equal(runtimeAvailability("claude_code").available, true);
 });
 
 test("allowed_warning rate_limit_event is ignored (hard cap only)", () => {
@@ -133,4 +144,20 @@ test("NOT-117: successful Codex turn.completed skips text fallback even when std
     "noise",
   ].join("\n");
   assert.ok(detectUsageCapFromRawLog(failed, "codex_local"));
+});
+
+// NOT-181: Muse's cap comes from the parsed failure kind, with the fallback cooldown (no reset time).
+test("recordMuseUsageCap records muse_code availability only for a usage_cap failure", () => {
+  clearAllRuntimeAvailability();
+  const now = Date.parse("2026-09-20T00:00:00.000Z");
+  assert.equal(recordMuseUsageCap(null, now), null);
+  assert.equal(recordMuseUsageCap({ kind: "auth", message: "login is no longer valid" }, now), null);
+  assert.equal(runtimeAvailability("muse_code", now).available, true);
+
+  const cap = recordMuseUsageCap({ kind: "usage_cap", message: "usage limit reached" }, now);
+  assert.equal(cap?.unavailableUntil, new Date(now + 1_800_000).toISOString());
+  const availability = runtimeAvailability("muse_code", now);
+  assert.equal(availability.available, false);
+  assert.equal(runtimeAvailability("claude_code", now).available, true);
+  clearAllRuntimeAvailability();
 });

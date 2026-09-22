@@ -791,3 +791,72 @@ test("NOT-83 review: a reviewer item cancelled during worktree/deck-bind setup (
   assert.equal(spawnCalled, false, "a cancelled item must never reach the real spawn");
   assert.deepEqual(outcome, { kind: "session_failed" });
 });
+
+// NOT-225: a setup/spawn throw (e.g. deps.spawn rejecting, or the NUL-byte spawn
+// throw pre-sanitize) used to be swallowed by the outer catch as a reason-less
+// session_failed — "Worker session failed or crashed" with no pid and no log.
+// The outcome must surface the setup error instead.
+test("NOT-225: a reviewer setup/spawn throw surfaces as session_failed with a 'could not start' reason", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  const ctxWithLease = reviewerCtxFactory(issueId);
+  setWorkItemLease(workItem.id, "token-1");
+
+  const throwingSpawn: ReviewerSpawnFn = async () => {
+    throw new Error("boom");
+  };
+  const outcome = await runReviewerEffect(ctxWithLease("token-1"), { deckCallTool: okDeckCallTool, spawn: throwingSpawn, github });
+
+  assert.equal(outcome.kind, "session_failed");
+  const reason = (outcome as { reason?: string }).reason ?? "";
+  assert.match(reason, /could not start/, "the reason names the setup failure");
+  assert.match(reason, /boom/, "the reason carries the underlying error");
+});
+
+test("NOT-225: the worker.failed timeline event for a reviewer spawn throw carries the 'could not start' reason", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const throwingSpawn: ReviewerSpawnFn = async () => {
+    throw new Error("boom");
+  };
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: throwingSpawn, github }));
+  await pump(1);
+
+  const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
+  const failed = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "worker.failed");
+  assert.ok(failed.length >= 1, "a failed reviewer session records a worker.failed event");
+  const payload = JSON.parse(failed[failed.length - 1]!.payloadJson!) as { reason?: string };
+  assert.match(payload.reason ?? "", /could not start/);
+  assert.match(payload.reason ?? "", /boom/);
+});
+
+test("NOT-225 regression: an unparseable reviewer transcript keeps its reason-less session_failed (not 'could not start')", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  const ctxWithLease = reviewerCtxFactory(issueId);
+  setWorkItemLease(workItem.id, "token-1");
+
+  const outcome = await runReviewerEffect(ctxWithLease("token-1"), { deckCallTool: okDeckCallTool, spawn: garbageSpawn, github });
+  assert.equal(outcome.kind, "session_failed");
+  const parseReason = (outcome as { reason?: string }).reason ?? "";
+  assert.ok(!parseReason.includes("could not start"), "a parse failure ran fine — it is not a setup failure");
+});
+
+test("NOT-225 regression: a non-zero reviewer exit keeps its session_failed behavior (not 'could not start')", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const workItem = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer" && i.status === "pending")!;
+  const ctxWithLease = reviewerCtxFactory(issueId);
+  setWorkItemLease(workItem.id, "token-1");
+
+  const outcome = await runReviewerEffect(ctxWithLease("token-1"), { deckCallTool: okDeckCallTool, spawn: crashingReviewerSpawn, github });
+  assert.equal(outcome.kind, "session_failed");
+  const crashReason = (outcome as { reason?: string }).reason ?? "";
+  assert.ok(!crashReason.includes("could not start"), "a spawned-then-crashed session is not a setup failure");
+});

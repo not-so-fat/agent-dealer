@@ -2,11 +2,41 @@
 //
 // NOT-103: durable operator-owned issue admission queue (order + wait_reason).
 
-import type { QueueEntry, QueueEntryState, QueueMoveTarget } from "@agent-dealer/shared";
+import type {
+  QueueEntry,
+  QueueEntryState,
+  QueueMoveTarget,
+  WorkflowEventType,
+} from "@agent-dealer/shared";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
 import { getActiveWorkflowInstance } from "./workflow-events.js";
 import { getIssue } from "./issues.js";
+import { classifyQueueWaitReason } from "../coordinator/queue-history.js";
+
+/**
+ * NOT-168: append-only queue evidence. Plain statement (no nested transaction
+ * wrapper) so it joins the caller's transaction — every queue mutation below
+ * pairs its row write with exactly one event write atomically.
+ */
+function insertQueueEvent(
+  issueId: string,
+  type: Extract<
+    WorkflowEventType,
+    "queue.enqueued" | "queue.wait_reason_changed" | "queue.admitted" | "queue.removed"
+  >,
+  payload: unknown
+): void {
+  const issue = getIssue(issueId);
+  getDb()
+    .prepare(
+      `INSERT INTO workflow_events (
+         id, issue_id, workflow_instance_id, worker_session_id, type, actor_type, actor_ref,
+         stage, round, payload_json, artifact_ref, idempotency_key, causation_event_id, ts
+       ) VALUES (?, ?, NULL, NULL, ?, 'system', NULL, ?, NULL, ?, NULL, NULL, NULL, ?)`
+    )
+    .run(uuid(), issueId, type, issue?.status ?? "unknown", JSON.stringify(payload), new Date().toISOString());
+}
 
 export type QueueEntryView = QueueEntry & {
   title?: string | null;
@@ -102,28 +132,33 @@ export function enqueueIssueWithOutcome(issueId: string): EnqueueOutcome {
   const existing = getQueuedEntryForIssue(issueId);
   if (existing) return { entry: existing, created: false };
 
-  const now = new Date().toISOString();
-  const maxPos = getDb()
-    .prepare("SELECT COALESCE(MAX(position), 0) AS m FROM queue_entries WHERE state = 'queued'")
-    .get() as { m: number };
-  const id = uuid();
-  const position = maxPos.m + 1;
-  // Partial unique index requires the WHERE predicate on ON CONFLICT (SQLite).
-  const info = getDb()
-    .prepare(
+  // Row write + `queue.enqueued` in one transaction; the early return above
+  // (and the raced-insert path below) emit nothing, so repeats never duplicate.
+  return getDb().transaction((): EnqueueOutcome => {
+    const now = new Date().toISOString();
+    const maxPos = getDb()
+      .prepare("SELECT COALESCE(MAX(position), 0) AS m FROM queue_entries WHERE state = 'queued'")
+      .get() as { m: number };
+    const id = uuid();
+    const position = maxPos.m + 1;
+    // Partial unique index requires the WHERE predicate on ON CONFLICT (SQLite).
+    const info = getDb()
+      .prepare(
+        `
+        INSERT INTO queue_entries (id, issue_id, position, enqueued_at, state, wait_reason, wait_reason_at)
+        VALUES (?, ?, ?, ?, 'queued', NULL, NULL)
+        ON CONFLICT(issue_id) WHERE state = 'queued' DO NOTHING
       `
-      INSERT INTO queue_entries (id, issue_id, position, enqueued_at, state, wait_reason, wait_reason_at)
-      VALUES (?, ?, ?, ?, 'queued', NULL, NULL)
-      ON CONFLICT(issue_id) WHERE state = 'queued' DO NOTHING
-    `
-    )
-    .run(id, issueId, position, now);
-  if (info.changes === 0) {
-    const raced = getQueuedEntryForIssue(issueId);
-    if (raced) return { entry: raced, created: false };
-    throw new Error("enqueue failed without creating a row");
-  }
-  return { entry: getQueueEntry(id)!, created: true };
+      )
+      .run(id, issueId, position, now);
+    if (info.changes === 0) {
+      const raced = getQueuedEntryForIssue(issueId);
+      if (raced) return { entry: raced, created: false };
+      throw new Error("enqueue failed without creating a row");
+    }
+    insertQueueEvent(issueId, "queue.enqueued", { queueEntryId: id, position });
+    return { entry: getQueueEntry(id)!, created: true };
+  })();
 }
 
 /**
@@ -191,50 +226,73 @@ export function moveQueueEntryToTop(issueId: string): QueueEntry | null {
 export function dequeueIssue(issueId: string): QueueEntry | null {
   const entry = getQueuedEntryForIssue(issueId);
   if (!entry) return null;
-  getDb()
-    .prepare(
-      "UPDATE queue_entries SET state = 'removed', wait_reason = NULL, wait_reason_at = NULL WHERE id = ?"
-    )
-    .run(entry.id);
-  return getQueueEntry(entry.id);
+  return getDb().transaction((): QueueEntry => {
+    getDb()
+      .prepare(
+        "UPDATE queue_entries SET state = 'removed', wait_reason = NULL, wait_reason_at = NULL WHERE id = ?"
+      )
+      .run(entry.id);
+    insertQueueEvent(issueId, "queue.removed", { queueEntryId: entry.id, via: "operator" });
+    return getQueueEntry(entry.id)!;
+  })();
 }
 
 /** Force-admit / successful admit — no-op when not queued. */
 export function markQueueEntryAdmitted(issueId: string): QueueEntry | null {
   const entry = getQueuedEntryForIssue(issueId);
   if (!entry) return null;
-  getDb()
-    .prepare(
+  // Nesting-safe (better-sqlite3 savepoints): admitNext and startWorkflowCore
+  // already hold a transaction here; standalone callers get their own.
+  return getDb().transaction((): QueueEntry => {
+    getDb()
+      .prepare(
+        `
+        UPDATE queue_entries
+        SET state = 'admitted', wait_reason = NULL, wait_reason_at = NULL
+        WHERE issue_id = ? AND state = 'queued'
       `
-      UPDATE queue_entries
-      SET state = 'admitted', wait_reason = NULL, wait_reason_at = NULL
-      WHERE issue_id = ? AND state = 'queued'
-    `
-    )
-    .run(issueId);
-  return getQueueEntry(entry.id);
+      )
+      .run(issueId);
+    insertQueueEvent(issueId, "queue.admitted", { queueEntryId: entry.id });
+    return getQueueEntry(entry.id)!;
+  })();
 }
 
 /** Issue closed / done while still queued. */
 export function markQueueEntryRemoved(issueId: string): void {
-  getDb()
-    .prepare("UPDATE queue_entries SET state = 'removed' WHERE issue_id = ? AND state = 'queued'")
-    .run(issueId);
+  const entry = getQueuedEntryForIssue(issueId);
+  if (!entry) return;
+  getDb().transaction((): void => {
+    getDb()
+      .prepare("UPDATE queue_entries SET state = 'removed' WHERE issue_id = ? AND state = 'queued'")
+      .run(issueId);
+    insertQueueEvent(issueId, "queue.removed", { queueEntryId: entry.id, via: "housekeeping" });
+  })();
 }
 
 /**
  * Persist wait_reason only when it changes (avoids write churn every coordinator tick).
- * Returns true when a write occurred.
+ * The change also appends `queue.wait_reason_changed` with `from`/`to`, a stable
+ * category, and the verbatim prose as `reason`. Returns true when a write occurred.
  */
 export function setQueueWaitReason(entryId: string, reason: string | null): boolean {
   const row = getDb()
-    .prepare("SELECT wait_reason FROM queue_entries WHERE id = ? AND state = 'queued'")
-    .get(entryId) as { wait_reason: string | null } | undefined;
+    .prepare("SELECT issue_id, wait_reason FROM queue_entries WHERE id = ? AND state = 'queued'")
+    .get(entryId) as { issue_id: string; wait_reason: string | null } | undefined;
   if (!row) return false;
   if (row.wait_reason === reason) return false;
-  const now = new Date().toISOString();
-  getDb()
-    .prepare("UPDATE queue_entries SET wait_reason = ?, wait_reason_at = ? WHERE id = ?")
-    .run(reason, reason !== null ? now : null, entryId);
+  getDb().transaction((): void => {
+    const now = new Date().toISOString();
+    getDb()
+      .prepare("UPDATE queue_entries SET wait_reason = ?, wait_reason_at = ? WHERE id = ?")
+      .run(reason, reason !== null ? now : null, entryId);
+    insertQueueEvent(row.issue_id, "queue.wait_reason_changed", {
+      queueEntryId: entryId,
+      from: row.wait_reason,
+      to: reason,
+      category: classifyQueueWaitReason(reason),
+      reason,
+    });
+  })();
   return true;
 }

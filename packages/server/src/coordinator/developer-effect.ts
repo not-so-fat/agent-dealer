@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
+import { parsePhaseBudget, parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
 import type { EffectContext } from "./effect-registry.js";
 import type { DeveloperOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
@@ -24,6 +24,8 @@ import { buildDeveloperPrompt } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn } from "./spawn.js";
 import {
+  DEFAULT_BASE_FETCH_TIMEOUT_MS,
+  fastForwardLocalBranchToSha,
   resolveDeveloperWorktree,
   safeRemoveWorktree,
   isWorktreeClean,
@@ -39,6 +41,7 @@ import {
   dirtyWorktreeRecoveryCommands,
   withRepoLock,
 } from "../adapters/git-worktree.js";
+import { recordIssueBaseSha } from "../repository/issues.js";
 import {
   ensureIssueRepoCheckout,
   roleWorktreePathForResolution,
@@ -47,7 +50,7 @@ import {
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
-import { getWorkerSession, patchRunningSession, recordSessionProcess } from "../repository/worker-sessions.js";
+import { getWorkerSession, patchRunningSession, recordSessionProcess, setSessionInputSha } from "../repository/worker-sessions.js";
 import { COORDINATOR_PROCESS_OWNER, readProcessStartTime } from "./process-liveness.js";
 import { checkDeveloperWorktreeOwnerLiveness } from "./worktree-owner-liveness.js";
 import { developerSessionTimeoutMs } from "./session-timeouts.js";
@@ -56,8 +59,10 @@ import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
 import { extractSpawnUsage } from "./usage.js";
+import { emitCheckpointObserved, emitRetryReuse } from "./checkpoint.js";
 import { syncIssueBaseBranch } from "./sync-issue-base-branch.js";
-import { recordUsageCapFromLog } from "../runners/usage-cap.js";
+import { emitAgentCompleted, emitAgentStarted } from "./agent-boundaries.js";
+import { recordMuseUsageCap, recordUsageCapFromLog } from "../runners/usage-cap.js";
 import { reasonForDirtyWorktree, reasonForSessionCrash } from "./failure-reason.js";
 import {
   emitSessionMilestone,
@@ -140,6 +145,10 @@ export const developerEffectConfig = {
   get checksPollIntervalMs(): number {
     return num("CHECKS_POLL_INTERVAL_MS", 15_000);
   },
+  /** NOT-197: bound for the pre-branch `git fetch origin <base>` on a fresh issue branch. */
+  get baseFetchTimeoutMs(): number {
+    return num("BASE_FETCH_TIMEOUT_MS", DEFAULT_BASE_FETCH_TIMEOUT_MS);
+  },
   /** NOT-110: bounded window to let a lagging `gh pr view` catch up to a just-pushed HEAD. */
   get headReconcileTimeoutMs(): number {
     return num("HEAD_RECONCILE_TIMEOUT_MS", 30_000);
@@ -177,18 +186,19 @@ function extractConclusion(transcript: string): string {
 
 /** NOT-130: mine + persist a SHA-scoped suite receipt while the worktree still exists.
  * Tip-tree equivalence: only vouch for HEAD when the tree is clean — a green suite on a
- * dirty checkout must not be reloaded as tip evidence after a later clean/revert. */
+ * dirty checkout must not be reloaded as tip evidence after a later clean/revert.
+ * Returns the persisted receipt so the caller can record its checkpoint. */
 async function persistVerificationReceiptIfAny(opts: {
   issueId: string;
   sessionId: string;
   logPath: string;
   worktreePath: string;
-}): Promise<void> {
+}): Promise<VerificationReceipt | null> {
   const clean = await isWorktreeClean(opts.worktreePath).catch(() => false);
-  if (!clean) return;
+  if (!clean) return null;
   const headShaHint = await revParseHead(opts.worktreePath).catch(() => null);
   const receipt = extractVerificationReceiptFromLog(opts.logPath, { headShaHint });
-  if (!receipt) return;
+  if (!receipt) return null;
   createIssueArtifact({
     issueId: opts.issueId,
     workerSessionId: opts.sessionId,
@@ -196,6 +206,7 @@ async function persistVerificationReceiptIfAny(opts: {
     author: "system",
     content: receipt,
   });
+  return receipt;
 }
 
 function loadPriorVerificationReceipt(
@@ -342,6 +353,33 @@ async function runPublishOnlyHandoff(
   try {
     setLiveIntent(issue.id, `Developer · retrying GitHub publish (round ${round})`);
 
+    // NOT-172: a publish-only run is inherently a retry over prior work — record the
+    // reuse once per session (durable + idempotent, so a repeated run is a no-op).
+    // Coordinator-only: no agent process, so this attempt adds zero agent waste.
+    try {
+      let publishRetryReason: string | null = null;
+      try {
+        if (workItem.payloadJson) {
+          const parsed = JSON.parse(workItem.payloadJson) as { retryReason?: unknown };
+          if (typeof parsed.retryReason === "string") publishRetryReason = parsed.retryReason;
+        }
+      } catch {
+        // keep null
+      }
+      emitRetryReuse({
+        issueId: issue.id,
+        workflowInstanceId: instance.id,
+        workerSessionId: sessionId,
+        role: "developer",
+        stage,
+        round,
+        kinds: ["publish_only"],
+        retryReason: publishRetryReason,
+      });
+    } catch {
+      // reuse evidence must never fail the attempt itself
+    }
+
     // Serialize fetch/push against the shared managed clone (same withRepoLock as
     // ensureIssueRepoCheckout / createRoleWorktree) so concurrent issues on one repo
     // cannot race repo-root git metadata.
@@ -364,7 +402,11 @@ async function runPublishOnlyHandoff(
           issue.id,
           `Developer · pushing ${progress.unpushed} recovered commit${progress.unpushed === 1 ? "" : "s"} (round ${round})`
         );
-        const recovered = await pushBranchRef({ repo: cwd, branch: branchName });
+        const recovered = await pushBranchRef({
+          repo: cwd,
+          branch: branchName,
+          lastKnownHeadSha: issue.headSha,
+        });
         if (!recovered.ok) {
           // Same policy as a live attempt's push: a clean rejection is a human decision, a
           // tooling error is a bounded infra retry. Either way the commits stay on the branch.
@@ -381,6 +423,10 @@ async function runPublishOnlyHandoff(
                   kind: "unpushed_commit",
                   reason: recovered.reason,
                   recoveryCommands: recovered.facts?.recoveryCommands,
+                  // NOT-221: the publish-only retry runs from the repo, not a worktree —
+                  // no worktreePath, so a later push_with_lease resolves from the checkout.
+                  branch: branchName,
+                  ...(recovered.facts ? { pushFacts: recovered.facts } : {}),
                 }
               : {
                   kind: "adapter_failure",
@@ -392,8 +438,38 @@ async function runPublishOnlyHandoff(
         milestone(
           "branch.pushed",
           `Developer · recovered branch pushed (${progress.unpushed} commit${progress.unpushed === 1 ? "" : "s"})`,
-          { branch: branchName, commitsAhead: progress.ahead, recoveredCommits: progress.unpushed }
+          {
+            branch: branchName,
+            commitsAhead: progress.ahead,
+            recoveredCommits: progress.unpushed,
+            // NOT-220: a lease-recovered rewrite is auditable — old and new SHA.
+            ...(recovered.leasePush
+              ? {
+                  viaLeasePush: true,
+                  oldSha: recovered.leasePush.oldSha,
+                  newSha: recovered.leasePush.newSha,
+                }
+              : {}),
+          }
         );
+        // NOT-172: durable branch-pushed checkpoint at the existing success point.
+        // Read-only: the push just updated the remote-tracking ref.
+        try {
+          const pushedSha = await revParseRef(cwd, `origin/${branchName}`).catch(() => null);
+          emitCheckpointObserved({
+            issueId: issue.id,
+            workflowInstanceId: instance.id,
+            workerSessionId: sessionId,
+            role: "developer",
+            stage,
+            round,
+            kind: "branch_pushed",
+            observedSha: pushedSha,
+            branch: branchName,
+          });
+        } catch {
+          // checkpoint evidence must never fail the attempt itself
+        }
       }
 
       await fetchRef(cwd, branchName);
@@ -623,6 +699,9 @@ export async function runDeveloperEffect(
   const reuseBranch = issue.branch != null || (await branchExists(repoPath, branchName));
 
   let worktreePath: string;
+  // NOT-172: whether the retry-resolution reused an existing checkout (source for
+  // the retry-reuse record emitted once the retry begins).
+  let worktreeReused = false;
   try {
     // Detects a leftover worktree from an earlier round/escalation that still holds this
     // branch (a plain `git worktree add` would collide with it and surface as an opaque
@@ -638,7 +717,14 @@ export async function runDeveloperEffect(
       reuseBranch,
       worktreePath: desiredWorktreePath,
       ownerLiveness: checkDeveloperWorktreeOwnerLiveness,
+      fetchTimeoutMs: developerEffectConfig.baseFetchTimeoutMs,
     });
+    if (resolved.kind === "base_unavailable") {
+      // NOT-197: the pre-branch fetch failed or timed out — defer the start (no branch
+      // was created, nothing spawned, no attempt spent) instead of falling back to the
+      // stale local base.
+      return { kind: "base_fetch_failed", reason: resolved.reason };
+    }
     if (resolved.kind === "conflict") {
       return { kind: "worktree_conflict", path: resolved.path, reason: resolved.reason, recoveryCommands: resolved.recoveryCommands };
     }
@@ -651,6 +737,14 @@ export async function runDeveloperEffect(
       };
     }
     worktreePath = resolved.path;
+    worktreeReused = resolved.kind === "reused";
+    if (resolved.kind === "created" && resolved.baseSha) {
+      // NOT-197: record the true branch point while it is known — the verified handoff
+      // re-checks it via merge-base, but crash/timeout progress inspection below already
+      // reads issue.baseSha.
+      recordIssueBaseSha(issue.id, resolved.baseSha);
+      issue.baseSha = resolved.baseSha;
+    }
   } catch (err) {
     return { kind: "adapter_failure", reason: `worktree setup failed: ${String(err)}` };
   }
@@ -660,21 +754,51 @@ export async function runDeveloperEffect(
     worktreePath: shortWorktreePath(worktreePath),
   });
 
+  // NOT-172: capture the worktree HEAD as this session's input-SHA baseline before
+  // the agent spawns — developer work items are never enqueued with an input SHA,
+  // so without this the sampler's HEAD diff (and the session_end fallback) have
+  // nothing per-session to compare against. Read-only `rev-parse`; a retry on a
+  // reused branch baselines at the inherited tip, so only commits this session
+  // adds count as its evidence. Persisted set-once: a restart re-entrant into the
+  // same session keeps the original baseline.
+  let samplerInputSha: string | null = session?.inputSha ?? null;
+  try {
+    const baselineHead = await revParseHead(worktreePath).catch(() => null);
+    if (baselineHead && samplerInputSha === null) {
+      try {
+        setSessionInputSha(sessionId, baselineHead);
+      } catch {
+        // baseline persistence must never fail the attempt itself
+      }
+      samplerInputSha = baselineHead;
+    }
+  } catch {
+    // baseline capture must never fail the attempt itself
+  }
+
   // One resolution, two consumers: the materialized MCP config's tool surface below and
   // the spawn args' tool surface further down. They were resolved separately and had to
   // agree by inspection — the exact shape this stack exists to remove (NOT-134 review).
   const policy = snapshot?.permissionPolicy ?? roleCeiling("developer");
 
+  // NOT-181: Muse Code workers get no MCP servers and no Agent Deck — nothing is materialized,
+  // verified or released for them, whatever deck the profile happens to carry.
+  const isMuse = runtime === "muse_code";
   let workerAuthority: { mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
+  // NOT-225: marks the setup/spawn boundary for the outer catch below. Only a throw
+  // before the worker's process exists is a "could not start" — anything after a
+  // successful spawn (push, PR verify, checks poll) keeps the pre-existing
+  // adapter_failure path, since the session did start, run, and possibly commit.
+  let sessionStarted = false;
   try {
-    if (!snapshot?.deckId) {
+    if (!isMuse && !snapshot?.deckId) {
       await bestEffortRemove(repoPath, worktreePath);
       return {
         kind: "deck_failure",
         reason: "Agent profile has no Agent Deck — workers never start without one",
       };
     }
-    {
+    if (!isMuse && snapshot?.deckId) {
       const prepared = await prepareWorkerDeckConnection({
         deckId: snapshot.deckId,
         worktreePath,
@@ -698,7 +822,7 @@ export async function runDeveloperEffect(
       });
     }
 
-    if (taskBriefIsComplete(taskSnapshot)) {
+    if (taskBriefIsComplete(taskSnapshot) || isMuse) {
       milestone("brief.resolved", `Developer · brief ready (Task/AC complete)`, {
         resolution: "task_complete",
       });
@@ -743,7 +867,8 @@ export async function runDeveloperEffect(
       priorConclusion,
       priorVerificationReceipt,
       worktreePath,
-      deckId: snapshot?.deckId ?? null,
+      deckId: isMuse ? null : (snapshot?.deckId ?? null),
+      noAgentDeck: isMuse,
       guidance: guidance.length ? guidance : undefined,
     });
 
@@ -762,17 +887,88 @@ export async function runDeveloperEffect(
     const logPath = developerSessionLogPath(sessionId);
     patchRunningSession(sessionId, { logPath, worktreePath });
     setLiveIntent(issue.id, `Developer · session running (round ${round})`);
-    const sampler = startActivitySampler({ issueId: issue.id, role: "developer", round, logPath });
+
+    // NOT-172: when a retry/recovery begins, record which prior work it actually
+    // reuses — existing resolution/recovery paths are the sources (reused
+    // checkout, existing commit/branch, carried SHA-scoped receipt). A retry
+    // with none of these is recorded with empty kinds: an explicit cold retry.
+    if (retryReason) {
+      try {
+        const reuseKinds: Array<"worktree" | "commit" | "verification_receipt"> = [];
+        if (worktreeReused) reuseKinds.push("worktree");
+        if (priorVerificationReceipt) reuseKinds.push("verification_receipt");
+        if (reuseBranch) {
+          const ahead = await commitsAhead({
+            worktreePath,
+            baseRef: `origin/${baseBranch}`,
+          }).catch(() => null);
+          if ((ahead !== null && ahead > 0) || (ahead === null && issue.branch != null)) {
+            reuseKinds.push("commit");
+          }
+        }
+        emitRetryReuse({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          workerSessionId: sessionId,
+          role: "developer",
+          stage,
+          round,
+          kinds: reuseKinds,
+          retryReason,
+        });
+      } catch {
+        // reuse evidence must never fail the attempt itself
+      }
+    }
+
+    // NOT-172: the sampler also watches HEAD read-only and records the `commit`
+    // checkpoint once when HEAD first differs from the session input SHA
+    // (captured at worktree-ready above and persisted on the session).
+    const sampler = startActivitySampler({
+      issueId: issue.id,
+      role: "developer",
+      round,
+      logPath,
+      workerSessionId: sessionId,
+      headCheck: {
+        inputSha: samplerInputSha,
+        readHead: () => revParseHead(worktreePath).catch(() => null),
+        onCommit: ({ observedSha, observedAt }) => {
+          try {
+            emitCheckpointObserved({
+              issueId: issue.id,
+              workflowInstanceId: instance.id,
+              workerSessionId: sessionId,
+              role: "developer",
+              stage,
+              round,
+              kind: "commit",
+              observedSha,
+              observedAt,
+              origin: "sampler",
+              inputSha: samplerInputSha,
+              samplingPrecisionMs: 10_000,
+            });
+          } catch {
+            // checkpoint evidence must never fail the attempt itself
+          }
+        },
+      },
+    });
 
     const spawnStartedAt = Date.now();
+    const agentModel = snapshot?.model ?? null;
+    let agentPid: number | null = null;
     let spawned;
     try {
       spawned = await deps.spawn({
         sessionId,
         runtime,
         policy,
-        model: snapshot?.model ?? null,
+        model: agentModel,
         effort: snapshot?.effort ?? null,
+        // Frozen profile budget → Muse's `--max-model-steps`; the other runtimes ignore it.
+        maxModelSteps: parsePhaseBudget(snapshot?.budgetJson)?.maxTurns ?? null,
         prompt,
         cwd: worktreePath,
         timeoutMs: developerEffectConfig.sessionTimeoutMs,
@@ -786,31 +982,157 @@ export async function runDeveloperEffect(
         // gone before presuming it dead on an expired lease.
         // NOT-131: the start time is read here, while the process is known to be this
         // spawn's child, so a successor coordinator can still identify it after a restart.
-        onSpawn: (pid) =>
-          recordSessionProcess(sessionId, pid, COORDINATOR_PROCESS_OWNER, readProcessStartTime(pid)),
+        // NOT-169: the onSpawn callback is the source of truth for agent.started — it
+        // fires only after the CLI child actually exists, never before slot acquisition.
+        onSpawn: (pid) => {
+          agentPid = pid;
+          recordSessionProcess(sessionId, pid, COORDINATOR_PROCESS_OWNER, readProcessStartTime(pid));
+          try {
+            emitAgentStarted({
+              issueId: issue.id,
+              workflowInstanceId: instance.id,
+              workerSessionId: sessionId,
+              role: "developer",
+              stage,
+              round,
+              runtime,
+              model: agentModel,
+              pid,
+            });
+          } catch {
+            // boundary evidence must never fail the attempt itself
+          }
+        },
       });
+    } catch (err) {
+      // NOT-169: a spawn that threw after process creation still closes the agent
+      // interval; a throw before onSpawn leaves setup evidence only (no fake agent).
+      if (agentPid !== null) {
+        try {
+          emitAgentCompleted({
+            issueId: issue.id,
+            workflowInstanceId: instance.id,
+            workerSessionId: sessionId,
+            role: "developer",
+            stage,
+            round,
+            runtime,
+            model: agentModel,
+            pid: agentPid,
+            exitCode: null,
+            timedOut: false,
+            aborted: Boolean(ctx.signal.aborted),
+            thrown: true,
+          });
+        } catch {
+          // ignore
+        }
+      }
+      throw err;
     } finally {
       sampler.stop();
+    }
+    // NOT-225: deps.spawn resolved — the worker's process existed. Every throw from
+    // here on (usage, receipt, push, PR verify, checks poll) is post-spawn and must
+    // not be mislabeled as a session that could not start.
+    sessionStarted = true;
+    // NOT-169: exactly one agent.completed per spawned process, at child exit and before
+    // any receipt mining, usage extraction, or validation. Raw outcome only — no
+    // failure classification.
+    if (agentPid !== null) {
+      try {
+        emitAgentCompleted({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          workerSessionId: sessionId,
+          role: "developer",
+          stage,
+          round,
+          runtime,
+          model: spawned.muse?.confirmedModel ?? agentModel,
+          pid: agentPid,
+          exitCode: spawned.exitCode,
+          timedOut: spawned.timedOut,
+          aborted: Boolean(ctx.signal.aborted),
+          thrown: false,
+        });
+      } catch {
+        // ignore
+      }
     }
 
     // NOT-130: record suite evidence even when the session later fails/times out — an
     // interrupted-but-verified tip must carry the receipt into the retry prompt.
-    await persistVerificationReceiptIfAny({
+    const verificationReceipt = await persistVerificationReceiptIfAny({
       issueId: issue.id,
       sessionId,
       logPath: spawned.logPath,
       worktreePath,
     });
 
+    // NOT-172: durable checkpoints at the existing post-session success points.
+    // All read-only and idempotent per (session, kind): when the sampler already
+    // recorded the commit, the session_end re-emit is a no-op.
+    try {
+      if (verificationReceipt) {
+        emitCheckpointObserved({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          workerSessionId: sessionId,
+          role: "developer",
+          stage,
+          round,
+          kind: "verification_receipt",
+          observedSha: verificationReceipt.headSha,
+        });
+      }
+      const endHead = await revParseHead(worktreePath).catch(() => null);
+      // A null baseline means HEAD was unreadable at session start, so a commit
+      // here cannot be attributed to this session (it may be inherited from a
+      // reused branch) — skip rather than misattribute.
+      if (endHead && samplerInputSha && endHead !== samplerInputSha) {
+        const endAhead = await commitsAhead({
+          worktreePath,
+          baseRef: `origin/${baseBranch}`,
+        }).catch(() => null);
+        if ((endAhead !== null && endAhead > 0) || (endAhead === null && issue.branch != null)) {
+          emitCheckpointObserved({
+            issueId: issue.id,
+            workflowInstanceId: instance.id,
+            workerSessionId: sessionId,
+            role: "developer",
+            stage,
+            round,
+            kind: "commit",
+            observedSha: endHead,
+            origin: "session_end",
+            inputSha: samplerInputSha,
+          });
+        }
+      }
+    } catch {
+      // checkpoint evidence must never fail the attempt itself
+    }
+
     // Recorded unconditionally, before any early return below: cost is incurred the
     // moment the process runs, whether or not the session subsequently timed out,
     // exited non-zero, or failed later-stage verification.
-    const usage = extractSpawnUsage(spawned.logPath, runtime);
+    // Muse reports usage only in its on-disk session log, already parsed by the spawn; tokens stay
+    // null when it did not report them and cost is always null (Muse has no cost figure, NOT-177).
+    const usage = spawned.muse
+      ? {
+          tokensIn: spawned.muse.usage.inputTokens,
+          tokensOut: spawned.muse.usage.outputTokens,
+          costUsd: spawned.muse.usage.costUsd,
+        }
+      : extractSpawnUsage(spawned.logPath, runtime);
     recordUsageEvent({
       issueId: issue.id,
       workerSessionId: sessionId,
       role: "developer",
       runtime,
+      // What actually ran: Muse's server-confirmed model, else what the frozen profile asked for.
+      model: spawned.muse?.confirmedModel ?? snapshot?.model ?? null,
       durationMs: Date.now() - spawnStartedAt,
       ...usage,
     });
@@ -827,7 +1149,31 @@ export async function runDeveloperEffect(
       workerAuthority = null;
     }
 
-    const usageCap = recordUsageCapFromLog(spawned.logPath, runtime);
+    // NOT-181: Muse cannot disable `cron_*`, so a session that touched any is failed and handed to
+    // the operator before anything else is decided. Detection only — a scheduled job could already
+    // have fired inside the process; its per-attempt data dir (and the job store in it) is gone.
+    if (spawned.muse && spawned.muse.cronCalls.length > 0) {
+      createIssueArtifact({
+        issueId: issue.id,
+        workerSessionId: sessionId,
+        kind: "developer_transcript",
+        author: "system",
+        blobPath: spawned.logPath,
+      });
+      return {
+        kind: "muse_cron_used",
+        reason:
+          `muse_cron_used: the Muse session called ${[...new Set(spawned.muse.cronCalls)].join(", ")}, ` +
+          `which Muse cannot disable. Worktree ${worktreePath} and session log ${spawned.logPath} were left ` +
+          `for inspection; nothing was pushed.`,
+        path: worktreePath,
+        logPath: spawned.logPath,
+      };
+    }
+
+    const usageCap = spawned.muse
+      ? recordMuseUsageCap(spawned.muse.failure)
+      : recordUsageCapFromLog(spawned.logPath, runtime);
     if (usageCap) {
       const clean = await isWorktreeClean(worktreePath).catch(() => false);
       if (!clean) {
@@ -881,6 +1227,24 @@ export async function runDeveloperEffect(
         const salvageKind = spawned.timedOut ? "timeout" : "crash";
         const salvaged = await salvageDirtyWorktree(worktreePath, salvageKind);
         if (salvaged.ok) {
+          // NOT-172: durable salvage-commit checkpoint at the existing success point.
+          try {
+            emitCheckpointObserved({
+              issueId: issue.id,
+              workflowInstanceId: instance.id,
+              workerSessionId: sessionId,
+              role: "developer",
+              stage,
+              round,
+              kind: "commit",
+              observedSha: salvaged.commitSha,
+              origin: "salvage",
+              inputSha: samplerInputSha,
+              branch: branchName,
+            });
+          } catch {
+            // checkpoint evidence must never fail the attempt itself
+          }
           // Measure progress while the worktree still exists (same rule as the clean
           // timeout/crash path below), then remove. Salvage always lands ≥1 tip commit.
           const crashReason = reasonForSessionCrash({
@@ -987,21 +1351,64 @@ export async function runDeveloperEffect(
     }
 
     setLiveIntent(issue.id, `Developer · pushing branch (round ${round})`);
-    const pushed = await pushBranch({ worktreePath, branch: branchName });
+    // NOT-220: pushBranch retries once with a lease pin when the divergence is
+    // proven safe (remote tip is issue.headSha, remote-only commits
+    // patch-equivalent locally). Anything else keeps the escalation below.
+    const pushed = await pushBranch({
+      worktreePath,
+      branch: branchName,
+      lastKnownHeadSha: issue.headSha,
+    });
     if (!pushed.ok) {
-      // Local commits preserved either way — never discarded, never force-retried.
+      // Local commits preserved either way — never discarded, never force-retried
+      // beyond the proven-equivalent lease recovery inside pushBranch. The worktree is
+      // deliberately NOT removed here: it is the preserved checkout a later
+      // push_with_lease resolution pushes from (NOT-221).
       return pushed.rejected
         ? {
             kind: "unpushed_commit",
             reason: pushed.reason,
             recoveryCommands: pushed.facts?.recoveryCommands,
+            branch: branchName,
+            ...(pushed.facts ? { pushFacts: pushed.facts } : {}),
+            worktreePath,
           }
         : { kind: "adapter_failure", reason: pushed.reason };
     }
     milestone("branch.pushed", `Developer · branch pushed (${ahead} commit${ahead === 1 ? "" : "s"})`, {
       branch: branchName,
       commitsAhead: ahead,
+      // NOT-220: a lease-recovered rewrite is auditable — old and new SHA.
+      ...(pushed.leasePush
+        ? { viaLeasePush: true, oldSha: pushed.leasePush.oldSha, newSha: pushed.leasePush.newSha }
+        : {}),
     });
+    // NOT-219: the worker may have committed on a side branch while this push just
+    // published HEAD to the issue branch — the managed clone's local issue-branch ref
+    // is then still at its pre-session tip. Fast-forward it to the pushed SHA so a
+    // leftover worktree or later reuse never sees a stale ref. Strictly a
+    // fast-forward: local-only commits are never discarded (and the next repair
+    // round's fetch heals a ref this missed anyway), so this stays best-effort.
+    const pushedHead = await revParseHead(worktreePath).catch(() => null);
+    if (pushedHead) {
+      await fastForwardLocalBranchToSha({ repo: repoPath, branch: branchName, sha: pushedHead }).catch(() => false);
+    }
+    // NOT-172: durable branch-pushed checkpoint at the existing success point.
+    try {
+      emitCheckpointObserved({
+        issueId: issue.id,
+        workflowInstanceId: instance.id,
+        workerSessionId: sessionId,
+        role: "developer",
+        stage,
+        round,
+        kind: "branch_pushed",
+        observedSha: pushedHead,
+        branch: branchName,
+      });
+    } catch {
+      // checkpoint evidence must never fail the attempt itself
+    }
     // From here on the branch is safely on the remote — a worktree removal on any
     // subsequent failure path loses nothing (bestEffortRemove is safe to call).
 
@@ -1146,6 +1553,20 @@ export async function runDeveloperEffect(
       prUrl: prView.url,
     };
   } catch (err) {
+    // NOT-225: only a throw before the worker's process existed (worktree setup,
+    // deck bind, prompt build, deps.spawn) surfaces as "could not start" — the
+    // NUL-byte spawn throw used to be swallowed upstream as a generic failure with
+    // no pid and no log. Paths that already set a reason (usage cap, deck failure,
+    // dirty worktree) return above and keep theirs. A throw after a successful
+    // spawn (transient git fetch, PR-checks poll, gh verify) keeps the pre-existing
+    // adapter_failure: the session did start, run, and possibly commit, so calling
+    // it "could not start" would feed a false reason into the retry prompt.
+    if (!sessionStarted) {
+      const message = err instanceof Error ? err.message : String(err);
+      const reason = `Developer session could not start: ${message.slice(0, 300)}`;
+      console.error("[coordinator] developer session could not start", { issueId: issue.id, sessionId, round, err });
+      return { kind: "session_failed", reason };
+    }
     return { kind: "adapter_failure", reason: String(err) };
   } finally {
     // The worker's own subprocess is done (or never started) by every path through this

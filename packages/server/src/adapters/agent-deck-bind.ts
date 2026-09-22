@@ -23,6 +23,7 @@ import { getAgentDeckMcpUrl } from "./agent-deck.js";
 import { getWorkerMcpConfigDir } from "../paths.js";
 import { resolveAmbientCodexHome } from "../cli-env.js";
 import { codexMcpServersTable } from "./codex-scoped-config.js";
+import { ensureWorktreeExcluded } from "./worktree-exclude.js";
 
 const CODEX_HOME_ENV_VAR = "CODEX_HOME";
 
@@ -221,31 +222,8 @@ function isCursorMcpTracked(worktreePath: string): boolean {
   return result.ok;
 }
 
-/** Append `/.cursor/mcp.json` idempotently to git's info/exclude.
- *
- * Note: for a linked worktree, `git rev-parse --git-path info/exclude` resolves to the
- * *main* repository's `.git/info/exclude` (shared across all worktrees of that repo), not
- * a per-worktree file. The `/.cursor/mcp.json` pattern is still correct per worktree root;
- * we rewrite with a single occurrence so concurrent preparations can't leave duplicate lines. */
 function ensureCursorMcpExcluded(worktreePath: string): void {
-  const excludePathResult = gitCaptured(worktreePath, ["rev-parse", "--git-path", "info/exclude"]);
-  if (!excludePathResult.ok) {
-    throw new Error(`could not resolve git info/exclude: ${excludePathResult.stderr || "unknown error"}`);
-  }
-  const excludePath = path.resolve(worktreePath, excludePathResult.stdout.trim());
-  fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-  const line = "/.cursor/mcp.json";
-  let existing = "";
-  try {
-    existing = fs.readFileSync(excludePath, "utf8");
-  } catch {
-    existing = "";
-  }
-  const kept = existing
-    .split(/\r?\n/)
-    .filter((l) => l.trim() !== "" && l.trim() !== line);
-  kept.push(line);
-  fs.writeFileSync(excludePath, `${kept.join("\n")}\n`, { mode: 0o644 });
+  ensureWorktreeExcluded(worktreePath, "/.cursor/mcp.json");
 }
 
 /**
@@ -270,6 +248,12 @@ async function materializeWorkerMcpConfig(opts: {
   const mcpBase = getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "");
   const mcpUrl = `${mcpBase}/mcp`;
   const headers = deckLaunchHeaders(opts.deckId, opts.worktreePath);
+
+  // Muse Code has no Agent Deck / MCP wiring (NOT-178 non-goal; NOT-181 owns it). Refuse before
+  // anything is written rather than fall through to the Claude config below.
+  if (opts.runtime === "muse_code") {
+    throw new Error("Muse Code does not support Agent Deck MCP configuration");
+  }
 
   if (opts.runtime === "codex_local") {
     const codexHome = path.join(getWorkerMcpConfigDir(), `codex-home-${opts.deckId.slice(0, 8)}-${randomUUID()}`);
@@ -321,7 +305,7 @@ async function materializeWorkerMcpConfig(opts: {
     return { mcpConfigPath: filePath };
   }
 
-  // claude_code
+  // claude_code — the only runtime left.
   const dir = getWorkerMcpConfigDir();
   const filePath = path.join(dir, `claude-mcp-${opts.deckId.slice(0, 8)}-${randomUUID()}.json`);
   try {

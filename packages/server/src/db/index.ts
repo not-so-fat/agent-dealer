@@ -157,6 +157,33 @@ export function migrate(): void {
     db.exec("ALTER TABLE worker_sessions ADD COLUMN process_started_at TEXT");
   }
 
+  // NOT-181: the model a session actually ran (Muse's server-confirmed one). Existing rows stay
+  // NULL, which every reader treats as "not recorded".
+  const usageEventCols = db.prepare("PRAGMA table_info(usage_events)").all() as Array<{ name: string }>;
+  if (!usageEventCols.some((c) => c.name === "model")) {
+    db.exec("ALTER TABLE usage_events ADD COLUMN model TEXT");
+  }
+
+  // NOT-170 round 3: per-line sequence in the activity idempotency key so parallel
+  // tool blocks on one NDJSON line persist as distinct rows. Existing rows keep the
+  // DEFAULT 0 (single-entry lines are unaffected). The old
+  // (worker_session_id, source_offset) unique index must go: it would reject the
+  // second entry of a two-block line. Rebuild only when the stored index definition
+  // predates source_seq, so steady-state migrate() stays a no-op.
+  const activityCols = db.prepare("PRAGMA table_info(session_activity_events)").all() as Array<{ name: string }>;
+  if (!activityCols.some((c) => c.name === "source_seq")) {
+    db.exec("ALTER TABLE session_activity_events ADD COLUMN source_seq INTEGER NOT NULL DEFAULT 0");
+  }
+  const activityIdem = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_session_activity_idempotency'")
+    .get() as { sql: string | null } | undefined;
+  if (activityIdem && activityIdem.sql && !activityIdem.sql.includes("source_seq")) {
+    db.exec("DROP INDEX idx_session_activity_idempotency");
+    db.exec(`CREATE UNIQUE INDEX idx_session_activity_idempotency
+      ON session_activity_events(worker_session_id, source_offset, source_seq)
+      WHERE source_offset IS NOT NULL`);
+  }
+
   // Tighten the workflow-event idempotency index to UNIQUE for DBs created before the
   // constraint (schema.sql's IF NOT EXISTS won't upgrade an existing non-unique index).
   // A pre-fix DB may already hold duplicate keys — the old index was non-unique and
@@ -399,6 +426,37 @@ export function migrate(): void {
         ON queue_entries(issue_id) WHERE state = 'queued';
       CREATE INDEX idx_queue_entries_queued_position
         ON queue_entries(position) WHERE state = 'queued';
+    `);
+  }
+
+  // NOT-171: append-only failure-cause evidence for databases created before
+  // schema.sql declared it. schema.sql's CREATE TABLE IF NOT EXISTS covers fresh
+  // databases; this guards the upgrade path the same way queue_entries does.
+  const failureCauses = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'failure_causes'")
+    .get() as { name: string } | undefined;
+  if (!failureCauses) {
+    db.exec(`
+      CREATE TABLE failure_causes (
+        id TEXT PRIMARY KEY,
+        issue_id TEXT NOT NULL,
+        worker_session_id TEXT,
+        workflow_instance_id TEXT,
+        workflow_event_id TEXT,
+        event_cursor INTEGER,
+        code TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        primary_flag INTEGER NOT NULL DEFAULT 0,
+        confidence TEXT NOT NULL,
+        evidence_source TEXT NOT NULL,
+        occurred_at TEXT,
+        raw_reason TEXT NOT NULL,
+        log_path TEXT,
+        quality TEXT NOT NULL DEFAULT 'exact',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_failure_causes_session ON failure_causes(worker_session_id);
+      CREATE INDEX idx_failure_causes_issue ON failure_causes(issue_id);
     `);
   }
 

@@ -33,7 +33,7 @@ const { listWorkItemsForIssue, claimWorkItem, bindWorkItemSession, cancelWorkIte
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listUsageEventsForIssue } = await import("../repository/usage-events.js");
-const { getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
+const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
 const { startWorkflow, resolveHumanActionAndAdvance } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
 const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
@@ -45,7 +45,9 @@ type SpawnFn = typeof realDeveloperSpawn;
 type GithubFn = typeof realGithubAdapter;
 
 before(() => migrate());
-beforeEach(() => getDb().exec("DELETE FROM work_items"));
+// NOT-220's test runs reviewer effects, which record review_publications rows keyed
+// by work item — they must go before work_items or the FK blocks every later test.
+beforeEach(() => getDb().exec("DELETE FROM review_publications; DELETE FROM work_items"));
 after(() => resetEffectHandlers());
 
 let repo: string;
@@ -732,6 +734,122 @@ test("unpushed_commit: the coordinator's own push is rejected by a diverged remo
   execFileSync("git", ["push", "-q", remote, `:${branch}`], { cwd: repo }).toString();
 });
 
+test("NOT-220: a repair round whose rebuild is patch-equivalent to the last pushed head recovers via the lease pin — no human action, auditable branch.pushed", async () => {
+  const { runReviewerEffect } = await import("./reviewer-effect.js");
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+
+  // Round 1 implements the widget for real; round 2 rebuilds the identical patch under
+  // a different message (same diff, always a different SHA) plus follow-up work — the
+  // diverged-but-proven-equivalent shape NOT-220 auto-recovers.
+  let devCalls = 0;
+  const rebuildSpawn: SpawnFn = async (input) => {
+    devCalls++;
+    if (devCalls === 1) return commitingSpawn(input);
+    git(input.cwd, "reset", "--hard", "origin/main");
+    fs.writeFileSync(path.join(input.cwd, "feature.txt"), "implemented\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "implement (rebuilt)");
+    fs.writeFileSync(path.join(input.cwd, "feature2.txt"), "follow-up\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "follow-up work");
+    return { exitCode: 0, transcript: "Implementation conclusion: rebuilt the widget and added follow-up work.", logPath: "/dev/null", timedOut: false };
+  };
+
+  // Round 1 requests changes; round 2 approves — reviewer transcripts must carry the
+  // coordinator-verified SHAs from the prompt or the verdict is rejected.
+  const shasFromPrompt = (prompt: string) => {
+    const baseSha = prompt.match(/"baseSha" to exactly "([0-9a-f]+)"/)?.[1];
+    const headSha = prompt.match(/"headSha" to exactly "([0-9a-f]+)"/)?.[1];
+    if (!baseSha || !headSha) throw new Error("could not extract SHAs from reviewer prompt");
+    return { baseSha, headSha };
+  };
+  let revCalls = 0;
+  const reviewerSpawn = async (input: { prompt: string }) => {
+    revCalls++;
+    const { baseSha, headSha } = shasFromPrompt(input.prompt);
+    const verdict = revCalls === 1 ? "changes_requested" : "approved";
+    const body = {
+      verdict,
+      baseSha,
+      headSha,
+      acceptanceCriteriaAssessment: verdict === "approved" ? "Met." : "Not yet — missing coverage.",
+      evidenceAssessment: "Evidence checked.",
+      findings:
+        verdict === "changes_requested"
+          ? [{ fingerprint: "missing-test", severity: "blocking", title: "No test", rationale: "Add a test." }]
+          : [],
+      risks: [],
+    };
+    return { exitCode: 0, transcript: "```json\n" + JSON.stringify(body) + "\n```\n", logPath: "/dev/null", timedOut: false };
+  };
+
+  // One PR store shared by both handlers: the developer selects by branch, the
+  // reviewer by PR number, and the head always comes from the bare remote.
+  const prsByBranch = new Map<string, { number: number; url: string; base: string }>();
+  const branchByNumber = new Map<number, string>();
+  let nextNumber = 300;
+  const remoteHead = (b: string) => git(remote, "rev-parse", b);
+  const sharedGithub = (): GithubFn => ({
+    async viewPr({ branch: b, number, cwd }) {
+      const name = b ?? (number != null ? branchByNumber.get(number) : undefined) ?? (cwd ? git(cwd, "rev-parse", "--abbrev-ref", "HEAD") : undefined);
+      if (!name) return null;
+      const pr = prsByBranch.get(name);
+      if (!pr) return null;
+      if (number != null && number !== pr.number) return null;
+      return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: name, headRefOid: remoteHead(name), isDraft: true };
+    },
+    async createDraftPr({ base, head }) {
+      if (!head) throw new Error("fakeGithub.createDraftPr requires an explicit --head");
+      const number = nextNumber++;
+      const url = `https://github.com/o/r/pull/${number}`;
+      prsByBranch.set(head, { number, url, base });
+      branchByNumber.set(number, head);
+      return { ok: true, number, url };
+    },
+    async checksSnapshot() {
+      return "success";
+    },
+    async publishReview({ event }) {
+      return { ok: true, event, usedCommentFallback: false };
+    },
+  });
+  const github = sharedGithub();
+
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: rebuildSpawn, github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: reviewerSpawn as never, github: github as never }));
+  startWorkflow(issueId);
+  await pump(20);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(devCalls, 2, "exactly two developer rounds must run");
+  assert.equal(issue.status, "final_review", "the lease-recovered round must complete, not escalate");
+  assert.equal(issue.currentRound, 2);
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.actionType === "policy_escalation").length,
+    0,
+    "a proven-equivalent divergence must not create a human escalation"
+  );
+
+  // Audit: the round-2 branch.pushed carries the lease pin's old and new SHA.
+  const pushedEvents = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "branch.pushed");
+  assert.equal(pushedEvents.length, 2, "both rounds push exactly once");
+  const [first, second] = pushedEvents;
+  assert.ok(!JSON.parse(first.payloadJson!).viaLeasePush, "round 1 is a plain push");
+  const leasePayload = JSON.parse(second.payloadJson!);
+  assert.equal(leasePayload.viaLeasePush, true);
+  assert.ok(leasePayload.oldSha, "audit event must contain the old (pre-rewrite) SHA");
+  assert.ok(leasePayload.newSha, "audit event must contain the new (published) SHA");
+  assert.notEqual(leasePayload.oldSha, leasePayload.newSha);
+  assert.equal(issue.headSha, leasePayload.newSha);
+  assert.equal(git(remote, "rev-parse", branch), leasePayload.newSha, "the remote carries the rebuilt tip");
+
+  // This is the only test in the file that registers a reviewer handler — restore the
+  // placeholders so later tests keep the no-reviewer-handler assumption they were
+  // written against (each re-registers its own developer handler).
+  resetEffectHandlers();
+});
+
 test("NOT-88: a leftover clean worktree from a resolved unpushed_commit escalation is reused on Resume, not a worktree-add collision", async () => {
   const issueId = await makeIssue();
   const branch = issueBranchName(issueId);
@@ -933,6 +1051,165 @@ test("baseSha is resolved against the fetched base ref, not a stale local branch
       staleLocalBase,
       "sanity: the fetched and stale-local bases must actually differ, or this test can't tell them apart"
     );
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-197: with a lagging local main, a new developer branch starts at the origin/main tip", async () => {
+  // The NOT-197 incident: the cached clone's local main lagged origin/main, so branches
+  // cut from it conflicted with already-merged work. Unlike the test above, the fake
+  // agent does NOT merge origin/main itself — the branch must already start there.
+  const isoRepo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-197-repo-"));
+  const isoRemote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-197-remote-"));
+  try {
+    git(isoRepo, "init", "-q", "-b", "main");
+    git(isoRepo, "config", "user.email", "test@example.com");
+    git(isoRepo, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(isoRepo, "README.md"), "hello\n");
+    git(isoRepo, "add", ".");
+    git(isoRepo, "commit", "-q", "-m", "init");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", isoRemote]);
+    git(isoRepo, "remote", "add", "origin", isoRemote);
+    git(isoRepo, "push", "-q", "origin", "main");
+    const staleLocalMain = git(isoRepo, "rev-parse", "main");
+
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-197-other-"));
+    execFileSync("git", ["clone", "-q", isoRemote, other]);
+    git(other, "config", "user.email", "test@example.com");
+    git(other, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(other, "upstream-change.txt"), "z");
+    git(other, "add", ".");
+    git(other, "commit", "-q", "-m", "upstream change");
+    git(other, "push", "-q", "origin", "main");
+    const originTip = git(other, "rev-parse", "HEAD");
+    fs.rmSync(other, { recursive: true, force: true });
+    assert.notEqual(staleLocalMain, originTip, "the local main must lag origin/main for this test to mean anything");
+
+    const dev = createAgent({ name: `dev-197-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const rev = createAgent({ name: `rev-197-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const issueId = createIssue({
+      title: "Fresh base",
+      acceptanceCriteria: "works",
+      repo: isoRepo,
+      baseBranch: "main",
+      developerAgentId: dev.id,
+      reviewerAgentId: rev.id,
+      maxReviewRounds: 3,
+      maxInfraAttempts: 3,
+      source: "manual"}).id;
+
+    const isoPrs = new Map<string, { number: number; url: string; base: string }>();
+    const isoGithub: GithubFn = {
+      async viewPr({ branch }) {
+        if (!branch) throw new Error("isoGithub.viewPr requires an explicit branch — bare current-branch lookup is the NOT-82 bug");
+        const pr = isoPrs.get(branch);
+        if (!pr) return null;
+        return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: branch, headRefOid: git(isoRemote, "rev-parse", branch), isDraft: true };
+      },
+      async createDraftPr({ base, head }) {
+        if (!head) throw new Error("isoGithub.createDraftPr requires an explicit --head — bare create is the NOT-82 bug");
+        isoPrs.set(head, { number: 1, url: "https://github.com/o/r/pull/1", base });
+        return { ok: true, number: 1, url: "https://github.com/o/r/pull/1" };
+      },
+      async checksSnapshot() {
+        return "success";
+      },
+      async publishReview() {
+        throw new Error("publishReview is unused by the developer effect");
+      }};
+
+    registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: isoGithub }));
+    startWorkflow(issueId);
+    await pump(1);
+
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.status, "reviewing");
+    const branch = `issue-${issueId}`;
+    assert.equal(issue.branch, branch);
+    assert.equal(
+      git(isoRepo, "rev-parse", `${branch}^`),
+      originTip,
+      "the new branch must be cut from the origin/main tip, not the stale local main"
+    );
+    assert.equal(issue.baseSha, originTip, "base_sha must equal the fetched origin/main tip");
+    assert.equal(git(isoRepo, "rev-parse", "main"), staleLocalMain, "sanity: the local main is still stale — the fix fetches, it does not move local branches");
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-197: a failed pre-branch fetch defers the start without a branch, a spawn, or an attempt", async () => {
+  // origin points at nothing fetchable: the effect must defer (worker.deferred, item
+  // pending, budgets untouched) instead of cutting the branch from the stale local base.
+  const isoRepo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-197fail-repo-"));
+  const isoRemote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-197fail-remote-"));
+  try {
+    git(isoRepo, "init", "-q", "-b", "main");
+    git(isoRepo, "config", "user.email", "test@example.com");
+    git(isoRepo, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(isoRepo, "README.md"), "hello\n");
+    git(isoRepo, "add", ".");
+    git(isoRepo, "commit", "-q", "-m", "init");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", isoRemote]);
+    git(isoRepo, "remote", "add", "origin", isoRemote);
+    git(isoRepo, "push", "-q", "origin", "main");
+    git(isoRepo, "remote", "set-url", "origin", path.join(isoRemote, "does-not-exist.git"));
+
+    const dev = createAgent({ name: `dev-197f-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const rev = createAgent({ name: `rev-197f-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const issueId = createIssue({
+      title: "Fetch fails",
+      acceptanceCriteria: "works",
+      repo: isoRepo,
+      baseBranch: "main",
+      developerAgentId: dev.id,
+      reviewerAgentId: rev.id,
+      maxReviewRounds: 3,
+      maxInfraAttempts: 3,
+      source: "manual"}).id;
+
+    let spawnCalled = false;
+    const spySpawn: SpawnFn = async () => {
+      spawnCalled = true;
+      return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false };
+    };
+    registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: spySpawn, github: fakeGithub() }));
+    startWorkflow(issueId);
+    await pump(1);
+
+    assert.equal(spawnCalled, false, "nothing may spawn when the base could not be fetched");
+    assert.equal(await branchExists(isoRepo, `issue-${issueId}`), false, "no branch may be created from a base that was never confirmed");
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.branch, null);
+    assert.equal(issue.baseSha, null);
+    assert.equal(issue.infraAttempts, 0, "a deferred start spends no infra attempt");
+    assert.equal(issue.currentRound, 1);
+    assert.notEqual(issue.status, "needs_human");
+    assert.match(issue.currentIntent ?? "", /Waiting for network/);
+
+    const { listWorkItemsForIssue } = await import("../repository/work-items.js");
+    const items = listWorkItemsForIssue(issueId);
+    assert.equal(items.length, 1);
+    assert.equal(items[0]!.status, "pending", "the item waits, it is not finished or dead-lettered");
+    assert.equal(items[0]!.attemptCount, 0, "the claim-time attempt bump is reverted");
+    assert.ok(
+      Date.parse(items[0]!.availableAt) > Date.parse(items[0]!.updatedAt),
+      "the next start is gated behind a wait"
+    );
+
+    assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
+    const events = listWorkflowEventsForIssue(issueId);
+    const deferrals = events.filter((e) => e.type === "worker.deferred");
+    assert.ok(deferrals.length > 0);
+    const payload = JSON.parse(deferrals[0]!.payloadJson ?? "{}");
+    assert.equal(payload.outcome, "base_fetch_failed");
+    assert.equal(events.some((e) => e.type === "worker.failed"), false, "a deferred start is not a failure");
+
+    const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
+    assert.equal(listWorkerSessionsForIssue(issueId).every((s) => s.status === "cancelled"), true);
   } finally {
     fs.rmSync(isoRepo, { recursive: true, force: true });
     fs.rmSync(isoRemote, { recursive: true, force: true });
@@ -1283,6 +1560,163 @@ test("NOT-130: receipt is dropped from the retry prompt when HEAD moved after it
   assert.doesNotMatch(prompts[1]!, /Prior verification receipt/);
 });
 
+test("NOT-219: a repair round after a side-branch round 1 starts at the pushed tip and pushes fast-forward", async () => {
+  // The NOT-171 incident end to end: round 1's worker commits on a side branch, so the
+  // clone's local issue branch never advances — Dealer pushes HEAD to origin/<branch>.
+  // A repair round must then start at that pushed tip (not the stale base) so its own
+  // push is a fast-forward instead of a false-diverged `unpushed_commit` escalation.
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  const base = git(repo, "rev-parse", "main");
+
+  const sideBranchSpawn: SpawnFn = async (input) => {
+    git(input.cwd, "checkout", "-qb", "feat/side-work");
+    fs.writeFileSync(path.join(input.cwd, "feature.txt"), "implemented\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "implement");
+    return { exitCode: 0, transcript: "Implementation conclusion: added the widget.", logPath: "/dev/null", timedOut: false };
+  };
+
+  let checksPass = false;
+  const github = fakeGithub();
+  github.checksSnapshot = async () => (checksPass ? "success" : "failure");
+
+  let spawnCalls = 0;
+  let repairStartHead = "";
+  let repairStartBranch = "";
+  let repairStartRemoteAhead = -1;
+  const alternatingSpawn: SpawnFn = async (input) => {
+    spawnCalls++;
+    if (spawnCalls === 1) return sideBranchSpawn(input);
+    // Repair round: observe the start BEFORE committing anything.
+    repairStartHead = git(input.cwd, "rev-parse", "HEAD");
+    repairStartBranch = git(input.cwd, "rev-parse", "--abbrev-ref", "HEAD");
+    repairStartRemoteAhead = Number(git(input.cwd, "rev-list", "--count", `origin/${branch}..HEAD`));
+    // One new commit on top, on the checked-out issue branch like a normal worker.
+    fs.writeFileSync(path.join(input.cwd, "repair.txt"), "repair\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "repair");
+    return { exitCode: 0, transcript: "Implementation conclusion: repaired.", logPath: "/dev/null", timedOut: false };
+  };
+
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: alternatingSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1); // round 1: the push lands, checks fail → infra retry queued
+
+  assert.equal(getIssue(issueId)!.status, "developing");
+  const pushedX = git(remote, "rev-parse", branch);
+  assert.notEqual(pushedX, base, "round 1 must have published a tip beyond base");
+  assert.equal(
+    git(repo, "rev-parse", branch),
+    pushedX,
+    "the post-push fast-forward keeps the clone's local ref at the pushed SHA even though the worker committed on a side branch"
+  );
+
+  // Re-create the pre-fix staleness: the local ref falls back to base while the remote
+  // still holds exactly what round 1 pushed.
+  git(repo, "branch", "-f", branch, base);
+  assert.equal(git(repo, "rev-parse", branch), base);
+
+  checksPass = true;
+  await pump(1); // repair round
+
+  assert.equal(spawnCalls, 2);
+  assert.equal(repairStartBranch, branch);
+  assert.equal(repairStartHead, pushedX, "the repair worktree must start at the pushed tip, not the stale base");
+  assert.equal(repairStartRemoteAhead, 0, "git rev-list --count origin/<branch>..HEAD must be 0 at repair start");
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "the repair push must fast-forward, never escalate as unpushed_commit");
+  assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
+  const repairHead = git(remote, "rev-parse", branch);
+  assert.notEqual(repairHead, pushedX, "the repair round must have published its own commit");
+  assert.equal(issue.headSha, repairHead);
+  assert.equal(git(repo, "rev-parse", branch), repairHead);
+  assert.equal(git(repo, "merge-base", pushedX, repairHead), pushedX, "the repair tip builds on the round-1 tip");
+});
+
+test("NOT-219: a repair round whose origin/<branch> fetch fails defers without spawning or spending an attempt", async () => {
+  // Like NOT-197's pre-branch deferral, but on the reuse path: the branch already exists
+  // locally (round 1 pushed it), then the network breaks — the repair start must defer
+  // as base_fetch_failed instead of starting from the stale local ref.
+  const isoRepo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-219fail-repo-"));
+  const isoRemote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-219fail-remote-"));
+  try {
+    git(isoRepo, "init", "-q", "-b", "main");
+    git(isoRepo, "config", "user.email", "test@example.com");
+    git(isoRepo, "config", "user.name", "Test");
+    fs.writeFileSync(path.join(isoRepo, "README.md"), "hello\n");
+    git(isoRepo, "add", ".");
+    git(isoRepo, "commit", "-q", "-m", "init");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", isoRemote]);
+    git(isoRepo, "remote", "add", "origin", isoRemote);
+    git(isoRepo, "push", "-q", "origin", "main");
+
+    const dev = createAgent({ name: `dev-219f-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const rev = createAgent({ name: `rev-219f-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099"});
+    const issueId = createIssue({
+      title: "Repair fetch fails",
+      acceptanceCriteria: "works",
+      repo: isoRepo,
+      baseBranch: "main",
+      developerAgentId: dev.id,
+      reviewerAgentId: rev.id,
+      maxReviewRounds: 3,
+      maxInfraAttempts: 3,
+      source: "manual"}).id;
+    const branch = issueBranchName(issueId);
+
+    let checksPass = false;
+    const github = fakeGithub();
+    github.checksSnapshot = async () => (checksPass ? "success" : "failure");
+    let spawnCalls = 0;
+    const countingSpawn: SpawnFn = async (input) => {
+      spawnCalls++;
+      return commitingSpawn(input);
+    };
+    registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: countingSpawn, github }));
+    startWorkflow(issueId);
+    await pump(1); // round 1: pushed, checks fail → repair retry queued
+
+    assert.equal(spawnCalls, 1);
+    assert.equal(getIssue(issueId)!.status, "developing");
+    assert.equal(await branchExists(isoRepo, branch), true, "round 1 must have left the local branch behind");
+    assert.ok(git(isoRepo, "ls-remote", "origin", `refs/heads/${branch}`).length > 0, "round 1 must have pushed the branch");
+    const infraAfterRound1 = getIssue(issueId)!.infraAttempts;
+
+    // Break the network only now, so round 1 proves the setup while the repair starves.
+    git(isoRepo, "remote", "set-url", "origin", path.join(isoRemote, "does-not-exist.git"));
+    await pump(1); // repair start: the origin/<branch> fetch fails → defer
+
+    assert.equal(spawnCalls, 1, "nothing may spawn when the repair branch could not be fetched");
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.infraAttempts, infraAfterRound1, "a deferred start spends no infra attempt");
+    assert.equal(issue.currentRound, 1);
+    assert.notEqual(issue.status, "needs_human");
+    assert.match(issue.currentIntent ?? "", /Waiting for network/);
+
+    const { listWorkItemsForIssue: listItems } = await import("../repository/work-items.js");
+    const items = listItems(issueId);
+    assert.equal(items.filter((i) => i.kind === "developer" && i.status === "pending").length, 1);
+    const pending = items.find((i) => i.kind === "developer" && i.status === "pending")!;
+    assert.equal(pending.attemptCount, 0, "the claim-time attempt bump is reverted");
+    assert.ok(Date.parse(pending.availableAt) > Date.parse(pending.updatedAt), "the next start is gated behind a wait");
+
+    const events = listWorkflowEventsForIssue(issueId);
+    const deferrals = events.filter((e) => e.type === "worker.deferred");
+    assert.ok(deferrals.length > 0);
+    assert.equal(JSON.parse(deferrals[deferrals.length - 1]!.payloadJson ?? "{}").outcome, "base_fetch_failed");
+
+    const { listWorkerSessionsForIssue: listSessions } = await import("../repository/worker-sessions.js");
+    const sessions = listSessions(issueId).filter((s) => s.role === "developer");
+    assert.equal(sessions.length, 2, "round 1 ran; the repair attempt never spawned");
+    assert.equal(sessions[sessions.length - 1]!.status, "cancelled", "the unfired repair session is cancelled, not failed");
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
 test("NOT-130: a green suite on a dirty worktree is not persisted as tip evidence", async () => {
   const issueId = await makeIssue();
   const logPath = writeVerificationLog({
@@ -1367,4 +1801,88 @@ test("NOT-130: checks_failed retry does not carry a prior green receipt into the
     /Prior verification receipt/,
     "CI-rejected tip must not re-authorize skip-suite on a later crash retry"
   );
+});
+
+/** Builds a direct-call EffectContext like worker-loop's session setup (claim → session → bind → start). */
+async function directDeveloperCtx(issueId: string) {
+  const { buildProfileSnapshot, serializeProfileSnapshot } = await import("./profile-snapshot.js");
+  const claimed = claimWorkItem(`test-${issueId}`, { leaseMs: 60_000 })!;
+  const agent = getIssue(issueId)!.developerAgentId
+    ? (await import("../repository/agents.js")).getAgent(getIssue(issueId)!.developerAgentId!)!
+    : null;
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: claimed.round,
+    agentId: agent?.id ?? null,
+    runtime: "claude_code",
+    profileSnapshotJson: agent
+      ? serializeProfileSnapshot(buildProfileSnapshot(agent, "developer"))
+      : undefined,
+  });
+  assert.ok(bindWorkItemSession(claimed.id, session.id, claimed.leaseToken!));
+  startSession(session.id);
+  return {
+    workItem: { ...claimed, workerSessionId: session.id },
+    issue: getIssue(issueId)!,
+    instance: getActiveWorkflowInstance(issueId)!,
+    signal: new AbortController().signal,
+  };
+}
+
+// NOT-225: a setup/spawn throw (e.g. deps.spawn rejecting, or the NUL-byte spawn
+// throw pre-sanitize) must surface as session_failed naming the setup failure —
+// not a reason-less "Worker session failed or crashed" with no pid and no log.
+test("NOT-225: a developer setup/spawn throw surfaces as session_failed with a 'could not start' reason", async () => {
+  const issueId = await makeIssue();
+  startWorkflow(issueId);
+  const ctx = await directDeveloperCtx(issueId);
+
+  const throwingSpawn: SpawnFn = async () => {
+    throw new Error("boom");
+  };
+  const outcome = await runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: throwingSpawn, github: fakeGithub() });
+
+  assert.equal(outcome.kind, "session_failed");
+  const reason = (outcome as { reason?: string }).reason ?? "";
+  assert.match(reason, /could not start/, "the reason names the setup failure");
+  assert.match(reason, /boom/, "the reason carries the underlying error");
+});
+
+test("NOT-225: the worker.failed timeline event for a developer spawn throw carries the 'could not start' reason", async () => {
+  const issueId = await makeIssue();
+  const throwingSpawn: SpawnFn = async () => {
+    throw new Error("boom");
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: throwingSpawn, github: fakeGithub() }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const failed = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "worker.failed");
+  assert.ok(failed.length >= 1, "a failed developer session records a worker.failed event");
+  const payload = JSON.parse(failed[failed.length - 1]!.payloadJson!) as { reason?: string };
+  assert.match(payload.reason ?? "", /could not start/);
+  assert.match(payload.reason ?? "", /boom/);
+});
+
+// NOT-225 repair round 2: the outer catch spans deck-bind/spawn AND all post-spawn
+// verification, but only a pre-spawn throw is a session that "could not start". A
+// transient failure after a successful spawn (here: gh pr view throwing after the
+// agent committed and the branch pushed) must keep the pre-existing adapter_failure
+// — mislabeling it would feed a false reason into the retry prompt and the timeline.
+test("NOT-225: a post-spawn verification throw stays adapter_failure (not 'could not start')", async () => {
+  const issueId = await makeIssue();
+  startWorkflow(issueId);
+  const ctx = await directDeveloperCtx(issueId);
+
+  const github = fakeGithub();
+  github.viewPr = async () => {
+    throw new Error("gh exploded");
+  };
+  const outcome = await runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github });
+
+  assert.equal(outcome.kind, "adapter_failure", "the session started, ran, and committed — only verification failed");
+  const reason = (outcome as { reason?: string }).reason ?? "";
+  assert.ok(!reason.includes("could not start"), `must not mislabel a started session, got: ${reason}`);
+  assert.match(reason, /gh exploded/, "the underlying verification error is preserved");
 });

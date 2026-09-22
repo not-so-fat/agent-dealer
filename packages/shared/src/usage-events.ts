@@ -11,5 +11,7 @@ export const UsageEvent = z.object({
   costUsd: z.number().nullable(),
   durationMs: z.number().int().nullable(),
   ts: z.string(),
+  /** The model the session ran (NOT-181); null on rows recorded before it existed or when unreported. */
+  model: z.string().nullable().optional(),
 });
 export type UsageEvent = z.infer<typeof UsageEvent>;

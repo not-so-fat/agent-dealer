@@ -23,6 +23,7 @@ const EXPECTED_TABLES = [
   "findings",
   "usage_events",
   "work_items",
+  "session_activity_events",
 ];
 
 test("schema creates every issue-centric table", () => {
@@ -34,6 +35,42 @@ test("schema creates every issue-centric table", () => {
   for (const t of EXPECTED_TABLES) {
     assert.ok(names.includes(t), `expected table ${t} to exist`);
   }
+});
+
+test("session_activity_events is indexed by session/time and idempotent per offset+seq", () => {
+  const db = freshDb();
+  const indexes = db
+    .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'session_activity_events'")
+    .all() as Array<{ name: string; sql: string }>;
+  const names = indexes.map((i) => i.name);
+  assert.ok(names.includes("idx_session_activity_session_time"), "session/time index");
+  assert.ok(names.includes("idx_session_activity_idempotency"), "idempotency index");
+  const idem = indexes.find((i) => i.name === "idx_session_activity_idempotency")!;
+  assert.ok(idem.sql.includes("source_seq"), "idempotency key covers the per-line seq");
+  db.prepare(
+    `INSERT INTO session_activity_events
+       (id, issue_id, worker_session_id, observed_at, source_cursor, source_offset, source_seq,
+        activity_kind, state, call_id, summary, raw_evidence)
+     VALUES ('a1', 'i1', 's1', '2026-09-01T10:00:00.000Z', 0, 100, 0, 'tool_started', 'started', 'tu_1', 'Running', 'log#offset=0')`
+  ).run();
+  // A second entry from the same line (parallel tool block) persists as its own row.
+  db.prepare(
+    `INSERT INTO session_activity_events
+       (id, issue_id, worker_session_id, observed_at, source_cursor, source_offset, source_seq,
+        activity_kind, state, call_id, summary, raw_evidence)
+     VALUES ('a2', 'i1', 's1', '2026-09-01T10:00:00.000Z', 0, 100, 1, 'tool_started', 'started', 'tu_2', 'Running', 'log#offset=0')`
+  ).run();
+  // Same (session, offset, seq) still collides.
+  assert.throws(() =>
+    db
+      .prepare(
+        `INSERT INTO session_activity_events
+           (id, issue_id, worker_session_id, observed_at, source_cursor, source_offset, source_seq,
+            activity_kind, state, call_id, summary, raw_evidence)
+         VALUES ('a3', 'i1', 's1', '2026-09-01T10:00:01.000Z', 0, 100, 0, 'tool_started', 'started', 'tu_1', 'Running', 'log#offset=0')`
+      )
+      .run()
+  );
 });
 
 test("schema enforces at most one active workflow_instance per issue", () => {

@@ -147,3 +147,57 @@ test("snapshot freezes defaultEffort alongside the model", () => {
   const cleared = updateAgent(agent.id, { defaultEffort: null })!;
   assert.equal(buildProfileSnapshot(cleared, "developer").effort, null);
 });
+
+test("a Muse Code profile round-trips through the agent APIs and its frozen snapshot (NOT-178)", async () => {
+  const { MUSE_CODE_CONTRIBUTOR_MODEL } = await import("@agent-dealer/shared");
+  const { parseProfileSnapshot } = await import("@agent-dealer/shared");
+  const created = createAgent({
+    name: "muse",
+    runtime: "muse_code",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
+  assert.equal(getAgent(created.id)!.runtime, "muse_code");
+  // No model given: the pinned contributor model is stored, not null (Muse would otherwise
+  // pick its own profile).
+  assert.equal(created.defaultModel, MUSE_CODE_CONTRIBUTOR_MODEL);
+
+  const snap = buildProfileSnapshot(created, "developer");
+  assert.equal(snap.runtime, "muse_code");
+  assert.equal(snap.model, MUSE_CODE_CONTRIBUTOR_MODEL);
+  assert.deepEqual(parseProfileSnapshot(JSON.stringify(snap)), snap);
+
+  // Editing keeps it a Muse profile, and clearing the model re-pins rather than storing null.
+  const edited = updateAgent(created.id, { name: "muse-2", defaultModel: null })!;
+  assert.equal(edited.runtime, "muse_code");
+  assert.equal(edited.defaultModel, MUSE_CODE_CONTRIBUTOR_MODEL);
+  assert.equal(edited.name, "muse-2");
+
+  // Switching another runtime to Muse also pins.
+  const claude = createAgent({
+    name: "to-muse",
+    runtime: "claude_code",
+    defaultModel: "sonnet",
+    deckId: "00000000-0000-4000-a000-000000000099",
+  });
+  assert.equal(updateAgent(claude.id, { runtime: "muse_code", defaultModel: null })!.defaultModel, MUSE_CODE_CONTRIBUTOR_MODEL);
+});
+
+test("a Muse Code profile is pinned to the contributor model on create and update, never an arbitrary one (NOT-178)", async () => {
+  const { MUSE_CODE_CONTRIBUTOR_MODEL } = await import("@agent-dealer/shared");
+  const deckId = "00000000-0000-4000-a000-000000000099";
+
+  const custom = createAgent({ name: "muse-custom", runtime: "muse_code", defaultModel: "sonnet", deckId });
+  assert.equal(custom.defaultModel, MUSE_CODE_CONTRIBUTOR_MODEL);
+  assert.equal(buildProfileSnapshot(custom, "developer").model, MUSE_CODE_CONTRIBUTOR_MODEL);
+
+  const editedCustom = updateAgent(custom.id, { defaultModel: "gpt-5" })!;
+  assert.equal(editedCustom.defaultModel, MUSE_CODE_CONTRIBUTOR_MODEL);
+
+  // Switching runtime with the model omitted must not carry the old runtime's model across.
+  for (const [runtime, model] of [["claude_code", "sonnet"], ["codex_local", "gpt-5"]] as const) {
+    const existing = createAgent({ name: `to-muse-${runtime}`, runtime, defaultModel: model, deckId });
+    const switched = updateAgent(existing.id, { runtime: "muse_code" })!;
+    assert.equal(switched.defaultModel, MUSE_CODE_CONTRIBUTOR_MODEL, runtime);
+    assert.equal(buildProfileSnapshot(switched, "developer").model, MUSE_CODE_CONTRIBUTOR_MODEL, runtime);
+  }
+});
