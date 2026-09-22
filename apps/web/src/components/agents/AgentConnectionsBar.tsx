@@ -27,7 +27,7 @@ function runtimeCliStatus(
 function githubCliStatus(agents: AgentWithHealth[]): { ok: boolean; detail: string } {
   const blocker = agents
     .flatMap((a) => a.issues)
-    .find((i) => i.code === "github_cli_missing" || i.code === "github_auth");
+    .find((i) => i.code === "github_cli_missing" || i.code === "github_auth" || i.code === "github_unreachable");
   if (blocker) return { ok: false, detail: blocker.message };
   if (agents.length === 0) return { ok: false, detail: "no agent" };
   return { ok: true, detail: "gh ready" };

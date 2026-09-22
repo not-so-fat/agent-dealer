@@ -391,29 +391,101 @@ function claudeUsesThirdPartyProvider(): boolean {
  */
 export async function githubIssuesUncached(): Promise<AgentHealthIssue[]> {
   const status = await runCommand("gh", ["auth", "status"]);
-  const out = status.output.toLowerCase();
+  return classifyGithubAuthStatus({
+    ok: status.ok,
+    output: status.output,
+    timedOut: status.timedOut,
+  });
+}
+
+const GITHUB_CLI_MISSING_MESSAGE = "gh CLI not found — install GitHub CLI (`gh`)";
+const GITHUB_AUTH_MESSAGE = "Run `gh auth login` — GitHub CLI auth required to open PRs";
+const GITHUB_UNREACHABLE_MESSAGE =
+  "Can't reach GitHub (network or keyring timeout) — check your VPN; Dealer will retry";
+
+/**
+ * Output fragments naming a timeout, TLS handshake, DNS or connection failure.
+ * Matched against lowercased `gh` output. `timedout` (no space) covers ETIMEDOUT;
+ * `timeout` covers gh's own "Timeout trying to log in … (keyring)" and the
+ * "timeout while trying to … secret in/from keyring" variants.
+ */
+const GITHUB_UNREACHABLE_PATTERNS = [
+  "timed out",
+  "timeout",
+  "timedout",
+  "tls",
+  "ssl",
+  "handshake",
+  "certificate",
+  "dns",
+  "could not resolve",
+  "no such host",
+  "name resolution",
+  "eai_again",
+  "enotfound",
+  "getaddrinfo",
+  "connection refused",
+  "connection reset",
+  "failed to connect",
+  "could not connect",
+  "network is unreachable",
+  "network unreachable",
+  "econnrefused",
+  "econnreset",
+  "ehostunreach",
+  "enetunreach",
+  "econnaborted",
+  "socket hang up",
+];
+
+export type GithubAuthProbe = {
+  ok: boolean;
+  output: string;
+  timedOut: boolean;
+  /** spawnSync `error.code` (`ENOENT`, `ETIMEDOUT`, …) — undefined on the async path. */
+  spawnErrorCode?: string;
+};
+
+/**
+ * NOT-195: one `gh auth status` classifier shared by the async (`runCommand`) and
+ * sync (`spawnSync`) paths. Four cases, checked in order:
+ *
+ * 1. CLI missing — `ENOENT` (or the pre-existing not-found texts) only. A spawn
+ *    timeout also sets the sync `error`, so any-error-means-missing misread a slow
+ *    network as an absent binary.
+ * 2. Unreachable — spawn timeout, `ETIMEDOUT`, or output naming a timeout / TLS /
+ *    DNS / connection failure. Checked before auth because gh maps some
+ *    connectivity failures onto login/token wording (and the keyring-login timeout
+ *    names neither). Transient: callers defer and retry.
+ * 3. Logged out / invalid token — the pre-existing texts, or any other non-zero exit.
+ * 4. Healthy.
+ */
+export function classifyGithubAuthStatus(probe: GithubAuthProbe): AgentHealthIssue[] {
+  const out = probe.output.toLowerCase();
   if (
+    probe.spawnErrorCode === "ENOENT" ||
     out.includes("enoent") ||
     out.includes("not found") ||
-    out.includes("no such file") ||
-    (out.includes("spawn") && out.includes("gh"))
+    out.includes("no such file")
   ) {
-    return [{ code: "github_cli_missing", message: "gh CLI not found — install GitHub CLI (`gh`)" }];
+    return [{ code: "github_cli_missing", message: GITHUB_CLI_MISSING_MESSAGE }];
   }
   if (
-    !status.ok ||
+    probe.timedOut ||
+    probe.spawnErrorCode === "ETIMEDOUT" ||
+    GITHUB_UNREACHABLE_PATTERNS.some((p) => out.includes(p))
+  ) {
+    return [{ code: "github_unreachable", message: GITHUB_UNREACHABLE_MESSAGE }];
+  }
+  if (
+    !probe.ok ||
     out.includes("not logged in") ||
     out.includes("failed to log in") ||
     out.includes("token in keyring is invalid") ||
     out.includes("re-authenticate") ||
     out.includes("to re-authenticate")
   ) {
-    return [
-      {
-        code: "github_auth",
-        message: "Run `gh auth login` — GitHub CLI auth required to open PRs",
-      },
-    ];
+    return [{ code: "github_auth", message: GITHUB_AUTH_MESSAGE }];
   }
   return [];
 }
@@ -440,30 +512,14 @@ export function githubIssuesSync(): AgentHealthIssue[] {
     env: process.env,
   });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}${result.error?.message ?? ""}`;
-  const out = output.toLowerCase();
-  let issues: AgentHealthIssue[] = [];
-  if (
-    result.error ||
-    out.includes("enoent") ||
-    out.includes("not found") ||
-    out.includes("no such file")
-  ) {
-    issues = [{ code: "github_cli_missing", message: "gh CLI not found — install GitHub CLI (`gh`)" }];
-  } else if (
-    result.status !== 0 ||
-    out.includes("not logged in") ||
-    out.includes("failed to log in") ||
-    out.includes("token in keyring is invalid") ||
-    out.includes("re-authenticate") ||
-    out.includes("to re-authenticate")
-  ) {
-    issues = [
-      {
-        code: "github_auth",
-        message: "Run `gh auth login` — GitHub CLI auth required to open PRs",
-      },
-    ];
-  }
+  // NOT-195: same four-case classifier as the async path — a spawnSync timeout sets
+  // `error` (ETIMEDOUT), which must not read as a missing CLI.
+  const issues = classifyGithubAuthStatus({
+    ok: result.status === 0,
+    output,
+    timedOut: (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT",
+    spawnErrorCode: (result.error as NodeJS.ErrnoException | undefined)?.code,
+  });
   githubIssueCache = { at: Date.now(), issues };
   return issues;
 }
