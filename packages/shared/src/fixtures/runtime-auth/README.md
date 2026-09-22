@@ -51,6 +51,33 @@ Muse has no offline `auth status`, so the health check cannot ask it whether a *
 still valid; it checks that a credential exists and leaves an expired one to fail at run time,
 where the second and third captures above are what classify it.
 
+GitHub CLI (NOT-195) — `gh auth status` classifies into missing CLI (`ENOENT` only),
+logged out / invalid token, unreachable (timeout / TLS / DNS / connection failure), and
+healthy. Captured 2026-09-22 on macOS 15 (darwin) with `gh` 2.78.0:
+
+| File | Command | Exit |
+| ---- | ------- | ---- |
+| `gh-auth-status-logged-out.txt` | `env -i PATH="$PATH" HOME="$(mktemp -d)" gh auth status </dev/null` | 1 |
+| `gh-auth-status-invalid-token.txt` | `gh auth status` with a stored dummy token and no network (same empty-`HOME` method, `oauth_token: REDACTED_FIXTURE_TOKEN` in a throwaway `hosts.yml`) | 1 |
+| `gh-auth-status-keyring-timeout.txt` | Operator incident capture from the 2026-09-20 VPN outage, quoted verbatim in NOT-195: `gh auth status` printed `Timeout trying to log in to github.com account not-so-fat (keyring)` and exited non-zero although the account was logged in | 1 |
+| `gh-auth-status-logged-in.txt` | Rendered from gh 2.78.0's own format string (`%s Logged in to %s account %s (%s)`, verified via `strings` on the installed binary) — a live healthy capture needs network plus a valid token, neither of which CI has | 0 |
+
+Notes:
+
+- The timeout row's `github.com` header and `X` glyph are the rendering this `gh`
+  version uses for a failing host section (same shape as the two live captures above
+  it); the status line itself is the verbatim incident quote. gh's binary also carries
+  the sibling token-path variant (`Timeout trying to log in to %s using token (%s)`)
+  and the `timeout while trying to get/set/delete secret … keyring` variants — the
+  classifier matches all of them through the `timeout` fragment, not the full line.
+- The invalid-token capture is what `gh` prints when the API is unreachable with a
+  stored token (observed here with DNS down: `dial tcp: lookup api.github.com: no such
+  host` under `GH_DEBUG=api`): `Failed to log in …` plus `The token … is invalid.`
+  That is why the unreachable patterns are checked *before* the logged-out texts —
+  gh maps some connectivity failures onto login/token wording.
+- The only sanitization is the scratch config path in the invalid-token capture
+  (→ `<HOME>`), matching the redaction precedent below.
+
 Notes:
 
 - `cursor-agent status` prints **`Not logged in`** and exits **0** when logged out — that is
