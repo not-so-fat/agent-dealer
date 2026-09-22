@@ -785,6 +785,11 @@ export async function runDeveloperEffect(
   // verified or released for them, whatever deck the profile happens to carry.
   const isMuse = runtime === "muse_code";
   let workerAuthority: { mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
+  // NOT-225: marks the setup/spawn boundary for the outer catch below. Only a throw
+  // before the worker's process exists is a "could not start" — anything after a
+  // successful spawn (push, PR verify, checks poll) keeps the pre-existing
+  // adapter_failure path, since the session did start, run, and possibly commit.
+  let sessionStarted = false;
   try {
     if (!isMuse && !snapshot?.deckId) {
       await bestEffortRemove(repoPath, worktreePath);
@@ -1027,6 +1032,10 @@ export async function runDeveloperEffect(
     } finally {
       sampler.stop();
     }
+    // NOT-225: deps.spawn resolved — the worker's process existed. Every throw from
+    // here on (usage, receipt, push, PR verify, checks poll) is post-spawn and must
+    // not be mislabeled as a session that could not start.
+    sessionStarted = true;
     // NOT-169: exactly one agent.completed per spawned process, at child exit and before
     // any receipt mining, usage extraction, or validation. Raw outcome only — no
     // failure classification.
@@ -1544,6 +1553,20 @@ export async function runDeveloperEffect(
       prUrl: prView.url,
     };
   } catch (err) {
+    // NOT-225: only a throw before the worker's process existed (worktree setup,
+    // deck bind, prompt build, deps.spawn) surfaces as "could not start" — the
+    // NUL-byte spawn throw used to be swallowed upstream as a generic failure with
+    // no pid and no log. Paths that already set a reason (usage cap, deck failure,
+    // dirty worktree) return above and keep theirs. A throw after a successful
+    // spawn (transient git fetch, PR-checks poll, gh verify) keeps the pre-existing
+    // adapter_failure: the session did start, run, and possibly commit, so calling
+    // it "could not start" would feed a false reason into the retry prompt.
+    if (!sessionStarted) {
+      const message = err instanceof Error ? err.message : String(err);
+      const reason = `Developer session could not start: ${message.slice(0, 300)}`;
+      console.error("[coordinator] developer session could not start", { issueId: issue.id, sessionId, round, err });
+      return { kind: "session_failed", reason };
+    }
     return { kind: "adapter_failure", reason: String(err) };
   } finally {
     // The worker's own subprocess is done (or never started) by every path through this

@@ -1802,3 +1802,87 @@ test("NOT-130: checks_failed retry does not carry a prior green receipt into the
     "CI-rejected tip must not re-authorize skip-suite on a later crash retry"
   );
 });
+
+/** Builds a direct-call EffectContext like worker-loop's session setup (claim → session → bind → start). */
+async function directDeveloperCtx(issueId: string) {
+  const { buildProfileSnapshot, serializeProfileSnapshot } = await import("./profile-snapshot.js");
+  const claimed = claimWorkItem(`test-${issueId}`, { leaseMs: 60_000 })!;
+  const agent = getIssue(issueId)!.developerAgentId
+    ? (await import("../repository/agents.js")).getAgent(getIssue(issueId)!.developerAgentId!)!
+    : null;
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: claimed.round,
+    agentId: agent?.id ?? null,
+    runtime: "claude_code",
+    profileSnapshotJson: agent
+      ? serializeProfileSnapshot(buildProfileSnapshot(agent, "developer"))
+      : undefined,
+  });
+  assert.ok(bindWorkItemSession(claimed.id, session.id, claimed.leaseToken!));
+  startSession(session.id);
+  return {
+    workItem: { ...claimed, workerSessionId: session.id },
+    issue: getIssue(issueId)!,
+    instance: getActiveWorkflowInstance(issueId)!,
+    signal: new AbortController().signal,
+  };
+}
+
+// NOT-225: a setup/spawn throw (e.g. deps.spawn rejecting, or the NUL-byte spawn
+// throw pre-sanitize) must surface as session_failed naming the setup failure —
+// not a reason-less "Worker session failed or crashed" with no pid and no log.
+test("NOT-225: a developer setup/spawn throw surfaces as session_failed with a 'could not start' reason", async () => {
+  const issueId = await makeIssue();
+  startWorkflow(issueId);
+  const ctx = await directDeveloperCtx(issueId);
+
+  const throwingSpawn: SpawnFn = async () => {
+    throw new Error("boom");
+  };
+  const outcome = await runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: throwingSpawn, github: fakeGithub() });
+
+  assert.equal(outcome.kind, "session_failed");
+  const reason = (outcome as { reason?: string }).reason ?? "";
+  assert.match(reason, /could not start/, "the reason names the setup failure");
+  assert.match(reason, /boom/, "the reason carries the underlying error");
+});
+
+test("NOT-225: the worker.failed timeline event for a developer spawn throw carries the 'could not start' reason", async () => {
+  const issueId = await makeIssue();
+  const throwingSpawn: SpawnFn = async () => {
+    throw new Error("boom");
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: throwingSpawn, github: fakeGithub() }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const failed = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "worker.failed");
+  assert.ok(failed.length >= 1, "a failed developer session records a worker.failed event");
+  const payload = JSON.parse(failed[failed.length - 1]!.payloadJson!) as { reason?: string };
+  assert.match(payload.reason ?? "", /could not start/);
+  assert.match(payload.reason ?? "", /boom/);
+});
+
+// NOT-225 repair round 2: the outer catch spans deck-bind/spawn AND all post-spawn
+// verification, but only a pre-spawn throw is a session that "could not start". A
+// transient failure after a successful spawn (here: gh pr view throwing after the
+// agent committed and the branch pushed) must keep the pre-existing adapter_failure
+// — mislabeling it would feed a false reason into the retry prompt and the timeline.
+test("NOT-225: a post-spawn verification throw stays adapter_failure (not 'could not start')", async () => {
+  const issueId = await makeIssue();
+  startWorkflow(issueId);
+  const ctx = await directDeveloperCtx(issueId);
+
+  const github = fakeGithub();
+  github.viewPr = async () => {
+    throw new Error("gh exploded");
+  };
+  const outcome = await runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github });
+
+  assert.equal(outcome.kind, "adapter_failure", "the session started, ran, and committed — only verification failed");
+  const reason = (outcome as { reason?: string }).reason ?? "";
+  assert.ok(!reason.includes("could not start"), `must not mislabel a started session, got: ${reason}`);
+  assert.match(reason, /gh exploded/, "the underlying verification error is preserved");
+});
