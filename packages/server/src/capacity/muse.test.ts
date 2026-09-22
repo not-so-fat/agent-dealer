@@ -17,14 +17,22 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-mu
 import {
   assertMuseReadOnlyMethod,
   createMuseCapacityAdapter,
+  MSP_FORBIDDEN_MODEL_METHODS,
+  museRefreshThrottleMs,
   museUsageToReadings,
+  maybeRefreshMuseCapacityFromServe,
   normalizeMuseResetsAt,
+  normalizeMuseUnavailable,
   readMuseCapacity,
+  refreshMuseCapacityFromServe,
   requestMuseUsage,
+  resetMuseCapacityRefreshState,
 } from "./muse.js";
 import { normalizeAdapterWindow } from "./adapter.js";
 const { migrate } = await import("../db/index.js");
-const { clearAllCapacitySnapshots } = await import("../repository/runtime-capacity.js");
+const { clearAllCapacitySnapshots, listCapacitySnapshots } = await import(
+  "../repository/runtime-capacity.js"
+);
 const {
   clearAllRuntimeAvailability,
   runtimeAvailability,
@@ -136,6 +144,20 @@ test("only usage/read can be sent; session prompts throw before write", () => {
   for (const m of ["session/start", "session/prompt", "session/resume", "exec", "usage/write"]) {
     assert.throws(() => assertMuseReadOnlyMethod(m), /refusing non-read method/);
   }
+  // The forbidden list is the billable surface the allowlist must refuse.
+  assert.ok(MSP_FORBIDDEN_MODEL_METHODS.length > 0);
+  for (const m of MSP_FORBIDDEN_MODEL_METHODS) {
+    assert.throws(() => assertMuseReadOnlyMethod(m), /refusing non-read method/);
+  }
+});
+
+test("unavailable normalization maps sentinel reasons without payload data", () => {
+  const missing = normalizeMuseUnavailable("missing");
+  assert.equal(missing.windowKey, "muse_account_usage");
+  assert.equal(missing.unavailableReason, "missing");
+  assert.equal(missing.remainingPercent, null);
+  assert.equal(normalizeMuseUnavailable("unsupported").unavailableReason, "unsupported");
+  assert.equal(normalizeMuseUnavailable("unparsable").unavailableReason, "unparsable");
 });
 
 test("fake MSP rolling+weekly usage becomes two snapshots end to end", async () => {
@@ -253,6 +275,44 @@ test("no credential short-circuits to missing without spawning", async () => {
   });
   assert.equal(result.windows.length, 0);
   assert.equal(result.unavailable[0]!.reason, "missing");
+});
+
+test("a successful refresh clears the failure sentinel", async () => {
+  clearAllCapacitySnapshots();
+  await refreshMuseCapacityFromServe(fakeOpts("crash").opts);
+  assert.deepEqual(
+    listCapacitySnapshots("muse_code").map((w) => w.windowKey),
+    ["muse_account_usage"]
+  );
+  const snap = await refreshMuseCapacityFromServe(fakeOpts("full").opts);
+  const keys = listCapacitySnapshots("muse_code")
+    .map((w) => w.windowKey)
+    .sort();
+  assert.deepEqual(keys, ["rolling_all_models", "weekly_all_models"]);
+  const muse = snap.runtimes.find((r) => r.runtime === "muse_code")!;
+  assert.ok(muse);
+  assert.equal(muse.windows.length, 2);
+  assert.equal(muse.unavailableReason, null);
+});
+
+test("production refresh is throttled and can be disabled", async () => {
+  clearAllCapacitySnapshots();
+  resetMuseCapacityRefreshState();
+  const { opts } = fakeOpts("full");
+  try {
+    assert.equal(museRefreshThrottleMs(), 5 * 60 * 1000);
+    const first = await maybeRefreshMuseCapacityFromServe(opts);
+    assert.ok(first, "first refresh runs");
+    assert.equal(await maybeRefreshMuseCapacityFromServe(opts), null, "second refresh throttled");
+    process.env.AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS = "off";
+    resetMuseCapacityRefreshState();
+    assert.equal(await maybeRefreshMuseCapacityFromServe(opts), null, "refresh disabled");
+    process.env.AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS = "garbage";
+    assert.equal(museRefreshThrottleMs(), 5 * 60 * 1000);
+  } finally {
+    delete process.env.AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS;
+    resetMuseCapacityRefreshState();
+  }
 });
 
 test("no token, tier, or raw account payload reaches the adapter output", async () => {

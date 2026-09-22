@@ -117,6 +117,15 @@ reaches the browser, the API, or the logs — evidence refs are static
 (`muse-serve:usage/read`).
 
 Refresh via `refreshMuseCapacityFromServe()` (bounded ingest through the
-shared service path). Tests use the committed fake MSP server
+shared service path). The only production trigger is `GET
+/api/runtime-capacity`: when `muse_code` is configured it runs
+`maybeRefreshMuseCapacityFromServe()` first — throttled (default 5 min,
+`AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS` override, `off` disables),
+best-effort, never failing the read. A successful refresh deletes the
+`muse_account_usage` failure sentinel so a stale N/A window cannot linger
+next to recovered windows. Tests use the committed fake MSP server
 (`packages/server/src/capacity/fixtures/fake-muse-serve.mjs`); CI performs no
-live Muse request.
+live Muse request. The `serve --protocol msp/1.3` argv and the
+handshake-free single request follow the ticket contract brief — they are
+unverified against the published docs (unreachable at implementation time),
+so re-check them against the docs before debugging any live failure.

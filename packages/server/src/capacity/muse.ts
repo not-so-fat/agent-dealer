@@ -78,7 +78,19 @@ function readOnlyRequest(id: string, method: MspReadOnlyMethod, params: unknown)
   return `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`;
 }
 
-/** Versioned Session Protocol argv. Fixed: capacity reads never `exec`. */
+/**
+ * Versioned Session Protocol argv. Fixed: capacity reads never `exec`.
+ *
+ * Caveat: this argv and the handshake-free single `usage/read` below were
+ * built from the ticket contract brief — the official Muse Code docs were
+ * unreachable at implementation time, so they are unverified against the
+ * published MSP surface. The committed fake (`fixtures/fake-muse-serve.mjs`)
+ * likewise enforces no handshake, so tests cannot catch a handshake
+ * requirement either. If a live `muse serve` demands an `initialize` step,
+ * the read-only allowlist will reject it and every live read will fail
+ * closed as `missing`/`unparsable` (never billed); re-check the argv against
+ * the docs before debugging any live failure.
+ */
 export const MUSE_SERVE_ARGV: readonly string[] = ["serve", "--protocol", "msp/1.3"];
 
 /** Single JSON-RPC request id for the one-shot read. */
@@ -150,14 +162,6 @@ export interface MuseUsageReadings {
 }
 
 /**
- * Normalize MSP 1.3 `usage` into adapter readings. Returns null when the
- * payload carries no observation or is malformed (callers needing the
- * distinction check the payload shape first). Entries that are individually
- * malformed are skipped — the caller re-reports present-but-bad keys as
- * per-window `unparsable` readings so a bad sibling never sinks a good
- * window.
- */
-/**
  * Extract the `usage` object from a `usage/read` result. Bare usage objects
  * (no envelope) are tolerated. An envelope with no `usage` key and no
  * usage-like keys carries no observation (null, not an error); anything else
@@ -180,6 +184,14 @@ function extractUsageObject(payload: unknown): { usage?: Record<string, unknown>
   return { error: "result carries no usage observation" };
 }
 
+/**
+ * Normalize MSP 1.3 `usage` into adapter readings. Returns null when the
+ * payload carries no observation or is malformed (callers needing the
+ * distinction check the payload shape first). Entries that are individually
+ * malformed are skipped — the caller re-reports present-but-bad keys as
+ * per-window `unparsable` readings so a bad sibling never sinks a good
+ * window.
+ */
 export function museUsageToReadings(
   payload: unknown,
   observedAt = new Date().toISOString()
@@ -569,15 +581,69 @@ export function createMuseCapacityAdapter(opts: MuseServeOptions = {}): Capacity
  * Bounded refresh: run the live adapter and ingest into normalized snapshots.
  * Reuses the shared ingest path; failures persist as N/A windows, never as
  * health rows. Imported lazily to keep the adapter module free of DB binds.
+ *
+ * A successful read (real windows) deletes the failure sentinel
+ * (`muse_account_usage`): snapshot writes are per-window upserts that never
+ * delete siblings, so without this a stale N/A sentinel would linger next to
+ * the recovered windows indefinitely.
  */
 export async function refreshMuseCapacityFromServe(
   opts: MuseServeOptions = {}
 ): Promise<import("@agent-dealer/shared").RuntimeCapacityResponse> {
   const { ingestAdapterResult, getRuntimeCapacitySnapshot } = await import("./service.js");
+  const { deleteCapacitySnapshots } = await import("../repository/runtime-capacity.js");
   const nowMs = opts.nowMs ?? Date.now();
   const result = await readMuseCapacity({ ...opts, nowMs });
   await ingestAdapterResult(result);
+  if (result.windows.length > 0) {
+    deleteCapacitySnapshots(MUSE_RUNTIME, [SENTINEL_WINDOW_KEY]);
+  }
   return getRuntimeCapacitySnapshot(nowMs);
+}
+
+/** Default minimum gap between production Muse refreshes (5 minutes). */
+export const MUSE_REFRESH_THROTTLE_MS_DEFAULT = 5 * 60 * 1000;
+
+/**
+ * Throttle bound for production refreshes. Override with
+ * `AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS` (milliseconds); `off` disables
+ * refresh entirely. Non-positive or unparsable values fall back to the default.
+ */
+export function museRefreshThrottleMs(): number {
+  const raw = process.env.AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS;
+  if (raw === undefined || raw === "") return MUSE_REFRESH_THROTTLE_MS_DEFAULT;
+  if (raw === "off") return Number.POSITIVE_INFINITY;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return n;
+  return MUSE_REFRESH_THROTTLE_MS_DEFAULT;
+}
+
+let lastMuseRefreshMs = 0;
+
+/** Test helper — reset the refresh throttle so the next refresh runs. */
+export function resetMuseCapacityRefreshState(): void {
+  lastMuseRefreshMs = 0;
+}
+
+/**
+ * Production trigger for the Muse adapter: throttled, bounded, best-effort.
+ * Returns the refreshed snapshot, or null when throttled/disabled. Never
+ * throws — a failed refresh persists as N/A through the shared ingest path,
+ * and any unexpected error resolves to null so callers (routes) can still
+ * serve the last-known snapshot.
+ */
+export async function maybeRefreshMuseCapacityFromServe(
+  opts: MuseServeOptions = {},
+  nowMs = Date.now()
+): Promise<import("@agent-dealer/shared").RuntimeCapacityResponse | null> {
+  const throttle = museRefreshThrottleMs();
+  if (!Number.isFinite(throttle) || nowMs - lastMuseRefreshMs < throttle) return null;
+  lastMuseRefreshMs = nowMs;
+  try {
+    return await refreshMuseCapacityFromServe({ ...opts, nowMs });
+  } catch {
+    return null;
+  }
 }
 
 /** Normalize one unavailable Muse reading for direct persistence (tests/tools). */

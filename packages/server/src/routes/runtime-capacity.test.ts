@@ -16,9 +16,12 @@ process.env.AGENT_DEALER_SKIP_AGENT_HEALTH = "1";
 
 const { migrate } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
-const { clearAllCapacitySnapshots } = await import("../repository/runtime-capacity.js");
+const { clearAllCapacitySnapshots, listCapacitySnapshots } = await import(
+  "../repository/runtime-capacity.js"
+);
 const { fixtureMultiWindowAdapter } = await import("../capacity/adapter.js");
 const { refreshCapacityFromAdapters } = await import("../capacity/service.js");
+const { resetMuseCapacityRefreshState } = await import("../capacity/muse.js");
 const { registerRoutes } = await import("./index.js");
 const { RuntimeCapacityResponse } = await import("@agent-dealer/shared");
 
@@ -56,4 +59,44 @@ test("GET /api/runtime-capacity returns normalized entries without evidence", as
   const raw = JSON.stringify(res.json());
   assert.ok(!raw.includes("evidence"), "no evidence pointers leak to the browser");
   await app.close();
+});
+
+test("GET triggers the Muse refresh when muse_code is configured", async () => {
+  // NOT-247: the route is the only production trigger for the Muse adapter.
+  // No credential here (env key removed, empty login dir), so the refresh
+  // short-circuits to a `missing` sentinel without spawning anything live.
+  clearAllCapacitySnapshots();
+  resetMuseCapacityRefreshState();
+  const prevKey = process.env.META_API_KEY;
+  const prevXdg = process.env.XDG_CONFIG_HOME;
+  delete process.env.META_API_KEY;
+  process.env.XDG_CONFIG_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cap-noauth-"));
+  try {
+    createAgent({
+      name: "route-muse",
+      runtime: "muse_code",
+      deckId: "33333333-3333-4333-8333-333333333333",
+    });
+    assert.equal(listCapacitySnapshots("muse_code").length, 0);
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: "/api/runtime-capacity" });
+      assert.equal(res.statusCode, 200);
+      const body = RuntimeCapacityResponse.parse(res.json());
+      const muse = body.runtimes.find((r) => r.runtime === "muse_code");
+      assert.ok(muse, "muse_code entry served");
+      assert.ok(
+        listCapacitySnapshots("muse_code").some((w) => w.windowKey === "muse_account_usage"),
+        "route-triggered refresh persisted the sentinel"
+      );
+    } finally {
+      await app.close();
+    }
+  } finally {
+    if (prevKey === undefined) delete process.env.META_API_KEY;
+    else process.env.META_API_KEY = prevKey;
+    if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdg;
+    resetMuseCapacityRefreshState();
+  }
 });

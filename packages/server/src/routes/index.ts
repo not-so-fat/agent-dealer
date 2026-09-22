@@ -16,7 +16,8 @@ import {
 } from "../adapters/linear-inbox.js";
 import { getLinearUsageSnapshot } from "../adapters/linear-graphql.js";
 import { listRuntimeModels } from "../runners/models.js";
-import { getRuntimeCapacitySnapshot } from "../capacity/service.js";
+import { configuredCapacityRuntimes, getRuntimeCapacitySnapshot } from "../capacity/service.js";
+import { maybeRefreshMuseCapacityFromServe } from "../capacity/muse.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
   if (!deckId) return null;
@@ -73,7 +74,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // NOT-245: provider-neutral capacity read model — one entry per configured
   // runtime account with its windows, freshness, and explicit unavailable
   // reasons. Normalized snapshots only; evidence stays server-side.
-  app.get("/api/runtime-capacity", async () => getRuntimeCapacitySnapshot());
+  // NOT-247: the only production trigger for the Muse adapter — a throttled
+  // (default 5 min), bounded, best-effort refresh when `muse_code` is
+  // configured. Failures persist as N/A and never fail the read.
+  app.get("/api/runtime-capacity", async () => {
+    try {
+      if (configuredCapacityRuntimes().includes("muse_code")) {
+        await maybeRefreshMuseCapacityFromServe();
+      }
+    } catch {
+      // Best-effort: serve the last-known snapshot below.
+    }
+    return getRuntimeCapacitySnapshot();
+  });
 
   app.get("/api/agents", async () => {
     const agents = await listAgentsWithHealth(listAgents());
