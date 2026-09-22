@@ -13,6 +13,7 @@ import Badge from "../components/ui/Badge";
 import AgentConnectionsBar from "../components/agents/AgentConnectionsBar";
 import RuntimeCapacityStrip from "../components/agents/RuntimeCapacityStrip";
 import CursorTeamBillingCard from "../components/agents/CursorTeamBillingCard";
+import CursorIndividualBillingCard from "../components/agents/CursorIndividualBillingCard";
 import { AgentRuntimeIcon } from "../components/agents/AgentIcon";
 
 type Props = {
@@ -152,6 +153,7 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
       <div className="mb-4 overflow-x-auto space-y-2">
         <RuntimeCapacityStrip />
         <CursorTeamBillingCard />
+        <CursorIndividualBillingCard />
       </div>
 
       <div className="space-y-3 mb-6">
