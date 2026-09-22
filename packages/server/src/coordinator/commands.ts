@@ -110,6 +110,7 @@ import {
   getQueuedEntryForIssue,
   markQueueEntryAdmitted,
 } from "../repository/queue-entries.js";
+import { fetchResumeLiveHeadSha } from "./resume-live-head.js";
 import { getWorkflow } from "./workflows/registry.js";
 import { DEV_REVIEWER_V1_VERSION } from "./workflows/dev-reviewer-v1.js";
 
@@ -1245,7 +1246,7 @@ export function resolveHumanActionAndAdvance(
   actionId: string,
   resolvedBy: string,
   choice: string,
-  opts?: { externalMergeState?: ExternalMergeState }
+  opts?: { resumeLiveHeadSha?: string | null; externalMergeState?: ExternalMergeState }
 ): ResolveResult {
   const action = getHumanAction(actionId);
   if (!action) return { ok: false, code: 404, error: "Human action not found" };
@@ -1385,13 +1386,24 @@ export function resolveHumanActionAndAdvance(
   // A reviewer-origin infra escalation (session_failed/publish_failed exhausted) tagged
   // its continuation with where to resume: nothing was wrong with the code/PR, only the
   // reviewer session/publish attempt kept failing, so "resume" must re-queue a reviewer
-  // at the still-valid pinned head — not default to an unrelated developer round.
+  // at the pinned head — not default to an unrelated developer round.
   const continuation = parseContinuationPreview(action.continuationPreviewJson);
   const resumeAsReviewer =
     (action.actionType === "policy_escalation" || action.actionType === "deck_interaction_required") &&
     resolution.choice === "resume" &&
     continuation?.resumeRole === "reviewer" &&
     !!continuation.resumeHeadSha;
+
+  // NOT-226: the pinned head may be stale — an operator can push a fix to the PR branch
+  // while the issue is parked. Re-check the PR's live head (same `gh pr view` head the
+  // reviewer uses for stale detection) and re-pin to it when it moved. Only when the
+  // issue has a PR; an unknown live head (lookup failure/timeout) keeps today's behavior.
+  const pinnedResumeHeadSha = resumeAsReviewer ? continuation!.resumeHeadSha! : null;
+  const liveResumeHeadSha =
+    resumeAsReviewer && issue.prNumber != null && opts?.resumeLiveHeadSha ? opts.resumeLiveHeadSha : null;
+  const rePinnedResumeHeadSha =
+    liveResumeHeadSha && liveResumeHeadSha !== pinnedResumeHeadSha ? liveResumeHeadSha : null;
+  const effectiveResumeHeadSha = rePinnedResumeHeadSha ?? pinnedResumeHeadSha;
 
   // "review"/"review_grant" advance current_round before the next session is queued;
   // "infra"/"none" queue at the round current_round is already at. Computed up front so
@@ -1435,7 +1447,14 @@ export function resolveHumanActionAndAdvance(
           : {};
 
   return getDb().transaction((): ResolveResult => {
-    resolveHumanAction(actionId, resolvedBy, { choice });
+    resolveHumanAction(actionId, resolvedBy, {
+      choice,
+      // NOT-226: record the re-pin so the resolved action itself shows which head the
+      // reviewer was re-queued at when the branch had moved while parked.
+      ...(rePinnedResumeHeadSha
+        ? { resumedFromHeadSha: pinnedResumeHeadSha, resumeLiveHeadSha: rePinnedResumeHeadSha }
+        : {}),
+    });
     // stage must be the status this resolution actually lands on (finalStatus), not the
     // generic developer-resume outcome.issueStatus — otherwise a reviewer resume's own
     // human_action.resolved/repair.started events would be recorded under "developing"
@@ -1458,8 +1477,13 @@ export function resolveHumanActionAndAdvance(
           : finalStatus === "closed"
             ? "Closed"
             : resumeAsReviewer
-              ? `Reviewer re-evaluating at ${continuation!.resumeHeadSha!.slice(0, 8)}`
+              ? rePinnedResumeHeadSha
+                ? `Reviewer re-evaluating at ${rePinnedResumeHeadSha.slice(0, 8)} (was ${pinnedResumeHeadSha!.slice(0, 8)})`
+                : `Reviewer re-evaluating at ${pinnedResumeHeadSha!.slice(0, 8)}`
               : `Developer implementing round ${nextRound}`,
+      // NOT-226: the reviewer now evaluates the live head — the issue must point there
+      // too, or the next stale check / resume would keep using the old commit.
+      ...(rePinnedResumeHeadSha ? { headSha: rePinnedResumeHeadSha } : {}),
     });
 
     if (outcome.workflowOutcome) {
@@ -1497,8 +1521,8 @@ export function resolveHumanActionAndAdvance(
     }
 
     // Another round: spend the budget this resolution's roundKind names, then queue the
-    // resumed effect — a reviewer at the pinned head for a reviewer-origin infra
-    // escalation, a fresh developer round otherwise.
+    // resumed effect — a reviewer at the pinned head (or the live head it was re-pinned
+    // to, NOT-226) for a reviewer-origin infra escalation, a fresh developer round otherwise.
     switch (outcome.roundKind) {
       case "review_grant":
         grantReviewRetry(issue.id);
@@ -1535,7 +1559,7 @@ export function resolveHumanActionAndAdvance(
           workflowInstanceId: instance.id,
           kind: "reviewer",
           round: issueNow.currentRound,
-          payload: { inputSha: continuation!.resumeHeadSha, profileSnapshot: queuedProfileSnapshot(issue, "reviewer") },
+          payload: { inputSha: effectiveResumeHeadSha!, profileSnapshot: queuedProfileSnapshot(issue, "reviewer") },
           idempotencyKey: `${instance.id}:reviewer:resume:${action.id}`,
         })
       : enqueueWorkItem({
@@ -1564,19 +1588,54 @@ export function resolveHumanActionAndAdvance(
 export async function resolveHumanActionAndAdvanceAsync(
   actionId: string,
   resolvedBy: string,
-  choice: string
+  choice: string,
+  opts?: { resumeLiveHeadSha?: string | null }
 ): Promise<ResolveResult> {
   // NOT-221: the lease push runs before anything resolves — a failed lease must leave
   // the action open with the fresh tip, which the sync core below cannot do.
   if (choice === "push_with_lease") {
     return resolvePushWithLeaseAsync(actionId, resolvedBy);
   }
+  // NOT-226: for a reviewer-role resume on an issue with a PR, read the PR's live head
+  // BEFORE the resolving transaction (network must never hold the SQLite write lock).
+  // An explicit opt wins (tests); otherwise look it up, bounded — any failure yields
+  // null and the sync core below keeps today's pinned-head behavior.
+  let resumeLiveHeadSha: string | null | undefined = opts?.resumeLiveHeadSha;
+  if (resumeLiveHeadSha === undefined) {
+    try {
+      const pendingAction = getHumanAction(actionId);
+      const pendingIssue = pendingAction?.issueId ? getIssue(pendingAction.issueId) : null;
+      const pendingResolution = pendingAction ? parseHumanResolution(pendingAction.actionType, choice) : null;
+      const pendingContinuation = pendingAction
+        ? parseContinuationPreview(pendingAction.continuationPreviewJson)
+        : null;
+      const isReviewerResumeCandidate =
+        !!pendingAction &&
+        pendingAction.status === "open" &&
+        !!pendingIssue &&
+        !!pendingResolution &&
+        (pendingAction.actionType === "policy_escalation" ||
+          pendingAction.actionType === "deck_interaction_required") &&
+        pendingResolution.choice === "resume" &&
+        pendingContinuation?.resumeRole === "reviewer" &&
+        !!pendingContinuation.resumeHeadSha &&
+        pendingIssue.prNumber != null;
+      resumeLiveHeadSha = isReviewerResumeCandidate
+        ? await fetchResumeLiveHeadSha({ prNumber: pendingIssue!.prNumber!, repo: pendingIssue!.repo })
+        : null;
+    } catch {
+      resumeLiveHeadSha = null;
+    }
+  }
   // NOT-196: the `gh` PR-state read runs here, outside any DB transaction — the sync
   // core below only consumes the pre-read state. Only close choices on issues with a
   // PR number pay for the call; anything unreadable resolves to "unknown" (or
   // undefined when there is nothing to check), both of which keep today's `closed`.
   const externalMergeState = await preReadExternalMergeState(actionId, choice);
-  const result = resolveHumanActionAndAdvance(actionId, resolvedBy, choice, { externalMergeState });
+  const result = resolveHumanActionAndAdvance(actionId, resolvedBy, choice, {
+    resumeLiveHeadSha,
+    externalMergeState,
+  });
   if (!result.ok || !result.pendingMerge) return result;
 
   const action = getHumanAction(actionId);

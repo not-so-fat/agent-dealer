@@ -6,6 +6,7 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ### Fixes
 
+- **Reviewer resume re-pins to the PR live head** — resolving `resume` on a reviewer-origin escalation now re-checks the PR's live head (`gh pr view`) when the issue has a PR: if the branch moved while parked, the reviewer is queued at the live head, `issues.head_sha` moves with it, and the intent reads `Reviewer re-evaluating at <live8> (was <pinned8>)`. A matching head, a missing PR, or a failed lookup keeps the previous pinned-head behavior (NOT-226).
 - **NUL-safe runner args and surfaced setup errors (NOT-225)** — `spawnCli` sanitizes every argv entry before `spawn()`, replacing each NUL byte with the visible text `\u0000`, so a reviewer prompt embedding a PR diff with a raw NUL starts instead of throwing `ERR_INVALID_ARG_VALUE` with no pid and no log. Setup/spawn failures in the reviewer and developer effects now return `session_failed` with a `could not start: <error>` reason (logged with issue, session, and round) instead of a reason-less failure; post-spawn verification failures keep their existing `adapter_failure` behavior.
 
 ## 1.1.8 — 2026-09-22

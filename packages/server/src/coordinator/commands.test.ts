@@ -13,9 +13,14 @@ const { createIssue, getIssue, updateIssue } = await import("../repository/issue
 const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
   "../repository/workflow-events.js"
 );
-const { createHumanAction, listHumanActionsForIssue } = await import("../repository/human-actions.js");
+const { createHumanAction, getHumanAction, listHumanActionsForIssue } = await import(
+  "../repository/human-actions.js"
+);
+const { setResumeLiveHeadReaderForTests } = await import("./resume-live-head.js");
 const { listFindingsForIssue, reconcileFinding } = await import("../repository/findings.js");
-const { claimWorkItem, listWorkItemsForIssue, getWorkItem, enqueueWorkItem, cancelWorkItem } = await import("../repository/work-items.js");
+const { cancelWorkItem, claimWorkItem, listWorkItemsForIssue, getWorkItem, enqueueWorkItem } = await import(
+  "../repository/work-items.js"
+);
 const { createWorkerSession, startSession, listWorkerSessionsForIssue } = await import(
   "../repository/worker-sessions.js"
 );
@@ -39,6 +44,7 @@ beforeEach(() => {
   getDb().exec("DELETE FROM work_items");
   clearFinalizeInflightForTests();
   setMergePrForTests(async () => ({ ok: true }));
+  setResumeLiveHeadReaderForTests(null);
   stubManagedCloneForTests("acme/app");
 });
 
@@ -580,6 +586,158 @@ test("a stale review that exhausts the infra budget still records the newly obse
     "head-B",
     "resuming must review the newly observed head, not the stale SHA that was pinned before the head moved"
   );
+});
+
+/** A reviewer escalation pinned at the pre-fix head; the injected live head moved on. */
+async function openReviewerEscalationPinnedAtCleanHandoff() {
+  const issueId = newIssue({ maxInfraAttempts: 0 });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff); // -> reviewing, pinned at cleanHandoff.headSha, PR #42
+  await complete(issueId, { kind: "session_failed" }); // 0 infra attempts allowed -> exhausts
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  assert.deepEqual(JSON.parse(action.continuationPreviewJson!), {
+    resumeRole: "reviewer",
+    resumeHeadSha: cleanHandoff.headSha});
+  return { issueId, action };
+}
+
+const liveHeadB = "d369964abcdef0123456789abcdef0123456789ab";
+
+test("NOT-226: reviewer resume re-pins to the PR live head when the branch moved while parked", async () => {
+  const { issueId, action } = await openReviewerEscalationPinnedAtCleanHandoff();
+  const before = getIssue(issueId)!;
+  const instanceId = getActiveWorkflowInstance(issueId)!.id;
+
+  setResumeLiveHeadReaderForTests(async () => liveHeadB);
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing");
+  assert.equal(issue.currentOwner, "reviewer");
+  assert.equal(issue.currentRound, before.currentRound, "a re-pin must not spend a review round");
+  assert.equal(issue.infraAttempts, 0, "round and infra reset behavior is unchanged");
+  assert.equal(issue.headSha, liveHeadB, "issues.head_sha moves to the live head");
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].kind, "reviewer");
+  assert.equal(JSON.parse(pending[0].payloadJson!).inputSha, liveHeadB);
+  assert.equal(
+    pending[0].idempotencyKey,
+    `${instanceId}:reviewer:resume:${action.id}`,
+    "the idempotency key is unchanged, so a double-click still yields one work item"
+  );
+  assert.equal(
+    issue.currentIntent,
+    `Reviewer re-evaluating at ${liveHeadB.slice(0, 8)} (was ${cleanHandoff.headSha.slice(0, 8)})`
+  );
+  assert.deepEqual(JSON.parse(getHumanAction(action.id)!.resolutionJson!), {
+    choice: "resume",
+    resumedFromHeadSha: cleanHandoff.headSha,
+    resumeLiveHeadSha: liveHeadB});
+});
+
+test("NOT-226: reviewer resume keeps the pinned head when the live head matches (no re-pin note)", async () => {
+  const { issueId, action } = await openReviewerEscalationPinnedAtCleanHandoff();
+
+  setResumeLiveHeadReaderForTests(async () => cleanHandoff.headSha);
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.headSha, cleanHandoff.headSha);
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1);
+  assert.equal(JSON.parse(pending[0].payloadJson!).inputSha, cleanHandoff.headSha);
+  assert.equal(issue.currentIntent, `Reviewer re-evaluating at ${cleanHandoff.headSha.slice(0, 8)}`);
+  assert.deepEqual(JSON.parse(getHumanAction(action.id)!.resolutionJson!), { choice: "resume" });
+});
+
+test("NOT-226: reviewer resume still succeeds at the pinned head when the live-head lookup throws", async () => {
+  const { issueId, action } = await openReviewerEscalationPinnedAtCleanHandoff();
+
+  setResumeLiveHeadReaderForTests(async () => {
+    throw new Error("gh is down");
+  });
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing");
+  assert.equal(issue.headSha, cleanHandoff.headSha, "a failed lookup must never re-pin");
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1);
+  assert.equal(JSON.parse(pending[0].payloadJson!).inputSha, cleanHandoff.headSha);
+  assert.equal(issue.currentIntent, `Reviewer re-evaluating at ${cleanHandoff.headSha.slice(0, 8)}`);
+});
+
+test("NOT-226: reviewer resume on an issue with no PR never consults the live head", async () => {
+  const issueId = newIssue({ maxInfraAttempts: 0 });
+  startWorkflow(issueId); // developing — no handoff yet, so no PR number
+  const instanceId = getActiveWorkflowInstance(issueId)!.id;
+  // Retire the starter developer item so the resume has exactly one next effect to queue
+  // (the one-active work-item index rejects a second pending/leased item per instance).
+  cancelWorkItem(listWorkItemsForIssue(issueId)[0].id);
+  const action = createHumanAction({
+    issueId,
+    workflowInstanceId: instanceId,
+    actionType: "policy_escalation",
+    reason: "reviewer session failed",
+    question: "Retry the review, or close the issue?",
+    continuationPreview: { resumeRole: "reviewer", resumeHeadSha: "head-A" },
+    responseOptions: [
+      { choice: "resume", label: "Retry review" },
+      { choice: "close", label: "Close" },
+    ]});
+
+  setResumeLiveHeadReaderForTests(async () => {
+    throw new Error("must not look up a live head without a PR number");
+  });
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing");
+  assert.equal(issue.headSha, null, "no re-pin without a PR");
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1);
+  assert.equal(JSON.parse(pending[0].payloadJson!).inputSha, "head-A");
+  assert.equal(issue.currentIntent, "Reviewer re-evaluating at head-A");
+});
+
+test("NOT-226: developer-role continuations ignore the live head", async () => {
+  const issueId = newIssue({ maxInfraAttempts: 1 });
+  startWorkflow(issueId);
+  await complete(issueId, { kind: "session_failed" }); // attempt 1: retries
+  await complete(issueId, { kind: "session_failed" }); // attempt 2: exhausts -> developer continuation
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation")!;
+  assert.equal(JSON.parse(action.continuationPreviewJson ?? "null"), null);
+
+  setResumeLiveHeadReaderForTests(async () => liveHeadB);
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing");
+  assert.equal(issue.headSha, null, "a developer resume never re-pins a head");
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.deepEqual(pending.map((i) => i.kind), ["developer"]);
+  assert.equal(issue.currentIntent, "Developer implementing round 1");
+  assert.deepEqual(JSON.parse(getHumanAction(action.id)!.resolutionJson!), { choice: "resume" });
+});
+
+test("NOT-226: closing a reviewer escalation never consults the live head", async () => {
+  const { issueId, action } = await openReviewerEscalationPinnedAtCleanHandoff();
+
+  setResumeLiveHeadReaderForTests(async () => {
+    throw new Error("close must not look up a live head");
+  });
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "yusuke", "close");
+  assert.equal(resolved.ok, true);
+
+  assert.equal(getIssue(issueId)!.status, "closed");
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0);
 });
 
 test("fail → retry → exhaust → resume → fail again does not collide with the pre-escalation retry's idempotency key", async () => {
