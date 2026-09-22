@@ -44,6 +44,19 @@ import {
 
 export const CODEX_RUNTIME: Runtime = "codex_local";
 
+/**
+ * Client version sent in the `initialize` handshake (`clientInfo.version`).
+ * Kept in sync with `packages/server/package.json` — the App Server requires
+ * a versioned client identity and may reject a version-less handshake.
+ */
+export const CODEX_CLIENT_VERSION = "1.1.10";
+
+export const CODEX_CLIENT_INFO = {
+  name: "agent-dealer",
+  title: "agent-dealer",
+  version: CODEX_CLIENT_VERSION,
+} as const;
+
 /** Methods this client may ever send. Anything else throws before write. */
 export const READ_ONLY_METHODS = [
   "initialize",
@@ -142,7 +155,7 @@ function sanitizeKeySegment(name: string): string {
 
 function windowReadingFromEntry(
   entry: unknown,
-  identity: { windowKey: string; providerBucket: string },
+  identity: { windowKey: string; providerBucket: string; labelOverride?: string | null },
   observedAt: string
 ): AdapterWindowReading | null {
   if (!entry || typeof entry !== "object") return null;
@@ -157,8 +170,13 @@ function windowReadingFromEntry(
     w.durationMinutes,
     w.duration_minutes,
   ]);
+  const override = identity.labelOverride;
   const label =
-    typeof w.label === "string" && w.label.length > 0 ? w.label : identity.providerBucket;
+    typeof w.label === "string" && w.label.length > 0
+      ? w.label
+      : typeof override === "string" && override.length > 0
+        ? override
+        : identity.providerBucket;
   return {
     windowKey: identity.windowKey,
     providerBucket: identity.providerBucket,
@@ -177,13 +195,37 @@ export interface CodexRateLimitsReadings {
   windows: AdapterWindowReading[];
 }
 
+/** One `rateLimitsByLimitId` bucket: identity plus nested window snapshots. */
+export interface CodexRateLimitBucketLike {
+  limitId?: unknown;
+  limit_id?: unknown;
+  limitName?: unknown;
+  limit_name?: unknown;
+  name?: unknown;
+  primary?: unknown;
+  secondary?: unknown;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 /**
  * Normalize `rateLimits` + `rateLimitsByLimitId` into adapter readings.
  * Returns null when the payload carries no usable window (caller maps that to
  * an `unparsable` unavailable reading). Entries that are individually
  * malformed are skipped; `rateLimits` keys use a `codex_rate_limit_` prefix
- * and `rateLimitsByLimitId` keys a `codex_limit_` prefix so the two maps can
- * never overwrite each other.
+ * and `rateLimitsByLimitId` keys a `codex_limit_<limitId>_<primary|secondary>`
+ * prefix so the two maps can never overwrite each other and per-limit buckets
+ * stay distinguishable.
+ *
+ * Each `rateLimitsByLimitId` bucket is a nested snapshot
+ * (`{ limitId, limitName, primary, secondary }`): every present
+ * primary/secondary sub-window becomes its own reading whose providerBucket
+ * carries both the limit id and the window (`<limitId>/<primary|secondary>`)
+ * and whose label is the bucket's `limitName`. A bucket without nested
+ * windows still parses as one legacy flat window so older servers keep
+ * working.
  */
 export function codexRateLimitsToReadings(
   payload: unknown,
@@ -205,13 +247,41 @@ export function codexRateLimitsToReadings(
   }
   const byId = p.rateLimitsByLimitId ?? p.rate_limits_by_limit_id;
   if (byId && typeof byId === "object") {
-    for (const [limitId, entry] of Object.entries(byId as Record<string, unknown>)) {
-      const reading = windowReadingFromEntry(
-        entry,
-        { windowKey: `codex_limit_${sanitizeKeySegment(limitId)}`, providerBucket: limitId },
-        observedAt
-      );
-      if (reading) out.push(reading);
+    for (const [mapKey, bucket] of Object.entries(byId as Record<string, unknown>)) {
+      if (!bucket || typeof bucket !== "object") continue;
+      const b = bucket as CodexRateLimitBucketLike;
+      const limitId =
+        nonEmptyString(b.limitId) ?? nonEmptyString(b.limit_id) ?? mapKey;
+      const limitName =
+        nonEmptyString(b.limitName) ?? nonEmptyString(b.limit_name) ?? nonEmptyString(b.name);
+      let nested = false;
+      for (const sub of ["primary", "secondary"] as const) {
+        const entry = b[sub];
+        if (!entry || typeof entry !== "object") continue;
+        nested = true;
+        const reading = windowReadingFromEntry(
+          entry,
+          {
+            windowKey: `codex_limit_${sanitizeKeySegment(limitId)}_${sub}`,
+            providerBucket: `${limitId}/${sub}`,
+            labelOverride: limitName,
+          },
+          observedAt
+        );
+        if (reading) out.push(reading);
+      }
+      if (!nested) {
+        const reading = windowReadingFromEntry(
+          bucket,
+          {
+            windowKey: `codex_limit_${sanitizeKeySegment(limitId)}`,
+            providerBucket: limitId,
+            labelOverride: limitName,
+          },
+          observedAt
+        );
+        if (reading) out.push(reading);
+      }
     }
   }
   return out.length > 0 ? { windows: out } : null;
@@ -245,7 +315,10 @@ export function codexCapacityTimeoutMs(): number {
 
 type FailureKind = "unavailable" | "unauthenticated" | "timeout" | "malformed" | "unsupported";
 
-const AUTH_RE = /unauthenticated|unauthorized|not (signed|logged) in|sign in|login|auth|401|403|forbidden/i;
+// Anchored to explicit auth-failure phrasing: bare `auth`/`login` substrings
+// misclassify unrelated crash output as unauthenticated in operator logs.
+const AUTH_RE =
+  /unauthenticated|unauthorized|not (signed|logged)[ -]in|not authenticated|authentication (required|failed|expired)|please (sign|log) in|signed out|logged out|\b401\b|\b403\b|forbidden/i;
 
 export interface CodexRateLimitsRead {
   payload: unknown;
@@ -335,7 +408,24 @@ export function readCodexRateLimits(opts: CodexAppServerOptions = {}): Promise<C
       }
     };
 
-    const timer = setTimeout(() => fail("timeout"), timeoutMs);
+    const timer = setTimeout(() => {
+      try {
+        child?.kill();
+      } catch {
+        // Already exited — nothing to signal.
+      }
+      // A wedged App Server can ignore SIGTERM; escalate once so repeated
+      // polls cannot orphan a subprocess per read.
+      const killer = setTimeout(() => {
+        try {
+          if (child && child.exitCode === null) child.kill("SIGKILL");
+        } catch {
+          // Already exited — nothing to signal.
+        }
+      }, 2000);
+      killer.unref?.();
+      fail("timeout");
+    }, timeoutMs);
     timer.unref?.();
 
     try {
@@ -390,7 +480,7 @@ export function readCodexRateLimits(opts: CodexAppServerOptions = {}): Promise<C
     };
 
     void (async () => {
-      if (!write(readOnlyRequest(1, "initialize", { clientInfo: { name: "agent-dealer" } }))) {
+      if (!write(readOnlyRequest(1, "initialize", { clientInfo: { ...CODEX_CLIENT_INFO } }))) {
         fail("unavailable");
         return;
       }
@@ -559,7 +649,61 @@ export async function refreshCodexCapacityFromAppServer(
   const nowMs = opts.nowMs ?? Date.now();
   const result = await readCodexAppServerCapacity({ ...opts, nowMs });
   await ingestAdapterResult(result);
+  if (result.windows.length > 0) {
+    // A successful read supersedes the failure sentinel: without this the
+    // N/A row lingers next to fresh windows until its own TTL expires.
+    const { deleteCapacitySnapshots } = await import("../repository/runtime-capacity.js");
+    deleteCapacitySnapshots(CODEX_RUNTIME, [SENTINEL_WINDOW_KEY]);
+  }
   return getRuntimeCapacitySnapshot(nowMs);
+}
+
+/**
+ * On-demand bounded refresh for runtimes without a scheduler: when
+ * `codex_local` is a configured runtime account and its stored snapshot is
+ * missing or older than the stale window, run one bounded non-billable read
+ * and ingest it, then return. Fresh snapshots short-circuit with no
+ * subprocess. Concurrent callers share one in-flight refresh
+ * (single-flight); failures resolve to the stored snapshot — this helper
+ * never throws, never touches runtime health, and never sends credentials.
+ * Set `AGENT_DEALER_CODEX_CAPACITY_REFRESH=off` to disable the refresh.
+ */
+let codexStaleRefreshInFlight: Promise<unknown> | null = null;
+
+export async function refreshCodexCapacityIfStale(
+  nowMs = Date.now(),
+  opts: CodexAppServerOptions = {}
+): Promise<void> {
+  if (process.env.AGENT_DEALER_CODEX_CAPACITY_REFRESH === "off") return;
+  const [{ configuredCapacityRuntimes }, { listCapacitySnapshots }, adapter] = await Promise.all([
+    import("./service.js"),
+    import("../repository/runtime-capacity.js"),
+    import("./adapter.js"),
+  ]);
+  if (!configuredCapacityRuntimes().includes(CODEX_RUNTIME)) return;
+  const rows = listCapacitySnapshots(CODEX_RUNTIME);
+  const newestObserved = rows.reduce<number | null>((max, row) => {
+    const ms = Date.parse(row.observedAt);
+    if (!Number.isFinite(ms)) return max;
+    return max === null || ms > max ? ms : max;
+  }, null);
+  if (
+    newestObserved !== null &&
+    newestObserved + adapter.DEFAULT_STALE_AFTER_MS > nowMs
+  ) {
+    return;
+  }
+  if (codexStaleRefreshInFlight) {
+    await codexStaleRefreshInFlight;
+    return;
+  }
+  const run = refreshCodexCapacityFromAppServer({ ...opts, nowMs }).catch(() => undefined);
+  codexStaleRefreshInFlight = run;
+  try {
+    await run;
+  } finally {
+    if (codexStaleRefreshInFlight === run) codexStaleRefreshInFlight = null;
+  }
 }
 
 /** Normalize one unavailable Codex reading for direct persistence (tests/tools). */

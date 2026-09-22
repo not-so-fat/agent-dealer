@@ -128,6 +128,18 @@ export function recordCapacitySnapshots(runtime: Runtime, windows: RecordCapacit
   run(windows);
 }
 
+/** Delete stored windows for one runtime account by window key. */
+export function deleteCapacitySnapshots(runtime: Runtime, windowKeys: string[]): void {
+  if (windowKeys.length === 0) return;
+  const stmt = getDb().prepare(
+    "DELETE FROM runtime_capacity_snapshots WHERE runtime = ? AND window_key = ?"
+  );
+  const run = getDb().transaction((keys: string[]) => {
+    for (const windowKey of keys) stmt.run(runtime, windowKey);
+  });
+  run(windowKeys);
+}
+
 /** All stored windows for one runtime account, ordered by window key. */
 export function listCapacitySnapshots(runtime: Runtime): CapacityWindowSnapshot[] {
   const rows = getDb()

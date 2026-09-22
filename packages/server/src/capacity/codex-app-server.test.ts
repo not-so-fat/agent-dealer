@@ -16,15 +16,21 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-co
 
 import {
   assertReadOnlyMethod,
+  CODEX_CLIENT_VERSION,
   codexRateLimitsToReadings,
   createCodexAppServerAdapter,
   normalizeCodexResetsAt,
   readCodexAppServerCapacity,
   readCodexRateLimits,
+  refreshCodexCapacityFromAppServer,
+  refreshCodexCapacityIfStale,
 } from "./codex-app-server.js";
 import { normalizeAdapterWindow } from "./adapter.js";
 const { migrate } = await import("../db/index.js");
-const { clearAllCapacitySnapshots } = await import("../repository/runtime-capacity.js");
+const { clearAllCapacitySnapshots, listCapacitySnapshots } = await import(
+  "../repository/runtime-capacity.js"
+);
+const { createAgent } = await import("../repository/agents.js");
 const {
   clearAllRuntimeAvailability,
   runtimeAvailability,
@@ -85,17 +91,59 @@ test("rateLimitsByLimitId buckets never overwrite each other or rateLimits", () 
   const parsed = codexRateLimitsToReadings({
     rateLimits: { primary: { usedPercent: 40, windowDurationMins: 300 } },
     rateLimitsByLimitId: {
-      primary: { usedPercent: 70, windowDurationMins: 300 },
-      other_bucket: { usedPercent: 5, windowDurationMins: 10080 },
+      team_a: {
+        limitId: "team_a",
+        limitName: "Team A",
+        primary: { usedPercent: 70, windowDurationMins: 300 },
+        secondary: { usedPercent: 5, windowDurationMins: 10080 },
+      },
+      team_b: {
+        limitId: "team_b",
+        limitName: "Team B",
+        primary: { usedPercent: 90, windowDurationMins: 300 },
+        secondary: { usedPercent: 25, windowDurationMins: 10080 },
+      },
     },
   });
   assert.ok(parsed);
-  assert.equal(parsed.windows.length, 3);
+  assert.equal(parsed.windows.length, 5);
   const keys = parsed.windows.map((w) => w.windowKey);
-  assert.equal(new Set(keys).size, 3);
+  assert.equal(new Set(keys).size, 5);
   assert.ok(keys.includes("codex_rate_limit_primary"));
-  assert.ok(keys.includes("codex_limit_primary"));
-  assert.ok(keys.includes("codex_limit_other_bucket"));
+  assert.ok(keys.includes("codex_limit_team_a_primary"));
+  assert.ok(keys.includes("codex_limit_team_a_secondary"));
+  assert.ok(keys.includes("codex_limit_team_b_primary"));
+  assert.ok(keys.includes("codex_limit_team_b_secondary"));
+  const aPrimary = parsed.windows.find((w) => w.windowKey === "codex_limit_team_a_primary")!;
+  assert.equal(aPrimary.providerBucket, "team_a/primary");
+  assert.equal(aPrimary.providerLabel, "Team A");
+  assert.equal(aPrimary.usedPercent, 70);
+});
+
+test("nested bucket windows keep per-limit identity when limitId is only the map key", () => {
+  const parsed = codexRateLimitsToReadings({
+    rateLimitsByLimitId: {
+      legacy_key: {
+        primary: { usedPercent: 10, windowDurationMins: 300 },
+      },
+    },
+  });
+  assert.ok(parsed);
+  assert.equal(parsed.windows.length, 1);
+  assert.equal(parsed.windows[0]!.windowKey, "codex_limit_legacy_key_primary");
+  assert.equal(parsed.windows[0]!.providerBucket, "legacy_key/primary");
+});
+
+test("flat legacy buckets without nested windows still parse", () => {
+  const parsed = codexRateLimitsToReadings({
+    rateLimitsByLimitId: {
+      flat_bucket: { usedPercent: 33, windowDurationMins: 300 },
+    },
+  });
+  assert.ok(parsed);
+  assert.equal(parsed.windows.length, 1);
+  assert.equal(parsed.windows[0]!.windowKey, "codex_limit_flat_bucket");
+  assert.equal(parsed.windows[0]!.providerBucket, "flat_bucket");
 });
 
 test("resetsAt accepts epoch seconds, ms, and ISO; rejects garbage", () => {
@@ -133,8 +181,8 @@ test("fake server 300/10080-min windows become 5H/1W snapshots end to end", asyn
   const codex = snap.runtimes.find((r) => r.runtime === "codex_local")!;
   assert.ok(codex, "codex_local entry exists");
   assert.equal(codex.unavailableReason, null);
-  // primary + secondary + two by-limit-id buckets.
-  assert.equal(codex.windows.length, 4);
+  // primary + secondary + two nested limit buckets × (primary + secondary).
+  assert.equal(codex.windows.length, 6);
   const fiveHour = codex.windows.find((w) => w.windowKey === "codex_rate_limit_primary")!;
   const weekly = codex.windows.find((w) => w.windowKey === "codex_rate_limit_secondary")!;
   assert.equal(fiveHour.displayLabel, "5H");
@@ -143,9 +191,95 @@ test("fake server 300/10080-min windows become 5H/1W snapshots end to end", asyn
   assert.equal(weekly.displayLabel, "1W");
   assert.equal(weekly.remainingPercent, 87.5);
   assert.equal(weekly.resetAt, new Date(Math.floor((now + 3 * 86400_000) / 1000) * 1000).toISOString());
-  const byId5h = codex.windows.find((w) => w.windowKey === "codex_limit_codex_main_5h")!;
-  assert.equal(byId5h.providerBucket, "codex_main_5h");
-  assert.equal(byId5h.remainingPercent, 30);
+  const mainPrimary = codex.windows.find((w) => w.windowKey === "codex_limit_main_primary")!;
+  assert.equal(mainPrimary.providerBucket, "main/primary");
+  assert.equal(mainPrimary.displayLabel, "5H");
+  assert.equal(mainPrimary.remainingPercent, 30);
+  assert.equal(
+    mainPrimary.resetAt,
+    new Date(Math.floor((now + 1 * 3600_000) / 1000) * 1000).toISOString()
+  );
+  const mainSecondary = codex.windows.find((w) => w.windowKey === "codex_limit_main_secondary")!;
+  assert.equal(mainSecondary.providerBucket, "main/secondary");
+  assert.equal(mainSecondary.displayLabel, "1W");
+  assert.equal(mainSecondary.remainingPercent, 95);
+  const extraPrimary = codex.windows.find((w) => w.windowKey === "codex_limit_extra_primary")!;
+  assert.equal(extraPrimary.remainingPercent, 10);
+  const extraSecondary = codex.windows.find((w) => w.windowKey === "codex_limit_extra_secondary")!;
+  assert.equal(extraSecondary.remainingPercent, 75);
+});
+
+test("initialize handshake carries a versioned client identity", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-codex-handshake-"));
+  const recordPath = path.join(dir, "methods.jsonl");
+  const { opts } = fakeOpts("ok", { env: { FAKE_CODEX_RECORD: recordPath } });
+  await readCodexRateLimits(opts);
+  const lines = fs
+    .readFileSync(recordPath, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as { method: string; params?: { clientInfo?: Record<string, unknown> } });
+  const init = lines.find((l) => l.method === "initialize");
+  assert.ok(init, "handshake recorded");
+  assert.equal(init.params?.clientInfo?.name, "agent-dealer");
+  assert.equal(init.params?.clientInfo?.version, CODEX_CLIENT_VERSION);
+});
+
+test("a successful refresh clears a previously stored failure sentinel", async () => {
+  clearAllCapacitySnapshots();
+  const crashed = fakeOpts("crash");
+  await refreshCodexCapacityFromAppServer(crashed.opts);
+  const sentinel = listCapacitySnapshots("codex_local").find(
+    (w) => w.windowKey === "codex_account_rate_limits"
+  );
+  assert.ok(sentinel, "failure sentinel stored");
+  assert.equal(sentinel.unavailableReason, "missing");
+  const { opts } = fakeOpts("ok");
+  await refreshCodexCapacityFromAppServer(opts);
+  const rows = listCapacitySnapshots("codex_local");
+  assert.ok(
+    !rows.some((w) => w.windowKey === "codex_account_rate_limits"),
+    "stale N/A sentinel cleared next to fresh windows"
+  );
+  assert.equal(rows.length, 6);
+});
+
+test("stale Codex snapshots refresh on demand; fresh ones short-circuit", async () => {
+  clearAllCapacitySnapshots();
+  createAgent({
+    name: "codex-on-demand",
+    runtime: "codex_local",
+    deckId: "33333333-3333-4333-8333-333333333333",
+  });
+  const { now, opts } = fakeOpts("ok");
+  await refreshCodexCapacityIfStale(now, opts);
+  assert.equal(listCapacitySnapshots("codex_local").length, 6);
+  // Fresh snapshots short-circuit before any spawn: a bogus binary would fail,
+  // so reaching here unchanged proves no subprocess ran.
+  await refreshCodexCapacityIfStale(Date.now(), {
+    command: "/nonexistent/codex-app-server-xyz",
+    timeoutMs: 2000,
+  });
+  assert.equal(listCapacitySnapshots("codex_local").length, 6);
+});
+
+test("concurrent stale refreshes share one result without corrupting snapshots", async () => {
+  clearAllCapacitySnapshots();
+  const { now, opts } = fakeOpts("ok");
+  await Promise.all([refreshCodexCapacityIfStale(now, opts), refreshCodexCapacityIfStale(now, opts)]);
+  assert.equal(listCapacitySnapshots("codex_local").length, 6);
+});
+
+test("refresh opt-out performs no read and stores nothing", async () => {
+  clearAllCapacitySnapshots();
+  process.env.AGENT_DEALER_CODEX_CAPACITY_REFRESH = "off";
+  try {
+    const { now, opts } = fakeOpts("ok");
+    await refreshCodexCapacityIfStale(now, opts);
+    assert.equal(listCapacitySnapshots("codex_local").length, 0);
+  } finally {
+    delete process.env.AGENT_DEALER_CODEX_CAPACITY_REFRESH;
+  }
 });
 
 test("updated notifications are consumed while the connection is alive", async () => {

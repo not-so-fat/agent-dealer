@@ -11,8 +11,10 @@
 //
 // `ok` payload mirrors the documented shapes: epoch-second resetsAt, a 300-min
 // primary and a 10,080-min secondary window, plus two `rateLimitsByLimitId`
-// buckets. An `account/rateLimits/updated` notification precedes the read
-// response so tests can assert notification consumption.
+// buckets in the official nested snapshot shape
+// ({ limitId, limitName, primary, secondary }). An
+// `account/rateLimits/updated` notification precedes the read response so
+// tests can assert notification consumption.
 
 import fs from "node:fs";
 
@@ -24,7 +26,10 @@ const epochSec = (deltaMs) => Math.floor((nowMs + deltaMs) / 1000);
 function record(msg) {
   if (!recordPath) return;
   try {
-    fs.appendFileSync(recordPath, `${JSON.stringify({ method: msg.method ?? null, id: msg.id ?? null })}\n`);
+    fs.appendFileSync(
+      recordPath,
+      `${JSON.stringify({ method: msg.method ?? null, id: msg.id ?? null, params: msg.params ?? null })}\n`
+    );
   } catch {
     // Recording is test assistance only — never break the fake over it.
   }
@@ -49,15 +54,33 @@ function okPayload() {
       },
     },
     rateLimitsByLimitId: {
-      codex_main_5h: {
-        usedPercent: 70,
-        windowDurationMins: 300,
-        resetsAt: epochSec(1 * 3600_000),
+      main: {
+        limitId: "main",
+        limitName: "Main quota",
+        primary: {
+          usedPercent: 70,
+          windowDurationMins: 300,
+          resetsAt: epochSec(1 * 3600_000),
+        },
+        secondary: {
+          usedPercent: 5,
+          windowDurationMins: 10080,
+          resetsAt: epochSec(6 * 24 * 3600_000),
+        },
       },
-      codex_main_1w: {
-        usedPercent: 5,
-        windowDurationMins: 10080,
-        resetsAt: epochSec(6 * 24 * 3600_000),
+      extra: {
+        limitId: "extra",
+        limitName: "Extra quota",
+        primary: {
+          usedPercent: 90,
+          windowDurationMins: 300,
+          resetsAt: epochSec(30 * 60_000),
+        },
+        secondary: {
+          usedPercent: 25,
+          windowDurationMins: 10080,
+          resetsAt: epochSec(2 * 24 * 3600_000),
+        },
       },
     },
   };
