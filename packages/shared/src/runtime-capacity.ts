@@ -202,6 +202,54 @@ export function isTeamBillingKnown(b: CursorTeamBilling, nowMs = Date.now()): bo
   return true;
 }
 
+/**
+ * NOT-250: monthly/billing-cycle capacity for Cursor Individual accounts via
+ * an opt-in *experimental* dashboard adapter. Cursor documents monthly
+ * individual usage (Spending dashboard) but exposes no supported usage API,
+ * so this surface reads authenticated dashboard endpoints using the existing
+ * local Cursor login. Those endpoints and credential formats are not a
+ * supported public contract and may change without notice — hence disabled
+ * by default, `experimental_api` source, and N/A degradation on any drift.
+ * Billing-cycle values only (label/start/end, reported usage, remaining
+ * percent): no 5H/1W-style windows are invented, and money is never rendered
+ * as a token percentage. N/A reasons reuse CapacityUnavailableReason.
+ */
+export const CursorIndividualBilling = z.object({
+  /** True only with explicit opt-in (`AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY=experimental`). */
+  enabled: z.boolean(),
+  /** True only when opted in AND a usable local credential was found. */
+  configured: z.boolean(),
+  /** Billing-cycle label exactly as reported (e.g. `September 2026`), never guessed. */
+  cycleLabel: z.string().nullable(),
+  /** Billing-cycle start as reported (ISO-8601, nullable). */
+  cycleStart: z.string().nullable(),
+  /** Billing-cycle reset/end as reported (ISO-8601, nullable). */
+  cycleEnd: z.string().nullable(),
+  /** Reported usage value/unit as reported (never normalized away). */
+  usageValue: z.number().nullable(),
+  usageUnit: z.string().nullable(),
+  /** Normalized remaining percent 0–100 when derivable; null renders N/A. */
+  remainingPercent: z.number().min(0).max(100).nullable(),
+  source: CapacitySource,
+  unavailableReason: CapacityUnavailableReason.nullable(),
+  /** When the backing dashboard read was observed (ISO-8601, nullable). */
+  observedAt: z.string().nullable(),
+  generatedAt: z.string(),
+});
+export type CursorIndividualBilling = z.infer<typeof CursorIndividualBilling>;
+
+/** True when the individual billing snapshot carries current, renderable values. */
+export function isIndividualBillingKnown(b: CursorIndividualBilling, nowMs = Date.now()): boolean {
+  if (!b.enabled || !b.configured) return false;
+  if (b.source === "unavailable" || b.unavailableReason !== null) return false;
+  if (b.usageValue === null && b.remainingPercent === null) return false;
+  if (b.observedAt) {
+    const obsMs = Date.parse(b.observedAt);
+    if (!Number.isFinite(obsMs) || obsMs > nowMs + 60_000) return false;
+  }
+  return true;
+}
+
 /** True when the window carries a current, renderable remaining value. */
 export function isWindowKnown(w: CapacityWindowSnapshot, nowMs = Date.now()): boolean {
   if (w.remainingPercent === null) return false;
