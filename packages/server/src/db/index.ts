@@ -407,6 +407,36 @@ export function migrate(): void {
     `);
   }
 
+  // NOT-245: normalized capacity snapshots for databases created before
+  // schema.sql declared the table (same upgrade-path pattern as queue_entries).
+  const capacitySnapshots = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_capacity_snapshots'")
+    .get() as { name: string } | undefined;
+  if (!capacitySnapshots) {
+    db.exec(`
+      CREATE TABLE runtime_capacity_snapshots (
+        runtime TEXT NOT NULL,
+        window_key TEXT NOT NULL,
+        provider_bucket TEXT NOT NULL,
+        duration_minutes INTEGER,
+        display_label TEXT NOT NULL,
+        used_value REAL,
+        used_unit TEXT,
+        remaining_percent REAL,
+        reset_at TEXT,
+        observed_at TEXT NOT NULL,
+        fresh_until TEXT,
+        expires_at TEXT,
+        source TEXT NOT NULL,
+        unavailable_reason TEXT,
+        evidence_ref TEXT,
+        PRIMARY KEY (runtime, window_key)
+      );
+      CREATE INDEX idx_runtime_capacity_runtime
+        ON runtime_capacity_snapshots(runtime);
+    `);
+  }
+
   // NOT-103: sequential issue admission queue.
   const queueEntries = db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'queue_entries'")

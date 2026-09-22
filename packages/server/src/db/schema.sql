@@ -380,6 +380,32 @@ CREATE INDEX IF NOT EXISTS idx_authority_attempts_owner ON authority_attempts(ow
 CREATE INDEX IF NOT EXISTS idx_authority_attempts_stale ON authority_attempts(status, stale_at) WHERE stale_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_authority_attempts_status ON authority_attempts(status);
 
+-- NOT-245: normalized account-level capacity snapshots. One row per
+-- (runtime, window_key): a provider may report several independently resetting
+-- windows per runtime account. Independent of runtime_availability (NOT-111
+-- hard caps) — nothing here changes that table's behavior.
+CREATE TABLE IF NOT EXISTS runtime_capacity_snapshots (
+  runtime TEXT NOT NULL,
+  window_key TEXT NOT NULL,
+  provider_bucket TEXT NOT NULL,
+  duration_minutes INTEGER,
+  display_label TEXT NOT NULL,
+  used_value REAL,
+  used_unit TEXT,
+  remaining_percent REAL,
+  reset_at TEXT,
+  observed_at TEXT NOT NULL,
+  fresh_until TEXT,
+  expires_at TEXT,
+  source TEXT NOT NULL,
+  unavailable_reason TEXT,
+  evidence_ref TEXT,
+  PRIMARY KEY (runtime, window_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_capacity_runtime
+  ON runtime_capacity_snapshots(runtime);
+
 -- NOT-111: account-level runtime usage caps (keyed per runtime, not per agent profile).
 CREATE TABLE IF NOT EXISTS runtime_availability (
   runtime TEXT PRIMARY KEY,

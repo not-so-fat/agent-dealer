@@ -16,6 +16,7 @@ import type {
   LinearCandidate,
   QueueMoveTarget,
   ReportFilterState,
+  RuntimeCapacityResponse,
   RuntimeModelsResponse,
   StartIssueResponse,
   UpdateAgentInput,
@@ -101,6 +102,13 @@ export async function fetchRuntimeModels(
     if (!res.ok) throw new Error(await res.text());
     return res.json();
   });
+}
+
+/** NOT-245: normalized per-runtime capacity (windows, freshness, N/A reasons). */
+export async function fetchRuntimeCapacity(): Promise<RuntimeCapacityResponse> {
+  const res = await fetch(`${API}/api/runtime-capacity`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 
 export async function fetchAgentDeckStatus(): Promise<AgentDeckStatus> {

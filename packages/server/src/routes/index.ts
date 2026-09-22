@@ -16,6 +16,7 @@ import {
 } from "../adapters/linear-inbox.js";
 import { getLinearUsageSnapshot } from "../adapters/linear-graphql.js";
 import { listRuntimeModels } from "../runners/models.js";
+import { getRuntimeCapacitySnapshot } from "../capacity/service.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
   if (!deckId) return null;
@@ -68,6 +69,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(502).send({ error: String(e) });
     }
   });
+
+  // NOT-245: provider-neutral capacity read model — one entry per configured
+  // runtime account with its windows, freshness, and explicit unavailable
+  // reasons. Normalized snapshots only; evidence stays server-side.
+  app.get("/api/runtime-capacity", async () => getRuntimeCapacitySnapshot());
 
   app.get("/api/agents", async () => {
     const agents = await listAgentsWithHealth(listAgents());
