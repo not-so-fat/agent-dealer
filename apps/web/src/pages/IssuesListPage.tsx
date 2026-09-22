@@ -338,7 +338,9 @@ export default function IssuesListPage({
   };
 
   const applyLinearCandidate = (c: LinearCandidate) => {
-    setCandidates((prev) => (prev.some((x) => x.id === c.id) ? prev : [c, ...prev]));
+    // A repeat Lookup must replace the cached candidate so fresher labels and
+    // repoResolution are never silently dropped.
+    setCandidates((prev) => [c, ...prev.filter((x) => x.id !== c.id)]);
     setSelectedLinearId(c.id);
     setLinearRef(c.identifier);
   };

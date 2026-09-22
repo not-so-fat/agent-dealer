@@ -84,3 +84,46 @@ test("manual creation has no Linear provenance but keeps the row", () => {
   assert.ok(html.includes("Manual entry"), "manual provenance shown");
   assert.ok(html.includes("Confirm this repository"), "confirmation still required");
 });
+
+test("manually edited repo in Linear mode is an override, not label provenance", () => {
+  const html = render({ canonical: "github.com/not-so-fat/other-repo" });
+  assert.ok(html.includes("Manual override"), "override copy shown");
+  assert.ok(!html.includes("From Linear label"), "must not claim the edited value came from the label");
+  assert.ok(
+    html.includes("repo:github.com/not-so-fat/agent-dealer"),
+    "still names the source label for traceability"
+  );
+  assert.ok(html.includes("github.com/not-so-fat/other-repo"), "shows the edited identity");
+  assert.ok(html.includes("Confirm this repository"), "overridden identity needs fresh confirmation");
+});
+
+test("conflict hint with a manual value names it as manual, not label-derived", () => {
+  const html = render({
+    canonical: "github.com/not-so-fat/agent-dealer",
+    hint: { status: "conflict", labels: ["repo:github.com/a/one", "repo:github.com/b/two"] },
+  });
+  assert.ok(html.includes("Conflicting"), "conflict block still shown");
+  assert.ok(html.includes("chosen manually, not from a Linear label"), "manual value disclaimed");
+});
+
+test("invalid hint with a manual value names it as manual, not label-derived", () => {
+  const html = render({
+    canonical: "github.com/not-so-fat/agent-dealer",
+    hint: {
+      status: "invalid",
+      labels: ["repo:https://gitlab.com/acme/app"],
+      error: "Only github.com repositories are supported (got host gitlab.com)",
+    },
+  });
+  assert.ok(html.includes("Invalid repository label"), "invalid block still shown");
+  assert.ok(html.includes("chosen manually, not from a Linear label"), "manual value disclaimed");
+});
+
+test("unresolved hint with a manual value names it as manual", () => {
+  const html = render({
+    canonical: "github.com/not-so-fat/agent-dealer",
+    hint: { status: "unresolved" },
+  });
+  assert.ok(html.includes("no"), "unresolved copy still shown");
+  assert.ok(html.includes("chosen manually, not from a Linear label"), "manual value disclaimed");
+});

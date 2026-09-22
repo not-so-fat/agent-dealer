@@ -30,6 +30,22 @@ export default function RepositoryConfirmRow({
   const confirmed = canonical != null && confirmedRepo === canonical;
   const conflictLabels = hint?.status === "conflict" ? (hint.labels ?? []) : [];
   const invalidLabel = hint?.status === "invalid" ? (hint.labels?.[0] ?? null) : null;
+  // NOT-242 repair: provenance must describe the CURRENT input value, not the
+  // selected ticket's labels alone. The repo field stays editable in Linear
+  // mode, so a resolved hint only proves provenance while the canonical
+  // identity still matches it — any manual edit is an override. Likewise a
+  // manual value next to an unresolved/conflict/invalid hint is a manual
+  // entry, never label-derived.
+  const resolvedMatches =
+    hint?.status === "resolved" &&
+    hint.repository != null &&
+    (canonical == null || canonical === hint.repository);
+  const resolvedOverride =
+    hint?.status === "resolved" &&
+    hint.sourceLabel != null &&
+    canonical != null &&
+    hint.repository != null &&
+    canonical !== hint.repository;
 
   return (
     <section
@@ -57,16 +73,37 @@ export default function RepositoryConfirmRow({
         </p>
       )}
 
-      {hint?.status === "resolved" && hint.sourceLabel ? (
-        <p className="text-xs text-white/55">
+      {resolvedOverride ? (
+        <p className="text-xs text-amber-200/90" data-testid="repo-provenance">
+          Manual override — the value above no longer matches Linear label{" "}
+          <code className="font-mono text-white/80">{hint?.sourceLabel}</code>
+          {hint?.repository ? (
+            <>
+              {" "}
+              (which suggested{" "}
+              <code className="font-mono text-white/80">{hint.repository}</code>)
+            </>
+          ) : null}
+          . Confirm the exact repository above before kicking.
+        </p>
+      ) : resolvedMatches && hint?.sourceLabel ? (
+        <p className="text-xs text-white/55" data-testid="repo-provenance">
           From Linear label <code className="font-mono text-white/80">{hint.sourceLabel}</code>
         </p>
       ) : hint?.status === "unresolved" ? (
-        <p className="text-xs text-amber-200/90">
-          {linearIdentifier ?? "This issue"} has no <code className="font-mono">repo:</code> label.
-          Add <code className="font-mono">repo:github.com/&lt;owner&gt;/&lt;repo&gt;</code> in
-          Linear, or choose the repository manually below.
-        </p>
+        <div className="space-y-1">
+          <p className="text-xs text-amber-200/90">
+            {linearIdentifier ?? "This issue"} has no <code className="font-mono">repo:</code>{" "}
+            label. Add{" "}
+            <code className="font-mono">repo:github.com/&lt;owner&gt;/&lt;repo&gt;</code> in
+            Linear, or choose the repository manually below.
+          </p>
+          {canonical ? (
+            <p className="text-xs text-white/55" data-testid="repo-provenance">
+              Manual entry — the value above was chosen manually, not from a Linear label.
+            </p>
+          ) : null}
+        </div>
       ) : hint?.status === "conflict" ? (
         <div className="text-xs text-red-300 space-y-1">
           <p>
@@ -78,13 +115,25 @@ export default function RepositoryConfirmRow({
               <li key={l}>{l}</li>
             ))}
           </ul>
+          {canonical ? (
+            <p className="text-white/55" data-testid="repo-provenance">
+              Manual entry — the value above was chosen manually, not from a Linear label.
+            </p>
+          ) : null}
         </div>
       ) : hint?.status === "invalid" ? (
-        <p className="text-xs text-red-300">
-          Invalid repository label{" "}
-          <code className="font-mono">{invalidLabel}</code>
-          {hint.error ? ` — ${hint.error}` : ""}. Fix the label in Linear, or choose manually below.
-        </p>
+        <div className="space-y-1">
+          <p className="text-xs text-red-300">
+            Invalid repository label <code className="font-mono">{invalidLabel}</code>
+            {hint.error ? ` — ${hint.error}` : ""}. Fix the label in Linear, or choose manually
+            below.
+          </p>
+          {canonical ? (
+            <p className="text-xs text-white/55" data-testid="repo-provenance">
+              Manual entry — the value above was chosen manually, not from a Linear label.
+            </p>
+          ) : null}
+        </div>
       ) : (
         <p className="text-xs text-white/55">Manual entry — no Linear source.</p>
       )}
