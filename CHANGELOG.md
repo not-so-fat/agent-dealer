@@ -4,6 +4,19 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.1.10 — 2026-09-22
+
+Patch over 1.1.9: runtime capacity visibility, simpler Linear repository selection, and richer CI-failure retry evidence.
+
+### Features
+
+- **Runtime capacity foundation (NOT-245)** — a new `GET /api/runtime-capacity` endpoint returns normalized per-runtime capacity snapshots (source `supported_protocol`/`observed_event`/`experimental_api`/`unavailable`; reason `unsupported`/`missing`/`expired`/`unparsable`/`stale`), backed by a new `runtime_capacity_snapshots` table and multi-window fixtures/adapters. The Agents page gains a **Runtime capacity** strip under the header showing per-runtime chips (e.g. `5H 50%`) with a distinct N/A state per reason; existing hard usage caps and the connection-health bar are unchanged. No polling yet — the strip loads once per page mount.
+
+### Fixes
+
+- **Linear intake no longer blocks on repository confirmation (NOT-251)** — removes the NOT-242 confirmation gate: a Linear ticket's `repo:` label now silently fills the repository field only when it resolves to exactly one valid repository, and any existing selection is otherwise preserved — switching tickets or source mode never clears it. Conflicting or invalid labels show a compact warning instead of blocking; Kick/Create goes back to ordinary required-field validation (title, valid repository, developer, reviewer), with no separate confirm step.
+- **`checks_failed` retries carry the actual failing check name and a log excerpt (NOT-252)** — after a PR's checks report failure, the developer/reviewer retry reason is now the real evidence: failing check names, workflow, conclusion, and a sanitized, length-capped excerpt from `gh run view --log-failed` (ANSI/control stripped, tokens and secrets redacted, URLs stripped of query/fragment) — instead of the generic "Developer's PR checks failed." A head-SHA mismatch or lookup failure falls back to the generic reason as before; this is best-effort and never blocks or changes the retry route.
+
 ## 1.1.9 — 2026-09-22
 
 Patch over 1.1.8: confirmed-repository Linear intake, clearer execution-report evidence, and a distinguished GitHub-timeout health state.
