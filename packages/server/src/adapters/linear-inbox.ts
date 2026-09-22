@@ -1,4 +1,5 @@
 import type { LinearCandidate, LinearIntakeConfig } from "@agent-dealer/shared";
+import { resolveLinearRepoLabels } from "@agent-dealer/shared";
 import { DEFAULT_LINEAR_STATE_FILTER, getLinearIntakeConfig } from "../repository/intake-settings.js";
 import { linearGraphqlRequest } from "./linear-graphql.js";
 
@@ -41,7 +42,14 @@ async function linearQuery(
   });
 }
 
-function nodeToCandidate(n: LinearIssueNode): LinearCandidate {
+/**
+ * NOT-242: every candidate carries a server-resolved repository hint read from
+ * explicit `repo:` labels. Raw labels stay on the candidate; resolution is
+ * deterministic (one valid label resolves, zero is unresolved, several
+ * conflict, a bad value is invalid) and never guesses from anything else.
+ */
+export function nodeToCandidate(n: LinearIssueNode): LinearCandidate {
+  const labels = n.labels?.nodes.map((l) => l.name) ?? [];
   return {
     id: n.id,
     identifier: n.identifier,
@@ -50,7 +58,8 @@ function nodeToCandidate(n: LinearIssueNode): LinearCandidate {
     url: n.url,
     state: n.state?.name,
     teamId: n.team?.id,
-    labels: n.labels?.nodes.map((l) => l.name) ?? [],
+    labels,
+    repoResolution: resolveLinearRepoLabels(labels),
   };
 }
 

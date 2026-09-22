@@ -72,6 +72,41 @@ These are read from SQLite (and overridden by env where noted). NOT-71 removed t
 
 Re-importing a Linear issue that is already present is idempotent: rather than creating a duplicate, it re-enqueues the existing issue when that issue is in a state admission can start.
 
+### Repository labels (NOT-242)
+
+A Linear issue declares its GitHub repository with an explicit reusable label
+that carries the canonical identity directly:
+
+```text
+repo:github.com/<owner>/<repo>
+```
+
+`repo:github.com/not-so-fat/agent-dealer`, for example. Dealer reads only
+labels whose name starts with `repo:` (prefix match is case-insensitive) and
+normalizes the remainder through the same shared parser as a manually entered
+repository, so the two can never drift. It never infers a repository from
+ordinary product labels (even one like `agent-dealer`), ticket text, team,
+title, recent history, or an Agent profile — those shortcuts are exactly the
+mistake this flow prevents.
+
+| Labels on the issue | What the New issue form does |
+|---------------------|------------------------------|
+| Exactly one valid `repo:` label | Auto-fills the canonical repository and names the source label |
+| No `repo:` label | Leaves the repository unresolved — add the label in Linear or choose manually; no guessed default |
+| More than one `repo:` label | Blocks auto-resolution and shows every conflicting label; never picks first |
+| Invalid / non-GitHub value | Shows the invalid label and the reason; fix the label or choose manually |
+
+The form shows the exact canonical repository in a dedicated **Repository**
+confirmation row with its provenance (`From Linear label \`repo:…\``) and a
+Change action back to the recent-repository / custom-entry control. **Kick
+from Linear** (and manual Create) stays disabled until the operator confirms
+the exact repository shown. Changing the selected ticket, the repository, or
+the source mode clears the confirmation, and a manual override must be
+confirmed again under its own canonical identity.
+
+Dealer never creates or mutates Linear labels. There is no friendly
+label-to-repository mapping — the label itself is the mapping.
+
 ### Status write-back
 
 > **By design since NOT-71.** Dealer does not write issue status back to Linear. Linear's

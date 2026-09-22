@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LinearRepoResolution } from "./linear-intake.js";
 import { Runtime } from "./runtime.js";
 import { AgentWithHealth } from "./agents.js";
 import { PhaseBudget, RunBudget } from "./budget.js";
@@ -12,6 +13,7 @@ export * from "./outbound-draft.js";
 export * from "./playbook-reflect.js";
 export * from "./issues.js";
 export * from "./github-repo.js";
+export * from "./linear-intake.js";
 export * from "./worker-sessions.js";
 export * from "./failure-cause.js";
 export * from "./attempt-waste.js";
@@ -316,6 +318,11 @@ export const LinearCandidate = z.object({
   state: z.string().optional(),
   labels: z.array(z.string()).optional(),
   teamId: z.string().optional(),
+  /**
+   * NOT-242: server-resolved repository hint read from explicit `repo:` labels.
+   * Raw labels stay on the candidate; this is the deterministic read of them.
+   */
+  repoResolution: LinearRepoResolution.optional(),
 });
 export type LinearCandidate = z.infer<typeof LinearCandidate>;
 

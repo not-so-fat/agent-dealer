@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import type { AgentWithHealth, HumanAction, LinearCandidate } from "@agent-dealer/shared";
+import { resolveLinearRepoLabels } from "@agent-dealer/shared";
+import {
+  canonicalRepoIdentity,
+  canSubmitNewIssue,
+  isRepoConfirmed,
+  repoHintFor,
+} from "../lib/linearRepoIntake";
 import {
   createIssue,
   dequeueIssue,
@@ -36,6 +43,7 @@ import {
   type IssuesFilterForm,
 } from "../lib/issuesList";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
+import RepositoryConfirmRow from "../components/issues/RepositoryConfirmRow";
 import AgentAssignmentEditor from "../components/issues/AgentAssignmentEditor";
 import NeedsAttentionPanel from "../components/issues/NeedsAttentionPanel";
 import AlertIcon from "../components/ui/AlertIcon";
@@ -92,6 +100,9 @@ export default function IssuesListPage({
   const [recentRepos, setRecentRepos] = useState<string[]>([]);
   const [title, setTitle] = useState("");
   const [repo, setRepo] = useState("");
+  /** NOT-242: the exact canonical identity the operator confirmed (null = unconfirmed). */
+  const [confirmedRepo, setConfirmedRepo] = useState<string | null>(null);
+  const repoInputRef = useRef<HTMLInputElement>(null);
   const [baseBranch, setBaseBranch] = useState("main");
   const [description, setDescription] = useState("");
   const [acceptanceCriteria, setAcceptanceCriteria] = useState("");
@@ -112,6 +123,23 @@ export default function IssuesListPage({
 
   const selectedLinear = candidates.find((c) => c.id === selectedLinearId) ?? null;
   const linearLocked = sourceMode === "linear" && selectedLinear != null;
+  // NOT-242: server-resolved hint (client recompute fallback); canonical identity
+  // of the current input; confirmation is only valid while it matches exactly.
+  const repoHint = repoHintFor(sourceMode, selectedLinear);
+  const repoCanonical = canonicalRepoIdentity(repo);
+  const submittable = canSubmitNewIssue({
+    title,
+    repo,
+    developerAgentId,
+    reviewerAgentId,
+    confirmedRepo,
+  });
+
+  /** Any repository edit clears the prior confirmation — it must be given again. */
+  const updateRepo = (value: string) => {
+    setRepo(value);
+    setConfirmedRepo(null);
+  };
 
   const refreshIssues = (f: typeof applied) => {
     fetchIssuesPage(f).then(setIssuePage).catch((e) => setError(String(e)));
@@ -284,11 +312,23 @@ export default function IssuesListPage({
     setTitle(`${selectedLinear.identifier}: ${selectedLinear.title}`);
     setDescription(selectedLinear.description ?? "");
     setAcceptanceCriteria(extractAcceptanceFromLinear(selectedLinear.description) ?? "");
+    // NOT-242: a new ticket clears the prior confirmation. Exactly one valid
+    // `repo:` label auto-fills the canonical repository; anything else leaves
+    // the field unresolved with no guessed default.
+    setConfirmedRepo(null);
+    const hint =
+      selectedLinear.repoResolution ?? resolveLinearRepoLabels(selectedLinear.labels);
+    if (hint.status === "resolved" && hint.repository) {
+      setRepo(hint.repository);
+    } else {
+      setRepo("");
+    }
   }, [selectedLinear]);
 
   const resetForm = () => {
     setTitle("");
     setRepo("");
+    setConfirmedRepo(null);
     setDescription("");
     setAcceptanceCriteria("");
     setSelectedLinearId("");
@@ -298,7 +338,9 @@ export default function IssuesListPage({
   };
 
   const applyLinearCandidate = (c: LinearCandidate) => {
-    setCandidates((prev) => (prev.some((x) => x.id === c.id) ? prev : [c, ...prev]));
+    // A repeat Lookup must replace the cached candidate so fresher labels and
+    // repoResolution are never silently dropped.
+    setCandidates((prev) => [c, ...prev.filter((x) => x.id !== c.id)]);
     setSelectedLinearId(c.id);
     setLinearRef(c.identifier);
   };
@@ -324,6 +366,14 @@ export default function IssuesListPage({
   const submitCreate = async () => {
     if (!title.trim() || !repo.trim() || !developerAgentId || !reviewerAgentId) {
       setError("Title, GitHub repository, developer, and reviewer are required");
+      return;
+    }
+    // NOT-242: Kick/Create stays disabled until the exact repository shown is
+    // confirmed; the guard here covers callers that bypass the disabled button.
+    if (!isRepoConfirmed(repo, confirmedRepo)) {
+      setError(
+        "Confirm the exact repository shown above before kicking — changing the ticket or repository clears the confirmation"
+      );
       return;
     }
     try {
@@ -381,6 +431,7 @@ export default function IssuesListPage({
               onClick={() => {
                 setSourceMode("manual");
                 setSelectedLinearId("");
+                setConfirmedRepo(null);
               }}
             >
               Manual
@@ -388,7 +439,10 @@ export default function IssuesListPage({
             <button
               type="button"
               className={`font-ui-display px-3 py-1 rounded border ${sourceMode === "linear" ? "border-teal/50 text-teal" : "border-white/10 text-white/50"}`}
-              onClick={() => setSourceMode("linear")}
+              onClick={() => {
+                setSourceMode("linear");
+                setConfirmedRepo(null);
+              }}
             >
               From Linear
             </button>
@@ -460,6 +514,16 @@ export default function IssuesListPage({
             value={acceptanceCriteria}
             onChange={(e) => setAcceptanceCriteria(e.target.value)}
           />
+          <RepositoryConfirmRow
+            canonical={repoCanonical}
+            confirmedRepo={confirmedRepo}
+            hint={repoHint}
+            linearIdentifier={selectedLinear?.identifier ?? null}
+            onConfirm={() => {
+              if (repoCanonical) setConfirmedRepo(repoCanonical);
+            }}
+            onChangeRepo={() => repoInputRef.current?.focus()}
+          />
           <div className="flex gap-2 items-stretch">
             <div className="flex-1 space-y-1">
               {recentRepos.length > 0 && (
@@ -467,7 +531,7 @@ export default function IssuesListPage({
                   className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
                   value={recentRepos.includes(repo) ? repo : ""}
                   onChange={(e) => {
-                    if (e.target.value) setRepo(e.target.value);
+                    if (e.target.value) updateRepo(e.target.value);
                   }}
                 >
                   <option value="">Recent repositories…</option>
@@ -479,10 +543,11 @@ export default function IssuesListPage({
                 </select>
               )}
               <input
+                ref={repoInputRef}
                 className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
                 placeholder="GitHub URL or owner/repo"
                 value={repo}
-                onChange={(e) => setRepo(e.target.value)}
+                onChange={(e) => updateRepo(e.target.value)}
               />
             </div>
             <input
@@ -527,7 +592,17 @@ export default function IssuesListPage({
             Auto-merge when reviewer approves (skip final human review)
           </label>
           <div className="flex gap-2">
-            <button type="button" className="btn-gold px-4" onClick={submitCreate}>
+            <button
+              type="button"
+              className="btn-gold px-4 disabled:opacity-40"
+              disabled={!submittable}
+              title={
+                submittable
+                  ? undefined
+                  : "Confirm the exact repository above before kicking"
+              }
+              onClick={submitCreate}
+            >
               {sourceMode === "linear" ? "Kick from Linear" : "Create"}
             </button>
             <button
