@@ -291,7 +291,10 @@ function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "sessi
     case "timed_out":
       return outcome.reason ?? "Developer session timed out.";
     case "checks_failed":
-      return "Developer's PR checks failed.";
+      // NOT-252: prefer the sanitized enrichment the effect threaded into `details`
+      // (failing check names + bounded untrusted excerpt at the verified head SHA).
+      // Blank/absent details keep today's exact generic reason.
+      return outcome.details?.trim() ? outcome.details : "Developer's PR checks failed.";
     case "adapter_failure":
       return `Git/GitHub verification failed: ${outcome.reason}`;
     case "deck_failure":
