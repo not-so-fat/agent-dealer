@@ -339,6 +339,27 @@ export async function abortIssue(id: string, resolvedBy = "web"): Promise<AbortI
   return res.json();
 }
 
+/**
+ * NOT-239: intentionally retire a `ready` issue that should never run. Only
+ * Issue Detail offers this (never list/queue rows or bulk actions): the server
+ * closes it atomically (status → `closed`, queue entry removed, one
+ * human-authored `issue.closed` event) and refuses anything in-flight.
+ */
+export interface CloseIssueResult {
+  issueStatus: IssueStatus;
+  alreadyClosed: boolean;
+}
+
+export async function closeIssue(id: string, closedBy = "web"): Promise<CloseIssueResult> {
+  const res = await fetch(`${API}/api/issues/${id}/close`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ closedBy }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 export async function enqueueIssue(issueId: string): Promise<{
   id: string;
   issueId: string;
