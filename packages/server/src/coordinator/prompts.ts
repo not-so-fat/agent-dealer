@@ -104,7 +104,7 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
   const opening = input.retryReason
     ? `This is a retry of round ${input.round} (same review round — prior attempt did not hand off cleanly).`
     : input.round === 1
-      ? `Implement this issue on a fresh branch off ${input.taskSnapshot.baseBranch}.`
+      ? `You are already on this issue's dedicated branch (already checked out for you by Dealer off ${input.taskSnapshot.baseBranch}). Commit your work there.`
       : `This is repair round ${input.round}. Address every blocking finding below, then commit your changes.`;
   const parts = [
     opening,

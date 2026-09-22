@@ -10,9 +10,11 @@ const taskSnapshot = {
   repo: "acme/app",
   baseBranch: "main"};
 
-test("round 1 prompt instructs a fresh branch off base and never mentions push/PR", () => {
+test("round 1 prompt states the dedicated branch is already checked out and never mentions push/PR", () => {
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1 });
-  assert.match(prompt, /fresh branch off main/);
+  assert.match(prompt, /already on this issue's dedicated branch/);
+  assert.match(prompt, /Commit your work there/);
+  assert.doesNotMatch(prompt, /fresh branch/);
   assert.match(prompt, /do NOT push and do NOT open a pull request/);
   assert.doesNotMatch(prompt, /gh pr create/);
 });
