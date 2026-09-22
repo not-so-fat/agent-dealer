@@ -867,3 +867,44 @@ test("NOT-157: soft Cursor probe timeout waits with probe-timeout reason, not lo
     setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
   }
 });
+
+// ---------------------------------------------------------------------------
+// NOT-239: Close issue vs the admission tick — exactly one terminal outcome.
+// ---------------------------------------------------------------------------
+
+test("NOT-239: closing the queue head lets the next tick admit the following issue", async () => {
+  const { closeReadyIssue } = await import("./commands.js");
+  const head = readyIssue("close-head");
+  const next = readyIssue("close-next");
+  enqueueIssue(head.id);
+  enqueueIssue(next.id);
+
+  // Close wins the race: the head retires without ever starting.
+  assert.deepEqual(closeReadyIssue(head.id, "web"), {
+    ok: true,
+    issueStatus: "closed",
+    alreadyClosed: false,
+  });
+
+  const admitted = await admitNext();
+  assert.equal(admitted?.issueId, next.id, "the tick fills the freed slot with the next issue");
+  assert.equal(getIssue(next.id)!.status, "developing");
+  assert.equal(getIssue(head.id)!.status, "closed");
+  assert.equal(instanceCount(head.id), 0, "close created no workflow instance");
+  assert.equal(instanceCount(next.id), 1);
+});
+
+test("NOT-239: a tick that admitted first makes a late close refuse", async () => {
+  const { closeReadyIssue } = await import("./commands.js");
+  const issue = readyIssue("close-late");
+  enqueueIssue(issue.id);
+
+  const admitted = await admitNext();
+  assert.equal(admitted?.issueId, issue.id);
+
+  const late = closeReadyIssue(issue.id, "web");
+  assert.equal(late.ok, false);
+  if (late.ok) throw new Error("expected the late close to refuse");
+  assert.equal(late.code, 409);
+  assert.equal(getIssue(issue.id)!.status, "developing");
+});

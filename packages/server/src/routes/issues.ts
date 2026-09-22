@@ -23,7 +23,7 @@ import {
 } from "../repository/workflow-events.js";
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
-import { abortIssueAsync, canEditParkedIssue, checkIssueReadiness } from "../coordinator/commands.js";
+import { abortIssueAsync, canEditParkedIssue, checkIssueReadiness, closeReadyIssue } from "../coordinator/commands.js";
 import {
   executeIssueNow,
   isStartable,
@@ -101,9 +101,17 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     // plus `{ page, limit, total, totalPages }`. Legacy callers (notably the
     // CLI status query) omit both and keep the existing unpaginated array.
     if (query.page !== undefined || query.limit !== undefined) {
-      const statuses = query.status
+      // NOT-239: the default Issues view is the *active* list — `closed` work
+      // leaves it and is found through an explicit status filter (`closed` or a
+      // list naming it) or the direct issue URL, never by hard delete. `done`
+      // stays in the default view (done semantics are unchanged).
+      const requested = query.status
         ? query.status.split(",").map((s) => s.trim()).filter(Boolean)
-        : undefined;
+        : [];
+      const statuses =
+        requested.length > 0
+          ? requested
+          : IssueStatus.options.filter((s) => s !== "closed");
       const result = queryIssues({
         search: query.q,
         status: statuses as IssueStatus[] | undefined,
@@ -402,6 +410,23 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const body = req.body as { resolvedBy?: string } | undefined;
     const result = await abortIssueAsync(id, body?.resolvedBy?.trim() || "human");
+    if (!result.ok) return reply.status(result.code).send({ error: result.error });
+    return { issueStatus: result.issueStatus, alreadyClosed: result.alreadyClosed };
+  });
+
+  /**
+   * NOT-239: intentionally retire a `ready` issue that should never run — the
+   * pre-execution counterpart to abort, never an alias for it. Only `ready`
+   * with no active workflow may close (anything else answers 409 and keeps
+   * Abort workflow as the stop for running work). Atomically transitions to
+   * `closed`, removes any queue entry, and appends one human-authored
+   * `issue.closed` event. Idempotent: repeating on `done`/`closed` answers
+   * 200 with `alreadyClosed: true` and writes nothing.
+   */
+  app.post("/api/issues/:id/close", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { closedBy?: string } | undefined;
+    const result = closeReadyIssue(id, body?.closedBy?.trim() || "human");
     if (!result.ok) return reply.status(result.code).send({ error: result.error });
     return { issueStatus: result.issueStatus, alreadyClosed: result.alreadyClosed };
   });

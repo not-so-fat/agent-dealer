@@ -11,6 +11,7 @@ import type {
   HumanAction,
   HumanActionType,
   Issue,
+  IssueStatus,
   WorkflowEvent,
   WorkflowInstance,
   WorkflowEventType,
@@ -104,7 +105,11 @@ import {
   type DeferWorkItemResult,
   type UsageCappedOutcome,
 } from "./usage-cap-defer.js";
-import { markQueueEntryAdmitted } from "../repository/queue-entries.js";
+import {
+  dequeueIssue,
+  getQueuedEntryForIssue,
+  markQueueEntryAdmitted,
+} from "../repository/queue-entries.js";
 import { getWorkflow } from "./workflows/registry.js";
 import { DEV_REVIEWER_V1_VERSION } from "./workflows/dev-reviewer-v1.js";
 
@@ -1924,6 +1929,101 @@ export function abortIssue(
  * state outside the transaction first so an externally-merged PR lands the issue as
  * `done`. Issues without a PR number skip the `gh` call entirely.
  */
+export type CloseReadyIssueResult =
+  | { ok: true; issueStatus: IssueStatus; alreadyClosed: boolean }
+  | { ok: false; code: number; error: string };
+
+/**
+ * NOT-239: intentionally retire a `ready` issue that should never run — the
+ * pre-execution counterpart to abort, never an alias for it. One transaction
+ * re-reads the issue (never trusting a pre-transaction read), then atomically:
+ * transitions `ready` → `closed`, removes any queue entry, and appends one
+ * human-authored `issue.closed` event naming who closed it and whether it was
+ * queued. No workflow instance, work item, or worker session is created — there
+ * is nothing to create: any live work (an active instance, or pending/leased
+ * items on a `ready` row) refuses with 409 and keeps Abort workflow as the only
+ * way to stop running work. Non-`ready` statuses refuse the same way, so Close
+ * can never silently end in-flight work.
+ *
+ * Idempotent like abort: a repeated call once the issue is `done`/`closed`
+ * returns that state with no new event. A `closed` issue can never be admitted
+ * afterwards — enqueue rejects it, start/execute reject the status, and the
+ * coordinator tick's housekeeping drops any stale queued row.
+ */
+export function closeReadyIssue(issueId: string, closedBy: string): CloseReadyIssueResult {
+  if (!getIssue(issueId)) return { ok: false, code: 404, error: "Issue not found" };
+
+  const coded = (code: number, error: string): never => {
+    throw Object.assign(new Error(error), { code });
+  };
+
+  let out: { issueStatus: IssueStatus; alreadyClosed: boolean };
+  try {
+    out = getDb().transaction((): { issueStatus: IssueStatus; alreadyClosed: boolean } => {
+      const issue = getIssue(issueId);
+      if (!issue) coded(404, "Issue not found");
+      const fresh = issue as Issue;
+      if (fresh.status === "done" || fresh.status === "closed") {
+        return { alreadyClosed: true, issueStatus: fresh.status };
+      }
+      if (fresh.status !== "ready") {
+        coded(
+          409,
+          `Only a ready issue can be closed — issue is ${fresh.status}; use Abort workflow for in-flight work`
+        );
+      }
+      if (getActiveWorkflowInstance(issueId)) {
+        coded(409, "Issue has an active workflow — use Abort workflow instead of Close issue");
+      }
+      for (const item of listWorkItemsForIssue(issueId)) {
+        if (item.status === "pending" || item.status === "leased") {
+          coded(409, "Issue has pending work — use Abort workflow instead of Close issue");
+        }
+      }
+      const wasQueued = getQueuedEntryForIssue(issueId) != null;
+      // Nesting-safe (better-sqlite3 savepoints, same as the admit path): the
+      // removal joins this transaction, so dequeue + transition + event commit
+      // together — a coordinator tick racing this close either started first
+      // (the guards above refuse) or loses (its start preconditions fail).
+      if (wasQueued) dequeueIssue(issueId);
+      // A dormant open action (e.g. on an unready `ready` row) must not outlive
+      // the issue as still-actionable work — resolve it as closed, not resumed.
+      let resolvedActions = 0;
+      for (const action of listHumanActionsForIssue(issueId)) {
+        if (action.status === "open") {
+          resolveHumanAction(action.id, closedBy, { reason: "closed_by_operator" });
+          resolvedActions += 1;
+        }
+      }
+      transitionIssue(issueId, "closed", {
+        currentOwner: "system",
+        currentIntent: "Closed by operator — will not execute",
+      });
+      appendWorkflowEvent({
+        issueId,
+        type: "issue.closed",
+        actorType: "human",
+        actorRef: closedBy,
+        stage: "closed",
+        payload: {
+          reason: "closed_by_operator",
+          closedBy,
+          closedAt: new Date().toISOString(),
+          wasQueued,
+          resolvedActions,
+        },
+      });
+      return { alreadyClosed: false, issueStatus: "closed" as IssueStatus };
+    })();
+  } catch (err) {
+    const code = (err as { code?: number }).code;
+    const message = err instanceof Error ? err.message : String(err);
+    if (code === 404 || code === 409) return { ok: false, code, error: message };
+    throw err;
+  }
+  return { ok: true, ...out };
+}
+
 export async function abortIssueAsync(
   issueId: string,
   resolvedBy: string,

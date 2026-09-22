@@ -26,9 +26,12 @@ const { listHumanActionsForIssue } = await import("../repository/human-actions.j
 const { applyCompletion, resolveHumanActionAndAdvance, getTaskSnapshot } = await import("../coordinator/commands.js");
 const { ReviewerResult } = await import("../coordinator/reviewer-result.js");
 const { getQueuedEntryForIssue, listQueuedEntries } = await import("../repository/queue-entries.js");
-const { setAdmissionHealthCheckerForTests, queueStatusForIssue } = await import(
+const { admitNext, setAdmissionHealthCheckerForTests, queueStatusForIssue } = await import(
   "../coordinator/admission.js"
 );
+const { listWorkflowInstancesForIssue } = await import("../repository/workflow-events.js");
+const { listWorkItemsForIssue } = await import("../repository/work-items.js");
+const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
 const { createAgent } = await import("../repository/agents.js");
 const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
 
@@ -1212,5 +1215,216 @@ test("NOT-240: PATCH repository that races admission answers 409 and never mutat
     0,
     "a conflicted edit leaves no audit event"
   );
+  await app.close();
+});
+
+// ---------------------------------------------------------------------------
+// NOT-239: Close issue — retire a `ready` issue that should never run.
+// ---------------------------------------------------------------------------
+
+/** A startable `ready` issue through the same HTTP create the UI uses. */
+async function createClosableIssue(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  title: string,
+  extra: Record<string, unknown> = {}
+): Promise<string> {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/issues",
+    payload: {
+      title,
+      repo: "acme/app",
+      baseBranch: "main",
+      developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+      reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+      acceptanceCriteria: "It works",
+      ...extra,
+    },
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  return (res.json() as { id: string }).id;
+}
+
+function closeEvents(issueId: string) {
+  return listWorkflowEventsForIssue(issueId).filter((e) => e.type === "issue.closed");
+}
+
+test("NOT-239: close retires an unqueued ready issue with no execution records", async () => {
+  const app = await buildApp();
+  const id = await createClosableIssue(app, "Obsolete draft", { enqueue: false });
+  const before = getIssue(id)!;
+
+  const res = await app.inject({
+    method: "POST",
+    url: `/api/issues/${id}/close`,
+    payload: { closedBy: "yusuke" },
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  assert.deepEqual(res.json(), { issueStatus: "closed", alreadyClosed: false });
+
+  const detail = (await app.inject({ method: "GET", url: `/api/issues/${id}` })).json() as {
+    issue: { status: string; branch: string | null; prNumber: number | null };
+    timeline: Array<{
+      type: string;
+      actorType: string;
+      actorRef: string | null;
+      ts: string;
+      payloadJson: string | null;
+    }>;
+    queued: boolean;
+    queueEntry: { position: number; waitReason: string | null } | null;
+  };
+  assert.equal(detail.issue.status, "closed");
+  assert.equal(detail.issue.branch, before.branch, "close creates no branch");
+  assert.equal(detail.issue.prNumber, null, "close creates no PR");
+  assert.equal(detail.queued, false);
+  assert.equal(detail.queueEntry, null);
+
+  // Exactly one durable human-authored close event naming who closed and when.
+  const closed = detail.timeline.filter((e) => e.type === "issue.closed");
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0]!.actorType, "human");
+  assert.equal(closed[0]!.actorRef, "yusuke");
+  assert.ok(closed[0]!.ts, "close event carries its timestamp");
+  const payload = JSON.parse(closed[0]!.payloadJson!) as Record<string, unknown>;
+  assert.equal(payload.reason, "closed_by_operator");
+  assert.equal(payload.closedBy, "yusuke");
+  assert.equal(typeof payload.closedAt, "string");
+  assert.equal(payload.wasQueued, false);
+  assert.equal(payload.resolvedActions, 0);
+
+  // No execution records of any kind.
+  assert.equal(listWorkflowInstancesForIssue(id).length, 0);
+  assert.equal(listWorkItemsForIssue(id).length, 0);
+  assert.equal(listWorkerSessionsForIssue(id).length, 0);
+  await app.close();
+});
+
+test("NOT-239: close on a queued ready issue atomically removes the entry and advances the next issue", async () => {
+  const app = await buildApp();
+  const first = await createClosableIssue(app, "First in line");
+  const second = await createClosableIssue(app, "Second in line");
+  assert.equal(queueStatusForIssue(first)?.position, 1);
+  assert.equal(queueStatusForIssue(second)?.position, 2);
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${first}/close` });
+  assert.equal(res.statusCode, 200, res.body);
+  assert.deepEqual(res.json(), { issueStatus: "closed", alreadyClosed: false });
+
+  assert.equal(getIssue(first)!.status, "closed");
+  assert.equal(getQueuedEntryForIssue(first), null, "queue entry removed with the close");
+  assert.equal(queueStatusForIssue(second)?.position, 1, "next issue advances normally");
+
+  const payload = JSON.parse(closeEvents(first)[0]!.payloadJson!);
+  assert.equal(payload.wasQueued, true);
+  await app.close();
+});
+
+test("NOT-239: close is idempotent — a repeat on closed writes no new event", async () => {
+  const app = await buildApp();
+  const id = await createClosableIssue(app, "Twice closed", { enqueue: false });
+
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${id}/close` })).statusCode, 200);
+  const second = await app.inject({ method: "POST", url: `/api/issues/${id}/close` });
+  assert.equal(second.statusCode, 200);
+  assert.deepEqual(second.json(), { issueStatus: "closed", alreadyClosed: true });
+  assert.equal(closeEvents(id).length, 1, "a repeated close must not append another event");
+  await app.close();
+});
+
+test("NOT-239: close 404s for an unknown issue", async () => {
+  const app = await buildApp();
+  const res = await app.inject({ method: "POST", url: "/api/issues/does-not-exist/close" });
+  assert.equal(res.statusCode, 404);
+  await app.close();
+});
+
+test("NOT-239: close refuses once execution started — exactly one terminal outcome, Abort stays the stop", async () => {
+  const app = await buildApp();
+  const id = await createClosableIssue(app, "Already running");
+  const started = await app.inject({ method: "POST", url: `/api/issues/${id}/start` });
+  assert.equal(started.statusCode, 200);
+  assert.equal((started.json() as { state: string }).state, "admitted");
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/close` });
+  assert.equal(res.statusCode, 409);
+  assert.match((res.json() as { error: string }).error, /active workflow|Abort/);
+
+  // Execution won: still developing, one instance, and no close event.
+  assert.equal(getIssue(id)!.status, "developing");
+  assert.equal(listWorkflowInstancesForIssue(id).length, 1);
+  assert.equal(closeEvents(id).length, 0);
+  await app.close();
+});
+
+test("NOT-239: close needs no readiness — an underspecified ready issue still closes", async () => {
+  const app = await buildApp();
+  // No acceptance criteria: unstartable, still `ready`, queued with a wait reason.
+  const id = await createClosableIssue(app, "Misconfigured", { acceptanceCriteria: undefined });
+  const cleared = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${id}`,
+    payload: { acceptanceCriteria: null },
+  });
+  assert.equal(cleared.statusCode, 200, cleared.body);
+  assert.ok(getQueuedEntryForIssue(id), "still queued before close");
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/close` });
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(getIssue(id)!.status, "closed");
+  assert.equal(getQueuedEntryForIssue(id), null);
+  await app.close();
+});
+
+test("NOT-239: a closed issue can never be admitted afterwards", async () => {
+  const app = await buildApp();
+  const id = await createClosableIssue(app, "Never run");
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${id}/close` })).statusCode, 200);
+
+  const start = await app.inject({ method: "POST", url: `/api/issues/${id}/start` });
+  assert.equal(start.statusCode, 409);
+
+  const execute = await app.inject({ method: "POST", url: `/api/issues/${id}/execute` });
+  assert.equal(execute.statusCode, 409);
+
+  // (The queue router is not mounted on this issues-only app — enqueue is
+  // asserted at the repository level, which is what the route calls.)
+  const { enqueueIssue } = await import("../repository/queue-entries.js");
+  assert.throws(() => enqueueIssue(id), (err: unknown) => {
+    assert.equal((err as { code?: number }).code, 409);
+    assert.match(err instanceof Error ? err.message : String(err), /cannot enqueue/);
+    return true;
+  });
+
+  // A coordinator tick racing the close finds nothing to start.
+  assert.equal(await admitNext(), null);
+  assert.equal(listWorkflowInstancesForIssue(id).length, 0);
+  await app.close();
+});
+
+test("NOT-239: closed issues leave the default paginated list but stay findable by status filter and direct URL", async () => {
+  const app = await buildApp();
+  const closedId = await createClosableIssue(app, "Retired work");
+  const activeId = await createClosableIssue(app, "Live work");
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${closedId}/close` })).statusCode, 200);
+
+  const def = (await app.inject({ method: "GET", url: "/api/issues?page=1" })).json() as {
+    issues: Array<{ id: string }>;
+  };
+  assert.ok(def.issues.some((i) => i.id === activeId), "active issue stays in the default view");
+  assert.ok(!def.issues.some((i) => i.id === closedId), "closed issue leaves the default view");
+
+  const filtered = (await app.inject({ method: "GET", url: "/api/issues?status=closed&page=1" })).json() as {
+    issues: Array<{ id: string }>;
+  };
+  assert.ok(filtered.issues.some((i) => i.id === closedId), "status filter still finds closed work");
+
+  const direct = await app.inject({ method: "GET", url: `/api/issues/${closedId}` });
+  assert.equal(direct.statusCode, 200);
+  assert.equal((direct.json() as { issue: { status: string } }).issue.status, "closed");
+
+  // Legacy unpaginated list (CLI contract) is untouched.
+  const legacy = (await app.inject({ method: "GET", url: "/api/issues" })).json() as Array<{ id: string }>;
+  assert.ok(legacy.some((i) => i.id === closedId));
   await app.close();
 });
