@@ -93,10 +93,19 @@ Normalization keeps both maps:
 
 - `rateLimits` entries → window keys `codex_rate_limit_<name>`
   (`primary`/`secondary` keep their provider identity as `providerBucket`).
-- `rateLimitsByLimitId` entries → window keys `codex_limit_<limitId>`, so
-  per-limit buckets stay distinguishable and can never overwrite each other.
+- `rateLimitsByLimitId` buckets are nested snapshots
+  (`{ limitId, limitName, primary, secondary }`); each present
+  primary/secondary sub-window becomes its own reading with window key
+  `codex_limit_<limitId>_<primary|secondary>`, provider bucket
+  `<limitId>/<primary|secondary>`, and the bucket's `limitName` as label — so
+  per-limit buckets stay distinguishable and can never overwrite each other
+  or the top-level windows.
 - Each window keeps `usedPercent`, `windowDurationMins` → `durationMinutes`,
   and `resetsAt` (epoch seconds/ms or ISO-8601 → ISO).
+
+The `initialize` handshake sends a versioned client identity
+(`{ name: "agent-dealer", title: "agent-dealer", version }`, version kept in
+sync with `packages/server/package.json`).
 
 Failure semantics (shared enum only, never thrown, never health rows):
 
@@ -112,6 +121,14 @@ passes no credentials (the subprocess uses its ambient session) and evidence
 refs are static (`codex-app-server:account/rateLimits/read`).
 
 Refresh via `refreshCodexCapacityFromAppServer()` (bounded ingest through the
-shared service path). Tests use the committed fake JSONL server
+shared service path); a successful refresh deletes the failure sentinel so a
+stale N/A row never lingers next to fresh windows. `GET /api/runtime-capacity`
+additionally triggers `refreshCodexCapacityIfStale()`: when `codex_local` is a
+configured runtime account and its stored snapshot is missing or older than
+the 15-minute stale window, the read performs one bounded non-billable poll
+(single-flight across concurrent requests, still under the overall timeout)
+and then serves the result — fresh snapshots short-circuit with no
+subprocess, and `AGENT_DEALER_CODEX_CAPACITY_REFRESH=off` disables the
+refresh. Tests use the committed fake JSONL server
 (`packages/server/src/capacity/fixtures/fake-codex-app-server.mjs`); CI
 performs no live provider request.
