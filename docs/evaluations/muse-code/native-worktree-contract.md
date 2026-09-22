@@ -29,28 +29,64 @@ This is not one of the six CLI probes below; it's the "do we already have data" 
 before this ticket started, answered from the live `worker_sessions` table (read-only queries,
 paths/branch names only — no prompt or code content extracted).
 
-109 `muse_code` worker sessions have run across 55 issues since NOT-181 shipped. Dealer never
-passes `-w`/`--worktree` in production (`muse-code-args.ts:31`); Muse always receives a
-Dealer-created worktree as `cwd`. Error-reason breakdown (`error_json.reason`, 37 of 109 sessions):
+110 `muse_code` worker sessions have run across 56 issues since NOT-181 shipped (queried
+2026-09-22 against `~/.agent-dealer/dealer.db`, read-only, paths/branch names only — no prompt or
+code content extracted). Dealer never passes `-w`/`--worktree` in production
+(`muse-code-args.ts:31`); Muse always receives a Dealer-created worktree as `cwd`.
 
-| Category | Count | Unique to `muse_code`? |
-|---|---|---|
-| `Developer session produced no PR.` | 13 | No — task-completion, not worktree |
-| **`local and origin/<branch> have diverged` (blocks a plain `git pull`)** | **10** | **Yes — 10/10, vs. 0/142 `claude_code`, 0/91 `codex_local`, 0/21 `cursor_local`** |
-| `Developer's PR checks failed.` | 8 | No — CI, not worktree |
-| `Developer session timed out.` (2 salvaged as `wip:` commits, 1 not) | 3 | No |
-| `aborted_by_user` | 2 | No |
-| other (transient GitHub API reset) | 1 | No |
+```sql
+SELECT
+  CASE
+    WHEN error_json LIKE '%have diverged%' THEN 'diverged_history'
+    WHEN error_json LIKE '%produced no PR%' THEN 'no_pr'
+    WHEN error_json LIKE '%PR checks failed%' THEN 'pr_checks_failed'
+    WHEN error_json LIKE '%timed out%' THEN 'timed_out'
+    WHEN error_json LIKE '%aborted_by_user%' THEN 'aborted'
+    ELSE 'other'
+  END as category, COUNT(*) as n
+FROM worker_sessions WHERE runtime='muse_code' AND error_json IS NOT NULL AND error_json != ''
+GROUP BY category ORDER BY n DESC;
+```
+```
+category          n
+----------------  --
+no_pr             13
+diverged_history  10
+pr_checks_failed  8
+timed_out         3
+aborted           2
+other             1
+```
 
-The diverged-history pattern is the only worktree/git-identity-shaped signal in the data, and it's
-100% concentrated on `muse_code`, on a code path that never touches `-w`/`--worktree`. It reads as:
-Muse commits inside the worktree it's handed across multiple rounds, and at least one of those
-rounds' pushes ends up with local and origin both holding commits the other doesn't — divergent,
-not just behind, which is what forces "do not `git pull`" rather than a plain fast-forward.
-Diagnosing the exact round-boundary mechanism is out of scope for this ticket (it would need
-instrumenting a live Dealer run, not a disposable sandbox); see Follow-ups.
+```sql
+SELECT runtime, COUNT(*) as total,
+  SUM(CASE WHEN error_json IS NOT NULL AND error_json != '' THEN 1 ELSE 0 END) as with_error,
+  SUM(CASE WHEN error_json LIKE '%have diverged%' THEN 1 ELSE 0 END) as diverged
+FROM worker_sessions GROUP BY runtime ORDER BY runtime;
+```
+```
+runtime       total  with_error  diverged
+------------  -----  ----------  --------
+claude_code   143    17          0
+codex_local   91     46          0
+cursor_local  21     1           0
+muse_code     110    37          10
+```
 
-Muse's overall session error rate (37/109, 34%) sits between `claude_code` (17/142, 12%) and
+The diverged-history pattern (exact text: `"local and origin/<branch> have diverged: local <sha>
+is N commit(s) ahead, remote <sha> is M commit(s) ahead. Do not git pull — that integrates the
+wrong history for a rewritten branch."`) is the only worktree/git-identity-shaped signal in the
+data, and it's 100% concentrated on `muse_code` (10/10), zero on the other three runtimes across
+254 combined sessions — on a code path that never touches `-w`/`--worktree`. Both local and
+remote hold commits the other doesn't (not just "behind"), which is what forces "do not `git
+pull`" rather than a plain fast-forward. This report does not know the round-by-round mechanism
+that produces that divergence — no push-timing or per-round transcript data was pulled, only the
+final stored `error_json.reason` string per session — so no causal claim is made here beyond "it's
+muse-specific and it's a real, recurring, already-encountered cost of the current design, not a
+hypothetical." Diagnosing the mechanism needs instrumenting a live Dealer run, not a disposable
+sandbox; see Follow-ups.
+
+Muse's overall session error rate (37/110, 34%) sits between `claude_code` (17/143, 12%) and
 `codex_local` (46/91, 51%) — Muse is not uniquely unreliable overall, only uniquely affected by
 this one divergence pattern.
 
@@ -100,11 +136,20 @@ Findings:
   `muse/session-<session-id, lowercased>` — the caller can predict it from the `--session-id` it
   already chose, without reading any event.
 - **Worktree path is not predictable, but is discoverable before first mutation.** The leaf
-  (`20260921-2d1b`) is date + short random suffix, chosen by Muse. But the first
-  `session.workspace_branch.observed` event arrives at JSONL sequence 4, immediately after
-  `run.model.configured` and before any `task.lifecycle.*` (tool call) event — i.e. before the
-  first repository mutation, same bootstrap-ordering guarantee the (canceled) NOT-202 dogfood
-  ticket wanted for Agent Deck context.
+  (`20260921-2d1b`) is date + short random suffix, chosen by Muse. The first
+  `session.workspace_branch.observed` event arrives before any `task.lifecycle.*` (tool call)
+  event — i.e. before the first repository mutation, same bootstrap-ordering guarantee the
+  (canceled) NOT-202 dogfood ticket wanted for Agent Deck context. `payload_type` per JSONL
+  `sequence` for this run's first six records:
+
+  ```
+  1 runtime.command.accepted
+  2 session.run.linked
+  3 run.model.configured
+  4 session.workspace_branch.observed   <- worktree path/branch/commit, before run.lifecycle.started
+  5 turn.input.user
+  6 run.lifecycle.started
+  ```
 - **A second, independent machine-readable mapping exists on disk**, inside the target repo, not
   in Muse's config: `.muse/worktrees/.session-worktree-reservations/v1/by-session/<session-id>.json`
   and `.../by-leaf/<leaf>.json`, each `{"schema_version":1,"leaf":"20260921-2d1b","session_id":"aabcea85-...","backend":"git","source_binding":"git-storage-root"}`. Dealer could read this file
@@ -112,12 +157,14 @@ Findings:
 
 ## Probe 3: resume determinism
 
-Four variants, same target worktree/session:
+Four variants, same target worktree/session (`--session-id aabcea85-...`, prompt: `"Run 'pwd &&
+git log --oneline -3 && git branch --show-current' and report the output verbatim. Do not edit any
+files."`):
 
 | Command | XDG state | Result |
 |---|---|---|
-| No `-w` flag, same `--session-id` | **same** attempt dir as probe 1-2 | Silently resumed in the *same* worktree, same branch — but only because the on-disk reservation file was visible from that XDG state. |
-| No `-w` flag, same `--session-id` | **fresh** attempt dir | **Silently ran in `cwd` (the main checkout) on `main`, ignoring the prior worktree entirely.** No error, no warning distinguishable from a first run. |
+| No `-w` flag, same `--session-id` | **same** attempt dir as probe 1-2 | stderr: `muse: workspace root: .../20260921-2d1b (explicit)` ... `session worktree retained at .../20260921-2d1b (caller-owned worktree retained)`. Final answer: `.../20260921-2d1b`, `ca399e9 probe-a: bump value`, `f4b43e7 initial commit`, `muse/session-aabcea85-...`. Resumed the *same* worktree/branch — but only because the on-disk reservation file was visible from that XDG state. |
+| No `-w` flag, same `--session-id` | **fresh** attempt dir | stderr: `muse: workspace root: .../sandbox-repo (cwd default)`. Final answer: `.../sandbox-repo`, `f4b43e7 initial commit`, `main`. **Silently ran in `cwd` (the main checkout) on `main`, ignoring the prior worktree entirely** — same command, same `--session-id`, only the XDG state differs, and the `(cwd default)` vs. `(explicit)` stderr tag is the only distinguishing signal, not an error or warning. |
 | `-w existing`, **no** `--worktree-existing` | fresh attempt dir | Exit 2: `--worktree existing requires --worktree-existing`. Fails loud and fast. |
 | `-w existing --worktree-existing <path>`, same `--session-id` | fresh attempt dir | Exit 0. Reattached correctly: stderr `session worktree retained at <path> (caller-owned worktree retained)`, new commit landed on the existing branch (`84f3a68` on top of `ca399e9`). |
 
@@ -152,9 +199,21 @@ The branch (`muse/session-7f9f1f49-...`) survives the removal, as normal for `gi
 remove`. What does **not** get cleaned up by that command: the
 `.session-worktree-reservations/v1/by-session/*.json` and `by-leaf/*.json` files — those are a
 Muse-internal bookkeeping layer inside the repo tree that plain `git worktree remove` doesn't know
-about. After removal, `by-leaf/20260921-2d1b.json` (from a separate probe, below) was confirmed
-still present and pointing at a leaf that no longer exists — a stale record an adapter would need
-to either ignore or explicitly prune.
+about. Checked directly against this same removed leaf, after the `git worktree remove --force`
+above and confirming `git worktree list` no longer showed it:
+
+```
+$ cat .muse/worktrees/.session-worktree-reservations/v1/by-leaf/20260921-8e5f.json
+{"schema_version":1,"leaf":"20260921-8e5f","session_id":"7f9f1f49-...","backend":"git","source_binding":"git-storage-root"}
+$ cat .muse/worktrees/.session-worktree-reservations/v1/by-session/7f9f1f49-14cc-4b37-89bb-3d7af827309f.json
+{"schema_version":1,"leaf":"20260921-8e5f","session_id":"7f9f1f49-...","backend":"git","source_binding":"git-storage-root"}
+```
+
+Both files are still there, still pointing at a leaf `git worktree list` no longer knows about — a
+stale record an adapter would need to either ignore or explicitly prune. (Probe 5.3 independently
+hits the same kind of stale record through a different, non-clean removal path — a worktree
+destroyed by concurrent access rather than an explicit `remove`; that is separate evidence for the
+same class of gap, not a substitute for it.)
 
 **Dirty completion** (no crash, session ends normally without committing): not separately
 re-run — Muse's own bundled `git` skill, captured verbatim in probe 1-2's JSONL
@@ -163,16 +222,23 @@ re-run — Muse's own bundled `git` skill, captured verbatim in probe 1-2's JSON
 asked for that exact write in this session... Finishing a task without that request is not
 authorization, so leave your work uncommitted for review."* So a normal exit with no explicit
 commit instruction leaves the tree dirty, same as today. Dealer's existing timeout-salvage path
-(`wip:` commit) already handles exactly this case for Dealer-owned worktrees — see Production
-evidence above, where it fired twice in the last two days.
+already handles exactly this case for Dealer-owned worktrees — of the 3 `timed_out` `muse_code`
+sessions in Production evidence above, 2 carry `error_json.reason` `"Developer session timed out.
+Salvaged uncommitted work as wip: timeout salvage (<sha>)."` (session ids `e4499b9f-...` and
+`4b97c9c8-...`); the third (`4946f385-...`) has no salvage suffix, i.e. nothing uncommitted was
+left to salvage.
 
 ## Probe 5: concurrent access and collision
 
 Three variants, all against the leaf created in probe 1-2 (owned by session `aabcea85-...`):
 
 1. **Re-run `-w create --worktree-base main` with the same `--session-id`** (sequential, not
-   concurrent): reused the existing worktree unchanged — `-w create` is idempotent per session-id,
-   not "always make a new one." No duplicate leaf, no error.
+   concurrent): exit 0, stderr `muse: workspace root: .../20260921-2d1b (cwd default)`, and the
+   `session.workspace_branch.observed` event reports `{"workspace_root": ".../20260921-2d1b",
+   "reference": {"name": "muse/session-aabcea85-..."}, "commit": "84f3a6890ccf"}` — `84f3a68` is
+   the same commit probe 3's row 4 had already landed there, not a new one. Reused the existing
+   worktree unchanged — `-w create` is idempotent per session-id, not "always make a new one." No
+   duplicate leaf, no error.
 2. **`-w existing --worktree-existing <path>` with a *different* `--session-id`** (the leaf's
    owner is `aabcea85-...`; tried `a1a2388c-...`): exit 1, `session worktree requires a Git source
    repository: <path>`. Ownership is enforced by session-id, not just by path — a session cannot
@@ -211,7 +277,7 @@ it itself.
 | Dealer requirement | Dealer-owned (today) | Muse-owned (`-w create`/`existing`) |
 |---|---|---|
 | Exact developer tip (path + SHA) | Dealer sets `cwd`, reads git directly | Reported via `session.workspace_branch.observed`, plus the on-disk reservation file — works, but Dealer still has to capture and store it itself (same DB write it already does) |
-| Push verification | Dealer's own git calls | Unaffected either way — Muse never pushes (confirmed: no push tool call in any captured transcript) |
+| Push verification | Dealer's own git calls | Unaffected either way — `grep -o '"command":"[^"]*"' attempts/*.jsonl \| grep -i push` across every captured transcript (probes 1-2 through 5) returns no match: no session ran a push |
 | Reviewer checkout at that SHA | Dealer builds the reviewer's own worktree/checkout | **No change, and no option to change**: probe 5.2 shows a second session (the reviewer) cannot attach to the developer's Muse-owned worktree via `-w existing` — ownership is single-session by design. Dealer must keep building the reviewer's checkout independently regardless of which side owns the developer worktree. |
 | Dirty-work salvage | Dealer's timeout/crash salvage commit | Same mechanism, same trigger conditions (probe 4) — nothing Muse-owned changes here |
 | Safe cleanup | `git worktree remove --force` | Same command, same result (probe 4) — plus a new, Muse-only cruft surface (`.session-worktree-reservations/`) that plain `git worktree remove` doesn't clean up |
