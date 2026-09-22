@@ -2,6 +2,19 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## 1.1.8 — 2026-09-22
+
+Patch over 1.1.7: close unused ready issues, edit repository/agents before execution, and a leaner Execution report.
+
+### Features
+
+- **Close issue for unused ready work (NOT-239)** — a `ready` issue with no active workflow can now be retired without running it: `POST /api/issues/:id/close` atomically moves it to `closed`, removes any queue entry, and records a human-authored `issue.closed` event; repeating the call on an already-closed or `done` issue is a no-op (`alreadyClosed: true`). In the UI this is a low-prominence **Close issue** control under More actions on eligible issues, behind a two-step confirmation naming its consequences. In-flight work still uses **Abort workflow**; terminal issues show neither. The default paginated `GET /api/issues` view now excludes `closed` work (unless the `status` filter names it or the issue is opened by direct URL); `done` issues are unaffected.
+- **Edit repository, developer and reviewer before execution (NOT-240)** — Issue Detail gains a **Configuration** section, always visible, showing repository, developer and reviewer. While the issue is `ready` with no active workflow, all three can be edited and saved together (repository takes the same GitHub URL / `owner/repo` forms as issue creation); a queued issue keeps its queue position and has its wait reason rechecked. After a workflow starts, the frozen inputs are read-only. Saved changes are recorded on the timeline via the existing `issue.reassigned` event, extended to carry the before/after repository alongside developer/reviewer.
+
+### UI
+
+- **Leaner Execution report (NOT-238)** — the report's bottom Issues list and its own Previous/Next pagination are removed as a duplicate of the Issues page; failure-evidence issue links, summary/cohort/failure analysis, filters and URL persistence are unchanged.
+
 ## 1.1.7 — 2026-09-21
 
 Patch over 1.1.6: restores the AgentDealer name in the dashboard header.
