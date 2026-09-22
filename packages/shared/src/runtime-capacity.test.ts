@@ -3,10 +3,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   deriveWindowLabel,
+  isTeamBillingKnown,
   isWindowKnown,
   remainingPercentFromFraction,
   remainingPercentFromUsedPercent,
   type CapacityWindowSnapshot,
+  type CursorTeamBilling,
 } from "./runtime-capacity.js";
 
 function window(over: Partial<CapacityWindowSnapshot> = {}): CapacityWindowSnapshot {
@@ -51,6 +53,64 @@ test("familiar durations derive labels; unknown keeps the provider label", () =>
   assert.equal(deriveWindowLabel(123, "qux_quota"), "qux_quota");
   assert.equal(deriveWindowLabel(null, "sesame_street"), "sesame_street");
   assert.equal(deriveWindowLabel(undefined, "plain"), "plain");
+});
+
+function teamBilling(over: Partial<CursorTeamBilling> = {}): CursorTeamBilling {
+  const now = new Date().toISOString();
+  return {
+    configured: true,
+    cycleStart: "2026-09-01T00:00:00.000Z",
+    cycleEnd: "2026-10-01T00:00:00.000Z",
+    spendValue: 12.5,
+    spendUnit: "USD",
+    hardLimitValue: 100,
+    hardLimitUnit: "USD",
+    usagePeriodStart: null,
+    usagePeriodEnd: null,
+    usageSpendValue: null,
+    usageSpendUnit: null,
+    source: "supported_protocol",
+    unavailableReason: null,
+    observedAt: now,
+    generatedAt: now,
+    ...over,
+  };
+}
+
+test("team billing is known only with values, source, and configuration", () => {
+  assert.equal(isTeamBillingKnown(teamBilling()), true);
+  assert.equal(isTeamBillingKnown(teamBilling({ configured: false })), false);
+  assert.equal(
+    isTeamBillingKnown(
+      teamBilling({ source: "unavailable", unavailableReason: "missing" })
+    ),
+    false
+  );
+  assert.equal(
+    isTeamBillingKnown(
+      teamBilling({
+        spendValue: null,
+        hardLimitValue: null,
+        usageSpendValue: null,
+        unavailableReason: "missing",
+      })
+    ),
+    false
+  );
+  // Usage-period spend alone still counts as known billing evidence.
+  assert.equal(
+    isTeamBillingKnown(
+      teamBilling({
+        spendValue: null,
+        spendUnit: null,
+        hardLimitValue: null,
+        hardLimitUnit: null,
+        usageSpendValue: 3.5,
+        usageSpendUnit: "USD",
+      })
+    ),
+    true
+  );
 });
 
 test("a past reset time is never current capacity", () => {

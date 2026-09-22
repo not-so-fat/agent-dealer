@@ -123,6 +123,58 @@ export function deriveWindowLabel(
   return providerLabel;
 }
 
+/**
+ * NOT-249: team-level billing usage from Cursor's official Admin API
+ * (https://docs.cursor.com/en/account/teams/admin-api). This is billing data
+ * for the whole team — NOT per-runtime quota — so it lives outside
+ * RuntimeCapacityEntry: cycle/spend/limit values keep the real units and
+ * source the API reported, and are never rendered as token percentages or
+ * 5H/1W windows. N/A reasons reuse CapacityUnavailableReason.
+ */
+export const CursorTeamBilling = z.object({
+  /** True only when an Admin API key is configured server-side. */
+  configured: z.boolean(),
+  /** Subscription-cycle start/end exactly as reported (ISO-8601, nullable). */
+  cycleStart: z.string().nullable(),
+  cycleEnd: z.string().nullable(),
+  /** Team spend in its reported unit (never converted, never a percent). */
+  spendValue: z.number().nullable(),
+  spendUnit: z.string().nullable(),
+  /** Spend hard limit in its reported unit (never a token percentage). */
+  hardLimitValue: z.number().nullable(),
+  hardLimitUnit: z.string().nullable(),
+  /** Trailing usage window actually queried (ISO-8601, nullable). */
+  usagePeriodStart: z.string().nullable(),
+  usagePeriodEnd: z.string().nullable(),
+  /** Summed usage-period spend, only when every row reports one currency. */
+  usageSpendValue: z.number().nullable(),
+  usageSpendUnit: z.string().nullable(),
+  source: CapacitySource,
+  unavailableReason: CapacityUnavailableReason.nullable(),
+  /** When the backing Admin API read was observed (ISO-8601, nullable). */
+  observedAt: z.string().nullable(),
+  generatedAt: z.string(),
+});
+export type CursorTeamBilling = z.infer<typeof CursorTeamBilling>;
+
+/** True when the billing snapshot carries current, renderable values. */
+export function isTeamBillingKnown(b: CursorTeamBilling, nowMs = Date.now()): boolean {
+  if (!b.configured) return false;
+  if (b.source === "unavailable" || b.unavailableReason !== null) return false;
+  if (
+    b.spendValue === null &&
+    b.hardLimitValue === null &&
+    b.usageSpendValue === null
+  ) {
+    return false;
+  }
+  if (b.observedAt) {
+    const obsMs = Date.parse(b.observedAt);
+    if (!Number.isFinite(obsMs) || obsMs > nowMs + 60_000) return false;
+  }
+  return true;
+}
+
 /** True when the window carries a current, renderable remaining value. */
 export function isWindowKnown(w: CapacityWindowSnapshot, nowMs = Date.now()): boolean {
   if (w.remainingPercent === null) return false;
