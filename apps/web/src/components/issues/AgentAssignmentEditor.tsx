@@ -17,11 +17,11 @@ function isUsageCapped(agent: AgentWithHealth): boolean {
 }
 
 /** Healthy agents first so the safe choices are easiest to identify. */
-function sortedAgents(agents: AgentWithHealth[]): AgentWithHealth[] {
+export function sortedAgents(agents: AgentWithHealth[]): AgentWithHealth[] {
   return [...agents].sort((a, b) => Number(b.healthy) - Number(a.healthy));
 }
 
-function optionLabel(agent: AgentWithHealth): string {
+export function optionLabel(agent: AgentWithHealth): string {
   const base = `${agent.name} · ${runtimeLabel(agent.runtime)}`;
   const flags: string[] = [];
   if (!agent.healthy) {
@@ -32,7 +32,7 @@ function optionLabel(agent: AgentWithHealth): string {
   return flags.length > 0 ? `${base} — ${flags.join(" · ")}` : base;
 }
 
-function healthNote(agent: AgentWithHealth | undefined): string | null {
+export function healthNote(agent: AgentWithHealth | undefined): string | null {
   if (!agent) return null;
   if (!agent.healthy) return agent.issues[0]?.message ?? "Agent is unhealthy";
   if (isUsageCapped(agent)) return "Usage capped — admission will refuse until the cap lifts";
