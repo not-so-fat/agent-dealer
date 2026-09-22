@@ -118,6 +118,14 @@ export async function runDoctor(): Promise<number> {
     } else {
       console.warn("⚠ LINEAR_API_KEY not set — Linear inbox disabled");
     }
+    // NOT-250: experimental Cursor Individual dashboard adapter status
+    // (informational only — never fails doctor, never reads credentials).
+    if (process.env.AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY === "experimental") {
+      console.warn(
+        "⚠ Cursor Individual capacity: EXPERIMENTAL dashboard adapter enabled " +
+          "(undocumented API, no support guarantee — unset AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY to disable)"
+      );
+    }
   } else {
     console.warn(`⚠ no config — run: agent-dealer setup`);
   }
