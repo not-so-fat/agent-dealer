@@ -225,11 +225,30 @@ test("timed_out with infra attempts remaining retries (same bucket as session_fa
 });
 
 test("checks_failed with infra attempts remaining retries (same bucket as session_failed/no_pr)", () => {
-  const outcome: DeveloperOutcome = { kind: "checks_failed", details: "lint failed" };
+  const outcome: DeveloperOutcome = { kind: "checks_failed" };
   assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
     next: "retry_developer",
     reason: "Developer's PR checks failed.",
   });
+});
+
+test("NOT-252: checks_failed with enrichment details retries with the enriched reason, not the generic one", () => {
+  const details =
+    "Developer's PR checks failed at abc123: build.\nFailed checks (PR #7 @ abc123):\n- build (CI · failure)";
+  const outcome: DeveloperOutcome = { kind: "checks_failed", details };
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    next: "retry_developer",
+    reason: details,
+  });
+});
+
+test("NOT-252: checks_failed with blank details falls back to exactly the generic reason", () => {
+  for (const outcome of [{ kind: "checks_failed", details: "   " } as DeveloperOutcome, { kind: "checks_failed" } as DeveloperOutcome]) {
+    assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+      next: "retry_developer",
+      reason: "Developer's PR checks failed.",
+    });
+  }
 });
 
 test("checks_failed at the infra-attempt limit escalates", () => {
@@ -237,6 +256,16 @@ test("checks_failed at the infra-attempt limit escalates", () => {
   const result = routeDeveloperOutcome(outcome, INFRA_AT_LIMIT);
   assert.equal(result.next, "human_action");
   assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+});
+
+test("NOT-252: checks_failed escalation at the limit carries the enriched reason", () => {
+  const details = "Developer's PR checks failed at abc123: build.";
+  const outcome: DeveloperOutcome = { kind: "checks_failed", details };
+  const result = routeDeveloperOutcome(outcome, INFRA_AT_LIMIT);
+  assert.equal(result.next, "human_action");
+  assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+  assert.match((result as { reason: string }).reason, /at abc123: build/);
+  assert.match((result as { reason: string }).reason, /infra-attempt limit reached/);
 });
 
 test("an infra-class developer failure never spends the review-round budget, even at the review-round limit", () => {
