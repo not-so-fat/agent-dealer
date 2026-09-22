@@ -423,10 +423,10 @@ test("same-allowlist redirects are followed", async () => {
       {
         [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: {
           status: 302,
-          headers: { location: "https://api.cursor.com/api/usage-summary/current-period" },
+          headers: { location: "https://api.cursor.com/api/usage-summary" },
           body: {},
         },
-        "/api/usage-summary/current-period": { status: 200, body: usagePayload(now) },
+        [CURSOR_INDIVIDUAL_USAGE_PATHS[1]]: { status: 200, body: usagePayload(now) },
       },
       calls
     ),
