@@ -604,8 +604,17 @@ export async function runReviewerEffect(
         },
       });
     }
-   } catch {
-    return { kind: "session_failed" };
+   } catch (err) {
+    // NOT-225: this catch covers worktree setup, diff/prompt build, and deps.spawn —
+    // a synchronous spawn throw (e.g. a NUL byte in argv pre-sanitize) used to be
+    // swallowed here as a reason-less session_failed ("Worker session failed or
+    // crashed", no pid, no agent.started). Surface the setup error instead. Paths
+    // that already set a reason (usage cap, runtime-auth classification, deck
+    // failure) return above and keep theirs.
+    const message = err instanceof Error ? err.message : String(err);
+    const reason = `Reviewer session could not start: ${message.slice(0, 300)}`;
+    console.error("[coordinator] reviewer session could not start", { issueId: issue.id, sessionId, round, err });
+    return { kind: "session_failed", reason };
    }
 
   if (issue.prNumber == null) {

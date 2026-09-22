@@ -20,6 +20,20 @@ export interface RunnerResult {
   timedOut?: boolean;
 }
 
+/**
+ * NOT-225: a NUL byte anywhere in argv makes `child_process.spawn` throw
+ * `ERR_INVALID_ARG_VALUE` synchronously, before any process exists — so a reviewer
+ * prompt embedding a PR diff with a raw NUL could never start, and the throw was
+ * swallowed upstream as a generic session failure. Replace each U+0000 with the
+ * visible six-character text `\u0000` so the session still runs and the reviewer can
+ * see the diff contains it. Pure and total: NUL-free args are returned untouched
+ * (same string values, no re-encoding — non-ASCII passes through byte-identical).
+ * Env values are out of scope.
+ */
+export function sanitizeArgv(args: string[]): string[] {
+  return args.map((arg) => (arg.includes("\0") ? arg.split("\0").join("\\u0000") : arg));
+}
+
 export function timeoutMsForMode(mode: "plan" | "execute" | "reflect" | "qa"): number {
   const envKey =
     mode === "plan"
@@ -96,7 +110,9 @@ export async function spawnCli(
         console.error(`[spawn-cli] log stream error for ${opts.logPath}`, err);
       });
 
-      const child = spawn(cmd, args, {
+      // NOT-225: sanitize before spawn — a raw NUL in any arg throws
+      // ERR_INVALID_ARG_VALUE synchronously (no process, no pid, no log).
+      const child = spawn(cmd, sanitizeArgv(args), {
         cwd,
         // Extra vars (e.g. codex's bearer-token env var for its per-attempt CODEX_HOME
         // MCP config, agent-deck-bind.ts) are added on top of, never in place of, the

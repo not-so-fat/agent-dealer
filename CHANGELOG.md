@@ -2,6 +2,12 @@
 
 Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** / managed install — see `docs/PUBLISHING.md`.
 
+## Unreleased
+
+### Fixes
+
+- **NUL-safe runner args and surfaced setup errors (NOT-225)** — `spawnCli` sanitizes every argv entry before `spawn()`, replacing each NUL byte with the visible text `\u0000`, so a reviewer prompt embedding a PR diff with a raw NUL starts instead of throwing `ERR_INVALID_ARG_VALUE` with no pid and no log. Setup/spawn failures in the reviewer and developer effects now return `session_failed` with a `could not start: <error>` reason (logged with issue, session, and round) instead of a reason-less failure; post-spawn verification failures keep their existing `adapter_failure` behavior.
+
 ## 1.1.8 — 2026-09-22
 
 Patch over 1.1.7: close unused ready issues, edit repository/agents before execution, and a leaner Execution report.

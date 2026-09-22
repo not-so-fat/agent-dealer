@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnCli } from "./spawn-cli.js";
+import { sanitizeArgv, spawnCli } from "./spawn-cli.js";
 
 test("spawnCli does not crash when the child process writes to stderr", async () => {
   const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
@@ -141,6 +141,46 @@ test("spawnCli escalates to SIGKILL when the child ignores SIGTERM", { timeout: 
     if (previous === undefined) delete process.env.SPAWN_ABORT_KILL_GRACE_MS;
     else process.env.SPAWN_ABORT_KILL_GRACE_MS = previous;
   }
+});
+
+// NOT-225: a NUL byte in any argv entry used to make spawn() throw
+// ERR_INVALID_ARG_VALUE synchronously (no process, no pid, no log), which killed
+// every reviewer session whose prompt embedded a PR diff containing a raw NUL.
+// spawnCli must start anyway, with the visible six-character `\u0000` text where
+// the byte was.
+test("spawnCli starts when an arg contains a NUL byte, with the escaped text in the transcript", async () => {
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+
+  const result = await spawnCli(
+    "test-run-nul",
+    process.execPath,
+    ["-e", "console.log(process.argv[1])", "a\0b"],
+    process.cwd(),
+    { logPath, timeoutMs: 5000 }
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.timedOut, false);
+  assert.ok(result.transcript.includes("a\\u0000b"), `expected the escaped text, got: ${JSON.stringify(result.transcript)}`);
+  assert.ok(!result.transcript.includes("\0"), "no raw NUL may reach the child or the transcript");
+});
+
+test("sanitizeArgv leaves NUL-free args byte-identical (no re-encoding)", () => {
+  const args = ["-p", "plain", "", "héllo😀", "--max-model-steps=10"];
+  const out = sanitizeArgv(args);
+  assert.deepEqual(out, args);
+  assert.notStrictEqual(out, args, "a new array is returned");
+  for (let i = 0; i < args.length; i++) {
+    assert.strictEqual(out[i], args[i], `arg ${i} must be the identical string, not a copy`);
+  }
+  assert.deepEqual(sanitizeArgv([]), []);
+});
+
+test("sanitizeArgv replaces every NUL with the visible six-character escape", () => {
+  assert.deepEqual(sanitizeArgv(["a\0b"]), ["a\\u0000b"]);
+  assert.deepEqual(sanitizeArgv(["a\0b\0c"]), ["a\\u0000b\\u0000c"]);
+  assert.deepEqual(sanitizeArgv(["\0"]), ["\\u0000"]);
+  assert.deepEqual(sanitizeArgv(["ok", "x\0y", "ok"]), ["ok", "x\\u0000y", "ok"]);
 });
 
 test("spawnCli runs normally when an un-aborted signal is supplied", { timeout: 10_000 }, async () => {
