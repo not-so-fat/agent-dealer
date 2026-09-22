@@ -23,6 +23,27 @@ The one open, real production issue (git-history divergence, below) is **not** a
 problem — it happens entirely under the current Dealer-owned posture, where `-w` is never passed.
 It should not be used as evidence for switching ownership models; it needs its own ticket.
 
+### Pros / cons of switching to Muse-owned (`-w create`/`existing`)
+
+**Pros:**
+- Real machine-readable worktree identity (path, branch, commit) reported before the first
+  repository mutation (probes 1-2) — better than NOT-177's earlier "omit it" read of the same flag.
+- A second, independent on-disk session→worktree mapping Dealer could cross-check against.
+- `-w create` is idempotent per session-id — a retry with the same id reuses, not duplicates.
+
+**Cons:**
+- Nothing Dealer owns today gets removed (probe 6): it still captures/stores the path, still
+  builds the reviewer's own checkout, still owns crash detection and salvage, still runs
+  `git worktree remove --force`. Lateral move, not a simplification.
+- New failure mode: silent misattachment to `cwd`/`main` when the caller under-specifies `-w`
+  across the per-attempt isolated config NOT-177's own posture requires (probe 3).
+- New failure mode: same-session concurrent access can destroy the worktree on disk, no locking
+  beyond session-id ownership (probe 5.3) — Dealer's own PID-liveness check would still be needed.
+- New cleanup surface: `.session-worktree-reservations/` isn't cleaned by `git worktree remove`
+  (probe 4).
+- Reviewer handoff doesn't simplify: a different session can't attach to another session's
+  Muse-owned worktree at all (probe 5.2).
+
 ## Production evidence (2026-09-20 → 2026-09-22, `dealer.db`, this machine)
 
 This is not one of the six CLI probes below; it's the "do we already have data" question asked
