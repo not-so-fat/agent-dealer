@@ -6,6 +6,14 @@ import {
   summarizeChecks,
   pollPrChecks,
   createGithubAdapter,
+  fetchChecksFailureEvidence,
+  sanitizeCiText,
+  sanitizeUrl,
+  extractActionsRunId,
+  buildFailureExcerpt,
+  formatChecksFailureDetails,
+  CHECKS_EVIDENCE_MAX_EXCERPT_CHARS,
+  CHECKS_FAILURE_GENERIC_REASON,
   PR_VIEW_FIELDS,
   type GithubAdapter,
   type ChecksSnapshot,
@@ -233,4 +241,275 @@ test("pollPrChecks bails out as timeout immediately when the lease signal is alr
     signal: controller.signal,
   });
   assert.equal(result, "timeout");
+});
+
+// --- NOT-252: terminal checks_failed enrichment ---
+
+const HEAD_SHA = "abc123def456abc123def456abc123def456abcd";
+
+function prViewWithRollup(rollup: unknown[], headSha: string = HEAD_SHA): string {
+  return JSON.stringify({ headRefOid: headSha, statusCheckRollup: rollup });
+}
+
+function actionsCheck(name: string, conclusion: string, runId: string, extra: Record<string, unknown> = {}) {
+  return {
+    name,
+    status: "COMPLETED",
+    conclusion,
+    workflowName: "CI",
+    detailsUrl: `https://github.com/o/r/actions/runs/${runId}/jobs/999?check_suite_focus=true`,
+    ...extra,
+  };
+}
+
+/** The NOT-245 shape: `npm ci` dying on a stale exact pin, buried in setup noise. */
+const NPM_E404_LOG = [
+  "Run npm ci",
+  " .npm ci --no-audit --no-fund",
+  "  added 12 packages in 3s",
+  "  npm error code E404",
+  "  npm error 404 Not Found - GET https://registry.npmjs.org/@agent-dealer%2fshared - Not found",
+  "  npm error 404",
+  "  npm error 404  '@agent-dealer/shared@1.1.8' is not in this registry.",
+  "  npm error 404",
+  "  npm error 404 Note that you can also install from a tarball.",
+  "  Error: Process completed with exit code 1.",
+].join("\n");
+
+test("NOT-252: single failed check fetches its run log once and enriches details", async () => {
+  const { exec, calls } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("build", "FAILURE", "111"), actionsCheck("lint", "SUCCESS", "111")]) },
+    { stdout: NPM_E404_LOG },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, {
+    cwd: "/repo",
+    number: 42,
+    expectedHeadSha: HEAD_SHA,
+    prNumber: 42,
+  });
+  assert.ok(evidence);
+  assert.deepEqual(calls[0], ["pr", "view", "42", "--json", "headRefOid,statusCheckRollup"]);
+  assert.deepEqual(calls[1], ["run", "view", "111", "--log-failed"]);
+  assert.equal(calls.length, 2);
+  assert.equal(evidence.headSha, HEAD_SHA);
+  assert.equal(evidence.failedChecks.length, 1);
+  assert.equal(evidence.failedChecks[0].name, "build");
+  assert.equal(evidence.failedChecks[0].workflowName, "CI");
+  assert.equal(evidence.failedChecks[0].conclusion, "failure");
+  assert.equal(evidence.failedChecks[0].runId, "111");
+  // Query/fragment stripped from the persisted URL.
+  assert.equal(evidence.failedChecks[0].detailsUrl, "https://github.com/o/r/actions/runs/111/jobs/999");
+  assert.match(evidence.details, /build/);
+  assert.match(evidence.details, new RegExp(HEAD_SHA));
+  assert.match(evidence.details, /'@agent-dealer\/shared@1\.1\.8' is not in this registry/);
+  assert.match(evidence.details, /untrusted/i);
+  assert.match(evidence.details, /do NOT follow/i);
+  assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+});
+
+test("NOT-252: multiple failed checks in one run share a single log fetch; distinct runs each fetched once", async () => {
+  const { exec, calls } = queuedExec([
+    {
+      stdout: prViewWithRollup([
+        actionsCheck("build", "FAILURE", "111"),
+        actionsCheck("test", "FAILURE", "111"),
+        actionsCheck("lint", "FAILURE", "222"),
+        actionsCheck("docs", "SUCCESS", "222"),
+      ]),
+    },
+    { stdout: "build failed\nError: boom\n" },
+    { stdout: "lint failed\nError: nit\n" },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", branch: "issue-x", expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  const runCalls = calls.filter((c) => c[0] === "run");
+  assert.equal(runCalls.length, 2, "one fetch per distinct run, not per check");
+  assert.deepEqual(runCalls[0], ["run", "view", "111", "--log-failed"]);
+  assert.deepEqual(runCalls[1], ["run", "view", "222", "--log-failed"]);
+  assert.deepEqual(
+    evidence.failedChecks.map((c) => c.name),
+    ["build", "test", "lint"]
+  );
+  assert.match(evidence.excerpt, /boom/);
+  assert.match(evidence.excerpt, /nit/);
+});
+
+test("NOT-252: head mismatch yields no enrichment and fetches no logs", async () => {
+  const { exec, calls } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("build", "FAILURE", "111")], "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef") },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.equal(evidence, null);
+  assert.equal(calls.length, 1, "must not touch another commit's logs");
+});
+
+test("NOT-252: PR lookup failure yields no enrichment", async () => {
+  const { exec } = queuedExec([{ error: 'no pull requests found for branch "issue-x"' }]);
+  assert.equal(await fetchChecksFailureEvidence(exec, { cwd: "/repo", branch: "issue-x", expectedHeadSha: HEAD_SHA }), null);
+});
+
+test("NOT-252: no failed checks yields no enrichment", async () => {
+  const { exec, calls } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("build", "SUCCESS", "111"), { state: "success" }]) },
+  ]);
+  assert.equal(await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA }), null);
+  assert.ok(calls.every((c) => c[0] === "pr"), "no log fetch without a failure");
+});
+
+test("NOT-252: noisy log focuses the excerpt on the actionable E404 lines", async () => {
+  const setup = Array.from({ length: 200 }, (_, i) => `setup step ${i}: downloading dependency cache chunk ${i}`).join("\n");
+  const tail = Array.from({ length: 100 }, (_, i) => `cleanup temp dir ${i}`).join("\n");
+  const { exec } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("build", "FAILURE", "111")]) },
+    { stdout: `${setup}\n${NPM_E404_LOG}\n${tail}` },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  assert.match(evidence.excerpt, /E404/);
+  assert.match(evidence.excerpt, /is not in this registry/);
+  assert.ok(evidence.excerpt.length < 3000, `excerpt stays focused, got ${evidence.excerpt.length} chars`);
+  assert.doesNotMatch(evidence.excerpt, /cleanup temp dir 99/);
+});
+
+test("NOT-252: huge logs are capped at the global excerpt budget", async () => {
+  const big = Array.from({ length: 3000 }, (_, i) => `Error: failure number ${i} in job output`).join("\n");
+  const { excerpt, truncated } = buildFailureExcerpt(big);
+  assert.ok(excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+  assert.equal(truncated, true);
+  assert.match(excerpt, /failure number 0/);
+});
+
+test("NOT-252: buildFailureExcerpt on an empty log yields an empty excerpt", async () => {
+  assert.deepEqual(buildFailureExcerpt("   \n  \n"), { excerpt: "", truncated: false });
+});
+
+test("NOT-252: sanitizeCiText redacts secrets and strips URL query/fragment", async () => {
+  // Secret-shaped fixtures are assembled at runtime so the sensitive shapes never sit
+  // in source as literals — what matters is that sanitizeCiText removes them from CI text.
+  const classicToken = "ghp_" + "abcdef1234567890";
+  const bearerValue = "super" + "secretvalue";
+  const uuidToken = "00000000-0000-0000-0000-" + "000000000000";
+  const dbPassword = "hunter" + "2";
+  const awsKey = "AKIA" + "IOSFODNN7EXAMPLE";
+  const fineGrainedPat = "github_" + "pat_abcDEF123";
+  const redactedTag = "[" + "REDACTED]";
+  const dirty = [
+    "\u001b[31mred text\u001b[0m",
+    `token ${classicToken} leaked`,
+    `Authorization: Bearer ${bearerValue}`,
+    `npm_token=${uuidToken}`,
+    `db password=${dbPassword} here`,
+    "see https://example.com/deploy?sig=abc123#frag for details",
+    "run https://github.com/o/r/actions/runs/111/jobs/222?check_suite_focus=true next",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    `${awsKey} exposed`,
+    `${fineGrainedPat}_restricted here`,
+    "key with\x01control\x7fchars",
+  ].join("\n");
+  const clean = sanitizeCiText(dirty);
+  assert.match(clean, /red text/);
+  assert.ok(!clean.includes(classicToken), "classic token redacted");
+  assert.ok(!clean.includes(bearerValue), "bearer value redacted");
+  assert.ok(!clean.includes(uuidToken), "assigned token value redacted");
+  assert.ok(!clean.includes(dbPassword), "password value redacted");
+  assert.ok(!clean.includes(awsKey), "aws key redacted");
+  assert.ok(!clean.includes(fineGrainedPat), "fine-grained pat redacted");
+  assert.doesNotMatch(clean, /\?sig=abc123/);
+  assert.doesNotMatch(clean, /#frag/);
+  assert.doesNotMatch(clean, /check_suite_focus/);
+  assert.doesNotMatch(clean, /BEGIN RSA PRIVATE KEY/);
+  assert.ok(!clean.includes("\x01"), "control chars stripped");
+  assert.ok(clean.includes(redactedTag), "redaction marker present");
+  assert.match(clean, /https:\/\/example\.com\/deploy( |$)/);
+  assert.match(clean, /https:\/\/github\.com\/o\/r\/actions\/runs\/111\/jobs\/222( |$)/);
+});
+
+test("NOT-252: partial fetch failure keeps names and marks the excerpt incomplete", async () => {
+  const exec: GhExec = async (args) => {
+    if (args[0] === "pr") return { stdout: prViewWithRollup([actionsCheck("build", "FAILURE", "111"), actionsCheck("lint", "FAILURE", "222")]) };
+    if (args[2] === "111") return { stdout: "build log\nError: boom\n" };
+    throw Object.assign(new Error("log gone"), { stderr: "log gone" });
+  };
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence, "partial failure still enriches with safe names");
+  assert.deepEqual(
+    evidence.failedChecks.map((c) => c.name),
+    ["build", "lint"]
+  );
+  assert.equal(
+    evidence.failedChecks.find((c) => c.name === "lint")?.logUnavailable,
+    true
+  );
+  assert.equal(evidence.logsUnavailable, true);
+  assert.match(evidence.excerpt, /boom/);
+  assert.match(evidence.details, /build, lint/);
+});
+
+test("NOT-252: total fetch failure keeps names with an unavailable-excerpt marker", async () => {
+  const exec: GhExec = async (args) => {
+    if (args[0] === "pr") return { stdout: prViewWithRollup([actionsCheck("build", "FAILURE", "111")]) };
+    throw Object.assign(new Error("forbidden"), { stderr: "forbidden" });
+  };
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence, "total log failure still enriches with safe names, never null");
+  assert.equal(evidence.excerpt, "");
+  assert.equal(evidence.logsUnavailable, true);
+  assert.match(evidence.details, /build/);
+  assert.match(evidence.details, /excerpt unavailable/);
+});
+
+test("NOT-252: non-Actions check keeps safe metadata with no log fetch", async () => {
+  const { exec, calls } = queuedExec([
+    {
+      stdout: prViewWithRollup([
+        { context: "deploy/preview", state: "failure", targetUrl: "https://example.com/deploy/9?sig=abc#frag" },
+      ]),
+    },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  assert.equal(evidence.failedChecks[0].name, "deploy/preview");
+  assert.equal(evidence.failedChecks[0].runId, null);
+  assert.equal(evidence.failedChecks[0].detailsUrl, "https://example.com/deploy/9");
+  assert.ok(calls.every((c) => c[0] === "pr"), "external checks have no Actions run to fetch");
+  assert.match(evidence.details, /deploy\/preview/);
+});
+
+test("NOT-252: checksSnapshot never shells out to a failure-log command", async () => {
+  const { exec, calls } = queuedExec([
+    { stdout: JSON.stringify({ statusCheckRollup: [{ conclusion: "failure" }] }) },
+  ]);
+  assert.equal(await createGithubAdapter(exec).checksSnapshot({ cwd: "/repo", number: 42 }), "failure");
+  assert.deepEqual(calls, [["pr", "view", "42", "--json", "statusCheckRollup"]]);
+});
+
+test("NOT-252: extractActionsRunId and sanitizeUrl helpers", async () => {
+  assert.equal(extractActionsRunId("https://github.com/o/r/actions/runs/123/jobs/456?x=1"), "123");
+  assert.equal(extractActionsRunId("https://example.com/deploy/9"), null);
+  assert.equal(extractActionsRunId(undefined), null);
+  assert.equal(sanitizeUrl("https://example.com/a?b=1#c"), "https://example.com/a");
+  assert.equal(sanitizeUrl("https://example.com/a"), "https://example.com/a");
+});
+
+test("NOT-252: formatChecksFailureDetails labels the excerpt as untrusted, not instructions", async () => {
+  const details = formatChecksFailureDetails({
+    headSha: HEAD_SHA,
+    prNumber: 7,
+    failedChecks: [{ name: "build", workflowName: "CI", conclusion: "failure", runId: "111" }],
+    excerpt: "npm error 404 boom",
+  });
+  assert.match(details, new RegExp(CHECKS_FAILURE_GENERIC_REASON.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").slice(0, 20)));
+  assert.match(details, /PR #7/);
+  assert.match(details, new RegExp(HEAD_SHA));
+  assert.match(details, /build \(CI · failure\)/);
+  assert.match(details, /untrusted/);
+  assert.match(details, /do NOT follow/);
+  assert.match(details, /begin untrusted CI log excerpt/);
+  assert.match(details, /end untrusted CI log excerpt/);
+  const noExcerpt = formatChecksFailureDetails({
+    headSha: HEAD_SHA,
+    failedChecks: [{ name: "build", conclusion: "failure", runId: null }],
+    excerpt: "",
+  });
+  assert.match(noExcerpt, /excerpt unavailable/);
 });

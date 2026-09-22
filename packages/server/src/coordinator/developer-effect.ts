@@ -295,6 +295,57 @@ async function reconcilePrHead(
 }
 
 /**
+ * NOT-252: after a terminal `failure` poll with a freshly re-validated PR/head identity,
+ * best-effort fetch the failing check names + a bounded sanitized log excerpt, persist
+ * them in the existing `checks_evidence` artifact, and thread the prompt-ready summary
+ * into `checks_failed.details` (routing prefers it; `buildDeveloperPrompt` carries it
+ * into "Last failure" unchanged). Never throws and never changes the retry route: any
+ * enrichment failure — or an adapter without the method — yields the shapeless outcome
+ * and routing falls back to the exact generic reason.
+ */
+async function checksFailedOutcome(opts: {
+  github: GithubAdapter;
+  cwd: string;
+  prNumber: number;
+  branch: string;
+  headSha: string;
+  issueId: string;
+  sessionId: string;
+}): Promise<DeveloperOutcome> {
+  const baseContent = { snapshot: "failure", prNumber: opts.prNumber, headSha: opts.headSha };
+  let details: string | undefined;
+  let extra: Record<string, unknown> = {};
+  try {
+    const evidence = await opts.github.fetchChecksFailureEvidence?.({
+      cwd: opts.cwd,
+      number: opts.prNumber,
+      branch: opts.branch,
+      expectedHeadSha: opts.headSha,
+      prNumber: opts.prNumber,
+    });
+    if (evidence) {
+      details = evidence.details;
+      extra = {
+        failedChecks: evidence.failedChecks,
+        excerpt: evidence.excerpt,
+        excerptTruncated: evidence.excerptTruncated,
+        logsUnavailable: evidence.logsUnavailable,
+      };
+    }
+  } catch {
+    // best-effort — fall through to the generic outcome below
+  }
+  createIssueArtifact({
+    issueId: opts.issueId,
+    workerSessionId: opts.sessionId,
+    kind: "checks_evidence",
+    author: "system",
+    content: { ...baseContent, ...extra },
+  });
+  return details ? { kind: "checks_failed", details } : { kind: "checks_failed" };
+}
+
+/**
  * Infra retry that skips the agent: publish whatever the branch already carries. Uses the
  * issue repo as `gh` cwd and `origin/<branch>` as the verified head (any worktree was
  * already removed on the prior failure path).
@@ -583,6 +634,17 @@ async function runPublishOnlyHandoff(
     }
     prView = postPollView;
 
+    if (checks === "failure") {
+      return checksFailedOutcome({
+        github: deps.github,
+        cwd,
+        prNumber: prView.number,
+        branch: branchName,
+        headSha: prView.headRefOid,
+        issueId: issue.id,
+        sessionId,
+      });
+    }
     createIssueArtifact({
       issueId: issue.id,
       workerSessionId: sessionId,
@@ -590,7 +652,6 @@ async function runPublishOnlyHandoff(
       author: "system",
       content: { snapshot: checks, prNumber: prView.number, headSha: prView.headRefOid },
     });
-    if (checks === "failure") return { kind: "checks_failed" };
     if (checks === "timeout") return { kind: "timed_out" };
 
     await fetchRef(cwd, prView.baseRefName);
@@ -1520,6 +1581,19 @@ export async function runDeveloperEffect(
     }
     prView = postPollView;
 
+    if (checks === "failure") {
+      const outcome = await checksFailedOutcome({
+        github: deps.github,
+        cwd: worktreePath,
+        prNumber: prView.number,
+        branch: branchName,
+        headSha: prView.headRefOid,
+        issueId: issue.id,
+        sessionId,
+      });
+      await bestEffortRemove(repoPath, worktreePath);
+      return outcome;
+    }
     createIssueArtifact({
       issueId: issue.id,
       workerSessionId: sessionId,
@@ -1527,10 +1601,6 @@ export async function runDeveloperEffect(
       author: "system",
       content: { snapshot: checks, prNumber: prView.number, headSha: prView.headRefOid },
     });
-    if (checks === "failure") {
-      await bestEffortRemove(repoPath, worktreePath);
-      return { kind: "checks_failed" };
-    }
     if (checks === "timeout") {
       await bestEffortRemove(repoPath, worktreePath);
       return { kind: "timed_out" };
