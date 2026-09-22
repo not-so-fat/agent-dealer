@@ -60,11 +60,13 @@ function teamBilling(over: Partial<CursorTeamBilling> = {}): CursorTeamBilling {
   return {
     configured: true,
     cycleStart: "2026-09-01T00:00:00.000Z",
-    cycleEnd: "2026-10-01T00:00:00.000Z",
-    spendValue: 12.5,
-    spendUnit: "USD",
-    hardLimitValue: 100,
-    hardLimitUnit: "USD",
+    cycleEnd: null,
+    spendValue: 1250,
+    spendUnit: "cents",
+    hardLimitValue: null,
+    hardLimitUnit: null,
+    memberCount: 2,
+    memberLimitOverrideCount: 1,
     usagePeriodStart: null,
     usagePeriodEnd: null,
     usageSpendValue: null,
@@ -107,6 +109,17 @@ test("team billing is known only with values, source, and configuration", () => 
         hardLimitUnit: null,
         usageSpendValue: 3.5,
         usageSpendUnit: "USD",
+      })
+    ),
+    true
+  );
+  // Reported team size alone still counts as known billing evidence.
+  assert.equal(
+    isTeamBillingKnown(
+      teamBilling({
+        spendValue: null,
+        spendUnit: null,
+        memberLimitOverrideCount: null,
       })
     ),
     true

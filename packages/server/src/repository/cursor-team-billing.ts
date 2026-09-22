@@ -24,6 +24,8 @@ interface CursorTeamBillingRow {
   spend_unit: string | null;
   hard_limit_value: number | null;
   hard_limit_unit: string | null;
+  member_count: number | null;
+  member_limit_override_count: number | null;
   usage_period_start: string | null;
   usage_period_end: string | null;
   usage_spend_value: number | null;
@@ -46,6 +48,8 @@ function rowToSnapshot(row: CursorTeamBillingRow): CursorTeamStoredSnapshot {
     spendUnit: row.spend_unit,
     hardLimitValue: row.hard_limit_value,
     hardLimitUnit: row.hard_limit_unit,
+    memberCount: row.member_count,
+    memberLimitOverrideCount: row.member_limit_override_count,
     usagePeriodStart: row.usage_period_start,
     usagePeriodEnd: row.usage_period_end,
     usageSpendValue: row.usage_spend_value,
@@ -66,13 +70,15 @@ export function writeCursorTeamBillingRow(input: WriteCursorTeamBillingInput): v
       `
     INSERT INTO cursor_team_billing_snapshots (
       id, cycle_start, cycle_end, spend_value, spend_unit,
-      hard_limit_value, hard_limit_unit, usage_period_start, usage_period_end,
+      hard_limit_value, hard_limit_unit, member_count,
+      member_limit_override_count, usage_period_start, usage_period_end,
       usage_spend_value, usage_spend_unit, source, unavailable_reason,
       observed_at, fresh_until, expires_at, evidence_ref
     )
     VALUES (
       1, @cycle_start, @cycle_end, @spend_value, @spend_unit,
-      @hard_limit_value, @hard_limit_unit, @usage_period_start, @usage_period_end,
+      @hard_limit_value, @hard_limit_unit, @member_count,
+      @member_limit_override_count, @usage_period_start, @usage_period_end,
       @usage_spend_value, @usage_spend_unit, @source, @unavailable_reason,
       @observed_at, @fresh_until, @expires_at, @evidence_ref
     )
@@ -83,6 +89,8 @@ export function writeCursorTeamBillingRow(input: WriteCursorTeamBillingInput): v
       spend_unit = excluded.spend_unit,
       hard_limit_value = excluded.hard_limit_value,
       hard_limit_unit = excluded.hard_limit_unit,
+      member_count = excluded.member_count,
+      member_limit_override_count = excluded.member_limit_override_count,
       usage_period_start = excluded.usage_period_start,
       usage_period_end = excluded.usage_period_end,
       usage_spend_value = excluded.usage_spend_value,
@@ -102,6 +110,8 @@ export function writeCursorTeamBillingRow(input: WriteCursorTeamBillingInput): v
       spend_unit: input.spendUnit,
       hard_limit_value: input.hardLimitValue,
       hard_limit_unit: input.hardLimitUnit,
+      member_count: input.memberCount,
+      member_limit_override_count: input.memberLimitOverrideCount,
       usage_period_start: input.usagePeriodStart,
       usage_period_end: input.usagePeriodEnd,
       usage_spend_value: input.usageSpendValue,

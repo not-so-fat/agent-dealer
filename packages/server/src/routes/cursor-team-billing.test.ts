@@ -55,15 +55,17 @@ test("with a key the route serves the stored snapshot in reported units", async 
     const now = Date.now();
     writeCursorTeamBillingRow({
       cycleStart: "2026-09-01T00:00:00.000Z",
-      cycleEnd: "2026-10-01T00:00:00.000Z",
-      spendValue: 12.5,
-      spendUnit: "USD",
-      hardLimitValue: 100,
-      hardLimitUnit: "USD",
+      cycleEnd: null,
+      spendValue: 1250,
+      spendUnit: "cents",
+      hardLimitValue: null,
+      hardLimitUnit: null,
+      memberCount: 2,
+      memberLimitOverrideCount: 1,
       usagePeriodStart: new Date(now - 30 * 24 * 3600_000).toISOString(),
       usagePeriodEnd: new Date(now).toISOString(),
-      usageSpendValue: 3.5,
-      usageSpendUnit: "USD",
+      usageSpendValue: null,
+      usageSpendUnit: null,
       source: "supported_protocol",
       unavailableReason: null,
       observedAt: new Date(now - 60_000).toISOString(),
@@ -77,10 +79,12 @@ test("with a key the route serves the stored snapshot in reported units", async 
     const body = CursorTeamBilling.parse(res.json());
     assert.equal(body.configured, true);
     assert.equal(body.unavailableReason, null);
-    assert.equal(body.spendValue, 12.5);
-    assert.equal(body.spendUnit, "USD");
-    assert.equal(body.hardLimitValue, 100);
-    assert.equal(body.hardLimitUnit, "USD");
+    assert.equal(body.spendValue, 1250);
+    assert.equal(body.spendUnit, "cents");
+    assert.equal(body.hardLimitValue, null);
+    assert.equal(body.memberCount, 2);
+    assert.equal(body.memberLimitOverrideCount, 1);
+    assert.equal(body.cycleEnd, null);
     const raw = JSON.stringify(res.json());
     assert.ok(!raw.includes("route-test-key"), "key leaked to the browser");
     assert.ok(!raw.includes("evidence"), "no evidence pointers leak to the browser");

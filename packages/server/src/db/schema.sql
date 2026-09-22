@@ -417,6 +417,8 @@ CREATE TABLE IF NOT EXISTS cursor_team_billing_snapshots (
   spend_unit TEXT,
   hard_limit_value REAL,
   hard_limit_unit TEXT,
+  member_count REAL,
+  member_limit_override_count REAL,
   usage_period_start TEXT,
   usage_period_end TEXT,
   usage_spend_value REAL,
