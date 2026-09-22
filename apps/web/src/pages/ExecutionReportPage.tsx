@@ -22,11 +22,18 @@ import {
   toCohortDisplay,
   toCoverageDisplay,
   toPercentileDisplay,
+  toSuccessDisplay,
   type CohortDisplayRow,
   type CoverageDisplay,
   type PercentileDisplay,
   type ReportFormState,
+  type SuccessDisplay,
 } from "../lib/executionReport";
+
+/** NOT-244: nullable rates are missing, never 0% — Reports copy reads N/A. */
+function rateText(rate: number | null): string {
+  return rate === null ? "N/A" : formatRate(rate);
+}
 
 /**
  * NOT-229 metric hierarchy: the label and supporting notes render through the
@@ -55,10 +62,39 @@ function Card({
   );
 }
 
+/**
+ * NOT-244 success hierarchy: the percentage is the primary operational value
+ * (Monaco, bounded size, never wrapping mid-number) while the denominator
+ * evidence is a smaller/lighter secondary fragment on the shared display
+ * token that may wrap independently. Missing data reads N/A, never zero.
+ */
+function SuccessReadout({ display, compact }: { display: SuccessDisplay; compact?: boolean }) {
+  if (!display.available) {
+    return (
+      <span className="font-mono text-white/45" title={display.title}>
+        N/A
+      </span>
+    );
+  }
+  const valueCls = compact
+    ? "font-mono text-sm font-medium text-white/85 tabular-nums leading-tight whitespace-nowrap"
+    : "font-mono text-base sm:text-lg font-semibold text-white/90 tabular-nums leading-tight whitespace-nowrap";
+  return (
+    <span className="inline-flex flex-wrap items-baseline gap-x-2" title={display.title}>
+      <span className={valueCls} aria-label={display.title}>
+        {display.valueText}
+      </span>
+      <span className="font-ui-display min-w-0 break-words text-xs text-white/40">
+        (<span className="font-mono tabular-nums">{display.evidenceCounts}</span> {display.evidenceNoun})
+      </span>
+    </span>
+  );
+}
+
 /** P50 and P95 as separate labeled values; sample size/sparse is supporting text. */
 function PercentileReadout({ display, compact }: { display: PercentileDisplay; compact?: boolean }) {
   if (!display.available) {
-    return <span className="font-mono text-white/45">Unavailable</span>;
+    return <span className="font-mono text-white/45">N/A</span>;
   }
   const labelCls = compact
     ? "font-ui-display text-[11px] uppercase tracking-wide text-white/40"
@@ -70,11 +106,11 @@ function PercentileReadout({ display, compact }: { display: PercentileDisplay; c
     <span className="inline-flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
       <span className="inline-flex items-baseline gap-x-1.5">
         <span className={labelCls}>P50</span>
-        <span className={valueCls}>{display.p50Text ?? "–"}</span>
+        <span className={valueCls}>{display.p50Text ?? "N/A"}</span>
       </span>
       <span className="inline-flex items-baseline gap-x-1.5">
         <span className={labelCls}>P95</span>
-        <span className={valueCls}>{display.p95Text ?? "–"}</span>
+        <span className={valueCls}>{display.p95Text ?? "N/A"}</span>
       </span>
       <span className="font-ui-display text-xs text-white/40" title={display.sampleTitle}>
         {display.sampleText}
@@ -86,7 +122,7 @@ function PercentileReadout({ display, compact }: { display: PercentileDisplay; c
 /** Known aggregate as the primary value; `known/total` evidence is a separate note. */
 function CoverageReadout({ display, compact }: { display: CoverageDisplay; compact?: boolean }) {
   if (!display.available) {
-    return <span className="font-mono text-white/45">Unavailable</span>;
+    return <span className="font-mono text-white/45">N/A</span>;
   }
   const exact = display.exactText ?? display.valueText;
   const valueCls = compact
@@ -172,8 +208,12 @@ function CohortTable({
               </th>
               <td className="px-3 py-2 font-mono text-white/75">{r.issuesText}</td>
               <td className="px-3 py-2 font-mono text-white/75">{r.attemptsText}</td>
-              <td className="px-3 py-2 font-mono text-white/75" title={r.issueSuccessTitle}>{r.issueSuccessText}</td>
-              <td className="px-3 py-2 font-mono text-white/75" title={r.attemptSuccessTitle}>{r.attemptSuccessText}</td>
+              <td className="px-3 py-2 text-white/75" title={r.issueSuccessTitle}>
+                <SuccessReadout display={r.issueSuccessDisplay} compact />
+              </td>
+              <td className="px-3 py-2 text-white/75" title={r.attemptSuccessTitle}>
+                <SuccessReadout display={r.attemptSuccessDisplay} compact />
+              </td>
               <td className="px-3 py-2 text-white/75"><PercentileReadout display={r.wall} compact /></td>
               <td className="px-3 py-2 font-mono text-white/75" title={r.retryTitle}>{r.retryText}</td>
               <td className="px-3 py-2 text-white/75"><CoverageReadout display={r.tokensIn} compact /></td>
@@ -268,21 +308,21 @@ export function ReportContent({ loading, error, report, onRetry, cohortLink }: R
                 <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
                   <Card
                     label="Issue success"
-                    value={formatRate(summary.issueSuccess)}
+                    value={<SuccessReadout display={toSuccessDisplay(summary.issueSuccess, summary.closedIssues, "closed")} />}
                     valueTitle={`done / (done + closed), denominator ${summary.closedIssues}`}
                     note={`${formatCount(summary.issues)} issues · ${formatCount(summary.closedIssues)} closed`}
                   />
                   <Card
                     label="Attempt success"
-                    value={formatRate(summary.attemptSuccess)}
+                    value={<SuccessReadout display={toSuccessDisplay(summary.attemptSuccess, summary.terminalAttempts, "terminal")} />}
                     valueTitle={`done sessions / terminal sessions, denominator ${summary.terminalAttempts}`}
                     note={`${formatCount(summary.attempts)} attempts · ${formatCount(summary.terminalAttempts)} terminal`}
                   />
                   <Card
                     label="Retry rate"
-                    value={formatRate(summary.retryRate)}
+                    value={rateText(summary.retryRate)}
                     valueTitle={`${summary.retryExtraAttempts} extra attempts after a terminal attempt in the same issue/role/round ÷ ${summary.attempts} attempts`}
-                    note={`Reuse rate ${formatRate(summary.reuseRate)} over ${formatCount(summary.reuseDenominator)} reviewer sessions with input SHA`}
+                    note={`Reuse rate ${rateText(summary.reuseRate)} over ${formatCount(summary.reuseDenominator)} reviewer sessions with input SHA`}
                   />
                   <Card
                     label="Human wait"
@@ -306,8 +346,8 @@ export function ReportContent({ loading, error, report, onRetry, cohortLink }: R
                   />
                   <Card
                     label="Reviewer rounds (avg)"
-                    value={summary.avgReviewerRounds === null ? "Unavailable" : summary.avgReviewerRounds.toFixed(1)}
-                    note={`Change-request rate ${formatRate(summary.changeRequestRate)} over ${formatCount(summary.reviewedIssues)} reviewed`}
+                    value={summary.avgReviewerRounds === null ? "N/A" : summary.avgReviewerRounds.toFixed(1)}
+                    note={`Change-request rate ${rateText(summary.changeRequestRate)} over ${formatCount(summary.reviewedIssues)} reviewed`}
                   />
                 </div>
               </section>
@@ -338,12 +378,12 @@ export function ReportContent({ loading, error, report, onRetry, cohortLink }: R
                   Composed from the execution-analysis read model over the same issues:
                   exact when agent start/complete events are recorded, inferred
                   usage-envelope backfill otherwise. Rows without evidence read
-                  Unavailable — never a guess. See per-row reasons.
+                  N/A — never a guess. See per-row reasons.
                 </p>
                 <div className="rounded border border-white/10 bg-panel-elevated/60 overflow-x-auto">
                   <table className="w-full min-w-[560px] text-sm">
                     <caption className="sr-only">
-                      Exclusive phase wall times. Boundaries without defensible evidence are Unavailable.
+                      Exclusive phase wall times. Boundaries without defensible evidence are N/A.
                     </caption>
                     <thead>
                       <tr className="font-ui-display text-left text-xs uppercase tracking-wide text-white/40 border-b border-white/10">
@@ -513,7 +553,7 @@ export default function ExecutionReportPage() {
       </div>
       <p className="font-ui-display text-sm text-white/50 mb-4">
         Reliability, latency, retry waste, and metadata coverage by role, runtime, and model.
-        Missing cost/token data reads as Unavailable — never as zero.
+        Missing cost/token data reads as N/A — never as zero.
       </p>
 
       <form
