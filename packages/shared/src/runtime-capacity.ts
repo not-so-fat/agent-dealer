@@ -123,6 +123,85 @@ export function deriveWindowLabel(
   return providerLabel;
 }
 
+/**
+ * NOT-249: team-level billing usage from Cursor's official Admin API
+ * (https://docs.cursor.com/en/account/teams/admin-api). This is billing data
+ * for the whole team — NOT per-runtime quota — so it lives outside
+ * RuntimeCapacityEntry: cycle start, summed per-member spend (cents), team
+ * size, and per-member limit-override counts keep the real units and source
+ * the API reported, and are never rendered as token percentages or 5H/1W
+ * windows. The API reports no team hard limit and no cycle end, so those
+ * stay null. N/A reasons reuse CapacityUnavailableReason.
+ */
+export const CursorTeamBilling = z.object({
+  /** True only when an Admin API key is configured server-side. */
+  configured: z.boolean(),
+  /** Subscription-cycle start as reported (ISO-8601, nullable). */
+  cycleStart: z.string().nullable(),
+  /**
+   * Subscription-cycle end. The Admin API reports no cycle end, so the
+   * adapter always leaves this null rather than inventing one.
+   */
+  cycleEnd: z.string().nullable(),
+  /**
+   * Team spend summed from per-member `spendCents` in its reported unit
+   * (`cents`) — never converted, never a percent.
+   */
+  spendValue: z.number().nullable(),
+  spendUnit: z.string().nullable(),
+  /**
+   * Team-level spend hard limit. The Admin API reports no team hard limit —
+   * only per-member `hardLimitOverrideDollars` (counted in
+   * `memberLimitOverrideCount`) — so this stays null, never a relabeled
+   * per-member value and never a token percentage.
+   */
+  hardLimitValue: z.number().nullable(),
+  hardLimitUnit: z.string().nullable(),
+  /** Reported team size (`totalMembers` on the spend response, nullable). */
+  memberCount: z.number().nullable(),
+  /**
+   * Members reporting a per-member `hardLimitOverrideDollars`. These are
+   * individual overrides — explicitly NOT a team hard limit.
+   */
+  memberLimitOverrideCount: z.number().nullable(),
+  /** Trailing usage window actually queried (ISO-8601, nullable). */
+  usagePeriodStart: z.string().nullable(),
+  usagePeriodEnd: z.string().nullable(),
+  /**
+   * Usage-period spend. The daily-usage rows report activity and request
+   * counts, not spend, so the adapter leaves this null rather than summing
+   * a monetary value the API never reported.
+   */
+  usageSpendValue: z.number().nullable(),
+  usageSpendUnit: z.string().nullable(),
+  source: CapacitySource,
+  unavailableReason: CapacityUnavailableReason.nullable(),
+  /** When the backing Admin API read was observed (ISO-8601, nullable). */
+  observedAt: z.string().nullable(),
+  generatedAt: z.string(),
+});
+export type CursorTeamBilling = z.infer<typeof CursorTeamBilling>;
+
+/** True when the billing snapshot carries current, renderable values. */
+export function isTeamBillingKnown(b: CursorTeamBilling, nowMs = Date.now()): boolean {
+  if (!b.configured) return false;
+  if (b.source === "unavailable" || b.unavailableReason !== null) return false;
+  if (
+    b.spendValue === null &&
+    b.hardLimitValue === null &&
+    b.usageSpendValue === null &&
+    b.memberCount === null &&
+    b.memberLimitOverrideCount === null
+  ) {
+    return false;
+  }
+  if (b.observedAt) {
+    const obsMs = Date.parse(b.observedAt);
+    if (!Number.isFinite(obsMs) || obsMs > nowMs + 60_000) return false;
+  }
+  return true;
+}
+
 /** True when the window carries a current, renderable remaining value. */
 export function isWindowKnown(w: CapacityWindowSnapshot, nowMs = Date.now()): boolean {
   if (w.remainingPercent === null) return false;

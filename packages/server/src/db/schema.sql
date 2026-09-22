@@ -406,6 +406,31 @@ CREATE TABLE IF NOT EXISTS runtime_capacity_snapshots (
 CREATE INDEX IF NOT EXISTS idx_runtime_capacity_runtime
   ON runtime_capacity_snapshots(runtime);
 
+-- NOT-249: normalized Cursor-team billing snapshot (single row, id = 1).
+-- Team-level Admin API billing, not per-runtime quota: independent of both
+-- runtime_capacity_snapshots and runtime_availability (NOT-111 health).
+CREATE TABLE IF NOT EXISTS cursor_team_billing_snapshots (
+  id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+  cycle_start TEXT,
+  cycle_end TEXT,
+  spend_value REAL,
+  spend_unit TEXT,
+  hard_limit_value REAL,
+  hard_limit_unit TEXT,
+  member_count REAL,
+  member_limit_override_count REAL,
+  usage_period_start TEXT,
+  usage_period_end TEXT,
+  usage_spend_value REAL,
+  usage_spend_unit TEXT,
+  source TEXT NOT NULL,
+  unavailable_reason TEXT,
+  observed_at TEXT NOT NULL,
+  fresh_until TEXT,
+  expires_at TEXT,
+  evidence_ref TEXT
+);
+
 -- NOT-111: account-level runtime usage caps (keyed per runtime, not per agent profile).
 CREATE TABLE IF NOT EXISTS runtime_availability (
   runtime TEXT PRIMARY KEY,

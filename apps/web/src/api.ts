@@ -5,6 +5,7 @@ import type {
   CreateAgentInput,
   CreateIssueInput,
   CreateIssueResult,
+  CursorTeamBilling,
   DeckAccessErrorCode,
   ExecuteIssueResponse,
   ExecutionReportResponse,
@@ -107,6 +108,16 @@ export async function fetchRuntimeModels(
 /** NOT-245: normalized per-runtime capacity (windows, freshness, N/A reasons). */
 export async function fetchRuntimeCapacity(): Promise<RuntimeCapacityResponse> {
   const res = await fetch(`${API}/api/runtime-capacity`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+/**
+ * NOT-249: team-level Cursor billing from the official Admin API. Monetary
+ * cycle/spend/limit values in their reported units — never token quota.
+ */
+export async function fetchCursorTeamBilling(): Promise<CursorTeamBilling> {
+  const res = await fetch(`${API}/api/cursor-team-billing`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
