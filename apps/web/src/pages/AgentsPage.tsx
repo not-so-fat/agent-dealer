@@ -11,6 +11,7 @@ import { runtimeLabel } from "../lib/display";
 import { agentPhaseBudgetFromJson, budgetFormEmpty, phaseBudgetFromForm } from "../lib/budgetForm";
 import Badge from "../components/ui/Badge";
 import AgentConnectionsBar from "../components/agents/AgentConnectionsBar";
+import RuntimeCapacityStrip from "../components/agents/RuntimeCapacityStrip";
 import { AgentRuntimeIcon } from "../components/agents/AgentIcon";
 
 type Props = {
@@ -145,6 +146,10 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
           </p>
         </div>
         <AgentConnectionsBar agents={agents} agentDeckOnline={agentDeckOnline} />
+      </div>
+
+      <div className="mb-4 overflow-x-auto">
+        <RuntimeCapacityStrip />
       </div>
 
       <div className="space-y-3 mb-6">
