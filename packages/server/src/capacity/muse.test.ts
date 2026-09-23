@@ -1,13 +1,17 @@
 // packages/server/src/capacity/muse.test.ts
 //
 // NOT-247: Muse serve adapter — fake-subprocess coverage only, never a live
-// Muse request. A fake MSP 1.3 server returns rolling + weekly usage (two
+// Muse request. A fake stable MSP server returns window + weekly usage (two
 // independent snapshots with correct remaining percents and reset times), the
 // rolling label derives from `windowDurationMins` (never hardcoded),
 // failure modes map to explicit N/A reasons without touching runtime health,
-// and the recorded protocol traffic proves the client never sends a prompt.
+// and the recorded protocol traffic proves the client runs the
+// initialize → initialized → usage/read handshake and never sends a prompt.
+// NOT-263: the fake enforces the stable contract (no `--protocol` argv,
+// handshake order, `usage.window` field names).
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +22,8 @@ import {
   assertMuseReadOnlyMethod,
   createMuseCapacityAdapter,
   MSP_FORBIDDEN_MODEL_METHODS,
+  MUSE_CLIENT_INFO,
+  MUSE_SERVE_ARGV,
   museRefreshThrottleMs,
   museUsageToReadings,
   maybeRefreshMuseCapacityFromServe,
@@ -64,6 +70,16 @@ function fakeOpts(mode: string, extra: Record<string, unknown> = {}) {
   };
 }
 
+test("serve argv is the shipping contract: no --protocol flag", () => {
+  assert.deepEqual([...MUSE_SERVE_ARGV], ["serve"]);
+  assert.ok(!MUSE_SERVE_ARGV.includes("--protocol"), "muse serve takes no --protocol flag");
+});
+
+test("handshake identity matches the stable clientInfo shape", () => {
+  assert.match(MUSE_CLIENT_INFO.name, /^[a-z0-9_]+$/);
+  assert.ok(MUSE_CLIENT_INFO.version.length > 0, "versioned client identity required");
+});
+
 test("usage windows keep identity, percent, duration, and reset", () => {
   const now = Date.now();
   const parsed = museUsageToReadings(
@@ -72,7 +88,7 @@ test("usage windows keep identity, percent, duration, and reset", () => {
       usage: {
         observedAtMs: now,
         tier: "contributor",
-        rolling: { usedPercent: 60, resetsAtMs: now + 2 * 3600_000, windowDurationMins: 300 },
+        window: { usedPercent: 60, resetsAtMs: now + 2 * 3600_000, windowDurationMins: 300 },
         weekly: { usedPercent: 25, resetsAtMs: now + 3 * 24 * 3600_000 },
       },
     },
@@ -94,13 +110,29 @@ test("usage windows keep identity, percent, duration, and reset", () => {
   assert.equal(normalizeAdapterWindow("muse_code", weekly, now).remainingPercent, 75);
 });
 
+test("legacy rolling spelling maps to the same snapshot", () => {
+  const now = Date.now();
+  const parsed = museUsageToReadings(
+    {
+      usage: {
+        observedAtMs: now,
+        rolling: { usedPercent: 60, resetsAtMs: now + 2 * 3600_000, windowDurationMins: 300 },
+      },
+    },
+    new Date(now).toISOString()
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.windows.length, 1);
+  assert.equal(parsed.windows[0]!.windowKey, "rolling_all_models");
+});
+
 test("rolling label derives from windowDurationMins, never a hardcoded 5H", () => {
   const now = Date.now();
   const parsed = museUsageToReadings(
     {
       usage: {
         observedAtMs: now,
-        rolling: { usedPercent: 10, resetsAtMs: now + 6 * 3600_000, windowDurationMins: 720 },
+        window: { usedPercent: 10, resetsAtMs: now + 6 * 3600_000, windowDurationMins: 720 },
       },
     },
     new Date(now).toISOString()
@@ -122,7 +154,7 @@ test("payloads without an observation read null, not empty", () => {
     0
   );
   assert.equal(
-    museUsageToReadings({ usage: { observedAtMs: Date.now(), rolling: { windowDurationMins: 300 } } })!
+    museUsageToReadings({ usage: { observedAtMs: Date.now(), window: { windowDurationMins: 300 } } })!
       .windows.length,
     0
   );
@@ -139,7 +171,9 @@ test("resetsAtMs accepts ms, seconds, and ISO; rejects garbage", () => {
   assert.equal(normalizeMuseResetsAt(-5), null);
 });
 
-test("only usage/read can be sent; session prompts throw before write", () => {
+test("only the handshake and usage/read can be sent; session prompts throw before write", () => {
+  assertMuseReadOnlyMethod("initialize");
+  assertMuseReadOnlyMethod("initialized");
   assertMuseReadOnlyMethod("usage/read");
   for (const m of ["session/start", "session/prompt", "session/resume", "exec", "usage/write"]) {
     assert.throws(() => assertMuseReadOnlyMethod(m), /refusing non-read method/);
@@ -188,20 +222,68 @@ test("usage/changed notifications are consumed while the connection is alive", a
   assert.equal(read.updates.length, 1);
 });
 
-test("protocol traffic is read-only: usage/read and nothing else", async () => {
+test("protocol traffic is the stable handshake then exactly one usage/read", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-record-"));
   const recordPath = path.join(dir, "methods.jsonl");
   const { opts } = fakeOpts("full", { env: { FAKE_MSP_RECORD: recordPath } });
   await readMuseCapacity(opts);
-  const methods = fs
+  const lines = fs
     .readFileSync(recordPath, "utf8")
     .split("\n")
     .filter(Boolean)
-    .map((l) => String(JSON.parse(l).method));
-  assert.ok(methods.length >= 1, `expected a read, got ${methods}`);
+    .map((l) => JSON.parse(l) as { method: string; params?: { clientInfo?: Record<string, unknown> } });
+  const methods = lines.map((l) => String(l.method));
+  assert.deepEqual(methods, ["initialize", "initialized", "usage/read"]);
+  const init = lines[0]!;
+  assert.equal(init.params?.clientInfo?.name, MUSE_CLIENT_INFO.name);
+  assert.match(String(init.params?.clientInfo?.name ?? ""), /^[a-z0-9_]+$/);
+  assert.equal(init.params?.clientInfo?.version, MUSE_CLIENT_INFO.version);
   for (const m of methods) {
-    assert.equal(m, "usage/read");
     assert.ok(!/session|prompt|exec|message|turn|thread/i.test(m), `billable method ${m}`);
+  }
+});
+
+test("fake rejects the removed --protocol argv like the shipped binary", async () => {
+  clearAllCapacitySnapshots();
+  const now = Date.now();
+  const result = await readMuseCapacity({
+    command: process.execPath,
+    args: [FAKE, "--protocol", "msp/1.3"],
+    env: { META_API_KEY: "test-fake-key", FAKE_MSP_MODE: "full" },
+    timeoutMs: 10_000,
+    nowMs: now,
+  });
+  assert.equal(result.windows.length, 0);
+  assert.equal(result.unavailable.length, 1);
+  assert.equal(result.unavailable[0]!.windowKey, "muse_account_usage");
+  assert.equal(result.unavailable[0]!.reason, "missing");
+});
+
+test("fake requires initialize before usage/read", async () => {
+  const child = spawn(process.execPath, [FAKE], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, FAKE_MSP_MODE: "full", META_API_KEY: "test-fake-key" },
+  });
+  try {
+    const first = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for fake response")), 5000);
+      timer.unref?.();
+      let buf = "";
+      child.stdout!.on("data", (chunk: Buffer) => {
+        buf += chunk.toString();
+        const idx = buf.indexOf("\n");
+        if (idx >= 0) {
+          clearTimeout(timer);
+          resolve(buf.slice(0, idx));
+        }
+      });
+      child.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id: "bare-read", method: "usage/read", params: {} })}\n`);
+    });
+    const msg = JSON.parse(first) as { error?: { message?: string } };
+    assert.ok(msg.error, "bare usage/read is rejected before the handshake");
+    assert.match(String(msg.error?.message ?? ""), /initialize/i);
+  } finally {
+    child.kill();
   }
 });
 

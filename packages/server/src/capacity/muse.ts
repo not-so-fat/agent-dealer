@@ -1,29 +1,31 @@
 // packages/server/src/capacity/muse.ts
 //
 // NOT-247: Muse Code capacity adapter — read stable MSP usage windows.
+// NOT-263: handshake repaired against the stable schema embedded in the
+// shipped binary (`muse schema generate-json-schema`).
 //
-// Reads observed capacity through the versioned `muse serve` Session Protocol
-// (MSP 1.3) without sending a prompt and without consuming model tokens: a
-// single `usage/read` JSON-RPC request over a one-shot managed `muse serve`
-// stdio connection, then shutdown. `usage/changed` notifications received
-// while the connection is alive are recorded. The client enforces a read-only
-// allowlist (`usage/read`) — any other method throws before it is written, so
-// polling can never start a session, send a prompt, or run model work. It
-// never touches the Keychain or undocumented endpoints.
+// Reads observed capacity through the stable Muse Session Protocol without
+// sending a prompt and without consuming model tokens: `muse serve` over a
+// one-shot managed stdio connection, then `initialize` → `initialized` → one
+// `usage/read`, then shutdown. `usage/changed` notifications received while
+// the connection is alive are recorded. The client enforces a read-only
+// allowlist (`initialize`, `initialized`, `usage/read`) — any other method
+// throws before it is written, so polling can never start a session, send a
+// prompt, or run model work. It never touches the Keychain or undocumented
+// endpoints.
 //
-// MSP 1.3 `usage/read` shape (per the contract):
+// Stable `usage/read` shape:
 //   result: {
-//     protocol: "msp/1.3",
 //     usage?: {
 //       observedAtMs: number,
 //       tier: string,                       // dropped: never persisted, never served
-//       rolling?: { usedPercent, resetsAtMs, windowDurationMins },
+//       window?: { usedPercent, resetsAtMs, windowDurationMins },
 //       weekly?: { usedPercent, resetsAtMs }
 //     }
 //   }
 // `usage` may be omitted when Muse has no observation — preserved as N/A
-// (`missing`). The rolling label is derived from `windowDurationMins` by the
-// shared normalization, never hardcoded.
+// (`missing`). The rolling (`window`) label is derived from
+// `windowDurationMins` by the shared normalization, never hardcoded.
 //
 // Failure semantics (shared CapacityUnavailableReason enum only):
 // - No credential (no META_API_KEY and no login file) / `usage` omitted /
@@ -53,8 +55,18 @@ import {
 export const MUSE_RUNTIME: Runtime = "muse_code";
 
 /** Methods this client may ever send. Anything else throws before write. */
-export const MSP_READ_ONLY_METHODS = ["usage/read"] as const;
+export const MSP_READ_ONLY_METHODS = ["initialize", "initialized", "usage/read"] as const;
 export type MspReadOnlyMethod = (typeof MSP_READ_ONLY_METHODS)[number];
+
+/**
+ * Client identity sent in the `initialize` handshake. The stable schema
+ * requires `clientInfo.name` to match `^[a-z0-9_]+$` plus a version string.
+ * Version is kept in sync with `packages/server/package.json`.
+ */
+export const MUSE_CLIENT_INFO = {
+  name: "agent_dealer",
+  version: "1.2.1",
+} as const;
 
 /** Notification the client records (never sends) while connected. */
 export const MSP_USAGE_CHANGED = "usage/changed";
@@ -78,22 +90,20 @@ function readOnlyRequest(id: string, method: MspReadOnlyMethod, params: unknown)
   return `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`;
 }
 
-/**
- * Versioned Session Protocol argv. Fixed: capacity reads never `exec`.
- *
- * Caveat: this argv and the handshake-free single `usage/read` below were
- * built from the ticket contract brief — the official Muse Code docs were
- * unreachable at implementation time, so they are unverified against the
- * published MSP surface. The committed fake (`fixtures/fake-muse-serve.mjs`)
- * likewise enforces no handshake, so tests cannot catch a handshake
- * requirement either. If a live `muse serve` demands an `initialize` step,
- * the read-only allowlist will reject it and every live read will fail
- * closed as `missing`/`unparsable` (never billed); re-check the argv against
- * the docs before debugging any live failure.
- */
-export const MUSE_SERVE_ARGV: readonly string[] = ["serve", "--protocol", "msp/1.3"];
+function readOnlyNotification(method: MspReadOnlyMethod, params: unknown): string {
+  assertMuseReadOnlyMethod(method);
+  return `${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`;
+}
 
-/** Single JSON-RPC request id for the one-shot read. */
+/**
+ * Stable Session Protocol argv. Fixed: capacity reads never `exec`, and the
+ * host takes no `--protocol` flag — `muse serve` with that flag exits 2
+ * against the shipped binary, so this stays exactly `["serve"]`.
+ */
+export const MUSE_SERVE_ARGV: readonly string[] = ["serve"];
+
+/** JSON-RPC request ids for the one-shot read (init handshake, then usage). */
+export const MSP_INITIALIZE_ID = "muse-capacity-init";
 export const MSP_USAGE_READ_ID = "muse-capacity-1";
 
 /** Weekly windows carry no duration in MSP 1.3; a week in minutes. */
@@ -176,7 +186,7 @@ function extractUsageObject(payload: unknown): { usage?: Record<string, unknown>
     if (typeof usage !== "object" || Array.isArray(usage)) return { error: "usage is not an object" };
     return { usage: usage as Record<string, unknown> };
   }
-  if ("observedAtMs" in result || "rolling" in result || "weekly" in result) {
+  if ("observedAtMs" in result || "window" in result || "rolling" in result || "weekly" in result) {
     return { usage: result };
   }
   const keys = Object.keys(result);
@@ -185,12 +195,13 @@ function extractUsageObject(payload: unknown): { usage?: Record<string, unknown>
 }
 
 /**
- * Normalize MSP 1.3 `usage` into adapter readings. Returns null when the
- * payload carries no observation or is malformed (callers needing the
- * distinction check the payload shape first). Entries that are individually
- * malformed are skipped — the caller re-reports present-but-bad keys as
- * per-window `unparsable` readings so a bad sibling never sinks a good
- * window.
+ * Normalize stable `usage` into adapter readings. The rolling window arrives
+ * as `usage.window` (a legacy `usage.rolling` spelling is tolerated and maps
+ * to the same `rolling_all_models` snapshot). Returns null when the payload
+ * carries no observation or is malformed (callers needing the distinction
+ * check the payload shape first). Entries that are individually malformed
+ * are skipped — the caller re-reports present-but-bad keys as per-window
+ * `unparsable` readings so a bad sibling never sinks a good window.
  */
 export function museUsageToReadings(
   payload: unknown,
@@ -199,14 +210,15 @@ export function museUsageToReadings(
   const { usage, error } = extractUsageObject(payload);
   if (error !== undefined || usage === undefined) return null;
   const u = usage;
-  const hasRolling = u.rolling !== undefined;
+  const rollingEntry = u.window !== undefined ? u.window : u.rolling;
+  const hasRolling = rollingEntry !== undefined;
   const hasWeekly = u.weekly !== undefined;
   const observedAtMs =
     typeof u.observedAtMs === "number" && Number.isFinite(u.observedAtMs) ? u.observedAtMs : null;
   const observed = observedAtMs !== null ? new Date(observedAtMs).toISOString() : observedAt;
   const out: AdapterWindowReading[] = [];
   if (hasRolling) {
-    const rolling = windowReadingFromEntry("rolling", u.rolling, observed);
+    const rolling = windowReadingFromEntry("rolling", rollingEntry, observed);
     if (rolling) out.push(rolling);
   }
   if (hasWeekly) {
@@ -224,10 +236,14 @@ export function museBadWindowKinds(payload: unknown): Array<"rolling" | "weekly"
   const { usage, error } = extractUsageObject(payload);
   if (error !== undefined || usage === undefined) return [];
   const u = usage;
+  const entries: Record<"rolling" | "weekly", unknown> = {
+    rolling: u.window !== undefined ? u.window : u.rolling,
+    weekly: u.weekly,
+  };
   const bad: Array<"rolling" | "weekly"> = [];
   for (const kind of ["rolling", "weekly"] as const) {
-    if (u[kind] === undefined) continue;
-    const probe = windowReadingFromEntry(kind, u[kind], new Date().toISOString());
+    if (entries[kind] === undefined) continue;
+    const probe = windowReadingFromEntry(kind, entries[kind], new Date().toISOString());
     if (!probe) bad.push(kind);
   }
   return bad;
@@ -308,10 +324,11 @@ function hasMuseCredential(env: NodeJS.ProcessEnv, authFilePath: string): boolea
 }
 
 /**
- * Spawn `muse serve`, send one `usage/read`, record any `usage/changed`
- * notifications, then shut the connection down. Never throws for
- * provider-side failures — those come back as `failure.kind`. Never sends
- * anything outside MSP_READ_ONLY_METHODS.
+ * Spawn `muse serve`, run the stable handshake (`initialize` with a
+ * `clientInfo` identity, then the `initialized` notification), send one
+ * `usage/read`, record any `usage/changed` notifications, then shut the
+ * connection down. Never throws for provider-side failures — those come back
+ * as `failure.kind`. Never sends anything outside MSP_READ_ONLY_METHODS.
  */
 export function requestMuseUsage(opts: MuseServeOptions = {}): Promise<MuseUsageRead> {
   const command = opts.command ?? resolveMuseBin();
@@ -327,6 +344,7 @@ export function requestMuseUsage(opts: MuseServeOptions = {}): Promise<MuseUsage
     let settled = false;
     let child: ChildProcess | undefined;
     let buffer = "";
+    let initResolve: ((r: RpcResponse) => void) | null = null;
     let readResolve: ((r: RpcResponse) => void) | null = null;
 
     const finish = (out: MuseUsageRead) => {
@@ -351,7 +369,11 @@ export function requestMuseUsage(opts: MuseServeOptions = {}): Promise<MuseUsage
         if (msg.method === MSP_USAGE_CHANGED) updates.push(msg.params ?? null);
         return;
       }
-      if (msg.id === MSP_USAGE_READ_ID && readResolve) {
+      if (msg.id === MSP_INITIALIZE_ID && initResolve) {
+        const cb = initResolve;
+        initResolve = null;
+        cb(msg);
+      } else if (msg.id === MSP_USAGE_READ_ID && readResolve) {
         const cb = readResolve;
         readResolve = null;
         cb(msg);
@@ -415,6 +437,24 @@ export function requestMuseUsage(opts: MuseServeOptions = {}): Promise<MuseUsage
     };
 
     void (async () => {
+      if (!write(readOnlyRequest(MSP_INITIALIZE_ID, "initialize", { clientInfo: { ...MUSE_CLIENT_INFO } }))) {
+        fail("unavailable");
+        return;
+      }
+      const init = await new Promise<RpcResponse | null>((res) => {
+        initResolve = res;
+      });
+      if (settled) return;
+      if (!init || init.error) {
+        if (init?.error && errorLooksAuth(init.error)) fail("unauthenticated");
+        else if (init?.error && init.error.code === -32601) fail("unsupported");
+        else fail("unavailable");
+        return;
+      }
+      if (!write(readOnlyNotification("initialized", {}))) {
+        fail("unavailable");
+        return;
+      }
       if (!write(readOnlyRequest(MSP_USAGE_READ_ID, "usage/read", {}))) {
         fail("unavailable");
         return;

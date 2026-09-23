@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 // packages/server/src/capacity/fixtures/fake-muse-serve.mjs
 //
-// NOT-247: fake `muse serve` Session Protocol for tests. Speaks MSP 1.3 over
-// stdio: answers one `usage/read` (or a failure mode), so adapter tests never
-// touch a live provider, send a prompt, or consume tokens.
+// NOT-247: fake `muse serve` Session Protocol for tests. Speaks the stable
+// MSP surface over stdio: the `initialize` handshake (with a `clientInfo`
+// identity), then the `initialized` notification, then exactly one
+// `usage/read` (or a failure mode), so adapter tests never touch a live
+// provider, send a prompt, or consume tokens.
+//
+// NOT-263: the fake enforces the stable contract — it rejects the removed
+// `--protocol` argv exactly like the shipped binary (`muse serve` takes no
+// such flag), requires the handshake before `usage/read`, and serves the
+// stable `usage.window` / `usage.weekly` field names.
 //
 // Env:
 //   FAKE_MSP_MODE: full | custom-duration | partial-bad-weekly |
@@ -12,20 +19,32 @@
 //   FAKE_MSP_RECORD: path of a file to append one JSON line per received message
 //   FAKE_MSP_NOW_MS: fixed clock for deterministic resetsAtMs (default Date.now())
 //
-// `full` mirrors the contracted MSP 1.3 shape: observedAtMs, tier, a rolling
-// window (300 min) and a weekly window. A `usage/changed` notification
-// precedes the read response so tests can assert notification consumption.
+// `full` mirrors the stable shape: observedAtMs, tier, a rolling `window`
+// (300 min) and a weekly window. A `usage/changed` notification precedes the
+// read response so tests can assert notification consumption.
 
 import fs from "node:fs";
+
+// The shipped `muse serve` takes no `--protocol` flag: reject it with the
+// same usage error and exit code 2 production reports.
+if (process.argv.includes("--protocol")) {
+  process.stderr.write("muse serve: unknown option --protocol\nusage: muse serve [OPTIONS]\n");
+  process.exit(2);
+}
 
 const mode = process.env.FAKE_MSP_MODE ?? "full";
 const recordPath = process.env.FAKE_MSP_RECORD;
 const nowMs = Number(process.env.FAKE_MSP_NOW_MS ?? Date.now());
 
+const CLIENT_NAME_RE = /^[a-z0-9_]+$/;
+
 function record(msg) {
   if (!recordPath) return;
   try {
-    fs.appendFileSync(recordPath, `${JSON.stringify({ method: msg.method ?? null, id: msg.id ?? null })}\n`);
+    fs.appendFileSync(
+      recordPath,
+      `${JSON.stringify({ method: msg.method ?? null, id: msg.id ?? null, params: msg.params ?? null })}\n`
+    );
   } catch {
     // Recording is test assistance only — never break the fake over it.
   }
@@ -39,10 +58,17 @@ function fullUsage() {
   return {
     observedAtMs: nowMs,
     tier: "contributor",
-    rolling: { usedPercent: 60, resetsAtMs: nowMs + 2 * 3600_000, windowDurationMins: 300 },
+    window: { usedPercent: 60, resetsAtMs: nowMs + 2 * 3600_000, windowDurationMins: 300 },
     weekly: { usedPercent: 25, resetsAtMs: nowMs + 3 * 24 * 3600_000 },
   };
 }
+
+// Handshake state: the stable host requires `initialize` (with a valid
+// clientInfo identity), then the `initialized` notification, before exactly
+// one `usage/read`.
+let initialized = false;
+let notified = false;
+let served = false;
 
 let buffer = "";
 process.stdin.setEncoding("utf8");
@@ -60,10 +86,26 @@ process.stdin.on("data", (chunk) => {
       continue;
     }
     record(msg);
-    if (msg.id === undefined) continue; // Notification from client — ignore.
+    if (msg.id === undefined) {
+      // Notification from client — only `initialized` advances the handshake.
+      if (msg.method === "initialized" && initialized) notified = true;
+      continue;
+    }
     handleRequest(msg);
   }
 });
+
+function validClientInfo(params) {
+  const info = params?.clientInfo;
+  return (
+    !!info &&
+    typeof info === "object" &&
+    typeof info.name === "string" &&
+    CLIENT_NAME_RE.test(info.name) &&
+    typeof info.version === "string" &&
+    info.version.length > 0
+  );
+}
 
 function handleRequest(msg) {
   switch (mode) {
@@ -83,11 +125,33 @@ function handleRequest(msg) {
     default:
       break;
   }
+  if (msg.method === "initialize") {
+    if (!validClientInfo(msg.params)) {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "invalid clientInfo" } });
+      return;
+    }
+    initialized = true;
+    send({ jsonrpc: "2.0", id: msg.id, result: { serverInfo: { name: "fake-muse-serve" } } });
+    return;
+  }
   if (msg.method !== "usage/read") {
     // The adapter must never send a prompt or any other method.
     send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
     return;
   }
+  if (!initialized) {
+    send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "initialize required" } });
+    return;
+  }
+  if (!notified) {
+    send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "initialized notification required" } });
+    return;
+  }
+  if (served) {
+    send({ jsonrpc: "2.0", id: msg.id, error: { code: -32600, message: "usage/read already served" } });
+    return;
+  }
+  served = true;
   if (mode === "no-method") {
     send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
     return;
@@ -110,7 +174,7 @@ function handleRequest(msg) {
         usage: {
           observedAtMs: nowMs,
           tier: "contributor",
-          rolling: { usedPercent: 10, resetsAtMs: nowMs + 6 * 3600_000, windowDurationMins: 720 },
+          window: { usedPercent: 10, resetsAtMs: nowMs + 6 * 3600_000, windowDurationMins: 720 },
           weekly: { usedPercent: 50, resetsAtMs: nowMs + 5 * 24 * 3600_000 },
         },
       },
@@ -126,7 +190,7 @@ function handleRequest(msg) {
         usage: {
           observedAtMs: nowMs,
           tier: "contributor",
-          rolling: { usedPercent: 20, resetsAtMs: nowMs + 3600_000, windowDurationMins: 300 },
+          window: { usedPercent: 20, resetsAtMs: nowMs + 3600_000, windowDurationMins: 300 },
           weekly: { usedPercent: "high", resetsAtMs: nowMs + 24 * 3600_000 },
         },
       },
@@ -142,7 +206,7 @@ function handleRequest(msg) {
         usage: {
           observedAtMs: nowMs,
           tier: "contributor",
-          rolling: { usedPercent: "lots", resetsAtMs: "soon", windowDurationMins: "long" },
+          window: { usedPercent: "lots", resetsAtMs: "soon", windowDurationMins: "long" },
           weekly: { usedPercent: "high", resetsAtMs: "later" },
         },
       },
