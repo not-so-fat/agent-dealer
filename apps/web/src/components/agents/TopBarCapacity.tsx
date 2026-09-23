@@ -43,10 +43,13 @@ const WEEKLY_LABEL = "1W";
 /** One labeled row inside a runtime block: a current percent or an N/A.
  * `remaining` is rounded for display; `rawRemaining` is the unrounded
  * provider value and is what exhaustion must be decided from — rounding
- * first can turn a nonzero remainder (e.g. 0.4%) into a false "0%". */
+ * first can turn a nonzero remainder (e.g. 0.4%) into a false "0%".
+ * `isCritical` marks a 5H/1W row — the per-row zero highlight is scoped to
+ * it so a non-critical extra bucket at 0% never looks like it exhausted the
+ * runtime when the block-level treatment (deliberately) says it didn't. */
 export type TopBarWindowValue =
-  | { key: string; label: string; kind: "known"; remaining: number; rawRemaining: number; detail: string }
-  | { key: string; label: string; kind: "unknown"; reason: CapacityUnavailableReason; detail: string };
+  | { key: string; label: string; kind: "known"; remaining: number; rawRemaining: number; detail: string; isCritical: boolean }
+  | { key: string; label: string; kind: "unknown"; reason: CapacityUnavailableReason; detail: string; isCritical: boolean };
 
 export type PerRuntimeSummary = {
   runtime: string;
@@ -96,31 +99,39 @@ function soleCodexDetailedPair(
  * so label/duration matching folds non-critical buckets into the critical
  * rows, min-collapses them, and can falsely mark the runtime exhausted.
  *
- * Per provider family, tried in order:
+ * Per provider family, tried in order, each half resolved independently so
+ * one provider's partial/malformed data never blanks a half the detailed
+ * data can still supply:
  * - Codex: the `rateLimits` aggregate (`codex_rate_limit_primary/secondary`)
- *   — always the account-wide summary when present. Only when it is fully
- *   absent (the server's NOT-263 dedup already collapsed it into whichever
- *   detailed bucket matched) does the sole unambiguous detailed pair stand
- *   in; two or more complete detailed pairs are ambiguous and yield no
- *   critical row rather than guessing a limit id.
- * - Claude / legacy adapters: `five_hour` / `seven_day` (or `weekly`)
- *   buckets, by window key or provider bucket.
+ *   — always the account-wide summary when present. A half missing from the
+ *   aggregate (whether from the server's NOT-263 dedup collapse or from
+ *   `rateLimitsByLimitId` malformed/partial upstream data) falls back to the
+ *   matching half of the sole unambiguous detailed pair; two or more
+ *   complete detailed pairs are ambiguous and yield no critical row rather
+ *   than guessing a limit id.
+ * - Claude / Muse / legacy adapters: `five_hour` / `seven_day` (or
+ *   `weekly`/`rolling_all_models`/`weekly_all_models`) buckets, by window
+ *   key or provider bucket.
  */
 function selectCriticalPair(
   windows: CapacityWindowSnapshot[]
 ): { fiveHour: CapacityWindowSnapshot | null; weekly: CapacityWindowSnapshot | null } {
   const aggFiveHour = windows.find((w) => w.windowKey === "codex_rate_limit_primary") ?? null;
   const aggWeekly = windows.find((w) => w.windowKey === "codex_rate_limit_secondary") ?? null;
-  if (aggFiveHour || aggWeekly) return { fiveHour: aggFiveHour, weekly: aggWeekly };
-
-  const solePair = soleCodexDetailedPair(windows);
-  if (solePair) return { fiveHour: solePair.primary, weekly: solePair.secondary };
+  const solePair = aggFiveHour === null || aggWeekly === null ? soleCodexDetailedPair(windows) : null;
+  if (aggFiveHour || aggWeekly || solePair) {
+    return {
+      fiveHour: aggFiveHour ?? solePair?.primary ?? null,
+      weekly: aggWeekly ?? solePair?.secondary ?? null,
+    };
+  }
 
   const fiveHour =
     windows.find(
       (w) =>
         w.windowKey === "five_hour" ||
         w.windowKey === "claude_unified_five_hour" ||
+        w.windowKey === "rolling_all_models" ||
         w.providerBucket.toLowerCase() === "five_hour"
     ) ?? null;
   const weekly =
@@ -129,6 +140,7 @@ function selectCriticalPair(
         w.windowKey === "weekly" ||
         w.windowKey === "claude_unified_seven_day" ||
         w.windowKey === "claude_unified_weekly" ||
+        w.windowKey === "weekly_all_models" ||
         w.providerBucket.toLowerCase() === "seven_day" ||
         w.providerBucket.toLowerCase() === "weekly"
     ) ?? null;
@@ -179,13 +191,16 @@ function windowDetail(
   return `${w.displayLabel}: N/A (${REASON_TEXT[effectiveWindowReason(w, nowMs, entryReason)]})`;
 }
 
-/** One half of the critical pair: exactly one identity-selected window, never
- * a min-collapse across buckets. The row keeps the provider's own label so
- * non-critical windows are never relabeled as 5H/1W. */
-function summarizeCriticalWindow(
+/** One row from one window: a known percent or an N/A, labeled under the
+ * window's own provider label so non-critical windows are never relabeled
+ * as 5H/1W. `isCritical` only changes the row's `isCritical` flag (used to
+ * scope the per-row zero highlight) — the critical pair is never
+ * min-collapsed across buckets, it is exactly one identity-selected window. */
+function summarizeWindow(
   w: CapacityWindowSnapshot,
   entry: RuntimeCapacityEntry,
-  nowMs: number
+  nowMs: number,
+  isCritical: boolean
 ): TopBarWindowValue {
   if (isWindowKnown(w, nowMs)) {
     const rawRemaining = w.remainingPercent ?? 0;
@@ -196,6 +211,7 @@ function summarizeCriticalWindow(
       remaining: Math.round(rawRemaining),
       rawRemaining,
       detail: windowDetail(w, nowMs, entry.unavailableReason),
+      isCritical,
     };
   }
   const reason: CapacityUnavailableReason = effectiveWindowReason(w, nowMs, entry.unavailableReason);
@@ -205,37 +221,7 @@ function summarizeCriticalWindow(
     kind: "unknown",
     reason,
     detail: windowDetail(w, nowMs, entry.unavailableReason),
-  };
-}
-
-/** A non-critical window renders truthfully under its own provider label. */
-function summarizeOtherWindow(
-  w: CapacityWindowSnapshot,
-  entry: RuntimeCapacityEntry,
-  nowMs: number
-): TopBarWindowValue {
-  if (isWindowKnown(w, nowMs)) {
-    const rawRemaining = w.remainingPercent ?? 0;
-    return {
-      key: w.windowKey,
-      label: w.displayLabel,
-      kind: "known",
-      remaining: Math.round(rawRemaining),
-      rawRemaining,
-      detail: windowDetail(w, nowMs, entry.unavailableReason),
-    };
-  }
-  const reason: CapacityUnavailableReason = effectiveWindowReason(
-    w,
-    nowMs,
-    entry.unavailableReason
-  );
-  return {
-    key: w.windowKey,
-    label: w.displayLabel,
-    kind: "unknown",
-    reason,
-    detail: windowDetail(w, nowMs, entry.unavailableReason),
+    isCritical,
   };
 }
 
@@ -246,7 +232,14 @@ function missingPairWindow(
   entry: RuntimeCapacityEntry
 ): TopBarWindowValue {
   const reason: CapacityUnavailableReason = entry.unavailableReason ?? "missing";
-  return { key: `missing:${label}`, label, kind: "unknown", reason, detail: `${label}: N/A (${REASON_TEXT[reason]})` };
+  return {
+    key: `missing:${label}`,
+    label,
+    kind: "unknown",
+    reason,
+    detail: `${label}: N/A (${REASON_TEXT[reason]})`,
+    isCritical: true,
+  };
 }
 
 /** One entry per runtime account: the 5H/1W pair (deterministically ordered,
@@ -266,14 +259,14 @@ export function summarizeCapacity(
     let criticalRows: TopBarWindowValue[];
     if (fiveHour !== null || weekly !== null) {
       const fiveRow =
-        fiveHour !== null ? summarizeCriticalWindow(fiveHour, entry, nowMs) : missingPairWindow(FIVE_HOUR_LABEL, entry);
+        fiveHour !== null ? summarizeWindow(fiveHour, entry, nowMs, true) : missingPairWindow(FIVE_HOUR_LABEL, entry);
       const weeklyRow =
-        weekly !== null ? summarizeCriticalWindow(weekly, entry, nowMs) : missingPairWindow(WEEKLY_LABEL, entry);
+        weekly !== null ? summarizeWindow(weekly, entry, nowMs, true) : missingPairWindow(WEEKLY_LABEL, entry);
       criticalRows = [fiveRow, weeklyRow];
-      windows = [...criticalRows, ...others.map((w) => summarizeOtherWindow(w, entry, nowMs))];
+      windows = [...criticalRows, ...others.map((w) => summarizeWindow(w, entry, nowMs, false))];
     } else if (entry.windows.length > 0) {
       criticalRows = [];
-      windows = entry.windows.map((w) => summarizeOtherWindow(w, entry, nowMs));
+      windows = entry.windows.map((w) => summarizeWindow(w, entry, nowMs, false));
     } else {
       criticalRows = [];
       windows = [];
@@ -380,7 +373,7 @@ export function TopBarCapacityView({
                       {w.kind === "known" ? (
                         <span
                           className={
-                            w.rawRemaining === 0
+                            w.isCritical && w.rawRemaining === 0
                               ? "font-medium text-red-300"
                               : "font-medium text-white/75"
                           }

@@ -301,9 +301,12 @@ test("critical pair is identity-selected: model-specific extras never fold into 
   assert.match(claudeHtml, /80%/);
   assert.match(claudeHtml, /40%/);
 
-  // Codex shape: the rateLimits aggregate is critical whenever present, even
-  // alongside a detailed pair — detailed buckets never win over it, since
-  // there is no name (e.g. `main`) that is reliably the account-wide one.
+  // Codex shape: the rateLimits aggregate is critical whenever present for
+  // the half it has; a half missing from the aggregate (here: no weekly
+  // aggregate reading) falls back to the matching half of the sole
+  // unambiguous detailed pair — "main" wins here only because it is the
+  // *only* complete detailed pair ("extra" has no secondary), never because
+  // of its name.
   const codexWindows = [
     window({
       windowKey: "codex_rate_limit_primary",
@@ -343,15 +346,73 @@ test("critical pair is identity-selected: model-specific extras never fold into 
     60,
     "the rateLimits aggregate is the critical 5H row whenever it is present"
   );
-  assert.equal(codex.windows[1].kind === "unknown", true, "no aggregate weekly reading: 1W reads N/A");
+  assert.equal(
+    codex.windows[1].kind === "known" && codex.windows[1].remaining,
+    55,
+    "the missing aggregate weekly half falls back to the sole complete detailed pair"
+  );
   assert.equal(codex.exhausted, false, "extra-bucket 0% does not exhaust the runtime");
   const codexHtml = render({ status: "ready", data: codexData });
   assert.ok(!/data-exhausted="true"/.test(codexHtml));
   assert.match(codexHtml, /60%/);
-  // The detailed main/extra buckets are not the aggregate, so they render as
-  // their own truthful rows rather than folding into or overriding 5H/1W.
-  assert.match(codexHtml, /70%/);
   assert.match(codexHtml, /55%/);
+  // The detailed main/extra primaries are not the aggregate, so they still
+  // render as their own truthful "other" rows alongside the critical pair.
+  assert.match(codexHtml, /70%/);
+});
+
+test("Codex: a half missing from the aggregate stays N/A when the detailed fallback is ambiguous", () => {
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "codex_local",
+        unavailableReason: null,
+        windows: [
+          window({
+            windowKey: "codex_rate_limit_primary",
+            providerBucket: "primary",
+            durationMinutes: 300,
+            displayLabel: "5H",
+            remainingPercent: 60,
+          }),
+          // No codex_rate_limit_secondary — but two complete detailed pairs,
+          // so which one is account-wide is not decidable.
+          window({
+            windowKey: "codex_limit_main_primary",
+            providerBucket: "main/primary",
+            durationMinutes: 300,
+            displayLabel: "5H",
+            remainingPercent: 70,
+          }),
+          window({
+            windowKey: "codex_limit_main_secondary",
+            providerBucket: "main/secondary",
+            durationMinutes: 10080,
+            displayLabel: "1W",
+            remainingPercent: 55,
+          }),
+          window({
+            windowKey: "codex_limit_extra_primary",
+            providerBucket: "extra/primary",
+            durationMinutes: 300,
+            displayLabel: "5H",
+            remainingPercent: 10,
+          }),
+          window({
+            windowKey: "codex_limit_extra_secondary",
+            providerBucket: "extra/secondary",
+            durationMinutes: 10080,
+            displayLabel: "1W",
+            remainingPercent: 20,
+          }),
+        ],
+      },
+    ],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.equal(summary.windows[0].kind === "known" && summary.windows[0].remaining, 60);
+  assert.equal(summary.windows[1].kind, "unknown", "ambiguous detailed fallback never guesses a limit id");
+  assert.equal(summary.exhausted, false);
 });
 
 test("Codex: no aggregate, one unambiguous detailed limit pair is critical regardless of its name", () => {
@@ -440,6 +501,69 @@ test("Codex: no aggregate and two complete detailed pairs is ambiguous — no cr
   assert.match(html, /55%/);
   assert.match(html, /30%/);
   assert.match(html, /20%/);
+});
+
+test("Muse: rolling_all_models/weekly_all_models is the critical 5H/1W pair", () => {
+  // packages/server/src/capacity/muse.ts always emits these two window keys
+  // (providerBucket "all_models") for the account-wide rolling/weekly pair.
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "muse_code",
+        unavailableReason: null,
+        windows: [
+          window({
+            windowKey: "rolling_all_models",
+            providerBucket: "all_models",
+            durationMinutes: 300,
+            displayLabel: "5H",
+            remainingPercent: 0,
+          }),
+          window({
+            windowKey: "weekly_all_models",
+            providerBucket: "all_models",
+            durationMinutes: 10080,
+            displayLabel: "1W",
+            remainingPercent: 60,
+          }),
+        ],
+      },
+    ],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.equal(summary.windows[0].kind === "known" && summary.windows[0].remaining, 0);
+  assert.equal(summary.windows[1].kind === "known" && summary.windows[1].remaining, 60);
+  assert.equal(summary.exhausted, true, "Muse's 5H at 0% must exhaust the runtime like any other provider");
+  const html = render({ status: "ready", data });
+  assert.match(html, /data-exhausted="true"/);
+});
+
+test("per-row zero highlight is scoped to the critical pair, matching the block-level exhausted decision", () => {
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "codex_local",
+        unavailableReason: null,
+        windows: [
+          window({ remainingPercent: 80 }),
+          weekly({ remainingPercent: 40 }),
+          window({
+            windowKey: "codex_limit_extra_primary",
+            providerBucket: "extra/primary",
+            durationMinutes: 300,
+            displayLabel: "5H",
+            remainingPercent: 0,
+          }),
+        ],
+      },
+    ],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  const extraRow = summary.windows.find((w) => w.key === "codex_limit_extra_primary");
+  assert.ok(extraRow && extraRow.kind === "known" && extraRow.isCritical === false);
+  const html = render({ status: "ready", data });
+  assert.ok(!/data-exhausted="true"/.test(html), "non-critical zero does not exhaust the block");
+  assert.ok(!html.includes("text-red-300"), "non-critical zero is not highlighted red like a critical zero would be");
 });
 
 test("exhaustion is decided from the raw value, not the rounded display value", () => {
