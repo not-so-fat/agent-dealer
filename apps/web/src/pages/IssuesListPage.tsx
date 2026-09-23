@@ -381,8 +381,7 @@ export default function IssuesListPage({
 
   return (
     <div className="flex-1 min-h-0 px-6 py-4 w-full overflow-y-auto">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="font-ui-display text-lg font-semibold text-white/90">Issues</h2>
+      <div className="flex items-center justify-end mb-4">
         <button type="button" className="btn-gold px-4" onClick={() => setShowCreate((v) => !v)}>
           New issue
         </button>
