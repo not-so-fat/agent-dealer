@@ -747,6 +747,34 @@ test("a malformed shared-poll response DOES overwrite the capacity strip, unlike
   assert.equal(cursor?.windows[0]?.unavailableReason, "unparsable");
 });
 
+test("a bad-credential shared-poll response DOES overwrite the capacity strip too — the other non-transient sibling", async () => {
+  // `transient` treats `malformed` and `bad-credential` as one non-transient
+  // class (both should overwrite); the previous test only covers `malformed`
+  // at the capacity-strip level — cover the sibling the same way.
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  await refreshCursorIndividualCapacityIfStale(now, {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(now)),
+    nowMs: now,
+  });
+  const before = getRuntimeCapacitySnapshot(now).runtimes.find((r) => r.runtime === "cursor_local");
+  assert.equal(before?.windows[0]?.remainingPercent, 62.5);
+  // The credential file changes shape before the next poll — the same
+  // "changed format" drift the credentials module itself calls unparsable.
+  fixtureCredential({ brandNewShape: true });
+  const later = now + DEFAULT_STALE_AFTER_MS + 60_000;
+  await refreshCursorIndividualCapacityIfStale(later, {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(later)),
+    nowMs: later,
+  });
+  const cursor = getRuntimeCapacitySnapshot(later).runtimes.find((r) => r.runtime === "cursor_local");
+  assert.equal(cursor?.unavailableReason, "unparsable");
+  assert.equal(cursor?.windows[0]?.unavailableReason, "unparsable");
+});
+
 test("payload parsing keeps reported values and rejects empty shapes", () => {
   const now = Date.now();
   const readings = cursorIndividualPayloadToReadings(usagePayload(now));
