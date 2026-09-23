@@ -295,6 +295,23 @@ test("a successful refresh clears the failure sentinel", async () => {
   assert.equal(muse.unavailableReason, null);
 });
 
+test("a read with every window unparsable clears the stale sentinel", async () => {
+  clearAllCapacitySnapshots();
+  await refreshMuseCapacityFromServe(fakeOpts("crash").opts);
+  assert.deepEqual(
+    listCapacitySnapshots("muse_code").map((w) => w.windowKey),
+    ["muse_account_usage"]
+  );
+  const result = await readMuseCapacity(fakeOpts("all-bad-windows").opts);
+  assert.equal(result.windows.length, 0);
+  assert.ok(result.unavailable.length > 0);
+  assert.ok(result.unavailable.every((u) => u.windowKey !== "muse_account_usage"));
+  await refreshMuseCapacityFromServe(fakeOpts("all-bad-windows").opts);
+  const keys = listCapacitySnapshots("muse_code").map((w) => w.windowKey);
+  assert.ok(!keys.includes("muse_account_usage"), `stale sentinel cleared, got ${keys}`);
+  assert.ok(keys.length > 0, "per-window unparsable rows persist");
+});
+
 test("production refresh is throttled and can be disabled", async () => {
   clearAllCapacitySnapshots();
   resetMuseCapacityRefreshState();

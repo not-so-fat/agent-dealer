@@ -6,8 +6,9 @@
 // touch a live provider, send a prompt, or consume tokens.
 //
 // Env:
-//   FAKE_MSP_MODE: full | custom-duration | partial-bad-weekly | missing |
-//     auth-error | malformed | hang | exit-nonzero | crash | no-method
+//   FAKE_MSP_MODE: full | custom-duration | partial-bad-weekly |
+//     all-bad-windows | missing | auth-error | malformed | hang |
+//     exit-nonzero | crash | no-method
 //   FAKE_MSP_RECORD: path of a file to append one JSON line per received message
 //   FAKE_MSP_NOW_MS: fixed clock for deterministic resetsAtMs (default Date.now())
 //
@@ -127,6 +128,22 @@ function handleRequest(msg) {
           tier: "contributor",
           rolling: { usedPercent: 20, resetsAtMs: nowMs + 3600_000, windowDurationMins: 300 },
           weekly: { usedPercent: "high", resetsAtMs: nowMs + 24 * 3600_000 },
+        },
+      },
+    });
+    return;
+  }
+  if (mode === "all-bad-windows") {
+    send({
+      jsonrpc: "2.0",
+      id: msg.id,
+      result: {
+        protocol: "msp/1.3",
+        usage: {
+          observedAtMs: nowMs,
+          tier: "contributor",
+          rolling: { usedPercent: "lots", resetsAtMs: "soon", windowDurationMins: "long" },
+          weekly: { usedPercent: "high", resetsAtMs: "later" },
         },
       },
     });

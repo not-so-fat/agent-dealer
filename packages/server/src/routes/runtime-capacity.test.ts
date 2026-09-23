@@ -85,6 +85,15 @@ test("GET triggers the Muse refresh when muse_code is configured", async () => {
       const body = RuntimeCapacityResponse.parse(res.json());
       const muse = body.runtimes.find((r) => r.runtime === "muse_code");
       assert.ok(muse, "muse_code entry served");
+      // The refresh runs in the background (GET never blocks on it), so
+      // poll briefly for the persisted sentinel.
+      const deadline = Date.now() + 5000;
+      while (
+        !listCapacitySnapshots("muse_code").some((w) => w.windowKey === "muse_account_usage") &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
       assert.ok(
         listCapacitySnapshots("muse_code").some((w) => w.windowKey === "muse_account_usage"),
         "route-triggered refresh persisted the sentinel"

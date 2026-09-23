@@ -76,11 +76,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // reasons. Normalized snapshots only; evidence stays server-side.
   // NOT-247: the only production trigger for the Muse adapter — a throttled
   // (default 5 min), bounded, best-effort refresh when `muse_code` is
-  // configured. Failures persist as N/A and never fail the read.
-  app.get("/api/runtime-capacity", async () => {
+  // configured. The refresh runs in the background without blocking the
+  // read: GET serves the last-known snapshot immediately so a slow or
+  // hanging `muse serve` (bounded by the capacity timeout) can never stall
+  // the Agents page. Failures persist as N/A and never fail the read.
+  app.get("/api/runtime-capacity", () => {
     try {
       if (configuredCapacityRuntimes().includes("muse_code")) {
-        await maybeRefreshMuseCapacityFromServe();
+        void maybeRefreshMuseCapacityFromServe().catch(() => {
+          // Best-effort: failures persist as N/A via the ingest path.
+        });
       }
     } catch {
       // Best-effort: serve the last-known snapshot below.

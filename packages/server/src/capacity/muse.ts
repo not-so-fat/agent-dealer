@@ -582,10 +582,10 @@ export function createMuseCapacityAdapter(opts: MuseServeOptions = {}): Capacity
  * Reuses the shared ingest path; failures persist as N/A windows, never as
  * health rows. Imported lazily to keep the adapter module free of DB binds.
  *
- * A successful read (real windows) deletes the failure sentinel
- * (`muse_account_usage`): snapshot writes are per-window upserts that never
- * delete siblings, so without this a stale N/A sentinel would linger next to
- * the recovered windows indefinitely.
+ * A successful read (real windows or per-window unparsable rows) deletes
+ * the failure sentinel (`muse_account_usage`): snapshot writes are
+ * per-window upserts that never delete siblings, so without this a stale
+ * N/A sentinel would linger next to the recovered rows indefinitely.
  */
 export async function refreshMuseCapacityFromServe(
   opts: MuseServeOptions = {}
@@ -595,7 +595,10 @@ export async function refreshMuseCapacityFromServe(
   const nowMs = opts.nowMs ?? Date.now();
   const result = await readMuseCapacity({ ...opts, nowMs });
   await ingestAdapterResult(result);
-  if (result.windows.length > 0) {
+  const hasRealRows =
+    result.windows.length > 0 ||
+    result.unavailable.some((u) => u.windowKey !== SENTINEL_WINDOW_KEY);
+  if (hasRealRows) {
     deleteCapacitySnapshots(MUSE_RUNTIME, [SENTINEL_WINDOW_KEY]);
   }
   return getRuntimeCapacitySnapshot(nowMs);
