@@ -2,6 +2,8 @@
 //
 // NOT-246: Codex capacity adapter over the official App Server interface
 // (https://developers.openai.com/codex/app-server).
+// NOT-263: semantic deduplication of the aggregate `rateLimits` pair against
+// `rateLimitsByLimitId` buckets, plus persisted-row reconciliation.
 //
 // Read-only account operation: the client performs the initialization
 // handshake, then a single `account/rateLimits/read`, and optionally records
@@ -15,6 +17,12 @@
 // (`providerBucket`), `usedPercent`, `windowDurationMins`, and `resetsAt`.
 // Parsing is tolerant (camelCase/snake_case, epoch-second/ms or ISO resets)
 // because only the canonical names above are contractual.
+//
+// When the aggregate primary/secondary pair exactly mirrors one detailed
+// bucket's pair (same used scale, duration, and reset — never the display
+// label alone), the aggregate aliases collapse and the detailed identity
+// wins, so each logical window renders once. Genuinely distinct buckets stay
+// visible even when they share a duration.
 //
 // Failure semantics (shared CapacityUnavailableReason enum only):
 // - App Server unavailable / unauthenticated / timeout -> `missing`
@@ -193,6 +201,32 @@ function windowReadingFromEntry(
 
 export interface CodexRateLimitsReadings {
   windows: AdapterWindowReading[];
+  /**
+   * Aggregate `rateLimits` keys collapsed because one detailed bucket
+   * exactly mirrors the pair. The refresh path deletes these persisted rows
+   * so databases written by older versions heal without manual cleanup.
+   */
+  collapsedAggregateKeys: string[];
+}
+
+/**
+ * Semantic window equality for dedup: same used scale and value, same
+ * duration, same normalized reset. Display labels (`5H`/`1W`) are never
+ * compared — two genuinely distinct buckets may share a duration.
+ */
+export function codexWindowValuesEqual(a: AdapterWindowReading, b: AdapterWindowReading): boolean {
+  const aPercent = a.usedPercent ?? null;
+  const bPercent = b.usedPercent ?? null;
+  if (aPercent !== null || bPercent !== null) {
+    if (aPercent === null || bPercent === null || aPercent !== bPercent) return false;
+  } else {
+    const aFraction = a.usedFraction ?? null;
+    const bFraction = b.usedFraction ?? null;
+    if (aFraction === null || bFraction === null || aFraction !== bFraction) return false;
+  }
+  if ((a.durationMinutes ?? null) !== (b.durationMinutes ?? null)) return false;
+  if ((a.resetAt ?? null) !== (b.resetAt ?? null)) return false;
+  return true;
 }
 
 /** One `rateLimitsByLimitId` bucket: identity plus nested window snapshots. */
@@ -226,6 +260,13 @@ function nonEmptyString(value: unknown): string | null {
  * and whose label is the bucket's `limitName`. A bucket without nested
  * windows still parses as one legacy flat window so older servers keep
  * working.
+ *
+ * Deduplication (NOT-263): when the aggregate `primary`/`secondary` pair
+ * exactly mirrors one detailed bucket's pair (same used scale, duration,
+ * and reset), the aggregate aliases collapse and the detailed identity wins
+ * — each logical window is reported once. The comparison is semantic, never
+ * label-based, so genuinely distinct buckets sharing a duration stay
+ * visible; a partial overlap (only one sub-window matches) never collapses.
  */
 export function codexRateLimitsToReadings(
   payload: unknown,
@@ -233,7 +274,7 @@ export function codexRateLimitsToReadings(
 ): CodexRateLimitsReadings | null {
   if (!payload || typeof payload !== "object") return null;
   const p = payload as Record<string, unknown>;
-  const out: AdapterWindowReading[] = [];
+  const aggregate: AdapterWindowReading[] = [];
   const primary = p.rateLimits;
   if (primary && typeof primary === "object") {
     for (const [name, entry] of Object.entries(primary as Record<string, unknown>)) {
@@ -242,9 +283,11 @@ export function codexRateLimitsToReadings(
         { windowKey: `codex_rate_limit_${sanitizeKeySegment(name)}`, providerBucket: name },
         observedAt
       );
-      if (reading) out.push(reading);
+      if (reading) aggregate.push(reading);
     }
   }
+  const buckets = new Map<string, { primary?: AdapterWindowReading; secondary?: AdapterWindowReading }>();
+  const flat: AdapterWindowReading[] = [];
   const byId = p.rateLimitsByLimitId ?? p.rate_limits_by_limit_id;
   if (byId && typeof byId === "object") {
     for (const [mapKey, bucket] of Object.entries(byId as Record<string, unknown>)) {
@@ -255,6 +298,7 @@ export function codexRateLimitsToReadings(
       const limitName =
         nonEmptyString(b.limitName) ?? nonEmptyString(b.limit_name) ?? nonEmptyString(b.name);
       let nested = false;
+      const pair: { primary?: AdapterWindowReading; secondary?: AdapterWindowReading } = {};
       for (const sub of ["primary", "secondary"] as const) {
         const entry = b[sub];
         if (!entry || typeof entry !== "object") continue;
@@ -268,9 +312,11 @@ export function codexRateLimitsToReadings(
           },
           observedAt
         );
-        if (reading) out.push(reading);
+        if (reading) pair[sub] = reading;
       }
-      if (!nested) {
+      if (nested) {
+        buckets.set(limitId, pair);
+      } else {
         const reading = windowReadingFromEntry(
           bucket,
           {
@@ -280,11 +326,34 @@ export function codexRateLimitsToReadings(
           },
           observedAt
         );
-        if (reading) out.push(reading);
+        if (reading) flat.push(reading);
       }
     }
   }
-  return out.length > 0 ? { windows: out } : null;
+  const collapsedAggregateKeys: string[] = [];
+  const aggPrimary = aggregate.find((w) => w.windowKey === "codex_rate_limit_primary");
+  const aggSecondary = aggregate.find((w) => w.windowKey === "codex_rate_limit_secondary");
+  if (aggPrimary && aggSecondary) {
+    for (const pair of buckets.values()) {
+      if (
+        pair.primary &&
+        pair.secondary &&
+        codexWindowValuesEqual(aggPrimary, pair.primary) &&
+        codexWindowValuesEqual(aggSecondary, pair.secondary)
+      ) {
+        collapsedAggregateKeys.push(aggPrimary.windowKey, aggSecondary.windowKey);
+        break;
+      }
+    }
+  }
+  const out: AdapterWindowReading[] = [
+    ...aggregate.filter((w) => !collapsedAggregateKeys.includes(w.windowKey)),
+    ...[...buckets.values()].flatMap((pair) =>
+      [pair.primary, pair.secondary].filter((w): w is AdapterWindowReading => w !== undefined)
+    ),
+    ...flat,
+  ];
+  return out.length > 0 ? { windows: out, collapsedAggregateKeys } : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -531,7 +600,17 @@ export function readCodexRateLimits(opts: CodexAppServerOptions = {}): Promise<C
 
 const SENTINEL_WINDOW_KEY = "codex_account_rate_limits";
 
-function unavailableResult(nowMs: number, reason: CapacityUnavailableReason): AdapterReadResult {
+/**
+ * Adapter read result carrying the NOT-263 collapse metadata: aggregate
+ * alias keys the fresh payload superseded. Older databases still hold those
+ * rows (per-window upserts never delete siblings), so the refresh path
+ * deletes them explicitly.
+ */
+export interface CodexAppServerReadResult extends AdapterReadResult {
+  collapsedAggregateKeys: string[];
+}
+
+function unavailableResult(nowMs: number, reason: CapacityUnavailableReason): CodexAppServerReadResult {
   const reading: AdapterUnavailableReading = {
     windowKey: SENTINEL_WINDOW_KEY,
     providerBucket: "account",
@@ -539,7 +618,7 @@ function unavailableResult(nowMs: number, reason: CapacityUnavailableReason): Ad
     reason,
     observedAt: new Date(nowMs).toISOString(),
   };
-  return { runtime: CODEX_RUNTIME, windows: [], unavailable: [reading] };
+  return { runtime: CODEX_RUNTIME, windows: [], unavailable: [reading], collapsedAggregateKeys: [] };
 }
 
 /**
@@ -550,7 +629,7 @@ function logFailure(kind: FailureKind): void {
   console.error(`[codex-capacity] app-server read failed: ${kind}`);
 }
 
-function failureToUnavailable(nowMs: number, kind: FailureKind): AdapterReadResult {
+function failureToUnavailable(nowMs: number, kind: FailureKind): CodexAppServerReadResult {
   logFailure(kind);
   switch (kind) {
     case "unsupported":
@@ -576,7 +655,7 @@ export function codexEvidenceRef(kind: FailureKind | "read"): string {
  */
 export async function readCodexAppServerCapacity(
   opts: CodexAppServerOptions = {}
-): Promise<AdapterReadResult> {
+): Promise<CodexAppServerReadResult> {
   const nowMs = opts.nowMs ?? Date.now();
   const observedAt = new Date(nowMs).toISOString();
   let read: CodexRateLimitsRead;
@@ -623,7 +702,12 @@ export async function readCodexAppServerCapacity(
     logFailure("malformed");
     return unavailableResult(nowMs, "unparsable");
   }
-  return { runtime: CODEX_RUNTIME, windows, unavailable };
+  return {
+    runtime: CODEX_RUNTIME,
+    windows,
+    unavailable,
+    collapsedAggregateKeys: parsed.collapsedAggregateKeys,
+  };
 }
 
 /** Live Codex adapter for the shared capacity service (runtime `codex_local`). */
@@ -641,6 +725,12 @@ export function createCodexAppServerAdapter(
  * Bounded refresh: run the live adapter and ingest into normalized snapshots.
  * Reuses the shared ingest path; failures persist as N/A windows, never as
  * health rows. Imported lazily to keep the adapter module free of DB binds.
+ *
+ * A successful read deletes the failure sentinel plus any aggregate alias
+ * keys the fresh payload collapsed (NOT-263): per-window upserts never
+ * delete siblings, so without this the obsolete `codex_rate_limit_*`
+ * duplicates from older versions would linger next to the surviving
+ * detailed rows indefinitely.
  */
 export async function refreshCodexCapacityFromAppServer(
   opts: CodexAppServerOptions = {}
@@ -649,11 +739,15 @@ export async function refreshCodexCapacityFromAppServer(
   const nowMs = opts.nowMs ?? Date.now();
   const result = await readCodexAppServerCapacity({ ...opts, nowMs });
   await ingestAdapterResult(result);
+  const obsolete = [...result.collapsedAggregateKeys];
   if (result.windows.length > 0) {
     // A successful read supersedes the failure sentinel: without this the
     // N/A row lingers next to fresh windows until its own TTL expires.
+    obsolete.push(SENTINEL_WINDOW_KEY);
+  }
+  if (obsolete.length > 0) {
     const { deleteCapacitySnapshots } = await import("../repository/runtime-capacity.js");
-    deleteCapacitySnapshots(CODEX_RUNTIME, [SENTINEL_WINDOW_KEY]);
+    deleteCapacitySnapshots(CODEX_RUNTIME, obsolete);
   }
   return getRuntimeCapacitySnapshot(nowMs);
 }

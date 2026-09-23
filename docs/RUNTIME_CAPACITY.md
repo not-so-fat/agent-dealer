@@ -81,25 +81,31 @@ capacity.
 ## Provider: Muse Code (NOT-247)
 
 Sources: the Muse Code docs (`https://dev.meta.ai/docs/muse-code`) and the
-subscriptions reference (`https://dev.meta.ai/docs/muse-code/subscriptions`).
-The adapter speaks the versioned Session Protocol over a managed
-`muse serve --protocol msp/1.3` subprocess: a single `usage/read` request,
-then shutdown. `usage/changed` notifications received while the connection is
-alive are recorded. The client enforces a read-only allowlist (`usage/read`)
-— any other method throws before it is written, so polling can never start a
-session, send a prompt, or consume model tokens. It is bounded (default 15 s
-overall, `AGENT_DEALER_MUSE_CAPACITY_TIMEOUT_MS` override) and never billed.
+subscriptions reference (`https://dev.meta.ai/docs/muse-code/subscriptions`),
+plus the stable schema embedded in the shipped binary (regenerable offline
+with `muse schema generate-json-schema`). The adapter speaks the stable
+Session Protocol over a managed `muse serve` subprocess (no `--protocol`
+flag — the shipped binary exits 2 on it): the `initialize` handshake with a
+`clientInfo` identity (`name` matching `^[a-z0-9_]+$`, currently
+`agent_dealer`, plus a version), then the `initialized` notification, then
+exactly one `usage/read`, then shutdown. `usage/changed` notifications
+received while the connection is alive are recorded. The client enforces a
+read-only allowlist (`initialize`, `initialized`, `usage/read`) — any other
+method throws before it is written, so polling can never start a session,
+send a prompt, or consume model tokens. It is bounded (default 15 s overall,
+`AGENT_DEALER_MUSE_CAPACITY_TIMEOUT_MS` override) and never billed.
 No Keychain access, no undocumented endpoints.
 
-Normalization keeps the two MSP 1.3 windows independently:
+Normalization keeps the two stable windows independently:
 
-- `rolling` → window key `rolling_all_models` (`providerBucket`
+- `window` → window key `rolling_all_models` (`providerBucket`
   `all_models`), `windowDurationMins` → `durationMinutes` so the shared
   normalization derives the label (`300` → `5H`, `720` → `12H`, …) instead of
-  hardcoding it; `usedPercent` and `resetsAtMs` pass through.
+  hardcoding it; `usedPercent` and `resetsAtMs` pass through. (A legacy
+  `rolling` spelling maps to the same snapshot.)
 - `weekly` → window key `weekly_all_models` with the definitional
-  `durationMinutes: 10080` (MSP 1.3 reports no weekly duration), `usedPercent`
-  and `resetsAt` likewise.
+  `durationMinutes: 10080` (the stable schema reports no weekly duration),
+  `usedPercent` and `resetsAt` likewise.
 - `observedAtMs` becomes the snapshot `observedAt`; `tier` is dropped at the
   adapter boundary — tier metadata beyond the runtime account context never
   persists and never reaches the browser.
@@ -126,11 +132,11 @@ shared service path). The only production trigger is `GET
 best-effort, never failing the read. A successful refresh deletes the
 `muse_account_usage` failure sentinel so a stale N/A window cannot linger
 next to recovered windows. Tests use the committed fake MSP server
-(`packages/server/src/capacity/fixtures/fake-muse-serve.mjs`); CI performs no
-live Muse request. The `serve --protocol msp/1.3` argv and the
-handshake-free single request follow the ticket contract brief — they are
-unverified against the published docs (unreachable at implementation time),
-so re-check them against the docs before debugging any live failure.
+(`packages/server/src/capacity/fixtures/fake-muse-serve.mjs`), which
+enforces the stable contract: it rejects the removed `--protocol` argv,
+requires `initialize` (with a valid `clientInfo`) → `initialized` → exactly
+one `usage/read`, and serves the stable `usage.window` / `usage.weekly`
+fields; CI performs no live Muse request.
 
 ## Provider: Codex App Server (NOT-246)
 
@@ -145,7 +151,7 @@ is written, so polling can never create a thread, submit a turn, or run a
 model prompt. It is bounded (default 15 s overall,
 `AGENT_DEALER_CODEX_CAPACITY_TIMEOUT_MS` override) and never billed.
 
-Normalization keeps both maps:
+Normalization keeps both maps, deduplicated (NOT-263):
 
 - `rateLimits` entries → window keys `codex_rate_limit_<name>`
   (`primary`/`secondary` keep their provider identity as `providerBucket`).
@@ -156,6 +162,13 @@ Normalization keeps both maps:
   `<limitId>/<primary|secondary>`, and the bucket's `limitName` as label — so
   per-limit buckets stay distinguishable and can never overwrite each other
   or the top-level windows.
+- When the aggregate `primary`/`secondary` pair exactly mirrors one detailed
+  bucket's pair — same used scale and value, same `windowDurationMins`, same
+  normalized `resetsAt` — the aggregate aliases collapse and the detailed
+  identity wins, so each logical window is reported once. The comparison is
+  semantic (`codexWindowValuesEqual`): display labels (`5H`/`1W`) are never
+  compared, so genuinely distinct buckets sharing a duration stay visible,
+  and a partial overlap (only one sub-window matches) never collapses.
 - Each window keeps `usedPercent`, `windowDurationMins` → `durationMinutes`,
   and `resetsAt` (epoch seconds/ms or ISO-8601 → ISO).
 
@@ -178,7 +191,11 @@ refs are static (`codex-app-server:account/rateLimits/read`).
 
 Refresh via `refreshCodexCapacityFromAppServer()` (bounded ingest through the
 shared service path); a successful refresh deletes the failure sentinel so a
-stale N/A row never lingers next to fresh windows. `GET /api/runtime-capacity`
+stale N/A row never lingers next to fresh windows, plus any aggregate alias
+keys the fresh payload collapsed — per-window upserts never delete siblings,
+so without this the obsolete `codex_rate_limit_primary/secondary` duplicates
+persisted by older versions would linger next to the surviving detailed rows
+and upgrading would not heal already-persisted databases. `GET /api/runtime-capacity`
 additionally triggers `refreshCodexCapacityIfStale()`: when `codex_local` is a
 configured runtime account and its stored snapshot is missing or older than
 the 15-minute stale window, the read performs one bounded non-billable poll
@@ -186,8 +203,10 @@ the 15-minute stale window, the read performs one bounded non-billable poll
 and then serves the result — fresh snapshots short-circuit with no
 subprocess, and `AGENT_DEALER_CODEX_CAPACITY_REFRESH=off` disables the
 refresh. Tests use the committed fake JSONL server
-(`packages/server/src/capacity/fixtures/fake-codex-app-server.mjs`); CI
-performs no live provider request.
+(`packages/server/src/capacity/fixtures/fake-codex-app-server.mjs`); its
+`mirror` mode reproduces the production duplicate shape (aggregate pair
+value-identical to one bucket, second bucket distinct); CI performs no live
+provider request.
 
 ## Provider: Claude unified windows (NOT-248, observed events only)
 

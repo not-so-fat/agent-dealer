@@ -74,3 +74,48 @@ test("strip wraps instead of growing: flex-wrap root, nowrap chips, one entry pe
   const claudeCount = (html.match(/capacity-entry-claude_code"/g) ?? []).length;
   assert.equal(claudeCount, 1);
 });
+
+test("deduped codex pair renders one 5H chip and one weekly chip, no aggregate aliases", () => {
+  // NOT-263: after the server-side collapse, the mirrored logical pair
+  // arrives once (detailed identity only) and the strip renders it once.
+  const deduped = {
+    generatedAt: new Date().toISOString(),
+    runtimes: [
+      {
+        runtime: "codex_local",
+        unavailableReason: null,
+        windows: [
+          window({ windowKey: "codex_limit_main_primary", displayLabel: "5H", durationMinutes: 300, remainingPercent: 30 }),
+          window({ windowKey: "codex_limit_main_secondary", displayLabel: "1W", durationMinutes: 10080, remainingPercent: 95 }),
+        ],
+      },
+    ],
+  } as unknown as RuntimeCapacityResponse;
+  const dedupedHtml = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data: deduped }));
+  assert.match(dedupedHtml, /capacity-window-codex_limit_main_primary/);
+  assert.match(dedupedHtml, /capacity-window-codex_limit_main_secondary/);
+  assert.ok(!dedupedHtml.includes("codex_rate_limit_"), "no aggregate alias chips");
+  const fiveHourChips = (dedupedHtml.match(/>5H</g) ?? []).length;
+  assert.equal(fiveHourChips, 1);
+});
+
+test("distinct buckets sharing a duration each render their own chip", () => {
+  const shared = {
+    generatedAt: new Date().toISOString(),
+    runtimes: [
+      {
+        runtime: "codex_local",
+        unavailableReason: null,
+        windows: [
+          window({ windowKey: "codex_limit_main_primary", displayLabel: "5H", durationMinutes: 300, remainingPercent: 30 }),
+          window({ windowKey: "codex_limit_extra_primary", displayLabel: "5H", durationMinutes: 300, remainingPercent: 10 }),
+        ],
+      },
+    ],
+  } as unknown as RuntimeCapacityResponse;
+  const sharedHtml = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data: shared }));
+  assert.match(sharedHtml, /capacity-window-codex_limit_main_primary/);
+  assert.match(sharedHtml, /capacity-window-codex_limit_extra_primary/);
+  const fiveHourChips = (sharedHtml.match(/>5H</g) ?? []).length;
+  assert.equal(fiveHourChips, 2);
+});

@@ -19,14 +19,17 @@ process.env.AGENT_DEALER_CODEX_CAPACITY_REFRESH = "off";
 
 const { migrate } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
-const { clearAllCapacitySnapshots, listCapacitySnapshots } = await import(
+const { clearAllCapacitySnapshots, listCapacitySnapshots, recordCapacitySnapshots } = await import(
   "../repository/runtime-capacity.js"
 );
-const { fixtureMultiWindowAdapter } = await import("../capacity/adapter.js");
+const { fixtureMultiWindowAdapter, normalizeAdapterWindow } = await import("../capacity/adapter.js");
 const { refreshCapacityFromAdapters } = await import("../capacity/service.js");
 const { resetMuseCapacityRefreshState } = await import("../capacity/muse.js");
+const { refreshCodexCapacityFromAppServer } = await import("../capacity/codex-app-server.js");
 const { registerRoutes } = await import("./index.js");
 const { RuntimeCapacityResponse } = await import("@agent-dealer/shared");
+
+const FAKE_CODEX = new URL("../capacity/fixtures/fake-codex-app-server.mjs", import.meta.url).pathname;
 
 migrate();
 
@@ -110,6 +113,81 @@ test("GET triggers the Muse refresh when muse_code is configured", async () => {
     if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = prevXdg;
     resetMuseCapacityRefreshState();
+  }
+});
+
+test("GET serves one logical Codex pair after a dedup refresh of legacy duplicates", async () => {
+  // NOT-263: databases written by older versions hold both the aggregate
+  // aliases (`codex_rate_limit_primary/secondary`) and the detailed rows for
+  // the same logical pair. One refresh against a mirroring payload must
+  // delete the aliases, and GET must serve each logical window once.
+  clearAllCapacitySnapshots();
+  createAgent({
+    name: "route-codex-dedup",
+    runtime: "codex_local",
+    deckId: "55555555-5555-4555-8555-555555555555",
+  });
+  const seedNow = Date.now();
+  const seedObserved = new Date(seedNow).toISOString();
+  const seed = (windowKey: string, providerBucket: string, durationMinutes: number) =>
+    normalizeAdapterWindow(
+      "codex_local",
+      {
+        windowKey,
+        providerBucket,
+        durationMinutes,
+        providerLabel: providerBucket,
+        usedValue: 9,
+        usedUnit: "percent",
+        usedPercent: 9,
+        resetAt: new Date(seedNow + 2 * 3600_000).toISOString(),
+        observedAt: seedObserved,
+        source: "supported_protocol",
+      },
+      seedNow
+    );
+  recordCapacitySnapshots("codex_local", [
+    seed("codex_rate_limit_primary", "primary", 300),
+    seed("codex_rate_limit_secondary", "secondary", 10080),
+    seed("codex_limit_main_primary", "main/primary", 300),
+    seed("codex_limit_main_secondary", "main/secondary", 10080),
+  ]);
+  assert.equal(listCapacitySnapshots("codex_local").length, 4);
+
+  const now = Date.now();
+  await refreshCodexCapacityFromAppServer({
+    command: process.execPath,
+    args: [FAKE_CODEX],
+    env: { FAKE_CODEX_MODE: "mirror", FAKE_CODEX_NOW_MS: String(now) },
+    timeoutMs: 10_000,
+    nowMs: now,
+  });
+
+  const app = await buildApp();
+  try {
+    const res = await app.inject({ method: "GET", url: "/api/runtime-capacity" });
+    assert.equal(res.statusCode, 200);
+    const body = RuntimeCapacityResponse.parse(res.json());
+    const codex = body.runtimes.find((r) => r.runtime === "codex_local");
+    assert.ok(codex, "codex_local entry served");
+    assert.equal(codex.unavailableReason, null);
+    const keys = codex.windows.map((w) => w.windowKey);
+    assert.ok(!keys.some((k) => k.startsWith("codex_rate_limit_")), `no aggregate aliases, got ${keys}`);
+    // Mirrored `main` pair renders once (5H + weekly); the genuinely
+    // distinct `extra` bucket renders as its own pair.
+    assert.deepEqual([...keys].sort(), [
+      "codex_limit_extra_primary",
+      "codex_limit_extra_secondary",
+      "codex_limit_main_primary",
+      "codex_limit_main_secondary",
+    ]);
+    const mainPrimary = codex.windows.find((w) => w.windowKey === "codex_limit_main_primary")!;
+    assert.equal(mainPrimary.displayLabel, "5H");
+    assert.equal(mainPrimary.remainingPercent, 30);
+    const raw = JSON.stringify(res.json());
+    assert.ok(!raw.includes("evidence"), "no evidence pointers leak to the browser");
+  } finally {
+    await app.close();
   }
 });
 

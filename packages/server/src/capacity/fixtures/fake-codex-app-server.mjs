@@ -5,7 +5,7 @@
 // mode), so adapter tests never touch a live provider.
 //
 // Env:
-//   FAKE_CODEX_MODE: ok | auth-error | malformed | hang | exit-nonzero | crash | no-method
+//   FAKE_CODEX_MODE: ok | mirror | auth-error | malformed | hang | exit-nonzero | crash | no-method
 //   FAKE_CODEX_RECORD: path of a file to append one JSON line per received message
 //   FAKE_CODEX_NOW_MS: fixed clock for deterministic resetsAt (default Date.now())
 //
@@ -15,6 +15,12 @@
 // ({ limitId, limitName, primary, secondary }). An
 // `account/rateLimits/updated` notification precedes the read response so
 // tests can assert notification consumption.
+//
+// `mirror` (NOT-263) is the production duplicate shape: the aggregate
+// `rateLimits` primary/secondary pair carries exactly the same values as one
+// `rateLimitsByLimitId` bucket (`main`), while a second bucket (`extra`)
+// stays genuinely distinct — so tests prove the aggregate aliases collapse
+// to the detailed identity without hiding distinct buckets.
 
 import fs from "node:fs";
 
@@ -37,6 +43,48 @@ function record(msg) {
 
 function send(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
+}
+
+function mirrorPayload() {
+  const mainPrimary = {
+    usedPercent: 70,
+    windowDurationMins: 300,
+    resetsAt: epochSec(1 * 3600_000),
+  };
+  const mainSecondary = {
+    usedPercent: 5,
+    windowDurationMins: 10080,
+    resetsAt: epochSec(6 * 24 * 3600_000),
+  };
+  return {
+    // Aggregate pair is value-identical to the `main` bucket below.
+    rateLimits: {
+      primary: { ...mainPrimary },
+      secondary: { ...mainSecondary },
+    },
+    rateLimitsByLimitId: {
+      main: {
+        limitId: "main",
+        limitName: "Main quota",
+        primary: { ...mainPrimary },
+        secondary: { ...mainSecondary },
+      },
+      extra: {
+        limitId: "extra",
+        limitName: "Extra quota",
+        primary: {
+          usedPercent: 90,
+          windowDurationMins: 300,
+          resetsAt: epochSec(30 * 60_000),
+        },
+        secondary: {
+          usedPercent: 25,
+          windowDurationMins: 10080,
+          resetsAt: epochSec(2 * 24 * 3600_000),
+        },
+      },
+    },
+  };
 }
 
 function okPayload() {
@@ -144,7 +192,7 @@ function handleRequest(msg) {
       method: "account/rateLimits/updated",
       params: { rateLimits: { primary: { usedPercent: 41, windowDurationMins: 300, resetsAt: epochSec(2 * 3600_000) } } },
     });
-    send({ jsonrpc: "2.0", id: msg.id, result: okPayload() });
+    send({ jsonrpc: "2.0", id: msg.id, result: mode === "mirror" ? mirrorPayload() : okPayload() });
     return;
   }
   send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
