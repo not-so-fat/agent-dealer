@@ -241,18 +241,23 @@ function loadPriorVerificationReceipt(
 /**
  * The ticket requires verifying "draft PR identity, base SHA, and current head SHA" —
  * not just accepting whatever `gh pr view` returns. A review round found the original
- * code took `prView` on faith: wrong base, a non-draft PR, a PR number that silently
- * changed between rounds, or a stale `headRefOid` would all have been accepted as a
- * clean handoff. `localHead` is this process's own `git rev-parse HEAD` right after the
- * push it just performed — the actual ground truth `gh`'s view is checked against.
+ * code took `prView` on faith: wrong base, a PR number that silently changed between
+ * rounds, or a stale `headRefOid` would all have been accepted as a clean handoff.
+ * `localHead` is this process's own `git rev-parse HEAD` right after the push it just
+ * performed — the actual ground truth `gh`'s view is checked against.
+ *
+ * NOT-255: draft-ness is deliberately NOT identity. A failed `retry_merge` undrafts
+ * the PR before attempting the squash-merge (`auto-merge.ts` runs `gh pr ready`
+ * first), so a merge-failure repair/resume round legitimately starts with a non-draft
+ * PR whose branch, base, number, and head still verify. Requiring `isDraft` here
+ * turned that legitimate state into an `adapter_failure` loop no repair round could
+ * exit. A non-draft PR whose branch/base/number/head all verify proceeds; the
+ * identity-drift cases above still fail exactly as before.
  */
 async function validatePrIdentity(
   prView: PrView,
   opts: { branchName: string; baseBranch: string; priorPrNumber: number | null; localHead: string }
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
-  if (!prView.isDraft) {
-    return { ok: false, reason: `PR #${prView.number} is not a draft PR` };
-  }
   if (prView.headRefName !== opts.branchName) {
     return { ok: false, reason: `PR head branch ${prView.headRefName} does not match the issue branch ${opts.branchName}` };
   }
