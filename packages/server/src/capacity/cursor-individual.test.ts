@@ -558,8 +558,7 @@ test("a bad-credential response overwrites the stored billing row too — the ot
     fetchImpl: mockFetch(okRoutes(now)),
     nowMs: now,
   });
-  let snap = await getCursorIndividualBillingSnapshot(now);
-  assert.equal(snap.remainingPercent, 62.5);
+  assert.equal(readCursorIndividualBillingRow()?.remainingPercent, 62.5);
   // The credential file changes shape before the next refresh.
   fixtureCredential({ brandNewShape: true });
   await refreshCursorIndividualBilling({
@@ -567,9 +566,15 @@ test("a bad-credential response overwrites the stored billing row too — the ot
     fetchImpl: mockFetch(okRoutes(now + 60_000)),
     nowMs: now + 60_000,
   });
-  snap = await getCursorIndividualBillingSnapshot(now + 60_000);
-  assert.equal(snap.unavailableReason, "unparsable");
-  assert.equal(snap.remainingPercent, null);
+  // Assert against the STORED ROW, not getCursorIndividualBillingSnapshot():
+  // the snapshot function has its own independent live credential re-check
+  // that reads `unparsable` whenever the CURRENT file is bad, regardless of
+  // whether ingestCursorIndividualObservation() actually overwrote the row —
+  // asserting through it would pass even if that gate's bad-credential
+  // branch were deleted.
+  const row = readCursorIndividualBillingRow();
+  assert.equal(row?.unavailableReason, "unparsable");
+  assert.equal(row?.remainingPercent, null);
 });
 
 test("stale, expired, and past-cycle snapshots read N/A with distinct reasons", async () => {
