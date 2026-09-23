@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { LinearCandidate } from "@agent-dealer/shared";
+import { resolveLinearRepoWithMappings } from "@agent-dealer/shared";
 import {
   canonicalRepoIdentity,
   canSubmitNewIssue,
@@ -124,6 +125,79 @@ test("manual override is just the new input value — no follow-up step", () => 
   assert.equal(nextRepoForLinearCandidate(edited, candidate({ labels: [] })), edited);
   // Switching source mode never clears the repository (mode carries no repo).
   assert.equal(nextRepoForLinearCandidate(edited, null), edited);
+});
+
+// NOT-260: a server-resolved mapping prefills the normal Repository picker
+// during list selection and direct lookup, and stays editable afterward.
+function mappedCandidate(): LinearCandidate {
+  const labels = ["agent-dealer"];
+  return {
+    id: "uuid-9",
+    identifier: "NOT-260",
+    title: "t",
+    url: "https://linear.app/not-so-fat/issue/NOT-260/t",
+    labels,
+    repoResolution: resolveLinearRepoWithMappings(labels, [
+      { label: "agent-dealer", repository: "github.com/not-so-fat/agent-dealer" },
+    ]),
+  };
+}
+
+test("a mapped Linear label prefills the normal Repository picker", () => {
+  const c = mappedCandidate();
+  assert.equal(c.repoResolution?.status, "resolved");
+  assert.equal(nextRepoForLinearCandidate("", c), REPO);
+  // A stale value is replaced — the mapped default wins on selection.
+  assert.equal(nextRepoForLinearCandidate("github.com/not-so-fat/other", c), REPO);
+  assert.equal(repoLabelWarning("linear", c), null);
+});
+
+test("after prefill, picking a recent repository or typing replaces the default", () => {
+  const c = mappedCandidate();
+  const prefilled = nextRepoForLinearCandidate("", c);
+  assert.equal(prefilled, REPO);
+  // Selecting a recent repository replaces the mapped default immediately.
+  const picked = "github.com/not-so-fat/other";
+  assert.equal(
+    canSubmitNewIssue({ title: "NOT-260: x", repo: picked, developerAgentId: "dev", reviewerAgentId: "rev" }),
+    true,
+    "picked recent repository is submittable"
+  );
+  // Typing a different repository replaces it too, and that value is submitted.
+  const typed = "https://github.com/not-so-fat/typed";
+  assert.equal(canonicalRepoIdentity(typed), "github.com/not-so-fat/typed");
+  assert.equal(
+    canSubmitNewIssue({ title: "NOT-260: x", repo: typed, developerAgentId: "dev", reviewerAgentId: "rev" }),
+    true,
+    "typed repository is submittable"
+  );
+});
+
+test("unmapped and ambiguous mapped candidates preserve the current value", () => {
+  const current = "github.com/not-so-fat/agent-dealer";
+  const mappings = [
+    { label: "agent-dealer", repository: "github.com/not-so-fat/agent-dealer" },
+    { label: "dealer", repository: "github.com/not-so-fat/other" },
+  ];
+  const labels = ["agent-dealer", "dealer"];
+  const ambiguous: LinearCandidate = {
+    id: "uuid-9",
+    identifier: "NOT-260",
+    title: "t",
+    url: "https://linear.app/not-so-fat/issue/NOT-260/t",
+    labels,
+    repoResolution: resolveLinearRepoWithMappings(labels, mappings),
+  };
+  assert.equal(ambiguous.repoResolution?.status, "conflict");
+  assert.equal(nextRepoForLinearCandidate(current, ambiguous), current);
+  assert.ok(repoLabelWarning("linear", ambiguous)?.includes("Conflicting"));
+  // No configured match keeps the repo: fallback behavior unchanged.
+  const fallback: LinearCandidate = {
+    ...ambiguous,
+    labels: ["repo:github.com/a/one"],
+    repoResolution: resolveLinearRepoWithMappings(["repo:github.com/a/one"], mappings),
+  };
+  assert.equal(nextRepoForLinearCandidate("", fallback), "github.com/a/one");
 });
 
 test("submit needs title, a valid repository, developer, and reviewer", () => {

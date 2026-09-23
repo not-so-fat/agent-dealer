@@ -61,6 +61,30 @@ export async function lookupLinearIssue(q: string): Promise<LinearCandidate> {
   return body.candidate;
 }
 
+/** NOT-260: Linear label → repository mappings (inline editor in New issue). */
+export interface RepositoryMapping {
+  label: string;
+  repository: string;
+}
+
+export async function fetchRepositoryMappings(): Promise<RepositoryMapping[]> {
+  const res = await fetch(`${API}/api/settings/repository-mappings`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  const json = (await res.json()) as { mappings?: RepositoryMapping[] };
+  return json.mappings ?? [];
+}
+
+export async function saveRepositoryMappings(mappings: RepositoryMapping[]): Promise<RepositoryMapping[]> {
+  const res = await fetch(`${API}/api/settings/repository-mappings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mappings }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  const json = (await res.json()) as { mappings?: RepositoryMapping[] };
+  return json.mappings ?? [];
+}
+
 export async function fetchAgents(): Promise<{ agents: AgentWithHealth[]; issueCount: number }> {
   const res = await fetch(`${API}/api/agents`);
   if (!res.ok) throw new Error("Failed to fetch agents");

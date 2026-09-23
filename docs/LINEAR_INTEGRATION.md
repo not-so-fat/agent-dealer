@@ -109,10 +109,40 @@ never a second gate. **Kick from Linear** (and manual Create) submit as soon
 as title, a valid repository, developer, and reviewer are present.
 
 Dealer never creates or mutates Linear labels — it only reads and validates
-them, and never writes them back. There is no friendly label-to-repository
-mapping and no Dealer-side sync action — the label itself is the mapping. See
+them, and never writes them back. See
 [Production setup](PROD_SETUP.md) for the one-time Linear label, template,
 and Triage Rule setup that automates the input.
+
+### Repository mappings (NOT-260)
+
+An operator can use a normal Linear label such as `agent-dealer` and teach
+Dealer what repository it means, without putting the repository identity in
+the label itself:
+
+1. Open **New issue** → click the gear beside the **Repository** control.
+2. Save `agent-dealer` → `github.com/not-so-fat/agent-dealer`.
+3. Apply the `agent-dealer` label in Linear.
+4. Look up the issue (candidate list or direct lookup); Dealer fills the
+   Repository default with the mapped repository.
+5. Override through **Recent repositories** or free-form entry when needed —
+   selecting a recent repository or typing/pasting another GitHub URL or
+   `owner/repo` replaces the mapped default immediately, and the submitted
+   repository is the one stored on the Dealer issue.
+
+Rules:
+
+- A normalized label (trimmed, case-insensitive) is a unique key: one label
+  points to exactly one repository, and saving a new repository for an
+  existing label overwrites it. Different labels may point to the same
+  repository.
+- A resolved mapping supplies only the default for the current New issue
+  form — it never locks the field and adds no confirmation step.
+- Later mapping edits affect future Linear lookups only; they never rewrite
+  repositories already stored on Dealer issues.
+- Legacy `repo:github.com/owner/repo` labels remain a fallback only when no
+  configured mapping matches. When several matched labels point at different
+  repositories the candidate conflicts and the current Repository value is
+  kept; when they agree on one repository it resolves.
 
 ### Status write-back
 
@@ -240,6 +270,21 @@ Resolve a Linear identifier or issue URL without relying on the candidate list (
 curl -s 'http://127.0.0.1:2222/api/intake/linear/lookup?q=NOT-103' | jq '.candidate | {id, identifier, title}'
 # q also accepts a Linear issue URL or UUID
 ```
+
+### Repository mappings (NOT-260)
+
+```bash
+curl -s http://127.0.0.1:2222/api/settings/repository-mappings | jq
+curl -s -X PUT http://127.0.0.1:2222/api/settings/repository-mappings \
+  -H 'Content-Type: application/json' \
+  -d '{"mappings":[{"label":"agent-dealer","repository":"not-so-fat/agent-dealer"}]}' | jq
+```
+
+`GET` returns `{ mappings: [...] }` (`[]` on a fresh install); `PUT`
+replaces the whole array atomically and returns the normalized rows
+(`agent-dealer` → `github.com/not-so-fat/agent-dealer`). Validation
+failures answer HTTP 400 with a readable `{ error }` and leave the last
+valid array untouched.
 
 ### Usage counters (NOT-159)
 
