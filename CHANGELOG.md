@@ -4,6 +4,21 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.0 — 2026-09-23
+
+Minor: four new runtime capacity adapters (Claude, Muse, Cursor Team, Codex) so the Agents page's capacity strip covers every supported runtime, plus a developer-prompt fix.
+
+### Features
+
+- **Claude capacity adapter (NOT-248)** — persists naturally observed `unifiedWindows` from Claude sessions (per-event `observedAt`, newer-row guard) so the runtime capacity strip can show Claude usage without polling an API.
+- **Muse capacity adapter (NOT-247)** — reads stable MSP usage windows via `muse serve`; `GET /api/runtime-capacity` throttles a best-effort background refresh (default 5 min, `AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS` to tune or disable) that never blocks or fails the read, and clears the failure sentinel on a successful or all-unparsable read.
+- **Cursor Team capacity adapter (NOT-249)** — integrates the official Cursor Admin API (`POST /teams/spend`, Basic auth, paginated) to read team spend (summed per-member cents, never a team hard limit), cycle start, member count, and per-member override counts; adds a snapshot table and a 60s failure backoff. The Agents page gains a Cursor Team billing card.
+- **Codex capacity adapter (NOT-246)** — reads official Codex App Server rate-limit windows (nested `rateLimitsByLimitId`, versioned handshake) with an on-demand refresh on `GET /api/runtime-capacity`.
+
+### Fixes
+
+- **Round-1 developer prompt states the dedicated branch is already checked out (NOT-253)** — the first-round developer prompt no longer says "implement on a fresh branch"; it now correctly states the issue's dedicated branch is already checked out by Dealer, avoiding a redundant/confusing branch-creation step.
+
 ## 1.1.10 — 2026-09-22
 
 Patch over 1.1.9: runtime capacity visibility, simpler Linear repository selection, and richer CI-failure retry evidence.
