@@ -6,6 +6,9 @@
 // `rateLimitsByLimitId` buckets stay distinguishable, failure modes map to
 // explicit N/A reasons without touching runtime health, and the recorded
 // protocol traffic proves the client never starts a model turn.
+// NOT-263: an aggregate pair mirroring one detailed bucket collapses to the
+// detailed identity (one 5H + one weekly window); distinct buckets stay
+// visible and refreshes delete obsolete duplicate rows.
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -18,6 +21,7 @@ import {
   assertReadOnlyMethod,
   CODEX_CLIENT_VERSION,
   codexRateLimitsToReadings,
+  codexWindowValuesEqual,
   createCodexAppServerAdapter,
   normalizeCodexResetsAt,
   readCodexAppServerCapacity,
@@ -27,7 +31,7 @@ import {
 } from "./codex-app-server.js";
 import { normalizeAdapterWindow } from "./adapter.js";
 const { migrate } = await import("../db/index.js");
-const { clearAllCapacitySnapshots, listCapacitySnapshots } = await import(
+const { clearAllCapacitySnapshots, listCapacitySnapshots, recordCapacitySnapshots } = await import(
   "../repository/runtime-capacity.js"
 );
 const { createAgent } = await import("../repository/agents.js");
@@ -107,6 +111,7 @@ test("rateLimitsByLimitId buckets never overwrite each other or rateLimits", () 
   });
   assert.ok(parsed);
   assert.equal(parsed.windows.length, 5);
+  assert.deepEqual(parsed.collapsedAggregateKeys, []);
   const keys = parsed.windows.map((w) => w.windowKey);
   assert.equal(new Set(keys).size, 5);
   assert.ok(keys.includes("codex_rate_limit_primary"));
@@ -144,6 +149,110 @@ test("flat legacy buckets without nested windows still parse", () => {
   assert.equal(parsed.windows.length, 1);
   assert.equal(parsed.windows[0]!.windowKey, "codex_limit_flat_bucket");
   assert.equal(parsed.windows[0]!.providerBucket, "flat_bucket");
+});
+
+test("aggregate pair mirroring one bucket collapses to the detailed identity", () => {
+  const now = Date.now();
+  const observedAt = new Date(now).toISOString();
+  const primary = { usedPercent: 9, windowDurationMins: 300, resetsAt: now + 2 * 3600_000 };
+  const secondary = { usedPercent: 2, windowDurationMins: 10080, resetsAt: now + 3 * 86400_000 };
+  const parsed = codexRateLimitsToReadings(
+    {
+      rateLimits: {
+        primary: { ...primary },
+        secondary: { ...secondary },
+      },
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: "codex",
+          limitName: "Codex quota",
+          primary: { ...primary },
+          secondary: { ...secondary },
+        },
+      },
+    },
+    observedAt
+  );
+  assert.ok(parsed);
+  assert.deepEqual(
+    parsed.windows.map((w) => w.windowKey).sort(),
+    ["codex_limit_codex_primary", "codex_limit_codex_secondary"]
+  );
+  assert.deepEqual(parsed.collapsedAggregateKeys, [
+    "codex_rate_limit_primary",
+    "codex_rate_limit_secondary",
+  ]);
+  const labels = parsed.windows.map((w) => normalizeAdapterWindow("codex_local", w, now));
+  assert.deepEqual(
+    labels.map((w) => w.displayLabel).sort(),
+    ["1W", "5H"]
+  );
+  assert.deepEqual(
+    labels.map((w) => w.remainingPercent).sort((a, b) => (a ?? 0) - (b ?? 0)),
+    [91, 98]
+  );
+});
+
+test("partial overlap never collapses: only one sub-window matches", () => {
+  const now = Date.now();
+  const parsed = codexRateLimitsToReadings(
+    {
+      rateLimits: {
+        primary: { usedPercent: 70, windowDurationMins: 300, resetsAt: now + 3600_000 },
+        secondary: { usedPercent: 12, windowDurationMins: 10080, resetsAt: now + 3 * 86400_000 },
+      },
+      rateLimitsByLimitId: {
+        main: {
+          limitId: "main",
+          primary: { usedPercent: 70, windowDurationMins: 300, resetsAt: now + 3600_000 },
+          secondary: { usedPercent: 5, windowDurationMins: 10080, resetsAt: now + 6 * 86400_000 },
+        },
+      },
+    },
+    new Date(now).toISOString()
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.windows.length, 4);
+  assert.deepEqual(parsed.collapsedAggregateKeys, []);
+});
+
+test("distinct buckets sharing a duration stay independently visible", () => {
+  const now = Date.now();
+  const parsed = codexRateLimitsToReadings(
+    {
+      rateLimitsByLimitId: {
+        team_a: {
+          limitId: "team_a",
+          primary: { usedPercent: 70, windowDurationMins: 300, resetsAt: now + 3600_000 },
+        },
+        team_b: {
+          limitId: "team_b",
+          primary: { usedPercent: 90, windowDurationMins: 300, resetsAt: now + 1800_000 },
+        },
+      },
+    },
+    new Date(now).toISOString()
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.windows.length, 2);
+  const labels = parsed.windows.map((w) => normalizeAdapterWindow("codex_local", w, now));
+  assert.ok(labels.every((w) => w.displayLabel === "5H"), "same label, both still visible");
+  assert.deepEqual(parsed.collapsedAggregateKeys, []);
+});
+
+test("window equality compares values, never display labels", () => {
+  const base = {
+    windowKey: "k",
+    providerBucket: "b",
+    providerLabel: "l",
+    source: "supported_protocol",
+  } as const;
+  const a = { ...base, usedPercent: 10, durationMinutes: 300, resetAt: "2026-09-20T12:00:00.000Z" };
+  assert.ok(codexWindowValuesEqual(a, { ...a, windowKey: "other", providerLabel: "5H" }));
+  assert.ok(!codexWindowValuesEqual(a, { ...a, usedPercent: 11 }));
+  assert.ok(!codexWindowValuesEqual(a, { ...a, durationMinutes: 10080 }));
+  assert.ok(!codexWindowValuesEqual(a, { ...a, resetAt: "2026-09-21T12:00:00.000Z" }));
+  assert.ok(!codexWindowValuesEqual(a, { ...a, usedPercent: undefined, usedFraction: 0.1 }));
 });
 
 test("resetsAt accepts epoch seconds, ms, and ISO; rejects garbage", () => {
@@ -223,6 +332,72 @@ test("initialize handshake carries a versioned client identity", async () => {
   assert.ok(init, "handshake recorded");
   assert.equal(init.params?.clientInfo?.name, "agent-dealer");
   assert.equal(init.params?.clientInfo?.version, CODEX_CLIENT_VERSION);
+});
+
+test("mirrored aggregate pair collapses end to end: one 5H, one weekly, distinct bucket kept", async () => {
+  clearAllCapacitySnapshots();
+  const { opts } = fakeOpts("mirror");
+  const result = await readCodexAppServerCapacity(opts);
+  assert.deepEqual(result.collapsedAggregateKeys, [
+    "codex_rate_limit_primary",
+    "codex_rate_limit_secondary",
+  ]);
+  const snap = await refreshCodexCapacityFromAppServer(opts);
+  const codex = snap.runtimes.find((r) => r.runtime === "codex_local")!;
+  assert.ok(codex, "codex_local entry exists");
+  assert.equal(codex.unavailableReason, null);
+  const keys = codex.windows.map((w) => w.windowKey).sort();
+  assert.deepEqual(keys, [
+    "codex_limit_extra_primary",
+    "codex_limit_extra_secondary",
+    "codex_limit_main_primary",
+    "codex_limit_main_secondary",
+  ]);
+  const mainPrimary = codex.windows.find((w) => w.windowKey === "codex_limit_main_primary")!;
+  assert.equal(mainPrimary.displayLabel, "5H");
+  assert.equal(mainPrimary.remainingPercent, 30);
+  const mainSecondary = codex.windows.find((w) => w.windowKey === "codex_limit_main_secondary")!;
+  assert.equal(mainSecondary.displayLabel, "1W");
+  assert.equal(mainSecondary.remainingPercent, 95);
+});
+
+test("refresh deletes obsolete duplicate aliases persisted by older versions", async () => {
+  clearAllCapacitySnapshots();
+  const seedNow = Date.now();
+  const seedObserved = new Date(seedNow).toISOString();
+  // Legacy shape: aggregate aliases plus the detailed rows describing the
+  // same logical pair (what pre-NOT-263 versions persisted).
+  function seedReading(windowKey: string, providerBucket: string, durationMinutes: number) {
+    return normalizeAdapterWindow(
+      "codex_local",
+      {
+        windowKey,
+        providerBucket,
+        durationMinutes,
+        providerLabel: providerBucket,
+        usedValue: 9,
+        usedUnit: "percent",
+        usedPercent: 9,
+        resetAt: new Date(seedNow + 2 * 3600_000).toISOString(),
+        observedAt: seedObserved,
+        source: "supported_protocol",
+      },
+      seedNow
+    );
+  }
+  recordCapacitySnapshots("codex_local", [
+    seedReading("codex_rate_limit_primary", "primary", 300),
+    seedReading("codex_rate_limit_secondary", "secondary", 10080),
+    seedReading("codex_limit_main_primary", "main/primary", 300),
+    seedReading("codex_limit_main_secondary", "main/secondary", 10080),
+  ]);
+  assert.equal(listCapacitySnapshots("codex_local").length, 4);
+  const { opts } = fakeOpts("mirror");
+  await refreshCodexCapacityFromAppServer(opts);
+  const keys = listCapacitySnapshots("codex_local").map((w) => w.windowKey);
+  assert.ok(!keys.some((k) => k.startsWith("codex_rate_limit_")), `obsolete aliases deleted, got ${keys}`);
+  assert.ok(keys.includes("codex_limit_main_primary"), `detailed identity kept, got ${keys}`);
+  assert.ok(keys.includes("codex_limit_main_secondary"), `detailed identity kept, got ${keys}`);
 });
 
 test("a successful refresh clears a previously stored failure sentinel", async () => {
