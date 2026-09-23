@@ -37,6 +37,61 @@ test("action row uses justify-between with no empty label slot", () => {
   assert.ok(bar[1].includes("mb-4"), "row keeps its bottom spacing so the list starts in place");
 });
 
+// NOT-260: the repository-mapping editor lives inside New issue — a small
+// accessible gear beside the Repository control, no Configuration page.
+test("gear beside Repository opens the inline mapping editor", () => {
+  assert.ok(
+    pageSource.includes('aria-label="Configure repository mappings"'),
+    "gear has an accessible label"
+  );
+  assert.ok(
+    pageSource.includes('title="Configure repository mappings"'),
+    "gear has a title"
+  );
+  assert.ok(pageSource.includes("RepositoryMappingsEditor"), "inline editor rendered");
+  assert.ok(pageSource.includes("mappingsOpen"), "gear toggles the editor");
+  // Compact 16–20px visual size; inline SVG, no new icon dependency.
+  assert.ok(/<svg width="18" height="18"/.test(pageSource), "compact inline gear icon");
+});
+
+test("New issue uses the shared RepositoryPicker for the Repository field", () => {
+  assert.ok(
+    pageSource.includes("RepositoryPicker"),
+    "repository entry goes through the shared picker"
+  );
+  assert.ok(
+    pageSource.includes("<RepositoryPicker value={repo} onChange={setRepo}"),
+    "picker is bound to the New issue repository value"
+  );
+  assert.ok(
+    pageSource.includes("RepositoryMappingsEditor"),
+    "mapping rows reuse the same picker component"
+  );
+});
+
+test("toggling or saving the editor never clears the in-progress form", () => {
+  // The gear toggle flips only its own boolean — no form setter runs.
+  const toggle = pageSource.match(/onClick=\{\(\) => setMappingsOpen\(\(v\) => !v\)\}/);
+  assert.ok(toggle, "toggle touches only editor visibility");
+  const editorSource = readFileSync(
+    join(dir, "..", "components", "issues", "RepositoryMappingsEditor.tsx"),
+    "utf8"
+  );
+  assert.ok(!editorSource.includes("setRepo"), "editor cannot write the parent repository");
+  assert.ok(!editorSource.includes("setTitle"), "editor cannot write the parent title");
+});
+
+test("no Configuration page, route, or top-level navigation item is introduced", () => {
+  assert.ok(!pageSource.includes("ConfigurationPage"), "no configuration page import");
+  assert.ok(!/path="\/configuration"/.test(appSource), "no /configuration route");
+  assert.ok(!/to="\/configuration"/.test(appSource), "no navigation link to configuration");
+  assert.ok(!/>Configuration(\s|<)/.test(appSource), "no Configuration nav label");
+  assert.ok(
+    !/NavLink[^>]*>[^<]*Configuration/.test(appSource),
+    "no configuration nav entry"
+  );
+});
+
 test("routing, counts, list controls, and list behavior are unchanged", () => {
   assert.ok(appSource.includes('path="/issues"'), "Issues route unchanged");
   for (const token of [

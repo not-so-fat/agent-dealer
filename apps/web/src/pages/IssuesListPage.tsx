@@ -41,6 +41,8 @@ import {
   type IssuesFilterForm,
 } from "../lib/issuesList";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
+import RepositoryPicker from "../components/issues/RepositoryPicker";
+import RepositoryMappingsEditor from "../components/issues/RepositoryMappingsEditor";
 import AgentAssignmentEditor from "../components/issues/AgentAssignmentEditor";
 import NeedsAttentionPanel from "../components/issues/NeedsAttentionPanel";
 import AlertIcon from "../components/ui/AlertIcon";
@@ -94,6 +96,9 @@ export default function IssuesListPage({
   const [filtersOpen, setFiltersOpen] = useState(false);
   const filtersActive = hasActiveIssuesFilters(applied);
   const [showCreate, setShowCreate] = useState(false);
+  // NOT-260: inline label → repository mapping editor toggled by the gear
+  // beside the Repository control. Toggling never touches the form fields.
+  const [mappingsOpen, setMappingsOpen] = useState(false);
   const [sourceMode, setSourceMode] = useState<"manual" | "linear">("manual");
   const [candidates, setCandidates] = useState<LinearCandidate[]>([]);
   const [selectedLinearId, setSelectedLinearId] = useState("");
@@ -491,29 +496,39 @@ export default function IssuesListPage({
             onChange={(e) => setAcceptanceCriteria(e.target.value)}
           />
           <div className="flex gap-2 items-stretch">
-            <div className="flex-1 space-y-1">
-              {recentRepos.length > 0 && (
-                <select
-                  className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-                  value={recentRepos.includes(repo) ? repo : ""}
-                  onChange={(e) => {
-                    if (e.target.value) setRepo(e.target.value);
-                  }}
+            <div className="flex-1 space-y-1 min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-white/50">Repository</span>
+                <button
+                  type="button"
+                  aria-label="Configure repository mappings"
+                  title="Configure repository mappings"
+                  aria-expanded={mappingsOpen}
+                  onClick={() => setMappingsOpen((v) => !v)}
+                  className="text-white/40 hover:text-white shrink-0 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyber-teal/45"
                 >
-                  <option value="">Recent repositories…</option>
-                  {recentRepos.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
+                  <svg width="18" height="18" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M8 5.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6Z"
+                      stroke="currentColor"
+                      strokeWidth="1.3"
+                    />
+                    <path
+                      d="M8 1.5v1.7M8 12.8v1.7M1.5 8h1.7M12.8 8h1.7M3.4 3.4l1.2 1.2M11.4 11.4l1.2 1.2M12.6 3.4l-1.2 1.2M4.6 11.4l-1.2 1.2"
+                      stroke="currentColor"
+                      strokeWidth="1.3"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                </button>
+              </div>
+              <RepositoryPicker value={repo} onChange={setRepo} recentRepos={recentRepos} />
+              {mappingsOpen && (
+                <RepositoryMappingsEditor
+                  recentRepos={recentRepos}
+                  onClose={() => setMappingsOpen(false)}
+                />
               )}
-              <input
-                className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-                placeholder="GitHub URL or owner/repo"
-                value={repo}
-                onChange={(e) => setRepo(e.target.value)}
-              />
               {repoWarning && (
                 <p className="text-xs text-amber-200/80" data-testid="repo-label-warning">
                   {repoWarning}

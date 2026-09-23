@@ -5,7 +5,10 @@ import { LinearCandidate } from "./index.js";
 import {
   LinearRepoResolution,
   extractRepoLabels,
+  normalizeMappingLabel,
+  normalizeRepositoryMappings,
   resolveLinearRepoLabels,
+  resolveLinearRepoWithMappings,
 } from "./linear-intake.js";
 
 test("one valid repo: label resolves to the canonical identity", () => {
@@ -88,6 +91,99 @@ test("LinearCandidate keeps raw labels and accepts the resolved hint", () => {
     url: "https://linear.app/x/issue/NOT-242/t",
   });
   assert.equal(bare.repoResolution, undefined);
+});
+
+test("mapping labels are unique after trim + lowercase normalization", () => {
+  assert.equal(normalizeMappingLabel("  Agent-Dealer "), "agent-dealer");
+  assert.throws(
+    () =>
+      normalizeRepositoryMappings({
+        mappings: [
+          { label: "agent-dealer", repository: "not-so-fat/agent-dealer" },
+          { label: "  AGENT-DEALER ", repository: "not-so-fat/other" },
+        ],
+      }),
+    /Duplicate repository mapping/
+  );
+  // Different labels may point at the same repository.
+  const same = normalizeRepositoryMappings({
+    mappings: [
+      { label: "agent-dealer", repository: "not-so-fat/agent-dealer" },
+      { label: "dealer", repository: "not-so-fat/agent-dealer" },
+    ],
+  });
+  assert.equal(same.length, 2);
+});
+
+test("mapping normalization trims labels and canonicalizes repositories", () => {
+  const [row] = normalizeRepositoryMappings({
+    mappings: [{ label: "  agent-dealer ", repository: "not-so-fat/agent-dealer" }],
+  })!;
+  assert.equal(row!.label, "agent-dealer");
+  assert.equal(row!.repository, "github.com/not-so-fat/agent-dealer");
+  // Full URL and .git forms land on the same identity.
+  const [url] = normalizeRepositoryMappings({
+    mappings: [{ label: "x", repository: "https://github.com/not-so-fat/agent-dealer.git" }],
+  })!;
+  assert.equal(url!.repository, "github.com/not-so-fat/agent-dealer");
+});
+
+test("mapping validation rejects empty labels, bad repos, and 101 rows", () => {
+  assert.throws(() => normalizeRepositoryMappings({ mappings: [{ label: "  ", repository: "a/b" }] }), /must not be empty/);
+  assert.throws(() => normalizeRepositoryMappings({ mappings: [{ label: "x".repeat(101), repository: "a/b" }] }), /1–100/);
+  assert.throws(
+    () => normalizeRepositoryMappings({ mappings: [{ label: "ok", repository: "not a repo!!" }] }),
+    /Invalid repository/
+  );
+  const many = Array.from({ length: 101 }, (_, i) => ({ label: `l${i}`, repository: "a/b" }));
+  assert.throws(() => normalizeRepositoryMappings({ mappings: many }), /At most 100/);
+  // Exactly 100 rows pass.
+  const hundred = Array.from({ length: 100 }, (_, i) => ({ label: `l${i}`, repository: "a/b" }));
+  assert.equal(normalizeRepositoryMappings({ mappings: hundred }).length, 100);
+});
+
+test("a mapped label resolves with the matched Linear label as sourceLabel", () => {
+  const r = resolveLinearRepoWithMappings(["backend", "Agent-Dealer"], [
+    { label: "agent-dealer", repository: "github.com/not-so-fat/agent-dealer" },
+  ]);
+  assert.equal(r.status, "resolved");
+  assert.equal(r.repository, "github.com/not-so-fat/agent-dealer");
+  assert.equal(r.sourceLabel, "Agent-Dealer");
+});
+
+test("multiple matched labels on the same repository resolve", () => {
+  const r = resolveLinearRepoWithMappings(["agent-dealer", "dealer"], [
+    { label: "agent-dealer", repository: "github.com/not-so-fat/agent-dealer" },
+    { label: "dealer", repository: "github.com/not-so-fat/agent-dealer" },
+  ]);
+  assert.equal(r.status, "resolved");
+  assert.equal(r.repository, "github.com/not-so-fat/agent-dealer");
+});
+
+test("multiple matched labels on different repositories conflict — never first", () => {
+  const r = resolveLinearRepoWithMappings(["agent-dealer", "dealer"], [
+    { label: "agent-dealer", repository: "github.com/not-so-fat/agent-dealer" },
+    { label: "dealer", repository: "github.com/not-so-fat/other" },
+  ]);
+  assert.equal(r.status, "conflict");
+  assert.equal(r.repository, undefined);
+  assert.deepEqual(r.labels, ["agent-dealer", "dealer"]);
+});
+
+test("no configured match falls back to the legacy repo: resolver", () => {
+  const mappings = [{ label: "agent-dealer", repository: "github.com/not-so-fat/agent-dealer" }];
+  const legacy = resolveLinearRepoWithMappings(["repo:github.com/a/one"], mappings);
+  assert.equal(legacy.status, "resolved");
+  assert.equal(legacy.repository, "github.com/a/one");
+  assert.equal(legacy.sourceLabel, "repo:github.com/a/one");
+  const none = resolveLinearRepoWithMappings(["backend"], mappings);
+  assert.equal(none.status, "unresolved");
+  const bare = resolveLinearRepoWithMappings(["backend"], []);
+  assert.equal(bare.status, "unresolved");
+  // Mapping wins over a repo: label when both are present.
+  const both = resolveLinearRepoWithMappings(["agent-dealer", "repo:github.com/a/one"], mappings);
+  assert.equal(both.status, "resolved");
+  assert.equal(both.repository, "github.com/not-so-fat/agent-dealer");
 });
 
 test("LinearRepoResolution schema round-trips every state", () => {
