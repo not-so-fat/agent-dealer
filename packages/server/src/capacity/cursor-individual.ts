@@ -402,14 +402,23 @@ async function fetchJson(
   let current = url;
   for (let hop = 0; hop <= CURSOR_INDIVIDUAL_MAX_REDIRECTS; hop += 1) {
     let res: CursorIndividualFetchResponse;
+    const controller = new AbortController();
+    // A manual, ref'd setTimeout (not AbortSignal.timeout(), whose internal
+    // timer is unref'd) — otherwise, once nothing else in the process holds
+    // the event loop open, Node can conclude the run before this timer ever
+    // fires, surfacing as "Promise resolution is still pending but the event
+    // loop has already resolved" instead of an actual abort.
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       res = await fetchImpl(current, {
         method: "GET",
         headers: { Authorization: authHeader, Accept: "application/json" },
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: controller.signal,
       });
     } catch {
       return { failure: "unavailable" };
+    } finally {
+      clearTimeout(timer);
     }
     if (isRedirect(res.status)) {
       const location = res.headers["location"];
