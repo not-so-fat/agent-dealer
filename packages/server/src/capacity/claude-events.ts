@@ -110,13 +110,6 @@ export function normalizeClaudeResetsAt(value: unknown): string | null {
 }
 
 /**
- * Per-event observed time: the event's own timestamp when present and valid
- * (clamped to `nowMs`), otherwise the session spawn start passed by the
- * caller, otherwise ingestion time. Stream-json lines carry no documented
- * timestamp field, so several spellings are accepted — an unknown shape
- * simply falls through to the conservative spawn-start fallback.
- */
-/**
  * Parse an event timestamp (ISO-8601, epoch seconds, or epoch milliseconds)
  * to epoch ms. Returns null when the value carries no usable time — the
  * caller then falls back conservatively to the session spawn start.
@@ -148,7 +141,13 @@ const EVENT_TIMESTAMP_KEYS = [
   "time",
 ] as const;
 
-/** Resolve one event's observed time per the module semantics above. */
+/**
+ * Per-event observed time: the event's own timestamp when present and valid
+ * (clamped to `nowMs`), otherwise the session spawn start passed by the
+ * caller, otherwise ingestion time. Stream-json lines carry no documented
+ * timestamp field, so several spellings are accepted — an unknown shape
+ * simply falls through to the conservative spawn-start fallback.
+ */
 export function claudeEventObservedAt(
   event: StreamEvent,
   nowMs: number,

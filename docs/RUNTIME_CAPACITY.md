@@ -183,3 +183,10 @@ present them as passive observations under the shared 15-min freshness /
 or writes `runtime_availability`: rejected events still drive NOT-111
 defer/admission exactly as before, and allowed events persist capacity
 without opening a cap.
+
+Fixture provenance: the `claude-rate-limit-*-unified-windows.ndjson`
+fixtures are hand-written shapes covering the accepted spellings (array and
+map forms, utilization scales, reset formats). They have not yet been
+verified against a captured real Dealer-managed Claude log — confirm the
+real event carries `unifiedWindows` in these shapes on one live session
+after landing; if it does not, nothing persists and the strip stays N/A.
