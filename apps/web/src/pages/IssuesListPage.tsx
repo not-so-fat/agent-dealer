@@ -88,6 +88,11 @@ export default function IssuesListPage({
   const appliedRef = useRef(applied);
   appliedRef.current = applied;
   const [filters, setFilters] = useState<IssuesFilterForm>(() => searchToIssuesForm(search));
+  // NOT-261: filter controls are collapsed by default so the issue list stays
+  // primary. Draft state lives here (not in the DOM), so collapsing never
+  // loses edits and Apply/Reset keep their exact URL behavior.
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersActive = hasActiveIssuesFilters(applied);
   const [showCreate, setShowCreate] = useState(false);
   const [sourceMode, setSourceMode] = useState<"manual" | "linear">("manual");
   const [candidates, setCandidates] = useState<LinearCandidate[]>([]);
@@ -770,72 +775,98 @@ export default function IssuesListPage({
         onResolve={(actionId, choice) => void resolveAction(actionId, choice)}
       />
 
-      <form
-        aria-label="Issues filters"
-        className="mb-4 p-4 rounded border border-white/10 bg-panel-elevated/60"
-        onSubmit={(e) => {
-          e.preventDefault();
-          applyFilters(filters);
-        }}
-      >
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          <label className="block text-sm">
-            <span className="block text-xs text-white/50 mb-1">Search</span>
-            <input
-              type="text"
-              placeholder="Title or label (e.g. NOT-175)"
-              className="w-full bg-black/30 border border-white/10 rounded px-3 py-2"
-              value={filters.q}
-              onChange={(e) => setFilter({ q: e.target.value })}
-            />
-          </label>
-          <label className="block text-sm">
-            <span className="block text-xs text-white/50 mb-1">Status</span>
-            <select
-              className="w-full bg-black/30 border border-white/10 rounded px-3 py-2"
-              value={filters.status}
-              onChange={(e) => setFilter({ status: e.target.value })}
+      <div className="mb-4 rounded border border-white/10 bg-panel-elevated/60">
+        <button
+          type="button"
+          aria-expanded={filtersOpen}
+          aria-controls="issues-filter-form"
+          onClick={() => setFiltersOpen((v) => !v)}
+          className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-white/70 hover:text-white"
+        >
+          <span aria-hidden="true" className="text-xs text-white/40 w-3 shrink-0">
+            {filtersOpen ? "▾" : "▸"}
+          </span>
+          <span className="font-ui-display">{filtersOpen ? "Hide filters" : "Show filters"}</span>
+          {filtersActive && (
+            <span
+              data-testid="filters-active-indicator"
+              title="The issue list is filtered"
+              className="text-xs px-2 py-0.5 rounded-full border border-[#C4B643]/50 text-[#C4B643]"
             >
-              <option value="">All statuses</option>
-              {ISSUE_STATUS_OPTIONS.map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-          </label>
-          <label className="block text-sm">
-            <span className="block text-xs text-white/50 mb-1">Repository</span>
-            <input
-              type="text"
-              placeholder="github.com/owner/repo"
-              title="Exact repository identity"
-              className="w-full bg-black/30 border border-white/10 rounded px-3 py-2"
-              value={filters.repo}
-              onChange={(e) => setFilter({ repo: e.target.value })}
-            />
-          </label>
-          <div className="flex items-end gap-2">
-            <label className="flex items-center gap-2 text-sm text-white/70 cursor-pointer pb-2">
-              <input
-                type="checkbox"
-                checked={filters.needsAttention}
-                onChange={(e) => setFilter({ needsAttention: e.target.checked })}
-                className="accent-[#C4B643]"
-              />
-              Needs attention
-            </label>
-          </div>
-          <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-4">
-            <button type="submit" className="btn-gold px-4">Apply</button>
-            <button
-              type="button"
-              className="px-4 py-2 text-sm text-white/60 hover:text-white"
-              onClick={resetFilters}
-            >
-              Reset
-            </button>
-          </div>
-        </div>
-      </form>
+              Filtered
+            </span>
+          )}
+        </button>
+        {filtersOpen && (
+          <form
+            id="issues-filter-form"
+            aria-label="Issues filters"
+            className="px-4 pb-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              applyFilters(filters);
+            }}
+          >
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <label className="block text-sm">
+                <span className="block text-xs text-white/50 mb-1">Search</span>
+                <input
+                  type="text"
+                  placeholder="Title or label (e.g. NOT-175)"
+                  className="w-full bg-black/30 border border-white/10 rounded px-3 py-2"
+                  value={filters.q}
+                  onChange={(e) => setFilter({ q: e.target.value })}
+                />
+              </label>
+              <label className="block text-sm">
+                <span className="block text-xs text-white/50 mb-1">Status</span>
+                <select
+                  className="w-full bg-black/30 border border-white/10 rounded px-3 py-2"
+                  value={filters.status}
+                  onChange={(e) => setFilter({ status: e.target.value })}
+                >
+                  <option value="">All statuses</option>
+                  {ISSUE_STATUS_OPTIONS.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-sm">
+                <span className="block text-xs text-white/50 mb-1">Repository</span>
+                <input
+                  type="text"
+                  placeholder="github.com/owner/repo"
+                  title="Exact repository identity"
+                  className="w-full bg-black/30 border border-white/10 rounded px-3 py-2"
+                  value={filters.repo}
+                  onChange={(e) => setFilter({ repo: e.target.value })}
+                />
+              </label>
+              <div className="flex items-end gap-2">
+                <label className="flex items-center gap-2 text-sm text-white/70 cursor-pointer pb-2">
+                  <input
+                    type="checkbox"
+                    checked={filters.needsAttention}
+                    onChange={(e) => setFilter({ needsAttention: e.target.checked })}
+                    className="accent-[#C4B643]"
+                  />
+                  Needs attention
+                </label>
+              </div>
+              <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-4">
+                <button type="submit" className="btn-gold px-4">Apply</button>
+                <button
+                  type="button"
+                  className="px-4 py-2 text-sm text-white/60 hover:text-white"
+                  onClick={resetFilters}
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+          </form>
+        )}
+      </div>
 
       {issuePage === null ? (
         <p className="text-white/50 text-sm">Loading…</p>
