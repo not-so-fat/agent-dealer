@@ -67,18 +67,21 @@ export const CURSOR_INDIVIDUAL_TIMEOUT_ENV = "AGENT_DEALER_CURSOR_INDIVIDUAL_TIM
 export const CURSOR_INDIVIDUAL_REFRESH_ENV = "AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH";
 
 /**
- * Undocumented dashboard origins the adapter may talk to. Community tools
- * target the Cursor web dashboard for these routes; the allowlist is exactly
- * these two origins — redirects or config pointing anywhere else are
- * rejected before any credential is sent.
+ * Undocumented dashboard origins the adapter may talk to. `www.cursor.com`
+ * canonicalizes to `cursor.com` (a same-site redirect), so the bare domain
+ * must be allowlisted too or that redirect itself reads `unsafe-redirect`.
+ * Community tools target the Cursor web dashboard for these routes; the
+ * allowlist is exactly these origins — redirects or config pointing
+ * anywhere else are rejected before any credential is sent.
  */
 export const CURSOR_INDIVIDUAL_ALLOWED_ORIGINS = [
+  "https://cursor.com",
   "https://www.cursor.com",
   "https://api.cursor.com",
 ] as const;
 
 /** Default dashboard origin (community-observed; undocumented, may drift). */
-export const CURSOR_INDIVIDUAL_DEFAULT_ORIGIN = "https://www.cursor.com";
+export const CURSOR_INDIVIDUAL_DEFAULT_ORIGIN = "https://cursor.com";
 
 /**
  * Candidate dashboard usage routes, tried in order. The first 2xx carrying
@@ -258,6 +261,8 @@ const CYCLE_LABEL_KEYS = [
 const CYCLE_START_KEYS = [
   "cycleStart",
   "cycle_start",
+  "billingCycleStart",
+  "billing_cycle_start",
   "periodStart",
   "period_start",
   "startDate",
@@ -268,6 +273,8 @@ const CYCLE_START_KEYS = [
 const CYCLE_END_KEYS = [
   "cycleEnd",
   "cycle_end",
+  "billingCycleEnd",
+  "billing_cycle_end",
   "periodEnd",
   "period_end",
   "endDate",
@@ -293,7 +300,14 @@ const USAGE_VALUE_KEYS = [
   "cost_in_cents",
 ];
 const USAGE_UNIT_KEYS = ["usageUnit", "usage_unit", "unit", "currency"];
-const USED_PERCENT_KEYS = ["usedPercent", "used_percent", "usagePercent", "usage_percent"];
+const USED_PERCENT_KEYS = [
+  "usedPercent",
+  "used_percent",
+  "usagePercent",
+  "usage_percent",
+  "totalPercentUsed",
+  "total_percent_used",
+];
 const USED_FRACTION_KEYS = ["usedFraction", "used_fraction", "usageFraction", "usage_fraction"];
 const REMAINING_PERCENT_KEYS = [
   "remainingPercent",
@@ -322,9 +336,22 @@ function clampPercent(n: number): number {
  * value (no cycle label/start/end AND no usage/remaining scale) — the caller
  * maps that to `unparsable`.
  */
+function individualUsagePlan(p: Record<string, unknown>): Record<string, unknown> | null {
+  const usage = p.individualUsage;
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
+  const plan = (usage as Record<string, unknown>).plan;
+  return plan && typeof plan === "object" && !Array.isArray(plan) ? (plan as Record<string, unknown>) : null;
+}
+
 export function cursorIndividualPayloadToReadings(payload: unknown): CursorIndividualReadings | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
-  const p = payload as Record<string, unknown>;
+  const top = payload as Record<string, unknown>;
+  // The live payload nests its usage scale under `individualUsage.plan`
+  // (e.g. `totalPercentUsed`) while the cycle dates stay top-level — merge
+  // the plan in (top-level wins on a name clash) so both shapes read the
+  // same fields below.
+  const plan = individualUsagePlan(top);
+  const p = plan ? { ...plan, ...top } : top;
   const cycleLabel = pickString(p, CYCLE_LABEL_KEYS);
   const cycleStart = normalizeCursorApiDate(pickRaw(p, CYCLE_START_KEYS));
   const cycleEnd = normalizeCursorApiDate(pickRaw(p, CYCLE_END_KEYS));
@@ -364,6 +391,38 @@ function isAllowedOrigin(url: string): boolean {
   return (CURSOR_INDIVIDUAL_ALLOWED_ORIGINS as readonly string[]).includes(origin);
 }
 
+/**
+ * Read a response body up to `CURSOR_INDIVIDUAL_MAX_BODY_BYTES`, aborting
+ * the read (never buffering the full body first) the moment that cap is
+ * crossed — `res.text()` has no such bound, so a large/streaming response
+ * would otherwise sit fully in memory before the size check ever ran.
+ * Shares the caller's `signal`, so a hop's timeout aborts a stalled body
+ * read the same way it aborts a stalled header response.
+ */
+export async function readBoundedText(res: Response, signal: AbortSignal): Promise<string> {
+  if (!res.body) return res.text();
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      if (signal.aborted) throw new Error("aborted");
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > CURSOR_INDIVIDUAL_MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("response exceeds the size cap");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8");
+}
+
 function defaultFetch(): FetchImpl {
   const impl = globalThis.fetch;
   return (url, init) =>
@@ -372,7 +431,7 @@ function defaultFetch(): FetchImpl {
       res.headers.forEach((value, key) => {
         headers[key.toLowerCase()] = value;
       });
-      return { status: res.status, headers, text: () => res.text() };
+      return { status: res.status, headers, text: () => readBoundedText(res, init.signal) };
     });
 }
 
@@ -401,57 +460,64 @@ async function fetchJson(
   if (!isAllowedOrigin(url)) return { failure: "unsafe-redirect" };
   let current = url;
   for (let hop = 0; hop <= CURSOR_INDIVIDUAL_MAX_REDIRECTS; hop += 1) {
-    let res: CursorIndividualFetchResponse;
     const controller = new AbortController();
     // A manual, ref'd setTimeout (not AbortSignal.timeout(), whose internal
     // timer is unref'd) — otherwise, once nothing else in the process holds
     // the event loop open, Node can conclude the run before this timer ever
     // fires, surfacing as "Promise resolution is still pending but the event
-    // loop has already resolved" instead of an actual abort.
+    // loop has already resolved" instead of an actual abort. The timer stays
+    // live for the WHOLE hop (headers + body read below), cleared only once
+    // this hop is fully settled — a server that sends headers and then
+    // stalls the body must abort too, not just a slow header response.
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      res = await fetchImpl(current, {
-        method: "GET",
-        headers: { Authorization: authHeader, Accept: "application/json" },
-        signal: controller.signal,
-      });
-    } catch {
-      return { failure: "unavailable" };
+      let res: CursorIndividualFetchResponse;
+      try {
+        res = await fetchImpl(current, {
+          method: "GET",
+          headers: { Cookie: authHeader, Accept: "application/json" },
+          signal: controller.signal,
+        });
+      } catch {
+        return { failure: "unavailable" };
+      }
+      if (isRedirect(res.status)) {
+        const location = res.headers["location"];
+        if (!location) return { failure: "unavailable" };
+        let next: string;
+        try {
+          next = new URL(location, current).toString();
+        } catch {
+          return { failure: "unsafe-redirect" };
+        }
+        if (!next.toLowerCase().startsWith("https://") || !isAllowedOrigin(next)) {
+          return { failure: "unsafe-redirect" };
+        }
+        current = next;
+        continue;
+      }
+      if (res.status === 401 || res.status === 403) return { failure: "forbidden" };
+      if (res.status === 429) return { failure: "rate-limited" };
+      // 404 on an undocumented path means the endpoint moved or never existed
+      // for this account — the caller tries the next candidate path.
+      if (res.status === 404 || res.status === 405) return { absent: true };
+      if (res.status < 200 || res.status >= 300) return { failure: "unavailable" };
+      let text: string;
+      try {
+        text = await res.text();
+      } catch {
+        // An abort mid-body-read is a timeout (`unavailable`), never a parse
+        // verdict on data that never fully arrived.
+        return { failure: controller.signal.aborted ? "unavailable" : "malformed" };
+      }
+      if (text.length > CURSOR_INDIVIDUAL_MAX_BODY_BYTES) return { failure: "malformed" };
+      try {
+        return { status: res.status, payload: JSON.parse(text) as unknown };
+      } catch {
+        return { failure: "malformed" };
+      }
     } finally {
       clearTimeout(timer);
-    }
-    if (isRedirect(res.status)) {
-      const location = res.headers["location"];
-      if (!location) return { failure: "unavailable" };
-      let next: string;
-      try {
-        next = new URL(location, current).toString();
-      } catch {
-        return { failure: "unsafe-redirect" };
-      }
-      if (!next.toLowerCase().startsWith("https://") || !isAllowedOrigin(next)) {
-        return { failure: "unsafe-redirect" };
-      }
-      current = next;
-      continue;
-    }
-    if (res.status === 401 || res.status === 403) return { failure: "forbidden" };
-    if (res.status === 429) return { failure: "rate-limited" };
-    // 404 on an undocumented path means the endpoint moved or never existed
-    // for this account — the caller tries the next candidate path.
-    if (res.status === 404 || res.status === 405) return { absent: true };
-    if (res.status < 200 || res.status >= 300) return { failure: "unavailable" };
-    let text: string;
-    try {
-      text = await res.text();
-    } catch {
-      return { failure: "malformed" };
-    }
-    if (text.length > CURSOR_INDIVIDUAL_MAX_BODY_BYTES) return { failure: "malformed" };
-    try {
-      return { status: res.status, payload: JSON.parse(text) as unknown };
-    } catch {
-      return { failure: "malformed" };
     }
   }
   return { failure: "unavailable" };
@@ -846,6 +912,7 @@ let cursorIndividualLastFailedPollMs: number | null = null;
 export function resetCursorIndividualPollStateForTests(): void {
   cursorIndividualLastFailedPollMs = null;
   cursorIndividualStaleRefreshInFlight = null;
+  cursorIndividualCapacityStaleRefreshInFlight = null;
 }
 
 /**
@@ -996,12 +1063,20 @@ export function cursorIndividualCapacityAdapter(
   };
 }
 
+let cursorIndividualCapacityStaleRefreshInFlight: Promise<unknown> | null = null;
+
 /**
  * On-demand capacity-strip refresh: ingest one bounded adapter read into
  * `runtime_capacity_snapshots` so the Agents-page strip shows the
  * billing-cycle window (or its explicit N/A) for `cursor_local`. Disabled is
- * a strict no-op — no credential, no HTTP. Never throws, never touches
- * runtime health. Imported lazily to keep this module free of DB binds.
+ * a strict no-op — no credential, no HTTP. Mirrors the Codex/Team stale-check
+ * pattern: a fresh stored window (younger than `DEFAULT_STALE_AFTER_MS`)
+ * short-circuits with no HTTP, and concurrent callers share one in-flight
+ * poll (single-flight) instead of each firing their own dashboard request —
+ * `GET /api/runtime-capacity` calls this on every poll, so without both
+ * checks it would hit the dashboard on every request. Never throws, never
+ * touches runtime health. Imported lazily to keep this module free of DB
+ * binds.
  */
 export async function refreshCursorIndividualCapacityIfStale(
   nowMs = Date.now(),
@@ -1009,12 +1084,36 @@ export async function refreshCursorIndividualCapacityIfStale(
 ): Promise<void> {
   if (process.env[CURSOR_INDIVIDUAL_REFRESH_ENV] === "off") return;
   if (!isCursorIndividualExperimentalEnabled()) return;
+  const { listCapacitySnapshots } = await import("../repository/runtime-capacity.js");
+  const rows = listCapacitySnapshots(CURSOR_INDIVIDUAL_RUNTIME);
+  const newestObserved = rows.reduce<number | null>((max, row) => {
+    const ms = Date.parse(row.observedAt);
+    if (!Number.isFinite(ms)) return max;
+    return max === null || ms > max ? ms : max;
+  }, null);
+  if (newestObserved !== null && newestObserved + DEFAULT_STALE_AFTER_MS > nowMs) {
+    return;
+  }
+  if (cursorIndividualCapacityStaleRefreshInFlight) {
+    await cursorIndividualCapacityStaleRefreshInFlight;
+    return;
+  }
+  const run = (async () => {
+    try {
+      const { ingestAdapterResult } = await import("./service.js");
+      const adapter = cursorIndividualCapacityAdapter(opts);
+      const result = await adapter.read(nowMs);
+      await ingestAdapterResult(result);
+    } catch {
+      // A refresh failure must never break capacity reads or job execution.
+    }
+  })();
+  cursorIndividualCapacityStaleRefreshInFlight = run;
   try {
-    const { ingestAdapterResult } = await import("./service.js");
-    const adapter = cursorIndividualCapacityAdapter(opts);
-    const result = await adapter.read(nowMs);
-    await ingestAdapterResult(result);
-  } catch {
-    // A refresh failure must never break capacity reads or job execution.
+    await run;
+  } finally {
+    if (cursorIndividualCapacityStaleRefreshInFlight === run) {
+      cursorIndividualCapacityStaleRefreshInFlight = null;
+    }
   }
 }

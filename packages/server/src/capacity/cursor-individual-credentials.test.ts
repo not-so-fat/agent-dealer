@@ -15,10 +15,19 @@ import {
   cursorIndividualAuthHeader,
   cursorIndividualCredentialCandidates,
   cursorIndividualCredentialStatus,
+  decodeJwtSubject,
   loadCursorIndividualCredential,
 } from "./cursor-individual-credentials.js";
 
 const SECRET = "fixture-secret-token-abc123";
+const USER_ID = "user_fixture_abc123";
+
+/** header.payload.signature with { sub: USER_ID } — no signature verification, so any value works. */
+function fixtureJwt(sub: string): string {
+  const b64url = (obj: unknown) =>
+    Buffer.from(JSON.stringify(obj)).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `${b64url({ alg: "none" })}.${b64url({ sub })}.sig`;
+}
 
 let dir: string;
 let savedFileEnv: string | undefined;
@@ -68,12 +77,12 @@ test("empty home directory reads absent (no real login touched)", () => {
 
 test("accepted token shapes load with an in-memory auth header", () => {
   const cases: Array<{ body: unknown; format: string }> = [
-    { body: { token: SECRET }, format: "token" },
-    { body: { accessToken: SECRET }, format: "accessToken" },
-    { body: { access_token: SECRET }, format: "access_token" },
-    { body: { sessionToken: SECRET }, format: "sessionToken" },
-    { body: { apiKey: SECRET }, format: "apiKey" },
-    { body: { auth: { accessToken: SECRET } }, format: "auth.accessToken" },
+    { body: { token: SECRET, userId: USER_ID }, format: "token" },
+    { body: { accessToken: SECRET, userId: USER_ID }, format: "accessToken" },
+    { body: { access_token: SECRET, user_id: USER_ID }, format: "access_token" },
+    { body: { sessionToken: SECRET, userId: USER_ID }, format: "sessionToken" },
+    { body: { apiKey: SECRET, userId: USER_ID }, format: "apiKey" },
+    { body: { auth: { accessToken: SECRET }, userId: USER_ID }, format: "auth.accessToken" },
   ];
   for (const { body, format } of cases) {
     const file = fixture("auth.json", JSON.stringify(body));
@@ -81,9 +90,32 @@ test("accepted token shapes load with an in-memory auth header", () => {
     assert.equal(credential.status, "found");
     assert.equal(credential.path, file);
     assert.equal(credential.format, format);
-    assert.equal(credential.authHeader, cursorIndividualAuthHeader(SECRET));
-    assert.ok(!credential.authHeader!.includes(SECRET) === false, "header carries the token in memory only");
+    assert.equal(credential.authHeader, cursorIndividualAuthHeader(USER_ID, SECRET));
+    assert.ok(credential.authHeader!.includes(SECRET), "header carries the token in memory only");
   }
+});
+
+test("a user id is derived from the token's own JWT `sub` claim when no explicit field is present", () => {
+  const jwt = fixtureJwt(USER_ID);
+  assert.equal(decodeJwtSubject(jwt), USER_ID);
+  fixture("auth.json", JSON.stringify({ token: jwt }));
+  const credential = loadCursorIndividualCredential();
+  assert.equal(credential.status, "found");
+  assert.equal(credential.authHeader, cursorIndividualAuthHeader(USER_ID, jwt));
+});
+
+test("an explicit user-id field wins over the token's own JWT `sub` claim", () => {
+  const jwt = fixtureJwt("jwt-subject-should-lose");
+  fixture("auth.json", JSON.stringify({ token: jwt, userId: USER_ID }));
+  const credential = loadCursorIndividualCredential();
+  assert.equal(credential.authHeader, cursorIndividualAuthHeader(USER_ID, jwt));
+});
+
+test("a token with no derivable user id reads unparsable — never a Bearer-only guess", () => {
+  fixture("auth.json", JSON.stringify({ token: SECRET }));
+  const credential = loadCursorIndividualCredential();
+  assert.equal(credential.status, "unparsable");
+  assert.equal(credential.authHeader, undefined);
 });
 
 test("changed credential formats read unparsable, never a guess", () => {
@@ -109,7 +141,7 @@ test("changed credential formats read unparsable, never a guess", () => {
 });
 
 test("diagnostics status never carries secret material", () => {
-  fixture("auth.json", JSON.stringify({ token: SECRET }));
+  fixture("auth.json", JSON.stringify({ token: SECRET, userId: USER_ID }));
   const status = cursorIndividualCredentialStatus();
   assert.equal(status.present, true);
   assert.equal(status.format, "token");

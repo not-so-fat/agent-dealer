@@ -16,6 +16,8 @@ import path from "node:path";
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cursor-indiv-"));
 
 import {
+  CURSOR_INDIVIDUAL_ALLOWED_ORIGINS,
+  CURSOR_INDIVIDUAL_DEFAULT_ORIGIN,
   CURSOR_INDIVIDUAL_MAX_BODY_BYTES,
   CURSOR_INDIVIDUAL_OPT_IN_ENV,
   CURSOR_INDIVIDUAL_OPT_IN_VALUE,
@@ -26,6 +28,7 @@ import {
   getCursorIndividualBillingSnapshot,
   ingestCursorIndividualObservation,
   isCursorIndividualExperimentalEnabled,
+  readBoundedText,
   readCursorIndividualBilling,
   refreshCursorIndividualBilling,
   refreshCursorIndividualBillingIfStale,
@@ -33,7 +36,10 @@ import {
   resetCursorIndividualPollStateForTests,
   type FetchImpl,
 } from "./cursor-individual.js";
-import { CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV } from "./cursor-individual-credentials.js";
+import {
+  CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV,
+  cursorIndividualAuthHeader,
+} from "./cursor-individual-credentials.js";
 
 const { migrate } = await import("../db/index.js");
 const {
@@ -50,6 +56,7 @@ const { normalizeAdapterWindow } = await import("./adapter.js");
 
 const MOCK_BASE = "https://www.cursor.com";
 const SECRET = "fixture-individual-secret-xyz789";
+const USER_ID = "user_fixture_individual_abc";
 
 let credDir: string;
 let savedOptIn: string | undefined;
@@ -88,7 +95,7 @@ function enable(): void {
   process.env[CURSOR_INDIVIDUAL_OPT_IN_ENV] = CURSOR_INDIVIDUAL_OPT_IN_VALUE;
 }
 
-function fixtureCredential(body: unknown = { token: SECRET }): void {
+function fixtureCredential(body: unknown = { token: SECRET, userId: USER_ID }): void {
   const file = path.join(credDir, "auth.json");
   fs.writeFileSync(file, typeof body === "string" ? body : JSON.stringify(body));
   process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV] = file;
@@ -215,7 +222,7 @@ test("opt-in with fixture credential/response reports cycle label/reset/remainin
   assert.equal(calls.length, 1);
   assert.ok(calls[0].url.startsWith(MOCK_BASE), `mock host only, got ${calls[0].url}`);
   assert.equal(calls[0].method, "GET");
-  assert.equal(calls[0].headers.Authorization, `Bearer ${SECRET}`);
+  assert.equal(calls[0].headers.Cookie, cursorIndividualAuthHeader(USER_ID, SECRET));
   const url = new URL(calls[0].url);
   assert.ok(!url.search.includes(SECRET) && !url.pathname.includes(SECRET));
   // The raw token appears nowhere outside the in-memory auth header.
@@ -388,6 +395,32 @@ test("timeout degrades to an explicit unavailable reason", async () => {
   assert.equal(obs.billing.unavailableReason, "missing");
 });
 
+test("the same deadline also covers a stalled body read, not just the header response", async () => {
+  enable();
+  fixtureCredential();
+  // Headers arrive immediately (200), but the body stream never delivers —
+  // the SAME per-hop timeout must still fire and abort it. Before the fix,
+  // the timer was cleared right after headers arrived, so a server that
+  // sent headers and then stalled left the request pending indefinitely.
+  const stallingBody: FetchImpl = async (_url, init) => ({
+    status: 200,
+    headers: {},
+    text: () =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }),
+  });
+  const started = Date.now();
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: stallingBody,
+    timeoutMs: 20,
+  });
+  assert.ok(Date.now() - started < 5000, "the stalled body read must be aborted, not hang");
+  assert.equal(obs.failure?.kind, "unavailable");
+  assert.equal(obs.billing.unavailableReason, "missing");
+});
+
 test("unsafe redirects are rejected before the credential travels", async () => {
   enable();
   fixtureCredential();
@@ -433,6 +466,28 @@ test("same-allowlist redirects are followed", async () => {
     nowMs: now,
   });
   // The redirect target answers under the other allowlisted origin.
+  assert.equal(obs.failure, null);
+  assert.equal(obs.billing.cycleLabel, "September 2026");
+});
+
+test("the default origin is the bare apex domain, and www's canonical redirect to it succeeds", async () => {
+  // www.cursor.com canonicalizes to cursor.com — that redirect target must
+  // itself be allowlisted, or the adapter would reject its own default.
+  assert.equal(CURSOR_INDIVIDUAL_DEFAULT_ORIGIN, "https://cursor.com");
+  assert.ok((CURSOR_INDIVIDUAL_ALLOWED_ORIGINS as readonly string[]).includes("https://cursor.com"));
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE, // https://www.cursor.com
+    fetchImpl: mockFetch({
+      [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: (count) =>
+        count === 1
+          ? { status: 301, headers: { location: `https://cursor.com${CURSOR_INDIVIDUAL_USAGE_PATHS[0]}` }, body: {} }
+          : { status: 200, body: usagePayload(now) },
+    }),
+    nowMs: now,
+  });
   assert.equal(obs.failure, null);
   assert.equal(obs.billing.cycleLabel, "September 2026");
 });
@@ -575,6 +630,34 @@ test("capacity-strip refresh ingests the billing-cycle window; disabled writes n
   );
 });
 
+test("capacity-strip refresh is stale-aware: a fresh stored window skips HTTP, concurrent callers single-flight", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  let calls = 0;
+  const opts = {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(now)) as FetchImpl,
+    nowMs: now,
+  };
+  const countingFetch: FetchImpl = async (url, init) => {
+    calls += 1;
+    return opts.fetchImpl(url, init);
+  };
+  // Two calls one millisecond apart against an empty store: both see the
+  // stored snapshot as missing, so — absent single-flight — each would fire
+  // its own dashboard request. They must share one instead.
+  await Promise.all([
+    refreshCursorIndividualCapacityIfStale(now, { ...opts, fetchImpl: countingFetch }),
+    refreshCursorIndividualCapacityIfStale(now + 1, { ...opts, fetchImpl: countingFetch }),
+  ]);
+  assert.equal(calls, 1, "concurrent refreshes single-flight into one HTTP call");
+  // A third call immediately after, against the now-fresh stored window,
+  // must not poll again either.
+  await refreshCursorIndividualCapacityIfStale(now + 2, { ...opts, fetchImpl: countingFetch });
+  assert.equal(calls, 1, "a fresh stored window is served with no further HTTP");
+});
+
 test("payload parsing keeps reported values and rejects empty shapes", () => {
   const now = Date.now();
   const readings = cursorIndividualPayloadToReadings(usagePayload(now));
@@ -600,4 +683,90 @@ test("payload parsing keeps reported values and rejects empty shapes", () => {
   assert.equal(cursorIndividualPayloadToReadings("nope"), null);
   assert.equal(cursorIndividualPayloadToReadings({ nonsense: true }), null);
   assert.equal(cursorIndividualPayloadToReadings({ usageUnit: "USD" }), null);
+});
+
+test("the live dashboard shape (billingCycleStart/End + nested individualUsage.plan.totalPercentUsed) parses", () => {
+  const now = Date.now();
+  const live = cursorIndividualPayloadToReadings({
+    billingCycleStart: "2026-09-01T00:00:00.000Z",
+    billingCycleEnd: new Date(now + 8 * 24 * 3600_000).toISOString(),
+    individualUsage: {
+      plan: {
+        totalPercentUsed: 37.5,
+      },
+    },
+  });
+  assert.ok(live);
+  assert.equal(live.cycleStart, "2026-09-01T00:00:00.000Z");
+  assert.equal(live.cycleEnd, new Date(now + 8 * 24 * 3600_000).toISOString());
+  // 37.5% used → 62.5 remaining, same scale as the top-level usedPercent path.
+  assert.equal(live.remainingPercent, 62.5);
+  // A top-level usedPercent still wins over a nested totalPercentUsed — the
+  // merge only fills gaps, it never lets the nested plan override a scale
+  // the top-level payload already reported.
+  const clash = cursorIndividualPayloadToReadings({
+    billingCycleStart: "2026-09-01T00:00:00.000Z",
+    usedPercent: 10,
+    individualUsage: { plan: { totalPercentUsed: 90 } },
+  });
+  assert.equal(clash?.remainingPercent, 90);
+  // A non-object individualUsage/plan is ignored, not a crash.
+  assert.equal(
+    cursorIndividualPayloadToReadings({ individualUsage: "nope" })?.remainingPercent ?? null,
+    null
+  );
+  assert.equal(cursorIndividualPayloadToReadings({ individualUsage: { plan: "nope" } }), null);
+});
+
+test("readBoundedText aborts once the body exceeds the size cap, without buffering it all first", async () => {
+  const chunkSize = 64 * 1024;
+  const chunk = new Uint8Array(chunkSize).fill(97);
+  // A stream far larger than the cap (well over 10x) — an attacker/broken
+  // server sending an oversized or unbounded body. Only ~8-9 chunks are
+  // needed to cross the 512 KiB cap; the assertion below proves the read
+  // stops there instead of buffering the whole thing.
+  const availableChunks = 100;
+  let delivered = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (delivered >= availableChunks) {
+        controller.close();
+        return;
+      }
+      delivered += 1;
+      controller.enqueue(chunk);
+    },
+  });
+  const res = new Response(stream);
+  const controller = new AbortController();
+  await assert.rejects(() => readBoundedText(res, controller.signal));
+  // The stream must have been cancelled well before the full body was
+  // pulled — i.e. the cap is enforced during the read, not after buffering
+  // it all. A few chunks of slack above the exact cap boundary is fine; the
+  // bulk of the 100-chunk body must never be read.
+  assert.ok(
+    delivered <= 15,
+    `expected the read to abort well before all ${availableChunks} chunks were pulled, got ${delivered}`
+  );
+
+  // A body within the cap still reads through normally.
+  const smallStream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("hello"));
+      controller.close();
+    },
+  });
+  const smallRes = new Response(smallStream);
+  const text = await readBoundedText(smallRes, new AbortController().signal);
+  assert.equal(text, "hello");
+
+  // An already-aborted signal aborts the read too.
+  const abortedController = new AbortController();
+  abortedController.abort();
+  const anotherStream = new ReadableStream<Uint8Array>({
+    start(c) {
+      c.enqueue(new TextEncoder().encode("x"));
+    },
+  });
+  await assert.rejects(() => readBoundedText(new Response(anotherStream), abortedController.signal));
 });

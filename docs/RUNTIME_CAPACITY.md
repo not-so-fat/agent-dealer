@@ -336,19 +336,25 @@ Opt-in (disabled by default — no silent opt-in, no credential migration):
 - Credential lookup is isolated in
   `packages/server/src/capacity/cursor-individual-credentials.ts`: unknown
   shapes read `unparsable` (changed format), and diagnostics return
-  presence/path/format only, never secret material.
+  presence/path/format only, never secret material. The session cookie needs
+  a WorkOS user id alongside the token — an explicit `userId`/`user_id` field
+  wins; otherwise it's derived locally from the token's own JWT `sub` claim
+  (no network, no signature check). A token with neither reads `unparsable`.
 
-Reads (bounded: 10 s per request,
-`AGENT_DEALER_CURSOR_INDIVIDUAL_TIMEOUT_MS` override; Bearer auth from the
-local login, header-only):
+Reads (bounded: 10 s per request covering the full response — headers AND
+body, `AGENT_DEALER_CURSOR_INDIVIDUAL_TIMEOUT_MS` override; a
+`WorkosCursorSessionToken` session cookie built from the local login,
+never an `Authorization` header — the dashboard rejects Bearer auth):
 
 - `GET /api/usage-summary/current-period`, falling back to
   `/api/usage-summary` on 404 (endpoint drift). Default origin
-  `https://www.cursor.com`; requests and redirects are allowlisted to exactly
-  `https://www.cursor.com` and `https://api.cursor.com` — a redirect
-  elsewhere (or a non-allowlisted base URL) fails as `unsafe-redirect` before
-  the credential travels. Manual redirect handling (max 3 hops), 512 KiB
-  response cap, JSON-schema validation.
+  `https://cursor.com` (its `www.` alias canonicalizes to the bare domain via
+  a same-site redirect); requests and redirects are allowlisted to exactly
+  `https://cursor.com`, `https://www.cursor.com`, and `https://api.cursor.com`
+  — a redirect elsewhere (or a non-allowlisted base URL) fails as
+  `unsafe-redirect` before the credential travels. Manual redirect handling
+  (max 3 hops), 512 KiB response cap enforced while streaming the body (never
+  buffered past the cap first), JSON-schema validation.
 - Billing-cycle values only: reported cycle label/start/end, reported usage
   value/unit, and remaining percent from a used/remaining scale. No durations
   are invented (monthly data never becomes a 5H/1W window), no cycle label is

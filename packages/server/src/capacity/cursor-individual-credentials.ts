@@ -59,7 +59,22 @@ export const CURSOR_INDIVIDUAL_TOKEN_KEYS = [
   "jwt",
 ] as const;
 
-/** Nested objects tolerated one level deep (same key allowlist applies). */
+/**
+ * Accepted top-level WorkOS user-id keys. The dashboard's session cookie is
+ * `<userId>::<token>` (see `cursorIndividualAuthHeader`) — a bare token is
+ * not enough. Same allowlist discipline as the token keys: an explicit field
+ * here wins; otherwise the id is derived from the token's own JWT `sub`
+ * claim (see `decodeJwtSubject`).
+ */
+export const CURSOR_INDIVIDUAL_USER_ID_KEYS = [
+  "userId",
+  "user_id",
+  "workosUserId",
+  "workos_user_id",
+  "sub",
+] as const;
+
+/** Nested objects tolerated one level deep (same key allowlists apply). */
 const NESTED_KEYS = ["auth", "data", "user"] as const;
 
 export type CredentialStatus = "found" | "absent" | "unparsable";
@@ -97,18 +112,21 @@ export function cursorIndividualCredentialCandidates(): string[] {
   return [path.join(homeDir(), CURSOR_INDIVIDUAL_DEFAULT_RELATIVE_PATH)];
 }
 
-function pickToken(obj: Record<string, unknown>): { key: string; token: string } | null {
-  for (const key of CURSOR_INDIVIDUAL_TOKEN_KEYS) {
+function pickByKeys(
+  obj: Record<string, unknown>,
+  keys: readonly string[]
+): { key: string; value: string } | null {
+  for (const key of keys) {
     const value = obj[key];
-    if (typeof value === "string" && value.trim()) return { key, token: value.trim() };
+    if (typeof value === "string" && value.trim()) return { key, value: value.trim() };
   }
   for (const nest of NESTED_KEYS) {
     const inner = obj[nest];
     if (inner && typeof inner === "object" && !Array.isArray(inner)) {
-      for (const key of CURSOR_INDIVIDUAL_TOKEN_KEYS) {
+      for (const key of keys) {
         const value = (inner as Record<string, unknown>)[key];
         if (typeof value === "string" && value.trim()) {
-          return { key: `${nest}.${key}`, token: value.trim() };
+          return { key: `${nest}.${key}`, value: value.trim() };
         }
       }
     }
@@ -116,14 +134,55 @@ function pickToken(obj: Record<string, unknown>): { key: string; token: string }
   return null;
 }
 
+function pickToken(obj: Record<string, unknown>): { key: string; token: string } | null {
+  const picked = pickByKeys(obj, CURSOR_INDIVIDUAL_TOKEN_KEYS);
+  return picked ? { key: picked.key, token: picked.value } : null;
+}
+
+function pickUserId(obj: Record<string, unknown>): string | null {
+  return pickByKeys(obj, CURSOR_INDIVIDUAL_USER_ID_KEYS)?.value ?? null;
+}
+
+function base64UrlDecode(segment: string): string | null {
+  try {
+    const padded = segment.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(segment.length / 4) * 4, "=");
+    return Buffer.from(padded, "base64").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Dashboard auth scheme. Community tools commonly present the local login
- * token as a Bearer token against Cursor dashboard origins; the scheme is
- * part of the undocumented surface and may drift (drift reads `unparsable`
- * at the HTTP layer, never a credential guess here).
+ * The WorkOS session id is normally the JWT's own `sub` claim — decoded
+ * locally (no network, no signature verification: this only *reads* an id
+ * already present in a credential the caller trusts) so a plain access-token
+ * file still yields a usable id without a separate stored field.
  */
-export function cursorIndividualAuthHeader(token: string): string {
-  return `Bearer ${token}`;
+export function decodeJwtSubject(token: string): string | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const json = base64UrlDecode(parts[1]);
+  if (json === null) return null;
+  try {
+    const payload = JSON.parse(json) as unknown;
+    if (!payload || typeof payload !== "object") return null;
+    const sub = (payload as Record<string, unknown>).sub;
+    return typeof sub === "string" && sub.trim() ? sub.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Dashboard auth scheme: a `WorkosCursorSessionToken` cookie of
+ * `<userId>::<token>` (community-observed: cursor-pulse, oh-my-pi) — the
+ * dashboard rejects a Bearer `Authorization` header. The scheme is part of
+ * the undocumented surface and may drift (drift reads `unparsable`/`forbidden`
+ * at the HTTP layer, never a credential guess here). Returns the `Cookie`
+ * header VALUE (the caller sends it under the `Cookie` header name).
+ */
+export function cursorIndividualAuthHeader(userId: string, token: string): string {
+  return `WorkosCursorSessionToken=${userId}::${token}`;
 }
 
 export interface ReadFileImpl {
@@ -161,11 +220,17 @@ export function loadCursorIndividualCredential(
     }
     const picked = pickToken(parsed as Record<string, unknown>);
     if (!picked) return { status: "unparsable", path: candidate, format: null };
+    // The cookie needs a user id too — an explicit field wins; otherwise
+    // derive it from the token's own JWT `sub` claim. Neither present means
+    // this credential cannot build a usable session, same as any other
+    // format drift.
+    const userId = pickUserId(parsed as Record<string, unknown>) ?? decodeJwtSubject(picked.token);
+    if (!userId) return { status: "unparsable", path: candidate, format: picked.key };
     return {
       status: "found",
       path: candidate,
       format: picked.key,
-      authHeader: cursorIndividualAuthHeader(picked.token),
+      authHeader: cursorIndividualAuthHeader(userId, picked.token),
     };
   }
   return { status: "absent", path: null, format: null };
