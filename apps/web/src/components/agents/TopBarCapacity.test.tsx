@@ -301,8 +301,9 @@ test("critical pair is identity-selected: model-specific extras never fold into 
   assert.match(claudeHtml, /80%/);
   assert.match(claudeHtml, /40%/);
 
-  // Codex shape: the main limit primary/secondary pair is critical; extra
-  // limit buckets (and the aggregate alias) stay separate rows.
+  // Codex shape: the rateLimits aggregate is critical whenever present, even
+  // alongside a detailed pair — detailed buckets never win over it, since
+  // there is no name (e.g. `main`) that is reliably the account-wide one.
   const codexWindows = [
     window({
       windowKey: "codex_rate_limit_primary",
@@ -337,14 +338,129 @@ test("critical pair is identity-selected: model-specific extras never fold into 
     runtimes: [{ runtime: "codex_local", unavailableReason: null, windows: codexWindows }],
   });
   const [codex] = summarizeCapacity(codexData, NOW);
-  assert.equal(codex.windows[0].kind === "known" && codex.windows[0].remaining, 70,
-    "main limit wins the critical 5H row over the aggregate alias");
-  assert.equal(codex.windows[1].kind === "known" && codex.windows[1].remaining, 55);
+  assert.equal(
+    codex.windows[0].kind === "known" && codex.windows[0].remaining,
+    60,
+    "the rateLimits aggregate is the critical 5H row whenever it is present"
+  );
+  assert.equal(codex.windows[1].kind === "unknown", true, "no aggregate weekly reading: 1W reads N/A");
   assert.equal(codex.exhausted, false, "extra-bucket 0% does not exhaust the runtime");
   const codexHtml = render({ status: "ready", data: codexData });
   assert.ok(!/data-exhausted="true"/.test(codexHtml));
+  assert.match(codexHtml, /60%/);
+  // The detailed main/extra buckets are not the aggregate, so they render as
+  // their own truthful rows rather than folding into or overriding 5H/1W.
   assert.match(codexHtml, /70%/);
   assert.match(codexHtml, /55%/);
+});
+
+test("Codex: no aggregate, one unambiguous detailed limit pair is critical regardless of its name", () => {
+  // Real Codex payloads: the rateLimits aggregate is absent exactly when the
+  // server's NOT-263 dedup already collapsed it into a matching detailed
+  // pair. The limit id is arbitrary provider data (not necessarily `main`).
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "codex_local",
+        unavailableReason: null,
+        windows: [
+          window({
+            windowKey: "codex_limit_codex_primary",
+            providerBucket: "codex/primary",
+            durationMinutes: 300,
+            displayLabel: "5H",
+            remainingPercent: 45,
+          }),
+          window({
+            windowKey: "codex_limit_codex_secondary",
+            providerBucket: "codex/secondary",
+            durationMinutes: 10080,
+            displayLabel: "1W",
+            remainingPercent: 90,
+          }),
+        ],
+      },
+    ],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.equal(summary.windows[0].kind === "known" && summary.windows[0].remaining, 45);
+  assert.equal(summary.windows[1].kind === "known" && summary.windows[1].remaining, 90);
+  assert.equal(summary.exhausted, false);
+});
+
+test("Codex: no aggregate and two complete detailed pairs is ambiguous — no critical row is guessed", () => {
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "codex_local",
+        unavailableReason: null,
+        windows: [
+          window({
+            windowKey: "codex_limit_main_primary",
+            providerBucket: "main/primary",
+            durationMinutes: 300,
+            displayLabel: "5H",
+            remainingPercent: 0,
+          }),
+          window({
+            windowKey: "codex_limit_main_secondary",
+            providerBucket: "main/secondary",
+            durationMinutes: 10080,
+            displayLabel: "1W",
+            remainingPercent: 55,
+          }),
+          window({
+            windowKey: "codex_limit_extra_primary",
+            providerBucket: "extra/primary",
+            durationMinutes: 300,
+            displayLabel: "5H",
+            remainingPercent: 30,
+          }),
+          window({
+            windowKey: "codex_limit_extra_secondary",
+            providerBucket: "extra/secondary",
+            durationMinutes: 10080,
+            displayLabel: "1W",
+            remainingPercent: 20,
+          }),
+        ],
+      },
+    ],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  // No fabricated 5H/1W pick: all four real buckets render as their own
+  // truthful rows instead of two of them being promoted to a guessed pair.
+  assert.equal(summary.windows.length, 4);
+  assert.ok(summary.windows.every((w) => w.kind === "known"));
+  assert.equal(summary.exhausted, false, "an unresolved pair is never treated as exhausted");
+  const html = render({ status: "ready", data });
+  assert.ok(!/data-exhausted="true"/.test(html));
+  // Both real pairs still render as their own truthful rows.
+  assert.match(html, /0%/);
+  assert.match(html, /55%/);
+  assert.match(html, /30%/);
+  assert.match(html, /20%/);
+});
+
+test("exhaustion is decided from the raw value, not the rounded display value", () => {
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "claude_code",
+        unavailableReason: null,
+        windows: [window({ remainingPercent: 0.4 }), weekly({ remainingPercent: 40 })],
+      },
+    ],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.equal(
+    summary.exhausted,
+    false,
+    "0.4% remaining rounds to a displayed 0% but must not exhaust the runtime"
+  );
+  const html = render({ status: "ready", data });
+  assert.ok(!/data-exhausted="true"/.test(html));
+  assert.match(html, /0%/, "the rounded display value is still 0%");
 });
 
 test("exhaustion comes from the critical pair only: extra-bucket zeros never mark the block", () => {

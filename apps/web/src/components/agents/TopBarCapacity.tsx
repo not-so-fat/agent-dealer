@@ -40,9 +40,12 @@ const REASON_TEXT: Record<CapacityUnavailableReason, string> = {
 const FIVE_HOUR_LABEL = "5H";
 const WEEKLY_LABEL = "1W";
 
-/** One labeled row inside a runtime block: a current percent or an N/A. */
+/** One labeled row inside a runtime block: a current percent or an N/A.
+ * `remaining` is rounded for display; `rawRemaining` is the unrounded
+ * provider value and is what exhaustion must be decided from — rounding
+ * first can turn a nonzero remainder (e.g. 0.4%) into a false "0%". */
 export type TopBarWindowValue =
-  | { key: string; label: string; kind: "known"; remaining: number; detail: string }
+  | { key: string; label: string; kind: "known"; remaining: number; rawRemaining: number; detail: string }
   | { key: string; label: string; kind: "unknown"; reason: CapacityUnavailableReason; detail: string };
 
 export type PerRuntimeSummary = {
@@ -54,58 +57,82 @@ export type PerRuntimeSummary = {
   detail: string;
 };
 
-/**
- * NOT-264 repair: the critical 5H/1W pair is selected by provider bucket
- * identity — never by rendered label or duration. The server labels every
- * 300/10,080-minute bucket 5H/1W via deriveWindowLabel, including
- * model-specific extras (Claude `seven_day_sonnet`/`seven_day_opus`, Codex
- * `codex_limit_<extra>_*`), so label/duration matching folds non-critical
- * buckets into the critical rows, min-collapses them, and can falsely mark
- * the runtime exhausted. Account-wide identities only:
- * - Claude: `five_hour` / `seven_day` (or `weekly`) buckets;
- * - Codex: the `main` limit primary/secondary pair (aggregate
- *   `codex_rate_limit_*` as fallback);
- * - legacy adapters: `five_hour` / `weekly` window keys.
- */
-function criticalRank(w: CapacityWindowSnapshot, kind: "5H" | "1W"): number | null {
-  const key = w.windowKey.toLowerCase();
-  const bucket = w.providerBucket.toLowerCase();
-  if (kind === "5H") {
-    if (key === "codex_limit_main_primary") return 0;
-    if (key === "codex_rate_limit_primary") return 1;
-    if (key === "five_hour" || key === "claude_unified_five_hour" || bucket === "five_hour") return 2;
-    return null;
+/** A Codex detailed per-limit window key: `codex_limit_<limitId>_<sub>`. The
+ * limitId is arbitrary provider data (`main`, `codex`, a team name, ...) —
+ * never a fixed name to match against. */
+const CODEX_DETAILED_KEY = /^codex_limit_(.+)_(primary|secondary)$/;
+
+/** The one Codex detailed limit pair, when exactly one limitId reports both
+ * halves. Two or more complete pairs (e.g. `main` + `extra`) are genuinely
+ * ambiguous — which one is account-wide is not decidable from the key alone
+ * — so this returns null rather than guessing a name like `main`. */
+function soleCodexDetailedPair(
+  windows: CapacityWindowSnapshot[]
+): { primary: CapacityWindowSnapshot; secondary: CapacityWindowSnapshot } | null {
+  const byLimitId = new Map<
+    string,
+    { primary?: CapacityWindowSnapshot; secondary?: CapacityWindowSnapshot }
+  >();
+  for (const w of windows) {
+    const m = CODEX_DETAILED_KEY.exec(w.windowKey);
+    if (!m) continue;
+    const [, limitId, sub] = m;
+    const entry = byLimitId.get(limitId) ?? {};
+    entry[sub as "primary" | "secondary"] = w;
+    byLimitId.set(limitId, entry);
   }
-  if (key === "codex_limit_main_secondary") return 0;
-  if (key === "codex_rate_limit_secondary") return 1;
-  if (
-    key === "weekly" ||
-    key === "claude_unified_seven_day" ||
-    key === "claude_unified_weekly" ||
-    bucket === "seven_day" ||
-    bucket === "weekly"
-  )
-    return 2;
-  return null;
+  const complete: Array<{ primary: CapacityWindowSnapshot; secondary: CapacityWindowSnapshot }> = [];
+  for (const entry of byLimitId.values()) {
+    if (entry.primary && entry.secondary) complete.push({ primary: entry.primary, secondary: entry.secondary });
+  }
+  return complete.length === 1 ? complete[0] : null;
 }
 
-/** Best identity match for one half of the critical pair (lowest rank wins,
- * API order breaks ties); every other same-duration bucket stays a distinct
- * non-critical row. */
-function selectCriticalWindow(
-  windows: CapacityWindowSnapshot[],
-  kind: "5H" | "1W"
-): CapacityWindowSnapshot | null {
-  let best: CapacityWindowSnapshot | null = null;
-  let bestRank = Number.POSITIVE_INFINITY;
-  for (const w of windows) {
-    const rank = criticalRank(w, kind);
-    if (rank !== null && rank < bestRank) {
-      best = w;
-      bestRank = rank;
-    }
-  }
-  return best;
+/**
+ * The critical 5H/1W pair, selected by provider bucket identity — never by
+ * rendered label or duration. The server labels every 300/10,080-minute
+ * bucket 5H/1W via deriveWindowLabel, including model-specific extras
+ * (Claude `seven_day_sonnet`/`seven_day_opus`, Codex `codex_limit_<x>_*`),
+ * so label/duration matching folds non-critical buckets into the critical
+ * rows, min-collapses them, and can falsely mark the runtime exhausted.
+ *
+ * Per provider family, tried in order:
+ * - Codex: the `rateLimits` aggregate (`codex_rate_limit_primary/secondary`)
+ *   — always the account-wide summary when present. Only when it is fully
+ *   absent (the server's NOT-263 dedup already collapsed it into whichever
+ *   detailed bucket matched) does the sole unambiguous detailed pair stand
+ *   in; two or more complete detailed pairs are ambiguous and yield no
+ *   critical row rather than guessing a limit id.
+ * - Claude / legacy adapters: `five_hour` / `seven_day` (or `weekly`)
+ *   buckets, by window key or provider bucket.
+ */
+function selectCriticalPair(
+  windows: CapacityWindowSnapshot[]
+): { fiveHour: CapacityWindowSnapshot | null; weekly: CapacityWindowSnapshot | null } {
+  const aggFiveHour = windows.find((w) => w.windowKey === "codex_rate_limit_primary") ?? null;
+  const aggWeekly = windows.find((w) => w.windowKey === "codex_rate_limit_secondary") ?? null;
+  if (aggFiveHour || aggWeekly) return { fiveHour: aggFiveHour, weekly: aggWeekly };
+
+  const solePair = soleCodexDetailedPair(windows);
+  if (solePair) return { fiveHour: solePair.primary, weekly: solePair.secondary };
+
+  const fiveHour =
+    windows.find(
+      (w) =>
+        w.windowKey === "five_hour" ||
+        w.windowKey === "claude_unified_five_hour" ||
+        w.providerBucket.toLowerCase() === "five_hour"
+    ) ?? null;
+  const weekly =
+    windows.find(
+      (w) =>
+        w.windowKey === "weekly" ||
+        w.windowKey === "claude_unified_seven_day" ||
+        w.windowKey === "claude_unified_weekly" ||
+        w.providerBucket.toLowerCase() === "seven_day" ||
+        w.providerBucket.toLowerCase() === "weekly"
+    ) ?? null;
+  return { fiveHour, weekly };
 }
 
 /** The reason an unknown window renders N/A: its explicit flag, else the
@@ -161,11 +188,13 @@ function summarizeCriticalWindow(
   nowMs: number
 ): TopBarWindowValue {
   if (isWindowKnown(w, nowMs)) {
+    const rawRemaining = w.remainingPercent ?? 0;
     return {
       key: w.windowKey,
       label: w.displayLabel,
       kind: "known",
-      remaining: Math.round(w.remainingPercent ?? 0),
+      remaining: Math.round(rawRemaining),
+      rawRemaining,
       detail: windowDetail(w, nowMs, entry.unavailableReason),
     };
   }
@@ -186,11 +215,13 @@ function summarizeOtherWindow(
   nowMs: number
 ): TopBarWindowValue {
   if (isWindowKnown(w, nowMs)) {
+    const rawRemaining = w.remainingPercent ?? 0;
     return {
       key: w.windowKey,
       label: w.displayLabel,
       kind: "known",
-      remaining: Math.round(w.remainingPercent ?? 0),
+      remaining: Math.round(rawRemaining),
+      rawRemaining,
       detail: windowDetail(w, nowMs, entry.unavailableReason),
     };
   }
@@ -228,8 +259,7 @@ export function summarizeCapacity(
 ): PerRuntimeSummary[] {
   return data.runtimes.map((entry) => {
     const runtime = runtimeLabel(entry.runtime as Runtime);
-    const fiveHour = selectCriticalWindow(entry.windows, "5H");
-    const weekly = selectCriticalWindow(entry.windows, "1W");
+    const { fiveHour, weekly } = selectCriticalPair(entry.windows);
     const criticalKeys = new Set([fiveHour?.windowKey, weekly?.windowKey].filter(Boolean));
     const others = entry.windows.filter((w) => !criticalKeys.has(w.windowKey));
     let windows: TopBarWindowValue[];
@@ -249,8 +279,10 @@ export function summarizeCapacity(
       windows = [];
     }
     // Exhaustion is a critical-pair state only: a non-critical extra bucket
-    // at 0% never marks the runtime unavailable.
-    const exhausted = criticalRows.some((w) => w.kind === "known" && w.remaining === 0);
+    // at 0% never marks the runtime unavailable. Decided from the raw
+    // provider value, never the rounded display value — rounding a small
+    // nonzero remainder (e.g. 0.4%) down to 0% must not falsely exhaust it.
+    const exhausted = criticalRows.some((w) => w.kind === "known" && w.rawRemaining === 0);
     const detail =
       entry.windows.length > 0
         ? entry.windows.map((w) => windowDetail(w, nowMs, entry.unavailableReason)).join("; ")
@@ -348,7 +380,7 @@ export function TopBarCapacityView({
                       {w.kind === "known" ? (
                         <span
                           className={
-                            w.remaining === 0
+                            w.rawRemaining === 0
                               ? "font-medium text-red-300"
                               : "font-medium text-white/75"
                           }

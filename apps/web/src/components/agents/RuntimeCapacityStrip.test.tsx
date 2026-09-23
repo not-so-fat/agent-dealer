@@ -150,6 +150,29 @@ test("remaining at or above 30% renders normal severity, no red or yellow", () =
   assert.ok(!html.includes("text-yellow-400"));
 });
 
+test("severity is decided from the raw value, not the rounded display value", () => {
+  // 9.6% rounds to a displayed 10% but is still under the 10% critical
+  // threshold; 29.6% rounds to a displayed 30% but is still under 30%.
+  const data = {
+    generatedAt: new Date().toISOString(),
+    runtimes: [
+      {
+        runtime: "claude_code",
+        unavailableReason: null,
+        windows: [
+          window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 9.6 }),
+          window({ windowKey: "weekly", displayLabel: "1W", remainingPercent: 29.6 }),
+        ],
+      },
+    ],
+  } as unknown as RuntimeCapacityResponse;
+  const html = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data }));
+  assert.match(html, /capacity-window-five_hour"[^]*?data-severity="critical"/, "9.6% stays critical despite rounding to 10%");
+  assert.match(html, /capacity-window-weekly"[^]*?data-severity="warning"/, "29.6% stays warning despite rounding to 30%");
+  assert.match(html, />10%</);
+  assert.match(html, />30%</);
+});
+
 test("distinct buckets sharing a duration each render their own chip", () => {
   const shared = {
     generatedAt: new Date().toISOString(),

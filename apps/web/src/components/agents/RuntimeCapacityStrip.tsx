@@ -59,11 +59,14 @@ function WindowChip({ window }: { window: CapacityWindowSnapshot }) {
       <span className="text-white/40">{window.displayLabel}</span>
       {known ? (
         (() => {
-          const remaining = Math.round(window.remainingPercent ?? 0);
-          const severity = capacitySeverity(remaining);
+          // Severity must key off the raw provider value: rounding first
+          // would let e.g. 9.6% (critical) read as 10% (not critical) and
+          // 29.6% (warning) read as 30% (normal).
+          const rawRemaining = window.remainingPercent ?? 0;
+          const severity = capacitySeverity(rawRemaining);
           return (
             <span data-severity={severity} className={SEVERITY_CLASSNAME[severity]}>
-              {remaining}%
+              {Math.round(rawRemaining)}%
             </span>
           );
         })()
