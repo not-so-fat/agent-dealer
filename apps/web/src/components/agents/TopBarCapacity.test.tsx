@@ -338,6 +338,44 @@ test("no aggregate/detailed re-derivation left client-side: an untagged pair nev
   assert.match(html, /55%/);
 });
 
+test("a known critical half plus an unavailable critical half renders one pair, never a duplicate N/A row", () => {
+  // NOT-264 review finding: an unavailable reading that still carries its
+  // criticalRole (e.g. Muse reconstructing a malformed weekly window) must
+  // be found by selectCriticalPair like any known window — otherwise the
+  // pair-synthesis path can't see it, treats the weekly half as entirely
+  // missing, and synthesizes a second, duplicate "1W N/A" row alongside the
+  // real (also N/A) one.
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "muse_code",
+        unavailableReason: null,
+        windows: [
+          window({ windowKey: "rolling_all_models", providerBucket: "all_models", remainingPercent: 40 }),
+          weekly({
+            windowKey: "weekly_all_models",
+            providerBucket: "all_models",
+            remainingPercent: null,
+            unavailableReason: "unparsable",
+            source: "unavailable",
+          }),
+        ],
+      },
+    ],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.equal(summary.windows.length, 2, "exactly one 5H row and one 1W row — no synthesized duplicate");
+  assert.equal(summary.windows[0].kind === "known" && summary.windows[0].remaining, 40);
+  assert.equal(summary.windows[1].kind, "unknown");
+  assert.equal(summary.windows[1].reason, "unparsable", "the real reason, not a generic 'missing'");
+  const html = render({ status: "ready", data });
+  // Exactly one 1W row in the visible markup — not a real N/A row plus a
+  // second synthesized one for the same half. (title-attribute tooltips
+  // legitimately repeat the same "N/A" text at two DOM levels, so a raw
+  // substring count of "N/A" would be a false positive here.)
+  assert.equal((html.match(/data-window="1W"/g) ?? []).length, 1);
+});
+
 test("Muse: whatever the server tags criticalRole on behaves exactly like any other runtime", () => {
   // The client no longer knows or cares that these came from Muse's
   // rolling_all_models/weekly_all_models keys — only the tag matters.

@@ -73,6 +73,10 @@ export interface AdapterUnavailableReading {
   durationMinutes?: number | null;
   reason: CapacityUnavailableReason;
   observedAt?: string;
+  /** Set when this unavailable reading stands in for a specific critical
+   * window (e.g. Muse's rolling/weekly pair reconstructed as unparsable) —
+   * never set for a whole-account failure sentinel with no window identity. */
+  criticalRole?: CapacityCriticalRole | null;
 }
 
 /** What one provider read returns: known windows plus unavailable ones. */
@@ -170,7 +174,7 @@ export function normalizeUnavailableWindow(
     source: "unavailable",
     unavailableReason: reading.reason,
     evidenceRef: null,
-    criticalRole: null,
+    criticalRole: reading.criticalRole ?? null,
   };
 }
 

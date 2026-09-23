@@ -602,6 +602,11 @@ export async function readMuseCapacity(opts: MuseServeOptions = {}): Promise<Ada
       durationMinutes: kind === "weekly" ? MUSE_WEEKLY_DURATION_MINUTES : null,
       reason: "unparsable",
       observedAt,
+      // This unavailable reading still stands in for the account-wide
+      // critical half it replaces — untagging it would make the client
+      // synthesize a second, duplicate N/A row for the same half (NOT-264
+      // review finding).
+      criticalRole: kind === "rolling" ? "five_hour" : "weekly",
     });
   }
   if (windows.length === 0 && unavailable.length === 0) {
