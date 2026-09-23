@@ -629,7 +629,7 @@ function logFailure(kind: FailureKind): void {
   console.error(`[codex-capacity] app-server read failed: ${kind}`);
 }
 
-function failureToUnavailable(nowMs: number, kind: FailureKind): AdapterReadResult {
+function failureToUnavailable(nowMs: number, kind: FailureKind): CodexAppServerReadResult {
   logFailure(kind);
   switch (kind) {
     case "unsupported":
