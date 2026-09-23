@@ -63,6 +63,7 @@ import { emitCheckpointObserved, emitRetryReuse } from "./checkpoint.js";
 import { syncIssueBaseBranch } from "./sync-issue-base-branch.js";
 import { emitAgentCompleted, emitAgentStarted } from "./agent-boundaries.js";
 import { recordMuseUsageCap, recordUsageCapFromLog } from "../runners/usage-cap.js";
+import { recordClaudeCapacityFromLog } from "../capacity/claude-events.js";
 import { reasonForDirtyWorktree, reasonForSessionCrash } from "./failure-reason.js";
 import {
   emitSessionMilestone,
@@ -1235,6 +1236,16 @@ export async function runDeveloperEffect(
     const usageCap = spawned.muse
       ? recordMuseUsageCap(spawned.muse.failure)
       : recordUsageCapFromLog(spawned.logPath, runtime);
+    // NOT-248: naturally observed Claude unified windows become capacity
+    // snapshots. Observational and best-effort — never fails the session
+    // effect, never launches a probe, never touches NOT-111 cap rows.
+    // Events without their own timestamp fall back to spawnStartedAt so a
+    // long session's early reading is never stamped as just observed.
+    try {
+      recordClaudeCapacityFromLog(spawned.logPath, runtime, Date.now(), spawnStartedAt);
+    } catch {
+      // Capacity is advisory; session outcome stands on its own.
+    }
     if (usageCap) {
       const clean = await isWorktreeClean(worktreePath).catch(() => false);
       if (!clean) {

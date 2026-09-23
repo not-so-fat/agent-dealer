@@ -1,0 +1,3 @@
+{"session_id":"unified-rejected-session","subtype":"init","type":"system","model":"claude-sonnet-4-20250514"}
+{"session_id":"unified-rejected-session","type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1784283600,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.99,"resetsAt":1784283600},"seven_day_overage":{"utilization":0.5,"resetsAt":1800000000}}},"uuid":"cap-unified-rejected-1"}
+{"type":"result","is_error":true,"result":"You've hit your usage limit. Try again later.","duration_ms":1200}
