@@ -545,6 +545,33 @@ test("malformed payloads persist as N/A; transient failures keep last-known valu
   assert.equal(snap.remainingPercent, null);
 });
 
+test("a bad-credential response overwrites the stored billing row too — the other non-transient sibling (billing table)", async () => {
+  // ingestCursorIndividualObservation() has the same two-kind non-transient
+  // gate (malformed, bad-credential) as pollCursorIndividualShared's
+  // capacity-strip write — malformed-overwrites-billing is covered above;
+  // cover the bad-credential sibling at this (billing-table) layer too.
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  await refreshCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(now)),
+    nowMs: now,
+  });
+  let snap = await getCursorIndividualBillingSnapshot(now);
+  assert.equal(snap.remainingPercent, 62.5);
+  // The credential file changes shape before the next refresh.
+  fixtureCredential({ brandNewShape: true });
+  await refreshCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(now + 60_000)),
+    nowMs: now + 60_000,
+  });
+  snap = await getCursorIndividualBillingSnapshot(now + 60_000);
+  assert.equal(snap.unavailableReason, "unparsable");
+  assert.equal(snap.remainingPercent, null);
+});
+
 test("stale, expired, and past-cycle snapshots read N/A with distinct reasons", async () => {
   enable();
   fixtureCredential();
