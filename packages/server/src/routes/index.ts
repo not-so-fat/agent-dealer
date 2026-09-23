@@ -16,7 +16,8 @@ import {
 } from "../adapters/linear-inbox.js";
 import { getLinearUsageSnapshot } from "../adapters/linear-graphql.js";
 import { listRuntimeModels } from "../runners/models.js";
-import { getRuntimeCapacitySnapshot } from "../capacity/service.js";
+import { configuredCapacityRuntimes, getRuntimeCapacitySnapshot } from "../capacity/service.js";
+import { maybeRefreshMuseCapacityFromServe } from "../capacity/muse.js";
 import { refreshCodexCapacityIfStale } from "../capacity/codex-app-server.js";
 import {
   getCursorTeamBillingSnapshot,
@@ -78,12 +79,27 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // NOT-245: provider-neutral capacity read model — one entry per configured
   // runtime account with its windows, freshness, and explicit unavailable
   // reasons. Normalized snapshots only; evidence stays server-side.
+  // NOT-247: the only production trigger for the Muse adapter — a throttled
+  // (default 5 min), bounded, best-effort refresh when `muse_code` is
+  // configured. The refresh runs in the background without blocking the
+  // read: GET serves the last-known snapshot immediately so a slow or
+  // hanging `muse serve` (bounded by the capacity timeout) can never stall
+  // the Agents page. Failures persist as N/A and never fail the read.
   // NOT-246: on-demand Codex refresh — when the stored Codex snapshot is
   // stale the read triggers one bounded, non-billable App Server poll
   // (single-flight, never health rows, never throws); fresh snapshots and
   // runtimes without a configured Codex account serve stored data with no
   // subprocess.
   app.get("/api/runtime-capacity", async () => {
+    try {
+      if (configuredCapacityRuntimes().includes("muse_code")) {
+        void maybeRefreshMuseCapacityFromServe().catch(() => {
+          // Best-effort: failures persist as N/A via the ingest path.
+        });
+      }
+    } catch {
+      // Best-effort: serve the last-known snapshot below.
+    }
     try {
       await refreshCodexCapacityIfStale();
     } catch {

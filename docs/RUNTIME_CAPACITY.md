@@ -41,7 +41,9 @@ Provider live reads (auth, subprocess protocol) land in sibling tickets.
 Until then, `fixtureMultiWindowAdapter` / `fixtureUnsupportedAdapter` /
 `fixtureStaleAdapter` stand in deterministically. The first live provider is
 Codex (NOT-246, `packages/server/src/capacity/codex-app-server.ts`) — see
-"Provider: Codex App Server" below.
+"Provider: Codex App Server" below; Muse (NOT-247,
+`packages/server/src/capacity/muse.ts`) — see "Provider: Muse Code" below;
+further providers land in sibling tickets.
 
 ## Freshness rules
 
@@ -75,6 +77,60 @@ still-valid sibling window. Independent of `runtime_availability` (NOT-111
 hard caps): capacity snapshots neither read nor clear hard-cap rows, and
 connection health stays a separate state — green health never implies known
 capacity.
+
+## Provider: Muse Code (NOT-247)
+
+Sources: the Muse Code docs (`https://dev.meta.ai/docs/muse-code`) and the
+subscriptions reference (`https://dev.meta.ai/docs/muse-code/subscriptions`).
+The adapter speaks the versioned Session Protocol over a managed
+`muse serve --protocol msp/1.3` subprocess: a single `usage/read` request,
+then shutdown. `usage/changed` notifications received while the connection is
+alive are recorded. The client enforces a read-only allowlist (`usage/read`)
+— any other method throws before it is written, so polling can never start a
+session, send a prompt, or consume model tokens. It is bounded (default 15 s
+overall, `AGENT_DEALER_MUSE_CAPACITY_TIMEOUT_MS` override) and never billed.
+No Keychain access, no undocumented endpoints.
+
+Normalization keeps the two MSP 1.3 windows independently:
+
+- `rolling` → window key `rolling_all_models` (`providerBucket`
+  `all_models`), `windowDurationMins` → `durationMinutes` so the shared
+  normalization derives the label (`300` → `5H`, `720` → `12H`, …) instead of
+  hardcoding it; `usedPercent` and `resetsAtMs` pass through.
+- `weekly` → window key `weekly_all_models` with the definitional
+  `durationMinutes: 10080` (MSP 1.3 reports no weekly duration), `usedPercent`
+  and `resetsAt` likewise.
+- `observedAtMs` becomes the snapshot `observedAt`; `tier` is dropped at the
+  adapter boundary — tier metadata beyond the runtime account context never
+  persists and never reaches the browser.
+
+Failure semantics (shared enum only, never thrown, never health rows):
+
+| Serve outcome | N/A reason |
+|---|---|
+| `usage` omitted / empty, no credential, unauthenticated, spawn error, bad exit, timeout | `missing` |
+| malformed payload | `unparsable` |
+| binary unavailable (ENOENT) or server without the method (`-32601`) | `unsupported` |
+
+A present-but-malformed sibling window becomes a per-window `unparsable`
+reading rather than sinking the good window. The exact cause is logged
+server-side as a static string; no credential, tier, or raw account payload
+reaches the browser, the API, or the logs — evidence refs are static
+(`muse-serve:usage/read`).
+
+Refresh via `refreshMuseCapacityFromServe()` (bounded ingest through the
+shared service path). The only production trigger is `GET
+/api/runtime-capacity`: when `muse_code` is configured it runs
+`maybeRefreshMuseCapacityFromServe()` first — throttled (default 5 min,
+`AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS` override, `off` disables),
+best-effort, never failing the read. A successful refresh deletes the
+`muse_account_usage` failure sentinel so a stale N/A window cannot linger
+next to recovered windows. Tests use the committed fake MSP server
+(`packages/server/src/capacity/fixtures/fake-muse-serve.mjs`); CI performs no
+live Muse request. The `serve --protocol msp/1.3` argv and the
+handshake-free single request follow the ticket contract brief — they are
+unverified against the published docs (unreachable at implementation time),
+so re-check them against the docs before debugging any live failure.
 
 ## Provider: Codex App Server (NOT-246)
 
