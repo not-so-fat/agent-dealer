@@ -99,6 +99,57 @@ test("deduped codex pair renders one 5H chip and one weekly chip, no aggregate a
   assert.equal(fiveHourChips, 1);
 });
 
+test("remaining under 10% renders critical (red, bold)", () => {
+  const critical = {
+    generatedAt: new Date().toISOString(),
+    runtimes: [
+      {
+        runtime: "claude_code",
+        unavailableReason: null,
+        windows: [window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 9 })],
+      },
+    ],
+  } as unknown as RuntimeCapacityResponse;
+  const html = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data: critical }));
+  assert.match(html, /data-severity="critical"/);
+  assert.match(html, /font-bold/);
+  assert.match(html, /text-red-400/);
+});
+
+test("remaining under 30% renders warning (yellow)", () => {
+  const warning = {
+    generatedAt: new Date().toISOString(),
+    runtimes: [
+      {
+        runtime: "claude_code",
+        unavailableReason: null,
+        windows: [window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 29 })],
+      },
+    ],
+  } as unknown as RuntimeCapacityResponse;
+  const html = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data: warning }));
+  assert.match(html, /data-severity="warning"/);
+  assert.match(html, /text-yellow-400/);
+  assert.ok(!html.includes("text-red-400"));
+});
+
+test("remaining at or above 30% renders normal severity, no red or yellow", () => {
+  const normal = {
+    generatedAt: new Date().toISOString(),
+    runtimes: [
+      {
+        runtime: "claude_code",
+        unavailableReason: null,
+        windows: [window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 30 })],
+      },
+    ],
+  } as unknown as RuntimeCapacityResponse;
+  const html = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data: normal }));
+  assert.match(html, /data-severity="normal"/);
+  assert.ok(!html.includes("text-red-400"));
+  assert.ok(!html.includes("text-yellow-400"));
+});
+
 test("distinct buckets sharing a duration each render their own chip", () => {
   const shared = {
     generatedAt: new Date().toISOString(),

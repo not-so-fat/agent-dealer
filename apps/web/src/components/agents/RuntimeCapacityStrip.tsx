@@ -21,6 +21,22 @@ const REASON_TEXT: Record<CapacityUnavailableReason, string> = {
   stale: "stale",
 };
 
+/** Remaining-capacity severity thresholds for the Agents-page strip: under
+ * 10% is critical (red, bold), under 30% is a warning (yellow). */
+type CapacitySeverity = "critical" | "warning" | "normal";
+
+function capacitySeverity(remainingPercent: number): CapacitySeverity {
+  if (remainingPercent < 10) return "critical";
+  if (remainingPercent < 30) return "warning";
+  return "normal";
+}
+
+const SEVERITY_CLASSNAME: Record<CapacitySeverity, string> = {
+  critical: "font-bold text-red-400",
+  warning: "text-yellow-400",
+  normal: "font-medium",
+};
+
 function windowTitle(w: CapacityWindowSnapshot): string {
   if (w.unavailableReason !== null) {
     return `${w.displayLabel}: N/A (${REASON_TEXT[w.unavailableReason]})`;
@@ -42,7 +58,15 @@ function WindowChip({ window }: { window: CapacityWindowSnapshot }) {
     >
       <span className="text-white/40">{window.displayLabel}</span>
       {known ? (
-        <span className="font-medium">{Math.round(window.remainingPercent ?? 0)}%</span>
+        (() => {
+          const remaining = Math.round(window.remainingPercent ?? 0);
+          const severity = capacitySeverity(remaining);
+          return (
+            <span data-severity={severity} className={SEVERITY_CLASSNAME[severity]}>
+              {remaining}%
+            </span>
+          );
+        })()
       ) : (
         <span>N/A</span>
       )}
