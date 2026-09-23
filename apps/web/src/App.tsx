@@ -6,11 +6,12 @@ import IssuesListPage from "./pages/IssuesListPage";
 import ExecutionReportPage from "./pages/ExecutionReportPage";
 import IssueDetailPage from "./pages/IssueDetailPage";
 import NotFoundPage from "./pages/NotFoundPage";
-import { fetchAgentDeckStatus, fetchAgents, fetchHumanActions } from "./api";
+import { fetchAgentDeckStatus, fetchAgents, fetchHumanActions, fetchRuntimeCapacity } from "./api";
 import AmbientBackground from "./components/ui/AmbientBackground";
 import AlertIcon from "./components/ui/AlertIcon";
 import AgentsNavIcon from "./components/ui/AgentsNavIcon";
 import Logo from "./components/ui/Logo";
+import { TopBarCapacityView, type TopBarCapacityState } from "./components/agents/TopBarCapacity";
 
 // NOT-71 / NOT-142: surviving destinations are Issues (list + detail) and Agents.
 // Navigation lives in the URL — no parallel view/selectedIssueId state.
@@ -54,10 +55,12 @@ export function ShellHeader({
   openHumanActionCount,
   agentCount,
   agentIssueCount,
+  capacity = { status: "loading" },
 }: {
   openHumanActionCount: number;
   agentCount: number;
   agentIssueCount: number;
+  capacity?: TopBarCapacityState;
 }) {
   return (
     <header className="px-6 py-4 border-b border-white/10 flex flex-wrap gap-4 items-center justify-between glass-header shrink-0">
@@ -102,34 +105,37 @@ export function ShellHeader({
           </NavLink>
         </nav>
       </div>
-      <NavLink
-        to="/agents"
-        className={({ isActive }) =>
-          `${navClass({ isActive })} inline-flex items-center gap-1.5 transition-colors`
-        }
-        aria-label="Agents"
-        title="Agents"
-      >
-        <AgentsNavIcon className="w-6 h-6 shrink-0" />
-        <span>Agents</span>
-        {agentCount > 0 && (
-          <span
-            className="font-mono text-xs leading-none bg-white/10 text-white/55 px-1.5 py-0.5 rounded tabular-nums border border-white/10"
-            title={`${agentCount} configured agent${agentCount === 1 ? "" : "s"}`}
-          >
-            {agentCount}
-          </span>
-        )}
-        {agentIssueCount > 0 && (
-          <span
-            className="inline-flex items-center gap-0.5 font-mono text-xs leading-none bg-red-500/20 text-red-300 px-1.5 py-0.5 rounded tabular-nums border border-red-400/30"
-            title={`${agentIssueCount} need${agentIssueCount === 1 ? "s" : ""} attention`}
-          >
-            <AlertIcon className="w-3 h-3 shrink-0" />
-            {agentIssueCount}
-          </span>
-        )}
-      </NavLink>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 min-w-0">
+        <TopBarCapacityView state={capacity} />
+        <NavLink
+          to="/agents"
+          className={({ isActive }) =>
+            `${navClass({ isActive })} inline-flex items-center gap-1.5 transition-colors`
+          }
+          aria-label="Agents"
+          title="Agents"
+        >
+          <AgentsNavIcon className="w-6 h-6 shrink-0" />
+          <span>Agents</span>
+          {agentCount > 0 && (
+            <span
+              className="font-mono text-xs leading-none bg-white/10 text-white/55 px-1.5 py-0.5 rounded tabular-nums border border-white/10"
+              title={`${agentCount} configured agent${agentCount === 1 ? "" : "s"}`}
+            >
+              {agentCount}
+            </span>
+          )}
+          {agentIssueCount > 0 && (
+            <span
+              className="inline-flex items-center gap-0.5 font-mono text-xs leading-none bg-red-500/20 text-red-300 px-1.5 py-0.5 rounded tabular-nums border border-red-400/30"
+              title={`${agentIssueCount} need${agentIssueCount === 1 ? "s" : ""} attention`}
+            >
+              <AlertIcon className="w-3 h-3 shrink-0" />
+              {agentIssueCount}
+            </span>
+          )}
+        </NavLink>
+      </div>
     </header>
   );
 }
@@ -139,6 +145,9 @@ export default function App() {
   const [agentIssueCount, setAgentIssueCount] = useState(0);
   const [agentDeckOnline, setAgentDeckOnline] = useState(false);
   const [humanActions, setHumanActions] = useState<HumanAction[]>([]);
+  // NOT-262: top-bar capacity shares the shell poll — same source and refresh
+  // behavior as the Agents-page strip (GET /api/runtime-capacity).
+  const [capacity, setCapacity] = useState<TopBarCapacityState>({ status: "loading" });
 
   const refreshAgents = useCallback(() => {
     fetchAgents()
@@ -150,6 +159,9 @@ export default function App() {
     fetchAgentDeckStatus()
       .then((s) => setAgentDeckOnline(s.connected))
       .catch(() => setAgentDeckOnline(false));
+    fetchRuntimeCapacity()
+      .then((data) => setCapacity({ status: "ready", data }))
+      .catch(() => setCapacity({ status: "unavailable" }));
   }, []);
 
   // One poll for every open action, shared by the header badge and the Issues home panel —
@@ -182,6 +194,7 @@ export default function App() {
           openHumanActionCount={openHumanActionCount}
           agentCount={agentCount}
           agentIssueCount={agentIssueCount}
+          capacity={capacity}
         />
 
         <main className="flex-1 flex overflow-hidden">
