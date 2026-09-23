@@ -6,7 +6,7 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## 1.2.1 — 2026-09-23
 
-Patch over 1.2.0: a merge-repair loop fix, a duplicate Issues heading removed, and a top-bar capacity summary.
+Patch over 1.2.0: a merge-repair loop fix, a removed duplicate Issues heading, and a top-bar capacity summary.
 
 ### Fixes
 
@@ -15,7 +15,7 @@ Patch over 1.2.0: a merge-repair loop fix, a duplicate Issues heading removed, a
 ### UI
 
 - **Duplicate Issues page heading removed (NOT-258)** — the Issues screen labeled itself twice (nav link plus a content `<h2>`); the redundant content heading is gone and the New-issue action row is right-aligned in its place. List section header, counts, controls, and routing are unchanged.
-- **Top-bar capacity summary (NOT-262)** — the shell header now shows a compact per-runtime capacity summary, fed by the existing `GET /api/runtime-capacity` source on the shell poll, visible on every shell route including Issues and the inline new-issue flow. Only a shared-contract current window renders a percent; loading, unavailable, and stale/unknown states are distinct and never show a stale number. Separate from the Agents page's runtime-capacity strip.
+- **Top-bar capacity summary (NOT-262)** — the shell header now shows a compact per-runtime capacity summary, fed by the existing `GET /api/runtime-capacity` source on the shell poll, visible on every shell route including Issues and the inline new-issue flow. Only a window that's still current renders a percent (the same freshness rule as the Agents-page strip); loading, unavailable, and stale/unknown states are distinct and never show a stale number. Separate from the Agents page's runtime-capacity strip.
 
 ## 1.2.0 — 2026-09-23
 
