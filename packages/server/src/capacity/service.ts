@@ -66,6 +66,7 @@ export async function ingestAdapterResult(result: AdapterReadResult): Promise<vo
       source: w.source,
       unavailableReason: w.unavailableReason,
       evidenceRef: w.evidenceRef,
+      criticalRole: w.criticalRole,
     }))
   );
 }

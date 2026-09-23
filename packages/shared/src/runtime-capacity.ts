@@ -40,6 +40,18 @@ export const CapacityUnavailableReason = z.enum([
 ]);
 export type CapacityUnavailableReason = z.infer<typeof CapacityUnavailableReason>;
 
+/**
+ * Which account-wide critical window this is, set once by the adapter that
+ * knows the provider's own identity for it (e.g. Codex's `rateLimits`
+ * aggregate, or whichever detailed limit pair it collapsed into) — never
+ * re-derived downstream from a window key, label, or duration, none of
+ * which can disambiguate multiple same-duration buckets a provider reports.
+ * Null means "not the account-wide pair" (a non-critical extra bucket, or a
+ * provider/window this contract has no opinion on).
+ */
+export const CapacityCriticalRole = z.enum(["five_hour", "weekly"]);
+export type CapacityCriticalRole = z.infer<typeof CapacityCriticalRole>;
+
 export const CapacityWindowSnapshot = z.object({
   /** Stable per-runtime key for this window (e.g. `weekly_all_models`). */
   windowKey: z.string().min(1),
@@ -64,6 +76,7 @@ export const CapacityWindowSnapshot = z.object({
   expiresAt: z.string().nullable(),
   source: CapacitySource,
   unavailableReason: CapacityUnavailableReason.nullable(),
+  criticalRole: CapacityCriticalRole.nullable(),
 });
 export type CapacityWindowSnapshot = z.infer<typeof CapacityWindowSnapshot>;
 

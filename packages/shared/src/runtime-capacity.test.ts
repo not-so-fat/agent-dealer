@@ -26,6 +26,7 @@ function window(over: Partial<CapacityWindowSnapshot> = {}): CapacityWindowSnaps
     expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     source: "supported_protocol",
     unavailableReason: null,
+    criticalRole: null,
     ...over,
   };
 }

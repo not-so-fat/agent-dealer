@@ -34,7 +34,7 @@ import {
   requestMuseUsage,
   resetMuseCapacityRefreshState,
 } from "./muse.js";
-import { normalizeAdapterWindow } from "./adapter.js";
+import { normalizeAdapterWindow, normalizeUnavailableWindow } from "./adapter.js";
 const { migrate } = await import("../db/index.js");
 const { clearAllCapacitySnapshots, listCapacitySnapshots } = await import(
   "../repository/runtime-capacity.js"
@@ -105,9 +105,11 @@ test("usage windows keep identity, percent, duration, and reset", () => {
   const normalized = normalizeAdapterWindow("muse_code", rolling, now);
   assert.equal(normalized.displayLabel, "5H");
   assert.equal(normalized.remainingPercent, 40);
+  assert.equal(normalized.criticalRole, "five_hour");
   const weekly = parsed.windows.find((w) => w.windowKey === "weekly_all_models")!;
   assert.equal(normalizeAdapterWindow("muse_code", weekly, now).displayLabel, "1W");
   assert.equal(normalizeAdapterWindow("muse_code", weekly, now).remainingPercent, 75);
+  assert.equal(normalizeAdapterWindow("muse_code", weekly, now).criticalRole, "weekly");
 });
 
 test("legacy rolling spelling maps to the same snapshot", () => {
@@ -293,9 +295,16 @@ test("a malformed sibling window does not sink the good one", async () => {
   const result = await readMuseCapacity(opts);
   assert.equal(result.windows.length, 1);
   assert.equal(result.windows[0]!.windowKey, "rolling_all_models");
+  assert.equal(result.windows[0]!.criticalRole, "five_hour");
   assert.equal(result.unavailable.length, 1);
   assert.equal(result.unavailable[0]!.windowKey, "weekly_all_models");
   assert.equal(result.unavailable[0]!.reason, "unparsable");
+  // NOT-264 review finding: the unavailable half must still carry its
+  // criticalRole, or the client can't find it and synthesizes a second,
+  // duplicate N/A row for the same half instead of one.
+  assert.equal(result.unavailable[0]!.criticalRole, "weekly");
+  const normalizedUnavailable = normalizeUnavailableWindow("muse_code", result.unavailable[0]!);
+  assert.equal(normalizedUnavailable.criticalRole, "weekly");
 });
 
 async function expectUnavailable(

@@ -55,6 +55,7 @@ test("upserts per (runtime, window) and keeps sibling windows on partial writes"
       resetAt: new Date(Date.now() + 1800_000).toISOString(),
       observedAt: nowIso(),
       source: "supported_protocol",
+      criticalRole: "five_hour",
     },
   ]);
   // Partial re-observation updates one window and leaves the sibling alone.
@@ -75,6 +76,9 @@ test("upserts per (runtime, window) and keeps sibling windows on partial writes"
   assert.equal(windows.length, 2);
   assert.equal(windows.find((w) => w.windowKey === "weekly")?.remainingPercent, 60);
   assert.equal(windows.find((w) => w.windowKey === "five_hour")?.remainingPercent, 50);
+  // criticalRole round-trips through the DB; a window that never set it reads null.
+  assert.equal(windows.find((w) => w.windowKey === "five_hour")?.criticalRole, "five_hour");
+  assert.equal(windows.find((w) => w.windowKey === "weekly")?.criticalRole, null);
   assert.deepEqual(capacityRuntimes(), ["claude_code"]);
   assert.equal(listAllCapacitySnapshots().length, 2);
 });

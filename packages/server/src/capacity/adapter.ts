@@ -19,6 +19,7 @@
 //   past reset is never presented as current capacity.
 
 import type {
+  CapacityCriticalRole,
   CapacitySource,
   CapacityUnavailableReason,
   Runtime,
@@ -58,6 +59,10 @@ export interface AdapterWindowReading {
   source: Exclude<CapacitySource, "unavailable">;
   /** Server-side evidence pointer only — never credentials or raw payloads. */
   evidenceRef?: string | null;
+  /** Set by the adapter when this reading IS the account-wide 5H/1W window
+   * (never re-derived downstream from the key/label/duration). Omitted or
+   * null for every non-critical window. */
+  criticalRole?: CapacityCriticalRole | null;
 }
 
 /** A raw provider failure that normalizes to an unavailable window. */
@@ -68,6 +73,10 @@ export interface AdapterUnavailableReading {
   durationMinutes?: number | null;
   reason: CapacityUnavailableReason;
   observedAt?: string;
+  /** Set when this unavailable reading stands in for a specific critical
+   * window (e.g. Muse's rolling/weekly pair reconstructed as unparsable) —
+   * never set for a whole-account failure sentinel with no window identity. */
+  criticalRole?: CapacityCriticalRole | null;
 }
 
 /** What one provider read returns: known windows plus unavailable ones. */
@@ -100,6 +109,7 @@ export interface NormalizedWindowInput {
   source: CapacitySource;
   unavailableReason: CapacityUnavailableReason | null;
   evidenceRef: string | null;
+  criticalRole: CapacityCriticalRole | null;
 }
 
 /** Normalize one raw provider window into the persistable snapshot shape. */
@@ -138,6 +148,7 @@ export function normalizeAdapterWindow(
     source: reading.source,
     unavailableReason,
     evidenceRef: reading.evidenceRef ?? null,
+    criticalRole: reading.criticalRole ?? null,
   };
 }
 
@@ -163,6 +174,7 @@ export function normalizeUnavailableWindow(
     source: "unavailable",
     unavailableReason: reading.reason,
     evidenceRef: null,
+    criticalRole: reading.criticalRole ?? null,
   };
 }
 
