@@ -164,6 +164,9 @@ function windowReadingFromEntry(
     resetAt,
     observedAt,
     source: "supported_protocol",
+    // Muse reports exactly this one rolling/weekly pair — it is always the
+    // account-wide critical window, never a model-specific extra.
+    criticalRole: kind === "rolling" ? "five_hour" : "weekly",
   };
 }
 

@@ -105,9 +105,11 @@ test("usage windows keep identity, percent, duration, and reset", () => {
   const normalized = normalizeAdapterWindow("muse_code", rolling, now);
   assert.equal(normalized.displayLabel, "5H");
   assert.equal(normalized.remainingPercent, 40);
+  assert.equal(normalized.criticalRole, "five_hour");
   const weekly = parsed.windows.find((w) => w.windowKey === "weekly_all_models")!;
   assert.equal(normalizeAdapterWindow("muse_code", weekly, now).displayLabel, "1W");
   assert.equal(normalizeAdapterWindow("muse_code", weekly, now).remainingPercent, 75);
+  assert.equal(normalizeAdapterWindow("muse_code", weekly, now).criticalRole, "weekly");
 });
 
 test("legacy rolling spelling maps to the same snapshot", () => {

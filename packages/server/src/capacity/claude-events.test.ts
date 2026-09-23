@@ -106,6 +106,8 @@ test("five-hour and seven-day windows persist independently", () => {
   assert.equal(fiveHour.remainingPercent, 83);
   assert.equal(sevenDay.remainingPercent, 58);
   assert.notEqual(fiveHour.resetAt, sevenDay.resetAt);
+  assert.equal(fiveHour.criticalRole, "five_hour");
+  assert.equal(sevenDay.criticalRole, "weekly");
 
   // A later partial observation (five_hour only) upserts its row and leaves
   // the seven-day sibling untouched.
@@ -135,6 +137,11 @@ test("model-specific and overage windows remain distinguishable", () => {
   assert.equal(overage.durationMinutes, 10080);
   assert.equal(sonnet.remainingPercent, 39);
   assert.equal(overage.remainingPercent, 50);
+  // Same 10,080-minute duration as the real account-wide weekly window, but
+  // neither model-specific/overage extra is ever the critical window.
+  assert.equal(sonnet.criticalRole, null);
+  assert.equal(overage.criticalRole, null);
+  assert.equal(plain.criticalRole, "weekly");
 });
 
 test("legacy rejected fixture still caps (NOT-111) and fabricates no capacity", () => {

@@ -23,6 +23,9 @@ import type { RuntimeCapacityResponse } from "@agent-dealer/shared";
 const NOW = Date.now();
 const iso = (ms: number) => new Date(ms).toISOString();
 
+// criticalRole defaults to the account-wide 5H role: this is what the server
+// now tags, never re-derived here from windowKey/label/duration. Any window
+// meant to be a non-critical extra must override it to null explicitly.
 function window(over: Record<string, unknown> = {}) {
   return {
     windowKey: "five_hour",
@@ -38,6 +41,7 @@ function window(over: Record<string, unknown> = {}) {
     expiresAt: iso(NOW + 3600_000),
     source: "supported_protocol",
     unavailableReason: null,
+    criticalRole: "five_hour",
     ...over,
   };
 }
@@ -53,6 +57,7 @@ function weekly(over: Record<string, unknown> = {}) {
     remainingPercent: 40,
     resetAt: iso(NOW + 7 * 24 * 3600_000),
     expiresAt: iso(NOW + 7 * 24 * 3600_000),
+    criticalRole: "weekly",
     ...over,
   });
 }
@@ -216,7 +221,7 @@ test("non-critical windows keep their own labels; providers without the pair sta
       {
         runtime: "codex_local",
         unavailableReason: null,
-        windows: [window({ windowKey: "six_hour", durationMinutes: 360, displayLabel: "6H" })],
+        windows: [window({ windowKey: "six_hour", durationMinutes: 360, displayLabel: "6H", criticalRole: null })],
       },
     ],
   });
@@ -238,38 +243,25 @@ test("non-critical windows keep their own labels; providers without the pair sta
   assert.match(emptyHtml, /N\/A/);
 });
 
-test("critical pair is identity-selected: model-specific extras never fold into 5H/1W or exhaust the runtime", () => {
-  // Server shape: every 300/10080-min bucket carries a derived 5H/1W label,
-  // including model-only buckets. Only the account-wide buckets may fill the
-  // critical rows; extras render as distinct rows under their own labels.
+test("critical pair is exactly what the server tags: model-specific extras never fold into 5H/1W or exhaust the runtime", () => {
+  // NOT-264 repair (P1, two review rounds): the client no longer re-derives
+  // identity from window key, label, or duration — it trusts `criticalRole`
+  // exactly as the adapter set it. Same duration/label as the real pair,
+  // but untagged (criticalRole: null): never promoted, never exhausts.
   const claudeWindows = [
-    window({
-      windowKey: "claude_unified_five_hour",
-      providerBucket: "five_hour",
-      durationMinutes: 300,
-      displayLabel: "5H",
-      remainingPercent: 80,
-    }),
-    window({
-      windowKey: "claude_unified_seven_day",
-      providerBucket: "seven_day",
-      durationMinutes: 10080,
-      displayLabel: "1W",
-      remainingPercent: 40,
-    }),
-    window({
+    window({ windowKey: "claude_unified_five_hour", providerBucket: "five_hour", remainingPercent: 80 }),
+    weekly({ windowKey: "claude_unified_seven_day", providerBucket: "seven_day", remainingPercent: 40 }),
+    weekly({
       windowKey: "claude_unified_seven_day_sonnet",
       providerBucket: "seven_day_sonnet",
-      durationMinutes: 10080,
-      displayLabel: "1W",
       remainingPercent: 0,
+      criticalRole: null,
     }),
-    window({
+    weekly({
       windowKey: "claude_unified_seven_day_opus",
       providerBucket: "seven_day_opus",
-      durationMinutes: 10080,
-      displayLabel: "1W",
       remainingPercent: 12,
+      criticalRole: null,
     }),
   ];
   const claudeData = dataWith({
@@ -282,13 +274,13 @@ test("critical pair is identity-selected: model-specific extras never fold into 
   assert.equal(
     claude.windows[1].kind === "known" && claude.windows[1].remaining,
     40,
-    "model-only 0% must not min-collapse into the critical 1W row"
+    "the untagged 0% extra must not fold into the tagged critical 1W row"
   );
   assert.equal(claude.windows.length, 4, "extras render as distinct rows");
   assert.equal(
     claude.exhausted,
     false,
-    "model-only bucket at 0% is not account exhaustion while the weekly window has capacity"
+    "an untagged bucket at 0% is not account exhaustion while the tagged weekly window has capacity"
   );
   assert.deepEqual(
     new Set(claude.windows.map((w) => w.key)).size,
@@ -296,236 +288,67 @@ test("critical pair is identity-selected: model-specific extras never fold into 
     "row keys are unique"
   );
   const claudeHtml = render({ status: "ready", data: claudeData });
-  assert.ok(!/data-exhausted="true"/.test(claudeHtml), "no exhausted treatment from extras");
+  assert.ok(!/data-exhausted="true"/.test(claudeHtml), "no exhausted treatment from untagged extras");
   assert.match(claudeHtml, /0%/, "extra-bucket zero stays visible in its own row");
   assert.match(claudeHtml, /80%/);
   assert.match(claudeHtml, /40%/);
 
-  // Codex shape: the rateLimits aggregate is critical whenever present for
-  // the half it has; a half missing from the aggregate (here: no weekly
-  // aggregate reading) falls back to the matching half of the sole
-  // unambiguous detailed pair — "main" wins here only because it is the
-  // *only* complete detailed pair ("extra" has no secondary), never because
-  // of its name.
+  // Two windows sharing everything (key prefix, label, duration) except the
+  // tag — only the tagged one is critical, regardless of naming ("main" vs
+  // "extra" has no special meaning to the client anymore).
   const codexWindows = [
-    window({
-      windowKey: "codex_rate_limit_primary",
-      providerBucket: "primary",
-      durationMinutes: 300,
-      displayLabel: "5H",
-      remainingPercent: 60,
-    }),
-    window({
-      windowKey: "codex_limit_main_primary",
-      providerBucket: "main/primary",
-      durationMinutes: 300,
-      displayLabel: "5H",
-      remainingPercent: 70,
-    }),
-    window({
-      windowKey: "codex_limit_main_secondary",
-      providerBucket: "main/secondary",
-      durationMinutes: 10080,
-      displayLabel: "1W",
-      remainingPercent: 55,
-    }),
-    window({
-      windowKey: "codex_limit_extra_primary",
-      providerBucket: "extra/primary",
-      durationMinutes: 300,
-      displayLabel: "5H",
-      remainingPercent: 0,
-    }),
+    window({ windowKey: "codex_limit_extra_primary", providerBucket: "extra/primary", remainingPercent: 0, criticalRole: null }),
+    window({ windowKey: "codex_limit_main_primary", providerBucket: "main/primary", remainingPercent: 70 }),
+    weekly({ windowKey: "codex_limit_main_secondary", providerBucket: "main/secondary", remainingPercent: 55 }),
   ];
   const codexData = dataWith({
     runtimes: [{ runtime: "codex_local", unavailableReason: null, windows: codexWindows }],
   });
   const [codex] = summarizeCapacity(codexData, NOW);
-  assert.equal(
-    codex.windows[0].kind === "known" && codex.windows[0].remaining,
-    60,
-    "the rateLimits aggregate is the critical 5H row whenever it is present"
-  );
-  assert.equal(
-    codex.windows[1].kind === "known" && codex.windows[1].remaining,
-    55,
-    "the missing aggregate weekly half falls back to the sole complete detailed pair"
-  );
-  assert.equal(codex.exhausted, false, "extra-bucket 0% does not exhaust the runtime");
+  assert.equal(codex.windows[0].kind === "known" && codex.windows[0].remaining, 70, "the tagged pair wins, not the untagged one that happens to sort first");
+  assert.equal(codex.windows[1].kind === "known" && codex.windows[1].remaining, 55);
+  assert.equal(codex.exhausted, false, "the untagged extra's 0% does not exhaust the runtime");
   const codexHtml = render({ status: "ready", data: codexData });
   assert.ok(!/data-exhausted="true"/.test(codexHtml));
-  assert.match(codexHtml, /60%/);
-  assert.match(codexHtml, /55%/);
-  // The detailed main/extra primaries are not the aggregate, so they still
-  // render as their own truthful "other" rows alongside the critical pair.
   assert.match(codexHtml, /70%/);
+  assert.match(codexHtml, /55%/);
+  assert.match(codexHtml, /0%/, "the untagged extra still renders in its own row");
 });
 
-test("Codex: a half missing from the aggregate stays N/A when the detailed fallback is ambiguous", () => {
+test("no aggregate/detailed re-derivation left client-side: an untagged pair never becomes critical no matter how it's named", () => {
   const data = dataWith({
     runtimes: [
       {
         runtime: "codex_local",
         unavailableReason: null,
         windows: [
-          window({
-            windowKey: "codex_rate_limit_primary",
-            providerBucket: "primary",
-            durationMinutes: 300,
-            displayLabel: "5H",
-            remainingPercent: 60,
-          }),
-          // No codex_rate_limit_secondary — but two complete detailed pairs,
-          // so which one is account-wide is not decidable.
-          window({
-            windowKey: "codex_limit_main_primary",
-            providerBucket: "main/primary",
-            durationMinutes: 300,
-            displayLabel: "5H",
-            remainingPercent: 70,
-          }),
-          window({
-            windowKey: "codex_limit_main_secondary",
-            providerBucket: "main/secondary",
-            durationMinutes: 10080,
-            displayLabel: "1W",
-            remainingPercent: 55,
-          }),
-          window({
-            windowKey: "codex_limit_extra_primary",
-            providerBucket: "extra/primary",
-            durationMinutes: 300,
-            displayLabel: "5H",
-            remainingPercent: 10,
-          }),
-          window({
-            windowKey: "codex_limit_extra_secondary",
-            providerBucket: "extra/secondary",
-            durationMinutes: 10080,
-            displayLabel: "1W",
-            remainingPercent: 20,
-          }),
+          window({ windowKey: "codex_limit_main_primary", providerBucket: "main/primary", remainingPercent: 0, criticalRole: null }),
+          weekly({ windowKey: "codex_limit_main_secondary", providerBucket: "main/secondary", remainingPercent: 55, criticalRole: null }),
         ],
       },
     ],
   });
   const [summary] = summarizeCapacity(data, NOW);
-  assert.equal(summary.windows[0].kind === "known" && summary.windows[0].remaining, 60);
-  assert.equal(summary.windows[1].kind, "unknown", "ambiguous detailed fallback never guesses a limit id");
-  assert.equal(summary.exhausted, false);
-});
-
-test("Codex: no aggregate, one unambiguous detailed limit pair is critical regardless of its name", () => {
-  // Real Codex payloads: the rateLimits aggregate is absent exactly when the
-  // server's NOT-263 dedup already collapsed it into a matching detailed
-  // pair. The limit id is arbitrary provider data (not necessarily `main`).
-  const data = dataWith({
-    runtimes: [
-      {
-        runtime: "codex_local",
-        unavailableReason: null,
-        windows: [
-          window({
-            windowKey: "codex_limit_codex_primary",
-            providerBucket: "codex/primary",
-            durationMinutes: 300,
-            displayLabel: "5H",
-            remainingPercent: 45,
-          }),
-          window({
-            windowKey: "codex_limit_codex_secondary",
-            providerBucket: "codex/secondary",
-            durationMinutes: 10080,
-            displayLabel: "1W",
-            remainingPercent: 90,
-          }),
-        ],
-      },
-    ],
-  });
-  const [summary] = summarizeCapacity(data, NOW);
-  assert.equal(summary.windows[0].kind === "known" && summary.windows[0].remaining, 45);
-  assert.equal(summary.windows[1].kind === "known" && summary.windows[1].remaining, 90);
-  assert.equal(summary.exhausted, false);
-});
-
-test("Codex: no aggregate and two complete detailed pairs is ambiguous — no critical row is guessed", () => {
-  const data = dataWith({
-    runtimes: [
-      {
-        runtime: "codex_local",
-        unavailableReason: null,
-        windows: [
-          window({
-            windowKey: "codex_limit_main_primary",
-            providerBucket: "main/primary",
-            durationMinutes: 300,
-            displayLabel: "5H",
-            remainingPercent: 0,
-          }),
-          window({
-            windowKey: "codex_limit_main_secondary",
-            providerBucket: "main/secondary",
-            durationMinutes: 10080,
-            displayLabel: "1W",
-            remainingPercent: 55,
-          }),
-          window({
-            windowKey: "codex_limit_extra_primary",
-            providerBucket: "extra/primary",
-            durationMinutes: 300,
-            displayLabel: "5H",
-            remainingPercent: 30,
-          }),
-          window({
-            windowKey: "codex_limit_extra_secondary",
-            providerBucket: "extra/secondary",
-            durationMinutes: 10080,
-            displayLabel: "1W",
-            remainingPercent: 20,
-          }),
-        ],
-      },
-    ],
-  });
-  const [summary] = summarizeCapacity(data, NOW);
-  // No fabricated 5H/1W pick: all four real buckets render as their own
-  // truthful rows instead of two of them being promoted to a guessed pair.
-  assert.equal(summary.windows.length, 4);
+  assert.equal(summary.windows.length, 2, "both real buckets still render as their own truthful rows");
   assert.ok(summary.windows.every((w) => w.kind === "known"));
-  assert.equal(summary.exhausted, false, "an unresolved pair is never treated as exhausted");
+  assert.equal(summary.exhausted, false, "an untagged pair is never treated as critical, however it's named");
   const html = render({ status: "ready", data });
   assert.ok(!/data-exhausted="true"/.test(html));
-  // Both real pairs still render as their own truthful rows.
   assert.match(html, /0%/);
   assert.match(html, /55%/);
-  assert.match(html, /30%/);
-  assert.match(html, /20%/);
 });
 
-test("Muse: rolling_all_models/weekly_all_models is the critical 5H/1W pair", () => {
-  // packages/server/src/capacity/muse.ts always emits these two window keys
-  // (providerBucket "all_models") for the account-wide rolling/weekly pair.
+test("Muse: whatever the server tags criticalRole on behaves exactly like any other runtime", () => {
+  // The client no longer knows or cares that these came from Muse's
+  // rolling_all_models/weekly_all_models keys — only the tag matters.
   const data = dataWith({
     runtimes: [
       {
         runtime: "muse_code",
         unavailableReason: null,
         windows: [
-          window({
-            windowKey: "rolling_all_models",
-            providerBucket: "all_models",
-            durationMinutes: 300,
-            displayLabel: "5H",
-            remainingPercent: 0,
-          }),
-          window({
-            windowKey: "weekly_all_models",
-            providerBucket: "all_models",
-            durationMinutes: 10080,
-            displayLabel: "1W",
-            remainingPercent: 60,
-          }),
+          window({ windowKey: "rolling_all_models", providerBucket: "all_models", remainingPercent: 0 }),
+          weekly({ windowKey: "weekly_all_models", providerBucket: "all_models", remainingPercent: 60 }),
         ],
       },
     ],
@@ -553,6 +376,7 @@ test("per-row zero highlight is scoped to the critical pair, matching the block-
             durationMinutes: 300,
             displayLabel: "5H",
             remainingPercent: 0,
+            criticalRole: null,
           }),
         ],
       },
@@ -601,11 +425,9 @@ test("exhaustion comes from the critical pair only: extra-bucket zeros never mar
             displayLabel: "5H",
             remainingPercent: 70,
           }),
-          window({
+          weekly({
             windowKey: "codex_limit_main_secondary",
             providerBucket: "main/secondary",
-            durationMinutes: 10080,
-            displayLabel: "1W",
             remainingPercent: 55,
           }),
           window({
@@ -614,6 +436,7 @@ test("exhaustion comes from the critical pair only: extra-bucket zeros never mar
             durationMinutes: 10080,
             displayLabel: "1W",
             remainingPercent: 0,
+            criticalRole: null,
           }),
         ],
       },

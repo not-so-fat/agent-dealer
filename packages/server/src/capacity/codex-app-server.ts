@@ -37,6 +37,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import type {
+  CapacityCriticalRole,
   CapacityUnavailableReason,
   Runtime,
 } from "@agent-dealer/shared";
@@ -163,7 +164,12 @@ function sanitizeKeySegment(name: string): string {
 
 function windowReadingFromEntry(
   entry: unknown,
-  identity: { windowKey: string; providerBucket: string; labelOverride?: string | null },
+  identity: {
+    windowKey: string;
+    providerBucket: string;
+    labelOverride?: string | null;
+    criticalRole?: CapacityCriticalRole | null;
+  },
   observedAt: string
 ): AdapterWindowReading | null {
   if (!entry || typeof entry !== "object") return null;
@@ -196,6 +202,7 @@ function windowReadingFromEntry(
     resetAt: normalizeCodexResetsAt(w.resetsAt ?? w.resets_at ?? w.resetAt ?? w.reset_at),
     observedAt,
     source: "supported_protocol",
+    criticalRole: identity.criticalRole ?? null,
   };
 }
 
@@ -278,9 +285,15 @@ export function codexRateLimitsToReadings(
   const primary = p.rateLimits;
   if (primary && typeof primary === "object") {
     for (const [name, entry] of Object.entries(primary as Record<string, unknown>)) {
+      // The `rateLimits` aggregate is, by construction, the account-wide
+      // summary — its `primary`/`secondary` entries are the critical 5H/1W
+      // pair whenever present; any other key the provider might add here is
+      // not part of that identity.
+      const criticalRole: CapacityCriticalRole | null =
+        name === "primary" ? "five_hour" : name === "secondary" ? "weekly" : null;
       const reading = windowReadingFromEntry(
         entry,
-        { windowKey: `codex_rate_limit_${sanitizeKeySegment(name)}`, providerBucket: name },
+        { windowKey: `codex_rate_limit_${sanitizeKeySegment(name)}`, providerBucket: name, criticalRole },
         observedAt
       );
       if (reading) aggregate.push(reading);
@@ -342,6 +355,11 @@ export function codexRateLimitsToReadings(
         codexWindowValuesEqual(aggSecondary, pair.secondary)
       ) {
         collapsedAggregateKeys.push(aggPrimary.windowKey, aggSecondary.windowKey);
+        // The surviving detailed pair now stands in for the aggregate it
+        // absorbed — it IS the account-wide identity, so it inherits the
+        // aggregate's criticalRole rather than reporting as non-critical.
+        pair.primary = { ...pair.primary, criticalRole: "five_hour" };
+        pair.secondary = { ...pair.secondary, criticalRole: "weekly" };
         break;
       }
     }

@@ -400,6 +400,12 @@ CREATE TABLE IF NOT EXISTS runtime_capacity_snapshots (
   source TEXT NOT NULL,
   unavailable_reason TEXT,
   evidence_ref TEXT,
+  -- NOT-264 repair: which account-wide critical window this is ('five_hour'
+  -- / 'weekly'), set once by the adapter that knows the provider's own
+  -- identity (e.g. Codex's rateLimits aggregate, or the detailed limit pair
+  -- it collapsed into) — never re-derived client-side from a window key or
+  -- label, which cannot disambiguate multiple same-duration buckets.
+  critical_role TEXT,
   PRIMARY KEY (runtime, window_key)
 );
 

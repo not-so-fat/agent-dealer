@@ -83,10 +83,13 @@ test("rateLimits windows keep identity, percent, duration, and reset", () => {
   assert.equal(primary.durationMinutes, 300);
   assert.equal(primary.usedPercent, 40);
   assert.equal(primary.resetAt, new Date((Math.floor(now / 1000) + 7200) * 1000).toISOString());
+  assert.equal(primary.criticalRole, "five_hour", "the rateLimits aggregate primary is always the critical 5H window");
   const normalized = normalizeAdapterWindow("codex_local", primary, now);
   assert.equal(normalized.displayLabel, "5H");
   assert.equal(normalized.remainingPercent, 60);
+  assert.equal(normalized.criticalRole, "five_hour");
   const secondary = parsed.windows.find((w) => w.providerBucket === "secondary")!;
+  assert.equal(secondary.criticalRole, "weekly", "the rateLimits aggregate secondary is always the critical 1W window");
   assert.equal(normalizeAdapterWindow("codex_local", secondary, now).displayLabel, "1W");
   assert.equal(normalizeAdapterWindow("codex_local", secondary, now).remainingPercent, 87.5);
 });
@@ -123,6 +126,11 @@ test("rateLimitsByLimitId buckets never overwrite each other or rateLimits", () 
   assert.equal(aPrimary.providerBucket, "team_a/primary");
   assert.equal(aPrimary.providerLabel, "Team A");
   assert.equal(aPrimary.usedPercent, 70);
+  // No secondary aggregate half at all: no collapse comparison runs, so the
+  // detailed team buckets are never promoted to critical.
+  assert.equal(aPrimary.criticalRole, null);
+  assert.equal(parsed.windows.find((w) => w.windowKey === "codex_limit_team_b_primary")!.criticalRole, null);
+  assert.equal(parsed.windows.find((w) => w.windowKey === "codex_rate_limit_primary")!.criticalRole, "five_hour");
 });
 
 test("nested bucket windows keep per-limit identity when limitId is only the map key", () => {
@@ -191,6 +199,46 @@ test("aggregate pair mirroring one bucket collapses to the detailed identity", (
     labels.map((w) => w.remainingPercent).sort((a, b) => (a ?? 0) - (b ?? 0)),
     [91, 98]
   );
+  // The surviving detailed pair inherits the collapsed aggregate's identity
+  // rather than reporting as an ordinary non-critical bucket — this is what
+  // lets the client find it without re-deriving "which limit id is real".
+  const primaryOut = parsed.windows.find((w) => w.windowKey === "codex_limit_codex_primary")!;
+  const secondaryOut = parsed.windows.find((w) => w.windowKey === "codex_limit_codex_secondary")!;
+  assert.equal(primaryOut.criticalRole, "five_hour");
+  assert.equal(secondaryOut.criticalRole, "weekly");
+});
+
+test("NOT-264 finding: a second, distinct detailed pair alongside the collapsed one is never tagged critical", () => {
+  // The realistic Codex shape a PR review caught: the aggregate collapses
+  // into "main" (identical values) while an unrelated "extra" pair also
+  // exists. The client can no longer tell these apart by name, but the
+  // server can, by value equality against the aggregate before it is
+  // discarded — so exactly the true survivor gets tagged, never both, never
+  // neither.
+  const now = Date.now();
+  const primary = { usedPercent: 9, windowDurationMins: 300, resetsAt: now + 2 * 3600_000 };
+  const secondary = { usedPercent: 2, windowDurationMins: 10080, resetsAt: now + 3 * 86400_000 };
+  const parsed = codexRateLimitsToReadings(
+    {
+      rateLimits: { primary: { ...primary }, secondary: { ...secondary } },
+      rateLimitsByLimitId: {
+        main: { limitId: "main", primary: { ...primary }, secondary: { ...secondary } },
+        extra: {
+          limitId: "extra",
+          primary: { usedPercent: 70, windowDurationMins: 300, resetsAt: now + 3600_000 },
+          secondary: { usedPercent: 55, windowDurationMins: 10080, resetsAt: now + 4 * 86400_000 },
+        },
+      },
+    },
+    new Date(now).toISOString()
+  );
+  assert.ok(parsed);
+  assert.deepEqual(parsed.collapsedAggregateKeys, ["codex_rate_limit_primary", "codex_rate_limit_secondary"]);
+  const byKey = new Map(parsed.windows.map((w) => [w.windowKey, w]));
+  assert.equal(byKey.get("codex_limit_main_primary")!.criticalRole, "five_hour");
+  assert.equal(byKey.get("codex_limit_main_secondary")!.criticalRole, "weekly");
+  assert.equal(byKey.get("codex_limit_extra_primary")!.criticalRole, null);
+  assert.equal(byKey.get("codex_limit_extra_secondary")!.criticalRole, null);
 });
 
 test("partial overlap never collapses: only one sub-window matches", () => {
@@ -238,6 +286,9 @@ test("distinct buckets sharing a duration stay independently visible", () => {
   const labels = parsed.windows.map((w) => normalizeAdapterWindow("codex_local", w, now));
   assert.ok(labels.every((w) => w.displayLabel === "5H"), "same label, both still visible");
   assert.deepEqual(parsed.collapsedAggregateKeys, []);
+  // No rateLimits aggregate at all here, so neither same-duration bucket is
+  // ever tagged critical — an honest "we don't know" rather than a guess.
+  assert.ok(parsed.windows.every((w) => w.criticalRole === null));
 });
 
 test("window equality compares values, never display labels", () => {

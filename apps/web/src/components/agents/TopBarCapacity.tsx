@@ -8,11 +8,13 @@
 //
 // NOT-264: runtimes that report the familiar 5H/1W pair render both readings
 // independently — a compact two-line block with 5H above 1W — instead of one
-// collapsed minimum. The pair is selected by provider bucket identity (never
-// by label/duration), so model-specific extras never fold into the critical
-// rows. Exhausting either critical window means the runtime cannot be used,
-// so either known critical row at 0% gives the whole block an exhausted
-// treatment while both labeled values stay visible.
+// collapsed minimum. The pair is selected by the server-tagged
+// `criticalRole` (never re-derived from a label, duration, or window-key
+// heuristic — see selectCriticalPair), so model-specific extras never fold
+// into the critical rows. Exhausting either critical window means the
+// runtime cannot be used, so either known critical row at 0% gives the
+// whole block an exhausted treatment while both labeled values stay
+// visible.
 import type {
   CapacityUnavailableReason,
   CapacityWindowSnapshot,
@@ -60,91 +62,22 @@ export type PerRuntimeSummary = {
   detail: string;
 };
 
-/** A Codex detailed per-limit window key: `codex_limit_<limitId>_<sub>`. The
- * limitId is arbitrary provider data (`main`, `codex`, a team name, ...) —
- * never a fixed name to match against. */
-const CODEX_DETAILED_KEY = /^codex_limit_(.+)_(primary|secondary)$/;
-
-/** The one Codex detailed limit pair, when exactly one limitId reports both
- * halves. Two or more complete pairs (e.g. `main` + `extra`) are genuinely
- * ambiguous — which one is account-wide is not decidable from the key alone
- * — so this returns null rather than guessing a name like `main`. */
-function soleCodexDetailedPair(
-  windows: CapacityWindowSnapshot[]
-): { primary: CapacityWindowSnapshot; secondary: CapacityWindowSnapshot } | null {
-  const byLimitId = new Map<
-    string,
-    { primary?: CapacityWindowSnapshot; secondary?: CapacityWindowSnapshot }
-  >();
-  for (const w of windows) {
-    const m = CODEX_DETAILED_KEY.exec(w.windowKey);
-    if (!m) continue;
-    const [, limitId, sub] = m;
-    const entry = byLimitId.get(limitId) ?? {};
-    entry[sub as "primary" | "secondary"] = w;
-    byLimitId.set(limitId, entry);
-  }
-  const complete: Array<{ primary: CapacityWindowSnapshot; secondary: CapacityWindowSnapshot }> = [];
-  for (const entry of byLimitId.values()) {
-    if (entry.primary && entry.secondary) complete.push({ primary: entry.primary, secondary: entry.secondary });
-  }
-  return complete.length === 1 ? complete[0] : null;
-}
-
 /**
- * The critical 5H/1W pair, selected by provider bucket identity — never by
- * rendered label or duration. The server labels every 300/10,080-minute
- * bucket 5H/1W via deriveWindowLabel, including model-specific extras
- * (Claude `seven_day_sonnet`/`seven_day_opus`, Codex `codex_limit_<x>_*`),
- * so label/duration matching folds non-critical buckets into the critical
- * rows, min-collapses them, and can falsely mark the runtime exhausted.
- *
- * Per provider family, tried in order, each half resolved independently so
- * one provider's partial/malformed data never blanks a half the detailed
- * data can still supply:
- * - Codex: the `rateLimits` aggregate (`codex_rate_limit_primary/secondary`)
- *   — always the account-wide summary when present. A half missing from the
- *   aggregate (whether from the server's NOT-263 dedup collapse or from
- *   `rateLimitsByLimitId` malformed/partial upstream data) falls back to the
- *   matching half of the sole unambiguous detailed pair; two or more
- *   complete detailed pairs are ambiguous and yield no critical row rather
- *   than guessing a limit id.
- * - Claude / Muse / legacy adapters: `five_hour` / `seven_day` (or
- *   `weekly`/`rolling_all_models`/`weekly_all_models`) buckets, by window
- *   key or provider bucket.
+ * The critical 5H/1W pair, selected by the server-tagged `criticalRole` —
+ * never re-derived here from a window key, label, or duration. Two windows
+ * sharing a duration (an account-wide weekly window and a model-specific
+ * `seven_day_sonnet` extra, or two same-duration Codex limit buckets) are
+ * not distinguishable from the client's side of the wire: only the adapter
+ * that produced the reading knows which one is account-wide, so it tags
+ * that one reading and every other window is simply not tagged.
  */
 function selectCriticalPair(
   windows: CapacityWindowSnapshot[]
 ): { fiveHour: CapacityWindowSnapshot | null; weekly: CapacityWindowSnapshot | null } {
-  const aggFiveHour = windows.find((w) => w.windowKey === "codex_rate_limit_primary") ?? null;
-  const aggWeekly = windows.find((w) => w.windowKey === "codex_rate_limit_secondary") ?? null;
-  const solePair = aggFiveHour === null || aggWeekly === null ? soleCodexDetailedPair(windows) : null;
-  if (aggFiveHour || aggWeekly || solePair) {
-    return {
-      fiveHour: aggFiveHour ?? solePair?.primary ?? null,
-      weekly: aggWeekly ?? solePair?.secondary ?? null,
-    };
-  }
-
-  const fiveHour =
-    windows.find(
-      (w) =>
-        w.windowKey === "five_hour" ||
-        w.windowKey === "claude_unified_five_hour" ||
-        w.windowKey === "rolling_all_models" ||
-        w.providerBucket.toLowerCase() === "five_hour"
-    ) ?? null;
-  const weekly =
-    windows.find(
-      (w) =>
-        w.windowKey === "weekly" ||
-        w.windowKey === "claude_unified_seven_day" ||
-        w.windowKey === "claude_unified_weekly" ||
-        w.windowKey === "weekly_all_models" ||
-        w.providerBucket.toLowerCase() === "seven_day" ||
-        w.providerBucket.toLowerCase() === "weekly"
-    ) ?? null;
-  return { fiveHour, weekly };
+  return {
+    fiveHour: windows.find((w) => w.criticalRole === "five_hour") ?? null,
+    weekly: windows.find((w) => w.criticalRole === "weekly") ?? null,
+  };
 }
 
 /** The reason an unknown window renders N/A: its explicit flag, else the

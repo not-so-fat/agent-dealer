@@ -52,7 +52,7 @@
 //   persist as independent rows.
 
 import fs from "node:fs";
-import type { Runtime } from "@agent-dealer/shared";
+import type { CapacityCriticalRole, Runtime } from "@agent-dealer/shared";
 import { parseNdjson } from "../runners/stream-json.js";
 import {
   listCapacitySnapshots,
@@ -184,6 +184,21 @@ export function inferClaudeDurationMinutes(bucket: string): number | null {
   return null;
 }
 
+/**
+ * The account-wide critical window's identity, decided here — once,
+ * authoritatively — and never re-derived downstream. Deliberately an exact
+ * match, unlike `inferClaudeDurationMinutes`'s loose regex: a model-specific
+ * extra like `seven_day_sonnet`/`seven_day_opus` shares the 10,080-minute
+ * duration with the real account-wide `seven_day`/`weekly` bucket but is
+ * not the critical window, so identity can't reuse that regex.
+ */
+export function claudeCriticalRole(bucket: string): CapacityCriticalRole | null {
+  const b = bucket.trim().toLowerCase();
+  if (b === "five_hour") return "five_hour";
+  if (b === "seven_day" || b === "weekly") return "weekly";
+  return null;
+}
+
 function windowReadingFromEntry(
   bucket: string,
   entry: unknown,
@@ -233,6 +248,7 @@ function windowReadingFromEntry(
     observedAt,
     source: "observed_event",
     evidenceRef: CLAUDE_UNIFIED_WINDOWS_EVIDENCE_REF,
+    criticalRole: claudeCriticalRole(cleanBucket),
   };
 }
 
@@ -376,6 +392,7 @@ export function recordClaudeCapacityFromEvents(
       source: w.source,
       unavailableReason: w.unavailableReason,
       evidenceRef: w.evidenceRef,
+      criticalRole: w.criticalRole,
     }))
   );
   return fresh.length;

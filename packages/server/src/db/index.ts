@@ -437,6 +437,14 @@ export function migrate(): void {
     `);
   }
 
+  // NOT-264 repair: critical_role on a table that predates it.
+  const capacityCols = db.prepare("PRAGMA table_info(runtime_capacity_snapshots)").all() as Array<{
+    name: string;
+  }>;
+  if (!capacityCols.some((c) => c.name === "critical_role")) {
+    db.exec("ALTER TABLE runtime_capacity_snapshots ADD COLUMN critical_role TEXT");
+  }
+
   // NOT-249: normalized Cursor-team billing snapshot for databases created
   // before schema.sql declared the table (same upgrade-path pattern as
   // runtime_capacity_snapshots above).

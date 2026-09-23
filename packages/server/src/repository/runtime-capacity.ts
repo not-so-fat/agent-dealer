@@ -11,6 +11,7 @@
 // (log path, probe id), never credentials and never a raw provider payload.
 
 import type {
+  CapacityCriticalRole,
   CapacitySource,
   CapacityUnavailableReason,
   CapacityWindowSnapshot,
@@ -34,6 +35,7 @@ interface CapacitySnapshotRow {
   source: string;
   unavailable_reason: string | null;
   evidence_ref: string | null;
+  critical_role: string | null;
 }
 
 export interface RecordCapacityWindowInput {
@@ -52,6 +54,7 @@ export interface RecordCapacityWindowInput {
   unavailableReason?: CapacityUnavailableReason | null;
   /** Server-side pointer only — never credentials or raw payloads. */
   evidenceRef?: string | null;
+  criticalRole?: CapacityCriticalRole | null;
 }
 
 function rowToSnapshot(row: CapacitySnapshotRow): CapacityWindowSnapshot {
@@ -69,6 +72,7 @@ function rowToSnapshot(row: CapacitySnapshotRow): CapacityWindowSnapshot {
     expiresAt: row.expires_at,
     source: row.source as CapacitySource,
     unavailableReason: row.unavailable_reason as CapacityUnavailableReason | null,
+    criticalRole: row.critical_role as CapacityCriticalRole | null,
   };
 }
 
@@ -82,12 +86,14 @@ export function recordCapacitySnapshots(runtime: Runtime, windows: RecordCapacit
     INSERT INTO runtime_capacity_snapshots (
       runtime, window_key, provider_bucket, duration_minutes, display_label,
       used_value, used_unit, remaining_percent, reset_at, observed_at,
-      fresh_until, expires_at, source, unavailable_reason, evidence_ref
+      fresh_until, expires_at, source, unavailable_reason, evidence_ref,
+      critical_role
     )
     VALUES (
       @runtime, @window_key, @provider_bucket, @duration_minutes, @display_label,
       @used_value, @used_unit, @remaining_percent, @reset_at, @observed_at,
-      @fresh_until, @expires_at, @source, @unavailable_reason, @evidence_ref
+      @fresh_until, @expires_at, @source, @unavailable_reason, @evidence_ref,
+      @critical_role
     )
     ON CONFLICT(runtime, window_key) DO UPDATE SET
       provider_bucket = excluded.provider_bucket,
@@ -102,7 +108,8 @@ export function recordCapacitySnapshots(runtime: Runtime, windows: RecordCapacit
       expires_at = excluded.expires_at,
       source = excluded.source,
       unavailable_reason = excluded.unavailable_reason,
-      evidence_ref = excluded.evidence_ref
+      evidence_ref = excluded.evidence_ref,
+      critical_role = excluded.critical_role
   `);
   const run = getDb().transaction((rows: RecordCapacityWindowInput[]) => {
     for (const w of rows) {
@@ -122,6 +129,7 @@ export function recordCapacitySnapshots(runtime: Runtime, windows: RecordCapacit
         source: w.source,
         unavailable_reason: w.unavailableReason ?? null,
         evidence_ref: w.evidenceRef ?? null,
+        critical_role: w.criticalRole ?? null,
       });
     }
   });
