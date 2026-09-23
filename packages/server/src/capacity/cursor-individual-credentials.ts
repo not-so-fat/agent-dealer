@@ -244,7 +244,12 @@ export function loadCursorIndividualCredential(
     // (`google-oauth2|user_abc`) — normalize both the same way.
     const rawUserId = pickUserId(parsed as Record<string, unknown>) ?? decodeJwtSubject(picked.token);
     if (!rawUserId) return { status: "unparsable", path: candidate, format: picked.key };
+    // Re-check AFTER normalization: an id ending in `|` (e.g. a bare
+    // `"google-oauth2|"` with nothing after it) is non-empty here but
+    // normalizes to "" — that must degrade too, not build a cookie with an
+    // empty user id.
     const userId = normalizeWorkosUserId(rawUserId);
+    if (!userId) return { status: "unparsable", path: candidate, format: picked.key };
     return {
       status: "found",
       path: candidate,

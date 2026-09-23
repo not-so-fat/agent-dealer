@@ -151,6 +151,24 @@ test("a provider-prefixed explicit userId field is normalized the same way", () 
   assert.equal(credential.authHeader, cursorIndividualAuthHeader("user_fixture", SECRET));
 });
 
+test("an id that normalizes to empty (nothing after the final |) reads unparsable, never an empty-id cookie", () => {
+  // Non-empty before normalization (passes the raw presence check), but
+  // normalizeWorkosUserId("github|") === "" — must still degrade, not build
+  // WorkosCursorSessionToken=%3A%3A<token>.
+  assert.equal(normalizeWorkosUserId("github|"), "");
+  // Explicit-field path.
+  fixture("auth.json", JSON.stringify({ token: SECRET, userId: "github|" }));
+  const fromField = loadCursorIndividualCredential();
+  assert.equal(fromField.status, "unparsable");
+  assert.equal(fromField.authHeader, undefined);
+  // JWT-`sub`-derived path.
+  const jwt = fixtureJwt("github|");
+  fixture("auth.json", JSON.stringify({ token: jwt }));
+  const fromJwt = loadCursorIndividualCredential();
+  assert.equal(fromJwt.status, "unparsable");
+  assert.equal(fromJwt.authHeader, undefined);
+});
+
 test("changed credential formats read unparsable, never a guess", () => {
   const changed: unknown[] = [
     { totallyNewShape: true, session: { id: "abc" } },
