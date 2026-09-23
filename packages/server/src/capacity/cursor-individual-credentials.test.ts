@@ -17,6 +17,7 @@ import {
   cursorIndividualCredentialStatus,
   decodeJwtSubject,
   loadCursorIndividualCredential,
+  normalizeWorkosUserId,
 } from "./cursor-individual-credentials.js";
 
 const SECRET = "fixture-secret-token-abc123";
@@ -116,6 +117,38 @@ test("a token with no derivable user id reads unparsable — never a Bearer-only
   const credential = loadCursorIndividualCredential();
   assert.equal(credential.status, "unparsable");
   assert.equal(credential.authHeader, undefined);
+});
+
+test("the auth header is the WorkosCursorSessionToken cookie with the :: delimiter percent-encoded", () => {
+  const header = cursorIndividualAuthHeader(USER_ID, SECRET);
+  assert.equal(header, `WorkosCursorSessionToken=${USER_ID}%3A%3A${SECRET}`);
+  // Never the raw, unencoded delimiter the dashboard rejects.
+  assert.ok(!header.includes(`${USER_ID}::${SECRET}`));
+});
+
+test("normalizeWorkosUserId strips a provider connection-type prefix", () => {
+  assert.equal(normalizeWorkosUserId("google-oauth2|user_abc"), "user_abc");
+  assert.equal(normalizeWorkosUserId("github|12345"), "12345");
+  // A bare id (no prefix) passes through unchanged.
+  assert.equal(normalizeWorkosUserId(USER_ID), USER_ID);
+  // Only the LAST `|` matters, in case a value itself contains one.
+  assert.equal(normalizeWorkosUserId("a|b|c"), "c");
+});
+
+test("a provider-prefixed JWT subject is normalized before it reaches the cookie", () => {
+  const jwt = fixtureJwt("google-oauth2|user_fixture");
+  fixture("auth.json", JSON.stringify({ token: jwt }));
+  const credential = loadCursorIndividualCredential();
+  assert.equal(credential.status, "found");
+  // The cookie carries the bare id, never the provider-qualified subject.
+  assert.equal(credential.authHeader, cursorIndividualAuthHeader("user_fixture", jwt));
+  assert.ok(!credential.authHeader!.includes("google-oauth2"));
+});
+
+test("a provider-prefixed explicit userId field is normalized the same way", () => {
+  fixture("auth.json", JSON.stringify({ token: SECRET, userId: "github|user_fixture" }));
+  const credential = loadCursorIndividualCredential();
+  assert.equal(credential.authHeader, cursorIndividualAuthHeader("user_fixture", SECRET));
 });
 
 test("changed credential formats read unparsable, never a guess", () => {

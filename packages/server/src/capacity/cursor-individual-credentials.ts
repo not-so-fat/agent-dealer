@@ -61,10 +61,11 @@ export const CURSOR_INDIVIDUAL_TOKEN_KEYS = [
 
 /**
  * Accepted top-level WorkOS user-id keys. The dashboard's session cookie is
- * `<userId>::<token>` (see `cursorIndividualAuthHeader`) — a bare token is
- * not enough. Same allowlist discipline as the token keys: an explicit field
- * here wins; otherwise the id is derived from the token's own JWT `sub`
- * claim (see `decodeJwtSubject`).
+ * `<userId>%3A%3A<token>` (see `cursorIndividualAuthHeader`) — a bare token
+ * is not enough. Same allowlist discipline as the token keys: an explicit
+ * field here wins; otherwise the id is derived from the token's own JWT
+ * `sub` claim (see `decodeJwtSubject`). Either source is normalized through
+ * `normalizeWorkosUserId` to strip a provider prefix.
  */
 export const CURSOR_INDIVIDUAL_USER_ID_KEYS = [
   "userId",
@@ -156,7 +157,11 @@ function base64UrlDecode(segment: string): string | null {
  * The WorkOS session id is normally the JWT's own `sub` claim — decoded
  * locally (no network, no signature verification: this only *reads* an id
  * already present in a credential the caller trusts) so a plain access-token
- * file still yields a usable id without a separate stored field.
+ * file still yields a usable id without a separate stored field. WorkOS
+ * subjects are commonly provider-prefixed (e.g. `google-oauth2|user_abc`);
+ * the raw claim is returned as-is here — `normalizeWorkosUserId` strips the
+ * prefix, applied uniformly to both this and an explicit `userId` field so
+ * either source lands on the same bare id.
  */
 export function decodeJwtSubject(token: string): string | null {
   const parts = token.split(".");
@@ -174,15 +179,27 @@ export function decodeJwtSubject(token: string): string | null {
 }
 
 /**
+ * Strips a WorkOS connection-type prefix (`google-oauth2|user_abc` →
+ * `user_abc`): the dashboard's own session cookie carries the bare id after
+ * the final `|`, never the provider-qualified subject.
+ */
+export function normalizeWorkosUserId(id: string): string {
+  const at = id.lastIndexOf("|");
+  return at === -1 ? id : id.slice(at + 1);
+}
+
+/**
  * Dashboard auth scheme: a `WorkosCursorSessionToken` cookie of
- * `<userId>::<token>` (community-observed: cursor-pulse, oh-my-pi) — the
- * dashboard rejects a Bearer `Authorization` header. The scheme is part of
- * the undocumented surface and may drift (drift reads `unparsable`/`forbidden`
- * at the HTTP layer, never a credential guess here). Returns the `Cookie`
- * header VALUE (the caller sends it under the `Cookie` header name).
+ * `<userId>%3A%3A<token>` (community-observed: cursor-pulse, oh-my-pi,
+ * vct-core) — the dashboard rejects a Bearer `Authorization` header, and the
+ * `::` delimiter itself is percent-encoded in the live cookie value, not
+ * sent literally. The scheme is part of the undocumented surface and may
+ * drift (drift reads `unparsable`/`forbidden` at the HTTP layer, never a
+ * credential guess here). Returns the `Cookie` header VALUE (the caller
+ * sends it under the `Cookie` header name).
  */
 export function cursorIndividualAuthHeader(userId: string, token: string): string {
-  return `WorkosCursorSessionToken=${userId}::${token}`;
+  return `WorkosCursorSessionToken=${userId}%3A%3A${token}`;
 }
 
 export interface ReadFileImpl {
@@ -223,9 +240,11 @@ export function loadCursorIndividualCredential(
     // The cookie needs a user id too — an explicit field wins; otherwise
     // derive it from the token's own JWT `sub` claim. Neither present means
     // this credential cannot build a usable session, same as any other
-    // format drift.
-    const userId = pickUserId(parsed as Record<string, unknown>) ?? decodeJwtSubject(picked.token);
-    if (!userId) return { status: "unparsable", path: candidate, format: picked.key };
+    // format drift. Either source may be provider-prefixed
+    // (`google-oauth2|user_abc`) — normalize both the same way.
+    const rawUserId = pickUserId(parsed as Record<string, unknown>) ?? decodeJwtSubject(picked.token);
+    if (!rawUserId) return { status: "unparsable", path: candidate, format: picked.key };
+    const userId = normalizeWorkosUserId(rawUserId);
     return {
       status: "found",
       path: candidate,

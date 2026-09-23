@@ -339,12 +339,16 @@ Opt-in (disabled by default — no silent opt-in, no credential migration):
   presence/path/format only, never secret material. The session cookie needs
   a WorkOS user id alongside the token — an explicit `userId`/`user_id` field
   wins; otherwise it's derived locally from the token's own JWT `sub` claim
-  (no network, no signature check). A token with neither reads `unparsable`.
+  (no network, no signature check). Either source is normalized to strip a
+  provider connection-type prefix (`google-oauth2|user_abc` → `user_abc`).
+  A token with no derivable id reads `unparsable`.
 
 Reads (bounded: 10 s per request covering the full response — headers AND
 body, `AGENT_DEALER_CURSOR_INDIVIDUAL_TIMEOUT_MS` override; a
-`WorkosCursorSessionToken` session cookie built from the local login,
-never an `Authorization` header — the dashboard rejects Bearer auth):
+`WorkosCursorSessionToken=<userId>%3A%3A<token>` session cookie built from
+the local login (the `::` delimiter percent-encoded, matching the live
+dashboard cookie), never an `Authorization` header — the dashboard rejects
+Bearer auth):
 
 - `GET /api/usage-summary/current-period`, falling back to
   `/api/usage-summary` on 404 (endpoint drift). Default origin
@@ -398,13 +402,17 @@ browser, the API, or the logs, and evidence refs are static
 (`cursor-dashboard:…`).
 
 `GET /api/cursor-individual-billing` triggers
-`refreshCursorIndividualBillingIfStale()`: when opted in with a missing/stale
-stored snapshot, the read performs one bounded poll (single-flight, each
-request under the per-request timeout) and then serves the result — fresh
-snapshots short-circuit with no credential/HTTP, and a failed poll backs off
-for 60 s. `AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH=off` disables the refresh.
-`GET /api/runtime-capacity` additionally ingests the billing-cycle window via
-`refreshCursorIndividualCapacityIfStale()` (disabled = strict no-op). The
+`refreshCursorIndividualBillingIfStale()`, and `GET /api/runtime-capacity`
+triggers `refreshCursorIndividualCapacityIfStale()` (disabled = strict
+no-op) to ingest the billing-cycle window. Each checks its OWN stored
+table's freshness first (the billing snapshot row vs. the
+`runtime_capacity_snapshots` window) and short-circuits with no
+credential/HTTP when fresh — but the two routes are usually mounted at once
+(the billing card and the capacity strip both render on the Agents page), so
+when BOTH decide they're stale they share one poll: a single in-flight
+dashboard read, its observation ingested into both stores, rather than one
+poll per route. A failed poll backs off for 60 s (shared by both routes).
+`AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH=off` disables the refresh. The
 Agents page renders individual billing in its own labeled section
 (`CursorIndividualBillingCard`, "Cursor individual billing · Experimental")
 below the team card: cycle label, remaining percent, reported usage, and

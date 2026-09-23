@@ -658,6 +658,35 @@ test("capacity-strip refresh is stale-aware: a fresh stored window skips HTTP, c
   assert.equal(calls, 1, "a fresh stored window is served with no further HTTP");
 });
 
+test("the billing-card and capacity-strip refresh paths share one poll, not two", async () => {
+  // The two paths read different stored tables (cursor_individual_billing
+  // vs runtime_capacity_snapshots), so each independently sees an empty
+  // database as stale. Without a shared single-flight, the billing card and
+  // the capacity strip mounting at once — the real Agents-page shape — fire
+  // two separate dashboard polls.
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  let calls = 0;
+  const baseFetch = mockFetch(okRoutes(now));
+  const countingFetch: FetchImpl = async (url, init) => {
+    calls += 1;
+    return baseFetch(url, init);
+  };
+  const opts = { baseUrl: MOCK_BASE, fetchImpl: countingFetch, nowMs: now };
+  await Promise.all([
+    refreshCursorIndividualBillingIfStale(now, opts),
+    refreshCursorIndividualCapacityIfStale(now, opts),
+  ]);
+  assert.equal(calls, 1, "both refresh paths share one HTTP call");
+  // The single poll's observation must have been ingested into BOTH stores.
+  const billingRow = readCursorIndividualBillingRow();
+  assert.equal(billingRow?.cycleLabel, "September 2026");
+  const snap = getRuntimeCapacitySnapshot(now);
+  const cursor = snap.runtimes.find((r) => r.runtime === "cursor_local");
+  assert.equal(cursor?.windows[0]?.remainingPercent, 62.5);
+});
+
 test("payload parsing keeps reported values and rejects empty shapes", () => {
   const now = Date.now();
   const readings = cursorIndividualPayloadToReadings(usagePayload(now));

@@ -905,23 +905,79 @@ export async function refreshCursorIndividualBilling(
   return getCursorIndividualBillingSnapshot(nowMs);
 }
 
-let cursorIndividualStaleRefreshInFlight: Promise<unknown> | null = null;
+let cursorIndividualSharedPollInFlight: Promise<void> | null = null;
 let cursorIndividualLastFailedPollMs: number | null = null;
 
 /** Test helper — clear the failure backoff (and any in-flight refresh). */
 export function resetCursorIndividualPollStateForTests(): void {
   cursorIndividualLastFailedPollMs = null;
-  cursorIndividualStaleRefreshInFlight = null;
-  cursorIndividualCapacityStaleRefreshInFlight = null;
+  cursorIndividualSharedPollInFlight = null;
+}
+
+/**
+ * One bounded dashboard poll, shared by BOTH on-demand refresh paths below.
+ * The billing card (`/api/cursor-individual-billing`) and the capacity strip
+ * (`/api/runtime-capacity`) each read a different stored table, so each
+ * deciding independently that its own table is stale — as when both mount
+ * concurrently against an empty database — would otherwise fire two
+ * separate dashboard polls. This single-flights across BOTH callers (not
+ * just concurrent calls to the same one) and ingests the one observation
+ * into both stores, so satisfying either caller's staleness also refreshes
+ * the other's. Failures back off for `CURSOR_INDIVIDUAL_FAILURE_BACKOFF_MS`
+ * (shared by both paths) before polling again. Never throws.
+ */
+async function pollCursorIndividualShared(
+  nowMs: number,
+  opts: CursorIndividualReadOptions
+): Promise<void> {
+  if (
+    cursorIndividualLastFailedPollMs !== null &&
+    nowMs - cursorIndividualLastFailedPollMs < CURSOR_INDIVIDUAL_FAILURE_BACKOFF_MS
+  ) {
+    return;
+  }
+  if (cursorIndividualSharedPollInFlight) {
+    await cursorIndividualSharedPollInFlight;
+    return;
+  }
+  cursorIndividualSharedPollInFlight = (async () => {
+    try {
+      const observation = await readCursorIndividualBilling({ ...opts, nowMs });
+      if (
+        observation.failure &&
+        observation.failure.kind !== "malformed" &&
+        observation.failure.kind !== "bad-credential"
+      ) {
+        cursorIndividualLastFailedPollMs = nowMs;
+      }
+      try {
+        await ingestCursorIndividualObservation(observation, nowMs);
+      } catch {
+        // Storage failure must not break the read below.
+      }
+      try {
+        const { ingestAdapterResult } = await import("./service.js");
+        await ingestAdapterResult(cursorIndividualObservationToAdapterResult(observation, nowMs));
+      } catch {
+        // Storage failure must not break the read below.
+      }
+    } catch {
+      cursorIndividualLastFailedPollMs = nowMs;
+    } finally {
+      cursorIndividualSharedPollInFlight = null;
+    }
+  })();
+  await cursorIndividualSharedPollInFlight;
 }
 
 /**
  * On-demand bounded refresh: when explicitly opted in and the stored
  * snapshot is missing or older than the stale window, run one bounded poll
- * and ingest it, then return. Disabled, fresh snapshots, and recent failed
- * polls short-circuit with no credential access and no HTTP (single-flight
- * across concurrent requests). This helper never throws, never touches
- * runtime health, and never sends the credential off the allowlist.
+ * (shared with the capacity-strip path below) and ingest it, then return.
+ * Disabled, fresh snapshots, and recent failed polls short-circuit with no
+ * credential access and no HTTP (single-flight across concurrent requests,
+ * including the other refresh path). This helper never throws, never
+ * touches runtime health, and never sends the credential off the allowlist.
  * Set `AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH=off` to disable.
  */
 export async function refreshCursorIndividualBillingIfStale(
@@ -938,38 +994,7 @@ export async function refreshCursorIndividualBillingIfStale(
   if (Number.isFinite(newestObserved) && newestObserved + DEFAULT_STALE_AFTER_MS > nowMs) {
     return;
   }
-  if (
-    cursorIndividualLastFailedPollMs !== null &&
-    nowMs - cursorIndividualLastFailedPollMs < CURSOR_INDIVIDUAL_FAILURE_BACKOFF_MS
-  ) {
-    return;
-  }
-  if (cursorIndividualStaleRefreshInFlight) {
-    await cursorIndividualStaleRefreshInFlight;
-    return;
-  }
-  cursorIndividualStaleRefreshInFlight = (async () => {
-    try {
-      const observation = await readCursorIndividualBilling({ ...opts, nowMs });
-      if (
-        observation.failure &&
-        observation.failure.kind !== "malformed" &&
-        observation.failure.kind !== "bad-credential"
-      ) {
-        cursorIndividualLastFailedPollMs = nowMs;
-      }
-      try {
-        await ingestCursorIndividualObservation(observation, nowMs);
-      } catch {
-        // Storage failure must not break the read below.
-      }
-    } catch {
-      cursorIndividualLastFailedPollMs = nowMs;
-    } finally {
-      cursorIndividualStaleRefreshInFlight = null;
-    }
-  })();
-  await cursorIndividualStaleRefreshInFlight;
+  await pollCursorIndividualShared(nowMs, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,20 +1088,18 @@ export function cursorIndividualCapacityAdapter(
   };
 }
 
-let cursorIndividualCapacityStaleRefreshInFlight: Promise<unknown> | null = null;
-
 /**
- * On-demand capacity-strip refresh: ingest one bounded adapter read into
- * `runtime_capacity_snapshots` so the Agents-page strip shows the
- * billing-cycle window (or its explicit N/A) for `cursor_local`. Disabled is
- * a strict no-op — no credential, no HTTP. Mirrors the Codex/Team stale-check
- * pattern: a fresh stored window (younger than `DEFAULT_STALE_AFTER_MS`)
- * short-circuits with no HTTP, and concurrent callers share one in-flight
- * poll (single-flight) instead of each firing their own dashboard request —
- * `GET /api/runtime-capacity` calls this on every poll, so without both
- * checks it would hit the dashboard on every request. Never throws, never
- * touches runtime health. Imported lazily to keep this module free of DB
- * binds.
+ * On-demand capacity-strip refresh: when the stored `cursor_local` window in
+ * `runtime_capacity_snapshots` is missing or stale, run the poll shared with
+ * the billing-card path above (see `pollCursorIndividualShared`) so the
+ * Agents-page strip shows the billing-cycle window (or its explicit N/A).
+ * Disabled is a strict no-op — no credential, no HTTP. Mirrors the
+ * Codex/Team stale-check pattern: a fresh stored window (younger than
+ * `DEFAULT_STALE_AFTER_MS`) short-circuits with no HTTP. `GET
+ * /api/runtime-capacity` calls this on every poll, so without the check (and
+ * the single-flight shared with the billing-card path) it would hit the
+ * dashboard on every request. Never throws, never touches runtime health.
+ * Imported lazily to keep this module free of DB binds.
  */
 export async function refreshCursorIndividualCapacityIfStale(
   nowMs = Date.now(),
@@ -1094,26 +1117,5 @@ export async function refreshCursorIndividualCapacityIfStale(
   if (newestObserved !== null && newestObserved + DEFAULT_STALE_AFTER_MS > nowMs) {
     return;
   }
-  if (cursorIndividualCapacityStaleRefreshInFlight) {
-    await cursorIndividualCapacityStaleRefreshInFlight;
-    return;
-  }
-  const run = (async () => {
-    try {
-      const { ingestAdapterResult } = await import("./service.js");
-      const adapter = cursorIndividualCapacityAdapter(opts);
-      const result = await adapter.read(nowMs);
-      await ingestAdapterResult(result);
-    } catch {
-      // A refresh failure must never break capacity reads or job execution.
-    }
-  })();
-  cursorIndividualCapacityStaleRefreshInFlight = run;
-  try {
-    await run;
-  } finally {
-    if (cursorIndividualCapacityStaleRefreshInFlight === run) {
-      cursorIndividualCapacityStaleRefreshInFlight = null;
-    }
-  }
+  await pollCursorIndividualShared(nowMs, opts);
 }
