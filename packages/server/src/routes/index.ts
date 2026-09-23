@@ -15,7 +15,6 @@ import {
   parseLinearIssueRef,
 } from "../adapters/linear-inbox.js";
 import { getLinearUsageSnapshot } from "../adapters/linear-graphql.js";
-import { registerRepositoryMappingsRoutes } from "./repository-mappings.js";
 import { listRuntimeModels } from "../runners/models.js";
 import { configuredCapacityRuntimes, getRuntimeCapacitySnapshot } from "../capacity/service.js";
 import { maybeRefreshMuseCapacityFromServe } from "../capacity/muse.js";
@@ -34,7 +33,6 @@ async function resolveDeckName(deckId?: string): Promise<string | null> {
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => ({ ok: true }));
-  await registerRepositoryMappingsRoutes(app);
 
   // NOT-159: process-lifetime Linear GraphQL counters (API-key bucket diagnostics).
   app.get("/api/debug/linear-usage", async () => getLinearUsageSnapshot());
