@@ -437,6 +437,51 @@ export function migrate(): void {
     `);
   }
 
+  // NOT-249: normalized Cursor-team billing snapshot for databases created
+  // before schema.sql declared the table (same upgrade-path pattern as
+  // runtime_capacity_snapshots above).
+  const cursorTeamBilling = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cursor_team_billing_snapshots'")
+    .get() as { name: string } | undefined;
+  if (!cursorTeamBilling) {
+    db.exec(`
+      CREATE TABLE cursor_team_billing_snapshots (
+        id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+        cycle_start TEXT,
+        cycle_end TEXT,
+        spend_value REAL,
+        spend_unit TEXT,
+        hard_limit_value REAL,
+        hard_limit_unit TEXT,
+        member_count REAL,
+        member_limit_override_count REAL,
+        usage_period_start TEXT,
+        usage_period_end TEXT,
+        usage_spend_value REAL,
+        usage_spend_unit TEXT,
+        source TEXT NOT NULL,
+        unavailable_reason TEXT,
+        observed_at TEXT NOT NULL,
+        fresh_until TEXT,
+        expires_at TEXT,
+        evidence_ref TEXT
+      );
+    `);
+  }
+  // NOT-249 round 2: the spend response reports team size and per-member
+  // limit overrides (no team hard limit). Backfill the columns for databases
+  // created before this round declared them.
+  {
+    const cols = db.prepare("PRAGMA table_info(cursor_team_billing_snapshots)").all() as Array<{ name: string }>;
+    if (cols.length > 0 && !cols.some((c) => c.name === "member_count")) {
+      db.exec("ALTER TABLE cursor_team_billing_snapshots ADD COLUMN member_count REAL");
+    }
+    const cols2 = db.prepare("PRAGMA table_info(cursor_team_billing_snapshots)").all() as Array<{ name: string }>;
+    if (cols2.length > 0 && !cols2.some((c) => c.name === "member_limit_override_count")) {
+      db.exec("ALTER TABLE cursor_team_billing_snapshots ADD COLUMN member_limit_override_count REAL");
+    }
+  }
+
   // NOT-103: sequential issue admission queue.
   const queueEntries = db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'queue_entries'")

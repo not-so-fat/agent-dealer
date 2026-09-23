@@ -18,6 +18,11 @@ import { getLinearUsageSnapshot } from "../adapters/linear-graphql.js";
 import { listRuntimeModels } from "../runners/models.js";
 import { configuredCapacityRuntimes, getRuntimeCapacitySnapshot } from "../capacity/service.js";
 import { maybeRefreshMuseCapacityFromServe } from "../capacity/muse.js";
+import { refreshCodexCapacityIfStale } from "../capacity/codex-app-server.js";
+import {
+  getCursorTeamBillingSnapshot,
+  refreshCursorTeamBillingIfStale,
+} from "../capacity/cursor-team.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
   if (!deckId) return null;
@@ -80,7 +85,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // read: GET serves the last-known snapshot immediately so a slow or
   // hanging `muse serve` (bounded by the capacity timeout) can never stall
   // the Agents page. Failures persist as N/A and never fail the read.
-  app.get("/api/runtime-capacity", () => {
+  // NOT-246: on-demand Codex refresh — when the stored Codex snapshot is
+  // stale the read triggers one bounded, non-billable App Server poll
+  // (single-flight, never health rows, never throws); fresh snapshots and
+  // runtimes without a configured Codex account serve stored data with no
+  // subprocess.
+  app.get("/api/runtime-capacity", async () => {
     try {
       if (configuredCapacityRuntimes().includes("muse_code")) {
         void maybeRefreshMuseCapacityFromServe().catch(() => {
@@ -90,7 +100,31 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     } catch {
       // Best-effort: serve the last-known snapshot below.
     }
+    try {
+      await refreshCodexCapacityIfStale();
+    } catch {
+      // A refresh failure must never break the read — stored snapshots still
+      // served below with their explicit N/A reasons.
+    }
     return getRuntimeCapacitySnapshot();
+  });
+
+  // NOT-249: team-level Cursor billing from the official Admin API — separate
+  // from per-runtime quota above and from `cursor_local` connection health.
+  // Optional: without `CURSOR_ADMIN_API_KEY` this reads `configured: false`.
+  // Normalized snapshots only; the key never leaves the server.
+  // On-demand stale refresh mirrors the Codex path: a missing/stale stored
+  // snapshot triggers one bounded Admin API poll (single-flight, never
+  // health rows, never throws); fresh snapshots serve stored data with no
+  // HTTP, and `AGENT_DEALER_CURSOR_TEAM_CAPACITY_REFRESH=off` disables it.
+  app.get("/api/cursor-team-billing", async () => {
+    try {
+      await refreshCursorTeamBillingIfStale();
+    } catch {
+      // A refresh failure must never break the read — the stored snapshot
+      // still serves below with its explicit N/A reason.
+    }
+    return getCursorTeamBillingSnapshot();
   });
 
   app.get("/api/agents", async () => {
