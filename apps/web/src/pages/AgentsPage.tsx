@@ -12,6 +12,7 @@ import { agentPhaseBudgetFromJson, budgetFormEmpty, phaseBudgetFromForm } from "
 import Badge from "../components/ui/Badge";
 import AgentConnectionsBar from "../components/agents/AgentConnectionsBar";
 import RuntimeCapacityStrip from "../components/agents/RuntimeCapacityStrip";
+import CursorTeamBillingCard from "../components/agents/CursorTeamBillingCard";
 import { AgentRuntimeIcon } from "../components/agents/AgentIcon";
 
 type Props = {
@@ -148,8 +149,9 @@ export default function AgentsPage({ agents, agentDeckOnline, onRefresh }: Props
         <AgentConnectionsBar agents={agents} agentDeckOnline={agentDeckOnline} />
       </div>
 
-      <div className="mb-4 overflow-x-auto">
+      <div className="mb-4 overflow-x-auto space-y-2">
         <RuntimeCapacityStrip />
+        <CursorTeamBillingCard />
       </div>
 
       <div className="space-y-3 mb-6">
