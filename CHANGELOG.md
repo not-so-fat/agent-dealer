@@ -6,7 +6,7 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## 1.2.0 — 2026-09-23
 
-Minor: four new runtime capacity adapters (Claude, Muse, Cursor Team, Codex) so the Agents page's capacity strip covers every supported runtime, plus a developer-prompt fix.
+Minor over 1.1.10: three new capacity-strip adapters (Claude, Codex, Muse), a Cursor Team billing card, and a developer-prompt fix.
 
 ### Features
 
