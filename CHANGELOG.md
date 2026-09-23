@@ -4,6 +4,19 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.1 — 2026-09-23
+
+Patch over 1.2.0: a merge-repair loop fix, a duplicate Issues heading removed, and a top-bar capacity summary.
+
+### Fixes
+
+- **Merge-repair round no longer loops on `adapter_failure` after a legitimate undraft (NOT-255)** — `validatePrIdentity` required `isDraft`, but a failed `retry_merge` undrafts the PR (`gh pr ready`) before the squash-merge attempt, so a repair/resume round on that PR always failed identity verification and never exited the loop. Draft-ness is no longer checked; branch, base, PR number, and head SHA still verify exactly as before.
+
+### UI
+
+- **Duplicate Issues page heading removed (NOT-258)** — the Issues screen labeled itself twice (nav link plus a content `<h2>`); the redundant content heading is gone and the New-issue action row is right-aligned in its place. List section header, counts, controls, and routing are unchanged.
+- **Top-bar capacity summary (NOT-262)** — the shell header now shows a compact per-runtime capacity summary, fed by the existing `GET /api/runtime-capacity` source on the shell poll, visible on every shell route including Issues and the inline new-issue flow. Only a shared-contract current window renders a percent; loading, unavailable, and stale/unknown states are distinct and never show a stale number. Separate from the Agents page's runtime-capacity strip.
+
 ## 1.2.0 — 2026-09-23
 
 Minor over 1.1.10: three new capacity-strip adapters (Claude, Codex, Muse), a Cursor Team billing card, and a developer-prompt fix.
