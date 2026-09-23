@@ -238,6 +238,154 @@ test("non-critical windows keep their own labels; providers without the pair sta
   assert.match(emptyHtml, /N\/A/);
 });
 
+test("critical pair is identity-selected: model-specific extras never fold into 5H/1W or exhaust the runtime", () => {
+  // Server shape: every 300/10080-min bucket carries a derived 5H/1W label,
+  // including model-only buckets. Only the account-wide buckets may fill the
+  // critical rows; extras render as distinct rows under their own labels.
+  const claudeWindows = [
+    window({
+      windowKey: "claude_unified_five_hour",
+      providerBucket: "five_hour",
+      durationMinutes: 300,
+      displayLabel: "5H",
+      remainingPercent: 80,
+    }),
+    window({
+      windowKey: "claude_unified_seven_day",
+      providerBucket: "seven_day",
+      durationMinutes: 10080,
+      displayLabel: "1W",
+      remainingPercent: 40,
+    }),
+    window({
+      windowKey: "claude_unified_seven_day_sonnet",
+      providerBucket: "seven_day_sonnet",
+      durationMinutes: 10080,
+      displayLabel: "1W",
+      remainingPercent: 0,
+    }),
+    window({
+      windowKey: "claude_unified_seven_day_opus",
+      providerBucket: "seven_day_opus",
+      durationMinutes: 10080,
+      displayLabel: "1W",
+      remainingPercent: 12,
+    }),
+  ];
+  const claudeData = dataWith({
+    runtimes: [{ runtime: "claude_code", unavailableReason: null, windows: claudeWindows }],
+  });
+  const [claude] = summarizeCapacity(claudeData, NOW);
+  assert.equal(claude.windows[0].label, "5H");
+  assert.equal(claude.windows[0].kind === "known" && claude.windows[0].remaining, 80);
+  assert.equal(claude.windows[1].label, "1W");
+  assert.equal(
+    claude.windows[1].kind === "known" && claude.windows[1].remaining,
+    40,
+    "model-only 0% must not min-collapse into the critical 1W row"
+  );
+  assert.equal(claude.windows.length, 4, "extras render as distinct rows");
+  assert.equal(
+    claude.exhausted,
+    false,
+    "model-only bucket at 0% is not account exhaustion while the weekly window has capacity"
+  );
+  assert.deepEqual(
+    new Set(claude.windows.map((w) => w.key)).size,
+    claude.windows.length,
+    "row keys are unique"
+  );
+  const claudeHtml = render({ status: "ready", data: claudeData });
+  assert.ok(!/data-exhausted="true"/.test(claudeHtml), "no exhausted treatment from extras");
+  assert.match(claudeHtml, /0%/, "extra-bucket zero stays visible in its own row");
+  assert.match(claudeHtml, /80%/);
+  assert.match(claudeHtml, /40%/);
+
+  // Codex shape: the main limit primary/secondary pair is critical; extra
+  // limit buckets (and the aggregate alias) stay separate rows.
+  const codexWindows = [
+    window({
+      windowKey: "codex_rate_limit_primary",
+      providerBucket: "primary",
+      durationMinutes: 300,
+      displayLabel: "5H",
+      remainingPercent: 60,
+    }),
+    window({
+      windowKey: "codex_limit_main_primary",
+      providerBucket: "main/primary",
+      durationMinutes: 300,
+      displayLabel: "5H",
+      remainingPercent: 70,
+    }),
+    window({
+      windowKey: "codex_limit_main_secondary",
+      providerBucket: "main/secondary",
+      durationMinutes: 10080,
+      displayLabel: "1W",
+      remainingPercent: 55,
+    }),
+    window({
+      windowKey: "codex_limit_extra_primary",
+      providerBucket: "extra/primary",
+      durationMinutes: 300,
+      displayLabel: "5H",
+      remainingPercent: 0,
+    }),
+  ];
+  const codexData = dataWith({
+    runtimes: [{ runtime: "codex_local", unavailableReason: null, windows: codexWindows }],
+  });
+  const [codex] = summarizeCapacity(codexData, NOW);
+  assert.equal(codex.windows[0].kind === "known" && codex.windows[0].remaining, 70,
+    "main limit wins the critical 5H row over the aggregate alias");
+  assert.equal(codex.windows[1].kind === "known" && codex.windows[1].remaining, 55);
+  assert.equal(codex.exhausted, false, "extra-bucket 0% does not exhaust the runtime");
+  const codexHtml = render({ status: "ready", data: codexData });
+  assert.ok(!/data-exhausted="true"/.test(codexHtml));
+  assert.match(codexHtml, /70%/);
+  assert.match(codexHtml, /55%/);
+});
+
+test("exhaustion comes from the critical pair only: extra-bucket zeros never mark the block", () => {
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "codex_local",
+        unavailableReason: null,
+        windows: [
+          window({
+            windowKey: "codex_limit_main_primary",
+            providerBucket: "main/primary",
+            durationMinutes: 300,
+            displayLabel: "5H",
+            remainingPercent: 70,
+          }),
+          window({
+            windowKey: "codex_limit_main_secondary",
+            providerBucket: "main/secondary",
+            durationMinutes: 10080,
+            displayLabel: "1W",
+            remainingPercent: 55,
+          }),
+          window({
+            windowKey: "codex_limit_extra_secondary",
+            providerBucket: "extra/secondary",
+            durationMinutes: 10080,
+            displayLabel: "1W",
+            remainingPercent: 0,
+          }),
+        ],
+      },
+    ],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.equal(summary.exhausted, false);
+  const html = render({ status: "ready", data });
+  assert.ok(!/data-exhausted="true"/.test(html));
+  assert.match(html, /0%/, "extra zero still shown in its own row");
+});
+
 test("tooltip/accessibility text carries both labels, values, and reset detail", () => {
   const html = render({ status: "ready", data: dataWith() });
   assert.match(html, /5H: 80% available/);
