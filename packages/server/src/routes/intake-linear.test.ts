@@ -42,7 +42,14 @@ before(() => {
     };
     const payload =
       typeof body.variables?.id === "string"
-        ? { data: { issue: LIST_NODES.find((n) => n.identifier === "NOT-242") ?? null } }
+        ? {
+            data: {
+              issue:
+                LIST_NODES.find((n) => n.identifier === body.variables?.id) ??
+                LIST_NODES.find((n) => n.identifier === "NOT-242") ??
+                null,
+            },
+          }
         : {
             data: {
               issues: { nodes: LIST_NODES, pageInfo: { hasNextPage: false, endCursor: null } },
@@ -108,4 +115,64 @@ test("GET /api/intake/linear/lookup rejects an unparseable ref without calling L
   const app = await buildApp();
   const res = await app.inject({ method: "GET", url: "/api/intake/linear/lookup?q=not%20a%20ticket" });
   assert.equal(res.statusCode, 400);
+});
+
+// NOT-260: a configured mapping prefills list candidates and direct lookups.
+test("a mapped Linear label resolves in the candidate list with repo: fallback intact", async () => {
+  const { replaceRepositoryMappings } = await import("../repository/repository-mappings.js");
+  replaceRepositoryMappings({
+    mappings: [{ label: "agent-dealer", repository: "not-so-fat/mapped" }],
+  });
+  try {
+    const app = await buildApp();
+    const res = await app.inject({ method: "GET", url: "/api/intake/linear" });
+    assert.equal(res.statusCode, 200);
+    const json = res.json() as {
+      candidates: Array<{
+        identifier: string;
+        labels?: string[];
+        repoResolution?: { status: string; repository?: string; sourceLabel?: string };
+      }>;
+    };
+    // NOT-243 carries the plain `agent-dealer` label — now mapped.
+    const mapped = json.candidates.find((c) => c.identifier === "NOT-243");
+    assert.equal(mapped?.repoResolution?.status, "resolved");
+    assert.equal(mapped?.repoResolution?.repository, "github.com/not-so-fat/mapped");
+    assert.equal(mapped?.repoResolution?.sourceLabel, "agent-dealer");
+    // Raw Linear labels stay on the candidate.
+    assert.deepEqual(mapped?.labels, ["agent-dealer"]);
+    // NOT-242 has no mapping match — legacy repo: fallback still resolves.
+    const legacy = json.candidates.find((c) => c.identifier === "NOT-242");
+    assert.equal(legacy?.repoResolution?.status, "resolved");
+    assert.equal(legacy?.repoResolution?.repository, "github.com/not-so-fat/agent-dealer");
+    assert.equal(legacy?.repoResolution?.sourceLabel, "repo:github.com/not-so-fat/agent-dealer");
+  } finally {
+    replaceRepositoryMappings({ mappings: [] });
+  }
+});
+
+test("a mapped Linear label resolves in direct lookup", async () => {
+  const { replaceRepositoryMappings } = await import("../repository/repository-mappings.js");
+  replaceRepositoryMappings({
+    mappings: [{ label: "agent-dealer", repository: "not-so-fat/mapped" }],
+  });
+  try {
+    const app = await buildApp();
+    const res = await app.inject({ method: "GET", url: "/api/intake/linear/lookup?q=NOT-243" });
+    assert.equal(res.statusCode, 200);
+    const json = res.json() as {
+      candidate: {
+        identifier: string;
+        labels?: string[];
+        repoResolution?: { status: string; repository?: string; sourceLabel?: string };
+      };
+    };
+    assert.equal(json.candidate.identifier, "NOT-243");
+    assert.equal(json.candidate.repoResolution?.status, "resolved");
+    assert.equal(json.candidate.repoResolution?.repository, "github.com/not-so-fat/mapped");
+    assert.equal(json.candidate.repoResolution?.sourceLabel, "agent-dealer");
+    assert.deepEqual(json.candidate.labels, ["agent-dealer"]);
+  } finally {
+    replaceRepositoryMappings({ mappings: [] });
+  }
 });

@@ -1,6 +1,11 @@
-import type { LinearCandidate, LinearIntakeConfig } from "@agent-dealer/shared";
-import { resolveLinearRepoLabels } from "@agent-dealer/shared";
+import type {
+  LinearCandidate,
+  LinearIntakeConfig,
+  LinearRepositoryMapping,
+} from "@agent-dealer/shared";
+import { resolveLinearRepoWithMappings } from "@agent-dealer/shared";
 import { DEFAULT_LINEAR_STATE_FILTER, getLinearIntakeConfig } from "../repository/intake-settings.js";
+import { listRepositoryMappings } from "../repository/repository-mappings.js";
 import { linearGraphqlRequest } from "./linear-graphql.js";
 
 export { DEFAULT_LINEAR_STATE_FILTER };
@@ -48,7 +53,10 @@ async function linearQuery(
  * deterministic (one valid label resolves, zero is unresolved, several
  * conflict, a bad value is invalid) and never guesses from anything else.
  */
-export function nodeToCandidate(n: LinearIssueNode): LinearCandidate {
+export function nodeToCandidate(
+  n: LinearIssueNode,
+  mappings?: readonly LinearRepositoryMapping[],
+): LinearCandidate {
   const labels = n.labels?.nodes.map((l) => l.name) ?? [];
   return {
     id: n.id,
@@ -59,7 +67,7 @@ export function nodeToCandidate(n: LinearIssueNode): LinearCandidate {
     state: n.state?.name,
     teamId: n.team?.id,
     labels,
-    repoResolution: resolveLinearRepoLabels(labels),
+    repoResolution: resolveLinearRepoWithMappings(labels, mappings ?? []),
   };
 }
 
@@ -158,7 +166,9 @@ export async function listLinearCandidates(): Promise<LinearCandidate[]> {
     after = data.issues.pageInfo.endCursor;
   }
 
-  return nodes.map(nodeToCandidate);
+  // NOT-260: mappings load once per list operation, not once per candidate.
+  const mappings = listRepositoryMappings();
+  return nodes.map((n) => nodeToCandidate(n, mappings));
 }
 
 export async function getLinearIssue(issueId: string): Promise<LinearCandidate | null> {
@@ -171,7 +181,8 @@ export async function getLinearIssue(issueId: string): Promise<LinearCandidate |
   )) as { issue: LinearIssueNode | null };
 
   if (!data.issue) return null;
-  return nodeToCandidate(data.issue);
+  // NOT-260: mappings load once per lookup operation.
+  return nodeToCandidate(data.issue, listRepositoryMappings());
 }
 
 /** A Linear issue that declares `blocks` on one of the issues we asked about (NOT-104). */
