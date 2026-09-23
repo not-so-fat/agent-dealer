@@ -721,6 +721,32 @@ test("a transient shared-poll failure keeps the capacity strip's last-known wind
   assert.equal(billingSnap.unavailableReason, "stale");
 });
 
+test("a malformed shared-poll response DOES overwrite the capacity strip, unlike a transient failure", async () => {
+  // The `!transient` gate must not swallow every failure — a genuine
+  // verdict on data that arrived (malformed/bad-credential) is not a
+  // transport hiccup and must still replace stale-but-stored data with an
+  // explicit `unparsable`, exactly like the billing table already does.
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  await refreshCursorIndividualCapacityIfStale(now, {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(now)),
+    nowMs: now,
+  });
+  const before = getRuntimeCapacitySnapshot(now).runtimes.find((r) => r.runtime === "cursor_local");
+  assert.equal(before?.windows[0]?.remainingPercent, 62.5);
+  const later = now + DEFAULT_STALE_AFTER_MS + 60_000;
+  await refreshCursorIndividualCapacityIfStale(later, {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({ [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 200, body: { nope: 1 } } }),
+    nowMs: later,
+  });
+  const cursor = getRuntimeCapacitySnapshot(later).runtimes.find((r) => r.runtime === "cursor_local");
+  assert.equal(cursor?.unavailableReason, "unparsable");
+  assert.equal(cursor?.windows[0]?.unavailableReason, "unparsable");
+});
+
 test("payload parsing keeps reported values and rejects empty shapes", () => {
   const now = Date.now();
   const readings = cursorIndividualPayloadToReadings(usagePayload(now));
