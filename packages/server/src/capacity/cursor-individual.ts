@@ -943,11 +943,20 @@ async function pollCursorIndividualShared(
   cursorIndividualSharedPollInFlight = (async () => {
     try {
       const observation = await readCursorIndividualBilling({ ...opts, nowMs });
-      if (
-        observation.failure &&
+      // Transient (auth/transport/rate-limit/redirect) failures must not
+      // overwrite either store's last-known value — only a genuine verdict
+      // on data that arrived (success, or malformed/bad-credential) does.
+      // `ingestCursorIndividualObservation` already self-gates this for the
+      // billing table; `ingestAdapterResult` has no such guard, so the call
+      // site below gates it too — otherwise a transient failure would keep
+      // the billing card's last-known value while silently replacing the
+      // capacity strip's with `missing`, the two surfaces disagreeing after
+      // the same poll.
+      const transient =
+        observation.failure !== null &&
         observation.failure.kind !== "malformed" &&
-        observation.failure.kind !== "bad-credential"
-      ) {
+        observation.failure.kind !== "bad-credential";
+      if (transient) {
         cursorIndividualLastFailedPollMs = nowMs;
       }
       try {
@@ -955,11 +964,13 @@ async function pollCursorIndividualShared(
       } catch {
         // Storage failure must not break the read below.
       }
-      try {
-        const { ingestAdapterResult } = await import("./service.js");
-        await ingestAdapterResult(cursorIndividualObservationToAdapterResult(observation, nowMs));
-      } catch {
-        // Storage failure must not break the read below.
+      if (!transient) {
+        try {
+          const { ingestAdapterResult } = await import("./service.js");
+          await ingestAdapterResult(cursorIndividualObservationToAdapterResult(observation, nowMs));
+        } catch {
+          // Storage failure must not break the read below.
+        }
       }
     } catch {
       cursorIndividualLastFailedPollMs = nowMs;

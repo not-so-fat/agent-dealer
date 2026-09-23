@@ -381,7 +381,10 @@ horizons as quota windows); a `cycleEnd` in the past reads `expired`. The
 read model carries `enabled`/`configured` flags and `experimental_api`
 source. Transient auth/transport/rate-limit/redirect failures do not
 overwrite a stored snapshot (last-known values keep serving as
-stale/expired); without stored data they read `missing`.
+stale/expired); without stored data they read `missing`. The shared poll
+(see below) applies this the same way to BOTH stores: a transient failure
+skips the `runtime_capacity_snapshots` write too, not just the billing
+snapshot, so the two surfaces agree after the same failed poll.
 
 Failure semantics (shared enum only, never thrown, never health rows):
 

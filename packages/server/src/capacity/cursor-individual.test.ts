@@ -52,7 +52,7 @@ const {
   runtimeAvailability,
 } = await import("../repository/runtime-availability.js");
 const { getRuntimeCapacitySnapshot } = await import("./service.js");
-const { normalizeAdapterWindow } = await import("./adapter.js");
+const { normalizeAdapterWindow, DEFAULT_STALE_AFTER_MS } = await import("./adapter.js");
 
 const MOCK_BASE = "https://www.cursor.com";
 const SECRET = "fixture-individual-secret-xyz789";
@@ -685,6 +685,40 @@ test("the billing-card and capacity-strip refresh paths share one poll, not two"
   const snap = getRuntimeCapacitySnapshot(now);
   const cursor = snap.runtimes.find((r) => r.runtime === "cursor_local");
   assert.equal(cursor?.windows[0]?.remainingPercent, 62.5);
+});
+
+test("a transient shared-poll failure keeps the capacity strip's last-known window, same as the billing card", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  // A successful poll populates both stores.
+  await refreshCursorIndividualCapacityIfStale(now, {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(okRoutes(now)),
+    nowMs: now,
+  });
+  const before = getRuntimeCapacitySnapshot(now).runtimes.find((r) => r.runtime === "cursor_local");
+  assert.equal(before?.windows[0]?.remainingPercent, 62.5);
+  // Advance past the stale horizon; the next poll 500s — a transient
+  // failure. Both the billing table AND the capacity table must keep the
+  // last-known value instead of one of them overwriting it with `missing`.
+  const later = now + DEFAULT_STALE_AFTER_MS + 60_000;
+  await refreshCursorIndividualCapacityIfStale(later, {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({ [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 500, body: {} } }),
+    nowMs: later,
+  });
+  const snap = getRuntimeCapacitySnapshot(later);
+  const cursor = snap.runtimes.find((r) => r.runtime === "cursor_local");
+  // The stored window is still THIS poll's window (source: experimental_api,
+  // freshUntil from the earlier successful poll) — read-time freshness
+  // classification names it `stale`, not the transient failure's `missing`.
+  assert.equal(cursor?.unavailableReason, "stale");
+  assert.equal(cursor?.windows.length, 1);
+  assert.equal(cursor?.windows[0]?.unavailableReason, "stale");
+  assert.equal(cursor?.windows[0]?.remainingPercent, null);
+  const billingSnap = await getCursorIndividualBillingSnapshot(later);
+  assert.equal(billingSnap.unavailableReason, "stale");
 });
 
 test("payload parsing keeps reported values and rejects empty shapes", () => {
