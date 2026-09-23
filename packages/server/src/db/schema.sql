@@ -431,6 +431,27 @@ CREATE TABLE IF NOT EXISTS cursor_team_billing_snapshots (
   evidence_ref TEXT
 );
 
+-- NOT-250: normalized Cursor-individual billing snapshot (single row, id = 1).
+-- Experimental dashboard billing-cycle state, not per-runtime quota windows:
+-- independent of both runtime_capacity_snapshots and runtime_availability
+-- (NOT-111 health). Carries normalized values plus a static evidence pointer
+-- only — never credential material.
+CREATE TABLE IF NOT EXISTS cursor_individual_billing_snapshots (
+  id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+  cycle_label TEXT,
+  cycle_start TEXT,
+  cycle_end TEXT,
+  usage_value REAL,
+  usage_unit TEXT,
+  remaining_percent REAL,
+  source TEXT NOT NULL,
+  unavailable_reason TEXT,
+  observed_at TEXT NOT NULL,
+  fresh_until TEXT,
+  expires_at TEXT,
+  evidence_ref TEXT
+);
+
 -- NOT-111: account-level runtime usage caps (keyed per runtime, not per agent profile).
 CREATE TABLE IF NOT EXISTS runtime_availability (
   runtime TEXT PRIMARY KEY,

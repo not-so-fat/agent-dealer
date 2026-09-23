@@ -334,3 +334,110 @@ the refresh. The Agents page renders team billing in its own labeled section
 per-runtime quota strip: summed spend in cents, cycle start, team size, and
 per-member override counts — never as percent chips. Tests inject a mock
 fetch; CI performs no live Cursor request.
+
+## Provider: Cursor Individual dashboard — EXPERIMENTAL, opt-in (NOT-250)
+
+Source: undocumented Cursor dashboard endpoints (usage-summary /
+current-period shape, as commonly called by community tools) using the
+existing local Cursor login (`~/.cursor/auth.json`, shape-tolerant within an
+explicit allowlist). There is deliberately NO supported contract here: the
+endpoints and credential formats may change without notice, carry no support
+guarantee, and are never scraped via browser automation or HTML parsing.
+
+Opt-in (disabled by default — no silent opt-in, no credential migration):
+
+- `AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY=experimental` enables the adapter.
+  Any other value (including unset) short-circuits before any credential file
+  is read and before any HTTP is attempted, and serves `enabled: false` N/A.
+- Unset the variable to disable again. `CURSOR_INDIVIDUAL_CREDENTIAL_FILE`
+  pins an explicit credential file (fixtures/tests); the default candidate is
+  the local login only — the adapter never hunts the home directory.
+- Credential lookup is isolated in
+  `packages/server/src/capacity/cursor-individual-credentials.ts`: unknown
+  shapes read `unparsable` (changed format), and diagnostics return
+  presence/path/format only, never secret material. The session cookie needs
+  a WorkOS user id alongside the token — an explicit `userId`/`user_id` field
+  wins; otherwise it's derived locally from the token's own JWT `sub` claim
+  (no network, no signature check). Either source is normalized to strip a
+  provider connection-type prefix (`google-oauth2|user_abc` → `user_abc`).
+  A token with no derivable id reads `unparsable`.
+
+Reads (bounded: 10 s per request covering the full response — headers AND
+body, `AGENT_DEALER_CURSOR_INDIVIDUAL_TIMEOUT_MS` override; a
+`WorkosCursorSessionToken=<userId>%3A%3A<token>` session cookie built from
+the local login (the `::` delimiter percent-encoded, matching the live
+dashboard cookie), never an `Authorization` header — the dashboard rejects
+Bearer auth):
+
+- `GET /api/usage-summary/current-period`, falling back to
+  `/api/usage-summary` on 404 (endpoint drift). Default origin
+  `https://cursor.com` (its `www.` alias canonicalizes to the bare domain via
+  a same-site redirect); requests and redirects are allowlisted to exactly
+  `https://cursor.com`, `https://www.cursor.com`, and `https://api.cursor.com`
+  — a redirect elsewhere (or a non-allowlisted base URL) fails as
+  `unsafe-redirect` before the credential travels. Manual redirect handling
+  (max 3 hops), 512 KiB response cap enforced while streaming the body (never
+  buffered past the cap first), JSON-schema validation.
+- Billing-cycle values only: reported cycle label/start/end, reported usage
+  value/unit, and remaining percent from a used/remaining scale. No durations
+  are invented (monthly data never becomes a 5H/1W window), no cycle label is
+  synthesized, and money is never rendered as a token percentage.
+
+A supported Cursor Individual usage surface is preferred automatically:
+`readCursorIndividualBilling()` checks an injected `supportedReader` first
+and skips the credential + dashboard entirely when one answers (source
+`supported_protocol`). No supported surface exists as of NOT-250, so the
+default reader returns null — wire a real reader in as the default when
+Cursor ships one and the dashboard becomes the fallback with no operator
+action.
+
+Normalized snapshots persist in `cursor_individual_billing_snapshots`
+(single row) plus one `billing_cycle` window for `cursor_local` in
+`runtime_capacity_snapshots`, independent of `runtime_availability`.
+`GET /api/cursor-individual-billing` → `CursorIndividualBilling` serves the
+stored snapshot with freshness applied (15-min stale / 60-min expiry, same
+horizons as quota windows); a `cycleEnd` in the past reads `expired`. The
+read model carries `enabled`/`configured` flags and `experimental_api`
+source. Transient auth/transport/rate-limit/redirect failures do not
+overwrite a stored snapshot (last-known values keep serving as
+stale/expired); without stored data they read `missing`. The shared poll
+(see below) applies this the same way to BOTH stores: a transient failure
+skips the `runtime_capacity_snapshots` write too, not just the billing
+snapshot, so the two surfaces agree after the same failed poll.
+
+Failure semantics (shared enum only, never thrown, never health rows):
+
+| Dashboard outcome | N/A reason |
+|---|---|
+| feature disabled (`enabled: false`, no credential/HTTP) | `missing` |
+| no usable local credential | `missing` |
+| unreadable/changed credential format | `unparsable` |
+| 401/403 (rejected login) / 429 (rate limited) | `missing` |
+| network error / 5xx / timeout | `missing` (stored snapshot still serves as stale/expired) |
+| 2xx without a usable billing value / oversized / non-JSON | `unparsable` |
+| endpoint absent on all candidates (404/405 drift) | `missing` |
+| redirect off the allowlist / non-allowlisted base URL | `missing` (`unsafe-redirect` in the server log) |
+
+The exact cause is logged server-side as a static string; the token, URLs
+carrying secrets (auth is header-only), and raw payloads never reach the
+browser, the API, or the logs, and evidence refs are static
+(`cursor-dashboard:…`).
+
+`GET /api/cursor-individual-billing` triggers
+`refreshCursorIndividualBillingIfStale()`, and `GET /api/runtime-capacity`
+triggers `refreshCursorIndividualCapacityIfStale()` (disabled = strict
+no-op) to ingest the billing-cycle window. Each checks its OWN stored
+table's freshness first (the billing snapshot row vs. the
+`runtime_capacity_snapshots` window) and short-circuits with no
+credential/HTTP when fresh — but the two routes are usually mounted at once
+(the billing card and the capacity strip both render on the Agents page), so
+when BOTH decide they're stale they share one poll: a single in-flight
+dashboard read, its observation ingested into both stores, rather than one
+poll per route. A failed poll backs off for 60 s (shared by both routes).
+`AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH=off` disables the refresh. The
+Agents page renders individual billing in its own labeled section
+(`CursorIndividualBillingCard`, "Cursor individual billing · Experimental")
+below the team card: cycle label, remaining percent, reported usage, and
+reset — plus the `AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY` setting that
+disables it. Tests use temporary fixture credentials and a mock fetch; CI
+touches neither the real local login nor the network.

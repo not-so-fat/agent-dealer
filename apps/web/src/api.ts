@@ -5,6 +5,7 @@ import type {
   CreateAgentInput,
   CreateIssueInput,
   CreateIssueResult,
+  CursorIndividualBilling,
   CursorTeamBilling,
   DeckAccessErrorCode,
   ExecuteIssueResponse,
@@ -142,6 +143,18 @@ export async function fetchRuntimeCapacity(): Promise<RuntimeCapacityResponse> {
  */
 export async function fetchCursorTeamBilling(): Promise<CursorTeamBilling> {
   const res = await fetch(`${API}/api/cursor-team-billing`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+/**
+ * NOT-250: monthly/billing-cycle capacity for Cursor Individual accounts via
+ * the opt-in EXPERIMENTAL dashboard adapter. Disabled by default
+ * (`enabled: false` N/A) — the browser surfaces the experimental source with
+ * the local setting that disables it (see CursorIndividualBillingCard).
+ */
+export async function fetchCursorIndividualBilling(): Promise<CursorIndividualBilling> {
+  const res = await fetch(`${API}/api/cursor-individual-billing`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

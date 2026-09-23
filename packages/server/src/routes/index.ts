@@ -23,6 +23,11 @@ import {
   getCursorTeamBillingSnapshot,
   refreshCursorTeamBillingIfStale,
 } from "../capacity/cursor-team.js";
+import {
+  getCursorIndividualBillingSnapshot,
+  refreshCursorIndividualBillingIfStale,
+  refreshCursorIndividualCapacityIfStale,
+} from "../capacity/cursor-individual.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
   if (!deckId) return null;
@@ -106,6 +111,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       // A refresh failure must never break the read — stored snapshots still
       // served below with their explicit N/A reasons.
     }
+    try {
+      // NOT-250: opted-in experimental Individual billing-cycle window for
+      // `cursor_local`. Disabled is a strict no-op (no credential, no HTTP);
+      // failures never break the read below.
+      await refreshCursorIndividualCapacityIfStale();
+    } catch {
+      // Stored snapshots still serve below with their explicit N/A reasons.
+    }
     return getRuntimeCapacitySnapshot();
   });
 
@@ -125,6 +138,28 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       // still serves below with its explicit N/A reason.
     }
     return getCursorTeamBillingSnapshot();
+  });
+
+  // NOT-250: monthly/billing-cycle capacity for Cursor Individual accounts
+  // via the opt-in EXPERIMENTAL dashboard adapter (undocumented endpoints,
+  // local-login credential — no supported contract, no support guarantee).
+  // Disabled by default: without `AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY=
+  // experimental` this reads `enabled: false` with no credential or endpoint
+  // access. Normalized snapshots only; the credential never leaves the
+  // server. On-demand stale refresh mirrors the Team path: a missing/stale
+  // stored snapshot triggers one bounded dashboard poll (single-flight,
+  // never health rows, never throws); fresh snapshots serve stored data with
+  // no HTTP, and `AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH=off` disables it.
+  // The browser must surface the `experimental_api` source with the local
+  // setting that disables it (see CursorIndividualBillingCard).
+  app.get("/api/cursor-individual-billing", async () => {
+    try {
+      await refreshCursorIndividualBillingIfStale();
+    } catch {
+      // A refresh failure must never break the read — the stored snapshot
+      // still serves below with its explicit N/A reason.
+    }
+    return getCursorIndividualBillingSnapshot();
   });
 
   app.get("/api/agents", async () => {
