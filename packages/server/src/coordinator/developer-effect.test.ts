@@ -547,8 +547,12 @@ test("timed_out (checks poll): checks stay pending past the poll deadline", asyn
   assert.equal(getIssue(issueId)!.status, "developing");
 });
 
-test("adapter_failure: a non-draft PR is rejected rather than accepted as a clean handoff", async () => {
-  const issueId = await makeIssue({ maxInfraAttempts: 0 });
+test("NOT-255: a non-draft PR with otherwise-verified identity hands off cleanly (just-failed retry_merge)", async () => {
+  // A merge-failure escalation is reachable from `retry_merge`, which undrafts the PR
+  // before attempting the squash-merge. When that merge fails the PR is left non-draft
+  // — legitimately — so a repair/resume developer round must not fail identity on
+  // draft-ness alone when branch/base/number/head all verify.
+  const issueId = await makeIssue();
   const github = fakeGithub();
   const realViewPr = github.viewPr.bind(github);
   github.viewPr = async (opts) => {
@@ -560,9 +564,71 @@ test("adapter_failure: a non-draft PR is rejected rather than accepted as a clea
   await pump(1);
 
   const issue = getIssue(issueId)!;
-  assert.equal(issue.status, "needs_human");
-  assert.equal(issue.currentRound, 1, "a rejected PR identity never consumes a round");
-  assert.equal(issue.prNumber, null, "a rejected identity must never be recorded as the verified handoff");
+  assert.equal(issue.status, "reviewing");
+  assert.ok(issue.prNumber, "a verified non-draft identity is still recorded as the handoff");
+});
+
+test("NOT-255: repair from a merge-failure escalation with a non-draft PR runs a round that hands off, not re-escalates", async () => {
+  // commands.ts routing: an open policy_escalation with mergeFailure evidence resolved
+  // with `repair` queues a developer round. That round starts with the non-draft PR
+  // the failed retry_merge left behind and must reach the reviewer instead of
+  // immediately re-escalating on "is not a draft PR".
+  const { transitionIssue } = await import("../repository/issues.js");
+  const { createHumanAction } = await import("../repository/human-actions.js");
+  const { responseOptionsFor } = await import("./commands.js");
+  const { MERGE_FAILURE_EVIDENCE_KEY } = await import("./human-resolution.js");
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  const realViewPr = github.viewPr.bind(github);
+  github.viewPr = async (opts) => {
+    const view = await realViewPr(opts);
+    return view ? { ...view, isDraft: false } : view;
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github }));
+  startWorkflow(issueId);
+  // A real merge failure happens after all work finished: clear the initial pending
+  // round (the coordinator enforces one pending/leased item per instance) to reach
+  // the parked state a failed retry_merge leaves behind.
+  for (const item of listWorkItemsForIssue(issueId)) {
+    if (item.status === "pending" || item.status === "leased") cancelWorkItem(item.id);
+  }
+  transitionIssue(issueId, "needs_human", {
+    currentOwner: "human",
+    currentIntent: "Auto-merge failed: merge conflict",
+  });
+  const action = createHumanAction({
+    issueId,
+    workflowInstanceId: getActiveWorkflowInstance(issueId)!.id,
+    actionType: "policy_escalation",
+    reason: "Auto-merge failed: merge conflict",
+    question: "Auto-merge failed: merge conflict Retry the merge, queue another repair round, or close the issue?",
+    responseOptions: responseOptionsFor("policy_escalation", false, { mergeFailure: true }),
+    evidence: { [MERGE_FAILURE_EVIDENCE_KEY]: true },
+  });
+
+  const resolved = resolveHumanActionAndAdvance(action.id, "op", "repair");
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) {
+    assert.equal(resolved.issueStatus, "repairing");
+    assert.ok(resolved.nextWorkItemId, "repair must queue a developer round");
+  }
+  // Only pump the developer item — the file's placeholder reviewer handler (always
+  // session_failed) would otherwise fail the just-queued reviewer round and mask the
+  // handoff this test actually checks.
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "the repair round must hand off, not immediately re-escalate");
+  assert.equal(
+    listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer" && i.status === "pending").length,
+    1,
+    "the handoff must queue the reviewer round"
+  );
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+    0,
+    "no fresh escalation may be waiting"
+  );
 });
 
 test("adapter_failure: a PR based against the wrong branch is rejected rather than accepted", async () => {
@@ -578,6 +644,93 @@ test("adapter_failure: a PR based against the wrong branch is rejected rather th
   await pump(1);
 
   assert.equal(getIssue(issueId)!.status, "needs_human");
+});
+
+test("adapter_failure: a PR on the wrong head branch is rejected rather than accepted", async () => {
+  // NOT-255 regression guard: tolerating non-draft must not weaken the branch check.
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
+  const github = fakeGithub();
+  const realViewPr = github.viewPr.bind(github);
+  github.viewPr = async (opts) => {
+    const view = await realViewPr(opts);
+    return view ? { ...view, headRefName: "someone-elses-branch" } : view;
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.prNumber, null, "a rejected identity must never be recorded as the verified handoff");
+});
+
+test("adapter_failure: a PR number that changed between rounds is rejected rather than accepted", async () => {
+  // NOT-255 regression guard: tolerating non-draft must not weaken the number check.
+  // Round 1 hands off cleanly (recording the PR number on the issue); the reviewer
+  // requests changes; round 2 reports a different PR number for the same branch and
+  // must be rejected.
+  const { runReviewerEffect } = await import("./reviewer-effect.js");
+  const issueId = await makeIssue({ maxInfraAttempts: 0 });
+  // Round 2 must push a NEW commit — re-running the identical write+commit against
+  // an unchanged file would fail with "nothing to commit" in the fake, not the fix.
+  let devCalls = 0;
+  const twoRoundSpawn: SpawnFn = async (input) => {
+    devCalls++;
+    if (devCalls === 1) return commitingSpawn(input);
+    fs.writeFileSync(path.join(input.cwd, "followup.txt"), "follow-up\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "follow-up");
+    return { exitCode: 0, transcript: "Implementation conclusion: follow-up work.", logPath: "/dev/null", timedOut: false };
+  };
+  const github = fakeGithub();
+  // The shared fake's publishReview throws (developer-only use) — the reviewer
+  // round needs the success stub NOT-220's shared github carries.
+  github.publishReview = async ({ event }) => ({ ok: true, event, usedCommentFallback: false });
+  const realViewPr = github.viewPr.bind(github);
+  github.viewPr = async (opts) => {
+    // The reviewer selects by PR number alone, but the shared fake requires an
+    // explicit branch (NOT-82) — pin the number-only lookup to this issue's branch.
+    const view = await realViewPr(
+      opts.branch == null && opts.number != null ? { ...opts, branch: issueBranchName(issueId) } : opts
+    );
+    if (!view) return view;
+    // Once round 1's handoff recorded the PR number, report a different one — but
+    // only on the developer's branch-pinned lookups (no `number` selector). The
+    // reviewer selects by PR number and must keep seeing the recorded one, or round
+    // 1 would never reach the repair round this test needs.
+    if (getIssue(issueId)?.prNumber != null && opts.number == null) {
+      return { ...view, number: view.number + 1000 };
+    }
+    return view;
+  };
+  const reviewerSpawn = async (input: { prompt: string }) => {
+    const baseSha = input.prompt.match(/"baseSha" to exactly "([0-9a-f]+)"/)?.[1];
+    const headSha = input.prompt.match(/"headSha" to exactly "([0-9a-f]+)"/)?.[1];
+    if (!baseSha || !headSha) throw new Error("could not extract SHAs from reviewer prompt");
+    const body = {
+      verdict: "changes_requested",
+      baseSha,
+      headSha,
+      acceptanceCriteriaAssessment: "Not yet.",
+      evidenceAssessment: "Evidence checked.",
+      findings: [{ fingerprint: "missing-test", severity: "blocking", title: "No test", rationale: "Add a test." }],
+      risks: [],
+    };
+    return { exitCode: 0, transcript: "```json\n" + JSON.stringify(body) + "\n```\n", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: twoRoundSpawn, github }));
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: reviewerSpawn as never, github: github as never }));
+  startWorkflow(issueId);
+  await pump(20);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(devCalls, 2, "the repair round must actually run against the changed PR number");
+  assert.equal(issue.status, "needs_human", "a changed PR number must escalate, not hand off");
+  assert.ok(
+    listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"),
+    "the number drift must surface as a policy escalation"
+  );
+  resetEffectHandlers();
 });
 
 test("clean handoff: a briefly stale headRefOid (gh's view lags the push) catches up within the reconcile window", async () => {
