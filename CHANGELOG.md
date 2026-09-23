@@ -4,6 +4,25 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.2 — 2026-09-23
+
+Patch over 1.2.1: an opt-in Cursor Individual capacity adapter, configurable Linear repository mappings, a two-window top-bar capacity display, and Muse/Codex capacity repairs.
+
+### Features
+
+- **Cursor Individual capacity adapter (NOT-250, experimental, off by default)** — an opt-in adapter reads usage from Cursor's own account dashboard via the local Cursor login session, behind `AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY=experimental`; unset, it stays fully disabled. The Agents page gains a corresponding experimental billing card. A poll is shared and single-flighted across the billing card and the capacity strip so both read one dashboard fetch; a transient auth/transport/rate-limit/redirect failure keeps the last-known value (served as stale) instead of overwriting it, while a malformed response or a changed credential does overwrite it to unparsable.
+- **Configurable Linear label-to-repository mappings (NOT-260)** — repository resolution for a Linear ticket's `repo:` label is now a persisted, editable mapping (`GET`/`PUT /api/settings/repository-mappings`) instead of a fixed convention, with an inline settings editor and a shared picker; existing label-based intake behavior is unchanged for labels already covered by a mapping.
+- **Top bar shows both 5H and 1W capacity windows (NOT-264)** — the shell header's per-runtime summary now shows both windows as a two-line block instead of one collapsed number. Each provider's account-wide 5H/1W pair is now tagged server-side (`criticalRole` on `CapacityWindowSnapshot`, with a `runtime_capacity_snapshots` migration) so the client no longer has to infer it from labels — a fix for Codex windows getting misidentified by a hardcoded limit id and for Muse never being recognized at all. Either critical window at 0% marks the block exhausted; a partially unknown pair shows the known value plus a labeled N/A rather than guessing. The Agents-page strip also gains red/yellow coloring for runtimes under 10%/30% remaining.
+
+### Fixes
+
+- **Muse capacity polling repaired; Codex windows deduplicated (NOT-263)** — repairs the Muse MSP handshake (serve argv, `initialize`, `usage.window`) that had stopped returning readable windows, and deduplicates Codex's rate-limit aggregate against its own detailed buckets so the same window no longer counts twice.
+- **Issues page heading duplication corrected (NOT-258)** — 1.2.1 removed the wrong duplicate: the page-level `<h2>Issues</h2>` is restored, and the actually-redundant list-section `<h3>Issues</h3>` is removed instead.
+
+### UI
+
+- **Issues filters collapse behind a show/hide toggle (NOT-261)** — the Issues page filter bar starts collapsed so the list is primary; a compact "Filtered" badge marks an active filter while collapsed. Apply/Reset and URL persistence are unchanged.
+
 ## 1.2.1 — 2026-09-23
 
 Patch over 1.2.0: a merge-repair loop fix, a removed duplicate Issues heading, and a top-bar capacity summary.
