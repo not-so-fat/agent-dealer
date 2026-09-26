@@ -64,8 +64,8 @@ function fakeOpts(mode: string, extra: Record<string, unknown> = {}) {
   };
 }
 
-test("serve argv is the shipping contract: no --protocol flag", () => {
-  assert.deepEqual([...MUSE_SERVE_ARGV], ["serve"]);
+test("serve argv is the shipping contract: no --protocol flag, restricted network", () => {
+  assert.deepEqual([...MUSE_SERVE_ARGV], ["serve", "--sandbox-network", "restricted"]);
   assert.ok(!MUSE_SERVE_ARGV.includes("--protocol"), "muse serve takes no --protocol flag");
 });
 

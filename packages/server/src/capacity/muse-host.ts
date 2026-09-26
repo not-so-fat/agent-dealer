@@ -40,16 +40,18 @@
 //   `initialized`, `usage/read`) — a capacity read by itself never sends
 //   `session/start`, a prompt, a turn, a tool, or any other billable method.
 //
-// Structural precondition (NOT-269): Dealer runs Muse turns as `muse exec`
-// subprocesses, so an exec-driven server leaves this host unobserved and
-// Muse capacity reads honest N/A until real turns flow through a serve
-// host. No synthetic model prompt is ever issued to refresh capacity.
-// Every real Dealer Muse session already ends with a best-effort refresh
-// kick at the session boundary (`refreshMuseCapacityAfterSession` in
-// coordinator/muse-spawn.ts) — no separate model turn, last-good preserved
-// — so the day the runner migration lands (real `session/start` +
-// `turn/start` through this owned host), that same hook is the final read
-// that populates 5H/1W.
+// Execution precondition (NOT-269): only a host that observes the account's
+// provider traffic can answer `usage/read`. Real Dealer Muse turns run
+// through THIS host (`session/start` + `turn/start` via the execution lane
+// below, driven by runners/muse-serve-session.ts) — that traffic is the
+// observation, so the session-boundary refresh hook
+// (`refreshMuseCapacityAfterSession` in coordinator/muse-spawn.ts) is the
+// final `usage/read` that populates 5H/1W. No synthetic model prompt is
+// ever issued to refresh capacity. When the serve execution lane cannot
+// admit a turn (host unavailable, unimplemented method, auth), the session
+// falls back to the legacy `muse exec` subprocess before any model work
+// starts — the host stays unobserved and the read stays honest N/A with
+// last-good rows preserved.
 //
 // PRODUCT DECISION (2026-09-26, resolved via human_action on this ticket):
 // the runner migration is in scope for NOT-270, in this same PR, not a
@@ -83,6 +85,7 @@ import {
   MSP_USAGE_CHANGED,
   MUSE_CLIENT_INFO,
   MUSE_SERVE_ARGV,
+  assertMuseExecMethod,
   assertMuseReadOnlyMethod,
   hasMuseCredential,
   ingestMuseUsagePayload,
@@ -90,8 +93,10 @@ import {
   museClassifyRpcError,
   museEvidenceRef,
   museRefreshThrottleMs,
+  museUuidv7,
   noteMuseCapacityFailure,
   parseMuseRpcLine,
+  type MspExecMethod,
   type MspReadOnlyMethod,
 } from "./muse.js";
 
@@ -127,6 +132,31 @@ function readOnlyNotification(method: MspReadOnlyMethod, params: unknown): strin
   return `${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`;
 }
 
+function execRequestLine(id: string, method: MspExecMethod, params: unknown): string {
+  assertMuseExecMethod(method);
+  return `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`;
+}
+
+export interface MuseHostRpcResponse {
+  result?: unknown;
+  error?: { code?: unknown; message?: unknown };
+}
+
+/** One parsed JSON-RPC line from the host (response or notification). */
+export interface MuseHostMessage {
+  id?: unknown;
+  method?: unknown;
+  params?: unknown;
+  result?: unknown;
+  error?: { code?: unknown; message?: unknown };
+}
+
+interface HostNotificationWaiter {
+  predicate: (msg: MuseHostMessage) => boolean;
+  resolve: (msg: MuseHostMessage | null) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 /**
  * One long-lived connection. A new instance is created per process (plus
  * per test reset); the module singleton below guarantees at most one live
@@ -139,6 +169,8 @@ export class MuseCapacityHost {
   private starting: Promise<boolean> | null = null;
   private inflightRead: Promise<MuseHostReadOutcome> | null = null;
   private pending = new Map<string, PendingRead>();
+  /** Live execution-turn subscribers (turn/completed, item/*, ...). */
+  private notifWaiters = new Set<HostNotificationWaiter>();
   private buffer = "";
   private stderrTail = "";
   private readSeq = 0;
@@ -167,12 +199,16 @@ export class MuseCapacityHost {
   }
 
   /**
-   * @param final true on the shutdown path (server teardown / explicit
-   * release): escalate synchronously — the process is exiting (or the
-   * caller is done with the child now), so no 2 s timer that the event
-   * loop may never run can be trusted to reap a SIGTERM-ignoring host.
+   * SIGTERM the child and release it. A wedged host can ignore SIGTERM, so
+   * every kill arms a one-shot 2 s SIGKILL escalation against that exact
+   * child — the timer holds only the old handle, so it can never signal a
+   * replacement host spawned later. SIGKILL is the backstop for wedged
+   * hosts only: a host that exits on SIGTERM is never signalled again.
+   *
+   * Notification waiters resolve null here so execution turns fail fast on
+   * host death instead of hanging until their own timeout.
    */
-  private killChild(final = false): void {
+  private killChild(): void {
     const child = this.child;
     this.child = null;
     this.dead = true;
@@ -184,6 +220,15 @@ export class MuseCapacityHost {
       }
     }
     this.pending.clear();
+    for (const w of this.notifWaiters) {
+      clearTimeout(w.timer);
+      try {
+        w.resolve(null);
+      } catch {
+        // Never throw out of teardown.
+      }
+    }
+    this.notifWaiters.clear();
     this.buffer = "";
     try {
       child?.kill();
@@ -191,19 +236,6 @@ export class MuseCapacityHost {
       // Already exited — nothing to signal.
     }
     if (child && child.exitCode === null) {
-      if (final) {
-        // Synchronous backstop: a host that ignores SIGTERM during
-        // shutdown must still die before process exit — no timer involved.
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          // Already exited — nothing to signal.
-        }
-        return;
-      }
-      // A wedged host can ignore SIGTERM; escalate once against that exact
-      // child so a hung process can never leak. The timer holds only the old
-      // handle, so it can never signal a replacement host spawned later.
       const killer = setTimeout(() => {
         try {
           if (child.exitCode === null) child.kill("SIGKILL");
@@ -221,7 +253,7 @@ export class MuseCapacityHost {
   }
 
   private onLine(line: string): void {
-    const msg = parseMuseRpcLine(line);
+    const msg = parseMuseRpcLine(line) as MuseHostMessage | null;
     if (!msg) return;
     if (typeof msg.method === "string" && msg.id === undefined) {
       if (msg.method === MSP_USAGE_CHANGED) {
@@ -239,6 +271,25 @@ export class MuseCapacityHost {
             // Best-effort: a failed ingest never breaks the connection.
           });
       }
+      // Execution-turn subscribers (turn/completed, item/*, ...). A waiter
+      // that fires is removed; waiters never see each other's messages.
+      for (const w of [...this.notifWaiters]) {
+        let match = false;
+        try {
+          match = w.predicate(msg);
+        } catch {
+          match = false;
+        }
+        if (match) {
+          this.notifWaiters.delete(w);
+          clearTimeout(w.timer);
+          try {
+            w.resolve(msg);
+          } catch {
+            // Never throw out of the read loop.
+          }
+        }
+      }
       return;
     }
     if (typeof msg.id === "string") {
@@ -247,6 +298,95 @@ export class MuseCapacityHost {
         this.pending.delete(msg.id);
         p.resolve({ result: msg.result, error: msg.error });
       }
+    }
+  }
+
+  /**
+   * NOT-270 execution lane: one JSON-RPC request for REAL Dealer work
+   * (`session/start`, `turn/start`, `turn/cancel`, `session/read` only —
+   * anything else throws before write). Multiplexed over the single shared
+   * connection by request id, so concurrent sessions share the one owned
+   * host and there is never a second Muse execution host per request.
+   * Resolves null on timeout, dead host, or unwritable stdin.
+   */
+  async execRequest(
+    id: string,
+    method: MspExecMethod,
+    params: unknown,
+    timeoutMs: number
+  ): Promise<MuseHostRpcResponse | null> {
+    assertMuseExecMethod(method);
+    if (this.dead || !this.child || this.child.exitCode !== null) return null;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        resolve(null);
+      }, timeoutMs);
+      timer.unref?.();
+      this.pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value as MuseHostRpcResponse);
+        },
+      });
+      try {
+        this.child?.stdin?.write(execRequestLine(id, method, params));
+      } catch {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        resolve(null);
+      }
+    });
+  }
+
+  /**
+   * Subscribe to one host notification (e.g. `turn/completed` for a session).
+   * Resolves with the first matching message, null on timeout or host death.
+   * Concurrent turns each hold their own waiter on the shared connection.
+   */
+  async waitForHostNotification(
+    predicate: (msg: MuseHostMessage) => boolean,
+    timeoutMs: number
+  ): Promise<MuseHostMessage | null> {
+    if (this.dead) return null;
+    return new Promise((resolve) => {
+      const waiter: HostNotificationWaiter = {
+        predicate,
+        resolve: (msg) => {
+          clearTimeout(waiter.timer);
+          this.notifWaiters.delete(waiter);
+          resolve(msg);
+        },
+        timer: setTimeout(() => {
+          this.notifWaiters.delete(waiter);
+          resolve(null);
+        }, timeoutMs),
+      };
+      waiter.timer.unref?.();
+      this.notifWaiters.add(waiter);
+    });
+  }
+
+  /**
+   * Best-effort `turn/cancel` for a timed-out or aborted execution turn.
+   * Never throws; the caller owns the timeout/abort verdict regardless.
+   */
+  async cancelExecTurn(sessionId: string, turnId?: string): Promise<void> {
+    try {
+      if (this.dead) return;
+      this.readSeq += 1;
+      await this.execRequest(
+        `muse-cancel-${this.connectionEpoch}-${this.readSeq}-${Date.now()}`,
+        "turn/cancel",
+        {
+          commandId: museUuidv7(),
+          sessionId,
+          ...(turnId ? { turnId } : {}),
+        },
+        10_000
+      );
+    } catch {
+      // Best-effort: cancellation must never break the caller's verdict.
     }
   }
 
@@ -278,10 +418,16 @@ export class MuseCapacityHost {
     });
   }
 
-  /** Start (or reuse) the connection. Single-flight across callers. */
+  /**
+   * Start (or reuse) the connection. Single-flight across callers: a start
+   * already in flight is always joined first. (The child is assigned before
+   * the handshake completes, so checking `isConnected()` first would let a
+   * second caller send requests down a half-open connection — session/start
+   * arriving before `initialized` is rejected by the host.)
+   */
   async ensureStarted(): Promise<boolean> {
-    if (this.isConnected()) return true;
     if (this.starting) return this.starting;
+    if (this.isConnected()) return true;
     this.starting = this.start();
     try {
       return await this.starting;
@@ -471,14 +617,38 @@ export class MuseCapacityHost {
   }
 
   /**
-   * Clean shutdown: release the child so no host process leaks. Final —
-   * a SIGTERM-ignoring host is SIGKILLed synchronously, never left to a
+   * Clean shutdown: release the child so no host process leaks.
+   * Graceful-first — a host that exits on SIGTERM is never signalled again
+   * (SIGKILL is the backstop for wedged hosts only). The close is awaited
+   * for a bounded grace window and a still-alive host is SIGKILLed before
+   * returning, so teardown never leaks the child and never depends on a
    * timer the exiting event loop may never run.
    */
   async shutdown(): Promise<void> {
-    this.killChild(true);
+    const child = this.child;
+    this.killChild();
     this.starting = null;
     this.inflightRead = null;
+    if (!child || child.exitCode !== null) return;
+    const closed = await new Promise<boolean>((resolve) => {
+      if (child.exitCode !== null) {
+        resolve(true);
+        return;
+      }
+      const timer = setTimeout(() => resolve(false), 2000);
+      timer.unref?.();
+      child.once("close", () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+    if (!closed) {
+      try {
+        if (child.exitCode === null) child.kill("SIGKILL");
+      } catch {
+        // Already exited — nothing to signal.
+      }
+    }
   }
 }
 

@@ -44,6 +44,7 @@
 // session) and evidence refs are static strings.
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import type { CapacityUnavailableReason, Runtime } from "@agent-dealer/shared";
 import { MUSE_CLI_ENV, resolveMuseAuthFile, resolveMuseBin } from "../cli-env.js";
@@ -61,6 +62,23 @@ export const MUSE_RUNTIME: Runtime = "muse_code";
 /** Methods this client may ever send. Anything else throws before write. */
 export const MSP_READ_ONLY_METHODS = ["initialize", "initialized", "usage/read"] as const;
 export type MspReadOnlyMethod = (typeof MSP_READ_ONLY_METHODS)[number];
+
+/**
+ * NOT-270: execution methods for REAL Dealer work through the server-owned
+ * serve host (the NOT-269 proven lifecycle: only a host that observes the
+ * account's provider traffic can answer `usage/read`). This is a separate
+ * allowlist from the read-only one above — a capacity read still never sends
+ * these. `session/resume` stays forbidden (state-changing, carries no usage
+ * per NOT-269 leg 2); `turn/steer` and approval writes are never sent by the
+ * headless runner, so they are refused here too.
+ */
+export const MSP_EXEC_METHODS = [
+  "session/start",
+  "turn/start",
+  "turn/cancel",
+  "session/read",
+] as const;
+export type MspExecMethod = (typeof MSP_EXEC_METHODS)[number];
 
 /**
  * Client identity sent in the `initialize` handshake. The stable schema
@@ -89,6 +107,30 @@ export function assertMuseReadOnlyMethod(method: string): asserts method is MspR
   }
 }
 
+export function assertMuseExecMethod(method: string): asserts method is MspExecMethod {
+  if (!(MSP_EXEC_METHODS as readonly string[]).includes(method)) {
+    throw new Error(`muse-serve: refusing non-execution method ${method}`);
+  }
+}
+
+/**
+ * UUIDv7 for MSP `commandId` idempotency handles (session/start, turn/start,
+ * turn/cancel require UUIDv7). Time-ordered; randomness from crypto.
+ */
+export function museUuidv7(nowMs = Date.now()): string {
+  const b = Buffer.alloc(16);
+  const ts = BigInt(nowMs) & ((1n << 48n) - 1n);
+  for (let i = 0; i < 6; i++) b[i] = Number((ts >> BigInt(40 - 8 * i)) & 0xffn);
+  randomBytes(10).copy(b, 6);
+  b[6] = 0x70 | (b[6] & 0x0f);
+  b[8] = 0x80 | (b[8] & 0x3f);
+  const hex = b.toString("hex");
+  return (
+    `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-` +
+    `${hex.slice(16, 20)}-${hex.slice(20)}`
+  );
+}
+
 function readOnlyRequest(id: string, method: MspReadOnlyMethod, params: unknown): string {
   assertMuseReadOnlyMethod(method);
   return `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`;
@@ -102,9 +144,17 @@ function readOnlyNotification(method: MspReadOnlyMethod, params: unknown): strin
 /**
  * Stable Session Protocol argv. Fixed: capacity reads never `exec`, and the
  * host takes no `--protocol` flag — `muse serve` with that flag exits 2
- * against the shipped binary, so this stays exactly `["serve"]`.
+ * against the shipped binary.
+ *
+ * NOT-270: the owned host is also the execution host for real Dealer Muse
+ * turns (the NOT-269 precondition — only a host that observes provider
+ * traffic can answer `usage/read`). Sandbox posture is fixed at host
+ * startup and applies to every session on the host, so the host carries the
+ * same `--sandbox-network restricted` every `muse exec` developer invocation
+ * already passes (see runners/muse-code-args.ts — a fixed constant, no
+ * per-session variation). Approval mode stays per-session on the wire.
  */
-export const MUSE_SERVE_ARGV: readonly string[] = ["serve"];
+export const MUSE_SERVE_ARGV: readonly string[] = ["serve", "--sandbox-network", "restricted"];
 
 /** JSON-RPC request ids for the one-shot read (init handshake, then usage). */
 export const MSP_INITIALIZE_ID = "muse-capacity-init";
