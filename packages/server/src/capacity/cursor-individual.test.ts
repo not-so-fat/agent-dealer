@@ -21,6 +21,7 @@ import {
   CURSOR_INDIVIDUAL_MAX_BODY_BYTES,
   CURSOR_INDIVIDUAL_OPT_IN_ENV,
   CURSOR_INDIVIDUAL_OPT_IN_VALUE,
+  CURSOR_INDIVIDUAL_RUNTIME,
   CURSOR_INDIVIDUAL_USAGE_PATHS,
   cursorIndividualCapacityAdapter,
   cursorIndividualFailureReason,
@@ -36,8 +37,12 @@ import {
   resetCursorIndividualPollStateForTests,
   type FetchImpl,
 } from "./cursor-individual.js";
+import Database from "better-sqlite3";
 import {
+  CURSOR_DESKTOP_ACCESS_TOKEN_KEY,
   CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV,
+  CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV,
+  CURSOR_INDIVIDUAL_HOME_ENV,
   cursorIndividualAuthHeader,
 } from "./cursor-individual-credentials.js";
 
@@ -62,6 +67,8 @@ let credDir: string;
 let savedOptIn: string | undefined;
 let savedCredFile: string | undefined;
 let savedRefresh: string | undefined;
+let savedDesktopFile: string | undefined;
+let savedHome: string | undefined;
 
 before(() => {
   migrate();
@@ -72,9 +79,13 @@ beforeEach(() => {
   savedOptIn = process.env[CURSOR_INDIVIDUAL_OPT_IN_ENV];
   savedCredFile = process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV];
   savedRefresh = process.env.AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH;
+  savedDesktopFile = process.env[CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV];
+  savedHome = process.env[CURSOR_INDIVIDUAL_HOME_ENV];
   delete process.env[CURSOR_INDIVIDUAL_OPT_IN_ENV];
   delete process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV];
   delete process.env.AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH;
+  delete process.env[CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV];
+  delete process.env[CURSOR_INDIVIDUAL_HOME_ENV];
   clearCursorIndividualBilling();
   clearAllCapacitySnapshots();
   clearAllRuntimeAvailability();
@@ -88,6 +99,10 @@ afterEach(() => {
   else process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV] = savedCredFile;
   if (savedRefresh === undefined) delete process.env.AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH;
   else process.env.AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH = savedRefresh;
+  if (savedDesktopFile === undefined) delete process.env[CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV];
+  else process.env[CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV] = savedDesktopFile;
+  if (savedHome === undefined) delete process.env[CURSOR_INDIVIDUAL_HOME_ENV];
+  else process.env[CURSOR_INDIVIDUAL_HOME_ENV] = savedHome;
   fs.rmSync(credDir, { recursive: true, force: true });
 });
 
@@ -918,4 +933,239 @@ test("readBoundedText aborts once the body exceeds the size cap, without bufferi
     },
   });
   await assert.rejects(() => readBoundedText(new Response(anotherStream), abortedController.signal));
+});
+
+// ---------------------------------------------------------------------------
+// NOT-267: desktop-login acquisition and one-window normalization of the
+// live `/api/usage-summary` shape.
+// ---------------------------------------------------------------------------
+
+/** header.payload.signature with { sub } — no signature verification needed. */
+function desktopJwt(sub: string): string {
+  const b64url = (obj: unknown) =>
+    Buffer.from(JSON.stringify(obj)).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `${b64url({ alg: "none" })}.${b64url({ sub })}.sig`;
+}
+
+/** Point the desktop resolution at a fixture state.vscdb (real SQLite). */
+function fixtureDesktopDb(token: string): string {
+  const file = path.join(credDir, "state.vscdb");
+  const db = new Database(file);
+  try {
+    db.exec("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)");
+    db.prepare("INSERT INTO ItemTable (key, value) VALUES (?, ?)").run(
+      CURSOR_DESKTOP_ACCESS_TOKEN_KEY,
+      token
+    );
+  } finally {
+    db.close();
+  }
+  process.env[CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV] = file;
+  return file;
+}
+
+/** Live-shape payload: cycle dates top-level, account total nested in the plan. */
+function liveUsagePayload(nowMs: number, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    billingCycleStart: "2026-09-01T00:00:00.000Z",
+    billingCycleEnd: new Date(nowMs + 8 * 24 * 3600_000).toISOString(),
+    individualUsage: {
+      plan: { totalPercentUsed: 37.5 },
+      apiUsage: { apiPercentUsed: 91.2 },
+    },
+    teamUsage: { totalPercentUsed: 99.9 },
+    ...over,
+  };
+}
+
+test("a desktop-login read sends the desktop session cookie and normalizes one window", async () => {
+  enable();
+  // Default resolution (no pinned credential file): the desktop database
+  // answers, the empty Agent home does not.
+  process.env[CURSOR_INDIVIDUAL_HOME_ENV] = credDir;
+  const jwt = desktopJwt(USER_ID);
+  fixtureDesktopDb(jwt);
+  const now = Date.now();
+  const calls: RecordedCall[] = [];
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({ [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 200, body: liveUsagePayload(now) } }, calls),
+    nowMs: now,
+  });
+  assert.equal(obs.failure, null);
+  assert.equal(obs.billing.remainingPercent, 62.5);
+  assert.equal(obs.billing.cycleStart, "2026-09-01T00:00:00.000Z");
+  assert.equal(obs.billing.cycleEnd, new Date(now + 8 * 24 * 3600_000).toISOString());
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].headers.Cookie, cursorIndividualAuthHeader(USER_ID, jwt));
+  assert.ok(!JSON.stringify(obs).includes(jwt), "raw desktop token stays in the header only");
+});
+
+test("default resolution with neither login performs no HTTP and reads absent-credential", async () => {
+  enable();
+  process.env[CURSOR_INDIVIDUAL_HOME_ENV] = credDir;
+  process.env[CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV] = path.join(credDir, "missing.vscdb");
+  const calls: RecordedCall[] = [];
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({}, calls),
+  });
+  assert.equal(obs.failure?.kind, "absent-credential");
+  assert.equal(obs.configured, false);
+  assert.equal(calls.length, 0);
+  assert.equal(cursorIndividualFailureReason("absent-credential"), "missing");
+});
+
+test("live usage-summary shape writes exactly one billing_cycle snapshot and one billing row", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const cycleEnd = new Date(now + 8 * 24 * 3600_000).toISOString();
+  await refreshCursorIndividualCapacityIfStale(now, {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({ [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 200, body: liveUsagePayload(now) } }),
+    nowMs: now,
+  });
+  const { listCapacitySnapshots } = await import("../repository/runtime-capacity.js");
+  const rows = listCapacitySnapshots(CURSOR_INDIVIDUAL_RUNTIME);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].windowKey, "billing_cycle");
+  assert.equal(rows[0].remainingPercent, 62.5);
+  assert.equal(rows[0].resetAt, cycleEnd);
+  const billingRow = readCursorIndividualBillingRow();
+  assert.ok(billingRow, "one billing row is written");
+  assert.equal(billingRow.cycleStart, "2026-09-01T00:00:00.000Z");
+  assert.equal(billingRow.cycleEnd, cycleEnd);
+  assert.equal(billingRow.remainingPercent, 62.5);
+  const snap = await getCursorIndividualBillingSnapshot(now);
+  assert.equal(snap.unavailableReason, null);
+  assert.equal(snap.remainingPercent, 62.5);
+});
+
+test("with multiple Cursor pools the primary value is 100 - totalPercentUsed; no second window", async () => {
+  // totalPercentUsed 37.5 → 62.5 remaining — NOT 100 - 91.2 (API pool) and
+  // NOT 100 - 99.9 (team scope). The adapter emits exactly one window.
+  const readings = cursorIndividualPayloadToReadings(liveUsagePayload(Date.now()));
+  assert.ok(readings);
+  assert.equal(readings.remainingPercent, 62.5);
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const result = await cursorIndividualCapacityAdapter({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({ [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 200, body: liveUsagePayload(now) } }),
+    nowMs: now,
+  }).read(now);
+  assert.equal(result.windows.length, 1);
+  assert.equal(result.unavailable.length, 0);
+  assert.equal(result.windows[0].windowKey, "billing_cycle");
+});
+
+test("a pool-only scale (apiPercentUsed) is never substituted for the account total", async () => {
+  const poolOnly = cursorIndividualPayloadToReadings({
+    billingCycleStart: "2026-09-01T00:00:00.000Z",
+    billingCycleEnd: new Date(Date.now() + 8 * 24 * 3600_000).toISOString(),
+    individualUsage: { plan: { apiPercentUsed: 91.2 } },
+  });
+  // Cycle dates parse, but the remaining scale is absent — never 100 - 91.2.
+  assert.ok(poolOnly);
+  assert.equal(poolOnly.remainingPercent, null);
+  assert.equal(
+    cursorIndividualPayloadToReadings({ individualUsage: { plan: { apiPercentUsed: 91.2 } } }),
+    null
+  );
+  // End to end: no usable scale reads unparsable with no window emitted.
+  enable();
+  fixtureCredential();
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({
+      [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: {
+        status: 200,
+        body: { individualUsage: { plan: { apiPercentUsed: 91.2 } } },
+      },
+    }),
+  });
+  assert.equal(obs.failure?.kind, "malformed");
+});
+
+test("the plan's explicit used/limit pair is a last resort when total percent is absent", async () => {
+  const now = Date.now();
+  const cycle = {
+    billingCycleStart: "2026-09-01T00:00:00.000Z",
+    billingCycleEnd: new Date(now + 8 * 24 * 3600_000).toISOString(),
+  };
+  // 30 used of a 100 limit → 70 remaining.
+  assert.equal(
+    cursorIndividualPayloadToReadings({ ...cycle, individualUsage: { plan: { used: 30, limit: 100 } } })
+      ?.remainingPercent,
+    70
+  );
+  // A present total percent always wins over the pair.
+  assert.equal(
+    cursorIndividualPayloadToReadings({
+      ...cycle,
+      individualUsage: { plan: { totalPercentUsed: 37.5, used: 30, limit: 100 } },
+    })?.remainingPercent,
+    62.5
+  );
+  // Degenerate pairs are not scales: zero limit, negative used.
+  assert.equal(
+    cursorIndividualPayloadToReadings({ ...cycle, individualUsage: { plan: { used: 30, limit: 0 } } })
+      ?.remainingPercent,
+    null
+  );
+  assert.equal(
+    cursorIndividualPayloadToReadings({ ...cycle, individualUsage: { plan: { used: -5, limit: 100 } } })
+      ?.remainingPercent,
+    null
+  );
+});
+
+test("a completed live billing cycle reads expired with its start/end intact", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  await refreshCursorIndividualCapacityIfStale(now, {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({ [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 200, body: liveUsagePayload(now) } }),
+    nowMs: now,
+  });
+  // Past the cycle end, the stored row still carries its dates — the read
+  // model reports them as expired, never as current capacity.
+  const pastEnd = Date.parse(new Date(now + 8 * 24 * 3600_000).toISOString()) + 1000;
+  const snap = await getCursorIndividualBillingSnapshot(pastEnd);
+  assert.equal(snap.unavailableReason, "expired");
+  assert.equal(snap.remainingPercent, null);
+  const row = readCursorIndividualBillingRow();
+  assert.equal(row?.cycleStart, "2026-09-01T00:00:00.000Z");
+  assert.equal(row?.remainingPercent, 62.5);
+});
+
+test("401/429/network failures keep last-good data and never leak the credential", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const good = {
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({ [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 200, body: liveUsagePayload(now) } }),
+    nowMs: now,
+  };
+  await refreshCursorIndividualBilling(good);
+  assert.equal(readCursorIndividualBillingRow()?.remainingPercent, 62.5);
+  const later = now + 60_000;
+  for (const routes of [
+    { [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 401, body: {} } },
+    { [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: { status: 429, body: {} } },
+    { [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: new Error("socket hang up") },
+  ]) {
+    const obs = await readCursorIndividualBilling({ baseUrl: MOCK_BASE, fetchImpl: mockFetch(routes), nowMs: later });
+    assert.ok(obs.failure, "failure is explicit");
+    assert.equal(obs.billing.unavailableReason, "missing");
+    assert.ok(!JSON.stringify(obs).includes(SECRET), "no credential material in the observation");
+    await refreshCursorIndividualBilling({ baseUrl: MOCK_BASE, fetchImpl: mockFetch(routes), nowMs: later });
+    const snap = await getCursorIndividualBillingSnapshot(later);
+    assert.equal(snap.remainingPercent, 62.5);
+    assert.equal(snap.unavailableReason, null);
+  }
 });
