@@ -158,23 +158,35 @@ released right after the read (it holds no state, so nothing is lost) and
 the next throttled refresh respawns it — production keeps no lifetime
 child that can only answer `missing`.
 
-Structural precondition: Dealer runs Muse turns as `muse exec`
-subprocesses, so an exec-driven server leaves the owned host unobserved and
-Muse capacity reads honest N/A until real turns flow through a serve host.
-No synthetic model prompt is ever issued to refresh capacity. Every real
-Dealer Muse session already kicks a best-effort refresh at its own end
-(`refreshMuseCapacityAfterSession` in `coordinator/muse-spawn.ts` — the
-proven safe point for the final `usage/read`, still read-only and never a
-model turn); while turns stay on `exec` that read is honestly N/A and
-preserves last-good rows. Follow-up runner ticket: route real Muse turns
-through the owned host (real `session/start` + `turn/start` on it) — that
-requires unifying the host-fixed sandbox posture (`muse serve` fixes
-sandbox for its lifetime; nothing about it is negotiable over the wire)
-and re-proving the NOT-177/179/181 runner contracts, so it is explicitly
-out of scope here. Server shutdown (`SIGINT`/`SIGTERM` in
-`packages/server/src/index.ts`) releases the owned host before exiting, so
-no `muse serve` child leaks; a wedged host that ignores `SIGTERM` is
-escalated once to `SIGKILL` (same backstop as the Codex adapter).
+Execution lane (NOT-270 runner migration, product decision 2026-09-26):
+real Dealer Muse turns run through the owned host — `session/start` +
+`turn/start` on it (`runners/muse-serve-session.ts`, driven by
+`coordinator/muse-spawn.ts`). That traffic IS the observation, so the
+session-boundary refresh hook (`refreshMuseCapacityAfterSession`, still
+read-only and never a model turn) is the final `usage/read` that populates
+5H/1W. No synthetic model prompt is ever issued to refresh capacity. When
+the serve lane cannot admit a turn (host unavailable, rejected start, no
+credential), the session falls back to the legacy `muse exec` subprocess
+before any model work starts — the host then stays unobserved by
+construction and the read stays honest N/A with last-good rows preserved.
+After admission there is no fallback: an admitted turn's verdict is
+reported honestly (a post-admission error fails loudly rather than
+executing the work twice). `AGENT_DEALER_MUSE_RUNNER=exec` forces the exec
+lane (operator escape hatch). Both lanes write identical normalized log
+evidence, so downstream log readers work unchanged either way.
+Posture: the owned host starts with `--sandbox-network restricted`, the
+same constant every exec invocation passes; approval is per-session on the
+wire as `denyUnmatched` (the wire enum has no `never` — the closest match,
+never prompts). Accepted deltas vs exec, re-verifiable with a free
+`--provider echo` session/turn: no `--disable-web-tools`,
+`--no-foreign-personal-context`, `--approval-judge off`, or
+`--max-model-steps` equivalent exists on the wire (runaway loops are
+bounded by the attempt wall-clock timeout + `turn/cancel`). Server shutdown
+(`SIGINT`/`SIGTERM` in `packages/server/src/index.ts`) releases the owned
+host before exiting, so no `muse serve` child leaks; shutdown is
+graceful-first (a host that exits on `SIGTERM` is never signalled again)
+and a wedged host that ignores `SIGTERM` is escalated to `SIGKILL` after a
+bounded grace window (same backstop as the Codex adapter).
 
 Normalization keeps the two stable windows independently:
 
@@ -221,6 +233,9 @@ enforces the stable contract: it rejects the removed `--protocol` argv,
 requires `initialize` (with a valid `clientInfo`) → `initialized` →
 `usage/read`, serves the stable `usage.window` / `usage.weekly` fields,
 and replays persistent-host and restart modes for the owned-host tests;
+execution modes additionally answer `session/start` / `turn/start` /
+`turn/cancel` / `session/read` (full, rejected, failed, and hanging turns)
+for the serve-lane tests in `runners/muse-serve-session.test.ts`;
 CI performs no live Muse request.
 
 ## Provider: Codex App Server (NOT-246)
