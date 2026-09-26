@@ -78,6 +78,33 @@ hard caps): capacity snapshots neither read nor clear hard-cap rows, and
 connection health stays a separate state — green health never implies known
 capacity.
 
+## Compact presentation (NOT-266)
+
+The top bar (`TopBarCapacity`) and the Agents-page strip
+(`RuntimeCapacityStrip`) are a compact decision aid, not a diagnostics dump.
+Presentation selection is explicit — never inferred from a provider label,
+window key, or duration:
+
+- Claude / Codex / Muse render exactly the tagged account-wide pair
+  (`criticalRole=five_hour|weekly`), 5H then 1W. A partial or missing pair
+  synthesizes the missing half as a public `5H N/A` / `1W N/A` row; it never
+  substitutes another window's label.
+- Cursor renders exactly its one `billing_cycle` window, labeled `1M`, with
+  a tooltip naming the current billing cycle and its reset.
+- Everything else stays in `GET /api/runtime-capacity` for diagnostics but
+  never renders in the compact UI: provider failure sentinels (Codex's
+  `codex_account_rate_limits` / `account_rate_limits`, Muse's
+  `muse_account_usage` / `account_usage`) and model-specific, overage, or
+  other diagnostic windows. Tooltips and accessibility text use only the
+  public labels plus value/used-share/reset/staleness detail — raw window
+  keys, provider buckets, and sentinel labels never appear.
+- The Agents page shows the single normalized Cursor billing-cycle snapshot
+  as the primary Cursor readout. The separate Team billing card
+  (`CursorTeamBillingCard`) and Individual billing card
+  (`CursorIndividualBillingCard`) are not part of the default capacity block;
+  their API routes and components remain for compatibility. Provider
+  acquisition is unchanged.
+
 ## Provider: Muse Code (NOT-247)
 
 Sources: the Muse Code docs (`https://dev.meta.ai/docs/muse-code`) and the
@@ -329,11 +356,14 @@ one bounded poll (single-flight, each request under the per-request timeout)
 and then serves the result — fresh snapshots short-circuit with no HTTP, and a failed
 poll backs off for 60 s before polling again (no per-request retry storm
 after a 429/5xx). `AGENT_DEALER_CURSOR_TEAM_CAPACITY_REFRESH=off` disables
-the refresh. The Agents page renders team billing in its own labeled section
-(`CursorTeamBillingCard`, "Cursor team billing · Admin API") below the
-per-runtime quota strip: summed spend in cents, cycle start, team size, and
-per-member override counts — never as percent chips. Tests inject a mock
-fetch; CI performs no live Cursor request.
+the refresh. Team billing is not a primary personal-capacity readout: since
+NOT-266 the Agents page no longer renders the separate team billing section
+(`CursorTeamBillingCard`, "Cursor team billing · Admin API") in the default
+capacity block — the one normalized Cursor billing-cycle snapshot is the
+primary UI. The card, its API route, and its unit (summed spend in cents,
+cycle start, team size, per-member override counts — never percent chips)
+remain for compatibility. Tests inject a mock fetch; CI performs no live
+Cursor request.
 
 ## Provider: Cursor Individual dashboard — EXPERIMENTAL, opt-in (NOT-250)
 
@@ -434,10 +464,13 @@ credential/HTTP when fresh — but the two routes are usually mounted at once
 when BOTH decide they're stale they share one poll: a single in-flight
 dashboard read, its observation ingested into both stores, rather than one
 poll per route. A failed poll backs off for 60 s (shared by both routes).
-`AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH=off` disables the refresh. The
-Agents page renders individual billing in its own labeled section
-(`CursorIndividualBillingCard`, "Cursor individual billing · Experimental")
-below the team card: cycle label, remaining percent, reported usage, and
-reset — plus the `AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY` setting that
-disables it. Tests use temporary fixture credentials and a mock fetch; CI
-touches neither the real local login nor the network.
+`AGENT_DEALER_CURSOR_INDIVIDUAL_REFRESH=off` disables the refresh. Since
+NOT-266 the Agents page no longer renders the separate individual billing
+section (`CursorIndividualBillingCard`, "Cursor individual billing ·
+Experimental") alongside the runtime window — the one normalized
+`billing_cycle` snapshot (the `1M` readout) is the primary UI, and the card
+and its API route remain for compatibility: cycle label, remaining percent,
+reported usage, and reset — plus the
+`AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY` setting that disables it. Tests use
+temporary fixture credentials and a mock fetch; CI touches neither the real
+local login nor the network.

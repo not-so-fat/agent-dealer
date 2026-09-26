@@ -1,5 +1,5 @@
 // Compact agent-capacity summary for the Agent Dealer top bar (NOT-262,
-// NOT-264 dual-window presentation).
+// NOT-264 dual-window presentation, NOT-266 explicit selection).
 // Uses the existing capacity source (`GET /api/runtime-capacity` via
 // fetchRuntimeCapacity) and the shared freshness contract (`isWindowKnown`):
 // only windows that are current render a numeric remaining percent. Loading,
@@ -15,6 +15,15 @@
 // runtime cannot be used, so either known critical row at 0% gives the
 // whole block an exhausted treatment while both labeled values stay
 // visible.
+//
+// NOT-266: presentation selection is explicit, never inferred from provider
+// labels. The top bar renders only the tagged account-wide critical pair
+// (`criticalRole=five_hour|weekly`) for Claude/Codex/Muse plus Cursor's one
+// `billing_cycle` window (labeled `1M`). Failure sentinels (e.g. Codex's
+// `codex_account_rate_limits`, Muse's `muse_account_usage`) and
+// model-specific/overage/diagnostic extras stay in the API for diagnostics
+// but never render here: with no tagged pair the runtime reads `5H N/A` /
+// `1W N/A` under the public labels, never under an internal name.
 import type {
   CapacityUnavailableReason,
   CapacityWindowSnapshot,
@@ -53,11 +62,30 @@ export type TopBarWindowValue =
   | { key: string; label: string; kind: "known"; remaining: number; rawRemaining: number; detail: string; isCritical: boolean }
   | { key: string; label: string; kind: "unknown"; reason: CapacityUnavailableReason; detail: string; isCritical: boolean };
 
+/**
+ * NOT-266 explicit presentation selection: the compact UI never infers
+ * importance from a provider label, window key, or duration.
+ * - Claude/Codex/Muse (`PAIR_RUNTIMES`) render exactly the tagged
+ *   account-wide pair (`criticalRole=five_hour|weekly`), 5H then 1W, with a
+ *   missing half synthesized as a public `5H N/A` / `1W N/A` row.
+ * - Cursor renders exactly its one `billing_cycle` window, labeled `1M`.
+ * - Everything else (failure sentinels, model-specific/overage/diagnostic
+ *   extras) stays in the API for diagnostics and never renders here.
+ */
+const PAIR_RUNTIMES: ReadonlySet<string> = new Set([
+  "claude_code",
+  "codex_local",
+  "muse_code",
+]);
+
+const CURSOR_BILLING_WINDOW_KEY = "billing_cycle";
+const CURSOR_BILLING_LABEL = "1M";
+
 export type PerRuntimeSummary = {
   runtime: string;
-  /** Labeled rows in display order: 5H, 1W, then any other windows. */
+  /** Labeled rows in display order: exactly 5H+1W, exactly one 1M, or none. */
   windows: TopBarWindowValue[];
-  /** True when either known critical (5H/1W) row is at 0% remaining. */
+  /** True when any known presented row is at 0% remaining. */
   exhausted: boolean;
   detail: string;
 };
@@ -111,49 +139,61 @@ function effectiveWindowReason(
   return entryReason ?? "missing";
 }
 
+/**
+ * Tooltip/accessibility detail for one presented row. Always labeled under
+ * the row's public compact label (`5H`, `1W`, `1M`) — raw window keys,
+ * provider buckets, and sentinel labels never appear here. Keeps the
+ * value, used share, reset, and N/A reason so the tooltip stays checkable.
+ */
 function windowDetail(
   w: CapacityWindowSnapshot,
   nowMs: number,
-  entryReason: CapacityUnavailableReason | null
+  entryReason: CapacityUnavailableReason | null,
+  publicLabel: string,
+  extraContext: string | null = null
 ): string {
   if (isWindowKnown(w, nowMs)) {
     const remaining = Math.round(w.remainingPercent ?? 0);
     const reset = w.resetAt ? `, resets ${new Date(w.resetAt).toLocaleString()}` : "";
-    return `${w.displayLabel}: ${remaining}% available (${100 - remaining}% used${reset})`;
+    const context = extraContext ? `, ${extraContext}` : "";
+    return `${publicLabel}: ${remaining}% available (${100 - remaining}% used${context}${reset})`;
   }
-  return `${w.displayLabel}: N/A (${REASON_TEXT[effectiveWindowReason(w, nowMs, entryReason)]})`;
+  return `${publicLabel}: N/A (${REASON_TEXT[effectiveWindowReason(w, nowMs, entryReason)]})`;
 }
 
 /** One row from one window: a known percent or an N/A, labeled under the
- * window's own provider label so non-critical windows are never relabeled
- * as 5H/1W. `isCritical` only changes the row's `isCritical` flag (used to
+ * explicit public label (`5H`, `1W`, or Cursor's `1M`) — never under the
+ * provider's own label, so sentinel/internal names can never leak into the
+ * compact UI. `isCritical` only changes the row's `isCritical` flag (used to
  * scope the per-row zero highlight) — the critical pair is never
  * min-collapsed across buckets, it is exactly one identity-selected window. */
 function summarizeWindow(
   w: CapacityWindowSnapshot,
   entry: RuntimeCapacityEntry,
   nowMs: number,
-  isCritical: boolean
+  isCritical: boolean,
+  publicLabel: string,
+  extraContext: string | null = null
 ): TopBarWindowValue {
   if (isWindowKnown(w, nowMs)) {
     const rawRemaining = w.remainingPercent ?? 0;
     return {
       key: w.windowKey,
-      label: w.displayLabel,
+      label: publicLabel,
       kind: "known",
       remaining: Math.round(rawRemaining),
       rawRemaining,
-      detail: windowDetail(w, nowMs, entry.unavailableReason),
+      detail: windowDetail(w, nowMs, entry.unavailableReason, publicLabel, extraContext),
       isCritical,
     };
   }
   const reason: CapacityUnavailableReason = effectiveWindowReason(w, nowMs, entry.unavailableReason);
   return {
     key: w.windowKey,
-    label: w.displayLabel,
+    label: publicLabel,
     kind: "unknown",
     reason,
-    detail: windowDetail(w, nowMs, entry.unavailableReason),
+    detail: windowDetail(w, nowMs, entry.unavailableReason, publicLabel, extraContext),
     isCritical,
   };
 }
@@ -175,45 +215,72 @@ function missingPairWindow(
   };
 }
 
-/** One entry per runtime account: the 5H/1W pair (deterministically ordered,
- * missing halves synthesized as N/A) followed by any other provider windows
- * under their own labels — or a single empty row when the runtime reported
- * nothing current. Exported for tests. */
+/** One Cursor billing-cycle row: the single primary Cursor readout, labeled
+ * `1M`, with a tooltip naming the billing-cycle source and its reset. */
+function summarizeCursorBilling(
+  w: CapacityWindowSnapshot,
+  entry: RuntimeCapacityEntry,
+  nowMs: number
+): TopBarWindowValue {
+  return summarizeWindow(w, entry, nowMs, true, CURSOR_BILLING_LABEL, "current billing cycle");
+}
+
+/** One entry per runtime account under the NOT-266 selection rule — exactly
+ * the 5H/1W pair (deterministically ordered, missing halves synthesized as
+ * public N/A rows) for Claude/Codex/Muse, exactly one `1M` billing-cycle
+ * row for Cursor, or no rows when the runtime reported nothing presentable.
+ * Untagged windows (failure sentinels, model-specific/overage/diagnostic
+ * extras) are ignored here AND in the tooltip detail: they stay in the API
+ * for diagnostics but never render or leak internal names. Exported for
+ * tests. */
 export function summarizeCapacity(
   data: RuntimeCapacityResponse,
   nowMs = Date.now()
 ): PerRuntimeSummary[] {
   return data.runtimes.map((entry) => {
     const runtime = runtimeLabel(entry.runtime as Runtime);
-    const { fiveHour, weekly } = selectCriticalPair(entry.windows);
-    const criticalKeys = new Set([fiveHour?.windowKey, weekly?.windowKey].filter(Boolean));
-    const others = entry.windows.filter((w) => !criticalKeys.has(w.windowKey));
-    let windows: TopBarWindowValue[];
-    let criticalRows: TopBarWindowValue[];
-    if (fiveHour !== null || weekly !== null) {
-      const fiveRow =
-        fiveHour !== null ? summarizeWindow(fiveHour, entry, nowMs, true) : missingPairWindow(FIVE_HOUR_LABEL, entry);
-      const weeklyRow =
-        weekly !== null ? summarizeWindow(weekly, entry, nowMs, true) : missingPairWindow(WEEKLY_LABEL, entry);
-      criticalRows = [fiveRow, weeklyRow];
-      windows = [...criticalRows, ...others.map((w) => summarizeWindow(w, entry, nowMs, false))];
-    } else if (entry.windows.length > 0) {
-      criticalRows = [];
-      windows = entry.windows.map((w) => summarizeWindow(w, entry, nowMs, false));
-    } else {
-      criticalRows = [];
-      windows = [];
+    if (entry.runtime === "cursor_local") {
+      const billing = entry.windows.find((w) => w.windowKey === CURSOR_BILLING_WINDOW_KEY) ?? null;
+      if (billing === null) {
+        return {
+          runtime,
+          windows: [],
+          exhausted: false,
+          detail: `N/A (${REASON_TEXT[entry.unavailableReason ?? "missing"]})`,
+        };
+      }
+      const row = summarizeCursorBilling(billing, entry, nowMs);
+      // Decided from the raw provider value, never the rounded display
+      // value — rounding a small nonzero remainder (e.g. 0.4%) down to 0%
+      // must not falsely exhaust it.
+      return {
+        runtime,
+        windows: [row],
+        exhausted: row.kind === "known" && row.rawRemaining === 0,
+        detail: row.detail,
+      };
     }
-    // Exhaustion is a critical-pair state only: a non-critical extra bucket
-    // at 0% never marks the runtime unavailable. Decided from the raw
-    // provider value, never the rounded display value — rounding a small
-    // nonzero remainder (e.g. 0.4%) down to 0% must not falsely exhaust it.
-    const exhausted = criticalRows.some((w) => w.kind === "known" && w.rawRemaining === 0);
-    const detail =
-      entry.windows.length > 0
-        ? entry.windows.map((w) => windowDetail(w, nowMs, entry.unavailableReason)).join("; ")
-        : `N/A (${REASON_TEXT[entry.unavailableReason ?? "missing"]})`;
-    return { runtime, windows, exhausted, detail };
+    if (PAIR_RUNTIMES.has(entry.runtime)) {
+      const { fiveHour, weekly } = selectCriticalPair(entry.windows);
+      const fiveRow =
+        fiveHour !== null
+          ? summarizeWindow(fiveHour, entry, nowMs, true, FIVE_HOUR_LABEL)
+          : missingPairWindow(FIVE_HOUR_LABEL, entry);
+      const weeklyRow =
+        weekly !== null
+          ? summarizeWindow(weekly, entry, nowMs, true, WEEKLY_LABEL)
+          : missingPairWindow(WEEKLY_LABEL, entry);
+      const windows = [fiveRow, weeklyRow];
+      const exhausted = windows.some((w) => w.kind === "known" && w.rawRemaining === 0);
+      const detail = windows.map((w) => w.detail).join("; ");
+      return { runtime, windows, exhausted, detail };
+    }
+    return {
+      runtime,
+      windows: [],
+      exhausted: false,
+      detail: `N/A (${REASON_TEXT[entry.unavailableReason ?? "missing"]})`,
+    };
   });
 }
 

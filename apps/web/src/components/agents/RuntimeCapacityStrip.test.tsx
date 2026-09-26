@@ -9,6 +9,8 @@ const { renderToStaticMarkup } = await import("react-dom/server");
 const { RuntimeCapacityStripView } = await import("./RuntimeCapacityStrip.js");
 import type { RuntimeCapacityResponse } from "@agent-dealer/shared";
 
+// Untagged by default: only windows carrying the server-tagged `criticalRole`
+// (or Cursor's `billing_cycle`) are selected for display — see selectStripRows.
 function window(over: Record<string, unknown> = {}) {
   return {
     windowKey: "weekly",
@@ -24,6 +26,7 @@ function window(over: Record<string, unknown> = {}) {
     expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     source: "supported_protocol",
     unavailableReason: null,
+    criticalRole: null,
     ...over,
   };
 }
@@ -35,8 +38,8 @@ const data = {
       runtime: "claude_code",
       unavailableReason: null,
       windows: [
-        window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 50 }),
-        window({ windowKey: "weekly", displayLabel: "1W", remainingPercent: 65 }),
+        window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 50, criticalRole: "five_hour" }),
+        window({ windowKey: "weekly", displayLabel: "1W", remainingPercent: 65, criticalRole: "weekly" }),
       ],
     },
     {
@@ -78,6 +81,8 @@ test("strip wraps instead of growing: flex-wrap root, nowrap chips, one entry pe
 test("deduped codex pair renders one 5H chip and one weekly chip, no aggregate aliases", () => {
   // NOT-263: after the server-side collapse, the mirrored logical pair
   // arrives once (detailed identity only) and the strip renders it once.
+  // NOT-266: selection is by the server tag — the detailed pair is the
+  // tagged critical pair.
   const deduped = {
     generatedAt: new Date().toISOString(),
     runtimes: [
@@ -85,8 +90,8 @@ test("deduped codex pair renders one 5H chip and one weekly chip, no aggregate a
         runtime: "codex_local",
         unavailableReason: null,
         windows: [
-          window({ windowKey: "codex_limit_main_primary", displayLabel: "5H", durationMinutes: 300, remainingPercent: 30 }),
-          window({ windowKey: "codex_limit_main_secondary", displayLabel: "1W", durationMinutes: 10080, remainingPercent: 95 }),
+          window({ windowKey: "codex_limit_main_primary", displayLabel: "5H", durationMinutes: 300, remainingPercent: 30, criticalRole: "five_hour" }),
+          window({ windowKey: "codex_limit_main_secondary", displayLabel: "1W", durationMinutes: 10080, remainingPercent: 95, criticalRole: "weekly" }),
         ],
       },
     ],
@@ -106,7 +111,7 @@ test("remaining under 10% renders critical (red, bold)", () => {
       {
         runtime: "claude_code",
         unavailableReason: null,
-        windows: [window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 9 })],
+        windows: [window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 9, criticalRole: "five_hour" })],
       },
     ],
   } as unknown as RuntimeCapacityResponse;
@@ -123,7 +128,7 @@ test("remaining under 30% renders warning (yellow)", () => {
       {
         runtime: "claude_code",
         unavailableReason: null,
-        windows: [window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 29 })],
+        windows: [window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 29, criticalRole: "five_hour" })],
       },
     ],
   } as unknown as RuntimeCapacityResponse;
@@ -140,7 +145,7 @@ test("remaining at or above 30% renders normal severity, no red or yellow", () =
       {
         runtime: "claude_code",
         unavailableReason: null,
-        windows: [window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 30 })],
+        windows: [window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 30, criticalRole: "five_hour" })],
       },
     ],
   } as unknown as RuntimeCapacityResponse;
@@ -160,8 +165,8 @@ test("severity is decided from the raw value, not the rounded display value", ()
         runtime: "claude_code",
         unavailableReason: null,
         windows: [
-          window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 9.6 }),
-          window({ windowKey: "weekly", displayLabel: "1W", remainingPercent: 29.6 }),
+          window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 9.6, criticalRole: "five_hour" }),
+          window({ windowKey: "weekly", displayLabel: "1W", remainingPercent: 29.6, criticalRole: "weekly" }),
         ],
       },
     ],
@@ -173,7 +178,9 @@ test("severity is decided from the raw value, not the rounded display value", ()
   assert.match(html, />30%</);
 });
 
-test("distinct buckets sharing a duration each render their own chip", () => {
+test("NOT-266: untagged buckets sharing a duration never render — only the tagged pair does", () => {
+  // Two same-duration buckets with no tag are diagnostics, not the
+  // account-wide pair: neither renders, and both public halves read N/A.
   const shared = {
     generatedAt: new Date().toISOString(),
     runtimes: [
@@ -188,8 +195,116 @@ test("distinct buckets sharing a duration each render their own chip", () => {
     ],
   } as unknown as RuntimeCapacityResponse;
   const sharedHtml = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data: shared }));
-  assert.match(sharedHtml, /capacity-window-codex_limit_main_primary/);
-  assert.match(sharedHtml, /capacity-window-codex_limit_extra_primary/);
-  const fiveHourChips = (sharedHtml.match(/>5H</g) ?? []).length;
-  assert.equal(fiveHourChips, 2);
+  assert.ok(!sharedHtml.includes("codex_limit_main_primary"), "untagged bucket never renders");
+  assert.ok(!sharedHtml.includes("codex_limit_extra_primary"), "untagged bucket never renders");
+  assert.ok(!/30%/.test(sharedHtml), "untagged numbers never present as current");
+  assert.ok(!/10%/.test(sharedHtml), "untagged numbers never present as current");
+  assert.match(sharedHtml, /N\/A/);
+});
+
+function sentinelWindow(over: Record<string, unknown> = {}) {
+  return window({
+    windowKey: "codex_account_rate_limits",
+    providerBucket: "account",
+    durationMinutes: null,
+    displayLabel: "account_rate_limits",
+    usedValue: null,
+    usedUnit: null,
+    remainingPercent: null,
+    resetAt: null,
+    source: "unavailable",
+    unavailableReason: "missing",
+    ...over,
+  });
+}
+
+test("NOT-266: Codex failure sentinel alone reads 5H N/A + 1W N/A, never account_rate_limits", () => {
+  const sentinelData = {
+    generatedAt: new Date().toISOString(),
+    runtimes: [{ runtime: "codex_local", unavailableReason: "missing", windows: [sentinelWindow()] }],
+  } as unknown as RuntimeCapacityResponse;
+  const html = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data: sentinelData }));
+  assert.match(html, /Codex/);
+  assert.match(html, /N\/A/);
+  assert.ok(!html.includes("account_rate_limits"), "sentinel label never renders");
+  assert.ok(!html.includes("codex_account_rate_limits"), "sentinel key never renders");
+});
+
+test("NOT-266: Muse failure sentinel alone reads 5H N/A + 1W N/A, never account_usage", () => {
+  const sentinelData = {
+    generatedAt: new Date().toISOString(),
+    runtimes: [
+      {
+        runtime: "muse_code",
+        unavailableReason: "missing",
+        windows: [sentinelWindow({ windowKey: "muse_account_usage", displayLabel: "account_usage" })],
+      },
+    ],
+  } as unknown as RuntimeCapacityResponse;
+  const html = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data: sentinelData }));
+  assert.match(html, /Muse Code/);
+  assert.match(html, /N\/A/);
+  assert.ok(!html.includes("account_usage"), "sentinel label never renders");
+  assert.ok(!html.includes("muse_account_usage"), "sentinel key never renders");
+});
+
+test("NOT-266: Cursor billing_cycle renders exactly one 1M chip", () => {
+  const cursorData = {
+    generatedAt: new Date().toISOString(),
+    runtimes: [
+      {
+        runtime: "cursor_local",
+        unavailableReason: null,
+        windows: [
+          window({
+            windowKey: "billing_cycle",
+            providerBucket: "individual",
+            durationMinutes: null,
+            displayLabel: "billing cycle",
+            remainingPercent: 65,
+            source: "experimental_api",
+          }),
+        ],
+      },
+    ],
+  } as unknown as RuntimeCapacityResponse;
+  const html = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data: cursorData }));
+  assert.match(html, /capacity-window-billing_cycle/);
+  assert.equal((html.match(/>1M</g) ?? []).length, 1, "exactly one 1M chip");
+  assert.match(html, /65%/);
+  assert.ok(!html.includes("billing_cycle\" data-reason"), "known chip carries no N/A reason");
+  assert.match(html, /current billing cycle/, "tooltip names the billing-cycle source");
+  assert.match(html, /resets/, "tooltip keeps the reset");
+});
+
+test("NOT-266: model-specific extras never render alongside the tagged pair", () => {
+  const extras = {
+    generatedAt: new Date().toISOString(),
+    runtimes: [
+      {
+        runtime: "claude_code",
+        unavailableReason: null,
+        windows: [
+          window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 80, criticalRole: "five_hour" }),
+          window({ windowKey: "weekly", displayLabel: "1W", remainingPercent: 40, criticalRole: "weekly" }),
+          window({ windowKey: "seven_day_sonnet", providerBucket: "seven_day_sonnet", remainingPercent: 12 }),
+          window({ windowKey: "seven_day_opus", providerBucket: "seven_day_opus", remainingPercent: 0 }),
+        ],
+      },
+    ],
+  } as unknown as RuntimeCapacityResponse;
+  const html = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data: extras }));
+  assert.equal((html.match(/>5H</g) ?? []).length, 1, "one 5H chip");
+  assert.equal((html.match(/>1W</g) ?? []).length, 1, "one 1W chip");
+  assert.ok(!html.includes("seven_day_sonnet"), "extra key never renders");
+  assert.ok(!html.includes("seven_day_opus"), "extra key never renders");
+  assert.ok(!/>0%/.test(html), "hidden extra zero never renders");
+  assert.match(html, /80%/);
+  assert.match(html, /40%/);
+});
+
+test("NOT-266: each runtime label stays grouped with its own values on narrow widths", () => {
+  assert.match(html, /whitespace-nowrap/, "labels and chips never split");
+  assert.match(html, /capacity-entry-claude_code/);
+  assert.match(html, /capacity-entry-cursor_local-na/);
 });
