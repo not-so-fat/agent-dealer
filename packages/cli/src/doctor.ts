@@ -1,5 +1,6 @@
 import net from "node:net";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cursorAuthIssueFromOutput } from "@agent-dealer/shared";
@@ -118,6 +119,18 @@ export async function runDoctor(): Promise<number> {
       console.log("✓ LINEAR_API_KEY set");
     } else {
       console.warn("⚠ LINEAR_API_KEY not set — Linear inbox disabled");
+    }
+    // NOT-268: Claude account capacity source status (informational only —
+    // never fails doctor). Reports whether Claude Code's own local 5H/1W
+    // cache exists and how old it is, plus whether the paid fallback probe
+    // is armed. Age labels only: never utilization values, prompts, tokens,
+    // or account ids.
+    try {
+      console.log((await checkClaudeCapacitySource()).line);
+      const probe = describeClaudeProbeOptIn(process.env.AGENT_DEALER_CLAUDE_CAPACITY_REFRESH);
+      if (probe) console.warn(probe);
+    } catch {
+      // Informational only: a broken probe must never fail doctor.
     }
     // NOT-250: experimental Cursor Individual dashboard adapter status
     // (informational only — never fails doctor). NOT-267: when enabled,
@@ -269,6 +282,125 @@ export async function checkCursorIndividualLogin(): Promise<CursorIndividualLogi
     return describeCursorIndividualLogin(reader.cursorIndividualCredentialStatus());
   } catch {
     return describeCursorIndividualLogin(null);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NOT-268: Claude capacity source reporting for doctor.
+// ---------------------------------------------------------------------------
+
+/** Env override for the Claude cache file (tests/smoke). */
+export const CLAUDE_CAPACITY_CACHE_FILE_ENV = "AGENT_DEALER_CLAUDE_CACHE_FILE";
+/** Paid-fallback opt-in env and its only enabling value. */
+export const CLAUDE_CAPACITY_REFRESH_ENV = "AGENT_DEALER_CLAUDE_CAPACITY_REFRESH";
+export const CLAUDE_CAPACITY_REFRESH_PAID_VALUE = "paid-after-1h";
+
+/** Which local 5H/1W cache state the capacity ladder would read. */
+export type ClaudeCapacitySourceKind = "fresh" | "stale" | "missing";
+
+export interface ClaudeCapacitySourceReport {
+  kind: ClaudeCapacitySourceKind;
+  /** Static operator-facing line — age labels only, never values or ids. */
+  line: string;
+}
+
+/**
+ * Map a cache-file presence/age probe to the doctor line. Pure (no I/O):
+ * unit tests pin all three states here.
+ */
+export function describeClaudeCapacitySource(
+  status: { present: boolean; ageMs: number | null } | null | undefined
+): ClaudeCapacitySourceReport {
+  if (status?.present === true && typeof status.ageMs === "number" && status.ageMs >= 0) {
+    if (status.ageMs < 60 * 60 * 1000) {
+      return {
+        kind: "fresh",
+        line: `✓ Claude capacity: local 5H/1W cache fresh (${formatCacheAge(status.ageMs)} old)`,
+      };
+    }
+    return {
+      kind: "stale",
+      line: `⚠ Claude capacity: local 5H/1W cache stale (${formatCacheAge(status.ageMs)} old — refreshes on the next Claude run)`,
+    };
+  }
+  return {
+    kind: "missing",
+    line: "⚠ Claude capacity: no local 5H/1W cache yet — run Claude Code once to populate it",
+  };
+}
+
+function formatCacheAge(ageMs: number): string {
+  const minutes = Math.floor(ageMs / 60_000);
+  if (minutes < 1) return "under a minute";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+/**
+ * Map the paid-fallback setting to an opt-in warning line, or null when the
+ * probe is disabled (the quiet default — no spend possible, nothing to say).
+ * Pure (no I/O): unit tests pin both states here.
+ */
+export function describeClaudeProbeOptIn(setting: string | undefined): string | null {
+  if (setting === CLAUDE_CAPACITY_REFRESH_PAID_VALUE) {
+    return (
+      "⚠ Claude capacity paid fallback: armed (one ≤$0.01 Haiku probe after 1h stale — " +
+        `unset ${CLAUDE_CAPACITY_REFRESH_ENV} to disable)`
+    );
+  }
+  return null;
+}
+
+/**
+ * Read the `cachedUsageUtilization.fetchedAtMs` timestamp out of Claude
+ * Code's config file (override first, then `~/.claude.json`) — the same key
+ * the server adapter normalizes, so doctor and the server always agree on
+ * freshness. File mtime is meaningless here: unrelated config writes touch
+ * it. Only the timestamp is read (never utilization values, ids, or
+ * siblings) and only an age label is reported. Never throws.
+ */
+export async function checkClaudeCapacitySource(
+  nowMs = Date.now()
+): Promise<ClaudeCapacitySourceReport> {
+  try {
+    const override = process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV]?.trim();
+    const file =
+      override || path.join(process.env.HOME ?? os.homedir(), ".claude.json");
+    let text: string;
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      return describeClaudeCapacitySource(null);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return describeClaudeCapacitySource(null);
+    }
+    const root =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    // A bare cache object (no config envelope — the shape override fixtures
+    // use) is accepted as-is; otherwise only the subtree counts.
+    const subtreeRaw = root?.cachedUsageUtilization;
+    const subtree =
+      subtreeRaw && typeof subtreeRaw === "object" && !Array.isArray(subtreeRaw)
+        ? (subtreeRaw as Record<string, unknown>)
+        : root;
+    const fetchedAtMs =
+      subtree && typeof subtree.fetchedAtMs === "number" && Number.isFinite(subtree.fetchedAtMs)
+        ? (subtree.fetchedAtMs as number)
+        : null;
+    if (fetchedAtMs === null || fetchedAtMs <= 0 || fetchedAtMs > nowMs) {
+      return describeClaudeCapacitySource(null);
+    }
+    return describeClaudeCapacitySource({ present: true, ageMs: nowMs - fetchedAtMs });
+  } catch {
+    return describeClaudeCapacitySource(null);
   }
 }
 

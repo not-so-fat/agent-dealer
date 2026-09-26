@@ -315,6 +315,92 @@ verified against a captured real Dealer-managed Claude log — confirm the
 real event carries `unifiedWindows` in these shapes on one live session
 after landing; if it does not, nothing persists and the strip stays N/A.
 
+## Provider: Claude local cache + one-hour paid fallback (NOT-268)
+
+`packages/server/src/capacity/claude-local-cache.ts`. The NOT-248 event path
+only observes Dealer-managed sessions, so the strip stays N/A when no recent
+Dealer run completed. Claude Code itself maintains exact provider usage in
+the `cachedUsageUtilization` key of `~/.claude.json` on every run —
+including interactive runs outside Dealer — so the capacity read consults
+this source ladder and the freshest valid observation wins per window:
+
+1. Dealer `rate_limit_event` ingestion (NOT-248, session-end, kept as-is).
+2. Read-only local cache: only the `cachedUsageUtilization` subtree of
+   `~/.claude.json` is parsed (`ingestClaudeLocalCache`, free, inside the
+   background refresh on every `GET /api/runtime-capacity`); the other 70+
+   config keys (accountUuid, email, credentials, projects) are never
+   retained.
+3. One minimal bounded paid probe, only when every valid 5H/1W observation
+   is older than 60 minutes AND
+   `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=paid-after-1h` is set. Any other
+   value disables paid probing entirely — reading capacity then never starts
+   Claude or spends money.
+
+Cache parsing (`parseClaudeCachedUtilization`, via
+`extractClaudeCacheSubtree`): only the `cachedUsageUtilization` subtree is
+read — `fetchedAtMs` (the observed time), `utilization.five_hour`,
+`utilization.seven_day`, and `utilization.limits[]`. `accountUuid`, email,
+credentials, extra-usage spend, experiments, and the full raw object are
+never persisted, returned, or logged. Observed provider shapes at 2.1.283
+are percent-scale: named fields look like `{ utilization: 9, resets_at:
+<ISO-8601> }` and `limits[]` entries like `{ kind: "session", group:
+"session", percent: 9, resets_at: <ISO-8601>, … }`. Bare `utilization` is
+dual-scale (≤ 1 fraction, above percent to 100) for older shapes; anything
+out of range on both scales is malformed and rejected. `limits[]` is
+preferred when it carries the explicit account-wide windows (`session` →
+five-hour, `weekly_all` → weekly, named via `kind`/`group`); the named
+`five_hour` / `seven_day` fields fill whichever role `limits[]` misses.
+Only the account-wide pair is normalized — model-specific and overage
+entries are dropped. Future `fetchedAtMs`, malformed scales, and expired
+resets are rejected; a stale cache ingests with its true age (read-time
+rules render it N/A) and an older cache never overwrites a newer row — both
+sources share the `claude_unified_*` window keys through the newer-wins
+`recordClaudeWindowReadings` path.
+
+Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
+
+- Trigger: `claude_code` configured, no valid 5H/1W sample newer than 60
+  minutes, opt-in set. Single-flight across concurrent readers; at most one
+  attempt per account per 60 minutes, backing off exponentially
+  (60m → 2h → 4h → 8h cap) on failure. Never retried per UI poll.
+- Argv (verified live at 2.1.283 — `claude -p --max-turns 1 --model
+  <bogus>` parses flags and fails only on model resolution, spending
+  nothing, even though `--help` hides the flag): `claude -p <fixed prompt>
+  --model haiku --max-turns 1 --tools "" --strict-mcp-config
+  --no-session-persistence --output-format stream-json --verbose
+  --max-budget-usd 0.01`. `--bare` is deliberately avoided so the account's
+  ambient login applies.
+  The probe spawns `claude` directly in the OS temp dir — never the
+  coordinator, so no Dealer workflow/session row, worktree, commit, PR, or
+  queue event is created.
+- Success ingests the stream's `rate_limit_event`s plus a re-read of the
+  local cache (the probe run refreshes Claude's own file) and requires both
+  critical roles; anything else keeps last-good rows. Every attempt appends
+  one JSON line (timestamps, model, budget, exit, cost, windows, outcome —
+  never prompt/output/credentials) to `<data-dir>/capacity/claude-probe.log`.
+  A `no_windows` streak means the probe is a paid no-op: disable the opt-in
+  and revise the ticket instead of shipping it.
+
+`GET /api/runtime-capacity` runs one background refresh (free cache
+ingest, then the probe gate) without blocking the read. `doctor` reports
+the cache age from `cachedUsageUtilization.fetchedAtMs` — never file mtime
+(`fresh` < 60m / `stale` / `missing`) — and warns only when the paid
+fallback is armed — age labels only, never values or ids. Tests inject a
+fake probe runner; CI performs no live provider request.
+
+Live proofs (require a real account, never CI): (a) DONE 2026-09-26 —
+read-only smoke of the operator's real `~/.claude.json` through the shipped
+parser: 73 top-level keys ignored, both windows normalize
+(`claude_unified_five_hour` / `claude_unified_seven_day`, percent scale,
+observed 2026-09-19T15:30:48Z); the 7-day-old sample renders N/A with
+honest age at read time and `doctor` agrees (`stale`, `7d old`). No ids,
+emails, or spend values were printed or persisted. (b) Paid-fallback smoke
+proving the minimal probe emits 5H/1W, with its actual cost in the
+diagnostic log — NOT RUN: spending money needs explicit operator
+acknowledgement, unavailable inside this spawn. The opt-in stays documented
+but unproven; obtain acknowledgement and run the smoke separately before
+anyone arms it in production.
+
 ## Provider: Cursor Team Admin API (NOT-249)
 
 Source: the official Admin API
