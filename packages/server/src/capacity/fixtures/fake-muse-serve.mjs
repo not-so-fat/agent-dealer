@@ -16,7 +16,20 @@
 //   FAKE_MSP_MODE: full | custom-duration | partial-bad-weekly |
 //     all-bad-windows | missing | auth-error | malformed | hang |
 //     exit-nonzero | crash | no-method | persistent-full | persistent-missing |
-//     exit-after-first-read | slow-term-full
+//     exit-after-first-read | slow-term-full |
+//     serve-turn-full | serve-turn-rejected | serve-session-start-error |
+//     serve-turn-failed | serve-turn-hang
+//
+// Execution modes (NOT-270 serve lane): after the handshake they answer
+// `session/start`, `turn/start`, `turn/cancel`, `session/read` with the
+// stable shapes, emitting `usage/changed` + `turn/completed` after a short
+// delay (the client subscribes microseconds after the turn/start ack while
+// a real completion takes seconds — the delay models that ordering).
+// `serve-turn-full` starts unobserved (`usage/read` → missing) and becomes
+// observed once its turn completes. `serve-turn-rejected` errors turn/start
+// (pre-admission); `serve-session-start-error` errors session/start;
+// `serve-turn-failed` completes the turn as failed; `serve-turn-hang` acks
+// the turn but never completes until `turn/cancel`.
 //   FAKE_MSP_RECORD: path of a file to append one JSON line per received message
 //   FAKE_MSP_NOW_MS: fixed clock for deterministic resetsAtMs (default Date.now())
 //
@@ -122,6 +135,22 @@ function validClientInfo(params) {
   );
 }
 
+const EXEC_MODES = new Set([
+  "serve-turn-full",
+  "serve-turn-rejected",
+  "serve-session-start-error",
+  "serve-turn-failed",
+  "serve-turn-hang",
+]);
+
+// Execution-mode state: sessions the fake has started, and whether provider
+// traffic has been observed yet (usage/read is missing until the first turn
+// completes — the NOT-269 fresh-host rule).
+let sessionSeq = 0;
+let turnSeq = 0;
+const sessions = new Map();
+let execObserved = false;
+
 function handleRequest(msg) {
   switch (mode) {
     case "hang":
@@ -147,6 +176,10 @@ function handleRequest(msg) {
     }
     initialized = true;
     send({ jsonrpc: "2.0", id: msg.id, result: { serverInfo: { name: "fake-muse-serve" } } });
+    return;
+  }
+  if (EXEC_MODES.has(mode)) {
+    handleExecRequest(msg);
     return;
   }
   if (msg.method !== "usage/read") {
@@ -252,4 +285,173 @@ function handleRequest(msg) {
     // restart transparently (NOT-269 restart rule: state is lost).
     setTimeout(() => process.exit(0), 10);
   }
+}
+
+// --- NOT-270 serve execution lane -------------------------------------------
+
+function requireExecHandshake(msg) {
+  if (!initialized || !notified) {
+    send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "initialize required" } });
+    return false;
+  }
+  return true;
+}
+
+function execSession(params) {
+  sessionSeq += 1;
+  const sessionId = `sess-${sessionSeq}`;
+  const session = {
+    sessionId,
+    modelId: params?.modelId ?? "test-model",
+    approvalMode: params?.approvalMode ?? null,
+    workspaceRoot: params?.workspaceRoot ?? null,
+    status: "idle",
+    activeTurnId: null,
+  };
+  sessions.set(sessionId, { session, prompt: null, turnId: null, completed: false });
+  return session;
+}
+
+function emitTurnObserved(sessionId, turnId) {
+  // Provider traffic on this host: usage/changed first, then the terminal.
+  execObserved = true;
+  send({ jsonrpc: "2.0", method: "usage/changed", params: fullUsage() });
+  send({
+    jsonrpc: "2.0",
+    method: "turn/completed",
+    params: {
+      sessionId,
+      turnId,
+      terminal: mode === "serve-turn-failed" ? "failed" : "completed",
+      ...(mode === "serve-turn-failed"
+        ? {
+            error: {
+              kind: "stepLimit",
+              message: "did not reach a terminal state within 300 steps",
+              retryable: false,
+            },
+          }
+        : {}),
+      usage: { inputTokens: 120, outputTokens: 45, cachedTokens: 0, reasoningTokens: 5 },
+      durationMs: 1500,
+      viewCursor: `vc-${turnId}`,
+    },
+  });
+}
+
+function handleExecRequest(msg) {
+  if (msg.method === "usage/read") {
+    if (!requireExecHandshake(msg)) return;
+    // Fresh-host rule: missing until a turn on THIS host observed traffic.
+    if (!execObserved) {
+      send({ jsonrpc: "2.0", id: msg.id, result: { protocol: "msp/1.3" } });
+      return;
+    }
+    send({ jsonrpc: "2.0", id: msg.id, result: { protocol: "msp/1.3", usage: fullUsage() } });
+    return;
+  }
+  if (msg.method === "session/start") {
+    if (!requireExecHandshake(msg)) return;
+    if (mode === "serve-session-start-error") {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "session store unavailable" } });
+      return;
+    }
+    const session = execSession(msg.params ?? {});
+    send({ jsonrpc: "2.0", id: msg.id, result: { session, viewCursor: "vc-0" } });
+    return;
+  }
+  if (msg.method === "turn/start") {
+    if (!requireExecHandshake(msg)) return;
+    const sessionId = msg.params?.sessionId;
+    const entry = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
+    if (!entry) {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "unknown session" } });
+      return;
+    }
+    if (mode === "serve-turn-rejected") {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "turn admission refused" } });
+      return;
+    }
+    const input = msg.params?.input;
+    if (!Array.isArray(input) || input.length === 0) {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "input required" } });
+      return;
+    }
+    turnSeq += 1;
+    const turnId = `turn-${turnSeq}`;
+    entry.turnId = turnId;
+    entry.prompt = input.map((p) => p?.text ?? "").join("");
+    send({
+      jsonrpc: "2.0",
+      id: msg.id,
+      result: {
+        commandId: msg.params?.commandId ?? null,
+        disposition: "started",
+        startedNewTurn: true,
+        status: "accepted",
+        turnId,
+      },
+    });
+    if (mode !== "serve-turn-hang") {
+      // Delayed so the client's turn/completed subscription (registered
+      // right after this ack) is in place before the terminal lands.
+      setTimeout(() => emitTurnObserved(sessionId, turnId), 50);
+    }
+    return;
+  }
+  if (msg.method === "turn/cancel") {
+    if (!requireExecHandshake(msg)) return;
+    const sessionId = msg.params?.sessionId;
+    const entry = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
+    send({ jsonrpc: "2.0", id: msg.id, result: { status: "accepted" } });
+    if (entry && !entry.completed) {
+      entry.completed = true;
+      setTimeout(() => {
+        send({
+          jsonrpc: "2.0",
+          method: "turn/completed",
+          params: {
+            sessionId,
+            turnId: msg.params?.turnId ?? entry.turnId ?? "turn-unknown",
+            terminal: "cancelled",
+            reason: "cancel requested",
+            viewCursor: "vc-cancel",
+          },
+        });
+      }, 20);
+    }
+    return;
+  }
+  if (msg.method === "session/read") {
+    if (!requireExecHandshake(msg)) return;
+    const sessionId = msg.params?.sessionId;
+    const entry = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
+    if (!entry) {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "unknown session" } });
+      return;
+    }
+    const turnId = entry.turnId ?? "turn-unknown";
+    send({
+      jsonrpc: "2.0",
+      id: msg.id,
+      result: {
+        session: entry.session,
+        history: {
+          items: [
+            { kind: "userMessage", text: entry.prompt ?? "", turnId },
+            { kind: "agentMessage", text: "serve-lane reply text", turnId },
+            { kind: "toolCall", tool: "read", callId: "call-1", status: "completed", turnId },
+          ],
+          mode: "inline",
+          snapshot: null,
+        },
+        viewCursor: "vc-read",
+      },
+    });
+    return;
+  }
+  // The execution lane allowlist is session/start, turn/start, turn/cancel,
+  // session/read — anything else (session/resume, prompts, steering) is
+  // refused exactly like the shipped host's unknown-method error.
+  send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
 }

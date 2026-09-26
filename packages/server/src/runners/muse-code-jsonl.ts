@@ -339,7 +339,13 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
   };
 }
 
-function normalizeMuseRun(r: {
+/**
+ * NOT-270: shared by the exec parser above and the serve execution lane
+ * (runners/muse-serve-session.ts) so both runners write byte-identical
+ * normalized log evidence — every downstream log reader works unchanged
+ * whichever lane ran the session.
+ */
+export function normalizeMuseRun(r: {
   sessionId: string | null;
   confirmedModel: string | null;
   tools: MuseToolActivity[];
