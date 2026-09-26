@@ -12,14 +12,38 @@ import path from "node:path";
 import Database from "better-sqlite3";
 // Local mirror of the server module's env/key contract
 // (packages/server/src/capacity/cursor-individual-credentials.ts). A static
-// import is impossible — CLI `rootDir` cannot include server sources — but
-// the runtime path always goes through checkCursorIndividualLogin()'s
-// dynamic loader, so a rename there breaks these integration tests loudly
-// (fixtures stop taking effect) rather than silently.
+// import is impossible — CLI `rootDir` cannot include server sources — so
+// the mirror is pinned against the live server module by the contract test
+// below: a rename there fails that test loudly instead of letting these
+// fixtures silently stop applying (and probe the real local login).
 const CURSOR_DESKTOP_ACCESS_TOKEN_KEY = "cursorAuth/accessToken";
 const CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV = "CURSOR_INDIVIDUAL_CREDENTIAL_FILE";
 const CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV = "CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE";
 const CURSOR_INDIVIDUAL_HOME_ENV = "CURSOR_INDIVIDUAL_HOME";
+
+test("fixture env/key names match the server module's live contract", async () => {
+  const { pathToFileURL, fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(here, "..", "..", "server", "src", "capacity", "cursor-individual-credentials.ts"),
+    path.resolve(here, "..", "..", "server", "dist", "capacity", "cursor-individual-credentials.js"),
+  ];
+  let mod: Record<string, unknown> | null = null;
+  for (const file of candidates) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      mod = (await import(pathToFileURL(file).href)) as Record<string, unknown>;
+      break;
+    } catch {
+      continue;
+    }
+  }
+  assert.ok(mod, "the server credentials module must be loadable for the contract pin");
+  assert.equal(mod.CURSOR_DESKTOP_ACCESS_TOKEN_KEY, CURSOR_DESKTOP_ACCESS_TOKEN_KEY);
+  assert.equal(mod.CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV, CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV);
+  assert.equal(mod.CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV, CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV);
+  assert.equal(mod.CURSOR_INDIVIDUAL_HOME_ENV, CURSOR_INDIVIDUAL_HOME_ENV);
+});
 import {
   CURSOR_INDIVIDUAL_LOGIN_LINES,
   checkCursorIndividualLogin,

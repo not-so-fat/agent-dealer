@@ -265,6 +265,13 @@ test("desktop state paths resolve per OS without touching the real login", () =>
     cursorIndividualDesktopStateCandidates({ platform: "win32", home, appData }),
     [path.join(appData, "Cursor", "User", "globalStorage", "state.vscdb")]
   );
+  // A present-but-blank APPDATA is the same as unset: the roaming default
+  // applies instead of an empty candidate list.
+  process.env.APPDATA = "   ";
+  assert.deepEqual(cursorIndividualDesktopStateCandidates({ platform: "win32", home }), [
+    path.join(home, "AppData", "Roaming", "Cursor", "User", "globalStorage", "state.vscdb"),
+  ]);
+  delete process.env.APPDATA;
   // Unknown platforms fall back to the Linux-style layout, never to nothing.
   assert.deepEqual(cursorIndividualDesktopStateCandidates({ platform: "freebsd", home }), [
     path.join(home, ".config", "Cursor", "User", "globalStorage", "state.vscdb"),

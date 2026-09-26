@@ -335,7 +335,8 @@ const REMAINING_FRACTION_KEYS = ["remainingFraction", "remaining_fraction"];
  * budget), read ONLY when no percent/fraction/remaining scale is present.
  * Money-vs-money and count-vs-count both reduce to the same share — but
  * this never mixes with the percent scales above, and never with a pool
- * scale: only the merged plan/top-level pair counts.
+ * scale: only the `individualUsage.plan` pair counts, never merged
+ * top-level fields.
  */
 const USED_AMOUNT_KEYS = [
   "used",
@@ -412,11 +413,14 @@ export function cursorIndividualPayloadToReadings(payload: unknown): CursorIndiv
   } else if (remainingFraction !== null) {
     remainingPercent = clampPercent(remainingFraction * 100);
   } else {
-    // Last resort: the plan's explicit used/limit pair. A non-positive
-    // limit (or a negative used amount) is not a scale — it reads as no
-    // usable value, never a division artifact.
-    const usedAmount = pickNumber(p, USED_AMOUNT_KEYS);
-    const limitAmount = pickNumber(p, LIMIT_AMOUNT_KEYS);
+    // Last resort: the plan's explicit used/limit pair, read from the plan
+    // object ONLY — never from the merged top level, where an unrelated
+    // numeric field (e.g. a top-level `usage` value next to a `limit`) could
+    // otherwise be misread as the plan's scale. A non-positive limit (or a
+    // negative used amount) is not a scale — it reads as no usable value,
+    // never a division artifact.
+    const usedAmount = plan ? pickNumber(plan, USED_AMOUNT_KEYS) : null;
+    const limitAmount = plan ? pickNumber(plan, LIMIT_AMOUNT_KEYS) : null;
     if (usedAmount !== null && limitAmount !== null && limitAmount > 0 && usedAmount >= 0) {
       remainingPercent = clampPercent(100 - (usedAmount / limitAmount) * 100);
     }

@@ -1168,6 +1168,12 @@ test("the plan's explicit used/limit pair is a last resort when total percent is
       ?.remainingPercent,
     null
   );
+  // Top-level numerics never form the plan pair: without individualUsage.plan
+  // there is no usable scale, even when the names line up.
+  assert.equal(
+    cursorIndividualPayloadToReadings({ ...cycle, used: 30, limit: 100 })?.remainingPercent,
+    null
+  );
 });
 
 test("a completed live billing cycle reads expired with its start/end intact", async () => {

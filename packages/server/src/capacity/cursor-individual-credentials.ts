@@ -172,8 +172,11 @@ export function cursorIndividualDesktopStateCandidates(opts: DesktopStatePathOpt
   const platform = opts.platform ?? process.platform;
   const home = opts.home ?? homeDir();
   if (platform === "win32") {
-    const appData =
-      opts.appData ?? process.env.APPDATA?.trim() ?? path.join(home, "AppData", "Roaming");
+    // An explicit `appData` opt always wins (even an explicit empty string,
+    // which reads as no candidate). A present-but-blank APPDATA is the same
+    // as unset — fall back to the roaming default instead of resolving to [].
+    const envAppData = process.env.APPDATA?.trim();
+    const appData = opts.appData ?? (envAppData ? envAppData : path.join(home, "AppData", "Roaming"));
     if (!appData) return [];
     return [path.join(appData, "Cursor", "User", "globalStorage", "state.vscdb")];
   }
