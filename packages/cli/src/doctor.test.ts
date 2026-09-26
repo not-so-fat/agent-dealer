@@ -10,12 +10,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import {
-  CURSOR_DESKTOP_ACCESS_TOKEN_KEY,
-  CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV,
-  CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV,
-  CURSOR_INDIVIDUAL_HOME_ENV,
-} from "../../server/src/capacity/cursor-individual-credentials.js";
+// Local mirror of the server module's env/key contract
+// (packages/server/src/capacity/cursor-individual-credentials.ts). A static
+// import is impossible — CLI `rootDir` cannot include server sources — but
+// the runtime path always goes through checkCursorIndividualLogin()'s
+// dynamic loader, so a rename there breaks these integration tests loudly
+// (fixtures stop taking effect) rather than silently.
+const CURSOR_DESKTOP_ACCESS_TOKEN_KEY = "cursorAuth/accessToken";
+const CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV = "CURSOR_INDIVIDUAL_CREDENTIAL_FILE";
+const CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV = "CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE";
+const CURSOR_INDIVIDUAL_HOME_ENV = "CURSOR_INDIVIDUAL_HOME";
 import {
   CURSOR_INDIVIDUAL_LOGIN_LINES,
   checkCursorIndividualLogin,
@@ -63,14 +67,15 @@ test("describe maps each credential state to its static line", () => {
     kind: "agent",
     line: CURSOR_INDIVIDUAL_LOGIN_LINES.agent,
   });
-  for (const degraded of [
+  const degraded: Array<{ present: boolean; source: "desktop" | "agent" | null } | null | undefined> = [
     { present: false, source: null },
     { present: false, source: "desktop" },
     { present: true, source: null },
     null,
     undefined,
-  ]) {
-    assert.deepEqual(describeCursorIndividualLogin(degraded), {
+  ];
+  for (const state of degraded) {
+    assert.deepEqual(describeCursorIndividualLogin(state), {
       kind: "none",
       line: CURSOR_INDIVIDUAL_LOGIN_LINES.none,
     });
