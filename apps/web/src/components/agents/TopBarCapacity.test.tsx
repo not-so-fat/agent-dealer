@@ -214,8 +214,9 @@ test("partial unknown: one current value plus a stale/expired/missing/unparsable
   }
 });
 
-test("non-critical windows keep their own labels; providers without the pair stay truthful", () => {
-  // A 6H provider window is not relabeled as 5H or 1W.
+test("NOT-266: untagged windows never render — an extras-only provider reads 5H N/A + 1W N/A", () => {
+  // A 6H provider window is not relabeled as 5H or 1W — and it is not shown
+  // at all. The compact UI selects only the tagged pair.
   const other = dataWith({
     runtimes: [
       {
@@ -226,11 +227,15 @@ test("non-critical windows keep their own labels; providers without the pair sta
     ],
   });
   const [codex] = summarizeCapacity(other, NOW);
-  assert.deepEqual(codex.windows.map((w) => w.label), ["6H"]);
+  assert.deepEqual(codex.windows.map((w) => w.label), ["5H", "1W"]);
+  assert.ok(codex.windows.every((w) => w.kind === "unknown"), "no tagged pair, so both halves read N/A");
+  assert.equal(codex.exhausted, false);
   const otherHtml = render({ status: "ready", data: other });
-  assert.match(otherHtml, /6H/);
-  assert.ok(!/data-window="5H"/.test(otherHtml), "no phantom 5H row synthesized");
-  assert.ok(!/data-window="1W"/.test(otherHtml), "no phantom 1W row synthesized");
+  assert.ok(!otherHtml.includes("six_hour"), "no raw window key leaks");
+  assert.ok(!/>6H</.test(otherHtml), "the untagged extra never renders");
+  assert.match(otherHtml, /data-window="5H"/);
+  assert.match(otherHtml, /data-window="1W"/);
+  assert.match(otherHtml, /N\/A/);
   // A provider with no windows at all renders a single truthful N/A.
   const empty = dataWith({
     runtimes: [{ runtime: "cursor_local", unavailableReason: "unsupported", windows: [] }],
@@ -276,7 +281,9 @@ test("critical pair is exactly what the server tags: model-specific extras never
     40,
     "the untagged 0% extra must not fold into the tagged critical 1W row"
   );
-  assert.equal(claude.windows.length, 4, "extras render as distinct rows");
+  // NOT-266: model-specific extras stay in the API for diagnostics — the
+  // compact UI renders exactly the tagged pair, nothing else.
+  assert.equal(claude.windows.length, 2, "extras never render in the compact UI");
   assert.equal(
     claude.exhausted,
     false,
@@ -289,7 +296,9 @@ test("critical pair is exactly what the server tags: model-specific extras never
   );
   const claudeHtml = render({ status: "ready", data: claudeData });
   assert.ok(!/data-exhausted="true"/.test(claudeHtml), "no exhausted treatment from untagged extras");
-  assert.match(claudeHtml, /0%/, "extra-bucket zero stays visible in its own row");
+  assert.ok(!/>0%/.test(claudeHtml), "the hidden extra-bucket zero never renders");
+  assert.ok(!claudeHtml.includes("seven_day_sonnet"), "no raw extra key leaks");
+  assert.ok(!claudeHtml.includes("seven_day_opus"), "no raw extra key leaks");
   assert.match(claudeHtml, /80%/);
   assert.match(claudeHtml, /40%/);
 
@@ -305,6 +314,7 @@ test("critical pair is exactly what the server tags: model-specific extras never
     runtimes: [{ runtime: "codex_local", unavailableReason: null, windows: codexWindows }],
   });
   const [codex] = summarizeCapacity(codexData, NOW);
+  assert.equal(codex.windows.length, 2, "only the tagged pair renders");
   assert.equal(codex.windows[0].kind === "known" && codex.windows[0].remaining, 70, "the tagged pair wins, not the untagged one that happens to sort first");
   assert.equal(codex.windows[1].kind === "known" && codex.windows[1].remaining, 55);
   assert.equal(codex.exhausted, false, "the untagged extra's 0% does not exhaust the runtime");
@@ -312,7 +322,8 @@ test("critical pair is exactly what the server tags: model-specific extras never
   assert.ok(!/data-exhausted="true"/.test(codexHtml));
   assert.match(codexHtml, /70%/);
   assert.match(codexHtml, /55%/);
-  assert.match(codexHtml, /0%/, "the untagged extra still renders in its own row");
+  assert.ok(!/>0%/.test(codexHtml), "the untagged extra never renders, even at 0%");
+  assert.ok(!codexHtml.includes("extra/primary"), "no raw provider bucket leaks");
 });
 
 test("no aggregate/detailed re-derivation left client-side: an untagged pair never becomes critical no matter how it's named", () => {
@@ -329,13 +340,16 @@ test("no aggregate/detailed re-derivation left client-side: an untagged pair nev
     ],
   });
   const [summary] = summarizeCapacity(data, NOW);
-  assert.equal(summary.windows.length, 2, "both real buckets still render as their own truthful rows");
-  assert.ok(summary.windows.every((w) => w.kind === "known"));
+  // NOT-266: an untagged pair is not the critical pair — and untagged
+  // windows never render — so both public halves read N/A.
+  assert.deepEqual(summary.windows.map((w) => w.label), ["5H", "1W"]);
+  assert.ok(summary.windows.every((w) => w.kind === "unknown"), "untagged buckets never read as critical");
   assert.equal(summary.exhausted, false, "an untagged pair is never treated as critical, however it's named");
   const html = render({ status: "ready", data });
   assert.ok(!/data-exhausted="true"/.test(html));
-  assert.match(html, /0%/);
-  assert.match(html, /55%/);
+  assert.ok(!/>0%/.test(html), "untagged numbers never present as current");
+  assert.ok(!/55%/.test(html), "untagged numbers never present as current");
+  assert.match(html, /N\/A/);
 });
 
 test("a known critical half plus an unavailable critical half renders one pair, never a duplicate N/A row", () => {
@@ -399,7 +413,10 @@ test("Muse: whatever the server tags criticalRole on behaves exactly like any ot
   assert.match(html, /data-exhausted="true"/);
 });
 
-test("per-row zero highlight is scoped to the critical pair, matching the block-level exhausted decision", () => {
+test("per-row zero highlight is scoped to the presented pair: hidden extras never highlight or exhaust", () => {
+  // NOT-266: the untagged extra at 0% never renders, so it can neither
+  // exhaust the block nor take the red critical-zero highlight — while a
+  // tagged critical zero still does both.
   const data = dataWith({
     runtimes: [
       {
@@ -421,11 +438,26 @@ test("per-row zero highlight is scoped to the critical pair, matching the block-
     ],
   });
   const [summary] = summarizeCapacity(data, NOW);
-  const extraRow = summary.windows.find((w) => w.key === "codex_limit_extra_primary");
-  assert.ok(extraRow && extraRow.kind === "known" && extraRow.isCritical === false);
+  assert.deepEqual(summary.windows.map((w) => w.label), ["5H", "1W"]);
+  assert.ok(!summary.windows.some((w) => w.key === "codex_limit_extra_primary"), "extra never becomes a row");
+  assert.ok(summary.windows.every((w) => w.isCritical), "every presented row is a primary row");
   const html = render({ status: "ready", data });
-  assert.ok(!/data-exhausted="true"/.test(html), "non-critical zero does not exhaust the block");
-  assert.ok(!html.includes("text-red-300"), "non-critical zero is not highlighted red like a critical zero would be");
+  assert.ok(!/data-exhausted="true"/.test(html), "hidden extra zero does not exhaust the block");
+  assert.ok(!html.includes("text-red-300"), "hidden extra zero is not highlighted red");
+  assert.ok(!/>0%/.test(html), "hidden extra zero never renders");
+
+  const exhaustedData = dataWith({
+    runtimes: [
+      {
+        runtime: "codex_local",
+        unavailableReason: null,
+        windows: [window({ remainingPercent: 0 }), weekly({ remainingPercent: 40 })],
+      },
+    ],
+  });
+  const exhaustedHtml = render({ status: "ready", data: exhaustedData });
+  assert.match(exhaustedHtml, /data-exhausted="true"/);
+  assert.ok(exhaustedHtml.includes("text-red-300"), "a tagged critical zero is highlighted red");
 });
 
 test("exhaustion is decided from the raw value, not the rounded display value", () => {
@@ -449,7 +481,7 @@ test("exhaustion is decided from the raw value, not the rounded display value", 
   assert.match(html, /0%/, "the rounded display value is still 0%");
 });
 
-test("exhaustion comes from the critical pair only: extra-bucket zeros never mark the block", () => {
+test("exhaustion comes from the presented pair only: hidden extra-bucket zeros never mark the block", () => {
   const data = dataWith({
     runtimes: [
       {
@@ -481,10 +513,11 @@ test("exhaustion comes from the critical pair only: extra-bucket zeros never mar
     ],
   });
   const [summary] = summarizeCapacity(data, NOW);
+  assert.deepEqual(summary.windows.map((w) => w.label), ["5H", "1W"]);
   assert.equal(summary.exhausted, false);
   const html = render({ status: "ready", data });
   assert.ok(!/data-exhausted="true"/.test(html));
-  assert.match(html, /0%/, "extra zero still shown in its own row");
+  assert.ok(!/>0%/.test(html), "hidden extra zero never renders");
 });
 
 test("tooltip/accessibility text carries both labels, values, and reset detail", () => {
@@ -581,6 +614,183 @@ test("shell header shows capacity inline — no secondary interaction needed", (
   assert.match(html, /80%/);
   assert.match(html, /40%/);
   assert.ok(html.includes('href="/agents"'), "Agents link retained beside capacity");
+});
+
+// NOT-266: a provider failure sentinel normalizes to an untagged unavailable
+// window carrying the internal provider label verbatim
+// (`account_rate_limits` / `account_usage`). The compact UI must never
+// render it: the runtime reads 5H N/A + 1W N/A under the public labels.
+function sentinel(over: Record<string, unknown> = {}) {
+  return {
+    windowKey: "codex_account_rate_limits",
+    providerBucket: "account",
+    durationMinutes: null,
+    displayLabel: "account_rate_limits",
+    usedValue: null,
+    usedUnit: null,
+    remainingPercent: null,
+    resetAt: null,
+    observedAt: iso(NOW - 60_000),
+    freshUntil: null,
+    expiresAt: null,
+    source: "unavailable",
+    unavailableReason: "missing",
+    criticalRole: null,
+    ...over,
+  };
+}
+
+function billingCycle(over: Record<string, unknown> = {}) {
+  return {
+    windowKey: "billing_cycle",
+    providerBucket: "individual",
+    durationMinutes: null,
+    displayLabel: "billing cycle",
+    usedValue: 35,
+    usedUnit: "percent",
+    remainingPercent: 65,
+    resetAt: iso(NOW + 20 * 24 * 3600_000),
+    observedAt: iso(NOW - 60_000),
+    freshUntil: iso(NOW + 600_000),
+    expiresAt: iso(NOW + 3600_000),
+    source: "experimental_api",
+    unavailableReason: null,
+    criticalRole: null,
+    ...over,
+  };
+}
+
+test("NOT-266: Codex failure sentinel alone reads Codex 5H N/A / 1W N/A, never account_rate_limits", () => {
+  const data = dataWith({
+    runtimes: [{ runtime: "codex_local", unavailableReason: "missing", windows: [sentinel()] }],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.deepEqual(summary.windows.map((w) => w.label), ["5H", "1W"]);
+  assert.ok(summary.windows.every((w) => w.kind === "unknown"));
+  assert.equal(summary.exhausted, false);
+  const html = render({ status: "ready", data });
+  assert.match(html, /Codex/);
+  assert.match(html, /5H/);
+  assert.match(html, /1W/);
+  assert.match(html, /N\/A/);
+  assert.ok(!html.includes("account_rate_limits"), "sentinel label never renders");
+  assert.ok(!html.includes("codex_account_rate_limits"), "sentinel key never renders");
+  assert.ok(!html.includes("account"), "provider bucket never renders");
+});
+
+test("NOT-266: Muse failure sentinel alone reads Muse Code 5H N/A / 1W N/A, never account_usage", () => {
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "muse_code",
+        unavailableReason: "missing",
+        windows: [
+          sentinel({
+            windowKey: "muse_account_usage",
+            displayLabel: "account_usage",
+          }),
+        ],
+      },
+    ],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.deepEqual(summary.windows.map((w) => w.label), ["5H", "1W"]);
+  assert.ok(summary.windows.every((w) => w.kind === "unknown"));
+  const html = render({ status: "ready", data });
+  assert.match(html, /Muse Code/);
+  assert.match(html, /N\/A/);
+  assert.ok(!html.includes("account_usage"), "sentinel label never renders");
+  assert.ok(!html.includes("muse_account_usage"), "sentinel key never renders");
+});
+
+test("NOT-266: Cursor billing_cycle renders exactly one 1M value with a billing-cycle tooltip", () => {
+  const data = dataWith({
+    runtimes: [{ runtime: "cursor_local", unavailableReason: null, windows: [billingCycle()] }],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.equal(summary.windows.length, 1, "exactly one Cursor row");
+  assert.equal(summary.windows[0].label, "1M");
+  assert.equal(summary.windows[0].kind === "known" && summary.windows[0].remaining, 65);
+  assert.equal(summary.exhausted, false);
+  const html = render({ status: "ready", data });
+  assert.equal((html.match(/data-window="1M"/g) ?? []).length, 1, "exactly one 1M row in the markup");
+  assert.match(html, /65%/);
+  assert.ok(!html.includes("billing_cycle"), "raw window key never renders");
+  assert.ok(!/>billing cycle</.test(html), "provider label never renders as a row label");
+  assert.match(html, /current billing cycle/, "tooltip names the billing-cycle source");
+  assert.match(html, /resets/, "tooltip keeps the reset");
+});
+
+test("NOT-266: Cursor billing_cycle at 0% exhausts the single primary readout", () => {
+  const data = dataWith({
+    runtimes: [{ runtime: "cursor_local", unavailableReason: null, windows: [billingCycle({ remainingPercent: 0 })] }],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.equal(summary.exhausted, true);
+  const html = render({ status: "ready", data });
+  assert.match(html, /data-exhausted="true"/);
+  assert.match(html, /0%/);
+});
+
+test("NOT-266: Cursor billing_cycle failure reads 1M N/A, never an empty label", () => {
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "cursor_local",
+        unavailableReason: "missing",
+        windows: [billingCycle({ remainingPercent: null, unavailableReason: "missing", source: "unavailable", resetAt: null })],
+      },
+    ],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.equal(summary.windows.length, 1);
+  assert.equal(summary.windows[0].label, "1M");
+  assert.equal(summary.windows[0].kind, "unknown");
+  const html = render({ status: "ready", data });
+  assert.match(html, /1M/);
+  assert.match(html, /N\/A/);
+  assert.ok(!html.includes("billing_cycle"), "raw window key never renders");
+});
+
+test("NOT-266: known pairs render exactly two rows in 5H-then-1W order for Claude, Codex, and Muse", () => {
+  const data = dataWith({
+    runtimes: [
+      { runtime: "claude_code", unavailableReason: null, windows: [window({ remainingPercent: 80 }), weekly({ remainingPercent: 40 })] },
+      {
+        runtime: "codex_local",
+        unavailableReason: null,
+        windows: [
+          window({ windowKey: "codex_limit_main_primary", providerBucket: "main/primary", remainingPercent: 70 }),
+          weekly({ windowKey: "codex_limit_main_secondary", providerBucket: "main/secondary", remainingPercent: 55 }),
+        ],
+      },
+      {
+        runtime: "muse_code",
+        unavailableReason: null,
+        windows: [
+          window({ windowKey: "rolling_all_models", providerBucket: "all_models", remainingPercent: 60 }),
+          weekly({ windowKey: "weekly_all_models", providerBucket: "all_models", remainingPercent: 30 }),
+        ],
+      },
+    ],
+  });
+  const summaries = summarizeCapacity(data, NOW);
+  for (const s of summaries) {
+    assert.deepEqual(s.windows.map((w) => w.label), ["5H", "1W"], `${s.runtime} renders exactly the pair`);
+  }
+  const html = render({ status: "ready", data });
+  assert.equal((html.match(/data-window="5H"/g) ?? []).length, 3, "one 5H row per pair runtime");
+  assert.equal((html.match(/data-window="1W"/g) ?? []).length, 3, "one 1W row per pair runtime");
+  for (const raw of [
+    "account_rate_limits",
+    "account_usage",
+    "muse_account_usage",
+    "codex_account_rate_limits",
+    "codex_limit_main_primary",
+    "rolling_all_models",
+  ]) {
+    assert.ok(!html.includes(raw), `no raw internal key leaks: ${raw}`);
+  }
 });
 
 test("summary stays aligned and usable across widths: wraps, runtime blocks stay whole", () => {
