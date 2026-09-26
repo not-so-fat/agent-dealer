@@ -45,8 +45,14 @@ test("fixture env/key names match the server module's live contract", async () =
   assert.equal(mod.CURSOR_INDIVIDUAL_HOME_ENV, CURSOR_INDIVIDUAL_HOME_ENV);
 });
 import {
+  CLAUDE_CAPACITY_CACHE_FILE_ENV,
+  CLAUDE_CAPACITY_REFRESH_ENV,
+  CLAUDE_CAPACITY_REFRESH_PAID_VALUE,
   CURSOR_INDIVIDUAL_LOGIN_LINES,
+  checkClaudeCapacitySource,
   checkCursorIndividualLogin,
+  describeClaudeCapacitySource,
+  describeClaudeProbeOptIn,
   describeCursorIndividualLogin,
 } from "./doctor.js";
 
@@ -68,6 +74,7 @@ beforeEach(() => {
     CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV,
     CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV,
     CURSOR_INDIVIDUAL_HOME_ENV,
+    CLAUDE_CAPACITY_CACHE_FILE_ENV,
   ]) {
     saved[key] = process.env[key];
     delete process.env[key];
@@ -162,4 +169,82 @@ test("check reports no usable local login when neither source answers", async ()
   const report = await checkCursorIndividualLogin();
   assert.equal(report.kind, "none");
   assert.equal(report.line, CURSOR_INDIVIDUAL_LOGIN_LINES.none);
+});
+
+// ---------------------------------------------------------------------------
+// NOT-268: Claude capacity source reporting. Tests never touch the real
+// ~/.claude.json.cachedUsageUtilization: every case points the override at a
+// temporary fixture.
+// ---------------------------------------------------------------------------
+
+test("fixture cache-file env name matches the server module's live contract", async () => {
+  const { fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(here, "..", "..", "server", "src", "capacity", "claude-local-cache.ts"),
+    path.resolve(here, "..", "..", "server", "dist", "capacity", "claude-local-cache.js"),
+  ];
+  const src = candidates.find((file) => fs.existsSync(file));
+  assert.ok(src, "the server cache module must exist for the contract pin");
+  const text = fs.readFileSync(src!, "utf8");
+  assert.ok(text.includes(`"${CLAUDE_CAPACITY_CACHE_FILE_ENV}"`));
+  assert.ok(text.includes(`"${CLAUDE_CAPACITY_REFRESH_ENV}"`));
+  assert.ok(text.includes(`"${CLAUDE_CAPACITY_REFRESH_PAID_VALUE}"`));
+});
+
+test("describe maps each cache state to its static line", () => {
+  const fresh = describeClaudeCapacitySource({ present: true, ageMs: 5 * 60_000 });
+  assert.equal(fresh.kind, "fresh");
+  assert.match(fresh.line, /fresh/);
+  const stale = describeClaudeCapacitySource({ present: true, ageMs: 61 * 60_000 });
+  assert.equal(stale.kind, "stale");
+  assert.match(stale.line, /stale/);
+  const degraded: Array<{ present: boolean; ageMs: number | null } | null | undefined> = [
+    { present: false, ageMs: null },
+    { present: false, ageMs: 0 },
+    { present: true, ageMs: null },
+    { present: true, ageMs: -1 },
+    null,
+    undefined,
+  ];
+  for (const state of degraded) {
+    const report = describeClaudeCapacitySource(state);
+    assert.equal(report.kind, "missing");
+    assert.match(report.line, /no local 5H\/1W cache/);
+  }
+});
+
+test("probe opt-in line appears only under the exact paid value", () => {
+  assert.equal(describeClaudeProbeOptIn(undefined), null);
+  assert.equal(describeClaudeProbeOptIn(""), null);
+  assert.equal(describeClaudeProbeOptIn("off"), null);
+  assert.equal(describeClaudeProbeOptIn("auto"), null);
+  const armed = describeClaudeProbeOptIn(CLAUDE_CAPACITY_REFRESH_PAID_VALUE);
+  assert.ok(armed);
+  assert.match(armed!, /armed/);
+  assert.match(armed!, /≤\$0\.01/);
+});
+
+test("check stats the fixture cache file, never the real home", async () => {
+  const now = Date.now();
+  const freshFile = path.join(dir, "cached-fresh.json");
+  fs.writeFileSync(freshFile, JSON.stringify({ fetchedAtMs: now }));
+  const mtime = new Date(now - 10 * 60_000);
+  fs.utimesSync(freshFile, mtime, mtime);
+  process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV] = freshFile;
+  const fresh = await checkClaudeCapacitySource(now);
+  assert.equal(fresh.kind, "fresh");
+
+  const staleFile = path.join(dir, "cached-stale.json");
+  fs.writeFileSync(staleFile, JSON.stringify({ fetchedAtMs: 1 }));
+  const old = new Date(now - 2 * 3600_000);
+  fs.utimesSync(staleFile, old, old);
+  process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV] = staleFile;
+  const stale = await checkClaudeCapacitySource(now);
+  assert.equal(stale.kind, "stale");
+
+  process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV] = path.join(dir, "missing.json");
+  const missing = await checkClaudeCapacitySource(now);
+  assert.equal(missing.kind, "missing");
+  delete process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV];
 });
