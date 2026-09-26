@@ -15,13 +15,18 @@
 // Env:
 //   FAKE_MSP_MODE: full | custom-duration | partial-bad-weekly |
 //     all-bad-windows | missing | auth-error | malformed | hang |
-//     exit-nonzero | crash | no-method
+//     exit-nonzero | crash | no-method | persistent-full | persistent-missing |
+//     exit-after-first-read
 //   FAKE_MSP_RECORD: path of a file to append one JSON line per received message
 //   FAKE_MSP_NOW_MS: fixed clock for deterministic resetsAtMs (default Date.now())
 //
 // `full` mirrors the stable shape: observedAtMs, tier, a rolling `window`
 // (300 min) and a weekly window. A `usage/changed` notification precedes the
 // read response so tests can assert notification consumption.
+// `persistent-full` / `persistent-missing` answer every `usage/read` (the
+// owned long-lived host reuses one connection across reads); the `served`
+// once-only guard applies to one-shot modes only. `exit-after-first-read`
+// serves one full read, then exits 0 to exercise transparent host restart.
 
 import fs from "node:fs";
 
@@ -147,7 +152,8 @@ function handleRequest(msg) {
     send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "initialized notification required" } });
     return;
   }
-  if (served) {
+  const persistent = mode === "persistent-full" || mode === "persistent-missing";
+  if (served && !persistent) {
     send({ jsonrpc: "2.0", id: msg.id, error: { code: -32600, message: "usage/read already served" } });
     return;
   }
@@ -161,8 +167,17 @@ function handleRequest(msg) {
     send({ jsonrpc: "2.0", id: msg.id, result: { nonsense: true } });
     return;
   }
-  if (mode === "missing") {
+  if (mode === "missing" || mode === "persistent-missing") {
     send({ jsonrpc: "2.0", id: msg.id, result: { protocol: "msp/1.3" } });
+    return;
+  }
+  if (mode === "persistent-full") {
+    send({
+      jsonrpc: "2.0",
+      method: "usage/changed",
+      params: fullUsage(),
+    });
+    send({ jsonrpc: "2.0", id: msg.id, result: { protocol: "msp/1.3", usage: fullUsage() } });
     return;
   }
   if (mode === "custom-duration") {
@@ -221,4 +236,9 @@ function handleRequest(msg) {
     params: fullUsage(),
   });
   send({ jsonrpc: "2.0", id: msg.id, result: { protocol: "msp/1.3", usage: fullUsage() } });
+  if (mode === "exit-after-first-read") {
+    // Served exactly one full observation — now die so the owned host must
+    // restart transparently (NOT-269 restart rule: state is lost).
+    setTimeout(() => process.exit(0), 10);
+  }
 }
