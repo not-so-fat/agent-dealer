@@ -1,6 +1,7 @@
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { cursorAuthIssueFromOutput } from "@agent-dealer/shared";
 import { claudeAvailable, cursorAvailable } from "./cli-check.js";
 import {
@@ -119,12 +120,22 @@ export async function runDoctor(): Promise<number> {
       console.warn("⚠ LINEAR_API_KEY not set — Linear inbox disabled");
     }
     // NOT-250: experimental Cursor Individual dashboard adapter status
-    // (informational only — never fails doctor, never reads credentials).
+    // (informational only — never fails doctor). NOT-267: when enabled,
+    // also report which local login the adapter would use — desktop first,
+    // Agent auth as the fallback. The probe only runs under the explicit
+    // opt-in, and prints kind labels only: never paths, tokens, or user ids.
     if (process.env.AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY === "experimental") {
       console.warn(
         "⚠ Cursor Individual capacity: EXPERIMENTAL dashboard adapter enabled " +
           "(undocumented API, no support guarantee — unset AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY to disable)"
       );
+      try {
+        const login = await checkCursorIndividualLogin();
+        if (login.kind === "none") console.warn(login.line);
+        else console.log(login.line);
+      } catch {
+        // Informational only: a broken probe must never fail doctor.
+      }
     }
   } else {
     console.warn(`⚠ no config — run: agent-dealer setup`);
@@ -165,6 +176,100 @@ export async function runDoctor(): Promise<number> {
   }
 
   return failed ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// NOT-267: Cursor Individual local-login reporting for doctor.
+// ---------------------------------------------------------------------------
+
+/** Which local login the Individual adapter would use, if any. */
+export type CursorIndividualLoginKind = "desktop" | "agent" | "none";
+
+export interface CursorIndividualLoginReport {
+  kind: CursorIndividualLoginKind;
+  /** Static operator-facing line — no paths, tokens, or user ids, ever. */
+  line: string;
+}
+
+export const CURSOR_INDIVIDUAL_LOGIN_LINES: Record<CursorIndividualLoginKind, string> = {
+  desktop: "✓ Cursor Individual capacity: desktop login found (experimental dashboard adapter can use it)",
+  agent: "✓ Cursor Individual capacity: Agent login found (fallback)",
+  none: "⚠ Cursor Individual capacity: no usable local login — log in to Cursor desktop or the Cursor Agent CLI",
+};
+
+/**
+ * Map a diagnostics-safe credential status to the doctor line. Pure (no
+ * I/O): unit tests pin all three states plus the degraded inputs here.
+ */
+export function describeCursorIndividualLogin(
+  status: { present: boolean; source: "desktop" | "agent" | null } | null | undefined
+): CursorIndividualLoginReport {
+  if (status?.present === true && status.source === "desktop") {
+    return { kind: "desktop", line: CURSOR_INDIVIDUAL_LOGIN_LINES.desktop };
+  }
+  if (status?.present === true && status.source === "agent") {
+    return { kind: "agent", line: CURSOR_INDIVIDUAL_LOGIN_LINES.agent };
+  }
+  return { kind: "none", line: CURSOR_INDIVIDUAL_LOGIN_LINES.none };
+}
+
+interface CredentialStatusModule {
+  cursorIndividualCredentialStatus: () => { present: boolean; source: "desktop" | "agent" | null };
+}
+
+/**
+ * Load the server's credential-status reader without depending on the
+ * server's daemon entrypoint (which has side effects on import). The
+ * checkout layout (TypeScript source, run under tsx) is tried first, then
+ * the installed layout (built dist) — whichever answers wins. Returns null
+ * when neither is loadable; the caller then reports "no usable local
+ * login", never a crash. The loaded reader itself returns presence/source
+ * only — secret material never crosses this boundary by construction.
+ */
+async function loadCredentialStatusReader(): Promise<CredentialStatusModule | null> {
+  const roots: string[] = [];
+  try {
+    const { resolveServerRoot } = await import("./paths.js");
+    roots.push(resolveServerRoot());
+  } catch {
+    // The installed package entry (dist) may not be built in a checkout —
+    // the workspace fallback below still locates the source.
+  }
+  // Workspace-checkout fallback: packages/cli/src → packages/server.
+  // Absent in installed layouts (no src shipped), where existsSync skips it.
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  roots.push(path.resolve(here, "..", "..", "server"));
+  const candidates = roots.flatMap((serverRoot) => [
+    path.join(serverRoot, "src", "capacity", "cursor-individual-credentials.ts"),
+    path.join(serverRoot, "dist", "capacity", "cursor-individual-credentials.js"),
+  ]);
+  for (const file of candidates) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const mod = (await import(pathToFileURL(file).href)) as Partial<CredentialStatusModule>;
+      if (typeof mod.cursorIndividualCredentialStatus === "function") {
+        return mod as CredentialStatusModule;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Probe the local Cursor logins the way the adapter would (desktop first,
+ * Agent auth as the fallback) and report the kind. Never throws, never
+ * prints secret material — the line is one of three static strings.
+ */
+export async function checkCursorIndividualLogin(): Promise<CursorIndividualLoginReport> {
+  try {
+    const reader = await loadCredentialStatusReader();
+    if (!reader) return describeCursorIndividualLogin(null);
+    return describeCursorIndividualLogin(reader.cursorIndividualCredentialStatus());
+  } catch {
+    return describeCursorIndividualLogin(null);
+  }
 }
 
 function isPortFree(port: number): Promise<boolean> {
