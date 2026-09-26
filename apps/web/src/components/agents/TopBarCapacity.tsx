@@ -24,6 +24,11 @@
 // model-specific/overage/diagnostic extras stay in the API for diagnostics
 // but never render here: with no tagged pair the runtime reads `5H N/A` /
 // `1W N/A` under the public labels, never under an internal name.
+//
+// NOT-271: each runtime block leads with a 16x16 provider logo (the shared
+// AgentRuntimeIcon mapping, selected by the raw runtime key) instead of a
+// visible provider-name span. The name survives as `aria-label` plus the
+// full-detail `title`; the logo image itself is decorative (`alt=""`).
 import type {
   CapacityUnavailableReason,
   CapacityWindowSnapshot,
@@ -31,8 +36,9 @@ import type {
   RuntimeCapacityEntry,
   RuntimeCapacityResponse,
 } from "@agent-dealer/shared";
-import { isWindowKnown } from "@agent-dealer/shared";
+import { Runtime as RuntimeSchema, isWindowKnown } from "@agent-dealer/shared";
 import { runtimeLabel } from "../../lib/display";
+import { AgentRuntimeIcon } from "./AgentIcon";
 
 export type TopBarCapacityState =
   | { status: "loading" }
@@ -81,8 +87,17 @@ const PAIR_RUNTIMES: ReadonlySet<string> = new Set([
 const CURSOR_BILLING_WINDOW_KEY = "billing_cycle";
 const CURSOR_BILLING_LABEL = "1M";
 
+/** Runtimes with a first-party logo tile, derived from the shared enum —
+ * never from the human-readable label, so relabeling the "No agent"
+ * fallback cannot silently break the accessible name below. */
+const KNOWN_RUNTIME_KEYS: ReadonlySet<string> = new Set(RuntimeSchema.options);
+
 export type PerRuntimeSummary = {
+  /** Human-readable provider label (e.g. "Muse Code") for tooltips and accessible names. */
   runtime: string;
+  /** Raw runtime key (e.g. "muse_code") — icon selection matches on this enum,
+   * never on the human-readable label above. */
+  runtimeKey: Runtime;
   /** Labeled rows in display order: exactly 5H+1W, exactly one 1M, or none. */
   windows: TopBarWindowValue[];
   /** True when any known presented row is at 0% remaining. */
@@ -239,11 +254,13 @@ export function summarizeCapacity(
 ): PerRuntimeSummary[] {
   return data.runtimes.map((entry) => {
     const runtime = runtimeLabel(entry.runtime as Runtime);
+    const runtimeKey = entry.runtime as Runtime;
     if (entry.runtime === "cursor_local") {
       const billing = entry.windows.find((w) => w.windowKey === CURSOR_BILLING_WINDOW_KEY) ?? null;
       if (billing === null) {
         return {
           runtime,
+          runtimeKey,
           windows: [],
           exhausted: false,
           detail: `N/A (${REASON_TEXT[entry.unavailableReason ?? "missing"]})`,
@@ -255,6 +272,7 @@ export function summarizeCapacity(
       // must not falsely exhaust it.
       return {
         runtime,
+        runtimeKey,
         windows: [row],
         exhausted: row.kind === "known" && row.rawRemaining === 0,
         detail: row.detail,
@@ -273,10 +291,11 @@ export function summarizeCapacity(
       const windows = [fiveRow, weeklyRow];
       const exhausted = windows.some((w) => w.kind === "known" && w.rawRemaining === 0);
       const detail = windows.map((w) => w.detail).join("; ");
-      return { runtime, windows, exhausted, detail };
+      return { runtime, runtimeKey, windows, exhausted, detail };
     }
     return {
       runtime,
+      runtimeKey,
       windows: [],
       exhausted: false,
       detail: `N/A (${REASON_TEXT[entry.unavailableReason ?? "missing"]})`,
@@ -351,13 +370,15 @@ export function TopBarCapacityView({
               data-known={known ? "true" : "false"}
               data-exhausted={s.exhausted ? "true" : "false"}
               title={blockTitle(s)}
+              role="group"
+              aria-label={`${KNOWN_RUNTIME_KEYS.has(s.runtimeKey) ? s.runtime : "Unknown runtime"} capacity`}
               className={
                 s.exhausted
                   ? "inline-flex items-center gap-1.5 whitespace-nowrap rounded border border-red-400/40 bg-red-500/10 px-1.5 py-0.5"
                   : "inline-flex items-center gap-1.5 whitespace-nowrap"
               }
             >
-              <span className={s.exhausted ? "text-red-200/80" : "text-white/40"}>{s.runtime}</span>
+              <AgentRuntimeIcon runtime={s.runtimeKey} className="h-4 w-4 shrink-0" />
               {s.windows.length === 0 ? (
                 <span className="text-white/35">N/A</span>
               ) : (

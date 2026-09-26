@@ -1,6 +1,8 @@
 import type { Runtime } from "@agent-dealer/shared";
 import claudeLogo from "../../assets/logos/claude.svg";
+import codexLogo from "../../assets/logos/codex.png";
 import cursorLogo from "../../assets/logos/cursor.svg";
+import museLogo from "../../assets/logos/muse.svg";
 
 type IconProps = {
   className?: string;
@@ -40,41 +42,11 @@ export function GenericAgentIcon({ className = "h-8 w-8" }: IconProps) {
 }
 
 export function CodexIcon({ className = "h-8 w-8" }: IconProps) {
-  return (
-    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden>
-      <rect width="32" height="32" rx="8" fill="white" fillOpacity="0.06" />
-      <text
-        x="16"
-        y="21"
-        textAnchor="middle"
-        fill="#92E4DD"
-        fontSize="11"
-        fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
-        fontWeight="600"
-      >
-        Cx
-      </text>
-    </svg>
-  );
+  return <LogoTile src={codexLogo} className={className} />;
 }
 
 export function MuseIcon({ className = "h-8 w-8" }: IconProps) {
-  return (
-    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden>
-      <rect width="32" height="32" rx="8" fill="white" fillOpacity="0.06" />
-      <text
-        x="16"
-        y="21"
-        textAnchor="middle"
-        fill="#92E4DD"
-        fontSize="11"
-        fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
-        fontWeight="600"
-      >
-        Mu
-      </text>
-    </svg>
-  );
+  return <LogoTile src={museLogo} className={className} />;
 }
 
 export function AgentRuntimeIcon({
