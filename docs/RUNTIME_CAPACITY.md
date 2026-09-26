@@ -105,6 +105,24 @@ window key, or duration:
   their API routes and components remain for compatibility. Provider
   acquisition is unchanged.
 
+## Provider identity in the header (NOT-271)
+
+Agent cards render all four runtimes through the same image-based logo tile
+(`AgentRuntimeIcon` → `LogoTile`, `h-8 w-8`): Claude, Cursor, Codex, and
+Muse. The Codex and Muse marks live in `apps/web/src/assets/logos/` (see
+the asset note there for first-party sources); nothing is hotlinked at
+runtime.
+
+The top bar (`TopBarCapacityView`) reuses that same mapping at `h-4 w-4`
+per runtime block instead of a visible provider-name span — the compact
+`5H`/`1W` (or Cursor `1M`) labels and values stay visible beside the logo.
+The name is not lost: each block carries `aria-label="<Provider> capacity"`
+and keeps the full-detail `title` (provider name plus window/reset/staleness
+detail), while the logo image itself is decorative (`alt=""`). Exhausted,
+missing, stale, loading, and unavailable styling still applies to the whole
+block; the logo tile keeps its own treatment in every state. An unknown
+runtime falls back to the generic icon with its accessible name intact.
+
 ## Provider: Muse Code (NOT-247)
 
 Sources: the Muse Code docs (`https://dev.meta.ai/docs/muse-code`) and the

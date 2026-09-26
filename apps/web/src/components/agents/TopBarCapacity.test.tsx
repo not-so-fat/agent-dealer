@@ -793,6 +793,92 @@ test("NOT-266: known pairs render exactly two rows in 5H-then-1W order for Claud
   }
 });
 
+// NOT-271: provider identity — each top-bar runtime block leads with a 16x16
+// provider logo instead of visible provider-name text. Names survive in
+// aria-label + title; logo images are decorative.
+function fourRuntimeReady() {
+  return dataWith({
+    runtimes: [
+      { runtime: "claude_code", unavailableReason: null, windows: [window({ remainingPercent: 80 }), weekly({ remainingPercent: 40 })] },
+      {
+        runtime: "codex_local",
+        unavailableReason: null,
+        windows: [
+          window({ windowKey: "codex_limit_main_primary", providerBucket: "main/primary", remainingPercent: 70 }),
+          weekly({ windowKey: "codex_limit_main_secondary", providerBucket: "main/secondary", remainingPercent: 55 }),
+        ],
+      },
+      {
+        runtime: "muse_code",
+        unavailableReason: null,
+        windows: [
+          window({ windowKey: "rolling_all_models", providerBucket: "all_models", remainingPercent: 60 }),
+          weekly({ windowKey: "weekly_all_models", providerBucket: "all_models", remainingPercent: 30 }),
+        ],
+      },
+      { runtime: "cursor_local", unavailableReason: null, windows: [billingCycle()] },
+    ],
+  });
+}
+
+test("NOT-271: every ready provider block renders exactly one 16x16 logo and no visible provider-name text", () => {
+  const html = render({ status: "ready", data: fourRuntimeReady() });
+  assert.equal((html.match(/<img/g) ?? []).length, 4, "one logo image per provider block");
+  assert.equal((html.match(/h-4 w-4/g) ?? []).length, 4, "each logo is exactly 16x16");
+  assert.ok(!html.includes(">Cx<"), "no Codex placeholder glyph");
+  assert.ok(!html.includes(">Mu<"), "no Muse placeholder glyph");
+  for (const name of ["Claude", "Cursor", "Codex", "Muse Code"]) {
+    assert.ok(!html.includes(`>${name}<`), `no visible ${name} text in the block`);
+    assert.ok(
+      html.includes(`aria-label="${name} capacity"`),
+      `${name} block keeps an accessible provider name`
+    );
+  }
+  assert.equal((html.match(/alt=""/g) ?? []).length, 4, "every logo image is decorative");
+  // Compact window labels and values stay visible beside the logos.
+  assert.equal((html.match(/data-window="5H"/g) ?? []).length, 3);
+  assert.equal((html.match(/data-window="1W"/g) ?? []).length, 3);
+  assert.equal((html.match(/data-window="1M"/g) ?? []).length, 1);
+  for (const value of ["80%", "70%", "60%", "65%"]) {
+    assert.ok(html.includes(value), `${value} still visible`);
+  }
+});
+
+test("NOT-271: summaries keep the raw runtime key so icons select by enum, not label text", () => {
+  const summaries = summarizeCapacity(fourRuntimeReady(), NOW);
+  assert.deepEqual(
+    summaries.map((s) => s.runtimeKey),
+    ["claude_code", "codex_local", "muse_code", "cursor_local"]
+  );
+  assert.deepEqual(
+    summaries.map((s) => s.runtime),
+    ["Claude", "Codex", "Muse Code", "Cursor"]
+  );
+});
+
+test("NOT-271: unknown runtime keeps a generic fallback icon plus an accessible name", () => {
+  const data = dataWith({
+    runtimes: [{ runtime: "brand_new_runtime", unavailableReason: "missing", windows: [] }],
+  });
+  const [summary] = summarizeCapacity(data, NOW);
+  assert.equal(summary.runtime, "No agent");
+  assert.equal(summary.runtimeKey, "brand_new_runtime");
+  const html = render({ status: "ready", data });
+  assert.ok(html.includes('aria-label="No agent capacity"'), "fallback block keeps an accessible name");
+  assert.match(html, /<svg/, "fallback block renders the generic icon");
+  assert.ok(!html.includes("<img"), "fallback block renders no provider image");
+  assert.match(html, /N\/A/);
+});
+
+test("NOT-271: hover titles still carry the provider name plus window/reset detail", () => {
+  const html = render({ status: "ready", data: fourRuntimeReady() });
+  assert.match(html, /Claude: 5H: 80% available/, "Claude hover names provider + 5H detail");
+  assert.match(html, /Codex: 5H: 70% available/, "Codex hover names provider + 5H detail");
+  assert.match(html, /Muse Code: 5H: 60% available/, "Muse hover names provider + 5H detail");
+  assert.match(html, /Cursor: 1M: 65% available/, "Cursor hover names provider + 1M detail");
+  assert.match(html, /resets/, "reset detail preserved");
+});
+
 test("summary stays aligned and usable across widths: wraps, runtime blocks stay whole", () => {
   const html = render({ status: "ready", data: dataWith() });
   assert.match(html, /flex-wrap/, "summary wraps on narrow widths");
