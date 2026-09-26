@@ -365,13 +365,13 @@ cycle start, team size, per-member override counts — never percent chips)
 remain for compatibility. Tests inject a mock fetch; CI performs no live
 Cursor request.
 
-## Provider: Cursor Individual dashboard — EXPERIMENTAL, opt-in (NOT-250)
+## Provider: Cursor Individual dashboard — EXPERIMENTAL, opt-in (NOT-250, NOT-267)
 
 Source: undocumented Cursor dashboard endpoints (usage-summary /
 current-period shape, as commonly called by community tools) using the
-existing local Cursor login (`~/.cursor/auth.json`, shape-tolerant within an
-explicit allowlist). There is deliberately NO supported contract here: the
-endpoints and credential formats may change without notice, carry no support
+existing local Cursor login — the desktop app login first, the Cursor Agent
+login as the fallback. There is deliberately NO supported contract here: the
+endpoints and credential stores may change without notice, carry no support
 guarantee, and are never scraped via browser automation or HTML parsing.
 
 Opt-in (disabled by default — no silent opt-in, no credential migration):
@@ -380,17 +380,32 @@ Opt-in (disabled by default — no silent opt-in, no credential migration):
   Any other value (including unset) short-circuits before any credential file
   is read and before any HTTP is attempted, and serves `enabled: false` N/A.
 - Unset the variable to disable again. `CURSOR_INDIVIDUAL_CREDENTIAL_FILE`
-  pins an explicit credential file (fixtures/tests); the default candidate is
-  the local login only — the adapter never hunts the home directory.
+  pins an explicit credential file (fixtures/tests); otherwise the adapter
+  never hunts the home directory beyond its two fixed candidates.
 - Credential lookup is isolated in
-  `packages/server/src/capacity/cursor-individual-credentials.ts`: unknown
-  shapes read `unparsable` (changed format), and diagnostics return
-  presence/path/format only, never secret material. The session cookie needs
-  a WorkOS user id alongside the token — an explicit `userId`/`user_id` field
-  wins; otherwise it's derived locally from the token's own JWT `sub` claim
-  (no network, no signature check). Either source is normalized to strip a
-  provider connection-type prefix (`google-oauth2|user_abc` → `user_abc`).
-  A token with no derivable id reads `unparsable`.
+  `packages/server/src/capacity/cursor-individual-credentials.ts`, in order:
+  1. Cursor desktop `state.vscdb`, key `cursorAuth/accessToken` only —
+     opened read-only, never copied, never written, no unrelated key read.
+     Per-OS database path: macOS
+     `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`,
+     Windows `%APPDATA%/Cursor/User/globalStorage/state.vscdb`, Linux
+     `~/.config/Cursor/User/globalStorage/state.vscdb`.
+     (`CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE` pins an explicit database for
+     fixtures/tests.)
+  2. Cursor Agent `auth.json` (`~/.cursor/auth.json`, shape-tolerant within
+     an explicit allowlist).
+  Unknown shapes read `unparsable` (changed format), and diagnostics return
+  presence/source/path/format only, never secret material. The session cookie
+  needs a WorkOS user id alongside the token — for Agent auth an explicit
+  `userId`/`user_id` field wins, otherwise it's derived locally from the
+  token's own JWT `sub` claim (no network, no signature check); desktop
+  tokens always use the JWT `sub` derivation. Either source is normalized to
+  strip a provider connection-type prefix (`google-oauth2|user_abc` →
+  `user_abc`). A token with no derivable id reads `unparsable`.
+- The adapter never writes Cursor's database, refreshes tokens, or touches
+  the Keychain or auth files. A rejected login (401/403) keeps last-good
+  data and logs a static `forbidden` diagnostic telling the operator to
+  refresh the Cursor login — Dealer never mutates Cursor auth to recover.
 
 Reads (bounded: 10 s per request covering the full response — headers AND
 body, `AGENT_DEALER_CURSOR_INDIVIDUAL_TIMEOUT_MS` override; a
@@ -412,6 +427,16 @@ Bearer auth):
   value/unit, and remaining percent from a used/remaining scale. No durations
   are invented (monthly data never becomes a 5H/1W window), no cycle label is
   synthesized, and money is never rendered as a token percentage.
+- Exactly one personal `billing_cycle` window per read: the primary value is
+  `100 - individualUsage.plan.totalPercentUsed` (the account-total included
+  usage), with the billing-cycle end as the reset. Per-pool scales such as
+  `apiPercentUsed` are never substituted for the account total; when the
+  total percent is absent the plan's explicit used/limit pair (or a reported
+  remaining scale) is the only fallback. No second capacity window is ever
+  emitted from additional pools.
+- `agent-dealer doctor` reports the login the adapter would use while the
+  opt-in is enabled: "desktop login found", "Agent login found", or "no
+  usable local login" — static labels only, never paths, tokens, or ids.
 
 A supported Cursor Individual usage surface is preferred automatically:
 `readCursorIndividualBilling()` checks an injected `supportedReader` first

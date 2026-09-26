@@ -146,9 +146,17 @@ type FailureKind =
   | "unsafe-redirect"
   | "malformed";
 
-/** Operator-safe failure log: the static kind only, never tokens or payloads. */
+/**
+ * Operator-safe failure log: the static kind only, never tokens or payloads.
+ * A rejected login (401/403) means the local Cursor session the adapter
+ * borrowed is expired or revoked — the operator must refresh the Cursor
+ * login itself (desktop app or `cursor agent login`); Dealer never mutates
+ * Cursor auth, so the hint is static text, not a credential action.
+ */
 function logFailure(kind: FailureKind): void {
-  console.error(`[cursor-individual-capacity] dashboard read failed: ${kind}`);
+  const hint =
+    kind === "forbidden" ? " (refresh the Cursor login and retry — Dealer never touches Cursor auth)" : "";
+  console.error(`[cursor-individual-capacity] dashboard read failed: ${kind}${hint}`);
 }
 
 export interface CursorIndividualFetchResponse {
@@ -308,6 +316,12 @@ const USED_PERCENT_KEYS = [
   "totalPercentUsed",
   "total_percent_used",
 ];
+// NOTE (NOT-267): `apiPercentUsed` is deliberately NOT listed anywhere here.
+// The live payload reports per-pool scales (e.g. an API-model pool) next to
+// the account-total `individualUsage.plan.totalPercentUsed` — substituting a
+// pool scale for the account total would misreport personal capacity, so a
+// payload carrying ONLY a pool scale reads as no usable scale (unparsable),
+// never as the account total.
 const USED_FRACTION_KEYS = ["usedFraction", "used_fraction", "usageFraction", "usage_fraction"];
 const REMAINING_PERCENT_KEYS = [
   "remainingPercent",
@@ -316,6 +330,34 @@ const REMAINING_PERCENT_KEYS = [
   "percent_remaining",
 ];
 const REMAINING_FRACTION_KEYS = ["remainingFraction", "remaining_fraction"];
+/**
+ * Last-resort scale: the plan's explicit used-vs-limit pair (e.g. spend vs
+ * budget), read ONLY when no percent/fraction/remaining scale is present.
+ * Money-vs-money and count-vs-count both reduce to the same share — but
+ * this never mixes with the percent scales above, and never with a pool
+ * scale: only the `individualUsage.plan` pair counts, never merged
+ * top-level fields.
+ */
+const USED_AMOUNT_KEYS = [
+  "used",
+  "usage",
+  "usedCredits",
+  "used_credits",
+  "consumed",
+  "consumedCredits",
+  "consumed_credits",
+];
+const LIMIT_AMOUNT_KEYS = [
+  "limit",
+  "quota",
+  "allowance",
+  "totalLimit",
+  "total_limit",
+  "limitValue",
+  "limit_value",
+  "monthlyLimit",
+  "monthly_limit",
+];
 
 export interface CursorIndividualReadings {
   cycleLabel: string | null;
@@ -370,6 +412,18 @@ export function cursorIndividualPayloadToReadings(payload: unknown): CursorIndiv
     remainingPercent = clampPercent(remainingDirect);
   } else if (remainingFraction !== null) {
     remainingPercent = clampPercent(remainingFraction * 100);
+  } else {
+    // Last resort: the plan's explicit used/limit pair, read from the plan
+    // object ONLY — never from the merged top level, where an unrelated
+    // numeric field (e.g. a top-level `usage` value next to a `limit`) could
+    // otherwise be misread as the plan's scale. A non-positive limit (or a
+    // negative used amount) is not a scale — it reads as no usable value,
+    // never a division artifact.
+    const usedAmount = plan ? pickNumber(plan, USED_AMOUNT_KEYS) : null;
+    const limitAmount = plan ? pickNumber(plan, LIMIT_AMOUNT_KEYS) : null;
+    if (usedAmount !== null && limitAmount !== null && limitAmount > 0 && usedAmount >= 0) {
+      remainingPercent = clampPercent(100 - (usedAmount / limitAmount) * 100);
+    }
   }
   const hasCycle = cycleLabel !== null || cycleStart !== null || cycleEnd !== null;
   const hasUsage = usageValue !== null || remainingPercent !== null;
@@ -653,9 +707,20 @@ export async function readCursorIndividualBilling(
 
   let fatal: FailureKind | null = null;
   let readings: CursorIndividualReadings | null = null;
+  // A 200 response this module cannot parse as JSON (`malformed`) is kept
+  // distinct from a genuine auth/rate-limit/transport/redirect failure: an
+  // undocumented path can serve an HTML SPA shell with a 200 status instead
+  // of a 404 for an account it doesn't apply to, so `malformed` is treated
+  // like `absent` and the next candidate still gets a try. The first such
+  // verdict is remembered as the diagnostic in case no candidate parses.
+  let malformedFallback: FailureKind | null = null;
   for (const candidatePath of CURSOR_INDIVIDUAL_USAGE_PATHS) {
     const outcome = await fetchJson(fetchImpl, `${baseUrl}${candidatePath}`, authHeader, timeoutMs);
     if ("failure" in outcome) {
+      if (outcome.failure === "malformed") {
+        malformedFallback = malformedFallback ?? outcome.failure;
+        continue;
+      }
       // Auth, rate-limit, transport, redirect, and oversize failures dominate
       // over remaining candidates: retrying another undocumented path cannot
       // fix a rejected credential or an unsafe redirect.
@@ -671,6 +736,7 @@ export async function readCursorIndividualBilling(
     readings = parsed;
     break;
   }
+  if (!fatal && !readings) fatal = malformedFallback;
   if (fatal) {
     logFailure(fatal);
     const reason: CapacityUnavailableReason = fatal === "malformed" ? "unparsable" : "missing";
