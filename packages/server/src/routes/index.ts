@@ -17,7 +17,7 @@ import {
 import { getLinearUsageSnapshot } from "../adapters/linear-graphql.js";
 import { listRuntimeModels } from "../runners/models.js";
 import { configuredCapacityRuntimes, getRuntimeCapacitySnapshot } from "../capacity/service.js";
-import { ingestClaudeLocalCache, refreshClaudeCapacityIfStale } from "../capacity/claude-local-cache.js";
+import { refreshClaudeCapacityIfStale } from "../capacity/claude-local-cache.js";
 import { maybeRefreshMuseCapacityFromServe } from "../capacity/muse.js";
 import { refreshCodexCapacityIfStale } from "../capacity/codex-app-server.js";
 import {
@@ -96,19 +96,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // (single-flight, never health rows, never throws); fresh snapshots and
   // runtimes without a configured Codex account serve stored data with no
   // subprocess.
-  // NOT-268: Claude local-first ladder — the read ingests Claude Code's own
-  // free cache file synchronously (plain file read, never a spawn), then
-  // considers the paid probe in the background without blocking the read: a
-  // bounded Haiku probe fires at most once per hour and only under the
-  // explicit `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=paid-after-1h` opt-in when
-  // every valid 5H/1W observation is older than 60 minutes. Disabled is a
-  // strict no-op (no spawn, no spend). Failures never break the read below.
+  // NOT-268: Claude local-first ladder — one background refresh ingests
+  // Claude Code's own free cache (plain file read, never a spawn) and then
+  // considers the paid probe without blocking the read: a bounded Haiku
+  // probe fires at most once per hour and only under the explicit
+  // `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=paid-after-1h` opt-in when every
+  // valid 5H/1W observation is older than 60 minutes. Disabled is a strict
+  // no-op (no spawn, no spend). Failures never break the read below.
   app.get("/api/runtime-capacity", async () => {
-    try {
-      ingestClaudeLocalCache();
-    } catch {
-      // Best-effort: serve the last-known snapshot below.
-    }
     try {
       void refreshClaudeCapacityIfStale().catch(() => {
         // Best-effort: failures persist via the probe diagnostic log.

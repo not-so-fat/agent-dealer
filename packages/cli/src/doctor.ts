@@ -354,9 +354,12 @@ export function describeClaudeProbeOptIn(setting: string | undefined): string | 
 }
 
 /**
- * Stat Claude Code's own cached-usage file the way the server adapter would
- * (override first, then `~/.claude.json.cachedUsageUtilization`). Never
- * throws, never reads utilization values — presence and age only.
+ * Read the `cachedUsageUtilization.fetchedAtMs` timestamp out of Claude
+ * Code's config file (override first, then `~/.claude.json`) — the same key
+ * the server adapter normalizes, so doctor and the server always agree on
+ * freshness. File mtime is meaningless here: unrelated config writes touch
+ * it. Only the timestamp is read (never utilization values, ids, or
+ * siblings) and only an age label is reported. Never throws.
  */
 export async function checkClaudeCapacitySource(
   nowMs = Date.now()
@@ -364,11 +367,38 @@ export async function checkClaudeCapacitySource(
   try {
     const override = process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV]?.trim();
     const file =
-      override ||
-      path.join(process.env.HOME ?? os.homedir(), ".claude.json.cachedUsageUtilization");
-    const stat = fs.statSync(file, { throwIfNoEntry: false });
-    if (!stat || !stat.isFile()) return describeClaudeCapacitySource(null);
-    return describeClaudeCapacitySource({ present: true, ageMs: nowMs - stat.mtimeMs });
+      override || path.join(process.env.HOME ?? os.homedir(), ".claude.json");
+    let text: string;
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      return describeClaudeCapacitySource(null);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return describeClaudeCapacitySource(null);
+    }
+    const root =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    // A bare cache object (no config envelope — the shape override fixtures
+    // use) is accepted as-is; otherwise only the subtree counts.
+    const subtreeRaw = root?.cachedUsageUtilization;
+    const subtree =
+      subtreeRaw && typeof subtreeRaw === "object" && !Array.isArray(subtreeRaw)
+        ? (subtreeRaw as Record<string, unknown>)
+        : root;
+    const fetchedAtMs =
+      subtree && typeof subtree.fetchedAtMs === "number" && Number.isFinite(subtree.fetchedAtMs)
+        ? (subtree.fetchedAtMs as number)
+        : null;
+    if (fetchedAtMs === null || fetchedAtMs <= 0 || fetchedAtMs > nowMs) {
+      return describeClaudeCapacitySource(null);
+    }
+    return describeClaudeCapacitySource({ present: true, ageMs: nowMs - fetchedAtMs });
   } catch {
     return describeClaudeCapacitySource(null);
   }

@@ -173,8 +173,7 @@ test("check reports no usable local login when neither source answers", async ()
 
 // ---------------------------------------------------------------------------
 // NOT-268: Claude capacity source reporting. Tests never touch the real
-// ~/.claude.json.cachedUsageUtilization: every case points the override at a
-// temporary fixture.
+// ~/.claude.json: every case points the override at a temporary fixture.
 // ---------------------------------------------------------------------------
 
 test("fixture cache-file env name matches the server module's live contract", async () => {
@@ -225,26 +224,57 @@ test("probe opt-in line appears only under the exact paid value", () => {
   assert.match(armed!, /≤\$0\.01/);
 });
 
-test("check stats the fixture cache file, never the real home", async () => {
+test("check reads fetchedAtMs from the config key, never mtime or the real home", async () => {
   const now = Date.now();
+  // Full config envelope with sensitive siblings: freshness comes from the
+  // subtree timestamp even though mtime is two days old (mtime must be
+  // ignored — unrelated config writes touch it). The line must not leak
+  // the sibling values.
   const freshFile = path.join(dir, "cached-fresh.json");
-  fs.writeFileSync(freshFile, JSON.stringify({ fetchedAtMs: now }));
-  const mtime = new Date(now - 10 * 60_000);
-  fs.utimesSync(freshFile, mtime, mtime);
+  fs.writeFileSync(
+    freshFile,
+    JSON.stringify({
+      userID: "user-secret-must-never-print",
+      email: "someone@example.com",
+      cachedUsageUtilization: { fetchedAtMs: now - 5 * 60_000, accountUuid: "acct-secret" },
+    })
+  );
+  const ancient = new Date(now - 2 * 24 * 3600_000);
+  fs.utimesSync(freshFile, ancient, ancient);
   process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV] = freshFile;
   const fresh = await checkClaudeCapacitySource(now);
   assert.equal(fresh.kind, "fresh");
+  assert.ok(!fresh.line.includes("user-secret-must-never-print"));
+  assert.ok(!fresh.line.includes("acct-secret"));
 
+  // Bare cache object (no envelope) still works; a brand-new mtime cannot
+  // rescue a stale timestamp.
   const staleFile = path.join(dir, "cached-stale.json");
   fs.writeFileSync(staleFile, JSON.stringify({ fetchedAtMs: 1 }));
-  const old = new Date(now - 2 * 3600_000);
-  fs.utimesSync(staleFile, old, old);
+  const justNow = new Date(now);
+  fs.utimesSync(staleFile, justNow, justNow);
   process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV] = staleFile;
   const stale = await checkClaudeCapacitySource(now);
   assert.equal(stale.kind, "stale");
 
+  // Missing file, garbage JSON, future timestamp, and a config without the
+  // key all report missing.
   process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV] = path.join(dir, "missing.json");
-  const missing = await checkClaudeCapacitySource(now);
-  assert.equal(missing.kind, "missing");
+  assert.equal((await checkClaudeCapacitySource(now)).kind, "missing");
+  const garbageFile = path.join(dir, "cached-garbage.json");
+  fs.writeFileSync(garbageFile, "{not json");
+  process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV] = garbageFile;
+  assert.equal((await checkClaudeCapacitySource(now)).kind, "missing");
+  const futureFile = path.join(dir, "cached-future.json");
+  fs.writeFileSync(
+    futureFile,
+    JSON.stringify({ cachedUsageUtilization: { fetchedAtMs: now + 60_000 } })
+  );
+  process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV] = futureFile;
+  assert.equal((await checkClaudeCapacitySource(now)).kind, "missing");
+  const keylessFile = path.join(dir, "cached-keyless.json");
+  fs.writeFileSync(keylessFile, JSON.stringify({ userID: "x", projects: {} }));
+  process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV] = keylessFile;
+  assert.equal((await checkClaudeCapacitySource(now)).kind, "missing");
   delete process.env[CLAUDE_CAPACITY_CACHE_FILE_ENV];
 });

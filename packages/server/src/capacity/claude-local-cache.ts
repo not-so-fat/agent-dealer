@@ -5,15 +5,17 @@
 //
 // Goal: keep Claude 5H/1W useful between Dealer runs. Production's last
 // Dealer-observed sample can be days old (no recent Dealer-managed Claude
-// run), while Claude Code itself maintains exact provider usage in
-// `~/.claude.json.cachedUsageUtilization` on every run — including
+// run), while Claude Code itself maintains exact provider usage in the
+// `cachedUsageUtilization` key of `~/.claude.json` on every run — including
 // interactive runs outside Dealer. So the freshest valid observation wins
 // from this ladder:
 //
 //   1. Existing Dealer `rate_limit_event` ingestion (claude-events.ts — kept
 //      as-is, session-end, per-window newer-wins).
-//   2. Read-only local cache `~/.claude.json.cachedUsageUtilization`
-//      (this module — free, ingested on every capacity read).
+//   2. Read-only local cache: the `cachedUsageUtilization` subtree of
+//      `~/.claude.json` (this module — free, ingested on every capacity
+//      read; only that subtree is ever parsed, the rest of the config —
+//      accountUuid, email, credentials, projects — is never retained).
 //   3. One minimal bounded paid probe, only when every valid 5H/1W
 //      observation is older than 60 minutes AND the explicit opt-in
 //      `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=paid-after-1h` is set.
@@ -26,20 +28,33 @@
 // tells them apart (`claude-session:unified-windows` vs
 // `claude-cache:cachedUsageUtilization` vs `claude-probe:minimal-print`).
 //
-// Local-cache safety: only the `utilization` subtree (`fetchedAtMs`,
-// `five_hour`, `seven_day`, `limits[]`) is ever read. `accountUuid`, email,
-// credentials, extra-usage spend, experiments, and the full raw object are
-// never persisted, returned, or logged. Only the account-wide five-hour and
+// Local-cache safety: only the `cachedUsageUtilization` subtree
+// (`fetchedAtMs`, `utilization.five_hour`, `utilization.seven_day`,
+// `utilization.limits[]`) is ever read. `accountUuid`, email, credentials,
+// extra-usage spend, experiments, and the full raw object are never
+// persisted, returned, or logged. Only the account-wide five-hour and
 // seven-day windows are normalized — every other bucket is dropped.
 //
-// Probe argv (validated against `claude -p --help` at 2.1.283):
+// Observed provider shapes (verified against a real `~/.claude.json` at
+// 2.1.283 — the cache is percent-scale, not 0–1 fractions):
+// - Named fields: `{ utilization: <0–100 percent>, resets_at: <ISO-8601> }`.
+//   Bare `utilization` ≤ 1 still reads as a fraction (compatibility); values
+//   in (1, 100] read as percent. Anything else is malformed — rejected.
+// - `limits[]`: `{ kind|group: "session"|"weekly_all", percent: <0–100>,
+//   resets_at: <ISO-8601>, ... }`. Model-specific and overage entries are
+//   dropped — only the account-wide pair is ever normalized.
+//
+// Probe argv (verified live at 2.1.283 — `claude -p --max-turns 1 --model
+// <bogus>` parses flags and fails only on model resolution, spending
+// nothing, even though `--help` hides the flag):
 // - `--model haiku` — the cheapest supported alias (matches
 //   runners/models.ts `haiku` "latest alias").
+// - `--max-turns 1` — hard one-turn bound, belt-and-braces with the
+//   structural bound below.
 // - `--tools ""` + `--strict-mcp-config` (with no `--mcp-config`) — no tools,
-//   no MCP. There is no `--max-turns` flag in 2.1.283 (an unknown option
-//   fails the spawn), so the one-turn bound is structural: with no tools the
-//   model cannot continue past its first response, the fixed minimal prompt
-//   asks for a single word, and `--max-budget-usd 0.01` hard-caps spend.
+//   no MCP. With no tools the model cannot continue past its first response,
+//   the fixed minimal prompt asks for a single word, and
+//   `--max-budget-usd 0.01` hard-caps spend.
 // - `--no-session-persistence` — the probe leaves no resumable session.
 // - `--output-format stream-json` (+ `--verbose`, matching Dealer's own
 //   stream-json parsing) so `rate_limit_event`s can be ingested.
@@ -147,11 +162,16 @@ function pickString(candidates: unknown[]): string | null {
   return null;
 }
 
-/** Path to Claude Code's own cached usage file (override for tests/smoke). */
+/**
+ * Path to the Claude Code config file whose `cachedUsageUtilization` key
+ * carries the local 5H/1W observation (override env for tests/smoke points
+ * at a fixture file instead). Only that key is ever parsed — see
+ * `extractClaudeCacheSubtree`.
+ */
 export function claudeCacheFilePath(): string {
   const override = process.env[CLAUDE_CACHE_FILE_ENV]?.trim();
   if (override) return override;
-  return path.join(process.env.HOME ?? os.homedir(), ".claude.json.cachedUsageUtilization");
+  return path.join(process.env.HOME ?? os.homedir(), ".claude.json");
 }
 
 export function claudeProbeTimeoutMs(): number {
@@ -165,9 +185,8 @@ export function claudeProbeTimeoutMs(): number {
 
 /**
  * Fixed probe argv. Pinned by tests: the fixed minimal prompt, cheapest
- * model, no tools, no MCP, no session persistence, stream JSON, ≤$0.01
- * budget. No `--max-turns` — 2.1.283 has no such flag, so the one-turn bound
- * is structural (no tools + trivial prompt + budget cap).
+ * model, `--max-turns 1`, no tools, no MCP, no session persistence, stream
+ * JSON, ≤$0.01 budget.
  */
 export function buildClaudeProbeArgv(): string[] {
   return [
@@ -175,6 +194,8 @@ export function buildClaudeProbeArgv(): string[] {
     CLAUDE_PROBE_PROMPT,
     "--model",
     CLAUDE_PROBE_MODEL,
+    "--max-turns",
+    "1",
     "--tools",
     "",
     "--strict-mcp-config",
@@ -197,10 +218,14 @@ interface CacheScale {
 }
 
 /**
- * Utilization scale for one cache window entry. `utilization` (and its
- * `used*` spellings) is a 0–1 fraction; explicit percent spellings are
- * 0–100. Anything else — wrong type, out of range on both scales — is
- * malformed and the window is rejected, never guessed.
+ * Utilization scale for one cache window entry. Explicit percent spellings
+ * (`usedPercent`, `percent`, …) are 0–100. Bare `utilization` (and its
+ * `used*` spellings) is dual-scale, matching the observed provider data: a
+ * real `~/.claude.json` at 2.1.283 carries percent values there
+ * (`{ utilization: 9, … }`), while older shapes carry 0–1 fractions — so
+ * ≤ 1 reads as a fraction and (1, 100] reads as percent. Anything else —
+ * wrong type, negative, or above 100 on both scales — is malformed and the
+ * window is rejected, never guessed.
  */
 function cacheEntryScale(entry: Record<string, unknown>): CacheScale | null {
   const usedPercent = pickNumber([
@@ -208,20 +233,24 @@ function cacheEntryScale(entry: Record<string, unknown>): CacheScale | null {
     entry.used_percent,
     entry.utilizationPercent,
     entry.utilization_percent,
+    entry.percent,
   ]);
   if (usedPercent !== null) {
     if (usedPercent < 0 || usedPercent > 100) return null;
     return { usedPercent, usedFraction: null };
   }
-  const usedFraction = pickNumber([
-    entry.utilization,
-    entry.used,
-    entry.usedFraction,
-    entry.used_fraction,
-  ]);
-  if (usedFraction === null) return null;
-  if (usedFraction < 0 || usedFraction > 1) return null;
-  return { usedPercent: null, usedFraction };
+  // Explicit fraction spellings stay strict 0–1.
+  const strictFraction = pickNumber([entry.usedFraction, entry.used_fraction]);
+  if (strictFraction !== null) {
+    if (strictFraction < 0 || strictFraction > 1) return null;
+    return { usedPercent: null, usedFraction: strictFraction };
+  }
+  // Bare `utilization`/`used` is dual-scale (fraction ≤ 1, percent above).
+  const usedValue = pickNumber([entry.utilization, entry.used]);
+  if (usedValue === null) return null;
+  if (usedValue < 0 || usedValue > 100) return null;
+  if (usedValue <= 1) return { usedPercent: null, usedFraction: usedValue };
+  return { usedPercent: usedValue, usedFraction: null };
 }
 
 function cacheWindowReading(
@@ -284,11 +313,13 @@ function limitEntryRole(name: string): "five_hour" | "weekly" | null {
  * account-wide 5H/1W readings. `fetchedAtMs` is the observed time.
  *
  * - `utilization.limits[]` is preferred when it carries the explicit
- *   account-wide windows (`session` → five-hour, `weekly_all` → weekly);
- *   any other limit entry (model-specific, overage) is dropped — only the
- *   account-wide pair is ever normalized.
+ *   account-wide windows (`session` → five-hour, `weekly_all` → weekly,
+ *   named via `kind`/`group`, scaled via `percent`); any other limit entry
+ *   (model-specific, overage) is dropped — only the account-wide pair is
+ *   ever normalized.
  * - The named `five_hour` / `seven_day` fields are the compatibility path
- *   for whichever role `limits[]` does not cover.
+ *   for whichever role `limits[]` does not cover. Bare `utilization` values
+ *   are dual-scale (≤ 1 fraction, above percent to 100).
  * - Returns null when nothing usable is present: missing/future
  *   `fetchedAtMs`, no account-wide window with a usable scale, or every
  *   window rejected (malformed scale, expired reset). Account identity,
@@ -316,13 +347,24 @@ export function parseClaudeCachedUtilization(
     const reading = cacheWindowReading(role, entry, observedAt, fetchedAtMs, evidenceRef);
     if (reading) byRole.set(role, reading);
   };
-  // Preferred path: explicit account-wide entries in limits[].
+  // Preferred path: explicit account-wide entries in limits[]. Real
+  // entries name their window via `kind`/`group` (`session`, `weekly_all`)
+  // and scale via `percent`; the `name`/`window`/… + `utilization` spellings
+  // are the compatibility path for older shapes.
   const limits = u.limits;
   if (Array.isArray(limits)) {
     for (const item of limits) {
       if (!item || typeof item !== "object" || Array.isArray(item)) continue;
       const w = item as Record<string, unknown>;
-      const name = pickString([w.name, w.window, w.bucket, w.key, w.id]);
+      const name = pickString([
+        w.name,
+        w.window,
+        w.bucket,
+        w.key,
+        w.id,
+        w.kind,
+        w.group,
+      ]);
       if (!name) continue;
       const role = limitEntryRole(name);
       if (!role) continue;
@@ -341,9 +383,26 @@ export function parseClaudeCachedUtilization(
 }
 
 /**
- * Read-only local-cache read. Returns null when the file is missing,
- * unparsable, or carries no usable 5H/1W observation — never throws, never
- * spawns Claude, never spends money.
+ * Extract the `cachedUsageUtilization` subtree from a parsed config file.
+ * A bare cache object (no such key — the shape override fixtures use) is
+ * accepted as-is so tests can point the override at a minimal file. The
+ * caller must drop the input immediately after: siblings carry accountUuid,
+ * email, credentials, and projects, none of which may persist.
+ */
+export function extractClaudeCacheSubtree(parsed: unknown): unknown {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const root = parsed as Record<string, unknown>;
+  const subtree = root.cachedUsageUtilization;
+  if (subtree && typeof subtree === "object" && !Array.isArray(subtree)) return subtree;
+  return parsed;
+}
+
+/**
+ * Read-only local-cache read: parse `~/.claude.json`, extract only the
+ * `cachedUsageUtilization` subtree, normalize it, and drop everything else.
+ * Returns null when the file is missing, unparsable, or carries no usable
+ * 5H/1W observation — never throws, never spawns Claude, never spends
+ * money.
  */
 export function readClaudeLocalCache(nowMs = Date.now()): AdapterReadResult | null {
   let text: string;
@@ -358,7 +417,7 @@ export function readClaudeLocalCache(nowMs = Date.now()): AdapterReadResult | nu
   } catch {
     return null;
   }
-  const windows = parseClaudeCachedUtilization(parsed, nowMs);
+  const windows = parseClaudeCachedUtilization(extractClaudeCacheSubtree(parsed), nowMs);
   if (!windows) return null;
   return { runtime: CLAUDE_RUNTIME, windows, unavailable: [] };
 }

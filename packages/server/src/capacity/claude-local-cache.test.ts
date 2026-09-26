@@ -26,6 +26,7 @@ const {
   CLAUDE_CAPACITY_REFRESH_ENV,
   buildClaudeProbeArgv,
   claudeCacheFilePath,
+  extractClaudeCacheSubtree,
   ingestClaudeLocalCache,
   isClaudePaidFallbackEnabled,
   maybeProbeClaudeCapacity,
@@ -239,12 +240,18 @@ test("future/missing fetchedAtMs rejects the whole observation", () => {
 });
 
 test("malformed scales and expired resets are rejected, never fabricated", () => {
+  // Bare `utilization` is dual-scale (≤ 1 fraction, above percent to 100 —
+  // the real cache carries percent values like 9 there), so 1.5 is a valid
+  // 1.5%, not malformed. Out-of-range on both scales stays rejected, as do
+  // explicit fraction spellings above 1.
   const bad: unknown[] = [
-    { utilization: 1.5, resets_at: FIVE_HOUR_RESET_SEC },
+    { utilization: 101, resets_at: FIVE_HOUR_RESET_SEC },
     { utilization: -0.1, resets_at: FIVE_HOUR_RESET_SEC },
     { utilization: "high", resets_at: FIVE_HOUR_RESET_SEC },
     { utilization: null, resets_at: FIVE_HOUR_RESET_SEC },
     { usedPercent: 101, resets_at: FIVE_HOUR_RESET_SEC },
+    { usedFraction: 1.5, resets_at: FIVE_HOUR_RESET_SEC },
+    { percent: -1, resets_at: FIVE_HOUR_RESET_SEC },
   ];
   for (const entry of bad) {
     assert.equal(
@@ -391,6 +398,8 @@ test("probe argv pins the fixed prompt, cheapest model, no tools/MCP, one turn, 
     "Reply with exactly: ok",
     "--model",
     "haiku",
+    "--max-turns",
+    "1",
     "--tools",
     "",
     "--strict-mcp-config",
@@ -401,9 +410,11 @@ test("probe argv pins the fixed prompt, cheapest model, no tools/MCP, one turn, 
     "--max-budget-usd",
     "0.01",
   ]);
-  // Semantic pins behind the exact match: cheapest model, tools fully off,
-  // MCP restricted to none passed, stream JSON, hard budget cap.
+  // Semantic pins behind the exact match: cheapest model, hard one-turn
+  // bound, tools fully off, MCP restricted to none passed, stream JSON,
+  // hard budget cap.
   assert.equal(seenArgv[seenArgv.indexOf("--model") + 1], "haiku");
+  assert.equal(seenArgv[seenArgv.indexOf("--max-turns") + 1], "1");
   assert.equal(seenArgv[seenArgv.indexOf("--tools") + 1], "");
   assert.ok(!seenArgv.includes("--mcp-config"));
   const budget = Number(seenArgv[seenArgv.indexOf("--max-budget-usd") + 1]);
@@ -504,11 +515,96 @@ test("full refresh ingests free cache first and skips the probe when fresh", asy
   assert.equal(listCapacitySnapshots("claude_code").length, 2);
 });
 
-test("cache file override resolves from env, defaulting to ~/.claude.json.cachedUsageUtilization", () => {
+test("cache file override resolves from env, defaulting to ~/.claude.json", () => {
   assert.equal(claudeCacheFilePath(), cacheFile);
   delete process.env[CLAUDE_CACHE_FILE_ENV];
   assert.equal(
     claudeCacheFilePath(),
-    path.join(process.env.HOME ?? os.homedir(), ".claude.json.cachedUsageUtilization")
+    path.join(process.env.HOME ?? os.homedir(), ".claude.json")
   );
+});
+
+test("a full ~/.claude.json-shaped file yields 5H/1W from the subtree only", () => {
+  // Mirrors the observed real config at 2.1.283: percent-scale named
+  // fields, kind/group/percent limits[], ISO resets, and sensitive
+  // top-level + extra-usage siblings that must never persist.
+  const fetchedAtMs = NOW_MS - 5 * 60_000;
+  const observedIso = new Date(fetchedAtMs).toISOString();
+  fs.writeFileSync(
+    cacheFile,
+    JSON.stringify({
+      userID: "user-secret-must-never-persist",
+      email: "someone@example.com",
+      projects: { "/tmp/x": { history: ["sensitive"] } },
+      cachedUsageUtilization: {
+        fetchedAtMs,
+        accountUuid: "acct-must-never-persist",
+        utilization: {
+          five_hour: {
+            utilization: 99,
+            resets_at: new Date(FIVE_HOUR_RESET_SEC * 1000).toISOString(),
+          },
+          seven_day: {
+            utilization: 88,
+            resets_at: new Date(SEVEN_DAY_RESET_SEC * 1000).toISOString(),
+          },
+          seven_day_sonnet: {
+            utilization: 5,
+            resets_at: new Date(SEVEN_DAY_RESET_SEC * 1000).toISOString(),
+          },
+          extra_usage: { is_enabled: true, used_credits: 4878, utilization: 69.68 },
+          limits: [
+            {
+              kind: "session",
+              group: "session",
+              percent: 9,
+              severity: "normal",
+              resets_at: new Date(FIVE_HOUR_RESET_SEC * 1000).toISOString(),
+              scope: null,
+              is_active: false,
+            },
+            {
+              kind: "weekly_all",
+              group: "weekly",
+              percent: 23,
+              severity: "normal",
+              resets_at: new Date(SEVEN_DAY_RESET_SEC * 1000).toISOString(),
+              scope: null,
+              is_active: true,
+            },
+          ],
+        },
+      },
+    })
+  );
+  // The subtree extractor drops the envelope before parsing.
+  const extracted = extractClaudeCacheSubtree(
+    JSON.parse(fs.readFileSync(cacheFile, "utf8"))
+  ) as Record<string, unknown>;
+  assert.equal(typeof (extracted as { fetchedAtMs?: unknown }).fetchedAtMs, "number");
+  assert.ok(!JSON.stringify(extracted).includes("user-secret-must-never-persist"));
+
+  const result = readClaudeLocalCache(NOW_MS);
+  assert.ok(result);
+  assert.equal(result!.windows.length, 2);
+  // limits[] (kind/group/percent) wins over the named fields per role.
+  const fiveHour = result!.windows.find((w) => w.criticalRole === "five_hour")!;
+  const weekly = result!.windows.find((w) => w.criticalRole === "weekly")!;
+  assert.equal(fiveHour.usedPercent, 9);
+  assert.equal(fiveHour.usedUnit, "percent");
+  assert.equal(fiveHour.observedAt, observedIso);
+  assert.equal(weekly.usedPercent, 23);
+  assert.equal(weekly.observedAt, observedIso);
+  for (const w of result!.windows) {
+    const text = JSON.stringify(w);
+    assert.ok(!text.includes("acct-must-never-persist"));
+    assert.ok(!text.includes("user-secret-must-never-persist"));
+    assert.ok(!text.includes("someone@example.com"));
+    assert.ok(!text.includes("4878"));
+  }
+  assert.equal(ingestClaudeLocalCache(NOW_MS), 2);
+  const snap = getRuntimeCapacitySnapshot(NOW_MS);
+  const claude = snap.runtimes.find((r) => r.runtime === "claude_code")!;
+  assert.equal(claude.windows.find((w) => w.displayLabel === "5H")!.remainingPercent, 91);
+  assert.equal(claude.windows.find((w) => w.displayLabel === "1W")!.remainingPercent, 77);
 });
