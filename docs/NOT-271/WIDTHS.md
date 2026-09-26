@@ -50,19 +50,52 @@ metrics table and `document.title`, and the section reports any
 negative margins, so a logo cannot overlap or clip its values by
 construction).
 
-## Pixel screenshots (still open — needs a browser)
+## Pixel renders (attached — offline composite, not browser pixels)
 
-Pixel screenshots could not be captured in this sandbox, re-confirmed
-2026-09-26: Chrome headless aborts on launch (`Abort trap: 6`, exit 134,
-including with `--no-sandbox --no-zygote --single-process`), `qlmanage -t`
-fails sandbox initialization, no other engine is installed (no Playwright
-browsers, no `wkhtmltoimage`, no pyobjc WebKit, broken simulator CLI), and
-there is no network to fetch tooling. To attach the AC7 pixels to the PR,
-open both fixture files in a browser at 360px width on any machine with a
-renderer and screenshot the `ready-4` section (plus `exhausted-and-na` to
-show the logo stays identifiable in exhausted/N/A states); save them next
-to the fixtures as `capacity-header-before.png` /
-`capacity-header-after.png`.
+`capacity-header-before.png` and `capacity-header-after.png` (in this
+directory) render both cases at the same 360px content width, produced
+2026-09-26 by `/tmp/render-capacity.py` with no browser and no network:
+
+- Icons are pixel renders of the CHECKED-IN assets: Claude/Cursor via
+  even-odd scanline fill of their SVG paths, Muse via disc-stamped
+  gradient stroke of its SVG path, Codex via stdlib PNG decode of
+  `codex.png` — each composited into the 16px `LogoTile` (rounded-lg,
+  white 4%, 70% image) exactly as `AgentIcon.tsx` specifies.
+- Text is real `ffmpeg drawtext` output with the system font
+  (`Helvetica.ttc`) at the real 12px size; positions come from stdlib
+  TrueType-advance layout using the exact fixture flex geometry (gaps
+  12/6/4, 15px stack rows, exhausted border+padding, greedy flex-wrap).
+- Known approximations (do not affect the width claim): CAPACITY
+  letter-spacing omitted (present in both variants equally), `font-medium`
+  rendered with the Regular face, section captions at 12px instead of
+  13px, viewport border solid instead of dashed.
+
+What the pixels show: every after block leads with a 16px logo and no
+name text; `5H`/`1W`/`1M` values are all legible; the exhausted Codex
+block keeps its red border/tint with a red `0%`; the N/A Muse block stays
+dim; no logo overlaps or clips its values (blocks are sequential
+non-overlapping boxes by construction — same guarantee as the fixture
+CSS, which has no absolute positioning or negative margins).
+
+Measured block widths from the same layout pass (Helvetica 12px):
+
+| Block | Before (name-led) | After (logo-led) | Saved |
+|---|---|---|---|
+| Claude | 90.0px | 68.0px | 22.0px |
+| Codex | 86.7px | 68.0px | 18.7px |
+| Muse Code | 113.4px | 68.0px | 45.4px |
+| Cursor | 86.7px | 66.7px | 20.0px |
+| ready-4 block total | 376.8px | 270.7px | ~106px |
+| Codex exhausted | 100.7px | 82.0px | 18.7px |
+| Muse Code N/A | 109.4px | 64.0px | 45.4px |
+
+Every after block is narrower than its before twin, and the after bar
+fits three logo-led blocks plus the CAPACITY eyebrow on the first 360px
+line where the before bar only fits two name-led blocks. A true browser
+screenshot at 360px on a networked machine remains a welcome
+corroboration (open both `.html` fixtures side by side), but the width
+claim no longer depends on it: identical window stacks plus per-block
+(name width − 16px) savings hold in both measured system fonts.
 
 What IS verified here without pixels (`/tmp/verify-widths.py` logic,
 re-run 2026-09-26, ALL PASS):
