@@ -1,18 +1,21 @@
 // packages/server/src/capacity/cursor-individual-credentials.ts
 //
 // NOT-250: isolated credential lookup for the experimental Cursor Individual
-// dashboard adapter.
+// dashboard adapter. NOT-267: the desktop Cursor login is the primary
+// source, the Cursor Agent auth file the fallback.
 //
 // The dashboard endpoints this feature calls are undocumented: the only
-// credential available is the existing local Cursor login, whose file
-// location and JSON shape are themselves not a supported contract and may
+// credential available is the existing local Cursor login, whose storage
+// locations and shapes are themselves not a supported contract and may
 // change without notice. All of that risk lives in this one module:
 //
-// - Candidate files are tried in order; the first readable file wins.
+// - Resolution order: Cursor desktop `state.vscdb` first (read-only,
+//   single allowlisted key), then the Cursor Agent `auth.json` allowlisted
+//   token shapes. The first usable source wins; Agent auth unchanged.
 // - Accepted JSON shapes are an explicit allowlist below — anything else
 //   reads `unparsable` (changed format), never a guess.
 // - `cursorIndividualCredentialStatus()` (the diagnostics surface) returns
-//   presence/path/format ONLY — never secret material.
+//   presence/source/path/format ONLY — never secret material.
 // - `loadCursorIndividualCredential()` additionally returns an in-memory
 //   `authHeader` for the dashboard HTTP call. The header value must never be
 //   persisted, returned to the browser, or logged — the adapter, repository,
@@ -22,7 +25,10 @@
 // *finds* credentials; whether they may be *used* is decided by the
 // explicit `AGENT_DEALER_CURSOR_INDIVIDUAL_CAPACITY=experimental` opt-in in
 // cursor-individual.ts, which short-circuits before touching this module.
+// Nothing here writes Cursor's database, refreshes tokens, or touches the
+// Keychain or auth files — all reads are read-only.
 
+import Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -32,6 +38,9 @@ export const CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV = "CURSOR_INDIVIDUAL_CREDENTI
 
 /** Home-directory override for tests (mirrors how OS home resolution works). */
 export const CURSOR_INDIVIDUAL_HOME_ENV = "CURSOR_INDIVIDUAL_HOME";
+
+/** Explicit desktop-state database override (tests point this at tmp fixtures). */
+export const CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV = "CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE";
 
 /**
  * Community-observed local Cursor login file. The location is undocumented
@@ -80,11 +89,19 @@ const NESTED_KEYS = ["auth", "data", "user"] as const;
 
 export type CredentialStatus = "found" | "absent" | "unparsable";
 
+/** Which local login answered: the desktop app state or the Agent auth file. */
+export type CursorIndividualCredentialSource = "desktop" | "agent";
+
 export interface CursorIndividualCredential {
   status: CredentialStatus;
+  /** Which local login answered (null unless `found`). */
+  source: CursorIndividualCredentialSource | null;
   /** Candidate file that answered (null when no file was readable). */
   path: string | null;
-  /** Which accepted shape matched (`token`, `auth.accessToken`, …; null otherwise). */
+  /**
+   * Which accepted shape matched (`desktop:cursorAuth/accessToken`,
+   * `token`, `auth.accessToken`, …; null otherwise).
+   */
   format: string | null;
   /**
    * In-memory dashboard auth header. Present ONLY on `found` — and only
@@ -93,9 +110,10 @@ export interface CursorIndividualCredential {
   authHeader?: string;
 }
 
-/** Operator-safe diagnostics: presence, path, and matched shape — no secret. */
+/** Operator-safe diagnostics: presence, source, path, matched shape — no secret. */
 export interface CursorIndividualCredentialStatus {
   present: boolean;
+  source: CursorIndividualCredentialSource | null;
   path: string | null;
   format: string | null;
 }
@@ -111,6 +129,123 @@ export function cursorIndividualCredentialCandidates(): string[] {
   const override = process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV]?.trim();
   if (override) return [override];
   return [path.join(homeDir(), CURSOR_INDIVIDUAL_DEFAULT_RELATIVE_PATH)];
+}
+
+// ---------------------------------------------------------------------------
+// Cursor desktop login (NOT-267, primary source).
+//
+// Cursor desktop keeps its login in the standard VS Code global-storage
+// SQLite database (`state.vscdb`), under the key
+// `cursorAuth/accessToken`. Community tools (ai-usagebar and ports) read
+// that same key first and fall back to a Cursor Agent `auth.json` — this
+// module follows the same order.
+// ---------------------------------------------------------------------------
+
+/** The ONLY desktop-state key this module ever reads — never anything else. */
+export const CURSOR_DESKTOP_ACCESS_TOKEN_KEY = "cursorAuth/accessToken";
+
+/** Format label for a credential answered by the desktop state database. */
+export const CURSOR_DESKTOP_FORMAT = "desktop:cursorAuth/accessToken";
+
+export interface DesktopStatePathOpts {
+  /** Defaults to `process.platform` — tests pass each OS explicitly. */
+  platform?: string;
+  /** Defaults to the (overridable) home directory. */
+  home?: string;
+  /** Windows roaming-app-data root; defaults to `process.env.APPDATA`. */
+  appData?: string;
+}
+
+/**
+ * Ordered desktop-state database candidates: exactly one default path per
+ * OS (plus the explicit file override when set). The module never hunts
+ * beyond these — an absent database degrades to the Agent auth fallback,
+ * never to a scan of unrelated files.
+ *
+ * - macOS: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
+ * - Windows: `%APPDATA%/Cursor/User/globalStorage/state.vscdb`
+ * - Linux (and anything else): `~/.config/Cursor/User/globalStorage/state.vscdb`
+ */
+export function cursorIndividualDesktopStateCandidates(opts: DesktopStatePathOpts = {}): string[] {
+  const override = process.env[CURSOR_INDIVIDUAL_DESKTOP_STATE_FILE_ENV]?.trim();
+  if (override) return [override];
+  const platform = opts.platform ?? process.platform;
+  const home = opts.home ?? homeDir();
+  if (platform === "win32") {
+    const appData =
+      opts.appData ?? process.env.APPDATA?.trim() ?? path.join(home, "AppData", "Roaming");
+    if (!appData) return [];
+    return [path.join(appData, "Cursor", "User", "globalStorage", "state.vscdb")];
+  }
+  if (platform === "darwin") {
+    return [
+      path.join(home, "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb"),
+    ];
+  }
+  return [path.join(home, ".config", "Cursor", "User", "globalStorage", "state.vscdb")];
+}
+
+/**
+ * Normalize one raw desktop-state value to a token. Cursor stores the
+ * access token as a plain-text JWT; a JSON-quoted wrapping is tolerated
+ * (same bytes, quoted), anything else is unusable — never a guess.
+ */
+export function normalizeDesktopTokenValue(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('"')) {
+    try {
+      const inner: unknown = JSON.parse(trimmed);
+      return typeof inner === "string" && inner.trim() ? inner.trim() : null;
+    } catch {
+      return null;
+    }
+  }
+  return trimmed;
+}
+
+/** Read-only single-key desktop database read, injectable for tests. */
+export type DesktopTokenReader = (dbPath: string) => string | null;
+
+/**
+ * Open the desktop state database READ-ONLY and read ONLY the allowlisted
+ * access-token key. Never throws: a missing/locked database, a missing key,
+ * or an unusable value all read null. The database is never copied, never
+ * written, and no unrelated key is ever selected.
+ */
+export function defaultReadDesktopAccessToken(dbPath: string): string | null {
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const row = db
+      .prepare("SELECT value FROM ItemTable WHERE key = ?")
+      .get(CURSOR_DESKTOP_ACCESS_TOKEN_KEY) as { value: unknown } | undefined;
+    if (!row) return null;
+    return normalizeDesktopTokenValue(row.value);
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // Read-only handle cleanup is best-effort; the read verdict stands.
+    }
+  }
+}
+
+/**
+ * Build a dashboard auth header from a desktop access token. The desktop
+ * store carries no separate user-id field, so the id is derived from the
+ * token's own JWT `sub` claim through the existing normalization — a token
+ * with no derivable id is unusable (null), never a Bearer-only guess.
+ */
+export function desktopTokenToAuthHeader(token: string): string | null {
+  const rawUserId = decodeJwtSubject(token);
+  if (!rawUserId) return null;
+  const userId = normalizeWorkosUserId(rawUserId);
+  if (!userId) return null;
+  return cursorIndividualAuthHeader(userId, token);
 }
 
 function pickByKeys(
@@ -215,14 +350,34 @@ function defaultReadFile(filePath: string): string | null {
 }
 
 /**
- * Find a usable local Cursor credential. Never throws: unreadable files,
- * invalid JSON, and unknown shapes all map to `absent`/`unparsable`.
+ * Find a usable local Cursor credential, desktop first, Agent auth as the
+ * fallback. Never throws: unreadable files, invalid JSON, unknown shapes,
+ * and unusable desktop tokens all map to `absent`/`unparsable`.
  * The raw token leaves this module only inside `authHeader`, held in memory
  * for the single dashboard call the adapter makes with it.
+ *
+ * When `CURSOR_INDIVIDUAL_CREDENTIAL_FILE` pins an explicit file, ONLY that
+ * file is consulted (legacy single-source behavior for fixtures); otherwise
+ * the desktop state database is tried first and the Agent auth file second.
  */
 export function loadCursorIndividualCredential(
-  readFile: ReadFileImpl = defaultReadFile
+  readFile: ReadFileImpl = defaultReadFile,
+  readDesktopToken: DesktopTokenReader = defaultReadDesktopAccessToken
 ): CursorIndividualCredential {
+  const explicitFile = process.env[CURSOR_INDIVIDUAL_CREDENTIAL_FILE_ENV]?.trim();
+  // A present-but-unusable desktop login is remembered (not returned yet):
+  // the Agent fallback still gets its chance — any usable credential wins
+  // over a precise-but-unusable verdict. When nothing is usable, the
+  // desktop verdict is the most precise diagnostic, so it wins over the
+  // Agent one.
+  let desktopUnparsable: CursorIndividualCredential | null = null;
+  if (!explicitFile) {
+    const desktop = loadDesktopCredential(readDesktopToken);
+    if (desktop?.found) return desktop.found;
+    desktopUnparsable = desktop?.unparsable ?? null;
+  }
+  const agentUnparsable = (candidate: string, format: string | null): CursorIndividualCredential =>
+    desktopUnparsable ?? { status: "unparsable", source: null, path: candidate, format };
   for (const candidate of cursorIndividualCredentialCandidates()) {
     const raw = readFile(candidate);
     if (raw === null) continue;
@@ -230,34 +385,81 @@ export function loadCursorIndividualCredential(
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return { status: "unparsable", path: candidate, format: null };
+      return agentUnparsable(candidate, null);
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { status: "unparsable", path: candidate, format: null };
+      return agentUnparsable(candidate, null);
     }
     const picked = pickToken(parsed as Record<string, unknown>);
-    if (!picked) return { status: "unparsable", path: candidate, format: null };
+    if (!picked) return agentUnparsable(candidate, null);
     // The cookie needs a user id too — an explicit field wins; otherwise
     // derive it from the token's own JWT `sub` claim. Neither present means
     // this credential cannot build a usable session, same as any other
     // format drift. Either source may be provider-prefixed
     // (`google-oauth2|user_abc`) — normalize both the same way.
     const rawUserId = pickUserId(parsed as Record<string, unknown>) ?? decodeJwtSubject(picked.token);
-    if (!rawUserId) return { status: "unparsable", path: candidate, format: picked.key };
+    if (!rawUserId) return agentUnparsable(candidate, picked.key);
     // Re-check AFTER normalization: an id ending in `|` (e.g. a bare
     // `"google-oauth2|"` with nothing after it) is non-empty here but
     // normalizes to "" — that must degrade too, not build a cookie with an
     // empty user id.
     const userId = normalizeWorkosUserId(rawUserId);
-    if (!userId) return { status: "unparsable", path: candidate, format: picked.key };
+    if (!userId) return agentUnparsable(candidate, picked.key);
     return {
       status: "found",
+      source: "agent",
       path: candidate,
       format: picked.key,
       authHeader: cursorIndividualAuthHeader(userId, picked.token),
     };
   }
-  return { status: "absent", path: null, format: null };
+  return desktopUnparsable ?? { status: "absent", source: null, path: null, format: null };
+}
+
+/**
+ * Try the desktop state database. Returns null when no desktop database
+ * was readable at all (fall through to Agent auth); otherwise the desktop
+ * verdict — `found` when the access token yields a usable session, or an
+ * `unparsable` diagnostic when the database answered but the token cannot
+ * (missing key, empty value, no derivable user id). A present-but-unusable
+ * desktop login is format drift, not absence — but the Agent fallback still
+ * gets its chance via the caller, which prefers any usable credential.
+ */
+function loadDesktopCredential(
+  readDesktopToken: DesktopTokenReader
+): { found: CursorIndividualCredential | null; unparsable: CursorIndividualCredential | null } | null {
+  let sawDatabase = false;
+  let unparsable: CursorIndividualCredential | null = null;
+  for (const dbPath of cursorIndividualDesktopStateCandidates()) {
+    let token: string | null;
+    try {
+      token = readDesktopToken(dbPath);
+    } catch {
+      continue;
+    }
+    if (token === null) continue;
+    sawDatabase = true;
+    const authHeader = desktopTokenToAuthHeader(token);
+    if (authHeader) {
+      return {
+        found: {
+          status: "found",
+          source: "desktop",
+          path: dbPath,
+          format: CURSOR_DESKTOP_FORMAT,
+          authHeader,
+        },
+        unparsable: null,
+      };
+    }
+    // Token present but no derivable user id — same verdict as an Agent
+    // token with no id: changed format, never a Bearer-only guess.
+    if (!unparsable) {
+      unparsable = { status: "unparsable", source: null, path: dbPath, format: CURSOR_DESKTOP_FORMAT };
+    }
+  }
+  if (!sawDatabase && !unparsable) return null;
+  return { found: null, unparsable };
 }
 
 /**
@@ -265,11 +467,13 @@ export function loadCursorIndividualCredential(
  * strips the in-memory secret. Safe to expose via logs and API responses.
  */
 export function cursorIndividualCredentialStatus(
-  readFile: ReadFileImpl = defaultReadFile
+  readFile: ReadFileImpl = defaultReadFile,
+  readDesktopToken: DesktopTokenReader = defaultReadDesktopAccessToken
 ): CursorIndividualCredentialStatus {
-  const credential = loadCursorIndividualCredential(readFile);
+  const credential = loadCursorIndividualCredential(readFile, readDesktopToken);
   return {
     present: credential.status === "found",
+    source: credential.source,
     path: credential.path,
     format: credential.format,
   };
