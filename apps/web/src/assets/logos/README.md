@@ -8,7 +8,7 @@ top-bar logo tiles. Nothing here is fetched at runtime.
 | `claude.svg` | Claude (Anthropic) | pre-existing asset |
 | `cursor.svg` | Cursor | pre-existing asset |
 | `codex.png` | Codex (OpenAI) | verbatim first-party app icon, downscaled (see below) |
-| `muse.svg` | Muse Code (Meta) | interim redraw referencing the first-party mark (see below) |
+| `muse.svg` | Muse Code (Meta) | interim redraw referencing the first-party mark, MD5 `e24645811462b986c9cd3110b70192b0` (see below) |
 
 ## Codex
 
@@ -39,7 +39,11 @@ referencing the first-party source
 sandbox has no network egress (DNS fails for all hosts, so the product
 page artwork cannot be fetched), no Meta app bundle is installed, and the
 local Muse CLI (1.4.0-R4161.1, `~/.local/share/muse`) ships no image
-assets — its 316MB binary contains no embedded PNGs. Square `viewBox`,
+assets — its 316MB binary contains no embedded PNGs. Retrieval
+re-attempted again 2026-09-26 (round 4): still fully blocked — every host
+probes `000` via curl (`registry.npmjs.org`, `example.com`, `dev.meta.ai`,
+`openai.com`), no Meta/Muse app bundle is installed in `/Applications`,
+and no renderer or fetcher exists that works offline. Square `viewBox`,
 preserved by the same `LogoTile` treatment. To finish: with network
 access, save the verbatim first-party mark from the URL above (checked in,
 never hotlinked at runtime), record its source URL, retrieval date, and
