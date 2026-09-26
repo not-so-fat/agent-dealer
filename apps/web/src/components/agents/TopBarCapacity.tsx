@@ -88,8 +88,8 @@ const CURSOR_BILLING_WINDOW_KEY = "billing_cycle";
 const CURSOR_BILLING_LABEL = "1M";
 
 /** Runtimes with a first-party logo tile, derived from the shared enum —
-// never from the human-readable label, so relabeling the "No agent"
-// fallback cannot silently break the accessible name below. */
+ * never from the human-readable label, so relabeling the "No agent"
+ * fallback cannot silently break the accessible name below. */
 const KNOWN_RUNTIME_KEYS: ReadonlySet<string> = new Set(RuntimeSchema.options);
 
 export type PerRuntimeSummary = {
