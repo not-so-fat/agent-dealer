@@ -123,7 +123,9 @@ The name is not lost: each block is a named group (`role="group"`,
 itself is decorative (`alt=""`). Exhausted, missing, stale, loading, and
 unavailable styling still applies to the whole block; the logo tile keeps
 its own treatment in every state. An unknown runtime falls back to the
-generic icon, announced as "Unknown runtime capacity".
+generic icon, announced as "Unknown runtime capacity" — the fallback is
+selected by membership of the raw key in the shared `Runtime` enum, never
+by matching the human-readable label.
 
 ## Provider: Muse Code (NOT-247)
 

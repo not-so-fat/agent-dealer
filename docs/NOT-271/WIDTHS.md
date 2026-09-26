@@ -50,7 +50,37 @@ metrics table and `document.title`, and the section reports any
 negative margins, so a logo cannot overlap or clip its values by
 construction).
 
-Pixel screenshots could not be captured in this sandbox (no network for
-screenshot tooling; the local Chrome and Quick Look renderers are blocked
-by the sandbox), so the fixtures above plus this analysis are the
-checked-in evidence; the PR attaches the resulting pixels.
+## Pixel screenshots (still open — needs a browser)
+
+Pixel screenshots could not be captured in this sandbox, re-confirmed
+2026-09-26: Chrome headless aborts on launch (`Abort trap: 6`, exit 134,
+including with `--no-sandbox --no-zygote --single-process`), `qlmanage -t`
+fails sandbox initialization, no other engine is installed (no Playwright
+browsers, no `wkhtmltoimage`, no pyobjc WebKit, broken simulator CLI), and
+there is no network to fetch tooling. To attach the AC7 pixels to the PR,
+open both fixture files in a browser at 360px width on any machine with a
+renderer and screenshot the `ready-4` section (plus `exhausted-and-na` to
+show the logo stays identifiable in exhausted/N/A states); save them next
+to the fixtures as `capacity-header-before.png` /
+`capacity-header-after.png`.
+
+What IS verified here without pixels (`/tmp/verify-widths.py` logic,
+re-run 2026-09-26, ALL PASS):
+
+- AFTER: all 6 provider blocks (4 ready + Codex-exhausted + Muse-Code-N/A)
+  carry exactly one `h-4 w-4` tile with a logo `<img>` and no visible
+  provider-name text.
+- BEFORE: all 6 blocks carry a name span and no logo tile or `<img>`.
+- Window stacks are byte-identical before/after once the single identity
+  node (plus NOT-271's `role`/`aria-label`) is normalized — only the
+  identity treatment changed.
+- No absolute positioning or negative margins anywhere in the fixture CSS;
+  viewports use `overflow:hidden`, so a logo cannot overlap or clip its
+  values by construction.
+- No `file://` paths remain (preload links removed 2026-09-26; images
+  resolve via paths relative to `docs/NOT-271/`).
+- Independent font-metric re-measurement (stdlib TrueType parse,
+  `/System/Library/Fonts/Helvetica.ttc` Unicode map, 12px): Claude 38.0px,
+  Codex 34.7px, Muse Code 61.4px, Cursor 36.0px — every name wider than the
+  16px tile, ~105px saved across the four blocks, corroborating the table
+  above.
