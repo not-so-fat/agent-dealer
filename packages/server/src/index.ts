@@ -56,13 +56,25 @@ async function main(): Promise<void> {
     );
     process.exit(1);
   }
+  // NOT-270: the server-owned Muse capacity host (`muse serve` child) must
+  // be released on shutdown — it is spawned with piped stdio, is not
+  // detached, and must not be assumed to exit on stdin EOF. Every handler
+  // below shuts it down before exiting so no host process leaks.
+  const shutdownCapacityHosts = async (): Promise<void> => {
+    try {
+      const { shutdownMuseCapacityHost } = await import("./capacity/muse-host.js");
+      await shutdownMuseCapacityHost();
+    } catch {
+      // Best-effort: shutdown must never block process exit.
+    }
+  };
   process.on("SIGINT", () => {
     removeServerPidFile();
-    process.exit(0);
+    void shutdownCapacityHosts().finally(() => process.exit(0));
   });
   process.on("SIGTERM", () => {
     removeServerPidFile();
-    process.exit(0);
+    void shutdownCapacityHosts().finally(() => process.exit(0));
   });
   process.on("exit", removeServerPidFile);
 

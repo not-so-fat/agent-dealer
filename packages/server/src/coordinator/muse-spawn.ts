@@ -127,6 +127,31 @@ function splitSpawnLog(raw: string): { stdout: string; stderr: string } {
     : { stdout: raw.slice(0, idx), stderr: raw.slice(idx + STDERR_MARKER.length) };
 }
 
+/**
+ * NOT-270: reuse real Dealer Muse work as the observation opportunity. After
+ * a genuine Muse session ends, kick one throttled, bounded, best-effort
+ * refresh through the server-owned serve host — the proven safe point for
+ * the final `usage/read`. This creates no model turn of its own (the host
+ * client only ever sends the read-only handshake/`usage/read` allowlist)
+ * and never affects the session result: while turns run as `muse exec`
+ * subprocesses the owned host stays unobserved by construction (the NOT-269
+ * structural precondition) and the read stays honest N/A with last-good
+ * rows preserved. When turns are routed through the serve host, this same
+ * hook is the final read that populates 5H/1W.
+ */
+function refreshMuseCapacityAfterSession(): void {
+  void (async () => {
+    try {
+      const [{ configuredCapacityRuntimes }, { maybeRefreshMuseCapacityFromHost }] =
+        await Promise.all([import("../capacity/service.js"), import("../capacity/muse-host.js")]);
+      if (!configuredCapacityRuntimes().includes("muse_code")) return;
+      await maybeRefreshMuseCapacityFromHost();
+    } catch {
+      // Best-effort: capacity must never break or delay a session result.
+    }
+  })();
+}
+
 export async function runMuseDeveloperSession(
   input: DeveloperSpawnInput & { logPath: string; maxModelSteps?: number }
 ): Promise<DeveloperSpawnResult> {
@@ -192,6 +217,11 @@ export async function runMuseDeveloperSession(
     logPath,
     `${events.map((e) => JSON.stringify(e)).join("\n")}\n${stderr.trim() ? `${STDERR_MARKER}${stderr}` : ""}`
   );
+
+  // The real session above is the observation opportunity: kick the
+  // best-effort capacity refresh (no synthetic turn, never throws, never
+  // blocks this result).
+  refreshMuseCapacityAfterSession();
 
   return {
     // A failed session must not read as success just because Muse exited 0 (wrong model, no terminal event).

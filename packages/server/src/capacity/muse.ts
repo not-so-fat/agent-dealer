@@ -562,18 +562,6 @@ export function museEvidenceRef(kind: FailureKind | "read" | "changed"): string 
 /** Window keys that carry real Muse capacity (NOT-266: never the sentinel). */
 export const MUSE_KNOWN_WINDOW_KEYS = ["rolling_all_models", "weekly_all_models"] as const;
 
-function isKnownMuseStoredRow(w: {
-  windowKey: string;
-  unavailableReason: unknown;
-  remainingPercent: unknown;
-}): boolean {
-  return (
-    (MUSE_KNOWN_WINDOW_KEYS as readonly string[]).includes(w.windowKey) &&
-    w.unavailableReason === null &&
-    typeof w.remainingPercent === "number"
-  );
-}
-
 function observedMs(value: unknown): number | null {
   if (typeof value !== "string") return null;
   const ms = Date.parse(value);
@@ -781,8 +769,11 @@ export async function ingestMuseUsagePayload(
 /**
  * NOT-270: record a host-level failure without touching last-good rows. A
  * failure diagnostic (the `muse_account_usage` sentinel) is written only
- * when no known 5H/1W row exists — it must never sit beside or relabel
- * valid windows.
+ * when no per-window row exists — it must never sit beside or relabel
+ * valid windows, nor beside per-window `unparsable` diagnostics (those
+ * already describe the 5H/1W entry; a sentinel next to them would mix two
+ * diagnostics for the same entry). A stored sentinel alone is refreshed in
+ * place.
  */
 export async function noteMuseCapacityFailure(
   reason: CapacityUnavailableReason,
@@ -792,7 +783,12 @@ export async function noteMuseCapacityFailure(
     "../repository/runtime-capacity.js"
   );
   const stored = listCapacitySnapshots(MUSE_RUNTIME);
-  if (stored.some(isKnownMuseStoredRow)) return "preserved";
+  if (
+    stored.some(
+      (w) => (MUSE_KNOWN_WINDOW_KEYS as readonly string[]).includes(w.windowKey)
+    )
+  )
+    return "preserved";
   const normalized = normalizeUnavailableWindow(
     MUSE_RUNTIME,
     {

@@ -104,7 +104,19 @@ test("observed host refresh serves exactly the 5H+1W pair to the browser shape",
   const served = getRuntimeCapacitySnapshot();
   const raw = JSON.stringify(served);
   assert.ok(!raw.includes("contributor"), "no tier metadata reaches the browser shape");
-  assert.ok(muse !== undefined || served.runtimes.length >= 0);
+  assert.ok(!raw.includes("muse_account_usage"), "no sentinel label reaches the browser shape");
+  // Stored rows guarantee the entry, so assert the exact served pair.
+  const servedMuse = served.runtimes.find((r) => r.runtime === "muse_code");
+  assert.ok(servedMuse, "muse_code entry served");
+  assert.deepEqual(
+    servedMuse.windows.map((w) => w.windowKey).sort(),
+    ["rolling_all_models", "weekly_all_models"]
+  );
+  assert.ok(
+    servedMuse.windows.every((w) => w.unavailableReason === null),
+    "both served windows are known"
+  );
+  assert.equal(muse?.runtime ?? "muse_code", "muse_code");
   await shutdownMuseCapacityHost();
 });
 
@@ -252,6 +264,8 @@ test("crash preserves last-good rows and writes no sentinel beside them", async 
 });
 
 test("timeout kills the hung child and preserves last-good rows", async () => {
+  await ingestMuseUsagePayload(pairPayload(Date.now(), 42, 17));
+  assert.deepEqual(keys(), ["rolling_all_models", "weekly_all_models"]);
   const host = new MuseCapacityHost(hostOpts("hang", { timeoutMs: 400 }));
   try {
     const outcome = await host.readUsage();
@@ -260,6 +274,9 @@ test("timeout kills the hung child and preserves last-good rows", async () => {
   } finally {
     await host.shutdown();
   }
+  assert.deepEqual(keys(), ["rolling_all_models", "weekly_all_models"]);
+  const stored = listCapacitySnapshots("muse_code");
+  assert.equal(stored.find((w) => w.windowKey === "rolling_all_models")!.remainingPercent, 58);
 });
 
 test("auth failure reads missing and preserves last-good rows", async () => {
@@ -301,6 +318,27 @@ test("noteMuseCapacityFailure never sits beside valid windows", async () => {
   assert.deepEqual(keys(), ["rolling_all_models", "weekly_all_models"]);
 });
 
+test("failure never adds a sentinel beside per-window unparsable rows", async () => {
+  const now = Date.now();
+  const outcome = await ingestMuseUsagePayload({
+    usage: {
+      observedAtMs: now,
+      tier: "synthetic-stand-in",
+      window: { usedPercent: "high", resetsAtMs: now + 3600_000, windowDurationMins: 300 },
+      weekly: { usedPercent: "high", resetsAtMs: now + 24 * 3600_000 },
+    },
+  });
+  assert.deepEqual(outcome.written.sort(), ["rolling_all_models", "weekly_all_models"]);
+  assert.deepEqual(keys(), ["rolling_all_models", "weekly_all_models"]);
+  const stored = listCapacitySnapshots("muse_code");
+  assert.ok(
+    stored.every((w) => w.unavailableReason === "unparsable"),
+    "both halves are per-window diagnostics"
+  );
+  assert.equal(await noteMuseCapacityFailure("missing"), "preserved");
+  assert.deepEqual(keys(), ["rolling_all_models", "weekly_all_models"]);
+});
+
 test("restart after observation restarts empty and re-observes", async () => {
   const host = new MuseCapacityHost(hostOpts("exit-after-first-read"));
   try {
@@ -321,6 +359,26 @@ test("restart after observation restarts empty and re-observes", async () => {
     await host.shutdown();
   }
   assert.deepEqual(keys(), ["rolling_all_models", "weekly_all_models"]);
+});
+
+test("a stale child's late close cannot kill its replacement", async () => {
+  const host = new MuseCapacityHost(hostOpts("slow-term-full"));
+  try {
+    assert.equal((await host.readUsage()).status, "observed");
+    assert.equal(host.connectionEpoch, 1);
+    // Shut down (SIGTERMs the slow child: it exits ~500 ms later) and
+    // restart immediately — the stale `close` lands on the live host.
+    await host.shutdown();
+    assert.equal((await host.readUsage()).status, "observed");
+    assert.equal(host.connectionEpoch, 2);
+    await new Promise((r) => setTimeout(r, 900));
+    assert.ok(host.isConnected(), "stale close did not kill the replacement");
+    assert.equal(host.connectionEpoch, 2, "no second host per restart");
+    assert.equal((await host.readUsage()).status, "observed");
+    assert.equal(host.connectionEpoch, 2, "replacement serves reads itself");
+  } finally {
+    await host.shutdown();
+  }
 });
 
 test("clean shutdown releases the child process", async () => {

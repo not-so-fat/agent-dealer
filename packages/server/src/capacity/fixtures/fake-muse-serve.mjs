@@ -16,7 +16,7 @@
 //   FAKE_MSP_MODE: full | custom-duration | partial-bad-weekly |
 //     all-bad-windows | missing | auth-error | malformed | hang |
 //     exit-nonzero | crash | no-method | persistent-full | persistent-missing |
-//     exit-after-first-read
+//     exit-after-first-read | slow-term-full
 //   FAKE_MSP_RECORD: path of a file to append one JSON line per received message
 //   FAKE_MSP_NOW_MS: fixed clock for deterministic resetsAtMs (default Date.now())
 //
@@ -27,6 +27,9 @@
 // owned long-lived host reuses one connection across reads); the `served`
 // once-only guard applies to one-shot modes only. `exit-after-first-read`
 // serves one full read, then exits 0 to exercise transparent host restart.
+// `slow-term-full` behaves like `persistent-full` but dies 500 ms after
+// SIGTERM, so a test can restart the host first and prove the stale child's
+// late `close` cannot kill its replacement.
 
 import fs from "node:fs";
 
@@ -40,6 +43,13 @@ if (process.argv.includes("--protocol")) {
 const mode = process.env.FAKE_MSP_MODE ?? "full";
 const recordPath = process.env.FAKE_MSP_RECORD;
 const nowMs = Number(process.env.FAKE_MSP_NOW_MS ?? Date.now());
+
+if (mode === "slow-term-full") {
+  // Linger after SIGTERM so the stale child's `close` lands after a restart.
+  process.on("SIGTERM", () => {
+    setTimeout(() => process.exit(0), 500);
+  });
+}
 
 const CLIENT_NAME_RE = /^[a-z0-9_]+$/;
 
@@ -152,7 +162,8 @@ function handleRequest(msg) {
     send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "initialized notification required" } });
     return;
   }
-  const persistent = mode === "persistent-full" || mode === "persistent-missing";
+  const persistent =
+    mode === "persistent-full" || mode === "persistent-missing" || mode === "slow-term-full";
   if (served && !persistent) {
     send({ jsonrpc: "2.0", id: msg.id, error: { code: -32600, message: "usage/read already served" } });
     return;
@@ -171,7 +182,7 @@ function handleRequest(msg) {
     send({ jsonrpc: "2.0", id: msg.id, result: { protocol: "msp/1.3" } });
     return;
   }
-  if (mode === "persistent-full") {
+  if (mode === "persistent-full" || mode === "slow-term-full") {
     send({
       jsonrpc: "2.0",
       method: "usage/changed",

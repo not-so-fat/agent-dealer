@@ -38,6 +38,15 @@
 // subprocesses, so an exec-driven server leaves this host unobserved and
 // Muse capacity reads honest N/A until real turns flow through a serve
 // host. No synthetic model prompt is ever issued to refresh capacity.
+// Every real Dealer Muse session already ends with a best-effort refresh
+// kick at the session boundary (`refreshMuseCapacityAfterSession` in
+// coordinator/muse-spawn.ts) — no separate model turn, last-good preserved
+// — so the day the runner migration lands (real `session/start` +
+// `turn/start` through this owned host), that same hook is the final read
+// that populates 5H/1W. Until then production stays truthful N/A: routing
+// turns here requires unifying the host-fixed sandbox posture and
+// re-proving the NOT-177/179/181 runner contracts, which is a follow-up
+// runner ticket, not this one.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import type { CapacityUnavailableReason, RuntimeCapacityResponse } from "@agent-dealer/shared";
@@ -139,6 +148,24 @@ export class MuseCapacityHost {
     } catch {
       // Already exited — nothing to signal.
     }
+    // A wedged host can ignore SIGTERM; escalate once against that exact
+    // child so a hung process can never leak. The timer holds only the old
+    // handle, so it can never signal a replacement host spawned later.
+    if (child && child.exitCode === null) {
+      const killer = setTimeout(() => {
+        try {
+          if (child.exitCode === null) child.kill("SIGKILL");
+        } catch {
+          // Already exited — nothing to signal.
+        }
+      }, 2000);
+      killer.unref?.();
+    }
+  }
+
+  /** True when `child` is still the live backing process for this host. */
+  private isCurrentChild(child: ChildProcess): boolean {
+    return this.child === child && !this.dead;
   }
 
   private onLine(line: string): void {
@@ -229,9 +256,15 @@ export class MuseCapacityHost {
     this.connectionEpoch += 1;
     this.stderrTail = "";
     child.stderr?.on("data", (buf: Buffer) => {
+      // Stderr is diagnostic-only; attribute it only while this child is live.
+      if (!this.isCurrentChild(child)) return;
       this.stderrTail = `${this.stderrTail}${buf.toString()}`.slice(-2000);
     });
     child.stdout?.on("data", (buf: Buffer) => {
+      // A previous child killed for restart may still flush output after its
+      // replacement spawns — never let a stale child feed the live buffer
+      // or tear the new connection down.
+      if (!this.isCurrentChild(child)) return;
       this.buffer += buf.toString();
       if (this.buffer.length > 10 * 1024 * 1024) {
         this.killChild();
@@ -246,13 +279,18 @@ export class MuseCapacityHost {
       }
     });
     child.on("error", () => {
+      if (!this.isCurrentChild(child)) return;
       this.killChild();
     });
     child.stdin?.on("error", () => {
+      if (!this.isCurrentChild(child)) return;
       this.killChild();
     });
     child.on("close", () => {
       // Process-local usage state dies with the host (NOT-269 restart rule).
+      // Guarded: a SIGTERMed hung child that exits after a restart spawned
+      // its replacement must not kill the new host.
+      if (!this.isCurrentChild(child)) return;
       this.killChild();
     });
 

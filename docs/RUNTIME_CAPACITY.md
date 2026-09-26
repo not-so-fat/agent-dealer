@@ -157,8 +157,20 @@ No Keychain access, no undocumented endpoints.
 Structural precondition: Dealer runs Muse turns as `muse exec`
 subprocesses, so an exec-driven server leaves the owned host unobserved and
 Muse capacity reads honest N/A until real turns flow through a serve host.
-No synthetic model prompt is ever issued to refresh capacity (follow-up:
-route real Muse turns through the owned host).
+No synthetic model prompt is ever issued to refresh capacity. Every real
+Dealer Muse session already kicks a best-effort refresh at its own end
+(`refreshMuseCapacityAfterSession` in `coordinator/muse-spawn.ts` — the
+proven safe point for the final `usage/read`, still read-only and never a
+model turn); while turns stay on `exec` that read is honestly N/A and
+preserves last-good rows. Follow-up runner ticket: route real Muse turns
+through the owned host (real `session/start` + `turn/start` on it) — that
+requires unifying the host-fixed sandbox posture (`muse serve` fixes
+sandbox for its lifetime; nothing about it is negotiable over the wire)
+and re-proving the NOT-177/179/181 runner contracts, so it is explicitly
+out of scope here. Server shutdown (`SIGINT`/`SIGTERM` in
+`packages/server/src/index.ts`) releases the owned host before exiting, so
+no `muse serve` child leaks; a wedged host that ignores `SIGTERM` is
+escalated once to `SIGKILL` (same backstop as the Codex adapter).
 
 Normalization keeps the two stable windows independently:
 
