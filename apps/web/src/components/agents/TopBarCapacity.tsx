@@ -36,7 +36,7 @@ import type {
   RuntimeCapacityEntry,
   RuntimeCapacityResponse,
 } from "@agent-dealer/shared";
-import { isWindowKnown } from "@agent-dealer/shared";
+import { Runtime as RuntimeSchema, isWindowKnown } from "@agent-dealer/shared";
 import { runtimeLabel } from "../../lib/display";
 import { AgentRuntimeIcon } from "./AgentIcon";
 
@@ -86,6 +86,11 @@ const PAIR_RUNTIMES: ReadonlySet<string> = new Set([
 
 const CURSOR_BILLING_WINDOW_KEY = "billing_cycle";
 const CURSOR_BILLING_LABEL = "1M";
+
+/** Runtimes with a first-party logo tile, derived from the shared enum —
+// never from the human-readable label, so relabeling the "No agent"
+// fallback cannot silently break the accessible name below. */
+const KNOWN_RUNTIME_KEYS: ReadonlySet<string> = new Set(RuntimeSchema.options);
 
 export type PerRuntimeSummary = {
   /** Human-readable provider label (e.g. "Muse Code") for tooltips and accessible names. */
@@ -366,7 +371,7 @@ export function TopBarCapacityView({
               data-exhausted={s.exhausted ? "true" : "false"}
               title={blockTitle(s)}
               role="group"
-              aria-label={`${s.runtime === "No agent" ? "Unknown runtime" : s.runtime} capacity`}
+              aria-label={`${KNOWN_RUNTIME_KEYS.has(s.runtimeKey) ? s.runtime : "Unknown runtime"} capacity`}
               className={
                 s.exhausted
                   ? "inline-flex items-center gap-1.5 whitespace-nowrap rounded border border-red-400/40 bg-red-500/10 px-1.5 py-0.5"

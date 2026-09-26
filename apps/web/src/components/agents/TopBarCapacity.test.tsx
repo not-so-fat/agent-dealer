@@ -15,6 +15,7 @@ register("../../test-helpers/asset-stub-hooks.mjs", import.meta.url);
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { MemoryRouter } = await import("react-router-dom");
 const { TopBarCapacityView, summarizeCapacity } = await import("./TopBarCapacity.js");
+const { Runtime: RuntimeSchema } = await import("@agent-dealer/shared");
 const { ShellHeader } = await import("../../App.js");
 // NOTE: from src/components/agents/ this resolves to src/App.js — the shell
 // header that owns the top bar.
@@ -864,6 +865,13 @@ test("NOT-271: unknown runtime keeps a generic fallback icon plus an accessible 
   const [summary] = summarizeCapacity(data, NOW);
   assert.equal(summary.runtime, "No agent");
   assert.equal(summary.runtimeKey, "brand_new_runtime");
+  // The fallback is selected by enum membership of the raw key, never by
+  // matching the human-readable label — relabeling "No agent" must not
+  // change the accessible name.
+  assert.ok(
+    !(RuntimeSchema.options as readonly string[]).includes(summary.runtimeKey),
+    "unknown key stays outside the shared Runtime enum"
+  );
   const html = render({ status: "ready", data });
   assert.ok(html.includes('aria-label="Unknown runtime capacity"'), "fallback block keeps an accessible name");
   assert.match(html, /<svg/, "fallback block renders the generic icon");
