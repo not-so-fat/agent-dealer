@@ -835,6 +835,7 @@ test("NOT-271: every ready provider block renders exactly one 16x16 logo and no 
     );
   }
   assert.equal((html.match(/alt=""/g) ?? []).length, 4, "every logo image is decorative");
+  assert.equal((html.match(/role="group"/g) ?? []).length, 4, "each block is grouped so the aria-label is exposed");
   // Compact window labels and values stay visible beside the logos.
   assert.equal((html.match(/data-window="5H"/g) ?? []).length, 3);
   assert.equal((html.match(/data-window="1W"/g) ?? []).length, 3);
@@ -864,7 +865,7 @@ test("NOT-271: unknown runtime keeps a generic fallback icon plus an accessible 
   assert.equal(summary.runtime, "No agent");
   assert.equal(summary.runtimeKey, "brand_new_runtime");
   const html = render({ status: "ready", data });
-  assert.ok(html.includes('aria-label="No agent capacity"'), "fallback block keeps an accessible name");
+  assert.ok(html.includes('aria-label="Unknown runtime capacity"'), "fallback block keeps an accessible name");
   assert.match(html, /<svg/, "fallback block renders the generic icon");
   assert.ok(!html.includes("<img"), "fallback block renders no provider image");
   assert.match(html, /N\/A/);

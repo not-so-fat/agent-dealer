@@ -365,7 +365,8 @@ export function TopBarCapacityView({
               data-known={known ? "true" : "false"}
               data-exhausted={s.exhausted ? "true" : "false"}
               title={blockTitle(s)}
-              aria-label={`${s.runtime} capacity`}
+              role="group"
+              aria-label={`${s.runtime === "No agent" ? "Unknown runtime" : s.runtime} capacity`}
               className={
                 s.exhausted
                   ? "inline-flex items-center gap-1.5 whitespace-nowrap rounded border border-red-400/40 bg-red-500/10 px-1.5 py-0.5"

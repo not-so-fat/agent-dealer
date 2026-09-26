@@ -1,6 +1,6 @@
 import type { Runtime } from "@agent-dealer/shared";
 import claudeLogo from "../../assets/logos/claude.svg";
-import codexLogo from "../../assets/logos/codex.svg";
+import codexLogo from "../../assets/logos/codex.png";
 import cursorLogo from "../../assets/logos/cursor.svg";
 import museLogo from "../../assets/logos/muse.svg";
 

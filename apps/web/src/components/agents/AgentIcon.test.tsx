@@ -48,6 +48,14 @@ test("Codex and Muse tiles contain no Cx/Mu glyphs", () => {
   }
 });
 
+test("logo tiles reference checked-in local assets, never remote URLs", () => {
+  for (const [name, Icon] of [["codex", CodexIcon], ["muse", MuseIcon]] as const) {
+    const html = render(React.createElement(Icon, {}));
+    assert.ok(!html.includes("http"), `${name}: no hotlinked remote asset`);
+    assert.match(html, new RegExp(`${name}\\.(png|svg)`), `${name}: renders the checked-in ${name} asset`);
+  }
+});
+
 test("icon size is caller-controlled: top-bar tiles render at 16x16", () => {
   const html = render(React.createElement(AgentRuntimeIcon, { runtime: "codex_local", className: "h-4 w-4 shrink-0" }));
   assert.match(html, /<img/, "still an image tile at top-bar size");
