@@ -457,7 +457,10 @@ test("probe success via the cache side effect when the stream carries no windows
   // The stream is empty but the probe run itself refreshes Claude's own
   // cache file — the re-read must count as success.
   const runner: ProbeRunner = async () => {
-    fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS));
+    // A real probe refreshes Claude's own cache file while it runs, so the
+    // new `fetchedAtMs` is later than the pre-spawn `NOW_MS` stamp — the
+    // post-spawn re-read must accept it, not reject it as future.
+    fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS + 5_000));
     return { stdout: "", exitCode: 0, timedOut: false, spawnError: null };
   };
   const result = await runClaudeCapacityProbe(NOW_MS, { runner });
@@ -466,7 +469,7 @@ test("probe success via the cache side effect when the stream carries no windows
   assert.deepEqual(result.windowsUpdated, ["claude_unified_five_hour", "claude_unified_seven_day"]);
   const rows = listCapacitySnapshots("claude_code");
   assert.equal(rows.find((r) => r.providerBucket === "five_hour")!.remainingPercent, 83);
-  assert.equal(rows.find((r) => r.providerBucket === "five_hour")!.observedAt, new Date(NOW_MS).toISOString());
+  assert.equal(rows.find((r) => r.providerBucket === "five_hour")!.observedAt, new Date(NOW_MS + 5_000).toISOString());
 });
 
 test("probe failure preserves last-good rows and enters bounded backoff", async () => {

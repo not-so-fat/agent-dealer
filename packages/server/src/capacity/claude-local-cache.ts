@@ -675,10 +675,14 @@ export async function runClaudeCapacityProbe(
   }
   // Then the cache side effect: the probe run refreshes Claude's own file.
   // Ingest regardless (newer-wins protects stored rows), but only a
-  // strictly newer observation counts toward success.
+  // strictly newer observation counts toward success. The re-read uses a
+  // post-spawn clock: Claude writes `fetchedAtMs` during the probe, so it is
+  // later than the pre-spawn `nowMs` and would be rejected as future
+  // against the stale stamp.
+  const postProbeNowMs = Math.max(nowMs, Date.now());
   let cacheRoles = new Set<string>();
   try {
-    const reread = readClaudeLocalCache(nowMs);
+    const reread = readClaudeLocalCache(postProbeNowMs);
     if (reread) {
       const afterObservedMs = maxReadingObservedMs(reread.windows);
       if (
@@ -687,7 +691,7 @@ export async function runClaudeCapacityProbe(
       ) {
         cacheRoles = rolesCoveredByReadings(reread.windows);
       }
-      recordClaudeWindowReadings(reread.windows, CLAUDE_RUNTIME, nowMs);
+      recordClaudeWindowReadings(reread.windows, CLAUDE_RUNTIME, postProbeNowMs);
     }
   } catch {
     // Advisory — stream coverage below still counts.
@@ -858,6 +862,11 @@ export async function refreshClaudeCapacityIfStale(
   nowMs = Date.now(),
   opts: { runner?: ProbeRunner; bin?: string; timeoutMs?: number } = {}
 ): Promise<ProbeGateOutcome> {
+  // Skip the file read entirely when no Claude account is configured:
+  // ~/.claude.json can be several MB and this runs on every capacity poll.
+  if (!configuredCapacityRuntimes().includes(CLAUDE_RUNTIME)) {
+    return { probed: false, reason: "unconfigured" };
+  }
   try {
     ingestClaudeLocalCache(nowMs);
   } catch {
