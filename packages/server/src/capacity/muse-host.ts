@@ -49,10 +49,32 @@
 // coordinator/muse-spawn.ts) — no separate model turn, last-good preserved
 // — so the day the runner migration lands (real `session/start` +
 // `turn/start` through this owned host), that same hook is the final read
-// that populates 5H/1W. Until then production stays truthful N/A: routing
-// turns here requires unifying the host-fixed sandbox posture and
-// re-proving the NOT-177/179/181 runner contracts, which is a follow-up
-// runner ticket, not this one.
+// that populates 5H/1W.
+//
+// PRODUCT DECISION (2026-09-26, resolved via human_action on this ticket):
+// the runner migration is in scope for NOT-270, in this same PR, not a
+// follow-up ticket. Facts supporting that decision:
+// - Sandbox-network posture is a fixed constant across every existing
+//   developer/reviewer invocation today (`--sandbox-network restricted`,
+//   see runners/muse-code-args.ts) — there is no per-session variation to
+//   lose. `muse serve --sandbox-network restricted` at host startup
+//   reproduces it exactly; this is a one-line host-launch change, not a
+//   rewrite.
+// - Approval mode is already wire-selectable per session
+//   (`SessionStartParams.approvalMode`), matching today's
+//   `--approval-mode never`.
+// - Re-verify the NOT-177/179/181 sandbox contracts (shell/write/network
+//   restriction actually holds under `serve`) using a free
+//   `--provider echo` session/turn on the host — no live paid Meta turn is
+//   needed for this verification.
+// - Accepted, explicit tradeoff (not an oversight): `muse serve` has no
+//   wire- or host-level equivalent to `--disable-web-tools` or
+//   `--no-foreign-personal-context` in this Muse version (1.4.0). Real
+//   turns routed through the owned host run without those two specific
+//   restrictions. Everything else (network sandbox, approval mode, write/
+//   shell restriction) is unaffected.
+// This question was escalated twice on this ticket (product_scope_decision,
+// resolved both times); the decision above is final for NOT-270's scope.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import type { CapacityUnavailableReason, RuntimeCapacityResponse } from "@agent-dealer/shared";
