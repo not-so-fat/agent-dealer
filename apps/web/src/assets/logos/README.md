@@ -17,19 +17,30 @@ top-bar logo tiles. Nothing here is fetched at runtime.
 (bundle identifier `com.openai.codex`, version 26.924.20706 build 11431),
 retrieved 2026-09-26 (source file 1024x1024 RGBA,
 MD5 `d59bbf589905db550bd212b2b073bf55`). It is checked in downscaled to
-128x128 lossless PNG via `sips` (14,676 bytes) — 8x the 16px top-bar tile
-and 4x the 32px Agent-card tile. Square, so the shared `LogoTile`
-treatment (`object-contain`, never stretched) preserves the mark's aspect
-ratio at both sizes. The dark variant matches the dark header/cards; the
-blue terminal-mark cloud stays identifiable down to 16px.
+108x108 lossless PNG (13,230 bytes,
+MD5 `8a7c2e12cc53d4ac14274f2aafaf3b89`): the 128x128 `sips` downscale with
+its 12px transparent macOS-icon padding per side cropped to a 2px fringe,
+pixel content otherwise untouched. Still well above both render sizes (16px
+top-bar tile, 32px Agent-card tile), so the crop makes the dark rounded
+square fill the tile's 70%-image area instead of rendering ~9px inside the
+16px tile. Square, so the shared `LogoTile` treatment (`object-contain`,
+never stretched) preserves the mark's aspect ratio at both sizes. The dark
+variant matches the dark header/cards; the blue terminal-mark cloud stays
+identifiable down to 16px.
 
 ## Muse
 
-The verbatim Muse artwork could not be retrieved in this environment (no
-network access; no Meta app bundle on disk), so `muse.svg` is an interim
-original redraw of the Muse loop mark — a continuous blue-gradient loop in
-Meta blue (`#0082FB` to `#0064E0`) — referencing the first-party source
+The verbatim Muse artwork could not be retrieved in this environment, so
+`muse.svg` is an interim original redraw of the Muse loop mark — a
+continuous blue-gradient loop in Meta blue (`#0082FB` to `#0064E0`) —
+referencing the first-party source
 [Meta Muse Code](https://dev.meta.ai/products/muse-code) (reference date
-2026-09-26). Square `viewBox`, preserved by the same `LogoTile`
-treatment. Replace these bytes with the verbatim first-party asset when
-network access allows; never hotlink a remote logo at runtime.
+2026-09-26). Retrieval re-attempted 2026-09-26 and still blocked: the
+sandbox has no network egress (DNS fails for all hosts, so the product
+page artwork cannot be fetched), no Meta app bundle is installed, and the
+local Muse CLI (1.4.0-R4161.1, `~/.local/share/muse`) ships no image
+assets — its 316MB binary contains no embedded PNGs. Square `viewBox`,
+preserved by the same `LogoTile` treatment. To finish: with network
+access, save the verbatim first-party mark from the URL above (checked in,
+never hotlinked at runtime), record its source URL, retrieval date, and
+checksum here, and delete this paragraph.
