@@ -282,7 +282,9 @@ function echoLeg() {
     if (!line.trim()) continue;
     records += 1;
     const low = line.toLowerCase();
-    if (low.includes("usedpercent") || low.includes("resetsatms") || low.includes("observedatms") || low.includes("subscriptionusage")) {
+    // Same key set as USAGE_KEYS in sessionLogLeg; window/weekly match only
+    // as quoted JSON keys so exec prose can never false-positive.
+    if (low.includes("usedpercent") || low.includes("resetsatms") || low.includes("observedatms") || low.includes("subscriptionusage") || low.includes('"window"') || low.includes('"weekly"')) {
       hits += 1;
     }
   }

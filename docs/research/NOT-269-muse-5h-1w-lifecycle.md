@@ -104,7 +104,11 @@ read-only except one optional free `--provider echo` control and the gated
 `--live-turn` leg, which spends one real minimal turn in a disposable scratch
 session — requires `MUSE_PROBE_CONFIRM_REAL_TURN=1` or it reports
 `confirmation-required` and does nothing; live MSP legs skip honestly when
-the host cannot authenticate). Deterministic contract test:
+the host cannot authenticate). Provenance: the authenticated legs above
+(same-host turn, restart, resume) were observed from a Keychain-capable host;
+reruns in sandboxed contexts without Keychain access reproduce only the
+offline legs and report `live-skipped` (`auth-unreadable`/`keychain-unreadable`)
+for the live ones — never a fabricated observation. Deterministic contract test:
 `packages/server/src/capacity/muse-lifecycle.test.ts` (fake host + redacted
 shapes, no account data).
 
