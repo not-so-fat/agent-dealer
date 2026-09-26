@@ -703,9 +703,20 @@ export async function readCursorIndividualBilling(
 
   let fatal: FailureKind | null = null;
   let readings: CursorIndividualReadings | null = null;
+  // A 200 response this module cannot parse as JSON (`malformed`) is kept
+  // distinct from a genuine auth/rate-limit/transport/redirect failure: an
+  // undocumented path can serve an HTML SPA shell with a 200 status instead
+  // of a 404 for an account it doesn't apply to, so `malformed` is treated
+  // like `absent` and the next candidate still gets a try. The first such
+  // verdict is remembered as the diagnostic in case no candidate parses.
+  let malformedFallback: FailureKind | null = null;
   for (const candidatePath of CURSOR_INDIVIDUAL_USAGE_PATHS) {
     const outcome = await fetchJson(fetchImpl, `${baseUrl}${candidatePath}`, authHeader, timeoutMs);
     if ("failure" in outcome) {
+      if (outcome.failure === "malformed") {
+        malformedFallback = malformedFallback ?? outcome.failure;
+        continue;
+      }
       // Auth, rate-limit, transport, redirect, and oversize failures dominate
       // over remaining candidates: retrying another undocumented path cannot
       // fix a rejected credential or an unsafe redirect.
@@ -721,6 +732,7 @@ export async function readCursorIndividualBilling(
     readings = parsed;
     break;
   }
+  if (!fatal && !readings) fatal = malformedFallback;
   if (fatal) {
     logFailure(fatal);
     const reason: CapacityUnavailableReason = fatal === "malformed" ? "unparsable" : "missing";

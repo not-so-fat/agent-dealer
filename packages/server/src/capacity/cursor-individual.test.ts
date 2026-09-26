@@ -353,6 +353,54 @@ test("endpoint drift falls through to the next candidate path", async () => {
   assert.equal(calls.length, 2);
 });
 
+test("a 200 HTML SPA shell on the first candidate (not a 404) still falls through", async () => {
+  enable();
+  fixtureCredential();
+  const now = Date.now();
+  const calls: RecordedCall[] = [];
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch(
+      {
+        [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+          body: "<!doctype html><html><body>app shell</body></html>",
+        },
+        [CURSOR_INDIVIDUAL_USAGE_PATHS[1]]: { status: 200, body: usagePayload(now) },
+      },
+      calls
+    ),
+    nowMs: now,
+  });
+  assert.equal(obs.failure, null);
+  assert.equal(obs.billing.cycleLabel, "September 2026");
+  assert.equal(obs.billing.remainingPercent, 62.5);
+  assert.equal(calls.length, 2);
+});
+
+test("a 200 HTML SPA shell on every candidate reads unparsable, not missing", async () => {
+  enable();
+  fixtureCredential();
+  const obs = await readCursorIndividualBilling({
+    baseUrl: MOCK_BASE,
+    fetchImpl: mockFetch({
+      [CURSOR_INDIVIDUAL_USAGE_PATHS[0]]: {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+        body: "<!doctype html><html><body>app shell</body></html>",
+      },
+      [CURSOR_INDIVIDUAL_USAGE_PATHS[1]]: {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+        body: "<!doctype html><html><body>app shell</body></html>",
+      },
+    }),
+  });
+  assert.equal(obs.failure?.kind, "malformed");
+  assert.equal(obs.billing.unavailableReason, "unparsable");
+});
+
 test("failure modes return explicit N/A without affecting runtime health", async () => {
   enable();
   fixtureCredential();
