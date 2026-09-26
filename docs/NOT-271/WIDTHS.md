@@ -40,65 +40,32 @@ same two datasets (`ready-4`, `exhausted-and-na`) at a 360px viewport:
   12px type, tile sizes, exhausted border/padding), inlined so the files
   open standalone.
 
-To capture the PR screenshots: open both files in a browser at 360px
-width and screenshot the `ready-4` section (plus the `exhausted-and-na`
-section to show the logo stays identifiable in exhausted/N/A states).
 Each page self-measures on load: per-block `offsetWidth`s render into the
 metrics table and `document.title`, and the section reports any
-`scrollWidth − clientWidth` overflow (expected: 0 — blocks are
-`inline-flex` + `whitespace-nowrap` with no absolute positioning or
-negative margins, so a logo cannot overlap or clip its values by
-construction).
+`scrollWidth − clientWidth` overflow. Both captures report 0px overflow.
 
-## Pixel renders (attached — offline composite, not browser pixels)
+## Pixel screenshots (360×800 viewport)
 
-`capacity-header-before.png` and `capacity-header-after.png` (in this
-directory) render both cases at the same 360px content width, produced
-2026-09-26 by `/tmp/render-capacity.py` with no browser and no network:
+Captured from the standalone fixtures in Google Chrome on 2026-09-26 at
+the same 360×800 CSS-pixel viewport. Both include the four-runtime ready
+case and the exhausted/N/A case so the identity marks, values, wrapping,
+and clipping can be compared directly.
 
-- Icons are pixel renders of the CHECKED-IN assets: Claude/Cursor via
-  even-odd scanline fill of their SVG paths, Muse via disc-stamped
-  gradient stroke of its SVG path, Codex via stdlib PNG decode of
-  `codex.png` — each composited into the 16px `LogoTile` (rounded-lg,
-  white 4%, 70% image) exactly as `AgentIcon.tsx` specifies.
-- Text is real `ffmpeg drawtext` output with the system font
-  (`Helvetica.ttc`) at the real 12px size; positions come from stdlib
-  TrueType-advance layout using the exact fixture flex geometry (gaps
-  12/6/4, 15px stack rows, exhausted border+padding, greedy flex-wrap).
-- Known approximations (do not affect the width claim): CAPACITY
-  letter-spacing omitted (present in both variants equally), `font-medium`
-  rendered with the Regular face, section captions at 12px instead of
-  13px, viewport border solid instead of dashed.
+### Before — provider-name text
 
-What the pixels show: every after block leads with a 16px logo and no
-name text; `5H`/`1W`/`1M` values are all legible; the exhausted Codex
-block keeps its red border/tint with a red `0%`; the N/A Muse block stays
-dim; no logo overlaps or clips its values (blocks are sequential
-non-overlapping boxes by construction — same guarantee as the fixture
-CSS, which has no absolute positioning or negative margins).
+![Capacity header before NOT-271](./capacity-header-before.png)
 
-Measured block widths from the same layout pass (Helvetica 12px):
+### After — official provider marks
 
-| Block | Before (name-led) | After (logo-led) | Saved |
-|---|---|---|---|
-| Claude | 90.0px | 68.0px | 22.0px |
-| Codex | 86.7px | 68.0px | 18.7px |
-| Muse Code | 113.4px | 68.0px | 45.4px |
-| Cursor | 86.7px | 66.7px | 20.0px |
-| ready-4 block total | 376.8px | 270.7px | ~106px |
-| Codex exhausted | 100.7px | 82.0px | 18.7px |
-| Muse Code N/A | 109.4px | 64.0px | 45.4px |
+![Capacity header after NOT-271](./capacity-header-after.png)
 
-Every after block is narrower than its before twin, and the after bar
-fits three logo-led blocks plus the CAPACITY eyebrow on the first 360px
-line where the before bar only fits two name-led blocks. A true browser
-screenshot at 360px on a networked machine remains a welcome
-corroboration (open both `.html` fixtures side by side), but the width
-claim no longer depends on it: identical window stacks plus per-block
-(name width − 16px) savings hold in both measured system fonts.
+The ready case shrinks from block widths `96, 92, 120, 93` to
+`72, 72, 72, 71` pixels. The exhausted/N/A case shrinks from `106, 113`
+to `86, 65` pixels. Both screenshots report 0px overflow; the official
+Meta infinity mark remains identifiable in the Muse ready and N/A blocks.
 
-What IS verified here without pixels (`/tmp/verify-widths.py` logic,
-re-run 2026-09-26, ALL PASS):
+Additional structural checks (`/tmp/verify-widths.py` logic, re-run
+2026-09-26, ALL PASS):
 
 - AFTER: all 6 provider blocks (4 ready + Codex-exhausted + Muse-Code-N/A)
   carry exactly one `h-4 w-4` tile with a logo `<img>` and no visible

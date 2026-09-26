@@ -8,7 +8,7 @@ top-bar logo tiles. Nothing here is fetched at runtime.
 | `claude.svg` | Claude (Anthropic) | pre-existing asset |
 | `cursor.svg` | Cursor | pre-existing asset |
 | `codex.png` | Codex (OpenAI) | verbatim first-party app icon, downscaled (see below) |
-| `muse.svg` | Muse Code (Meta) | interim redraw referencing the first-party mark, MD5 `e24645811462b986c9cd3110b70192b0` (see below) |
+| `muse.svg` | Muse Code (Meta) | exact Meta infinity mark extracted from Meta's first-party SVG (see below) |
 
 ## Codex
 
@@ -30,21 +30,20 @@ identifiable down to 16px.
 
 ## Muse
 
-The verbatim Muse artwork could not be retrieved in this environment, so
-`muse.svg` is an interim original redraw of the Muse loop mark — a
-continuous blue-gradient loop in Meta blue (`#0082FB` to `#0064E0`) —
-referencing the first-party source
-[Meta Muse Code](https://dev.meta.ai/products/muse-code) (reference date
-2026-09-26). Retrieval re-attempted 2026-09-26 and still blocked: the
-sandbox has no network egress (DNS fails for all hosts, so the product
-page artwork cannot be fetched), no Meta app bundle is installed, and the
-local Muse CLI (1.4.0-R4161.1, `~/.local/share/muse`) ships no image
-assets — its 316MB binary contains no embedded PNGs. Retrieval
-re-attempted again 2026-09-26 (round 4): still fully blocked — every host
-probes `000` via curl (`registry.npmjs.org`, `example.com`, `dev.meta.ai`,
-`openai.com`), no Meta/Muse app bundle is installed in `/Applications`,
-and no renderer or fetcher exists that works offline. Square `viewBox`,
-preserved by the same `LogoTile` treatment. To finish: with network
-access, save the verbatim first-party mark from the URL above (checked in,
-never hotlinked at runtime), record its source URL, retrieval date, and
-checksum here, and delete this paragraph.
+Meta's first-party [Muse Code product page](https://dev.meta.ai/products/muse-code)
+does not publish a distinct Muse Code icon: the product identity is a
+text-only “Muse Code” heading beneath Meta branding. For the compact
+provider tile, `muse.svg` therefore uses the official Meta infinity mark
+that identifies Muse Code's vendor rather than inventing a Muse-specific
+symbol.
+
+The 13 infinity-mark paths and their gradients are copied exactly from
+Meta's first-party
+[`meta-logo-with-text.svg`](https://dev.meta.ai/logo/meta-logo-with-text.svg),
+retrieved 2026-09-26. The downloaded source SHA-256 is
+`7a0430c375fc8563eafa7636869b5b132e6da4461711a81d384bc0044a20d039`.
+Only the trailing “Meta” wordmark paths were omitted and the `viewBox` was
+tightened to the infinity-mark bounds; path geometry, fill colors, and
+gradient coordinates are unchanged. The asset is checked in and never
+fetched at runtime. Its checked-in SHA-256 is
+`46648966515643b9d4a0d445b2a0d8e3aa9dc9063a2f4dc85115d8a5427ca033`.
