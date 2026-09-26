@@ -89,10 +89,11 @@ test("lifecycle: the first observation arrives as usage/changed with the pair", 
   const read = await requestMuseUsage(fakeOpts("full"));
   assert.equal(read.failure, null);
   assert.equal(read.updates.length, 1);
-  const params = read.updates[0] as { usage?: Record<string, unknown> };
+  // Stable schema refs SubscriptionUsage directly at
+  // /notifications/usage/changed/params — not wrapped in {usage}.
+  const params = read.updates[0] as Record<string, unknown>;
   assert.ok(params && typeof params === "object");
-  assert.ok(params.usage && typeof params.usage === "object", "usage/changed carries the usage pair");
-  assert.deepEqual(Object.keys(params.usage).sort(), ["observedAtMs", "tier", "weekly", "window"]);
+  assert.deepEqual(Object.keys(params).sort(), ["observedAtMs", "tier", "weekly", "window"]);
 });
 
 test("lifecycle: a fresh host with no observation reads missing — twice", async () => {

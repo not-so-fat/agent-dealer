@@ -216,7 +216,9 @@ function handleRequest(msg) {
   send({
     jsonrpc: "2.0",
     method: "usage/changed",
-    params: { usage: fullUsage() },
+    // NOT-269: stable schema refs SubscriptionUsage directly at
+    // /notifications/usage/changed/params — not wrapped in {usage}.
+    params: fullUsage(),
   });
   send({ jsonrpc: "2.0", id: msg.id, result: { protocol: "msp/1.3", usage: fullUsage() } });
 }

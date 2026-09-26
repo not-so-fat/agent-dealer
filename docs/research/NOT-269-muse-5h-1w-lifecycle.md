@@ -43,24 +43,30 @@ Parent: NOT-265. Bounded research slice; production adapter (`packages/server/sr
 
 `usage/read` result when the host observed nothing: `{}` (or `{protocol}`
 envelope) — `usage` omitted, never null. `usage/changed` params carry the same
-`SubscriptionUsage` object (not wrapped in `{usage}`).
+`SubscriptionUsage` object directly (schema ref at
+`/notifications/usage/changed/params` — **not** wrapped in `{usage}`).
 
-## Answers (observed vs blocked — stated plainly)
+## Answers (all five now live-observed, not inferred)
 
-1. **Long-lived host + real session on that same host? — NOT directly observed
-   (blocked, see boundaries), but the schema proves the mechanism.** First
-   provider traffic on a host emits `usage/changed` (absent-to-present counts as
-   a change, D3); afterwards `usage/read` returns both `window` and `weekly`
-   (both are `required` in `SubscriptionUsage`, so a conforming observation
-   always carries the full 5H + 1W pair). Live confirmation needs an
-   authenticated host plus one real meta-provider turn; this spawn has Keychain
-   code -50 isolation (below) and manufacturing a paid turn is a non-goal.
-2. **`session/resume` without a prompt? — No, by schema.** `SessionResumeResult`
-   is `{history, pendingRequests, session, viewCursor}` — no `usage` member, so
-   a resume cannot return quota in-band. It is non-billable (no turn/model call
-   in the method), but it is state-changing (writes a durable `SessionResumed`
-   record, auto-subscribes the connection) and already on the adapter's
-   forbidden list — never use it as a refresh path.
+An authenticated host became available after the initial escalation. All
+three previously-blocked legs were then run for real: one disposable session
+in a scratch workspace, one minimal real turn ("Reply with only the single
+word OK"), then a restart and a resume, both on fresh hosts. No project
+session was touched; see `--live-turn` in the harness below.
+
+1. **Long-lived host + real session on that same host? — Observed, live.**
+   `session/start` → `turn/start` → the turn reached `terminal: "completed"`
+   → `usage/changed` fired on that connection → the immediately-following
+   `usage/read` returned `usage.present: true` with **both** `window` and
+   `weekly` populated (matching the schema's `required` pair, D3's
+   first-observation-emits rule, and the doc's prediction below).
+2. **`session/resume` without a prompt? — Observed, live: no.** Resumed the
+   same session on a brand-new host with no `turn/start` sent
+   (`resumeOk: true`); the following `usage/read` still returned `usage`
+   absent. Matches `SessionResumeResult`'s schema shape (no `usage` member).
+   Non-billable (no turn/model call in the method) but
+   state-changing (durable `SessionResumed` record, auto-subscribe) —
+   already on the adapter's forbidden list; never use it as a refresh path.
 3. **Any stable `muse exec --json` event with the usage payload? — No.**
    `SubscriptionUsage` is `$ref`'d from exactly two schema locations:
    `usage/read` result and `usage/changed` params. `session/tokenUsage` is
@@ -73,11 +79,12 @@ envelope) — `usage` omitted, never null. `usage/changed` params carry the same
    two real on-disk completed session logs (979 + 53 records plus subagent
    logs) contain zero `usedPercent`/`resetsAtMs`/`observedAtMs`/`window`/`weekly`
    keys — their `usage` members are token counters and resource stats only.
-4. **Process-local, persisted, or resumable? — Process-local.** Session logs
-   persist no subscription observation (scans above); the schema calls it the
-   "host's last-observed" with a "frame arrival" stamp. A restarted host has
-   observed nothing, so `usage/read` returns `usage` omitted until that host
-   sees fresh provider traffic. Persistence is rejected, not merely unproven.
+4. **Process-local, persisted, or resumable? — Observed, live: process-local.**
+   After the real turn observed usage on host A, host A was killed and a
+   brand-new host B spawned; its immediate `usage/read` returned `usage`
+   absent. Persistence across restart is rejected by direct observation, not
+   inference — a restarted host has observed nothing, so `usage/read` returns
+   `usage` omitted until that host sees fresh provider traffic itself.
 5. **Smallest supported no-cost integration? — See recommendation.** No method
    returns quota without prior provider traffic on the same host, and no exec
    event substitutes for it.
@@ -86,15 +93,18 @@ envelope) — `usage` omitted, never null. `usage/changed` params carry the same
 
 | Probe | Result |
 |---|---|
-| Fresh host → initialize → initialized → usage/read | Reproduced the failure mode: in a spawn without Keychain access the host exits 3 (`keychain item for meta is unreadable (os status -50)`), empty stdout, `initialize` unanswered → adapter `missing`. With working auth the ticket premise holds: `usage` omitted → `missing` (never throws, never a synthetic call). |
-| Same host → real session → usage/changed → usage/read (window + weekly) | Blocked live (no authenticated host + no paid synthetic turn); mechanism proven by schema (D3 first-observation emit; both members `required`). |
-| Fresh host → resume existing completed session, no prompt | No in-band usage per `SessionResumeResult` shape; state-changing; forbidden for refresh. Two completed sessions exist on disk but no authenticated host could resume them. |
+| Fresh host → initialize → initialized → usage/read | Reproduced both failure modes: in a spawn without Keychain access the host exits 3 (`keychain item for meta is unreadable (os status -50)`), empty stdout, `initialize` unanswered → adapter `missing`. On an authenticated host, a never-observed host's `usage/read` returns `usage` omitted → `missing` (never throws, never a synthetic call) — reproduced live, not just asserted. |
+| Same host → real session → usage/changed → usage/read (window + weekly) | **Observed live**: real turn admitted, terminal `completed`, `usage/changed` fired, `usage/read` returned both `window` and `weekly` present. |
+| Fresh host → resume existing completed session, no prompt | **Observed live**: `session/resume` succeeded (non-billable) on a fresh host with no new `turn/start`; `usage/read` still returned `usage` absent — no in-band usage per `SessionResumeResult` shape, confirmed rather than only schema-derived. |
 | Existing `exec --json` logs → typed usage-event search | Done: zero subscription-usage keys in 979 + 53 real session records and 27 echo-exec frames. |
-| Host restart after observation | Persistence rejected by (3)+(4): observations live in host memory only; a new host starts unobserved. |
+| Host restart after observation | **Observed live**: host A observed usage from the real turn; killed; fresh host B's immediate `usage/read` returned `usage` absent. Persistence rejected by direct observation. |
 
 Rerun harness: `scripts/muse-capacity-lifecycle-probe.mjs` (sanitized output,
-read-only except one optional free `--provider echo` control; live MSP legs
-skip honestly when the host cannot authenticate). Deterministic contract test:
+read-only except one optional free `--provider echo` control and the gated
+`--live-turn` leg, which spends one real minimal turn in a disposable scratch
+session — requires `MUSE_PROBE_CONFIRM_REAL_TURN=1` or it reports
+`confirmation-required` and does nothing; live MSP legs skip honestly when
+the host cannot authenticate). Deterministic contract test:
 `packages/server/src/capacity/muse-lifecycle.test.ts` (fake host + redacted
 shapes, no account data).
 
