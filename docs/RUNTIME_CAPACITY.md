@@ -135,9 +135,9 @@ plus the stable schema embedded in the shipped binary (regenerable offline
 with `muse schema generate-json-schema`). Full lifecycle evidence lives in
 `docs/research/NOT-269-muse-5h-1w-lifecycle.md` (Muse Code 1.4.0).
 
-The server owns one long-lived `muse serve` host per process (no
+The server owns one `muse serve` host per process (no
 `--protocol` flag — the shipped binary exits 2 on it), started at first
-demand and held open for process lifetime. The `initialize` handshake
+demand. The `initialize` handshake
 carries a `clientInfo` identity (`name` matching `^[a-z0-9_]+$`, currently
 `agent_dealer`, plus a version), then the `initialized` notification, then
 the connection stays open: `usage/changed` is ingested as soon as received
@@ -152,7 +152,11 @@ before it is written, so a capacity read can never start a session, send a
 prompt, or consume model tokens. Reads are bounded (default 15 s per read,
 `AGENT_DEALER_MUSE_CAPACITY_TIMEOUT_MS` override), single-flight across
 concurrent requests (never a second host), and never billed.
-No Keychain access, no undocumented endpoints.
+No Keychain access, no undocumented endpoints. The host is held open only
+once it has observed provider traffic; a host that reads `missing` is
+released right after the read (it holds no state, so nothing is lost) and
+the next throttled refresh respawns it — production keeps no lifetime
+child that can only answer `missing`.
 
 Structural precondition: Dealer runs Muse turns as `muse exec`
 subprocesses, so an exec-driven server leaves the owned host unobserved and

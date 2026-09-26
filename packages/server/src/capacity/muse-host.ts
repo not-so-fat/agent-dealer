@@ -11,10 +11,16 @@
 // `session/resume` carries no usage, so neither is used here.
 //
 // Ownership (exactly the NOT-269 design):
-// - One `muse serve` host per server process, started at first demand and
-//   held open for process lifetime. Concurrent readers share it: connection
-//   startup and `usage/read` are both single-flight, so there is never a
-//   second Muse execution host per concurrent request.
+// - One `muse serve` host per server process, started at first demand.
+//   Concurrent readers share it: connection startup and `usage/read` are
+//   both single-flight, so there is never a second Muse execution host
+//   per concurrent request.
+// - The host is held open only once it has observed provider traffic
+//   (state worth preserving across restarts is process-local to the
+//   host). A host that has observed nothing is released right after the
+//   read — an unobserved host holds no state, so releasing it loses
+//   nothing, and production keeps no lifetime child that can only answer
+//   `missing`. The next throttled refresh transparently respawns it.
 // - `usage/changed` is ingested as soon as received; the throttled
 //   on-demand `usage/read` on the same host is the final read.
 // - Restart/crash: usage state is process-local to the host, so a dead host
@@ -114,6 +120,14 @@ export class MuseCapacityHost {
   private buffer = "";
   private stderrTail = "";
   private readSeq = 0;
+  /**
+   * True once this connection has observed provider traffic (a `usage/read`
+   * or `usage/changed` ingest that wrote rows). Only an observed host is
+   * held open — an unobserved one is released after the read. Reset on
+   * every (re)spawn: usage state is process-local, so a restarted host
+   * starts unobserved.
+   */
+  private observedOnConnection = false;
   /** Increments on every spawn — tests use it to prove host reuse/restart. */
   connectionEpoch = 0;
 
@@ -130,7 +144,13 @@ export class MuseCapacityHost {
     return { ...process.env, ...this.opts.env };
   }
 
-  private killChild(): void {
+  /**
+   * @param final true on the shutdown path (server teardown / explicit
+   * release): escalate synchronously — the process is exiting (or the
+   * caller is done with the child now), so no 2 s timer that the event
+   * loop may never run can be trusted to reap a SIGTERM-ignoring host.
+   */
+  private killChild(final = false): void {
     const child = this.child;
     this.child = null;
     this.dead = true;
@@ -148,10 +168,20 @@ export class MuseCapacityHost {
     } catch {
       // Already exited — nothing to signal.
     }
-    // A wedged host can ignore SIGTERM; escalate once against that exact
-    // child so a hung process can never leak. The timer holds only the old
-    // handle, so it can never signal a replacement host spawned later.
     if (child && child.exitCode === null) {
+      if (final) {
+        // Synchronous backstop: a host that ignores SIGTERM during
+        // shutdown must still die before process exit — no timer involved.
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Already exited — nothing to signal.
+        }
+        return;
+      }
+      // A wedged host can ignore SIGTERM; escalate once against that exact
+      // child so a hung process can never leak. The timer holds only the old
+      // handle, so it can never signal a replacement host spawned later.
       const killer = setTimeout(() => {
         try {
           if (child.exitCode === null) child.kill("SIGKILL");
@@ -177,9 +207,15 @@ export class MuseCapacityHost {
         // ingest immediately, newest-observedAtMs-wins.
         void ingestMuseUsagePayload(msg.params ?? null, {
           evidenceRef: museEvidenceRef("changed"),
-        }).catch(() => {
-          // Best-effort: a failed ingest never breaks the connection.
-        });
+        })
+          .then((outcome) => {
+            // A changed-notification that wrote rows means this host has
+            // observed traffic: it is worth holding open.
+            if (outcome.written.length > 0) this.observedOnConnection = true;
+          })
+          .catch(() => {
+            // Best-effort: a failed ingest never breaks the connection.
+          });
       }
       return;
     }
@@ -254,6 +290,8 @@ export class MuseCapacityHost {
     this.child = child;
     this.dead = false;
     this.connectionEpoch += 1;
+    // Usage state is process-local: a (re)spawned host starts unobserved.
+    this.observedOnConnection = false;
     this.stderrTail = "";
     child.stderr?.on("data", (buf: Buffer) => {
       // Stderr is diagnostic-only; attribute it only while this child is live.
@@ -330,7 +368,17 @@ export class MuseCapacityHost {
     if (this.inflightRead) return this.inflightRead;
     this.inflightRead = this.read();
     try {
-      return await this.inflightRead;
+      const outcome = await this.inflightRead;
+      if (outcome.status === "observed") {
+        this.observedOnConnection = true;
+      } else if (!this.observedOnConnection) {
+        // The host observed nothing and holds no state worth keeping:
+        // release the child instead of parking a lifetime process that
+        // can only answer `missing`. The next refresh transparently
+        // respawns it; last-good DB rows are untouched either way.
+        this.killChild();
+      }
+      return outcome;
     } finally {
       this.inflightRead = null;
     }
@@ -400,9 +448,13 @@ export class MuseCapacityHost {
     return { status: "observed", written: outcome.written, skippedStale: outcome.skippedStale };
   }
 
-  /** Clean shutdown: release the child so no host process leaks. */
+  /**
+   * Clean shutdown: release the child so no host process leaks. Final —
+   * a SIGTERM-ignoring host is SIGKILLed synchronously, never left to a
+   * timer the exiting event loop may never run.
+   */
   async shutdown(): Promise<void> {
-    this.killChild();
+    this.killChild(true);
     this.starting = null;
     this.inflightRead = null;
   }

@@ -116,7 +116,17 @@ test("observed host refresh serves exactly the 5H+1W pair to the browser shape",
     servedMuse.windows.every((w) => w.unavailableReason === null),
     "both served windows are known"
   );
-  assert.equal(muse?.runtime ?? "muse_code", "muse_code");
+  assert.equal(
+    servedMuse.windows.find((w) => w.windowKey === "rolling_all_models")?.remainingPercent,
+    40,
+    "served 5H matches the stored row"
+  );
+  assert.equal(
+    servedMuse.windows.find((w) => w.windowKey === "weekly_all_models")?.remainingPercent,
+    75,
+    "served 1W matches the stored row"
+  );
+  assert.equal(muse?.runtime, "muse_code");
   await shutdownMuseCapacityHost();
 });
 
@@ -387,6 +397,35 @@ test("clean shutdown releases the child process", async () => {
   assert.ok(host.isConnected());
   await host.shutdown();
   assert.ok(!host.isConnected(), "no host process left behind");
+});
+
+test("an unobserved host is released after the read — no lifetime child that can only answer missing", async () => {
+  const host = new MuseCapacityHost(hostOpts("persistent-missing"));
+  try {
+    assert.equal((await host.readUsage()).status, "missing");
+    assert.ok(!host.isConnected(), "unobserved host released, none parked");
+    // The next refresh transparently respawns (state was empty anyway).
+    assert.equal((await host.readUsage()).status, "missing");
+    assert.equal(host.connectionEpoch, 2, "respawned on demand, still one host at a time");
+    assert.ok(!host.isConnected(), "still-unobserved host released again");
+  } finally {
+    await host.shutdown();
+  }
+  // Releasing the empty host never deletes last-good rows.
+  assert.deepEqual(keys(), ["muse_account_usage"]);
+});
+
+test("an observed host stays resident across reads", async () => {
+  const host = new MuseCapacityHost(hostOpts("persistent-full"));
+  try {
+    assert.equal((await host.readUsage()).status, "observed");
+    assert.ok(host.isConnected(), "observed host held open");
+    assert.equal((await host.readUsage()).status, "observed");
+    assert.equal(host.connectionEpoch, 1, "no respawn while observed");
+    assert.ok(host.isConnected());
+  } finally {
+    await host.shutdown();
+  }
 });
 
 test("production refresh is throttled and can be disabled", async () => {
