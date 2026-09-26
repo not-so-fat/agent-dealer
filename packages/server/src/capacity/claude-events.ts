@@ -341,23 +341,23 @@ export function extractClaudeCapacityFromEvents(
 }
 
 /**
- * Persist naturally observed unified windows as normalized capacity
- * snapshots (per-window upserts — siblings not in this observation are left
- * untouched, and a stored row newer than the incoming reading is never
- * overwritten). Returns the number of windows persisted, or null when the
- * runtime is not Claude or no usable windows were observed. Never touches
- * `runtime_availability`.
+ * Persist Claude window readings as normalized capacity snapshots
+ * (per-window upserts — siblings not in this observation are left untouched,
+ * and a stored row newer than the incoming reading is never overwritten).
+ * Shared by session-event ingestion and the local-cache/probe path (NOT-268):
+ * both sources write the same `claude_unified_*` window keys, so the freshest
+ * observation wins per window regardless of which source produced it.
+ * Returns the number of windows persisted, or null when no usable window was
+ * observed. Never touches `runtime_availability`.
  */
-export function recordClaudeCapacityFromEvents(
-  events: StreamEvent[],
+export function recordClaudeWindowReadings(
+  readings: AdapterWindowReading[],
   runtime: Runtime,
-  nowMs = Date.now(),
-  fallbackObservedAtMs = nowMs
+  nowMs = Date.now()
 ): number | null {
   if (runtime !== CLAUDE_RUNTIME) return null;
-  const result = extractClaudeCapacityFromEvents(events, nowMs, fallbackObservedAtMs);
-  if (!result) return null;
-  const normalized = result.windows.map((w) => normalizeAdapterWindow(runtime, w, nowMs));
+  if (readings.length === 0) return null;
+  const normalized = readings.map((w) => normalizeAdapterWindow(runtime, w, nowMs));
   const persistable = normalized.filter(
     (n) => n.unavailableReason === null && n.remainingPercent !== null
   );
@@ -396,6 +396,26 @@ export function recordClaudeCapacityFromEvents(
     }))
   );
   return fresh.length;
+}
+
+/**
+ * Persist naturally observed unified windows as normalized capacity
+ * snapshots. Status is irrelevant — allowed events carry the utilization
+ * signal; rejected ones additionally drive NOT-111 elsewhere. Thin wrapper
+ * over `recordClaudeWindowReadings`: per-window upserts, newer-wins, never
+ * touches `runtime_availability`. Returns the number of windows persisted,
+ * or null when the runtime is not Claude or no usable windows were observed.
+ */
+export function recordClaudeCapacityFromEvents(
+  events: StreamEvent[],
+  runtime: Runtime,
+  nowMs = Date.now(),
+  fallbackObservedAtMs = nowMs
+): number | null {
+  if (runtime !== CLAUDE_RUNTIME) return null;
+  const result = extractClaudeCapacityFromEvents(events, nowMs, fallbackObservedAtMs);
+  if (!result) return null;
+  return recordClaudeWindowReadings(result.windows, runtime, nowMs);
 }
 
 /**
