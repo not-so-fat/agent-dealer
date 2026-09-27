@@ -88,13 +88,14 @@
 // This question was escalated twice on this ticket (product_scope_decision,
 // resolved both times); the decision above is final for NOT-270's scope.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { CapacityUnavailableReason, RuntimeCapacityResponse } from "@agent-dealer/shared";
 import { MUSE_CLI_ENV, resolveMuseAuthFile, resolveMuseBin } from "../cli-env.js";
 import { getDataDir } from "../db/index.js";
+import { parseMuseVersion } from "../adapters/muse-capability.js";
 import { buildMuseDeveloperSettings } from "../runners/muse-code-settings.js";
 import {
   MSP_USAGE_CHANGED,
@@ -134,6 +135,23 @@ export interface MuseHostOptions {
   cwd?: string;
   /** Spawn implementation override (tests). Defaults to `node:child_process` spawn. */
   spawnImpl?: typeof spawn;
+  /**
+   * NOT-277: what the binary reports as its version (null when it cannot say). Defaults to
+   * `<muse> --version` for the resolved CLI; with a `command` override and no reader the host's
+   * version is unknown (null).
+   */
+  readVersion?: () => Promise<string | null>;
+}
+
+function readResolvedMuseVersion(): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(
+      resolveMuseBin(),
+      ["--version"],
+      { encoding: "utf8", timeout: 30_000, env: { ...process.env, ...MUSE_CLI_ENV } },
+      (err, stdout) => resolve(err ? null : parseMuseVersion(stdout))
+    );
+  });
 }
 
 /**
@@ -307,6 +325,14 @@ export class MuseCapacityHost {
   /** Increments on every spawn — tests use it to prove host reuse/restart. */
   connectionEpoch = 0;
   /**
+   * NOT-277: the Muse version the live child runs — the on-disk binary's reported version, read
+   * immediately before the spawn and again after the handshake; null when unknown or when the
+   * binary changed across the spawn. A long-lived host keeps running the build it started on
+   * after an auto-update, so developer work only uses it when this is the capability-checked
+   * version (see `ensureStartedOnVersion`).
+   */
+  runningVersion: string | null = null;
+  /**
    * Server-owned XDG home for the host (worker settings + auth link).
    * Built lazily on first spawn, reused across restarts, removed on
    * shutdown.
@@ -378,6 +404,7 @@ export class MuseCapacityHost {
     const child = this.child;
     this.child = null;
     this.dead = true;
+    this.runningVersion = null;
     for (const [, p] of this.pending) {
       try {
         p.resolve({});
@@ -602,8 +629,25 @@ export class MuseCapacityHost {
     }
   }
 
+  /**
+   * NOT-277: start (or reuse) the host, and report whether it runs `version`. A live host on any
+   * other (or an unknown) version is restarted onto the current on-disk binary when it is idle;
+   * while real turns are using it, it is left alone and this returns false (the caller runs its
+   * work on the exec lane instead). Never true for a host not known to run `version`.
+   */
+  async ensureStartedOnVersion(version: string): Promise<boolean> {
+    if (!(await this.ensureStarted())) return false;
+    if (this.runningVersion === version) return true;
+    if (this.hasInflightExecution() || this.inflightRead) return false;
+    this.killChild();
+    if (!(await this.ensureStarted())) return false;
+    return this.runningVersion === version;
+  }
+
   private async start(): Promise<boolean> {
     this.killChild();
+    const readVersion = this.opts.readVersion ?? (this.opts.command ? async () => null : readResolvedMuseVersion);
+    const versionBefore = await readVersion();
     const timeoutMs = this.opts.timeoutMs ?? museCapacityTimeoutMs();
     const mergedEnv = this.mergedEnv();
     if (!hasMuseCredential(mergedEnv, this.opts.authFilePath ?? resolveMuseAuthFile())) {
@@ -710,6 +754,11 @@ export class MuseCapacityHost {
     } catch {
       this.killChild();
       return false;
+    }
+    // The spawned build is the on-disk one only if the binary did not change across the spawn.
+    const versionAfter = await readVersion();
+    if (this.isCurrentChild(child)) {
+      this.runningVersion = versionBefore !== null && versionBefore === versionAfter ? versionBefore : null;
     }
     return true;
   }

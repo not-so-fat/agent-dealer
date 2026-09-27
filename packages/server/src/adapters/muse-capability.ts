@@ -219,6 +219,19 @@ export function museCapabilityIssues(version: string, onSettled: () => void = ()
   return verifyingIssue(version, from);
 }
 
+/**
+ * NOT-277: the Muse version developer work may run on outside the on-disk binary (i.e. on the
+ * long-lived serve host). `undefined` when no version has been observed yet — nothing to bind to;
+ * `null` when the reported version is not confirmed capable (only the on-disk binary, which
+ * admission gates on, may run work then); otherwise the reported, confirmed-capable version.
+ */
+export function museVersionRequiredForWork(): string | null | undefined {
+  const s = loadState();
+  if (!s.current) return undefined;
+  const checked = s.lastChecked;
+  return checked?.status === "capable" && checked.version === s.current.version ? checked.version : null;
+}
+
 /** True while a capability check is running (callers use a short health-cache TTL meanwhile). */
 export function museCapabilityCheckInFlight(): boolean {
   return inFlight !== null;
@@ -285,7 +298,10 @@ function reportedMuseVersion(): string | null {
  * fresh nonce to result.txt — the model cannot produce that value without a shell call, and the
  * file only exists if the shell could write the workspace.
  */
-export async function defaultMuseCapabilityProbe(version: string): Promise<MuseCapabilityProbeResult> {
+export async function defaultMuseCapabilityProbe(
+  version: string,
+  opts: { timeoutMs?: number } = {}
+): Promise<MuseCapabilityProbeResult> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-capability-"));
   try {
     execFileSync("git", ["init", "-q"], { cwd: dir, stdio: "ignore" });
@@ -306,7 +322,7 @@ export async function defaultMuseCapabilityProbe(version: string): Promise<MuseC
         "directory: sh probe.sh\nDo not create or edit result.txt any other way. When the command " +
         "has finished, reply with the single word DONE.",
       cwd: dir,
-      timeoutMs: PROBE_TIMEOUT_MS,
+      timeoutMs: opts.timeoutMs ?? PROBE_TIMEOUT_MS,
       logPath: path.join(dir, "probe.ndjson"),
       execLaneOnly: true,
     });
@@ -323,11 +339,12 @@ export async function defaultMuseCapabilityProbe(version: string): Promise<MuseC
     } catch {
       written = null;
     }
-    if (written === gitBlobSha1(nonce)) return { status: "capable" };
+    // A session that did not complete cleanly is never a verdict, even if the shell ran first.
     if (run.timedOut) return { status: "error", detail: `probe session on ${version} timed out` };
     const failure = run.muse?.failure;
     if (failure) return { status: "error", detail: `probe session failed (${failure.kind}: ${failure.message})` };
     if (run.exitCode !== 0) return { status: "error", detail: `probe session exited ${run.exitCode}` };
+    if (written === gitBlobSha1(nonce)) return { status: "capable" };
     return {
       status: "missing",
       detail:

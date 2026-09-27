@@ -266,7 +266,11 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
     "../coordinator/fixtures/fake-muse.mjs"
   );
 
-  async function probeWith(scenario: string, extraEnv: Record<string, string> = {}): Promise<ProbeResult> {
+  async function probeWith(
+    scenario: string,
+    extraEnv: Record<string, string> = {},
+    opts: { timeoutMs?: number } = {}
+  ): Promise<ProbeResult> {
     const env: Record<string, string> = {
       MUSE_CLI: FAKE_MUSE,
       FAKE_MUSE_SCENARIO: scenario,
@@ -279,7 +283,7 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
     // The serve lane is the production default; the probe must bypass it on its own.
     delete process.env.AGENT_DEALER_MUSE_RUNNER;
     try {
-      return await defaultMuseCapabilityProbe(NEW);
+      return await defaultMuseCapabilityProbe(NEW, opts);
     } finally {
       for (const k of keys) {
         if (prev[k] === undefined) delete process.env[k];
@@ -300,6 +304,18 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
   test("a session that fails to run at all is an error (could not verify), not missing", async () => {
     const result = await probeWith("auth");
     assert.equal(result.status, "error");
+  });
+
+  test("a session that ran the shell but then timed out is could-not-verify, never capable", async () => {
+    const result = await probeWith("capability-shell-then-hang", {}, { timeoutMs: 1500 });
+    assert.equal(result.status, "error");
+    assert.match((result as { detail: string }).detail, /timed out/);
+  });
+
+  test("a session that ran the shell but then failed is could-not-verify, never capable", async () => {
+    const result = await probeWith("capability-shell-then-fail");
+    assert.equal(result.status, "error");
+    assert.match((result as { detail: string }).detail, /probe session (failed|exited)/);
   });
 
   test("the probe never runs on the shared serve host (it may still be the pre-update build)", async () => {
@@ -329,5 +345,88 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
     });
     assert.equal(result.status, "error");
     assert.match((result as { detail: string }).detail, /1\.5\.0-R5000\.1 after probing 1\.4\.0-R4161\.1/);
+  });
+});
+
+// Admission checks the on-disk binary; developer work must not then run on a serve host that is
+// still an older (possibly broken) build. A capable → B broken → C capable, host restarted onto B.
+describe("developer sessions run only on the capability-checked build", { concurrency: false }, () => {
+  const FAKE_MUSE = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../coordinator/fixtures/fake-muse.mjs"
+  );
+  const B = NEW;
+  const C = "1.4.0-R4302.1";
+
+  /** One developer session with the shared host reporting `hostVersion`; returns the RPCs sent to it. */
+  async function sessionWithHostOn(hostVersion: string): Promise<string[]> {
+    const { getMuseCapacityHost, resetMuseCapacityHostForTests } = await import("../capacity/muse-host.js");
+    const { runMuseDeveloperSession } = await import("../coordinator/muse-spawn.js");
+    await resetMuseCapacityHostForTests();
+    const host = getMuseCapacityHost({
+      command: process.execPath,
+      args: [path.join(path.dirname(fileURLToPath(import.meta.url)), "../capacity/fixtures/fake-muse-serve.mjs")],
+      env: { META_API_KEY: "test-fake-key", FAKE_MSP_MODE: "persistent-full" },
+      readVersion: async () => hostVersion,
+    });
+    const sent: string[] = [];
+    const execRequest = host.execRequest.bind(host);
+    host.execRequest = (id, method, params, timeoutMs) => {
+      sent.push(method);
+      return execRequest(id, method, params, timeoutMs);
+    };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-bound-"));
+    const keys = ["MUSE_CLI", "FAKE_MUSE_SCENARIO", "FAKE_MUSE_VERSION", "AGENT_DEALER_MUSE_RUNNER"];
+    const prev = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    Object.assign(process.env, { MUSE_CLI: FAKE_MUSE, FAKE_MUSE_SCENARIO: "success", FAKE_MUSE_VERSION: C });
+    delete process.env.AGENT_DEALER_MUSE_RUNNER;
+    try {
+      const { execFileSync } = await import("node:child_process");
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      const run = await runMuseDeveloperSession({
+        sessionId: "bound-session",
+        runtime: "muse_code",
+        policy: {} as never,
+        model: null,
+        prompt: "implement",
+        cwd: dir,
+        timeoutMs: 30_000,
+        logPath: path.join(dir, "session.ndjson"),
+      });
+      assert.equal(run.exitCode, 0);
+      return sent;
+    } finally {
+      for (const k of keys) {
+        if (prev[k] === undefined) delete process.env[k];
+        else process.env[k] = prev[k];
+      }
+      await resetMuseCapacityHostForTests();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  beforeEach(() => {
+    resetMuseCapabilityStateForTests();
+    stubProbe({ [OLD]: { status: "capable" }, [B]: { status: "missing", detail: "no shell" }, [C]: { status: "capable" } });
+  });
+
+  test("C confirmed but the host still runs broken B: the session never reaches the host", async () => {
+    await check(OLD);
+    await check(B);
+    const { settled } = await check(C);
+    assert.deepEqual(settled, []);
+    assert.deepEqual(await sessionWithHostOn(B), [], "work ran on the checked exec lane, not the B host");
+  });
+
+  test("a host running the confirmed version serves the session", async () => {
+    await check(C);
+    const sent = await sessionWithHostOn(C);
+    assert.ok(sent.includes("session/start"), "serve lane used when the host runs the checked build");
+  });
+
+  test("while the reported version is not confirmed, no session reaches the host", async () => {
+    await check(OLD);
+    await check(B);
+    assert.deepEqual(await sessionWithHostOn(OLD), []);
   });
 });

@@ -22,6 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { MUSE_CODE_CONTRIBUTOR_MODEL } from "@agent-dealer/shared";
 import { resolveMuseAuthFile, resolveMuseBin } from "../cli-env.js";
+import { museVersionRequiredForWork } from "../adapters/muse-capability.js";
 import { ensureWorktreeExcluded } from "../adapters/worktree-exclude.js";
 import { buildMuseDeveloperInvocation } from "../runners/muse-code-args.js";
 import { buildMuseDeveloperSettings } from "../runners/muse-code-settings.js";
@@ -193,12 +194,19 @@ async function runMuseServeLane(
   onAdmitted: () => void
 ): Promise<DeveloperSpawnResult | null> {
   const { getMuseCapacityHost } = await import("../capacity/muse-host.js");
+  const host = getMuseCapacityHost();
+  // NOT-277: admission gated on the capability check of the on-disk binary; a long-lived host can
+  // still run an older (possibly broken) build. Serve only on a host known to run the confirmed
+  // version (restarted onto it when idle); otherwise the work runs on the checked exec lane.
+  const required = museVersionRequiredForWork();
+  if (required === null) return null;
+  if (required !== undefined && !(await host.ensureStartedOnVersion(required))) return null;
   // Only this call may fall back: it resolves `admitted:false` (or throws)
   // strictly before any model work starts. Everything below runs after
   // admission — the caller's no-double-execution rule (via onAdmitted)
   // keeps those errors loud instead of falling back to exec.
   const turn = await runMuseServeTurn({
-    host: getMuseCapacityHost(),
+    host,
     prompt: input.prompt,
     model,
     cwd: input.cwd,
