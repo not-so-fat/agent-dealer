@@ -512,6 +512,11 @@ test("NOT-277: a Muse Code update is admitted when capable, refused by name when
   const stub = path.join(stubDir, "muse");
   fs.writeFileSync(stub, `#!/bin/sh\ncat ${JSON.stringify(versionFile)}\n`);
   fs.chmodSync(stub, 0o755);
+  // The real checker's async path runs `gh auth status` too; CI runners have no gh login,
+  // so a logged-in stub keeps the `ok: true` assertions about Muse alone.
+  const ghStub = path.join(stubDir, "gh");
+  fs.writeFileSync(ghStub, "#!/bin/sh\necho 'Logged in to github.com account dealer-test'\nexit 0\n");
+  fs.chmodSync(ghStub, 0o755);
   const probed: string[] = [];
   setMuseCapabilityProbeForTests(async (version) => {
     probed.push(version);
@@ -524,8 +529,10 @@ test("NOT-277: a Muse Code update is admitted when capable, refused by name when
     MUSE_CLI: process.env.MUSE_CLI,
     META_API_KEY: process.env.META_API_KEY,
     SKIP: process.env.AGENT_DEALER_SKIP_AGENT_HEALTH,
+    PATH: process.env.PATH,
   };
   process.env.MUSE_CLI = stub;
+  process.env.PATH = `${stubDir}${path.delimiter}${process.env.PATH ?? ""}`;
   process.env.META_API_KEY = "k";
   delete process.env.AGENT_DEALER_SKIP_AGENT_HEALTH;
   setAdmissionHealthCheckerForTests(null);
@@ -571,6 +578,7 @@ test("NOT-277: a Muse Code update is admitted when capable, refused by name when
       MUSE_CLI: saved.MUSE_CLI,
       META_API_KEY: saved.META_API_KEY,
       AGENT_DEALER_SKIP_AGENT_HEALTH: saved.SKIP,
+      PATH: saved.PATH,
     })) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
