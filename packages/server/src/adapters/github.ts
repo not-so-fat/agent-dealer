@@ -117,6 +117,15 @@ export const CHECKS_EVIDENCE_MAX_RUNS = 5;
  * plus the per-excerpt line/char caps already bound the output.
  */
 export const CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN = 2_000_000;
+/**
+ * NOT-276 round 3: explicit `maxBuffer` (bytes) for the `gh run view --log-failed`
+ * fetch. Node's `execFile` defaults to ~1 MiB, which would reject any log over
+ * that size with ERR_CHILD_PROCESS_STDIO_MAXBUFFER before the 2MB raw-log
+ * ceiling above ever applies. This buffer sits above the ceiling (plus headroom
+ * for stderr bytes and multi-byte chars) so the ceiling — not the process
+ * buffer — is what bounds memory.
+ */
+export const CHECKS_EVIDENCE_GH_LOG_MAX_BUFFER = 4_000_000;
 /** Single global cap on the focused excerpt threaded into the retry prompt. */
 export const CHECKS_EVIDENCE_MAX_EXCERPT_CHARS = 4_000;
 /** Max lines in the focused excerpt; context lines kept around each failure line. */
@@ -470,9 +479,9 @@ export interface GithubAdapter {
 }
 
 /** The `gh` shell-out, as a seam: production uses `run("gh", ...)`, tests inject a fake that records exact args. */
-export type GhExec = (args: string[], opts: { cwd: string }) => Promise<{ stdout: string }>;
+export type GhExec = (args: string[], opts: { cwd: string; maxBuffer?: number }) => Promise<{ stdout: string }>;
 
-const defaultExec: GhExec = (args, opts) => run("gh", args, opts);
+const defaultExec: GhExec = (args, opts) => run("gh", args, { cwd: opts.cwd, maxBuffer: opts.maxBuffer });
 
 async function ghPrView(exec: GhExec, cwd: string, fields: string, selector?: string): Promise<Record<string, unknown> | null> {
   const args = ["pr", "view", ...(selector != null ? [selector] : []), "--json", fields];
@@ -595,7 +604,10 @@ export async function fetchChecksFailureEvidence(
   let logsUnavailable = false;
   for (const runId of runIds) {
     try {
-      const { stdout } = await exec(["run", "view", runId, "--log-failed"], { cwd: opts.cwd });
+      const { stdout } = await exec(["run", "view", runId, "--log-failed"], {
+        cwd: opts.cwd,
+        maxBuffer: CHECKS_EVIDENCE_GH_LOG_MAX_BUFFER,
+      });
       // NOT-276: search before truncating — the full fetched log feeds
       // `buildFailureExcerpt`'s failure-pattern search, so an early failure is
       // never discarded by a small tail window. Only logs beyond the raw memory

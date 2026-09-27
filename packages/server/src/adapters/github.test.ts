@@ -15,6 +15,7 @@ import {
   CHECKS_EVIDENCE_MAX_EXCERPT_CHARS,
   CHECKS_EVIDENCE_MAX_EXCERPT_LINES,
   CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN,
+  CHECKS_EVIDENCE_GH_LOG_MAX_BUFFER,
   CHECKS_FAILURE_GENERIC_REASON,
   PR_VIEW_FIELDS,
   type GithubAdapter,
@@ -57,16 +58,22 @@ test("summarizeChecks accepts neutral/skipped as success but fails closed on an 
 });
 
 /** Records every `gh` invocation and returns responses off a queue — never calls real `gh`. */
-function queuedExec(responses: Array<{ stdout?: string; error?: string }>): { exec: GhExec; calls: string[][] } {
+function queuedExec(responses: Array<{ stdout?: string; error?: string }>): {
+  exec: GhExec;
+  calls: string[][];
+  execOpts: Array<{ cwd: string; maxBuffer?: number }>;
+} {
   const calls: string[][] = [];
+  const execOpts: Array<{ cwd: string; maxBuffer?: number }> = [];
   const queue = [...responses];
-  const exec: GhExec = async (args) => {
+  const exec: GhExec = async (args, opts) => {
     calls.push(args);
+    execOpts.push(opts);
     const next = queue.shift() ?? { stdout: "" };
     if (next.error != null) throw Object.assign(new Error(next.error), { stderr: next.error });
     return { stdout: next.stdout ?? "" };
   };
-  return { exec, calls };
+  return { exec, calls, execOpts };
 }
 
 test("viewPr looks up the PR explicitly by branch, never a bare `gh pr view`", async () => {
@@ -749,6 +756,27 @@ test("NOT-276: log larger than the raw memory ceiling stays bounded without cras
   // The excerpt is built from the kept tail portion, never the discarded head.
   assert.equal(evidence.excerpt, buildFailureExcerpt(log.slice(-CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN)).excerpt);
   assert.match(evidence.excerpt, new RegExp(`pad pad ${count - 1}`));
+});
+
+test("NOT-276 round 3: run-log fetch carries an explicit maxBuffer above the raw ceiling", async () => {
+  // Node's execFile defaults to ~1 MiB maxBuffer, which would reject any larger
+  // --log-failed output with ERR_CHILD_PROCESS_STDIO_MAXBUFFER before the 2MB
+  // raw-log ceiling applies. The fetch must pass an explicit buffer above the
+  // ceiling so the ceiling — not the process buffer — bounds memory.
+  assert.ok(
+    CHECKS_EVIDENCE_GH_LOG_MAX_BUFFER > CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN,
+    "maxBuffer must sit above the raw-log ceiling"
+  );
+  const { exec, calls, execOpts } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("verify", "FAILURE", "111")]) },
+    { stdout: "verify log\nError: boom\n" },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  assert.deepEqual(calls[1], ["run", "view", "111", "--log-failed"]);
+  assert.equal(execOpts[1]?.maxBuffer, CHECKS_EVIDENCE_GH_LOG_MAX_BUFFER);
+  // The small pr-view lookup needs no oversized buffer.
+  assert.ok(execOpts[0]?.maxBuffer == null, "pr view must not carry the log buffer");
 });
 
 test("NOT-252: formatChecksFailureDetails labels the excerpt as untrusted, not instructions", async () => {
