@@ -129,12 +129,6 @@ const commitingSpawn: SpawnFn = async (input) => {
 /** Never touches the worktree — nothing to push, the no_pr outcome. */
 const noopSpawn: SpawnFn = async () => ({ exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false });
 
-/** Leaves an untracked file uncommitted — the dirty_worktree outcome. */
-const dirtySpawn: SpawnFn = async (input) => {
-  fs.writeFileSync(path.join(input.cwd, "scratch.txt"), "oops\n");
-  return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false };
-};
-
 const crashingSpawn: SpawnFn = async () => ({ exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: false });
 const timedOutSpawn: SpawnFn = async () => ({ exitCode: 1, transcript: "", logPath: "/dev/null", timedOut: true });
 
@@ -294,9 +288,23 @@ test("the branch created on a retried round is reused, not re-created — no 'br
   assert.doesNotMatch(prompts[1], /fresh branch/);
 });
 
-test("dirty_worktree: an uncommitted file escalates without consuming a round", async () => {
+test("dirty_worktree: an uncommitted file whose salvage commit fails escalates without consuming a round", async () => {
+  // NOT-275: a clean exit (exitCode 0) that leaves the worktree dirty is salvaged
+  // first — escalation only happens when the salvage commit itself fails. Force
+  // that failure with a rejecting pre-commit hook (same technique as the NOT-145
+  // salvage-failure test).
   const issueId = await makeIssue();
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: dirtySpawn, github: fakeGithub() }));
+  const salvageBlockedSpawn: SpawnFn = async (input) => {
+    fs.writeFileSync(path.join(input.cwd, "scratch.txt"), "oops\n");
+    const common = git(input.cwd, "rev-parse", "--git-common-dir");
+    const hooks = path.isAbsolute(common) ? path.join(common, "hooks") : path.join(input.cwd, common, "hooks");
+    fs.mkdirSync(hooks, { recursive: true });
+    const hookPath = path.join(hooks, "pre-commit");
+    fs.writeFileSync(hookPath, "#!/bin/sh\necho salvage-blocked >&2\nexit 1\n");
+    fs.chmodSync(hookPath, 0o755);
+    return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: salvageBlockedSpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -305,9 +313,101 @@ test("dirty_worktree: an uncommitted file escalates without consuming a round", 
   assert.equal(issue.currentRound, 1, "dirty worktree never consumes a round");
   const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation");
   assert.ok(action, "expected a policy_escalation human action");
-  // NOT-145 / NOT-137: exit-0 dirty escalations carry path + recovery like worktree_conflict.
+  assert.match(action!.reason, /Auto-commit salvage failed|salvage-blocked/i);
+  // NOT-145 / NOT-137: dirty escalations carry path + recovery like worktree_conflict.
   assert.match(action!.reason, /Recovery:/);
   assert.match(action!.reason, /git status/);
+
+  // Cleanup hook so later tests in this file aren't poisoned (worktrees share
+  // .git/hooks via the common dir).
+  const round1 = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  const leftover = roleWorktreePath(repo, round1.id, "developer");
+  assert.ok(fs.existsSync(path.join(leftover, "scratch.txt")), "failed salvage must not wipe WIP");
+  const common = git(repo, "rev-parse", "--git-common-dir");
+  const hooks = path.isAbsolute(common) ? path.join(common, "hooks") : path.join(repo, common, "hooks");
+  fs.rmSync(path.join(hooks, "pre-commit"), { force: true });
+  fs.rmSync(leftover, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+test("NOT-275: a clean exit that leaves tracked + untracked changes salvages a checkpoint and proceeds to push/PR", async () => {
+  // The session exits 0 (not timed out, no usage cap) but never ran `git commit`.
+  // The effect must auto-commit the WIP as a salvage checkpoint on the issue
+  // branch and continue exactly as if the agent had committed the work itself —
+  // it must NOT return kind: "dirty_worktree".
+  const issueId = await makeIssue();
+  const cleanExitDirtySpawn: SpawnFn = async (input) => {
+    fs.appendFileSync(path.join(input.cwd, "README.md"), "more docs\n");
+    fs.writeFileSync(path.join(input.cwd, "feature.txt"), "implemented\n");
+    return { exitCode: 0, transcript: "Implementation conclusion: added the widget.", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: cleanExitDirtySpawn, github: fakeGithub() }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "salvaged clean-exit work proceeds to push/PR like a self-committed session");
+  assert.equal(issue.currentRound, 1);
+  assert.ok(issue.headSha, "push happened — head SHA recorded");
+  assert.ok(issue.prNumber, "draft PR opened");
+  assert.equal(git(repo, "ls-remote", "origin", `refs/heads/${issue.branch}`).length > 0, true);
+  const branch = issueBranchName(issueId);
+  assert.equal(git(repo, "log", "-1", "--pretty=%s", branch), "wip: crash salvage");
+  assert.ok(git(repo, "show", `${branch}:feature.txt`).includes("implemented"), "untracked WIP is in the salvage tip");
+  assert.ok(git(repo, "show", `${branch}:README.md`).includes("more docs"), "tracked WIP is in the salvage tip");
+
+  const dev = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  assert.equal(dev.status, "done");
+  assert.ok(!listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"), "no dirty_worktree escalation");
+
+  // Deliverable 1: the salvage path emits the commit checkpoint evidence event.
+  const salvageCommits = listWorkflowEventsForIssue(issueId)
+    .filter((e) => e.type === "checkpoint.observed")
+    .map((e) => JSON.parse(e.payloadJson!) as Record<string, unknown>)
+    .filter((p) => p.kind === "commit" && p.origin === "salvage");
+  assert.equal(salvageCommits.length, 1, "salvage emits exactly one salvage-origin commit checkpoint");
+  assert.equal(salvageCommits[0]!.observedSha, issue.headSha, "the checkpoint vouches for the salvaged tip");
+});
+
+test("NOT-275: a clean exit with dirty worktree still returns dirty_worktree when the salvage commit itself fails", async () => {
+  const issueId = await makeIssue();
+  const failingSalvageSpawn: SpawnFn = async (input) => {
+    fs.appendFileSync(path.join(input.cwd, "README.md"), "more docs\n");
+    fs.writeFileSync(path.join(input.cwd, "feature.txt"), "implemented\n");
+    // Reject the coordinator's salvage commit so we exercise the escalate-and-preserve path.
+    const common = git(input.cwd, "rev-parse", "--git-common-dir");
+    const hooks = path.isAbsolute(common) ? path.join(common, "hooks") : path.join(input.cwd, common, "hooks");
+    fs.mkdirSync(hooks, { recursive: true });
+    const hookPath = path.join(hooks, "pre-commit");
+    fs.writeFileSync(hookPath, "#!/bin/sh\necho salvage-blocked >&2\nexit 1\n");
+    fs.chmodSync(hookPath, 0o755);
+    return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: failingSalvageSpawn, github: fakeGithub() })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.currentRound, 1, "dirty worktree never consumes a round");
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation");
+  assert.ok(action, "expected a policy_escalation human action");
+  assert.match(action!.reason, /Auto-commit salvage failed|salvage-blocked/i);
+  assert.match(action!.reason, /Recovery:/);
+  assert.match(action!.reason, /git status/);
+
+  const round1 = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  const leftover = roleWorktreePath(repo, round1.id, "developer");
+  assert.ok(fs.existsSync(path.join(leftover, "feature.txt")), "failed salvage must not wipe WIP");
+
+  // Cleanup hook so later tests in this file aren't poisoned.
+  const common = git(repo, "rev-parse", "--git-common-dir");
+  const hooks = path.isAbsolute(common) ? path.join(common, "hooks") : path.join(repo, common, "hooks");
+  fs.rmSync(path.join(hooks, "pre-commit"), { force: true });
+  fs.rmSync(leftover, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
 });
 
 test("session_failed: the agent process exits non-zero — retried like no_pr", async () => {
@@ -1065,11 +1165,22 @@ test("NOT-88: a leftover clean worktree from a resolved unpushed_commit escalati
 test("NOT-88: a leftover dirty worktree escalates as an actionable worktree_conflict on every Resume — no infra budget burned, no opaque crash loop", async () => {
   const issueId = await makeIssue();
 
-  // Round 1 exits 0 but leaves the worktree dirty — dirty_worktree escalation preserves the
-  // checkout (NOT-145 salvage applies only to timeout/crash infra deaths). That leftover is
+  // Round 1 exits 0 but leaves the worktree dirty with salvage blocked (NOT-275
+  // salvages clean-exit dirt first, so a rejecting pre-commit hook forces the
+  // dirty_worktree escalation that preserves the checkout). That leftover is
   // the setup NOT-88's collision needs: round 2 must find that SAME dirty leftover still
   // holding the branch.
-  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: dirtySpawn, github: fakeGithub() }));
+  const salvageBlockedDirtySpawn: SpawnFn = async (input) => {
+    fs.writeFileSync(path.join(input.cwd, "scratch.txt"), "oops\n");
+    const common = git(input.cwd, "rev-parse", "--git-common-dir");
+    const hooks = path.isAbsolute(common) ? path.join(common, "hooks") : path.join(input.cwd, common, "hooks");
+    fs.mkdirSync(hooks, { recursive: true });
+    const hookPath = path.join(hooks, "pre-commit");
+    fs.writeFileSync(hookPath, "#!/bin/sh\necho salvage-blocked >&2\nexit 1\n");
+    fs.chmodSync(hookPath, 0o755);
+    return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: salvageBlockedDirtySpawn, github: fakeGithub() }));
   startWorkflow(issueId);
   await pump(1);
 
@@ -1099,6 +1210,11 @@ test("NOT-88: a leftover dirty worktree escalates as an actionable worktree_conf
   assert.match(secondAction.reason, /uncommitted changes/);
   assert.match(secondAction.reason, new RegExp(leftoverPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 
+  // Cleanup the salvage-blocking hook too (worktrees share .git/hooks via the
+  // common dir — leaving it would reject commits in every later test).
+  const commonDir = git(repo, "rev-parse", "--git-common-dir");
+  const hooksDir = path.isAbsolute(commonDir) ? path.join(commonDir, "hooks") : path.join(repo, commonDir, "hooks");
+  fs.rmSync(path.join(hooksDir, "pre-commit"), { force: true });
   fs.rmSync(leftoverPath, { recursive: true, force: true });
   await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
 });
@@ -1893,7 +2009,10 @@ test("NOT-130: a green suite on a dirty worktree is not persisted as tip evidenc
     false,
     "dirty tree must not mint a tip-scoped verification receipt"
   );
-  assert.equal(getIssue(issueId)!.status, "needs_human");
+  // NOT-275: the post-suite dirt is salvaged and the handoff proceeds (the receipt
+  // check above stays the point of this test — the suite ran on a dirty tree, so
+  // no tip-scoped receipt may exist even after the salvaged push/PR).
+  assert.equal(getIssue(issueId)!.status, "reviewing");
 });
 
 test("NOT-130: checks_failed retry does not carry a prior green receipt into the prompt", async () => {

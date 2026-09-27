@@ -1420,13 +1420,40 @@ export async function runDeveloperEffect(
       blobPath: spawned.logPath,
     });
 
+    // NOT-275: a clean exit (exitCode 0, not timed out, no usage cap) that leaves
+    // the worktree dirty hit the same escalation as a crash before this — the
+    // session did real ticket-scoped work but never ran `git commit`. Salvage
+    // first (same mechanism as the crash/timeout path above): on success fall
+    // through to push/PR as if the agent had committed itself; only when the
+    // salvage commit itself fails do we escalate dirty_worktree with recovery.
     if (!(await isWorktreeClean(worktreePath))) {
-      return {
-        kind: "dirty_worktree",
-        reason: reasonForDirtyWorktree(spawned.logPath, runtime),
-        path: worktreePath,
-        recoveryCommands: dirtyWorktreeRecoveryCommands(repoPath, worktreePath),
-      };
+      const salvaged = await salvageDirtyWorktree(worktreePath, "crash");
+      if (!salvaged.ok) {
+        return {
+          kind: "dirty_worktree",
+          reason: `${reasonForDirtyWorktree(spawned.logPath, runtime)} Auto-commit salvage failed: ${salvaged.reason}`,
+          path: worktreePath,
+          recoveryCommands: dirtyWorktreeRecoveryCommands(repoPath, worktreePath),
+        };
+      }
+      // NOT-172: durable salvage-commit checkpoint at the existing success point.
+      try {
+        emitCheckpointObserved({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          workerSessionId: sessionId,
+          role: "developer",
+          stage,
+          round,
+          kind: "commit",
+          observedSha: salvaged.commitSha,
+          origin: "salvage",
+          inputSha: samplerInputSha,
+          branch: branchName,
+        });
+      } catch {
+        // checkpoint evidence must never fail the attempt itself
+      }
     }
 
     const ahead = await commitsAhead({ worktreePath, baseRef: `origin/${baseBranch}` });
