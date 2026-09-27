@@ -34,7 +34,14 @@ jobs:
         run: npm run typecheck
 
       - name: Unit tests
+        id: unit
         run: npm run test:unit
+
+      # NOT-274: verify "pre-existing failure" claims against the merge-base.
+      # Gated on the Unit tests outcome: skipped (zero cost/noise) on green.
+      - name: Verify baseline failures
+        if: steps.unit.outcome == 'failure'
+        run: bash scripts/verify-baseline-failures.sh
 
       # NOT-71: flow:verify drove the deleted plan/execute product. The boot + /health
       # check it depended on is kept on its own — it still catches a server that cannot start.
