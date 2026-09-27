@@ -10,6 +10,7 @@ Patch over 1.2.3: Claude and Muse capacity refresh reliability fix.
 
 ### Fixes
 
+- **Claude capacity paid fallback is now default-on instead of opt-in** — the 1h-stale, single-flighted, backed-off (60m→8h) minimal-cost probe introduced in 1.2.3 now runs by default; set `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` to disable spending (previously required an explicit `=paid-after-1h` to enable it).
 - **Muse 5H/1W no longer stays N/A after the free host loses its observation** — capacity refresh now tries the existing no-cost same-host read first, then defaults to one restricted minimal paid turn only when either window has been unavailable or stale for an hour. The fallback is background, single-flight, time-bounded, backed off through eight hours after failures, and preserves last-good values; `AGENT_DEALER_MUSE_CAPACITY_REFRESH=off` disables it, and `agent-dealer doctor` warns whenever the paid fallback is armed.
 
 ## 1.2.3 — 2026-09-26
@@ -19,7 +20,7 @@ Patch over 1.2.2: real desktop-backed Cursor Individual capacity, a free local C
 ### Features
 
 - **Cursor Individual capacity reads the real desktop login (NOT-267, experimental)** — the opt-in adapter now resolves Cursor's own desktop `state.vscdb` login first (per-OS paths), falling back to the Agent `auth.json` credential; a usable login from either source wins, an unusable desktop login degrades to `unparsable`, and total absence skips the request entirely. `doctor` reports which source (if any) was found, with no paths or secrets printed.
-- **Claude capacity gets a free local cache with a paid one-hour fallback (NOT-268)** — `GET /api/runtime-capacity` now reads Claude's own on-disk utilization cache directly (no cost) and normalizes it onto the same account-wide 5H/1W window keys the event path already writes, so the freshest source always wins. When no sample is under an hour old, a default-on, single-flighted, backed-off (60m→8h) minimal-cost probe can refresh it; set `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` to disable spending. Every attempt is logged with cost/outcome, never prompt or output.
+- **Claude capacity gets a free local cache with a paid one-hour fallback (NOT-268)** — `GET /api/runtime-capacity` now reads Claude's own on-disk utilization cache directly (no cost) and normalizes it onto the same account-wide 5H/1W window keys the event path already writes, so the freshest source always wins. When no sample is under an hour old, an opt-in (`AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=paid-after-1h`), single-flighted, backed-off (60m→8h) minimal-cost probe can refresh it; every attempt is logged with cost/outcome, never prompt or output.
 - **Muse capacity moves onto an owned, long-lived host (NOT-269 research, NOT-270)** — research proved a one-shot `usage/read` can never observe real capacity, since Muse only reports usage to the serve host that ran the turn, and Dealer runs turns via short-lived `muse exec`. Capacity polling now maintains one server-owned `muse serve` host per process, ingests `usage/changed` as it arrives, and takes a throttled `usage/read` as the final read — newest-observed-wins, with honest `missing`/N/A until a real turn is routed through an owned host.
 
 ### UI
