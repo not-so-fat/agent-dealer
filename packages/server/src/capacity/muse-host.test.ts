@@ -31,6 +31,7 @@ import {
   refreshMuseCapacityFromHost,
   resetMuseCapacityHostForTests,
   resetMuseCapacityRefreshState,
+  resolveMuseHostCwd,
   shutdownMuseCapacityHost,
 } from "./muse-host.js";
 import {
@@ -520,6 +521,73 @@ test("prepareMuseServeHome links the ambient login, or records API-key auth", as
     fs.rmSync(path.dirname(keyHome.configHome), { recursive: true, force: true });
   }
   fs.rmSync(ambientRoot, { recursive: true, force: true });
+});
+
+test("NOT-273: the serve child spawns with an explicit cwd under the managed data dir", async () => {
+  const { EventEmitter } = await import("node:events");
+  const { getDataDir } = await import("../db/index.js");
+  const seen: Array<{ command: string; args: string[]; options: { cwd?: unknown } }> = [];
+  const hangingChild = () => {
+    const events = new EventEmitter();
+    const fake = {
+      stdin: { write: () => true, on: () => ({}) },
+      stdout: { on: () => ({}) },
+      stderr: { on: () => ({}) },
+      on: events.on.bind(events),
+      // The handshake never answers, but a kill() must still settle the
+      // child like a real process would — otherwise shutdown()'s teardown
+      // has nothing but its 2s unref'd SIGKILL-escalation timer to resolve
+      // on, which races the test runner's own event-loop bookkeeping and
+      // can cancel the test outright (see the child-ticket playbook gotcha:
+      // never await an infinite fake handler).
+      kill: () => {
+        fake.exitCode = 0;
+        queueMicrotask(() => events.emit("close"));
+        return true;
+      },
+      exitCode: null as number | null,
+    };
+    return fake as unknown as import("node:child_process").ChildProcess;
+  };
+  const host = new MuseCapacityHost({
+    command: process.execPath,
+    args: [FAKE],
+    env: { META_API_KEY: "test-fake-key" },
+    // Handshake never answers — start() still records the exact spawn options.
+    timeoutMs: 100,
+    spawnImpl: ((command: string, args: string[], options: { cwd?: unknown }) => {
+      seen.push({ command, args, options });
+      return hangingChild();
+    }) as unknown as typeof import("node:child_process").spawn,
+  });
+  // This test's fake spawn has no real child process, so nothing else keeps
+  // the event loop busy while the production code's handshake/kill timers
+  // (deliberately unref'd — a real server must never block on them) are
+  // pending. With zero other ref'd handles, some Node versions' test runner
+  // treats the loop as "drained" before those timers fire and cancels the
+  // test outright (cancelledByParent). A trivial ref'd keepalive avoids the
+  // race without touching the production unref'd-timer behavior being tested.
+  const keepalive = setInterval(() => {}, 10);
+  try {
+    // Missing (handshake timeout), not a spawn failure — the spawn happened.
+    assert.equal((await host.readUsage()).status, "missing");
+    assert.equal(seen.length, 1, "exactly one serve spawn");
+    const cwd = seen[0]!.options.cwd;
+    assert.equal(typeof cwd, "string", "spawn options include an explicit cwd");
+    const dir = cwd as string;
+    assert.ok(path.isAbsolute(dir), `cwd is absolute, got ${dir}`);
+    assert.notEqual(path.resolve(dir), path.resolve(process.cwd()), "cwd is not the ambient process cwd");
+    assert.ok(
+      dir.startsWith(`${getDataDir()}${path.sep}`),
+      `cwd lives under the managed data dir, got ${dir}`
+    );
+    assert.equal(path.basename(dir), "muse-host-home");
+    assert.ok(fs.existsSync(dir), "the dedicated cwd is created if missing");
+    assert.equal(resolveMuseHostCwd(), dir, "default cwd is the dedicated data-dir home");
+  } finally {
+    await host.shutdown();
+    clearInterval(keepalive);
+  }
 });
 
 test("no credential short-circuits to missing without spawning", async () => {
