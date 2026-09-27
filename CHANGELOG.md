@@ -4,6 +4,10 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.4 — 2026-09-27
+
+Patch over 1.2.3: Claude and Muse capacity refresh reliability fix.
+
 ### Fixes
 
 - **Muse 5H/1W no longer stays N/A after the free host loses its observation** — capacity refresh now tries the existing no-cost same-host read first, then defaults to one restricted minimal paid turn only when either window has been unavailable or stale for an hour. The fallback is background, single-flight, time-bounded, backed off through eight hours after failures, and preserves last-good values; `AGENT_DEALER_MUSE_CAPACITY_REFRESH=off` disables it, and `agent-dealer doctor` warns whenever the paid fallback is armed.
