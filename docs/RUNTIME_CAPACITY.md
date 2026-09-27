@@ -502,15 +502,30 @@ Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
   across concurrent readers; at most one attempt per account per 60 minutes,
   backing off exponentially (60m → 2h → 4h → 8h cap) on failure. Never
   retried per UI poll.
-- Argv (verified live at 2.1.283): `claude -p "/usage" --strict-mcp-config
-  --no-session-persistence --output-format stream-json --verbose
-  --max-budget-usd 0.01`. No `--model`/`--max-turns`/`--tools` — `/usage`
-  never reaches the model, so those flags are meaningless; `--max-budget-usd`
-  stays as a defensive cap only. `--bare` is deliberately avoided so the
-  account's ambient OAuth login applies (the probe must read the capacity of
-  the account it measures). The probe spawns `claude` directly in the OS
-  temp dir — never the coordinator, so no Dealer workflow/session row,
-  worktree, commit, PR, or queue event is created.
+- Argv (verified live at 2.1.283): `claude -p "/usage" --model haiku
+  --max-turns 1 --tools "" --strict-mcp-config --no-session-persistence
+  --output-format stream-json --verbose --max-budget-usd 0.01`. `--bare` is
+  deliberately avoided so the account's ambient OAuth login applies (the
+  probe must read the capacity of the account it measures). The probe
+  spawns `claude` directly in the OS temp dir — never the coordinator, so no
+  Dealer workflow/session row, worktree, commit, PR, or queue event is
+  created.
+- **Structural safeguards (2026-09-27 review hardening, PR #165):**
+  `--model`/`--max-turns`/`--tools` were initially dropped as meaningless —
+  `/usage` never reaches the model on 2.1.283 — but a reviewer correctly
+  flagged that as version-specific behavior, not a contract: on a different
+  CLI build where `/usage` fell through to a real prompt, dropping these
+  would remove the only bounds on cost/tool-use, and `--max-budget-usd`
+  alone is not sufficient (live proof #1 above shows ambient context can
+  blow the cap before the check fires). Verified live that keeping all
+  three does not break local resolution, so they stay as belt-and-braces:
+  cheapest model, exactly one turn, no tools. The result is additionally
+  checked before any ingestion: the stream must carry the local-command
+  marker (`local_command_run.command === "usage"`) and report exactly $0
+  cost, or the whole run is rejected (`not_local_command` /
+  `unexpected_cost`) — no windows are recorded, last-good rows are kept,
+  and failure backoff engages, so a future CLI behavior change is loud
+  instead of silently becoming a recurring paid probe again.
 - Success reads `usage_report.rate_limits.limits[]` directly from the stream
   (primary signal, present on every successful run) plus, as non-exclusive
   corroboration, any `rate_limit_event` and a re-read of the local cache

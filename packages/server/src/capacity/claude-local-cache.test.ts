@@ -419,7 +419,7 @@ test("default-on refresh suppresses a fresh sample; stale data triggers exactly 
   assert.ok(outcomes.every((o) => o.probed && o.ok));
 });
 
-test("probe argv pins the fixed /usage command, no MCP, no session, stream JSON, ≤$0.01 defensive cap", async () => {
+test("probe argv pins the fixed /usage command plus structural model-turn safeguards", async () => {
   fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS - 61 * 60_000));
   assert.equal(ingestClaudeLocalCache(NOW_MS), 2);
   let seenBin = "";
@@ -437,6 +437,12 @@ test("probe argv pins the fixed /usage command, no MCP, no session, stream JSON,
   assert.deepEqual(seenArgv, [
     "-p",
     "/usage",
+    "--model",
+    "haiku",
+    "--max-turns",
+    "1",
+    "--tools",
+    "",
     "--strict-mcp-config",
     "--no-session-persistence",
     "--output-format",
@@ -445,12 +451,14 @@ test("probe argv pins the fixed /usage command, no MCP, no session, stream JSON,
     "--max-budget-usd",
     "0.01",
   ]);
-  // Semantic pins behind the exact match: no MCP config passed, no model
-  // turn flags (unnecessary — /usage never reaches the model), hard
-  // defensive budget cap.
+  // Semantic pins behind the exact match: no MCP config passed, cheapest
+  // model + hard one-turn bound + no tools kept as structural safeguards
+  // (2026-09-27 review hardening) even though `/usage` never reaches the
+  // model on 2.1.283, plus the defensive budget cap.
   assert.ok(!seenArgv.includes("--mcp-config"));
-  assert.ok(!seenArgv.includes("--model"));
-  assert.ok(!seenArgv.includes("--max-turns"));
+  assert.equal(seenArgv[seenArgv.indexOf("--model") + 1], "haiku");
+  assert.equal(seenArgv[seenArgv.indexOf("--max-turns") + 1], "1");
+  assert.equal(seenArgv[seenArgv.indexOf("--tools") + 1], "");
   const budget = Number(seenArgv[seenArgv.indexOf("--max-budget-usd") + 1]);
   assert.ok(Number.isFinite(budget) && budget <= 0.01);
   assert.equal(seenArgv.filter((a) => a === "-p").length, 1);
@@ -465,7 +473,7 @@ test("probe success updates both 5H and 1W and records cost without prompt/outpu
   assert.equal(ingestClaudeLocalCache(NOW_MS), 2);
   const marker = "probe-stream-marker-must-never-reach-log";
   const runner: ProbeRunner = async () => ({
-    stdout: `${probeStreamFixture(new Date(NOW_MS).toISOString(), 0.0007)}\n${JSON.stringify({ type: "assistant", text: marker })}`,
+    stdout: `${probeStreamFixture(new Date(NOW_MS).toISOString())}\n${JSON.stringify({ type: "assistant", text: marker })}`,
     exitCode: 0,
     timedOut: false,
     spawnError: null,
@@ -473,29 +481,100 @@ test("probe success updates both 5H and 1W and records cost without prompt/outpu
   const result = await runClaudeCapacityProbe(NOW_MS, { runner });
   assert.equal(result.ok, true);
   assert.equal(result.failureKind, null);
-  assert.equal(result.costUsd, 0.0007);
+  assert.equal(result.costUsd, 0);
   assert.deepEqual(result.windowsUpdated, ["claude_unified_five_hour", "claude_unified_seven_day"]);
   const rows = listCapacitySnapshots("claude_code");
   assert.equal(rows.find((r) => r.providerBucket === "five_hour")!.remainingPercent, 80);
   assert.equal(rows.find((r) => r.providerBucket === "seven_day")!.remainingPercent, 60);
   assert.equal(rows.find((r) => r.providerBucket === "five_hour")!.observedAt, new Date(NOW_MS).toISOString());
   const logText = fs.readFileSync(probeDiagnosticLogPath(), "utf8");
-  assert.ok(logText.includes('"costUsd":0.0007'));
+  assert.ok(logText.includes('"costUsd":0'));
   assert.ok(!logText.includes("Reply with exactly"));
   assert.ok(!logText.includes(marker));
 });
 
-test("probe success via the cache side effect when the stream carries no windows", async () => {
+test("probe rejects and ingests nothing when the result reports nonzero cost", async () => {
+  // Reviewer-requested hardening (PR #165): any charge means /usage did not
+  // resolve locally as expected — reject the whole run rather than trusting
+  // windows a real (unexpected) model turn happened to produce.
   process.env[CLAUDE_CAPACITY_REFRESH_ENV] = "paid-after-1h";
   fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS - 61 * 60_000));
-  // The stream is empty but the probe run itself refreshes Claude's own
-  // cache file — the re-read must count as success.
+  assert.equal(ingestClaudeLocalCache(NOW_MS), 2);
+  const runner: ProbeRunner = async () => ({
+    stdout: probeStreamFixture(new Date(NOW_MS).toISOString(), 0.0007),
+    exitCode: 0,
+    timedOut: false,
+    spawnError: null,
+  });
+  const result = await runClaudeCapacityProbe(NOW_MS, { runner });
+  assert.equal(result.ok, false);
+  assert.equal(result.failureKind, "unexpected_cost");
+  assert.equal(result.costUsd, 0.0007);
+  assert.deepEqual(result.windowsUpdated, []);
+  // Last-good rows from before the rejected run are untouched.
+  const rows = listCapacitySnapshots("claude_code");
+  assert.equal(rows.find((r) => r.providerBucket === "five_hour")!.remainingPercent, 83);
+});
+
+test("probe rejects and ingests nothing when the local-command marker is absent", async () => {
+  // Reviewer-requested hardening (PR #165): a stream that never shows
+  // `/usage` resolving locally must not be trusted, even if it happens to
+  // carry a well-formed usage_report (e.g. a different CLI build echoing it
+  // from a real turn) or a fresh cache-file side effect.
+  process.env[CLAUDE_CAPACITY_REFRESH_ENV] = "paid-after-1h";
+  fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS - 61 * 60_000));
+  assert.equal(ingestClaudeLocalCache(NOW_MS), 2);
+  const runner: ProbeRunner = async () => {
+    fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS + 5_000));
+    return {
+      stdout: [
+        JSON.stringify({
+          type: "assistant",
+          timestamp: new Date(NOW_MS).toISOString(),
+          usage_report: {
+            rate_limits: { limits: [{ kind: "session", percent: 20, resets_at: null }] },
+          },
+        }),
+        JSON.stringify({ type: "result", is_error: false, total_cost_usd: 0 }),
+      ].join("\n"),
+      exitCode: 0,
+      timedOut: false,
+      spawnError: null,
+    };
+  };
+  const result = await runClaudeCapacityProbe(NOW_MS, { runner });
+  assert.equal(result.ok, false);
+  assert.equal(result.failureKind, "not_local_command");
+  assert.deepEqual(result.windowsUpdated, []);
+  const rows = listCapacitySnapshots("claude_code");
+  assert.equal(rows.find((r) => r.providerBucket === "five_hour")!.remainingPercent, 83);
+});
+
+test("probe success via the cache side effect when usage_report carries no windows", async () => {
+  process.env[CLAUDE_CAPACITY_REFRESH_ENV] = "paid-after-1h";
+  fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS - 61 * 60_000));
+  // The local-command marker is present (so the run is trusted) and cost is
+  // $0, but usage_report carries no usable limits[] — the cache re-read
+  // (the probe run itself refreshes Claude's own cache file) still counts
+  // as corroborating success.
   const runner: ProbeRunner = async () => {
     // A real probe refreshes Claude's own cache file while it runs, so the
     // new `fetchedAtMs` is later than the pre-spawn `NOW_MS` stamp — the
     // post-spawn re-read must accept it, not reject it as future.
     fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS + 5_000));
-    return { stdout: "", exitCode: 0, timedOut: false, spawnError: null };
+    return {
+      stdout: [
+        JSON.stringify({
+          type: "assistant",
+          timestamp: new Date(NOW_MS).toISOString(),
+          local_command_run: { command: "usage", args: "" },
+        }),
+        JSON.stringify({ type: "result", is_error: false, total_cost_usd: 0 }),
+      ].join("\n"),
+      exitCode: 0,
+      timedOut: false,
+      spawnError: null,
+    };
   };
   const result = await runClaudeCapacityProbe(NOW_MS, { runner });
   assert.equal(result.ok, true);
@@ -518,7 +597,9 @@ test("probe failure preserves last-good rows and enters bounded backoff", async 
   const first = await maybeProbeClaudeCapacity(NOW_MS, { runner: failing });
   assert.equal(first.probed, true);
   assert.equal(first.ok, false);
-  assert.equal(first.failureKind, "nonzero_exit");
+  // Unparsable stdout ("not-json") means no local-command marker is found —
+  // that check runs before the nonzero-exit fallback.
+  assert.equal(first.failureKind, "not_local_command");
   // Last-good rows are untouched by the failed probe (0.17 used → 83 left).
   const rows = listCapacitySnapshots("claude_code");
   assert.equal(rows.find((r) => r.providerBucket === "five_hour")!.remainingPercent, 83);

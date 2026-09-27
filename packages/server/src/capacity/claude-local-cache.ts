@@ -75,14 +75,22 @@
 // - `-p "/usage"` — the fixed local slash-command; never interpolated, never
 //   a natural-language prompt. Resolved entirely locally: no model call, no
 //   tokens, no cost.
+// - `--model haiku` + `--max-turns 1` + `--tools ""` — structural safeguards
+//   kept even though `/usage` never reaches the model on 2.1.283: verified
+//   live that they do not break local resolution, and they bound the
+//   (unobserved) case where a different CLI build makes `/usage` fall
+//   through to a real prompt (2026-09-27 review hardening — see
+//   `buildClaudeProbeArgv`).
 // - `--strict-mcp-config` (with no `--mcp-config`) — no MCP servers loaded.
 // - `--no-session-persistence` — the probe leaves no resumable session.
 // - `--output-format stream-json` (+ `--verbose`, matching Dealer's own
 //   stream-json parsing) so the `usage_report` and any `rate_limit_event`s
 //   can be ingested.
 // - `--max-budget-usd 0.01` — defensive belt-and-braces only: normal cost is
-//   exactly $0, but this caps the (unobserved) case where some future CLI
-//   version falls through to a real turn instead of the local command.
+//   exactly $0. Not sufficient alone (ambient context can blow the cap
+//   before the check fires — see live proof #1 below), so the result is
+//   also checked for the local-command marker and exactly-zero cost before
+//   it counts as success (`runClaudeCapacityProbe`).
 // - `--bare` is deliberately NOT used: it restricts auth to
 //   ANTHROPIC_API_KEY/apiKeyHelper and would bypass the account's OAuth
 //   login — the probe must read the capacity of the account it measures.
@@ -133,6 +141,9 @@ export const CLAUDE_PROBE_EVIDENCE_REF = "claude-probe:usage-command";
 /** Fixed local slash-command — asserted in tests; never interpolated, never
  * sent to the model (Claude Code resolves it locally, no API call). */
 export const CLAUDE_PROBE_PROMPT = "/usage";
+/** Cheapest supported model alias — structural safeguard only; see module
+ * header on why this stays even though `/usage` never reaches the model. */
+export const CLAUDE_PROBE_MODEL = "haiku";
 /** Defensive spend cap (USD) — normal cost is $0; see module header. */
 export const CLAUDE_PROBE_MAX_BUDGET_USD = 0.01;
 
@@ -209,15 +220,34 @@ export function claudeProbeTimeoutMs(): number {
 }
 
 /**
- * Fixed probe argv. Pinned by tests: the fixed local slash-command, no MCP,
- * no session persistence, stream JSON, defensive ≤$0.01 budget. No `--model`
- * or `--max-turns`/`--tools` — `/usage` resolves locally and never reaches
- * the model, so those flags are meaningless here (see module header).
+ * Fixed probe argv. Pinned by tests: the fixed local slash-command, cheapest
+ * model, hard one-turn bound, no tools, no MCP, no session persistence,
+ * stream JSON, defensive ≤$0.01 budget.
+ *
+ * Reviewer-requested hardening (2026-09-27, PR #165): `--model`/`--max-turns`/
+ * `--tools` were originally dropped as "meaningless" because `/usage` never
+ * reaches the model on 2.1.283 — but that is an empirical fact about one CLI
+ * version, not a contract. Verified live that keeping all three does not
+ * break local resolution (still `$0`, still `local_command: usage`), so they
+ * stay as structural bounds: if some other CLI build ever makes `/usage`
+ * fall through to a real prompt, the model is the cheapest alias, gets
+ * exactly one turn, and has no tools to call — the same belt-and-braces the
+ * original (abandoned) paid-turn design relied on. `--max-budget-usd` alone
+ * is not sufficient (this repo's own live proof showed ambient context can
+ * blow the cap before the check fires); see `runClaudeCapacityProbe` for the
+ * matching fail-closed checks on the result (local-command marker present,
+ * cost must be exactly $0).
  */
 export function buildClaudeProbeArgv(): string[] {
   return [
     "-p",
     CLAUDE_PROBE_PROMPT,
+    "--model",
+    CLAUDE_PROBE_MODEL,
+    "--max-turns",
+    "1",
+    "--tools",
+    "",
     "--strict-mcp-config",
     "--no-session-persistence",
     "--output-format",
@@ -551,7 +581,18 @@ export type ProbeFailureKind =
   | "spawn"
   | "timeout"
   | "nonzero_exit"
-  | "no_windows";
+  | "no_windows"
+  // Reviewer-requested (2026-09-27, PR #165): the stream never resolved
+  // `/usage` as a local command — on 2.1.283 this never happens, but if a
+  // different CLI build ever falls through to a real prompt, fail closed
+  // instead of trusting whatever signal it happened to produce.
+  | "not_local_command"
+  // The result reported nonzero cost. `/usage` costs exactly $0 whenever it
+  // resolves locally; any charge means the structural safeguards above did
+  // not prevent a real model turn. Treated as a failure (not success) even
+  // if windows were somehow produced, so backoff engages instead of quietly
+  // normalizing recurring spend.
+  | "unexpected_cost";
 
 export interface ProbeRunResult {
   ok: boolean;
@@ -571,6 +612,21 @@ function probeCostFromEvents(events: Array<Record<string, unknown>>): number | n
     if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) return cost;
   }
   return null;
+}
+
+/**
+ * True only when the stream shows `/usage` actually resolved as Claude
+ * Code's local command (`local_command_run.command === "usage"`) — the
+ * structural marker that the probe never reached the model. Absence means
+ * the CLI build in use does not behave like 2.1.283; the caller must not
+ * trust any windows the stream happens to carry (`not_local_command`).
+ */
+function hasLocalUsageCommandMarker(events: Array<Record<string, unknown>>): boolean {
+  return events.some((e) => {
+    const run = (e as { local_command_run?: unknown }).local_command_run;
+    if (!run || typeof run !== "object") return false;
+    return (run as Record<string, unknown>).command === "usage";
+  });
 }
 
 /**
@@ -670,13 +726,18 @@ function appendProbeDiagnostic(entry: Record<string, unknown>): void {
 }
 
 /**
- * Run one minimal FREE `/usage` probe and ingest whatever 5H/1W it yields:
- * primarily the local command's own `usage_report.rate_limits.limits[]`
- * (present on every successful run), plus any `rate_limit_event` the stream
- * happens to carry and a re-read of the local cache (the probe run itself
- * refreshes Claude's own cache file) as non-exclusive corroboration. Success
- * means the union covers both critical roles. Never throws; never creates
- * Dealer workflow/session rows, worktrees, commits, PRs, or queue events.
+ * Run one minimal FREE `/usage` probe and ingest whatever 5H/1W it yields.
+ * Fails closed before touching any of it unless the stream both carries the
+ * local-command marker (`local_command_run.command === "usage"`) and reports
+ * exactly $0 cost — the structural proof `/usage` actually resolved locally
+ * rather than falling through to a real (billable) model turn. Once that
+ * holds, success ingests primarily the local command's own
+ * `usage_report.rate_limits.limits[]` (present on every successful run),
+ * plus any `rate_limit_event` the stream happens to carry and a re-read of
+ * the local cache (the probe run itself refreshes Claude's own cache file)
+ * as non-exclusive corroboration; success means the union covers both
+ * critical roles. Never throws; never creates Dealer workflow/session rows,
+ * worktrees, commits, PRs, or queue events.
  */
 export async function runClaudeCapacityProbe(
   nowMs = Date.now(),
@@ -738,6 +799,17 @@ export async function runClaudeCapacityProbe(
     events = [];
   }
   const costUsd = probeCostFromEvents(events);
+  // Fail-closed structural checks (reviewer-requested, 2026-09-27, PR #165):
+  // the whole design rests on `/usage` resolving as a local command that
+  // never reaches the model. If either assumption is violated — no local-
+  // command marker in the stream, or any nonzero cost — reject the run
+  // entirely before ingesting anything from it, rather than trusting
+  // whatever windows a real (unexpected) model turn happened to produce.
+  // This also makes a future CLI-behavior change loud (backoff engages,
+  // logged as a distinct failure kind) instead of silently becoming a
+  // recurring paid probe again.
+  if (!hasLocalUsageCommandMarker(events)) return fail("not_local_command", { costUsd });
+  if (costUsd !== null && costUsd > 0) return fail("unexpected_cost", { costUsd });
   // Primary signal: the `/usage` local command's own structured result.
   // Present on every successful run (verified live) — most reliable source.
   let usageReportRoles = new Set<string>();
