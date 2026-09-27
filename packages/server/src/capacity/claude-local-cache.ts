@@ -1,14 +1,11 @@
 // packages/server/src/capacity/claude-local-cache.ts
 //
-// NOT-268: Claude account capacity — local-first source ladder with a
-// one-hour paid fallback.
+// NOT-268: Claude account capacity — local-first source ladder with a free
+// `/usage` refresh (corrected 2026-09-27; see below for what changed and why).
 //
 // Goal: keep Claude 5H/1W useful between Dealer runs. Production's last
 // Dealer-observed sample can be days old (no recent Dealer-managed Claude
-// run), while Claude Code itself maintains exact provider usage in the
-// `cachedUsageUtilization` key of `~/.claude.json` on every run — including
-// interactive runs outside Dealer. So the freshest valid observation wins
-// from this ladder:
+// run). The ladder:
 //
 //   1. Existing Dealer `rate_limit_event` ingestion (claude-events.ts — kept
 //      as-is, session-end, per-window newer-wins).
@@ -16,9 +13,37 @@
 //      `~/.claude.json` (this module — free, ingested on every capacity
 //      read; only that subtree is ever parsed, the rest of the config —
 //      accountUuid, email, credentials, projects — is never retained).
-//   3. One minimal bounded paid probe when every valid 5H/1W observation is
-//      older than 60 minutes. This is the default; operators can explicitly
-//      disable it with `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off`.
+//   3. One minimal FREE refresh when every valid 5H/1W observation is older
+//      than 60 minutes: `claude -p "/usage"`. This is the default behavior.
+//      Set `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` to disable it entirely
+//      — reading capacity then never spawns Claude. Unrecognized values also
+//      fail closed (stay disabled).
+//
+// 2026-09-27 correction (what changed and why): the original design for rung
+// 3 spawned a real one-turn model prompt (`claude -p "Reply with exactly: ok"
+// --model haiku ...`), assuming any `claude` invocation would emit a
+// `rate_limit_event` and/or refresh rung 2's cache file. A live proof against
+// a real account falsified both assumptions: three attempts each overspent
+// the $0.01 cap on ambient context alone (~11K cache-creation tokens before
+// the model could even answer), none emitted a `rate_limit_event`, and the
+// cache file was untouched afterward — a decompiled trace of the installed
+// CLI showed the cache write (`Juo()`) lives behind the interactive
+// usage/plan-limits fetch, not the ordinary chat-turn path. That path
+// initially looked unreachable from a headless probe, until a second live
+// test found the actual trigger: passing the **local slash-command**
+// `/usage` as the `-p` prompt. Claude Code resolves `/usage` as a local
+// command — no model call, `total_cost_usd: 0`, ~300ms — and its NDJSON
+// output carries the exact structured result Dealer needs directly, at
+// `usage_report.rate_limits.limits[]` (`{ kind: "session"|"weekly_all",
+// percent, resets_at, ... }` — the same shape rung 2 already parses from the
+// cache file's `limits[]`). It also performs the identical write rung 2
+// reads, confirmed by `cachedUsageUtilization.fetchedAtMs` changing on every
+// run. Verified reproducible across repeated live invocations. This is a
+// documented, user-facing CLI command (listed in the session's own
+// `slash_commands`), not an internal/undocumented surface, and it costs
+// nothing — so the refresh is back to default-on, and the diagnostic log
+// records real ~$0 outcomes instead of a `no_windows` failure streak. See
+// docs/RUNTIME_CAPACITY.md for the full writeup and both live proofs.
 //
 // Both file sources write the same `claude_unified_five_hour` /
 // `claude_unified_seven_day` window keys through the shared
@@ -26,7 +51,7 @@
 // automatic per window and an older cache can never clobber a newer event
 // (or vice versa). `source` stays `observed_event` for both; `evidenceRef`
 // tells them apart (`claude-session:unified-windows` vs
-// `claude-cache:cachedUsageUtilization` vs `claude-probe:minimal-print`).
+// `claude-cache:cachedUsageUtilization` vs `claude-probe:usage-command`).
 //
 // Local-cache safety: only the `cachedUsageUtilization` subtree
 // (`fetchedAtMs`, `utilization.five_hour`, `utilization.seven_day`,
@@ -42,34 +67,37 @@
 //   in (1, 100] read as percent. Anything else is malformed — rejected.
 // - `limits[]`: `{ kind|group: "session"|"weekly_all", percent: <0–100>,
 //   resets_at: <ISO-8601>, ... }`. Model-specific and overage entries are
-//   dropped — only the account-wide pair is ever normalized.
+//   dropped — only the account-wide pair is ever normalized. The `/usage`
+//   probe's `usage_report.rate_limits.limits[]` is this exact same shape and
+//   shares the same role mapping (`limitEntryRole`).
 //
-// Probe argv (verified live at 2.1.283 — `claude -p --max-turns 1 --model
-// <bogus>` parses flags and fails only on model resolution, spending
-// nothing, even though `--help` hides the flag):
-// - `--model haiku` — the cheapest supported alias (matches
-//   runners/models.ts `haiku` "latest alias").
-// - `--max-turns 1` — hard one-turn bound, belt-and-braces with the
-//   structural bound below.
-// - `--tools ""` + `--strict-mcp-config` (with no `--mcp-config`) — no tools,
-//   no MCP. With no tools the model cannot continue past its first response,
-//   the fixed minimal prompt asks for a single word, and
-//   `--max-budget-usd 0.01` hard-caps spend.
+// Probe argv (verified live at 2.1.283):
+// - `-p "/usage"` — the fixed local slash-command; never interpolated, never
+//   a natural-language prompt. Resolved entirely locally: no model call, no
+//   tokens, no cost.
+// - `--model haiku` + `--max-turns 1` + `--tools ""` — structural safeguards
+//   kept even though `/usage` never reaches the model on 2.1.283: verified
+//   live that they do not break local resolution, and they bound the
+//   (unobserved) case where a different CLI build makes `/usage` fall
+//   through to a real prompt (2026-09-27 review hardening — see
+//   `buildClaudeProbeArgv`).
+// - `--strict-mcp-config` (with no `--mcp-config`) — no MCP servers loaded.
 // - `--no-session-persistence` — the probe leaves no resumable session.
 // - `--output-format stream-json` (+ `--verbose`, matching Dealer's own
-//   stream-json parsing) so `rate_limit_event`s can be ingested.
+//   stream-json parsing) so the `usage_report` and any `rate_limit_event`s
+//   can be ingested.
+// - `--max-budget-usd 0.01` — defensive belt-and-braces only: normal cost is
+//   exactly $0. Not sufficient alone (ambient context can blow the cap
+//   before the check fires — see live proof #1 below), so the result is
+//   also checked for the local-command marker and exactly-zero cost before
+//   it counts as success (`runClaudeCapacityProbe`).
 // - `--bare` is deliberately NOT used: it restricts auth to
 //   ANTHROPIC_API_KEY/apiKeyHelper and would bypass the account's OAuth
-//   login — the probe must bill to the account whose capacity it measures.
+//   login — the probe must read the capacity of the account it measures.
 // - Ambient settings are kept (auth must resolve); no worktree is created
 //   (cwd is the OS temp dir) and nothing touches Dealer workflow/session
 //   rows, worktrees, commits, PRs, or queue events — the probe spawns
 //   `claude` directly, never through the coordinator.
-//
-// If a live proof ever shows the minimal probe does not reliably emit 5H/1W
-// (neither in its stream nor via the cache side effect), the probe is a
-// recurring paid no-op: disable the fallback and revise this ticket instead of
-// shipping it. The `no_windows` diagnostic below exists to make that visible.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -92,7 +120,12 @@ import type { AdapterReadResult, AdapterWindowReading } from "./adapter.js";
 /** Override for the Claude cache file (tests, smoke). */
 export const CLAUDE_CACHE_FILE_ENV = "AGENT_DEALER_CLAUDE_CACHE_FILE";
 
-/** Paid-fallback setting. Unset defaults to PAID_AFTER_1H; `off` disables it. */
+/**
+ * Refresh setting. Default ON (unset/empty, or the historical explicit
+ * `paid-after-1h` value — kept accepted for backward compat with 1.2.4
+ * configs, though the refresh is no longer paid). Only `off` (or any other
+ * unrecognized value) disables it, failing closed on typos.
+ */
 export const CLAUDE_CAPACITY_REFRESH_ENV = "AGENT_DEALER_CLAUDE_CAPACITY_REFRESH";
 export const CLAUDE_CAPACITY_REFRESH_PAID_VALUE = "paid-after-1h";
 export const CLAUDE_CAPACITY_REFRESH_OFF_VALUE = "off";
@@ -103,16 +136,18 @@ export const CLAUDE_PROBE_TIMEOUT_MS_DEFAULT = 90_000;
 
 /** Static evidence pointers — never credentials or raw payloads. */
 export const CLAUDE_CACHE_EVIDENCE_REF = "claude-cache:cachedUsageUtilization";
-export const CLAUDE_PROBE_EVIDENCE_REF = "claude-probe:minimal-print";
+export const CLAUDE_PROBE_EVIDENCE_REF = "claude-probe:usage-command";
 
-/** Cheapest supported model alias for the probe (cf. runners/models.ts). */
+/** Fixed local slash-command — asserted in tests; never interpolated, never
+ * sent to the model (Claude Code resolves it locally, no API call). */
+export const CLAUDE_PROBE_PROMPT = "/usage";
+/** Cheapest supported model alias — structural safeguard only; see module
+ * header on why this stays even though `/usage` never reaches the model. */
 export const CLAUDE_PROBE_MODEL = "haiku";
-/** Fixed minimal prompt — asserted in tests; never interpolated. */
-export const CLAUDE_PROBE_PROMPT = "Reply with exactly: ok";
-/** Hard spend cap for the probe (USD). */
+/** Defensive spend cap (USD) — normal cost is $0; see module header. */
 export const CLAUDE_PROBE_MAX_BUDGET_USD = 0.01;
 
-/** A 5H/1W observation newer than this suppresses the paid probe. */
+/** A 5H/1W observation newer than this suppresses the refresh. */
 export const CLAUDE_PROBE_STALE_AFTER_MS = 60 * 60 * 1000;
 /** Minimum gap between probe attempts (per account); failures back off. */
 export const CLAUDE_PROBE_ATTEMPT_COOLDOWN_MS = 60 * 60 * 1000;
@@ -185,9 +220,23 @@ export function claudeProbeTimeoutMs(): number {
 }
 
 /**
- * Fixed probe argv. Pinned by tests: the fixed minimal prompt, cheapest
- * model, `--max-turns 1`, no tools, no MCP, no session persistence, stream
- * JSON, ≤$0.01 budget.
+ * Fixed probe argv. Pinned by tests: the fixed local slash-command, cheapest
+ * model, hard one-turn bound, no tools, no MCP, no session persistence,
+ * stream JSON, defensive ≤$0.01 budget.
+ *
+ * Reviewer-requested hardening (2026-09-27, PR #165): `--model`/`--max-turns`/
+ * `--tools` were originally dropped as "meaningless" because `/usage` never
+ * reaches the model on 2.1.283 — but that is an empirical fact about one CLI
+ * version, not a contract. Verified live that keeping all three does not
+ * break local resolution (still `$0`, still `local_command: usage`), so they
+ * stay as structural bounds: if some other CLI build ever makes `/usage`
+ * fall through to a real prompt, the model is the cheapest alias, gets
+ * exactly one turn, and has no tools to call — the same belt-and-braces the
+ * original (abandoned) paid-turn design relied on. `--max-budget-usd` alone
+ * is not sufficient (this repo's own live proof showed ambient context can
+ * blow the cap before the check fires); see `runClaudeCapacityProbe` for the
+ * matching fail-closed checks on the result (local-command marker present,
+ * cost must be exactly $0).
  */
 export function buildClaudeProbeArgv(): string[] {
   return [
@@ -436,13 +485,15 @@ export function ingestClaudeLocalCache(nowMs = Date.now()): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// Paid fallback probe (enabled by default, explicit off switch)
+// Free `/usage` refresh (default on)
 // ---------------------------------------------------------------------------
 
 /**
- * Paid probing defaults on when the setting is absent/empty. The documented
- * `paid-after-1h` value is accepted explicitly; `off` and unrecognized values
- * disable spending so a typo never silently changes the configured policy.
+ * Refresh defaults ON when the setting is absent/empty. The historical
+ * `paid-after-1h` value is still accepted explicitly (it now just means
+ * "enabled" — the refresh costs nothing, see module header); `off` and
+ * unrecognized values disable it so a typo never silently changes the
+ * configured policy.
  */
 export function isClaudePaidFallbackEnabled(): boolean {
   const setting = process.env[CLAUDE_CAPACITY_REFRESH_ENV];
@@ -530,7 +581,22 @@ export type ProbeFailureKind =
   | "spawn"
   | "timeout"
   | "nonzero_exit"
-  | "no_windows";
+  | "no_windows"
+  // Reviewer-requested (2026-09-27, PR #165): the stream never resolved
+  // `/usage` as a local command — on 2.1.283 this never happens, but if a
+  // different CLI build ever falls through to a real prompt, fail closed
+  // instead of trusting whatever signal it happened to produce.
+  | "not_local_command"
+  // The result did not prove exactly $0 cost — either a positive charge, or
+  // `total_cost_usd` missing/unparsable so zero cannot be verified at all
+  // (reviewer-requested, 2026-09-27: an unverifiable cost must fail closed
+  // the same as a confirmed one — `costUsd === null` is not evidence of
+  // safety). `/usage` costs exactly $0 whenever it resolves locally; any
+  // other outcome means the structural safeguards above did not prevent (or
+  // cannot rule out) a real model turn. Treated as a failure even if windows
+  // were somehow produced, so backoff engages instead of quietly normalizing
+  // recurring spend.
+  | "unexpected_cost";
 
 export interface ProbeRunResult {
   ok: boolean;
@@ -550,6 +616,68 @@ function probeCostFromEvents(events: Array<Record<string, unknown>>): number | n
     if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) return cost;
   }
   return null;
+}
+
+/**
+ * True only when the stream shows `/usage` actually resolved as Claude
+ * Code's local command (`local_command_run.command === "usage"`) — the
+ * structural marker that the probe never reached the model. Absence means
+ * the CLI build in use does not behave like 2.1.283; the caller must not
+ * trust any windows the stream happens to carry (`not_local_command`).
+ */
+function hasLocalUsageCommandMarker(events: Array<Record<string, unknown>>): boolean {
+  return events.some((e) => {
+    const run = (e as { local_command_run?: unknown }).local_command_run;
+    if (!run || typeof run !== "object") return false;
+    return (run as Record<string, unknown>).command === "usage";
+  });
+}
+
+/**
+ * Extract account-wide 5H/1W readings directly from a `/usage` probe's
+ * stream: the local-command result event carries `usage_report.rate_limits.
+ * limits[]` in the exact shape (and role mapping via `limitEntryRole`) as
+ * the cache file's `limits[]` — see module header. This is the primary,
+ * most-reliable success signal for the probe (present on every successful
+ * `/usage` run, verified live); the rate_limit_event and cache-re-read
+ * checks below stay as additional, non-exclusive corroboration. Returns
+ * null when no usable account-wide window is present — never fabricated.
+ */
+export function extractClaudeUsageReportLimits(
+  events: Array<Record<string, unknown>>,
+  nowMs: number,
+  evidenceRef: string = CLAUDE_PROBE_EVIDENCE_REF
+): AdapterWindowReading[] | null {
+  let limits: unknown[] | null = null;
+  let eventTimestamp: string | null = null;
+  for (const e of events) {
+    const report = (e as { usage_report?: unknown }).usage_report;
+    if (!report || typeof report !== "object") continue;
+    const rateLimits = (report as Record<string, unknown>).rate_limits;
+    if (!rateLimits || typeof rateLimits !== "object") continue;
+    const l = (rateLimits as Record<string, unknown>).limits;
+    if (Array.isArray(l)) {
+      limits = l;
+      const ts = (e as { timestamp?: unknown }).timestamp;
+      eventTimestamp = typeof ts === "string" ? ts : null;
+    }
+  }
+  if (!limits) return null;
+  const parsedTsMs = eventTimestamp !== null ? Date.parse(eventTimestamp) : Number.NaN;
+  const observedMs = Number.isFinite(parsedTsMs) ? Math.min(parsedTsMs, nowMs) : nowMs;
+  const observedAt = new Date(observedMs).toISOString();
+  const byRole = new Map<"five_hour" | "weekly", AdapterWindowReading>();
+  for (const item of limits) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const w = item as Record<string, unknown>;
+    const name = pickString([w.kind, w.group, w.name, w.window, w.bucket, w.key, w.id]);
+    if (!name) continue;
+    const role = limitEntryRole(name);
+    if (!role || byRole.has(role)) continue;
+    const reading = cacheWindowReading(role, item, observedAt, observedMs, evidenceRef);
+    if (reading) byRole.set(role, reading);
+  }
+  return byRole.size > 0 ? [...byRole.values()] : null;
 }
 
 function rolesCoveredByReadings(readings: AdapterWindowReading[]): Set<string> {
@@ -602,12 +730,18 @@ function appendProbeDiagnostic(entry: Record<string, unknown>): void {
 }
 
 /**
- * Run one minimal bounded probe and ingest whatever 5H/1W it yields — first
- * the stream's `rate_limit_event`s, then a re-read of the local cache (the
- * probe run itself refreshes Claude's own cache file, so the side effect
- * counts even when the stream carries no windows). Success means the union
- * covers both critical roles. Never throws; never creates Dealer
- * workflow/session rows, worktrees, commits, PRs, or queue events.
+ * Run one minimal FREE `/usage` probe and ingest whatever 5H/1W it yields.
+ * Fails closed before touching any of it unless the stream both carries the
+ * local-command marker (`local_command_run.command === "usage"`) and reports
+ * exactly $0 cost — the structural proof `/usage` actually resolved locally
+ * rather than falling through to a real (billable) model turn. Once that
+ * holds, success ingests primarily the local command's own
+ * `usage_report.rate_limits.limits[]` (present on every successful run),
+ * plus any `rate_limit_event` the stream happens to carry and a re-read of
+ * the local cache (the probe run itself refreshes Claude's own cache file)
+ * as non-exclusive corroboration; success means the union covers both
+ * critical roles. Never throws; never creates Dealer workflow/session rows,
+ * worktrees, commits, PRs, or queue events.
  */
 export async function runClaudeCapacityProbe(
   nowMs = Date.now(),
@@ -654,7 +788,7 @@ export async function runClaudeCapacityProbe(
       ts: new Date(nowMs).toISOString(),
       event: "claude_capacity_probe",
       trigger: "stale_60m",
-      model: CLAUDE_PROBE_MODEL,
+      probeCommand: CLAUDE_PROBE_PROMPT,
       budgetUsd: CLAUDE_PROBE_MAX_BUDGET_USD,
       ...out,
     });
@@ -669,7 +803,35 @@ export async function runClaudeCapacityProbe(
     events = [];
   }
   const costUsd = probeCostFromEvents(events);
-  // Ingest the stream first (event timestamps clamp to nowMs inside).
+  // Fail-closed structural checks (reviewer-requested, 2026-09-27, PR #165):
+  // the whole design rests on `/usage` resolving as a local command that
+  // never reaches the model. If either assumption is violated — no local-
+  // command marker in the stream, or cost not provably exactly $0 — reject
+  // the run entirely before ingesting anything from it, rather than trusting
+  // whatever windows a real (unexpected) model turn happened to produce.
+  // `costUsd !== 0` (not `> 0`) is deliberate: `null` — a missing or
+  // unparsable `total_cost_usd` — is not evidence of zero cost either, and
+  // must fail closed exactly like a confirmed charge (second review round).
+  // This also makes a future CLI-behavior change loud (backoff engages,
+  // logged as a distinct failure kind) instead of silently becoming a
+  // recurring paid probe again.
+  if (!hasLocalUsageCommandMarker(events)) return fail("not_local_command", { costUsd });
+  if (costUsd !== 0) return fail("unexpected_cost", { costUsd });
+  // Primary signal: the `/usage` local command's own structured result.
+  // Present on every successful run (verified live) — most reliable source.
+  let usageReportRoles = new Set<string>();
+  try {
+    const usageWindows = extractClaudeUsageReportLimits(events, nowMs);
+    if (usageWindows) {
+      usageReportRoles = rolesCoveredByReadings(usageWindows);
+      recordClaudeWindowReadings(usageWindows, CLAUDE_RUNTIME, nowMs);
+    }
+  } catch {
+    // A broken stream must not fail the probe path — other checks below
+    // may still yield fresh rows.
+  }
+  // Secondary corroboration: any `rate_limit_event` the stream happens to
+  // carry (kept from the original NOT-248 event path; harmless if absent).
   let streamRoles = new Set<string>();
   try {
     const extracted = extractClaudeCapacityFromEvents(events, nowMs, nowMs);
@@ -702,12 +864,13 @@ export async function runClaudeCapacityProbe(
   } catch {
     // Advisory — stream coverage below still counts.
   }
-  const covered = new Set([...streamRoles, ...cacheRoles]);
+  const covered = new Set([...usageReportRoles, ...streamRoles, ...cacheRoles]);
   if (spawnResult.exitCode !== 0 && covered.size === 0) return fail("nonzero_exit", { costUsd });
   if (!covered.has("five_hour") || !covered.has("weekly")) {
-    // The probe spent money but produced no 5H/1W pair — a `no_windows`
-    // streak is the signal to disable the opt-in and revise the ticket
-    // rather than ship a recurring paid no-op.
+    // A `/usage` run should always carry both roles directly in
+    // `usage_report.rate_limits.limits[]` (verified live) — a `no_windows`
+    // streak here means something changed upstream and is worth revisiting,
+    // but since the refresh is free it is not itself a cost problem.
     return fail("no_windows", { costUsd });
   }
   const out: ProbeRunResult = {
@@ -724,7 +887,7 @@ export async function runClaudeCapacityProbe(
     ts: new Date(nowMs).toISOString(),
     event: "claude_capacity_probe",
     trigger: "stale_60m",
-    model: CLAUDE_PROBE_MODEL,
+    probeCommand: CLAUDE_PROBE_PROMPT,
     budgetUsd: CLAUDE_PROBE_MAX_BUDGET_USD,
     ...out,
   });
@@ -801,12 +964,12 @@ function probeCooldownMs(): number {
 }
 
 /**
- * On-demand paid fallback: when `claude_code` is configured and no valid
- * 5H/1W observation is newer than 60 minutes, run one minimal bounded probe
- * (single-flight across concurrent readers; at most one attempt per account
- * per 60 minutes, backing off exponentially on failure). Explicitly disabled
- * is a strict no-op — no spawn, no spend. Never throws, never touches Dealer
- * workflow/session state or `runtime_availability`.
+ * On-demand free `/usage` refresh: when `claude_code` is configured and no
+ * valid 5H/1W observation is newer than 60 minutes, run one minimal bounded
+ * probe (single-flight across concurrent readers; at most one attempt per
+ * account per 60 minutes, backing off exponentially on failure). Explicitly
+ * disabled is a strict no-op — no spawn at all. Never throws, never touches
+ * Dealer workflow/session state or `runtime_availability`.
  */
 export async function maybeProbeClaudeCapacity(
   nowMs = Date.now(),
@@ -861,8 +1024,8 @@ export async function maybeProbeClaudeCapacity(
 
 /**
  * Full on-demand refresh for `GET /api/runtime-capacity`: ingest the free
- * local cache first, then consider the paid probe. Best-effort — never
- * throws. The route serves the stored snapshot regardless.
+ * local cache first, then consider the free `/usage` probe. Best-effort —
+ * never throws. The route serves the stored snapshot regardless.
  */
 export async function refreshClaudeCapacityIfStale(
   nowMs = Date.now(),

@@ -16,8 +16,9 @@ process.env.AGENT_DEALER_SKIP_AGENT_HEALTH = "1";
 // Never spawn a real provider from route tests: the on-demand Codex refresh is
 // covered against the fake App Server in codex-app-server.test.ts.
 process.env.AGENT_DEALER_CODEX_CAPACITY_REFRESH = "off";
-// Claude's paid-after-1h fallback is default-on in production. Route tests
-// exercise stored/read behavior only and must never launch a real paid probe.
+// Claude's `/usage` refresh is free and default-on in production (fixed
+// 2026-09-27 — see docs/RUNTIME_CAPACITY.md); still disabled here so route
+// tests never spawn a real `claude` subprocess.
 process.env.AGENT_DEALER_CLAUDE_CAPACITY_REFRESH = "off";
 // Muse's one-hour fallback is also default-on; route tests cover the free
 // host trigger only and must never run a real model turn.
