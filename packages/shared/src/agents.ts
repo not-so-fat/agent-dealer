@@ -30,6 +30,12 @@ export const AgentHealthIssue = z.object({
      */
     "runtime_unknown",
     /**
+     * The runtime's reported version changed and its developer capability (Muse Code: shell/write
+     * access) is missing, not yet verified, or could not be verified on the new binary (NOT-277).
+     * The message names the old and new versions and the capability.
+     */
+    "runtime_capability",
+    /**
      * Cursor macOS keychain stuck (errSecDuplicateItem / exit 45) — sessions die mid-run
      * even when status briefly looked logged-in (NOT-114 / NOT-103).
      */

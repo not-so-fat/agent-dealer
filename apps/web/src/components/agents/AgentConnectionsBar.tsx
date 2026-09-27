@@ -18,6 +18,7 @@ function runtimeCliStatus(
       i.code === "cli_missing" ||
       i.code === "runtime_auth" ||
       i.code === "runtime_unknown" ||
+      i.code === "runtime_capability" ||
       i.code === "cursor_keychain"
   );
   if (blocker) return { ok: false, detail: blocker.message };

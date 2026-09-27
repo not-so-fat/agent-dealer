@@ -28,6 +28,12 @@ import {
   type DeckAccessResult,
 } from "./agent-deck.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
+import {
+  museCapabilityCheckInFlight,
+  museCapabilityIssues,
+  parseMuseVersion,
+  resetMuseCapabilityStateForTests,
+} from "./muse-capability.js";
 
 const RUNTIME_LABEL: Record<Runtime, string> = {
   claude_code: "Claude",
@@ -177,6 +183,7 @@ export function clearAgentHealthCaches(): void {
   githubIssueCache = null;
   cursorSoftFailStreak = 0;
   cursorLastHealthyAt = null;
+  resetMuseCapabilityStateForTests();
 }
 
 function isSoftCursorProbeIssue(issue: AgentHealthIssue): boolean {
@@ -279,6 +286,11 @@ async function cursorRuntimeIssues(): Promise<AgentHealthIssue[]> {
  * billed `muse exec`, so a *present* but expired login is not detectable here — it surfaces at
  * the first run, which the same classifier reads from stderr. `auth.json` is tested for
  * existence only, never read.
+ *
+ * NOT-277: with CLI and credentials present, the reported version is handed to the capability
+ * check — a version not yet checked runs one real developer-shell probe (muse-capability.ts);
+ * `runtime_capability` blocks while it runs, when it finds shell/write missing, or when it could
+ * not complete.
  */
 async function museRuntimeIssues(): Promise<AgentHealthIssue[]> {
   const bin = resolveMuseBin();
@@ -308,7 +320,17 @@ async function museRuntimeIssues(): Promise<AgentHealthIssue[]> {
   if (!process.env.META_API_KEY && !fs.existsSync(resolveMuseAuthFile())) {
     return [{ code: "runtime_auth", message: MUSE_AUTH_REMEDIATION }];
   }
-  return [];
+  const version = parseMuseVersion(ver.output);
+  if (!version) {
+    return [
+      {
+        code: "runtime_unknown",
+        message: "Could not determine Muse Code health — `muse --version` printed no version",
+      },
+    ];
+  }
+  // A settled check drops the cached result so admission sees it on its next health read.
+  return museCapabilityIssues(version, () => runtimeIssueCache.delete("muse_code"));
 }
 
 /** Exported for direct testing — bypasses the 60s cache in runtimeIssues(). */
@@ -546,7 +568,8 @@ async function runtimeIssues(runtime: Runtime): Promise<AgentHealthIssue[]> {
   // a sticky 60s cache of "Could not confirm" is what parked the queue after sleep (NOT-157).
   const softProbeFailure =
     nonCap.some(isSoftCursorProbeIssue) ||
-    (runtime === "cursor_local" && cursorSoftFailStreak > 0);
+    (runtime === "cursor_local" && cursorSoftFailStreak > 0) ||
+    (runtime === "muse_code" && museCapabilityCheckInFlight());
   runtimeIssueCache.set(runtime, { at: Date.now(), issues: nonCap, softProbeFailure });
   return [...capIssues, ...nonCap];
 }
