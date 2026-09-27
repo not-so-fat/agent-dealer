@@ -334,7 +334,6 @@ export function buildFailureExcerpt(combinedLog: string): { excerpt: string; tru
       taken.push([w.from, w.to]);
       used += size;
       usedChars += chars;
-      if (used >= CHECKS_EVIDENCE_MAX_EXCERPT_LINES) break;
     }
     taken.sort((a, b) => a[0] - b[0]);
     const picked: string[] = [];

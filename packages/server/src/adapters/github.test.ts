@@ -717,6 +717,32 @@ test("NOT-276 round 3: an earlier low-priority region must not crowd the real fa
   assert.equal(truncated, true, "dropping the lower-ranked region must be reported as truncation");
 });
 
+test("NOT-276: an exact line-budget fill still reports a later failure region as truncated", async () => {
+  // The A and B windows contain 39 and 40 lines respectively. With the separator
+  // between them, taking both fills the 80-line budget exactly. Region C is a real
+  // failure that must be omitted, and that omission must set truncated=true.
+  const ordinary = (label: string, count: number) =>
+    Array.from({ length: count }, (_, i) => `ok ${label}-${i + 1} - passing test`);
+  const regionA = Array.from({ length: 27 }, (_, i) => `not ok A-${i + 1} - strong failure A`);
+  const regionB = Array.from({ length: 28 }, (_, i) => `not ok B-${i + 1} - strong failure B`);
+  const lines = [
+    ...ordinary("prefix", 6),
+    ...regionA,
+    ...ordinary("gap-a-b", 13),
+    ...regionB,
+    ...ordinary("gap-b-c", 13),
+    "not ok C-1 - later real failure",
+    ...ordinary("suffix", 6),
+  ];
+
+  const { excerpt, truncated } = buildFailureExcerpt(lines.join("\n"));
+  assert.equal(excerpt.split("\n").length, CHECKS_EVIDENCE_MAX_EXCERPT_LINES);
+  assert.match(excerpt, /not ok A-1/);
+  assert.match(excerpt, /not ok B-1/);
+  assert.doesNotMatch(excerpt, /not ok C-1/);
+  assert.equal(truncated, true, "the omitted third failure region must be reported as truncation");
+});
+
 test("NOT-276: log with no failure-pattern hits still falls back to the tail, unchanged", async () => {
   // NB: this filler must stay free of FAILURE_LINE_PATTERN words — that absence is the no-hit premise.
   const log = Array.from({ length: 200 }, (_, i) => `ok ${i + 1} - passing test number ${i + 1}`).join("\n");
