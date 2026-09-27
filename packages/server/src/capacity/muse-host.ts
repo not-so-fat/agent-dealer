@@ -194,6 +194,19 @@ export class MuseCapacityHost {
     return !this.dead && this.child !== null && this.child.exitCode === null;
   }
 
+  /**
+   * True while a real execution turn (or its admission) is using the shared
+   * connection: an unanswered execution request id, or a live
+   * `turn/completed` subscriber. A capacity read must never tear the host
+   * down while this is true — on a fresh host the first turn is still
+   * unobserved, so an unconditional unobserved-host release would SIGTERM
+   * the admitted billable turn and fail it with 'no turn completion
+   * observed'.
+   */
+  hasInflightExecution(): boolean {
+    return this.pending.size > 0 || this.notifWaiters.size > 0;
+  }
+
   private mergedEnv(): NodeJS.ProcessEnv {
     return { ...process.env, ...this.opts.env };
   }
@@ -539,11 +552,14 @@ export class MuseCapacityHost {
       const outcome = await this.inflightRead;
       if (outcome.status === "observed") {
         this.observedOnConnection = true;
-      } else if (!this.observedOnConnection) {
+      } else if (!this.observedOnConnection && !this.hasInflightExecution()) {
         // The host observed nothing and holds no state worth keeping:
         // release the child instead of parking a lifetime process that
         // can only answer `missing`. The next refresh transparently
         // respawns it; last-good DB rows are untouched either way.
+        // Skipped while an execution turn is using the connection — the
+        // release must never SIGTERM an admitted turn (see
+        // hasInflightExecution).
         this.killChild();
       }
       return outcome;
@@ -575,7 +591,11 @@ export class MuseCapacityHost {
     }>(id, "usage/read", {}, timeoutMs);
     if (this.dead || !res) {
       console.error("[muse-capacity] host read failed: timeout");
-      this.killChild();
+      // Never tear down under an admitted turn: a capacity timeout must not
+      // become a turn failure. The turn's own timeout/cancel owns that
+      // verdict; the hung child is reaped when the turn settles or when a
+      // later read finds the connection idle.
+      if (!this.hasInflightExecution()) this.killChild();
       await noteMuseCapacityFailure("missing");
       return { status: "missing" };
     }

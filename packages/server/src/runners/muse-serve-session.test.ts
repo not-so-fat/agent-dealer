@@ -243,6 +243,43 @@ test("timeout cancels the turn and reports cancelled honestly", async () => {
   }
 });
 
+test("capacity read during a hanging turn never kills the admitted turn", async () => {
+  // Fresh host, first turn still unobserved: a concurrent GET
+  // /api/runtime-capacity refresh reads `missing` and must not release the
+  // shared host under the admitted billable turn (previously SIGTERMed it,
+  // failing the turn with 'no turn completion observed').
+  const host = new MuseCapacityHost(hostOpts("serve-turn-hang"));
+  try {
+    let admitted: () => void = () => {};
+    const admittedP = new Promise<void>((r) => {
+      admitted = r;
+    });
+    const turnP = runMuseServeTurn({
+      host,
+      prompt: "do the thing",
+      model: "test-model-x",
+      cwd: fs.mkdtempSync(path.join(os.tmpdir(), "muse-ws-")),
+      timeoutMs: 3000,
+      onAdmitted: () => admitted(),
+    });
+    await admittedP;
+    // Let the turn/completed subscription register before the read lands.
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(host.hasInflightExecution(), "turn holds the shared connection");
+    const outcome = await host.readUsage();
+    assert.equal(outcome.status, "missing");
+    assert.ok(host.isConnected(), "capacity read must not release the in-flight turn");
+    assert.equal(host.connectionEpoch, 1, "no restart while the turn runs");
+    const turn = await turnP;
+    assert.equal(turn.admitted, true);
+    assert.equal(turn.timedOut, true);
+    assert.equal(turn.terminal, "cancelled", "turn survives the read and settles on its own timeout");
+    assert.ok(host.isConnected(), "host reusable after the turn settles");
+  } finally {
+    await host.shutdown();
+  }
+});
+
 test("concurrent turns share one host connection", async () => {
   const host = new MuseCapacityHost(hostOpts("serve-turn-full"));
   try {
