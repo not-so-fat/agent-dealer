@@ -393,6 +393,67 @@ test("a stale child's late close cannot kill its replacement", async () => {
   }
 });
 
+// NOT-277: developer work is only served on a host known to run the capability-checked build.
+function versionedHost(versions: (string | null)[]) {
+  let i = 0;
+  const readVersion = async () => versions[Math.min(i++, versions.length - 1)] ?? null;
+  return new MuseCapacityHost({ ...hostOpts("persistent-full"), readVersion });
+}
+
+test("the host records the version it was spawned on; a matching host is reused", async () => {
+  const host = versionedHost(["1.4.0-R4161.1"]);
+  try {
+    assert.equal(await host.ensureStartedOnVersion("1.4.0-R4161.1"), true);
+    assert.equal(host.runningVersion, "1.4.0-R4161.1");
+    assert.equal(await host.ensureStartedOnVersion("1.4.0-R4161.1"), true);
+    assert.equal(host.connectionEpoch, 1, "no restart when the host already runs the version");
+  } finally {
+    await host.shutdown();
+  }
+});
+
+test("an idle host on an older build is restarted onto the confirmed version", async () => {
+  // Spawned on B (before + after the handshake), then the binary is C for the restart.
+  const host = versionedHost(["1.4.0-R4161.1", "1.4.0-R4161.1", "1.4.0-R4302.1"]);
+  try {
+    assert.ok(await host.ensureStarted());
+    assert.equal(host.runningVersion, "1.4.0-R4161.1");
+    assert.equal(await host.ensureStartedOnVersion("1.4.0-R4302.1"), true);
+    assert.equal(host.connectionEpoch, 2, "restarted onto the checked build");
+    assert.equal(host.runningVersion, "1.4.0-R4302.1");
+  } finally {
+    await host.shutdown();
+  }
+});
+
+test("a busy host on an older build is left alone and not used", async () => {
+  const host = versionedHost(["1.4.0-R4161.1", "1.4.0-R4161.1", "1.4.0-R4302.1"]);
+  try {
+    assert.ok(await host.ensureStarted());
+    // An admitted turn on the shared connection: never torn down under it.
+    const waiting = host.waitForHostNotification(() => false, 5_000);
+    assert.equal(await host.ensureStartedOnVersion("1.4.0-R4302.1"), false);
+    assert.equal(host.connectionEpoch, 1);
+    assert.ok(host.isConnected());
+    await host.shutdown();
+    await waiting;
+  } finally {
+    await host.shutdown();
+  }
+});
+
+test("a binary that changed across the spawn leaves the host's version unknown (never served)", async () => {
+  // Changes across the first spawn and again across the restart.
+  const host = versionedHost(["1.4.0-R4161.1", "1.4.0-R4302.1", "1.4.0-R4302.1", "1.5.0-R5000.1"]);
+  try {
+    assert.equal(await host.ensureStartedOnVersion("1.4.0-R4302.1"), false);
+    assert.equal(host.connectionEpoch, 2);
+    assert.equal(host.runningVersion, null);
+  } finally {
+    await host.shutdown();
+  }
+});
+
 test("clean shutdown releases the child process", async () => {
   const host = new MuseCapacityHost(hostOpts("persistent-full"));
   assert.equal((await host.readUsage()).status, "observed");

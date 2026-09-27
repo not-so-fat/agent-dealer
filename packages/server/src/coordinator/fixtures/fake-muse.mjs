@@ -22,6 +22,15 @@ if (argv[0] === "serve") {
   process.exit(1);
 }
 
+// NOT-277: `muse --version`. FAKE_MUSE_VERSION_FILE (when set) is read on every call, so a test can
+// "update" the binary between the probe session and the version re-read.
+if (argv[0] === "--version") {
+  const file = process.env.FAKE_MUSE_VERSION_FILE;
+  const version = file ? fs.readFileSync(file, "utf8").trim() : (process.env.FAKE_MUSE_VERSION ?? "0.0.0-R0.1");
+  process.stdout.write(`Muse Code ${version.split("-")[0]} (${version})\n`);
+  process.exit(0);
+}
+
 const flag = (name) => argv[argv.indexOf(name) + 1];
 const sessionId = flag("--session-id");
 const model = flag("--model");
@@ -106,6 +115,35 @@ switch (scenario) {
     execFileSync("git", ["-c", "user.email=muse@test", "-c", "user.name=Muse", "commit", "-q", "-m", "hello"]);
     writeSessionLog({ usage: USAGE });
     completed("Created hello.txt.");
+    break;
+  }
+  case "capability-shell-then-hang":
+  case "capability-shell-then-fail": {
+    // NOT-277: the shell ran (result.txt is correct) but the session never completes cleanly.
+    tool("bash", "call-1");
+    execFileSync("sh", ["probe.sh"]);
+    if (scenario === "capability-shell-then-hang") {
+      setInterval(() => {}, 1000);
+      break;
+    }
+    writeSessionLog({ usage: USAGE });
+    failed("provider error after tool call");
+    process.exit(1);
+    break;
+  }
+  case "capability-shell":
+  case "capability-no-shell": {
+    // NOT-277: the developer-capability probe (adapters/muse-capability.ts). A capable build runs
+    // its shell command; a build that lost shell access just answers without a tool call.
+    if (scenario === "capability-shell") {
+      tool("bash", "call-1");
+      execFileSync("sh", ["probe.sh"]);
+    }
+    if (process.env.FAKE_MUSE_UPDATE_TO && process.env.FAKE_MUSE_VERSION_FILE) {
+      fs.writeFileSync(process.env.FAKE_MUSE_VERSION_FILE, process.env.FAKE_MUSE_UPDATE_TO);
+    }
+    writeSessionLog({ usage: USAGE });
+    completed("DONE");
     break;
   }
   case "cron": {
