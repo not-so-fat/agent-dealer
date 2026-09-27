@@ -13,7 +13,7 @@
 //  - in flight    → blocked while the one-time check runs (never assumed capable).
 //
 // Deliberately NOT covered: NOT-177's security-enforcement evidence (`mcp_tool_allowlist_enforcement`,
-// `cron_tool_disable` in runners/muse-config-core.ts) stays manually re-validated as before.
+// `cron_tool_disable`, pinned in the runners' Muse config core) stays manually re-validated as before.
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
