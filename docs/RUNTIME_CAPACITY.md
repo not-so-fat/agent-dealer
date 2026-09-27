@@ -521,11 +521,15 @@ Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
   three does not break local resolution, so they stay as belt-and-braces:
   cheapest model, exactly one turn, no tools. The result is additionally
   checked before any ingestion: the stream must carry the local-command
-  marker (`local_command_run.command === "usage"`) and report exactly $0
-  cost, or the whole run is rejected (`not_local_command` /
-  `unexpected_cost`) — no windows are recorded, last-good rows are kept,
-  and failure backoff engages, so a future CLI behavior change is loud
-  instead of silently becoming a recurring paid probe again.
+  marker (`local_command_run.command === "usage"`) and `costUsd` must be
+  exactly `0` — a second review round tightened this from "not positive" to
+  "provably zero": a missing/unparsable `total_cost_usd` (`costUsd === null`)
+  fails closed identically to a confirmed charge, since `null` is not
+  evidence of safety either. Either violation rejects the whole run
+  (`not_local_command` / `unexpected_cost`) — no windows are recorded,
+  last-good rows are kept, and failure backoff engages, so a future CLI
+  behavior change is loud instead of silently becoming a recurring paid
+  probe again.
 - Success reads `usage_report.rate_limits.limits[]` directly from the stream
   (primary signal, present on every successful run) plus, as non-exclusive
   corroboration, any `rate_limit_event` and a re-read of the local cache

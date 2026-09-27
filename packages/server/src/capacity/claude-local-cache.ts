@@ -587,11 +587,15 @@ export type ProbeFailureKind =
   // different CLI build ever falls through to a real prompt, fail closed
   // instead of trusting whatever signal it happened to produce.
   | "not_local_command"
-  // The result reported nonzero cost. `/usage` costs exactly $0 whenever it
-  // resolves locally; any charge means the structural safeguards above did
-  // not prevent a real model turn. Treated as a failure (not success) even
-  // if windows were somehow produced, so backoff engages instead of quietly
-  // normalizing recurring spend.
+  // The result did not prove exactly $0 cost — either a positive charge, or
+  // `total_cost_usd` missing/unparsable so zero cannot be verified at all
+  // (reviewer-requested, 2026-09-27: an unverifiable cost must fail closed
+  // the same as a confirmed one — `costUsd === null` is not evidence of
+  // safety). `/usage` costs exactly $0 whenever it resolves locally; any
+  // other outcome means the structural safeguards above did not prevent (or
+  // cannot rule out) a real model turn. Treated as a failure even if windows
+  // were somehow produced, so backoff engages instead of quietly normalizing
+  // recurring spend.
   | "unexpected_cost";
 
 export interface ProbeRunResult {
@@ -802,14 +806,17 @@ export async function runClaudeCapacityProbe(
   // Fail-closed structural checks (reviewer-requested, 2026-09-27, PR #165):
   // the whole design rests on `/usage` resolving as a local command that
   // never reaches the model. If either assumption is violated — no local-
-  // command marker in the stream, or any nonzero cost — reject the run
-  // entirely before ingesting anything from it, rather than trusting
+  // command marker in the stream, or cost not provably exactly $0 — reject
+  // the run entirely before ingesting anything from it, rather than trusting
   // whatever windows a real (unexpected) model turn happened to produce.
+  // `costUsd !== 0` (not `> 0`) is deliberate: `null` — a missing or
+  // unparsable `total_cost_usd` — is not evidence of zero cost either, and
+  // must fail closed exactly like a confirmed charge (second review round).
   // This also makes a future CLI-behavior change loud (backoff engages,
   // logged as a distinct failure kind) instead of silently becoming a
   // recurring paid probe again.
   if (!hasLocalUsageCommandMarker(events)) return fail("not_local_command", { costUsd });
-  if (costUsd !== null && costUsd > 0) return fail("unexpected_cost", { costUsd });
+  if (costUsd !== 0) return fail("unexpected_cost", { costUsd });
   // Primary signal: the `/usage` local command's own structured result.
   // Present on every successful run (verified live) — most reliable source.
   let usageReportRoles = new Set<string>();

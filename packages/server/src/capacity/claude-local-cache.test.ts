@@ -516,6 +516,44 @@ test("probe rejects and ingests nothing when the result reports nonzero cost", a
   assert.equal(rows.find((r) => r.providerBucket === "five_hour")!.remainingPercent, 83);
 });
 
+test("probe rejects and ingests nothing when cost cannot be verified as zero", async () => {
+  // Reviewer-requested hardening, round 2 (PR #165): a stream with the
+  // local-command marker and well-formed windows, but a `result` event that
+  // omits `total_cost_usd` (costUsd === null), must fail closed exactly like
+  // a confirmed positive charge — null is not evidence of zero cost.
+  process.env[CLAUDE_CAPACITY_REFRESH_ENV] = "paid-after-1h";
+  fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS - 61 * 60_000));
+  assert.equal(ingestClaudeLocalCache(NOW_MS), 2);
+  const runner: ProbeRunner = async () => ({
+    stdout: [
+      JSON.stringify({
+        type: "assistant",
+        timestamp: new Date(NOW_MS).toISOString(),
+        local_command_run: { command: "usage", args: "" },
+        usage_report: {
+          rate_limits: {
+            limits: [
+              { kind: "session", percent: 20, resets_at: new Date(FIVE_HOUR_RESET_SEC * 1000).toISOString() },
+              { kind: "weekly_all", percent: 40, resets_at: new Date(SEVEN_DAY_RESET_SEC * 1000).toISOString() },
+            ],
+          },
+        },
+      }),
+      // No `result` event at all — total_cost_usd is unknowable.
+    ].join("\n"),
+    exitCode: 0,
+    timedOut: false,
+    spawnError: null,
+  });
+  const result = await runClaudeCapacityProbe(NOW_MS, { runner });
+  assert.equal(result.ok, false);
+  assert.equal(result.failureKind, "unexpected_cost");
+  assert.equal(result.costUsd, null);
+  assert.deepEqual(result.windowsUpdated, []);
+  const rows = listCapacitySnapshots("claude_code");
+  assert.equal(rows.find((r) => r.providerBucket === "five_hour")!.remainingPercent, 83);
+});
+
 test("probe rejects and ingests nothing when the local-command marker is absent", async () => {
   // Reviewer-requested hardening (PR #165): a stream that never shows
   // `/usage` resolving locally must not be trusted, even if it happens to
