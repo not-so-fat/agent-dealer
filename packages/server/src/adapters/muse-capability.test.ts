@@ -183,6 +183,72 @@ describe("muse-capability", { concurrency: false }, () => {
     assert.deepEqual(museCapabilityIssues(NEW), []);
   });
 
+  test("consecutive updates name the exact previous version, not the last confirmed baseline", async () => {
+    const LATER = "1.4.0-R4302.1";
+    stubProbe({
+      [OLD]: { status: "capable" },
+      [NEW]: { status: "missing", detail: "no shell" },
+      [LATER]: { status: "missing", detail: "no shell" },
+    });
+    await check(OLD);
+    await check(NEW);
+    const { first, settled } = await check(LATER);
+    assert.match(first[0]!.message, new RegExp(`^Muse Code updated ${NEW} → ${LATER}: verifying`));
+    assert.match(settled[0]!.message, new RegExp(`^Muse Code updated ${NEW} → ${LATER}: developer sessions no longer get`));
+    assert.doesNotMatch(settled[0]!.message, new RegExp(OLD.replace(/\./g, "\\.")));
+    assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).confirmedVersion, OLD);
+  });
+
+  test("consecutive could-not-verify updates also name the exact previous version", async () => {
+    const LATER = "1.4.0-R4302.1";
+    stubProbe({
+      [OLD]: { status: "capable" },
+      [NEW]: { status: "error", detail: "timed out" },
+      [LATER]: { status: "error", detail: "timed out" },
+    });
+    await check(OLD);
+    await check(NEW);
+    const { settled } = await check(LATER);
+    assert.match(settled[0]!.message, new RegExp(`after version change \\(${NEW} → ${LATER}\\)`));
+  });
+
+  test("a version reported mid-probe is checked once, after the running probe, and the stale verdict is discarded", async () => {
+    const LATER = "1.4.0-R4302.1";
+    const calls: string[] = [];
+    const release = new Map<string, () => void>();
+    setMuseCapabilityProbeForTests(
+      (version) =>
+        new Promise((resolve) => {
+          calls.push(version);
+          release.set(version, () => resolve(version === NEW ? { status: "capable" } : { status: "missing", detail: "no shell" }));
+        })
+    );
+    museCapabilityIssues(NEW);
+    assert.deepEqual(calls, [NEW]);
+    // Muse updates again while NEW is still being probed: no second concurrent probe.
+    const during = museCapabilityIssues(LATER);
+    assert.match(during[0]!.message, new RegExp(`^Muse Code updated ${NEW} → ${LATER}: verifying`));
+    museCapabilityIssues(LATER);
+    assert.deepEqual(calls, [NEW]);
+    // NEW's verdict lands after Muse moved on: discarded, and LATER is probed next (once).
+    release.get(NEW)!();
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(calls, [NEW, LATER]);
+    let saved = JSON.parse(fs.readFileSync(STATE, "utf8"));
+    assert.equal(saved.confirmedVersion, null);
+    assert.equal(saved.lastChecked, null);
+    assert.equal(saved.current.version, LATER);
+    release.get(LATER)!();
+    await settleMuseCapabilityCheckForTests();
+    const settled = museCapabilityIssues(LATER);
+    assert.match(settled[0]!.message, new RegExp(`^Muse Code updated ${NEW} → ${LATER}: developer sessions no longer get`));
+    for (let i = 0; i < 3; i++) museCapabilityIssues(LATER);
+    assert.equal(museCapabilityCheckInFlight(), false);
+    assert.deepEqual(calls, [NEW, LATER]);
+    saved = JSON.parse(fs.readFileSync(STATE, "utf8"));
+    assert.equal(saved.lastChecked.version, LATER);
+  });
+
   test("onSettled fires once the check lands so the caller can drop its health cache", async () => {
     stubProbe({ [NEW]: { status: "capable" } });
     let settled = 0;
@@ -193,19 +259,25 @@ describe("muse-capability", { concurrency: false }, () => {
   });
 });
 
-// The real probe: one developer-posture session through the exec lane against the fake Muse.
+// The real probe: one developer-posture session against the fake Muse, always a fresh `muse exec`.
 describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () => {
   const FAKE_MUSE = path.join(
     path.dirname(fileURLToPath(import.meta.url)),
     "../coordinator/fixtures/fake-muse.mjs"
   );
 
-  async function probeWith(scenario: string): Promise<ProbeResult> {
-    const keys = ["MUSE_CLI", "FAKE_MUSE_SCENARIO", "AGENT_DEALER_MUSE_RUNNER"] as const;
+  async function probeWith(scenario: string, extraEnv: Record<string, string> = {}): Promise<ProbeResult> {
+    const env: Record<string, string> = {
+      MUSE_CLI: FAKE_MUSE,
+      FAKE_MUSE_SCENARIO: scenario,
+      FAKE_MUSE_VERSION: NEW,
+      ...extraEnv,
+    };
+    const keys = [...Object.keys(env), "AGENT_DEALER_MUSE_RUNNER"];
     const prev = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
-    process.env.MUSE_CLI = FAKE_MUSE;
-    process.env.FAKE_MUSE_SCENARIO = scenario;
-    process.env.AGENT_DEALER_MUSE_RUNNER = "exec";
+    Object.assign(process.env, env);
+    // The serve lane is the production default; the probe must bypass it on its own.
+    delete process.env.AGENT_DEALER_MUSE_RUNNER;
     try {
       return await defaultMuseCapabilityProbe(NEW);
     } finally {
@@ -228,5 +300,34 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
   test("a session that fails to run at all is an error (could not verify), not missing", async () => {
     const result = await probeWith("auth");
     assert.equal(result.status, "error");
+  });
+
+  test("the probe never runs on the shared serve host (it may still be the pre-update build)", async () => {
+    const { getMuseCapacityHost, resetMuseCapacityHostForTests } = await import("../capacity/muse-host.js");
+    await resetMuseCapacityHostForTests();
+    let serveSpawns = 0;
+    getMuseCapacityHost({
+      spawnImpl: (() => {
+        serveSpawns += 1;
+        throw new Error("serve host must not be used by the capability probe");
+      }) as never,
+    });
+    try {
+      assert.deepEqual(await probeWith("capability-shell"), { status: "capable" });
+      assert.equal(serveSpawns, 0);
+    } finally {
+      await resetMuseCapacityHostForTests();
+    }
+  });
+
+  test("a binary that changes version during the probe is could-not-verify, not capable", async () => {
+    const versionFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-ver-")), "version");
+    fs.writeFileSync(versionFile, NEW);
+    const result = await probeWith("capability-shell", {
+      FAKE_MUSE_VERSION_FILE: versionFile,
+      FAKE_MUSE_UPDATE_TO: "1.5.0-R5000.1",
+    });
+    assert.equal(result.status, "error");
+    assert.match((result as { detail: string }).detail, /1\.5\.0-R5000\.1 after probing 1\.4\.0-R4161\.1/);
   });
 });

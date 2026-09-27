@@ -260,7 +260,15 @@ async function runMuseServeLane(
 }
 
 export async function runMuseDeveloperSession(
-  input: DeveloperSpawnInput & { logPath: string; maxModelSteps?: number }
+  input: DeveloperSpawnInput & {
+    logPath: string;
+    maxModelSteps?: number;
+    /**
+     * NOT-277: skip the shared serve host and spawn the on-disk binary. The capability probe
+     * needs this — a long-lived host may still be the build from before an auto-update.
+     */
+    execLaneOnly?: boolean;
+  }
 ): Promise<DeveloperSpawnResult> {
   const model = input.model ?? MUSE_CODE_CONTRIBUTOR_MODEL;
   const museSessionId = randomUUID();
@@ -271,7 +279,7 @@ export async function runMuseDeveloperSession(
   // executing the work a second time on the exec lane.
   // `AGENT_DEALER_MUSE_RUNNER=exec` skips the serve lane entirely
   // (operator escape hatch).
-  if (museServeLaneEnabled()) {
+  if (museServeLaneEnabled() && !input.execLaneOnly) {
     let admitted = false;
     try {
       const served = await runMuseServeLane(input, model, () => {

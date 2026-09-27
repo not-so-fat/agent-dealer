@@ -22,6 +22,15 @@ if (argv[0] === "serve") {
   process.exit(1);
 }
 
+// NOT-277: `muse --version`. FAKE_MUSE_VERSION_FILE (when set) is read on every call, so a test can
+// "update" the binary between the probe session and the version re-read.
+if (argv[0] === "--version") {
+  const file = process.env.FAKE_MUSE_VERSION_FILE;
+  const version = file ? fs.readFileSync(file, "utf8").trim() : (process.env.FAKE_MUSE_VERSION ?? "0.0.0-R0.1");
+  process.stdout.write(`Muse Code ${version.split("-")[0]} (${version})\n`);
+  process.exit(0);
+}
+
 const flag = (name) => argv[argv.indexOf(name) + 1];
 const sessionId = flag("--session-id");
 const model = flag("--model");
@@ -115,6 +124,9 @@ switch (scenario) {
     if (scenario === "capability-shell") {
       tool("bash", "call-1");
       execFileSync("sh", ["probe.sh"]);
+    }
+    if (process.env.FAKE_MUSE_UPDATE_TO && process.env.FAKE_MUSE_VERSION_FILE) {
+      fs.writeFileSync(process.env.FAKE_MUSE_VERSION_FILE, process.env.FAKE_MUSE_UPDATE_TO);
     }
     writeSessionLog({ usage: USAGE });
     completed("DONE");

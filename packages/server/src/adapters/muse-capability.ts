@@ -12,6 +12,11 @@
 //                   message (fail closed), retried after a backoff;
 //  - in flight    → blocked while the one-time check runs (never assumed capable).
 //
+// The probe is a fresh `muse exec` of the on-disk binary (never the long-lived serve host, which can
+// still be the pre-update build). Checks are serialized: a version reported mid-probe is checked
+// once the running probe settles, and a verdict for a version no longer reported is discarded.
+// Messages name the exact update — the previously reported version → the current one.
+//
 // Deliberately NOT covered: NOT-177's security-enforcement evidence (`mcp_tool_allowlist_enforcement`,
 // `cron_tool_disable`, pinned in the runners' Muse config core) stays manually re-validated as before.
 import { execFileSync } from "node:child_process";
@@ -21,6 +26,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentHealthIssue } from "@agent-dealer/shared";
 import { DEVELOPER_ROLE_CEILING } from "@agent-dealer/shared";
+import { MUSE_CLI_ENV, resolveMuseBin } from "../cli-env.js";
 import { getDataDir } from "../db/index.js";
 
 export type MuseCapabilityProbeResult =
@@ -35,6 +41,12 @@ type CheckedVersion = { version: string; checkedAt: number } & MuseCapabilityPro
 type PersistedState = {
   /** Last version whose developer sessions were confirmed to get shell/write access. */
   confirmedVersion: string | null;
+  /**
+   * The version `muse --version` last reported and the one it was reported before it, so a
+   * message names the exact update (B → C), not the last good baseline (A → C).
+   */
+  current: { version: string; from: string | null } | null;
+  /** Result for `current.version` only; a result for any other version is never stored. */
   lastChecked: CheckedVersion | null;
 };
 
@@ -46,12 +58,15 @@ const STATE_FILE = "muse-capability.json";
 const CAPABILITY = "shell/write access";
 
 let state: PersistedState | null = null;
+/** At most one probe at a time (serialized); a newer version is chained after it settles. */
 let inFlight: { version: string; promise: Promise<void> } | null = null;
 /** Bumped whenever a check settles, so callers can tell a result landed mid-read. */
 let settledCount = 0;
 /** Bumped by resets so a probe started before a reset cannot write into the fresh state. */
 let generation = 0;
 let probeImpl: MuseCapabilityProbe = defaultMuseCapabilityProbe;
+/** Latest caller hook; a chained check reports through it too. */
+let settledHook: () => void = () => {};
 
 function statePath(): string {
   return path.join(getDataDir(), STATE_FILE);
@@ -61,12 +76,19 @@ function loadState(): PersistedState {
   if (state) return state;
   try {
     const parsed = JSON.parse(fs.readFileSync(statePath(), "utf8")) as Partial<PersistedState>;
+    const lastChecked =
+      parsed.lastChecked && typeof parsed.lastChecked.version === "string" ? parsed.lastChecked : null;
+    const current =
+      parsed.current && typeof parsed.current.version === "string"
+        ? { version: parsed.current.version, from: typeof parsed.current.from === "string" ? parsed.current.from : null }
+        : null;
     state = {
       confirmedVersion: typeof parsed.confirmedVersion === "string" ? parsed.confirmedVersion : null,
-      lastChecked: parsed.lastChecked && typeof parsed.lastChecked.version === "string" ? parsed.lastChecked : null,
+      current,
+      lastChecked: lastChecked && lastChecked.version === current?.version ? lastChecked : null,
     };
   } catch {
-    state = { confirmedVersion: null, lastChecked: null };
+    state = { confirmedVersion: null, current: null, lastChecked: null };
   }
   return state;
 }
@@ -81,6 +103,15 @@ function saveState(next: PersistedState): void {
   }
 }
 
+/** Record `version` as the one Muse now reports; a change remembers what it changed from. */
+function observe(version: string): PersistedState {
+  const s = loadState();
+  if (s.current?.version === version) return s;
+  const from = s.current?.version ?? s.confirmedVersion;
+  saveState({ ...s, current: { version, from: from !== version ? from : null }, lastChecked: null });
+  return state!;
+}
+
 /** `Muse Code 1.3.0 (1.3.0-R3401.1)` → `1.3.0-R3401.1`; otherwise the last non-empty line. */
 export function parseMuseVersion(output: string): string | null {
   const paren = /\(([^()\s]+)\)\s*$/m.exec(output.trim());
@@ -93,9 +124,9 @@ function transition(from: string | null, to: string): string {
   return from && from !== to ? `Muse Code updated ${from} → ${to}` : `Muse Code ${to}`;
 }
 
-function issueFor(checked: CheckedVersion, confirmedVersion: string | null): AgentHealthIssue[] {
+function issueFor(checked: CheckedVersion, from: string | null): AgentHealthIssue[] {
   if (checked.status === "capable") return [];
-  const head = transition(confirmedVersion, checked.version);
+  const head = transition(from, checked.version);
   if (checked.status === "missing") {
     return [
       {
@@ -111,13 +142,32 @@ function issueFor(checked: CheckedVersion, confirmedVersion: string | null): Age
       code: "runtime_capability",
       message:
         `Could not verify Muse Code developer ${CAPABILITY} after version change ` +
-        `(${confirmedVersion && confirmedVersion !== checked.version ? `${confirmedVersion} → ` : ""}${checked.version}): ` +
+        `(${from && from !== checked.version ? `${from} → ` : ""}${checked.version}): ` +
         `${checked.detail} — developer admission blocked; the check retries automatically`,
     },
   ];
 }
 
-function startCheck(version: string, onSettled: () => void): void {
+function verifyingIssue(version: string, from: string | null): AgentHealthIssue[] {
+  return [
+    {
+      code: "runtime_capability",
+      message:
+        `${transition(from, version)}: verifying developer ${CAPABILITY} ` +
+        `(one-time check for this version) — developer admission waits for the result`,
+    },
+  ];
+}
+
+/** Current version is unchecked, or its could-not-verify result is due a retry. */
+function checkDue(s: PersistedState): boolean {
+  if (!s.current) return false;
+  const checked = s.lastChecked;
+  if (!checked) return true;
+  return checked.status === "error" && Date.now() - checked.checkedAt >= ERROR_RETRY_MS;
+}
+
+function startCheck(version: string): void {
   const gen = generation;
   const promise = (async () => {
     let result: MuseCapabilityProbeResult;
@@ -128,12 +178,16 @@ function startCheck(version: string, onSettled: () => void): void {
     }
     if (gen !== generation) return;
     const prev = loadState();
+    // Muse moved on while this probe ran: its verdict is about a build no longer reported, so it
+    // must not overwrite state for the newer one (which is checked next, below).
+    if (prev.current?.version !== version) return;
     const checked: CheckedVersion = { version, checkedAt: Date.now(), ...result };
     saveState({
+      ...prev,
       confirmedVersion: result.status === "capable" ? version : prev.confirmedVersion,
       lastChecked: checked,
     });
-    const from = prev.confirmedVersion;
+    const from = prev.current.from;
     if (result.status === "capable") {
       console.log(`[muse-capability] ${transition(from, version)}: developer ${CAPABILITY} confirmed`);
     } else {
@@ -141,33 +195,28 @@ function startCheck(version: string, onSettled: () => void): void {
     }
   })().finally(() => {
     if (inFlight?.promise === promise) inFlight = null;
+    if (gen !== generation) return;
     settledCount += 1;
-    if (gen === generation) onSettled();
+    const s = loadState();
+    if (!inFlight && s.current && s.current.version !== version && checkDue(s)) startCheck(s.current.version);
+    settledHook();
   });
   inFlight = { version, promise };
 }
 
 /**
  * Capability issues for the currently reported Muse version. Never awaits the probe: a version not
- * yet checked starts one background check (single-flight) and blocks until it settles; `onSettled`
- * lets the caller drop its health cache so admission unblocks as soon as the result is in.
+ * yet checked starts one background check and blocks until it settles. Checks are serialized — a
+ * version observed while another is being probed waits for that probe, then is checked once.
+ * `onSettled` lets the caller drop its health cache so admission unblocks as soon as the result is in.
  */
 export function museCapabilityIssues(version: string, onSettled: () => void = () => {}): AgentHealthIssue[] {
-  const s = loadState();
-  const checked = s.lastChecked?.version === version ? s.lastChecked : null;
-  const retryDue = checked?.status === "error" && Date.now() - checked.checkedAt >= ERROR_RETRY_MS;
-  if (checked && !retryDue) return issueFor(checked, s.confirmedVersion);
-
-  if (!inFlight || inFlight.version !== version) startCheck(version, onSettled);
-  if (checked) return issueFor(checked, s.confirmedVersion); // error retry: keep the block up
-  return [
-    {
-      code: "runtime_capability",
-      message:
-        `${transition(s.confirmedVersion, version)}: verifying developer ${CAPABILITY} ` +
-        `(one-time check for this version) — developer admission waits for the result`,
-    },
-  ];
+  settledHook = onSettled;
+  const s = observe(version);
+  const from = s.current!.from;
+  if (checkDue(s) && !inFlight) startCheck(version);
+  if (s.lastChecked) return issueFor(s.lastChecked, from); // incl. error retry: keep the block up
+  return verifyingIssue(version, from);
 }
 
 /** True while a capability check is running (callers use a short health-cache TTL meanwhile). */
@@ -198,6 +247,7 @@ export function resetMuseCapabilityStateForTests(): void {
   generation += 1;
   inFlight = null;
   state = null;
+  settledHook = () => {};
   fs.rmSync(statePath(), { force: true });
 }
 
@@ -212,9 +262,26 @@ function gitBlobSha1(content: string): string {
   return createHash("sha1").update(`blob ${Buffer.byteLength(content)}\0${content}`).digest("hex");
 }
 
+/** What the on-disk `muse` reports now (null when it cannot say). */
+function reportedMuseVersion(): string | null {
+  try {
+    const out = execFileSync(resolveMuseBin(), ["--version"], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: { ...process.env, ...MUSE_CLI_ENV },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return parseMuseVersion(out);
+  } catch {
+    return null;
+  }
+}
+
 /**
- * One real developer session (same lane, posture and model a developer round uses) in a throwaway
- * git repo. Its only path to success is running `sh probe.sh`, which writes a git blob hash of a
+ * One real developer session (same posture and model a developer round uses) in a throwaway
+ * git repo. Always a fresh `muse exec` of the on-disk binary — never the shared serve host, which
+ * may still be the pre-update build — and the binary must still report `version` afterwards, so
+ * the verdict is about the build that was probed. Its only path to success is running `sh probe.sh`, which writes a git blob hash of a
  * fresh nonce to result.txt — the model cannot produce that value without a shell call, and the
  * file only exists if the shell could write the workspace.
  */
@@ -241,7 +308,15 @@ export async function defaultMuseCapabilityProbe(version: string): Promise<MuseC
       cwd: dir,
       timeoutMs: PROBE_TIMEOUT_MS,
       logPath: path.join(dir, "probe.ndjson"),
+      execLaneOnly: true,
     });
+    const after = reportedMuseVersion();
+    if (after !== version) {
+      return {
+        status: "error",
+        detail: `muse reported ${after ?? "no version"} after probing ${version} (changed during the check)`,
+      };
+    }
     let written: string | null = null;
     try {
       written = fs.readFileSync(path.join(dir, "result.txt"), "utf8").trim();

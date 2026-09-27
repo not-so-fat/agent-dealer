@@ -570,7 +570,7 @@ test("NOT-277: a Muse Code update is admitted when capable, refused by name when
     assert.equal(unverified.ok, false);
     assert.match(
       (unverified as { reason: string }).reason,
-      new RegExp(`Could not verify Muse Code developer shell/write access after version change \\(${NEW} → 9\\.9\\.9-R1\\)`)
+      new RegExp(`Could not verify Muse Code developer shell/write access after version change \\(${BROKEN} → 9\\.9\\.9-R1\\)`)
     );
     assert.deepEqual(probed, [OLD, NEW, BROKEN, "9.9.9-R1"]);
   } finally {
