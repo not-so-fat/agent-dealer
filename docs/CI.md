@@ -52,7 +52,14 @@ Look for the `[verify-baseline]` lines after a red "Unit tests" step:
 To replay the case that motivated this gate — `runtime-capacity.test.ts` failing from
 `857f6b1` while passing at `v1.2.2` (`f85d2ff~5`) — check out `857f6b1` itself (so
 HEAD is `857f6b1`), copy this script into that checkout (the script does not exist
-at `857f6b1`), and override the baseline explicitly:
+at `857f6b1`), and override the baseline explicitly. The canonical one-liner the
+gate's acceptance criteria (AC4) asks for is:
+
+```bash
+BASELINE_REF=v1.2.2 bash scripts/verify-baseline-failures.sh packages/server/src/routes/runtime-capacity.test.ts; echo "exit=$?"
+```
+
+Full setup (same replay, spelled out step by step):
 
 ```bash
 git checkout 857f6b1
@@ -75,10 +82,38 @@ fresh container with no such file, which is why CI stayed green), and HEAD must 
 
 Expected: non-zero exit naming the failing test with HEAD (`857f6b1`) vs baseline
 (`v1.2.2`) — i.e. CI would have failed loudly at NOT-268/269/270 time instead of
-letting the "pre-existing, verified on the clean tree" claim through. Paste the
-verbatim output plus the `exit=` line as verification evidence in the PR
-description (AC4) — the finding is only closed by an actually-run transcript,
-not by this procedure text.
+letting the "pre-existing, verified on the clean tree" claim through.
+
+### AC4 evidence (paste into the PR description)
+
+AC4 is only closed by an actually-run verbatim transcript, not by this procedure
+text. This coding session has no shell access, so the transcript below is still
+pending a human (or shell-enabled) run. To close the finding, run the one-liner
+above at HEAD `857f6b1` on a machine with a real developer `~/.claude.json`
+present, then paste the verbatim output plus the `exit=` line into the PR
+description inside the block below. If a live replay is impossible (e.g. no
+machine with `~/.claude.json` handy), record an explicit waiver here instead.
+
+```text
+# AC4 NOT-268 replay transcript (pending — replace this block with verbatim output):
+# $ git rev-parse HEAD
+# 857f6b1...
+# $ ls ~/.claude.json
+# /Users/<you>/.claude.json
+# $ BASELINE_REF=v1.2.2 bash scripts/verify-baseline-failures.sh packages/server/src/routes/runtime-capacity.test.ts; echo "exit=$?"
+# <paste verbatim script output here — must show non-zero exit, the failing
+#  test name ("GET /api/runtime-capacity returns normalized entries without
+#  evidence"), HEAD 857f6b1 and the v1.2.2 baseline>
+# exit=1
+```
+
+Known limitation (deliberate, documented): when neither the HEAD nor the baseline
+run yields parseable TAP `not ok` test names (e.g. an import/harness crash on both
+sides), the script falls back to a file-level verdict and counts the file as
+pre-existing. That keeps the gate from red-flagging identical crashes, but it is a
+blind spot — differing root causes with identical unparseable signatures will not
+be distinguished. See the `both runs failed` branch in
+`scripts/verify-baseline-failures.sh`.
 
 Note: on PR runs, `HEAD` as printed by the script is GitHub's temporary merge commit
 (`refs/pull/N/merge`), not the PR head — the script also prints `PR head` (from the
