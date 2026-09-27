@@ -558,9 +558,11 @@ test("NOT-276: failure line before the last 20K chars still reaches the excerpt"
 // so this mirrors its exact byte shape at faithful scale instead): every line
 // carries the real `<job>\t<step>\t<timestamp> ` prefix, 1667 TAP results with
 // `not ok 355`/`356` + `cancelledByParent` at ~21% through, ~24 passing lines
-// before the failure carrying failure-pattern words in their names, and >20K
-// chars of passing-test tail after it. The excerpt must surface the failure,
-// not the tail.
+// before the failure carrying failure-pattern words in their names, >20K
+// chars of passing-test tail after it, and the node:test TAP summary block at
+// the true end of the log (the root-cause mechanism: node:test runs to
+// completion, so `# fail 2` — a weak tail hit — sits after thousands of passing
+// lines). The excerpt must surface the early strong failure, not the tail.
 test("NOT-276 round-2 replay: full-scale Actions-prefixed log with an early `not ok` failure", async () => {
   const bodies: string[] = [];
   for (let n = 1; n <= 354; n++) {
@@ -586,6 +588,19 @@ test("NOT-276 round-2 replay: full-scale Actions-prefixed log with an early `not
     else if (i % 150 === 0) bodies.push(`ok ${n} - cleans up after failure ${n}`);
     else bodies.push(`ok ${n} - passing test number ${n}`);
   }
+  // node:test's own end-of-run TAP summary, as in the real incident log — its
+  // `# fail 2` line is a weak failure-pattern hit in the tail that must not
+  // outrank the early strong `not ok` failure (round-2 blocking finding).
+  bodies.push(
+    "# tests 1667",
+    "# suites 4",
+    "# pass 1663",
+    "# fail 2",
+    "# cancelled 2",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 184213.015"
+  );
   const log = bodies
     .map(
       (b, i) =>
