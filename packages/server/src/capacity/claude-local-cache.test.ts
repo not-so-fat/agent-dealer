@@ -1,8 +1,8 @@
 // packages/server/src/capacity/claude-local-cache.test.ts
 //
 // NOT-268: Claude capacity local-first ladder — local cache 5H/1W plus a
-// one-hour paid fallback. No test here performs a live provider request:
-// every probe spawn goes through an injected fake runner.
+// free `/usage` refresh after one hour stale. No test here performs a live
+// provider request: every probe spawn goes through an injected fake runner.
 import { test, before, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

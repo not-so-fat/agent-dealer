@@ -885,12 +885,12 @@ function probeCooldownMs(): number {
 }
 
 /**
- * On-demand paid fallback: when `claude_code` is configured and no valid
- * 5H/1W observation is newer than 60 minutes, run one minimal bounded probe
- * (single-flight across concurrent readers; at most one attempt per account
- * per 60 minutes, backing off exponentially on failure). Explicitly disabled
- * is a strict no-op — no spawn, no spend. Never throws, never touches Dealer
- * workflow/session state or `runtime_availability`.
+ * On-demand free `/usage` refresh: when `claude_code` is configured and no
+ * valid 5H/1W observation is newer than 60 minutes, run one minimal bounded
+ * probe (single-flight across concurrent readers; at most one attempt per
+ * account per 60 minutes, backing off exponentially on failure). Explicitly
+ * disabled is a strict no-op — no spawn at all. Never throws, never touches
+ * Dealer workflow/session state or `runtime_availability`.
  */
 export async function maybeProbeClaudeCapacity(
   nowMs = Date.now(),
@@ -945,8 +945,8 @@ export async function maybeProbeClaudeCapacity(
 
 /**
  * Full on-demand refresh for `GET /api/runtime-capacity`: ingest the free
- * local cache first, then consider the paid probe. Best-effort — never
- * throws. The route serves the stored snapshot regardless.
+ * local cache first, then consider the free `/usage` probe. Best-effort —
+ * never throws. The route serves the stored snapshot regardless.
  */
 export async function refreshClaudeCapacityIfStale(
   nowMs = Date.now(),
