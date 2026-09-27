@@ -256,11 +256,11 @@ export default function IssuesListPage({
   const setFilter = (patch: Partial<IssuesFilterForm>) => setFilters((f) => ({ ...f, ...patch }));
 
   /** Resolve an action inline (run-scoped items have no issue page to resolve them on). */
-  const resolveAction = async (actionId: string, choice: string) => {
+  const resolveAction = async (actionId: string, choice: string, note?: string) => {
     setBusyActionId(actionId);
     setError(null);
     try {
-      await resolveHumanAction(actionId, RESOLVED_BY, choice);
+      await resolveHumanAction(actionId, RESOLVED_BY, choice, note);
       onHumanActionsChanged();
       refresh();
     } catch (e) {

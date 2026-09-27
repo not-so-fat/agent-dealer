@@ -67,6 +67,30 @@ export const PUSH_DIVERGENCE_RESPONSE_OPTIONS: Array<{ choice: string; label: st
   { choice: "close", label: "Close" },
 ];
 
+/**
+ * NOT-272: cap for the optional human note on a `product_scope_decision` resolution.
+ * Introduced here (no route-level text cap convention exists to mirror) — long enough
+ * for a real scope decision, short enough to fit verbatim in the next round's prompt.
+ */
+export const PRODUCT_SCOPE_NOTE_MAX_CHARS = 4000;
+
+/**
+ * NOT-272: normalizes the raw `note` body field of POST /api/human-actions/:id/resolve.
+ * Absent/blank is "no note" (today's behavior); a present non-string or an over-long
+ * string is a caller error. Scoping to `product_scope_decision` happens in
+ * `parseHumanResolution` / the resolve path — this only validates the shape.
+ */
+export function normalizeResolutionNote(note: unknown): { ok: true; note?: string } | { ok: false; error: string } {
+  if (note === undefined || note === null) return { ok: true };
+  if (typeof note !== "string") return { ok: false, error: "note must be a string" };
+  const trimmed = note.trim();
+  if (!trimmed) return { ok: true };
+  if (trimmed.length > PRODUCT_SCOPE_NOTE_MAX_CHARS) {
+    return { ok: false, error: `note must be at most ${PRODUCT_SCOPE_NOTE_MAX_CHARS} characters` };
+  }
+  return { ok: true, note: trimmed };
+}
+
 export interface HumanResolutionResult {
   issueStatus: "done" | "repairing" | "closed" | "developing";
   workflowOutcome?: "done" | "closed";
@@ -121,12 +145,17 @@ const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
  * Run-scoped, has no Issue/workflow_instance to advance, and its only legal resolver is
  * `resolveOutboundDeliveryAction` (queue/approve-deliver.ts).
  */
-export function parseHumanResolution(actionType: string, choice: string): HumanResolution | null {
+export function parseHumanResolution(actionType: string, choice: string, note?: string): HumanResolution | null {
   if (actionType === "reflection_interaction_required" || actionType === "outbound_delivery_interaction_required") {
     return null;
   }
   if (!(actionType in VALID_CHOICES)) return null;
   if (!VALID_CHOICES[actionType as HumanActionType].includes(choice)) return null;
+  // NOT-272: `note` is declared only on the product_scope_decision variant — a note
+  // arriving with any other action type is dropped here, never stored or threaded.
+  if (actionType === "product_scope_decision" && note) {
+    return { actionType, choice, note } as HumanResolution;
+  }
   return { actionType, choice } as HumanResolution;
 }
 

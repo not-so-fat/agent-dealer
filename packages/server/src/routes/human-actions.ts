@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { getHumanAction, listOpenHumanActions } from "../repository/human-actions.js";
 import { resolveHumanActionAndAdvanceAsync } from "../coordinator/commands.js";
+import { normalizeResolutionNote } from "../coordinator/human-resolution.js";
 import { triggerIssueReflect, resolveReflectionInteractionAction } from "../coordinator/reflect-trigger.js";
 import { resolveOutboundDeliveryAction } from "../queue/approve-deliver.js";
 
@@ -16,6 +17,12 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
     const choice = typeof body?.choice === "string" ? body.choice.trim() : "";
     if (!resolvedBy || !choice) {
       return reply.status(400).send({ error: "resolvedBy and choice are required" });
+    }
+    // NOT-272: optional human note for a product_scope_decision resolution — validated
+    // the same way as resolvedBy/choice above (present-but-not-a-string 400s, never 500s).
+    const normalizedNote = normalizeResolutionNote(body?.note);
+    if (!normalizedNote.ok) {
+      return reply.status(400).send({ error: normalizedNote.error });
     }
 
     // Read before resolving — the issue id this action belongs to, needed for the reflect
@@ -49,7 +56,9 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
 
     // Awaits undraft+merge when final_review:complete (NOT-102) — sync resolve alone would
     // only park at AUTO_MERGE_INTENT and leave the PR draft.
-    const result = await resolveHumanActionAndAdvanceAsync(id, resolvedBy, choice);
+    const result = await resolveHumanActionAndAdvanceAsync(id, resolvedBy, choice, {
+      note: normalizedNote.note,
+    });
     if (!result.ok) return reply.status(result.code).send({ error: result.error });
 
     // Reflect is a best-effort network call to Agent Deck (health check + a sequential

@@ -48,6 +48,10 @@ export interface DeveloperPromptInput {
    * doc "Guidance semantics") — a one-shot CLI process never inherits a running session,
    * so this is how guidance actually reaches the next developer/reviewer input. */
   guidance?: string[];
+  /** NOT-272: the human's note from resolving a `product_scope_decision` — carried on
+   * this round's work-item payload (never read from the DB), so exactly the very next
+   * developer round sees it. Rendered verbatim under its own heading. */
+  scopeDecisionNote?: string;
 }
 
 function guidanceSection(guidance: string[] | undefined): string[] {
@@ -57,6 +61,19 @@ function guidanceSection(guidance: string[] | undefined): string[] {
     `Apply this unless it would require changing the frozen acceptance criteria, scope, or round limits — if it would, say so in your conclusion instead of deviating.`,
     ``,
     ...guidance.flatMap((g) => [g.trim(), ``]),
+  ];
+}
+
+/** NOT-272: a resolved product_scope_decision's human note, verbatim. Empty/absent
+ * renders nothing so noteless resolves produce byte-for-byte the prompt they always did. */
+function scopeDecisionSection(note: string | undefined): string[] {
+  if (!note?.trim()) return [];
+  return [
+    `## Human decision`,
+    `A human resolved the product-scope question that was holding this work. This is the decision — follow it. Do not re-derive it, do not re-escalate the same question, and do not write this decision into source comments; it is recorded on the human action.`,
+    ``,
+    note.trim(),
+    ``,
   ];
 }
 
@@ -126,6 +143,9 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
       parts.push(...formatVerificationReceiptSection(input.priorVerificationReceipt));
     }
   }
+
+  // NOT-272: the scope decision leads — the developer reads it before the task itself.
+  parts.push(...scopeDecisionSection(input.scopeDecisionNote));
 
   parts.push(
     `## Task`,

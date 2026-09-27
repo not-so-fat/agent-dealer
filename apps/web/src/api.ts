@@ -529,12 +529,17 @@ export interface ResolveHumanActionResult {
 export async function resolveHumanAction(
   id: string,
   resolvedBy: string,
-  choice: string
+  choice: string,
+  note?: string
 ): Promise<ResolveHumanActionResult> {
   const res = await fetch(`${API}/api/human-actions/${id}/resolve`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ resolvedBy, choice }),
+    // NOT-272: optional product_scope_decision note — omitted when blank so noteless
+    // resolves send byte-for-byte the body they always did.
+    body: JSON.stringify(
+      note?.trim() ? { resolvedBy, choice, note: note.trim() } : { resolvedBy, choice }
+    ),
   });
   if (!res.ok) throw new Error(await readApiError(res));
   return res.json();
