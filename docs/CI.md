@@ -86,13 +86,16 @@ letting the "pre-existing, verified on the clean tree" claim through.
 
 ### AC4 evidence (paste into the PR description)
 
-AC4 is only closed by an actually-run verbatim transcript, not by this procedure
-text. This coding session has no shell access, so the transcript below is still
-pending a human (or shell-enabled) run. To close the finding, run the one-liner
-above at HEAD `857f6b1` on a machine with a real developer `~/.claude.json`
-present, then paste the verbatim output plus the `exit=` line into the PR
-description inside the block below. If a live replay is impossible (e.g. no
-machine with `~/.claude.json` handy), record an explicit waiver here instead.
+AC4 is only closed by an actually-run verbatim transcript pasted into the PR
+description, not by this procedure text. This repair-round session has no shell
+access (all shell commands are policy-denied), so no transcript can be produced
+or verified from here — repeated coding passes cannot close AC4. To close the
+finding, a human (or shell-enabled session) must run the one-liner above at
+HEAD `857f6b1` on a machine with a real developer `~/.claude.json` present,
+then paste the verbatim output plus the `exit=` line into the PR description
+inside the block below. If a live replay is impossible (e.g. no machine with
+`~/.claude.json` handy), a human must record an explicit waiver in the PR
+instead — the agent cannot waive AC4 on its own authority.
 
 ```text
 # AC4 NOT-268 replay transcript (pending — replace this block with verbatim output):
