@@ -146,23 +146,26 @@ function splitSpawnLog(raw: string): { stdout: string; stderr: string } {
 
 /**
  * NOT-270: reuse real Dealer Muse work as the observation opportunity. After
- * a genuine Muse session ends, kick one throttled, bounded, best-effort
- * refresh through the server-owned serve host — the proven safe point for
- * the final `usage/read`. This creates no model turn of its own (the
- * capacity client only ever sends the read-only handshake/`usage/read`
- * allowlist) and never affects the session result. Serve-lane turns
- * observed the host, so this hook is the final read that populates 5H/1W;
- * after an exec-lane fallback the host stays unobserved by construction
- * (the NOT-269 structural precondition) and the read stays honest N/A with
- * last-good rows preserved.
+ * a genuine Muse session ends, kick one bounded, best-effort refresh
+ * through the server-owned serve host — the proven safe point for the final
+ * `usage/read`. This deliberately bypasses the GET-route throttle
+ * (`maybeRefreshMuseCapacityFromHost` shares it): the final read at the
+ * safe point is contractual, not opportunistic — a recent Agents-page poll
+ * must never skip it. This creates no model turn of its own (the capacity
+ * client only ever sends the read-only handshake/`usage/read` allowlist)
+ * and never affects the session result. Serve-lane turns observed the host,
+ * so this hook is the final read that populates 5H/1W; after an exec-lane
+ * fallback the host stays unobserved by construction (the NOT-269
+ * structural precondition) and the read stays honest N/A with last-good
+ * rows preserved.
  */
 function refreshMuseCapacityAfterSession(): void {
   void (async () => {
     try {
-      const [{ configuredCapacityRuntimes }, { maybeRefreshMuseCapacityFromHost }] =
+      const [{ configuredCapacityRuntimes }, { refreshMuseCapacityFromHost }] =
         await Promise.all([import("../capacity/service.js"), import("../capacity/muse-host.js")]);
       if (!configuredCapacityRuntimes().includes("muse_code")) return;
-      await maybeRefreshMuseCapacityFromHost();
+      await refreshMuseCapacityFromHost();
     } catch {
       // Best-effort: capacity must never break or delay a session result.
     }
@@ -176,11 +179,13 @@ function refreshMuseCapacityAfterSession(): void {
  * lane. Never returns null after admission: an admitted turn is real work
  * and its verdict is reported honestly, never retried on the other lane.
  *
- * The serve lane needs no per-attempt XDG config/data dirs: durability and
- * auth are the host's own (ambient login, same identity the capacity reads
- * use — runner and capacity can never diverge). `onSpawn` is deliberately
- * not called: there is no per-attempt pid to persist, and recovery must
- * never treat the shared host as an attempt process.
+ * The serve lane needs no per-attempt XDG config/data dirs: the host runs
+ * under its own server-owned home (`prepareMuseServeHome` in
+ * capacity/muse-host.ts — same worker settings as the exec lane's
+ * per-attempt settings.json plus a symlink to the ambient login, so runner
+ * and capacity can never diverge on identity or posture). `onSpawn` is
+ * deliberately not called: there is no per-attempt pid to persist, and
+ * recovery must never treat the shared host as an attempt process.
  */
 async function runMuseServeLane(
   input: DeveloperSpawnInput & { logPath: string },

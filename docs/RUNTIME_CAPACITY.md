@@ -174,19 +174,35 @@ reported honestly (a post-admission error fails loudly rather than
 executing the work twice). `AGENT_DEALER_MUSE_RUNNER=exec` forces the exec
 lane (operator escape hatch). Both lanes write identical normalized log
 evidence, so downstream log readers work unchanged either way.
-Posture: the owned host starts with `--sandbox-network restricted`, the
-same constant every exec invocation passes; approval is per-session on the
-wire as `denyUnmatched` (the wire enum has no `never` — the closest match,
-never prompts). Accepted deltas vs exec, re-verifiable with a free
-`--provider echo` session/turn: no `--disable-web-tools`,
-`--no-foreign-personal-context`, `--approval-judge off`, or
-`--max-model-steps` equivalent exists on the wire (runaway loops are
-bounded by the attempt wall-clock timeout + `turn/cancel`). Server shutdown
-(`SIGINT`/`SIGTERM` in `packages/server/src/index.ts`) releases the owned
-host before exiting, so no `muse serve` child leaks; shutdown is
-graceful-first (a host that exits on `SIGTERM` is never signalled again)
-and a wedged host that ignores `SIGTERM` is escalated to `SIGKILL` after a
-bounded grace window (same backstop as the Codex adapter).
+Posture (scope decision recorded in `capacity/muse-host.ts`, 2026-09-26):
+the decision accepts exactly two gaps — `--disable-web-tools` and
+`--no-foreign-personal-context` have no wire- or host-level equivalent in
+this Muse version (1.4.0). Everything else claimed here matches: the owned
+host starts with `--sandbox-network restricted` (the same constant every
+exec invocation passes), and worker posture matches via the host's
+server-owned XDG home (`prepareMuseServeHome` — the same
+`buildMuseDeveloperSettings()` worker switches as the exec per-attempt
+settings.json plus a symlink to the ambient login, so serve-lane turns
+never inherit the operator's ambient MCP servers, subagents, or
+workflows). Known deltas OUTSIDE the recorded decision (not accepted —
+need product sign-off or a wire equivalent): approval is per-session on
+the wire as `denyUnmatched` (the wire enum has no `never`; never-prompts
+behavior unverified live), and `--approval-judge off` /
+`--max-model-steps` have no wire equivalent at all (runaway loops are
+bounded only by the attempt wall-clock timeout + `turn/cancel`). All of
+the above is re-verifiable with a free `--provider echo` session/turn.
+Server shutdown (`SIGINT`/`SIGTERM` in `packages/server/src/index.ts`)
+releases the owned host before exiting, so no `muse serve` child leaks;
+shutdown is graceful-first (a host that exits on `SIGTERM` is never
+signalled again) and a wedged host that ignores `SIGTERM` is escalated to
+`SIGKILL` after a bounded grace window (same backstop as the Codex
+adapter). A capacity read never releases the host while an execution turn
+is using the connection, so a concurrent refresh cannot SIGTERM an
+admitted turn. The session-boundary refresh hook
+(`refreshMuseCapacityAfterSession`) calls `refreshMuseCapacityFromHost`
+directly — it deliberately bypasses the GET-route throttle so the final
+read at the proven safe point is contractual even when the Agents page
+polled seconds earlier.
 
 Normalization keeps the two stable windows independently:
 

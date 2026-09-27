@@ -18,17 +18,22 @@
 // (state-changing, carries no usage — NOT-269 leg 2), `turn/steer`,
 // approval writes. A capacity read never touches this lane.
 //
-// Product-accepted posture deltas vs `muse exec` (NOT-270 scope decision):
-// approvalMode `denyUnmatched` is the closest wire-selectable match for
-// `--approval-mode never` (the wire enum has no `never`; both never prompt,
-// unmatched tools are denied rather than policy-allowed); `muse serve` has
-// no equivalent to `--disable-web-tools`, `--no-foreign-personal-context`,
-// `--approval-judge off`, or `--max-model-steps` (no wire step cap exists —
-// a runaway loop is bounded by the attempt wall-clock timeout + turn/cancel
-// here). Network sandbox parity is exact: the owned host starts with
-// `--sandbox-network restricted`, the same constant every exec invocation
-// passes. These deltas are re-verifiable with a free `--provider echo`
-// session/turn; the production smoke check on Muse 1.4.x remains.
+// Posture vs `muse exec` (NOT-270 scope decision, recorded in
+// capacity/muse-host.ts): the decision accepts exactly two gaps —
+// `--disable-web-tools` and `--no-foreign-personal-context` have no wire-
+// or host-level equivalent in this Muse version (1.4.0). Network sandbox
+// parity is exact (the owned host starts with `--sandbox-network
+// restricted`, the same constant every exec invocation passes) and worker
+// posture matches via the host's server-owned config home (no MCP servers,
+// no subagents/workflows/reminders, same as the exec per-attempt settings).
+// Known deltas OUTSIDE the recorded decision (not accepted — need product
+// sign-off or a wire equivalent): approvalMode `denyUnmatched` stands in
+// for `--approval-mode never` (the wire enum has no `never`;
+// never-prompts behavior unverified live), and `--approval-judge off` /
+// `--max-model-steps` have no wire equivalent at all — a runaway loop is
+// bounded only by the attempt wall-clock timeout + `turn/cancel` here.
+// Re-verify all of the above with a free `--provider echo` session/turn;
+// the production smoke check on Muse 1.4.x remains.
 //
 // Admission rule: anything that fails BEFORE the turn is admitted
 // (host unavailable, session/start rejected, turn/start rejected) returns
