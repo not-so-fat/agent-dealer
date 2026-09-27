@@ -10,6 +10,18 @@ import fs from "node:fs";
 import path from "node:path";
 
 const argv = process.argv.slice(2);
+
+// NOT-270: the real `muse` binary also serves a long-lived JSON-RPC `serve` host (a completely
+// different stdio protocol this fixture never implements). Without this guard, a background
+// capacity-host spawn racing a real developer session would run the `exec`-shaped scenario below
+// under `serve` argv, clobbering FAKE_MUSE_RECORD non-deterministically. Fail fast and cleanly
+// instead, exactly like a real host this fixture can't speak to — callers already treat that as a
+// normal pre-admission failure and fall back to the `exec` lane.
+if (argv[0] === "serve") {
+  process.stderr.write("fake-muse: serve not implemented by this exec-only fixture\n");
+  process.exit(1);
+}
+
 const flag = (name) => argv[argv.indexOf(name) + 1];
 const sessionId = flag("--session-id");
 const model = flag("--model");

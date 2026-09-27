@@ -4,6 +4,21 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.3 — 2026-09-26
+
+Patch over 1.2.2: real desktop-backed Cursor Individual capacity, a free local Claude capacity cache, Muse capacity moved onto an owned long-lived host, and provider logo/header cleanup.
+
+### Features
+
+- **Cursor Individual capacity reads the real desktop login (NOT-267, experimental)** — the opt-in adapter now resolves Cursor's own desktop `state.vscdb` login first (per-OS paths), falling back to the Agent `auth.json` credential; a usable login from either source wins, an unusable desktop login degrades to `unparsable`, and total absence skips the request entirely. `doctor` reports which source (if any) was found, with no paths or secrets printed.
+- **Claude capacity gets a free local cache with a paid one-hour fallback (NOT-268)** — `GET /api/runtime-capacity` now reads Claude's own on-disk utilization cache directly (no cost) and normalizes it onto the same account-wide 5H/1W window keys the event path already writes, so the freshest source always wins. When no sample is under an hour old, an opt-in (`AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=paid-after-1h`), single-flighted, backed-off (60m→8h) minimal-cost probe can refresh it; every attempt is logged with cost/outcome, never prompt or output.
+- **Muse capacity moves onto an owned, long-lived host (NOT-269 research, NOT-270)** — research proved a one-shot `usage/read` can never observe real capacity, since Muse only reports usage to the serve host that ran the turn, and Dealer runs turns via short-lived `muse exec`. Capacity polling now maintains one server-owned `muse serve` host per process, ingests `usage/changed` as it arrives, and takes a throttled `usage/read` as the final read — newest-observed-wins, with honest `missing`/N/A until a real turn is routed through an owned host.
+
+### UI
+
+- **Capacity header shows exactly one pair per provider (NOT-266)** — Claude/Codex/Muse show only their tagged 5H/1W pair (missing half shown as N/A) and Cursor shows only its 1M billing-cycle window; internal sentinels, extras, and diagnostics no longer leak into the header or tooltips as bogus "other" rows.
+- **Real Codex/Muse logos, icon-only capacity labels (NOT-271)** — the generic `Cx`/`Mu` glyphs are replaced with checked-in first-party-sourced logos shared across all four runtime icons; the top-bar capacity blocks drop their text label in favor of the icon plus an accessible `aria-label`, narrowing each block.
+
 ## 1.2.2 — 2026-09-23
 
 Patch over 1.2.1: an opt-in Cursor Individual capacity adapter, configurable Linear repository mappings, a two-window top-bar capacity display, and Muse/Codex capacity repairs.
