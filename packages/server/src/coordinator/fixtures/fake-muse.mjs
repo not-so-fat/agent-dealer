@@ -117,6 +117,20 @@ switch (scenario) {
     completed("Created hello.txt.");
     break;
   }
+  case "capability-shell-then-hang":
+  case "capability-shell-then-fail": {
+    // NOT-277: the shell ran (result.txt is correct) but the session never completes cleanly.
+    tool("bash", "call-1");
+    execFileSync("sh", ["probe.sh"]);
+    if (scenario === "capability-shell-then-hang") {
+      setInterval(() => {}, 1000);
+      break;
+    }
+    writeSessionLog({ usage: USAGE });
+    failed("provider error after tool call");
+    process.exit(1);
+    break;
+  }
   case "capability-shell":
   case "capability-no-shell": {
     // NOT-277: the developer-capability probe (adapters/muse-capability.ts). A capable build runs
