@@ -39,15 +39,22 @@ test("real worktree-shaped paths pass the guard", () => {
 
 test("the primary repo root and other non-worktree paths are rejected", () => {
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-guard-repo-"));
+  // A plain checkout dir (what the ambient process cwd is in a normal dev
+  // checkout). Deliberately synthetic, never `process.cwd()` itself: the
+  // runner's own cwd is environment-dependent and may itself be
+  // worktree-shaped (e.g. a `<uuid>-developer` dir under a `worktrees`
+  // parent), which the guard correctly accepts per the naming convention.
+  const checkoutDir = path.join(repoRoot, "checkout");
+  fs.mkdirSync(checkoutDir);
   try {
     assert.equal(isManagedWorktreeCwd(repoRoot), false, "primary repo root itself");
-    assert.equal(isManagedWorktreeCwd(process.cwd()), false, "ambient process cwd");
+    assert.equal(isManagedWorktreeCwd(checkoutDir), false, "ambient-checkout-shaped cwd");
     assert.equal(isManagedWorktreeCwd(os.tmpdir()), false, "bare temp dir");
     assert.equal(isManagedWorktreeCwd(path.join(os.tmpdir(), `${SESSION_ID}-developer`)), false, "role suffix without a worktrees parent");
     assert.equal(isManagedWorktreeCwd("/repo/.agent-dealer-worktrees"), false, "worktrees root without a session dir");
     assert.equal(isManagedWorktreeCwd(""), false, "empty cwd");
     assert.throws(() => assertWorktreeCwd(repoRoot), /managed worktree/);
-    assert.throws(() => assertWorktreeCwd(process.cwd()), /managed worktree/);
+    assert.throws(() => assertWorktreeCwd(checkoutDir), /managed worktree/);
   } finally {
     fs.rmSync(repoRoot, { recursive: true, force: true });
   }
@@ -75,17 +82,24 @@ test("realDeveloperSpawn refuses the primary repo root before any process is spa
 });
 
 test("realReviewerSpawn refuses the primary repo root before any process is spawned", async () => {
-  await assert.rejects(
-    realReviewerSpawn({
-      sessionId: SESSION_ID,
-      runtime: "claude_code",
-      policy: { worktreeWrite: false } as never,
-      model: null,
-      prompt: "Review it",
-      cwd: process.cwd(),
-      timeoutMs: 1000,
-    }),
-    /managed worktree/,
-    "repo-root cwd throws instead of spawning"
-  );
+  // Synthetic repo-root stand-in, never `process.cwd()`: the runner's own
+  // cwd is environment-dependent and may itself be worktree-shaped.
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-guard-rev-"));
+  try {
+    await assert.rejects(
+      realReviewerSpawn({
+        sessionId: SESSION_ID,
+        runtime: "claude_code",
+        policy: { worktreeWrite: false } as never,
+        model: null,
+        prompt: "Review it",
+        cwd: repoRoot,
+        timeoutMs: 1000,
+      }),
+      /managed worktree/,
+      "repo-root cwd throws instead of spawning"
+    );
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+  }
 });
