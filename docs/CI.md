@@ -11,7 +11,10 @@
 When the "Unit tests" step fails, the gate re-runs exactly the failing test files in a
 disposable git worktree checked out at the merge-base (`git merge-base origin/main HEAD`)
 and compares individual failing **test names** per file (not whole-file pass/fail, so
-a new failing test in an already-red file is still caught):
+a new failing test in an already-red file is still caught). Names are normalized
+before comparison — the TAP ordinal (`not ok 3 - `), trailing `# TODO`/`# SKIP`
+directives, and absolute worktree path prefixes are stripped — so a pre-existing
+failure still matches when tests are renumbered or the checkout path differs:
 
 - Test fails on HEAD **and** at the merge-base → confirmed pre-existing. The script
   exits 0 and prints the merge-base commit plus the confirmed test name(s).
@@ -20,7 +23,9 @@ a new failing test in an already-red file is still caught):
   exits non-zero, failing the job, printing the failing test name(s) and both commits
   compared (current HEAD vs merge-base).
 - Fail-closed: if no HEAD failure can be reproduced, it exits non-zero instead of
-  blessing an unknown state.
+  blessing an unknown state. Likewise, if HEAD has specific failing test names
+  but the baseline run yields none (e.g. a harness crash at the merge-base),
+  the file counts as a regression — an unparseable baseline proves nothing.
 
 The step is gated with
 `if: failure() && steps.unit.outcome == 'failure' && github.event_name == 'pull_request'`,

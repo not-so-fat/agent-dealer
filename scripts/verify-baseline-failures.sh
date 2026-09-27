@@ -12,7 +12,8 @@
 # at the baseline commit (default: `git merge-base origin/main HEAD`,
 # override with BASELINE_REF=<commit> for manual replays) and then, comparing
 # individual failing TEST NAMES per file (not whole-file pass/fail, so a new
-# failing test in an already-red file is still caught):
+# failing test in an already-red file is still caught), normalized without TAP
+# ordinals so renumbered pre-existing failures still match:
 #   exit 0 — every test failing on HEAD also fails at the baseline
 #            (pre-existing confirmed). Prints the baseline commit plus the
 #            confirmed test name(s).
@@ -49,9 +50,20 @@ resolve_baseline() {
 
 BASE="$(resolve_baseline)"
 
-# failing_test_names <output-log> : print TAP "not ok" lines (the specific test names).
+# failing_test_names <output-log> : print normalized failing TEST NAMES, one per line.
+# Normalization (so renumbered tests still compare equal across commits):
+#   - strip the TAP ordinal ("not ok 3 - " -> ""), which shifts whenever tests
+#     are added/removed earlier in the file;
+#   - drop trailing "# TODO"/"# SKIP" directives;
+#   - reduce absolute *.test.ts(x) paths (whole-file TAP failures) to their
+#     basename, since the HEAD and baseline worktree roots always differ.
 failing_test_names() {
-  grep -E '^[[:space:]]*not ok' "$1" 2>/dev/null | sed -E 's/^[[:space:]]*//' | sort -u || true
+  grep -E '^[[:space:]]*not ok' "$1" 2>/dev/null \
+    | sed -E 's/^[[:space:]]*//' \
+    | sed -E 's/^not ok [0-9]+ - //' \
+    | sed -E 's/ # (TODO|SKIP).*//' \
+    | sed -E 's|/[^ ]*/([^ /]+\.test\.tsx?)|\1|g' \
+    | sort -u || true
 }
 
 # run_suite_file <tree-root> <file-relative-to-root> <output-log> : exit code of the run.
@@ -165,10 +177,27 @@ for f in "${FAIL_FILES[@]}"; do
   head_names="$(failing_test_names "$(log_for "$f")")"
   base_names="$(failing_test_names "$blog")"
   rm -f "$blog"
-  if [[ -z "$head_names" || -z "$base_names" ]]; then
-    # No parseable TAP "not ok" names on one side (e.g. harness/setup error):
-    # fall back to file-level verdict — both runs failed, so pre-existing.
+  if [[ -z "$head_names" && -z "$base_names" ]]; then
+    # No parseable TAP "not ok" names on either side (e.g. harness/setup error
+    # on both): fall back to file-level verdict — both runs failed, so
+    # pre-existing.
     echo "[verify-baseline] pre-existing confirmed (unparseable test names, both runs failed): $f" >&2
+    PREEXISTING+=("$f")
+    continue
+  fi
+  if [[ -z "$base_names" ]]; then
+    # HEAD has specific failing test names but the baseline run produced none
+    # (e.g. import/harness crash at the merge-base): nothing proves these
+    # failures pre-date the branch, so fail closed as a regression.
+    echo "[verify-baseline] REGRESSION (baseline produced no parseable failing test names to confirm against): $f" >&2
+    echo "$head_names" | sed 's/^/[verify-baseline]   /' >&2
+    REGRESSIONS+=("$f")
+    continue
+  fi
+  if [[ -z "$head_names" ]]; then
+    # HEAD failed without parseable names while the baseline failed with them:
+    # no specific HEAD failure to dispute, so file-level pre-existing.
+    echo "[verify-baseline] pre-existing confirmed (unparseable HEAD test names, both runs failed): $f" >&2
     PREEXISTING+=("$f")
     continue
   fi
