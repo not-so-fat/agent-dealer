@@ -225,9 +225,14 @@ const FAILURE_LINE_PATTERN =
 
 /**
  * Focus a (sanitized) log around its useful failure/error lines: keep a small context
- * window around each matching line, merge overlapping windows, collapse long runs of
- * identical lines (CI setup spam), then enforce the global line/char caps. With no
- * matching line, the tail is the most likely failure site. Never returns unsanitized text.
+ * window around each matching line, merge overlapping windows, rank merged regions by
+ * hit density (most failure-pattern hits first, ties in log order) so an early real
+ * failure cluster is not crowded out of the line budget by sparse isolated mentions
+ * in passing-test names (NOT-276 round 2: `node:test` runs to completion, so the real
+ * failure can sit at test 355/1667 with dozens of weak `error`/`fail` hits before it),
+ * then collapse long runs of identical lines (CI setup spam) and enforce the global
+ * line/char caps. With no matching line, the tail is the most likely failure site.
+ * Never returns unsanitized text.
  */
 export function buildFailureExcerpt(combinedLog: string): { excerpt: string; truncated: boolean } {
   const sanitized = sanitizeCiText(combinedLog);
@@ -251,8 +256,39 @@ export function buildFailureExcerpt(combinedLog: string): { excerpt: string; tru
       if (last && w[0] <= last[1] + 1) last[1] = Math.max(last[1], w[1]);
       else merged.push([w[0], w[1]]);
     }
+    // Rank merged regions by hit density so the excerpt budget goes to the most
+    // failure-indicative clusters first. Format-agnostic: no TAP-specific patterns,
+    // just "more pattern hits in one window = more likely the real failure".
+    // Ties keep log order, and output is re-sorted to log order for readability.
+    // `hits` is ascending (built in line order) and `merged` is ascending by `from`,
+    // so a single linear pass counts hits per region.
+    let hi = 0;
+    const ranked = merged.map(([from, to]) => {
+      while (hi < hits.length && hits[hi] < from) hi++;
+      let count = 0;
+      let k = hi;
+      while (k < hits.length && hits[k] <= to) {
+        count++;
+        k++;
+      }
+      return { from, to, count };
+    });
+    ranked.sort((a, b) => b.count - a.count || a.from - b.from);
+    const taken: Array<[number, number]> = [];
+    let used = 0;
+    for (const w of ranked) {
+      const size = w.to - w.from + 1 + (taken.length > 0 ? 1 : 0);
+      // Skip regions that no longer fit so a smaller later region can still fill
+      // the budget — but always take the top-ranked region even if it alone
+      // exceeds the budget (the caps below truncate it, as before).
+      if (taken.length > 0 && used + size > CHECKS_EVIDENCE_MAX_EXCERPT_LINES) continue;
+      taken.push([w.from, w.to]);
+      used += size;
+      if (used >= CHECKS_EVIDENCE_MAX_EXCERPT_LINES) break;
+    }
+    taken.sort((a, b) => a[0] - b[0]);
     const picked: string[] = [];
-    merged.forEach(([from, to], idx) => {
+    taken.forEach(([from, to], idx) => {
       if (idx > 0) picked.push("...");
       for (let i = from; i <= to; i++) picked.push(lines[i]);
     });

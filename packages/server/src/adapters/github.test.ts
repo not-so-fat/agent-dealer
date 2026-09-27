@@ -496,20 +496,29 @@ test("NOT-252: extractActionsRunId and sanitizeUrl helpers", async () => {
 // --- NOT-276: search-before-truncate — an early failure must survive excerpt building ---
 
 // Replays the NOT-273 incident shape (Actions run 36330128633 "Unit tests" step):
-// `not ok 355/356` + `cancelledByParent` near the head of the log, followed by
-// thousands of passing-test lines. Under the old last-20K-chars pre-truncation
+// 1667 TAP lines, `not ok 355/356` + `cancelledByParent` at ~21% through the log,
+// followed by ~1300 passing-test lines. Under the old last-20K-chars pre-truncation
 // the failure sat outside the kept tail and the excerpt showed only passing
 // tail noise; with search-before-truncate it must surface the failure instead.
-// Passing lines deliberately include realistic failure-pattern words in their
-// test names (real TAP `ok` lines do this — e.g. "handles error ..."), so this
-// also proves ordinary pattern-matching passing lines don't break it. NOTE on
-// scale: only a handful of pre-failure pattern hits fit in the 80-line budget
-// alongside the failure window — see the product-call note in the round conclusion.
+// Faithful-scale substitute for the real `gh run view 36330128633 --log-failed`
+// replay (no network/gh in this sandbox — the PR description must still record a
+// replay against the saved real "Unit tests" log showing `not ok 355`/`356`).
+// Crucially, ~21 passing lines BEFORE the failure carry realistic
+// failure-pattern words in their test names (real TAP `ok` lines do this — e.g.
+// "handles error ..."), spaced >13 lines apart so each is an isolated hit region:
+// without hit-density ranking, those early weak hits fill the 80-line budget
+// ahead of the real failure cluster (round-2 blocking finding). The dense
+// failure block (failureType x2 + error: x1 within 9 lines) must outrank them.
 test("NOT-276: failure line before the last 20K chars still reaches the excerpt", async () => {
-  const preface = [
-    "ok 353 - reports error when child fails to spawn",
-    "ok 354 - cleans up after failure",
-  ].join("\n");
+  const early: string[] = [];
+  for (let n = 1; n <= 354; n++) {
+    // Isolated pattern hits every 16 lines (> 2x the 6-line context radius, so
+    // windows never merge): ~22 weak hits precede the real failure.
+    if (n % 16 === 0) early.push(`ok ${n} - handles error output for test ${n}`);
+    else if (n === 353) early.push("ok 353 - reports error when child fails to spawn");
+    else if (n === 354) early.push("ok 354 - cleans up after failure");
+    else early.push(`ok ${n} - passing test number ${n}`);
+  }
   const failureBlock = [
     "not ok 355 - coordinator spawns child with explicit cwd",
     "  ---",
@@ -521,12 +530,13 @@ test("NOT-276: failure line before the last 20K chars still reaches the excerpt"
     "  failureType: 'cancelledByParent'",
     "  ---",
   ].join("\n");
-  const filler = Array.from({ length: 1000 }, (_, i) => {
-    const n = 1000 + i;
+  const filler = Array.from({ length: 1667 - 356 }, (_, i) => {
+    const n = 357 + i;
     if (i % 200 === 0) return `ok ${n} - handles error output for test ${n}`;
+    if (i % 150 === 0) return `ok ${n} - cleans up after failure ${n}`;
     return `ok ${n} - passing test number ${n}`;
   }).join("\n");
-  const log = `${preface}\n${failureBlock}\n${filler}`;
+  const log = `${early.join("\n")}\n${failureBlock}\n${filler}`;
   // Guard the test's premise: the failure really does sit outside the old 20K tail window.
   assert.ok(log.indexOf("not ok 355") < log.length - 20_000);
   const { exec } = queuedExec([
@@ -536,11 +546,30 @@ test("NOT-276: failure line before the last 20K chars still reaches the excerpt"
   const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 160, expectedHeadSha: HEAD_SHA });
   assert.ok(evidence);
   assert.match(evidence.excerpt, /not ok 355/);
+  assert.match(evidence.excerpt, /not ok 356/);
   assert.match(evidence.excerpt, /cancelledByParent/);
-  assert.match(evidence.excerpt, /reports error when child fails to spawn/);
-  assert.match(evidence.excerpt, /handles error output/);
-  assert.doesNotMatch(evidence.excerpt, /passing test number 1999/);
+  assert.doesNotMatch(evidence.excerpt, /passing test number 1667/);
   assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+  assert.ok(evidence.excerpt.split("\n").length <= CHECKS_EVIDENCE_MAX_EXCERPT_LINES);
+});
+
+test("NOT-276: dense failure cluster outranks sparse earlier weak hits (unit level)", async () => {
+  // Minimal direct proof of the round-2 ranking: 30 isolated weak hits precede one
+  // dense 3-hit failure cluster; the excerpt must contain the cluster.
+  const lines: string[] = [];
+  for (let g = 0; g < 30; g++) {
+    for (let k = 0; k < 15; k++) lines.push(`ok ${g * 16 + k + 1} - passing test number ${g * 16 + k + 1}`);
+    lines.push(`ok ${g * 16 + 16} - handles error output for test ${g * 16 + 16}`);
+  }
+  lines.push(
+    "not ok 999 - real failure here",
+    "  failureType: 'cancelledByParent'",
+    "  error: test cancelled by parent"
+  );
+  for (let n = 1000; n < 1100; n++) lines.push(`ok ${n} - passing test number ${n}`);
+  const { excerpt } = buildFailureExcerpt(lines.join("\n"));
+  assert.match(excerpt, /not ok 999/);
+  assert.match(excerpt, /cancelledByParent/);
 });
 
 test("NOT-276: log with no failure-pattern hits still falls back to the tail, unchanged", async () => {
