@@ -116,10 +116,13 @@ if [[ ${#FAIL_FILES[@]} -eq 0 ]]; then
 fi
 
 # ---- Baseline worktree ----
-WORKTREE="$(mktemp -d)"
+# NOTE: `git worktree add` refuses an existing path (even an empty dir), so
+# reserve a not-yet-existing child of a fresh temp dir as the worktree location.
+WORKTREE_PARENT="$(mktemp -d)"
+WORKTREE="$WORKTREE_PARENT/baseline"
 cleanup() {
   git -C "$ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
-  rm -rf "$WORKTREE" "$LOG_DIR"
+  rm -rf "$WORKTREE_PARENT" "$LOG_DIR"
 }
 trap cleanup EXIT
 
