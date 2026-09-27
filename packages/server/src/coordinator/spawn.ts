@@ -18,6 +18,7 @@ import { resolveClaudeBin, resolveCodexBin, resolveCursorBin, resolveMuseBin } f
 import { spawnCli } from "../runners/spawn-cli.js";
 import { buildDeveloperArgs, buildReviewerArgs } from "./args.js";
 import { assertReviewerReadOnly } from "./permissions.js";
+import { assertWorktreeCwd } from "./worktree-cwd-guard.js";
 import { extractResultTranscript } from "./usage.js";
 import { runMuseDeveloperSession, type MuseSessionSummary } from "./muse-spawn.js";
 
@@ -97,6 +98,9 @@ const BIN_FOR: Record<Runtime, () => string> = {
 };
 
 export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
+  // NOT-273: never spawn a worker outside a managed worktree — throws before
+  // any child process exists (the effect reports it as "could not start").
+  assertWorktreeCwd(input.cwd);
   if (input.runtime === "muse_code") {
     // Own argv, per-attempt XDG dirs and result parsing; deck/MCP are never wired for Muse.
     return runMuseDeveloperSession({
@@ -130,6 +134,9 @@ export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
  * loosens a reviewer's tools can never silently reach a live spawn.
  */
 export const realReviewerSpawn: ReviewerSpawn = async (input) => {
+  // NOT-273: same worktree-cwd guard as the developer path — throws before
+  // any child process exists.
+  assertWorktreeCwd(input.cwd);
   const args = buildReviewerArgs(
     input.runtime,
     input.prompt,

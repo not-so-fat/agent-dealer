@@ -94,6 +94,7 @@ import os from "node:os";
 import path from "node:path";
 import type { CapacityUnavailableReason, RuntimeCapacityResponse } from "@agent-dealer/shared";
 import { MUSE_CLI_ENV, resolveMuseAuthFile, resolveMuseBin } from "../cli-env.js";
+import { getDataDir } from "../db/index.js";
 import { buildMuseDeveloperSettings } from "../runners/muse-code-settings.js";
 import {
   MSP_USAGE_CHANGED,
@@ -125,6 +126,27 @@ export interface MuseHostOptions {
   timeoutMs?: number;
   /** Muse login file (existence only, never read). Defaults to resolveMuseAuthFile(). */
   authFilePath?: string;
+  /**
+   * NOT-273: working directory for the serve child. Defaults to
+   * `resolveMuseHostCwd()` — a dedicated directory under the server's managed
+   * data dir, never the ambient process cwd. Overridable for tests.
+   */
+  cwd?: string;
+  /** Spawn implementation override (tests). Defaults to `node:child_process` spawn. */
+  spawnImpl?: typeof spawn;
+}
+
+/**
+ * NOT-273: dedicated cwd for the coordinator-owned `muse serve` child.
+ * The spawn must never inherit the server process's ambient working
+ * directory (in a maintainer's `npm run dev` checkout that is the repo
+ * itself, where a stray `git add . && git commit` in the child would land
+ * real commits on the checkout). Created if missing.
+ */
+export function resolveMuseHostCwd(): string {
+  const dir = path.join(getDataDir(), "capacity", "muse-host-home");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 export interface MuseServeHome {
@@ -592,7 +614,12 @@ export class MuseCapacityHost {
     const args = this.opts.args ?? [...MUSE_SERVE_ARGV];
     let child: ChildProcess;
     try {
-      child = spawn(command, args, {
+      // NOT-273: explicit cwd — never inherit the server process's ambient
+      // working directory (which in dev is the repo checkout itself).
+      const cwd = this.opts.cwd ?? resolveMuseHostCwd();
+      const spawnFn = this.opts.spawnImpl ?? spawn;
+      child = spawnFn(command, args, {
+        cwd,
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...mergedEnv, ...MUSE_CLI_ENV },
       });
