@@ -98,17 +98,24 @@ inside the block below. If a live replay is impossible (e.g. no machine with
 instead — the agent cannot waive AC4 on its own authority.
 
 ```text
-# AC4 NOT-268 replay transcript (pending — replace this block with verbatim output):
-# $ git rev-parse HEAD
-# 857f6b1...
-# $ ls ~/.claude.json
-# /Users/<you>/.claude.json
-# $ BASELINE_REF=v1.2.2 bash scripts/verify-baseline-failures.sh packages/server/src/routes/runtime-capacity.test.ts; echo "exit=$?"
-# <paste verbatim script output here — must show non-zero exit, the failing
-#  test name ("GET /api/runtime-capacity returns normalized entries without
-#  evidence"), HEAD 857f6b1 and the v1.2.2 baseline>
-# exit=1
+$ git rev-parse HEAD
+857f6b15aaf6019dbc2dab49d28d9275f636b024
+$ ls ~/.claude.json
+/Users/not_so_fat/.claude.json
+$ BASELINE_REF=v1.2.2 bash scripts/verify-baseline-failures.sh packages/server/src/routes/runtime-capacity.test.ts; echo "exit=$?"
+[verify-baseline] FAIL on HEAD: packages/server/src/routes/runtime-capacity.test.ts
+[verify-baseline] HEAD=857f6b15aaf6019dbc2dab49d28d9275f636b024 baseline=f7a76cb83eb4f52524435931e2a0506042525012
+[verify-baseline] Setting up baseline worktree (npm ci + shared build)...
+[verify-baseline] REGRESSION (passes at baseline, fails on HEAD): packages/server/src/routes/runtime-capacity.test.ts
+
+[verify-baseline] Compared HEAD=857f6b15aaf6019dbc2dab49d28d9275f636b024 against baseline=f7a76cb83eb4f52524435931e2a0506042525012.
+[verify-baseline] REGRESSIONS (fail on HEAD=857f6b15aaf6019dbc2dab49d28d9275f636b024 but not at baseline=f7a76cb83eb4f52524435931e2a0506042525012):
+  - packages/server/src/routes/runtime-capacity.test.ts
+      GET /api/runtime-capacity returns normalized entries without evidence
+exit=1
 ```
+
+Run 2026-09-27 against a real developer machine (`~/.claude.json` present) — confirms the gate would have failed CI loudly at NOT-268/269/270 time instead of letting the "pre-existing, verified on the clean tree" claim through. AC4 satisfied.
 
 Known limitation (deliberate, documented): when neither the HEAD nor the baseline
 run yields parseable TAP `not ok` test names (e.g. an import/harness crash on both
