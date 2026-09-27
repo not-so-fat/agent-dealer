@@ -9,14 +9,15 @@
 // retired: only a host that observed the account's provider traffic can
 // answer `usage/read` / emit `usage/changed`.
 //
-// Reads observed capacity through the stable Muse Session Protocol without
-// sending a prompt and without consuming model tokens: `initialize` →
+// The free read phase reads observed capacity through the stable Muse Session
+// Protocol without sending a prompt or consuming model tokens: `initialize` →
 // `initialized` → `usage/read` on the owned host, with `usage/changed`
 // notifications ingested as received. The client enforces a read-only
 // allowlist (`initialize`, `initialized`, `usage/read`) — any other method
 // throws before it is written, so a capacity read can never start a
-// session, send a prompt, or run model work. It never touches the Keychain
-// or undocumented endpoints.
+// session, send a prompt, or run model work. The separate default-on fallback
+// in `muse-probe.ts` runs only after this phase still lacks a complete current
+// pair for an hour. Neither path touches the Keychain or undocumented endpoints.
 //
 // Stable `usage/read` shape:
 //   result: {
@@ -58,6 +59,12 @@ import {
 } from "./adapter.js";
 
 export const MUSE_RUNTIME: Runtime = "muse_code";
+
+/** Muse observations remain the last-known current value until the one-hour
+ * fallback boundary. This avoids the shared adapter's generic 15-minute N/A
+ * gap before a bounded refresh is eligible to run. */
+export const MUSE_CAPACITY_STALE_AFTER_MS = 60 * 60 * 1000;
+export const MUSE_CAPACITY_EXPIRES_AFTER_MS = 60 * 60 * 1000;
 
 /** Methods this client may ever send. Anything else throws before write. */
 export const MSP_READ_ONLY_METHODS = ["initialize", "initialized", "usage/read"] as const;
@@ -217,6 +224,8 @@ function windowReadingFromEntry(
     usedPercent,
     resetAt,
     observedAt,
+    staleAfterMs: MUSE_CAPACITY_STALE_AFTER_MS,
+    expiresAfterMs: MUSE_CAPACITY_EXPIRES_AFTER_MS,
     source: "supported_protocol",
     // Muse reports exactly this one rolling/weekly pair — it is always the
     // account-wide critical window, never a model-specific extra.
@@ -975,8 +984,10 @@ export const MUSE_REFRESH_THROTTLE_MS_DEFAULT = 5 * 60 * 1000;
 
 /**
  * Throttle bound for production refreshes. Override with
- * `AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS` (milliseconds); `off` disables
- * refresh entirely. Non-positive or unparsable values fall back to the default.
+ * `AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS` (milliseconds); `off` disables the
+ * free host read and, for backward-compatible no-spend behavior, also disables
+ * the paid fallback unless `AGENT_DEALER_MUSE_CAPACITY_REFRESH=paid-after-1h`
+ * is explicit. Non-positive or unparsable values fall back to the default.
  * Shared with the owned host (`./muse-host.js`).
  */
 export function museRefreshThrottleMs(): number {

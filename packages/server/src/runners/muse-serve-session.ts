@@ -1,12 +1,13 @@
 // packages/server/src/runners/muse-serve-session.ts
 //
-// NOT-270: run a real Dealer Muse developer turn through the server-owned
-// `muse serve` host (the NOT-269 proven lifecycle). Only a host that
+// NOT-270: run a Muse turn through a caller-owned `muse serve` host (the
+// NOT-269 proven lifecycle). Only a host that
 // observes the account's provider traffic can answer `usage/read`, so the
-// observation opportunity IS the real session: `session/start` +
-// `turn/start` on the owned host, then the session-boundary `usage/read`
-// (the existing refresh hook) populates 5H/1W. No synthetic prompt is ever
-// sent — the turn below carries the genuine Dealer developer prompt.
+// observation opportunity is a `session/start` + `turn/start` on that host.
+// Production callers use this for genuine Dealer developer work and, when
+// capacity has been unavailable for an hour, the dedicated bounded capacity
+// probe. The capacity probe owns a separate restricted host and shuts it down
+// after its final `usage/read`.
 //
 // Wire contract (stable MSP, Muse 1.4.x):
 //   session/start {commandId UUIDv7, workspaceRoot, modelId, approvalMode}
@@ -56,9 +57,9 @@ function serveReqId(prefix: string): string {
 }
 
 export interface MuseServeTurnInput {
-  /** The shared owned host — execution traffic must land on the capacity host. */
+  /** The caller-owned host; usage must be read back from this same host. */
   host: MuseCapacityHost;
-  /** Genuine Dealer developer prompt. Never empty (mirrors the exec guard). */
+  /** Dealer developer prompt or fixed capacity-probe prompt. Never empty. */
   prompt: string;
   /** Explicit model id, passed as session `modelId`. */
   model: string;

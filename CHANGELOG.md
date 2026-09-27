@@ -4,6 +4,10 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+### Fixes
+
+- **Muse 5H/1W no longer stays N/A after the free host loses its observation** — capacity refresh now tries the existing no-cost same-host read first, then defaults to one restricted minimal paid turn only when either window has been unavailable or stale for an hour. The fallback is background, single-flight, time-bounded, backed off through eight hours after failures, and preserves last-good values; `AGENT_DEALER_MUSE_CAPACITY_REFRESH=off` disables it.
+
 ## 1.2.3 — 2026-09-26
 
 Patch over 1.2.2: real desktop-backed Cursor Individual capacity, a free local Claude capacity cache, Muse capacity moved onto an owned long-lived host, and provider logo/header cleanup.

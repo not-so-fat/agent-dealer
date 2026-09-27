@@ -44,9 +44,11 @@
 //   clears the sentinel.
 // - Capacity stays independent from `runtime_availability` hard-cap
 //   admission: this module never reads or writes health rows.
-// - The client enforces the read-only allowlist (`initialize`,
-//   `initialized`, `usage/read`) — a capacity read by itself never sends
-//   `session/start`, a prompt, a turn, a tool, or any other billable method.
+// - The free read path enforces the read-only allowlist (`initialize`,
+//   `initialized`, `usage/read`) and never starts billable work. The separate
+//   default-on fallback in `muse-probe.ts` may create a dedicated restricted
+//   host for one fixed, bounded turn after the complete pair has been absent
+//   for an hour.
 //
 // Execution precondition (NOT-269): only a host that observes the account's
 // provider traffic can answer `usage/read`. Real Dealer Muse turns run
@@ -54,12 +56,12 @@
 // below, driven by runners/muse-serve-session.ts) — that traffic is the
 // observation, so the session-boundary refresh hook
 // (`refreshMuseCapacityAfterSession` in coordinator/muse-spawn.ts) is the
-// final `usage/read` that populates 5H/1W. No synthetic model prompt is
-// ever issued to refresh capacity. When the serve execution lane cannot
-// admit a turn (host unavailable, unimplemented method, auth), the session
-// falls back to the legacy `muse exec` subprocess before any model work
-// starts — the host stays unobserved and the read stays honest N/A with
-// last-good rows preserved.
+// final `usage/read` that populates 5H/1W. If no genuine turn has populated
+// a complete current pair for an hour, `muse-probe.ts` may use its own host
+// for the bounded paid fallback. When the normal serve execution lane cannot
+// admit a developer turn, that session still falls back to the legacy
+// `muse exec` subprocess before any model work starts; last-good capacity
+// rows remain preserved.
 //
 // PRODUCT DECISION (2026-09-26, resolved via human_action on this ticket):
 // the runner migration is in scope for NOT-270, in this same PR, not a
@@ -178,8 +180,43 @@ export function prepareMuseServeHome(
 
 export type MuseHostReadOutcome =
   | { status: "observed"; written: string[]; skippedStale: string[] }
-  | { status: "missing" }
-  | { status: "failure"; reason: CapacityUnavailableReason };
+  | { status: "missing"; diagnostic: MuseHostDiagnostic }
+  | { status: "failure"; reason: CapacityUnavailableReason; diagnostic: MuseHostDiagnostic };
+
+/** Static, credential-free diagnostics kept server-side. The public capacity
+ * response still uses the small shared unavailable-reason enum. */
+export type MuseHostDiagnostic =
+  | "credential_missing"
+  | "keychain_unreadable"
+  | "auth_rejected"
+  | "binary_missing"
+  | "spawn_failed"
+  | "host_exited"
+  | "handshake_timeout"
+  | "handshake_rejected"
+  | "transport_error"
+  | "read_timeout"
+  | "read_rejected"
+  | "unobserved"
+  | "payload_unparsable"
+  | "unsupported";
+
+type MuseHostStartFailure = Extract<
+  MuseHostDiagnostic,
+  | "credential_missing"
+  | "keychain_unreadable"
+  | "auth_rejected"
+  | "binary_missing"
+  | "spawn_failed"
+  | "host_exited"
+  | "handshake_timeout"
+  | "handshake_rejected"
+  | "transport_error"
+  | "unsupported"
+>;
+
+const KEYCHAIN_UNREADABLE_RE = /keychain item .* unreadable|OSStatus\s+-?\d+/i;
+const AUTH_FAILURE_RE = /credential|auth|login|sign[ -]?in|\b401\b|\b403\b/i;
 
 interface PendingRead {
   resolve: (value: { result?: unknown; error?: { code?: unknown; message?: unknown } }) => void;
@@ -548,6 +585,7 @@ export class MuseCapacityHost {
     const timeoutMs = this.opts.timeoutMs ?? museCapacityTimeoutMs();
     const mergedEnv = this.mergedEnv();
     if (!hasMuseCredential(mergedEnv, this.opts.authFilePath ?? resolveMuseAuthFile())) {
+      this.startFailure = "credential_missing";
       return false;
     }
     const command = this.opts.command ?? resolveMuseBin();
@@ -559,7 +597,8 @@ export class MuseCapacityHost {
         env: { ...mergedEnv, ...MUSE_CLI_ENV },
       });
     } catch (err) {
-      this.startFailure = (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "unsupported" : null;
+      this.startFailure =
+        (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "binary_missing" : "spawn_failed";
       return false;
     }
     this.child = child;
@@ -591,12 +630,15 @@ export class MuseCapacityHost {
         if (this.dead) return;
       }
     });
-    child.on("error", () => {
+    child.on("error", (err) => {
       if (!this.isCurrentChild(child)) return;
+      this.startFailure =
+        (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "binary_missing" : "spawn_failed";
       this.killChild();
     });
     child.stdin?.on("error", () => {
       if (!this.isCurrentChild(child)) return;
+      this.startFailure = "transport_error";
       this.killChild();
     });
     child.on("close", () => {
@@ -604,6 +646,13 @@ export class MuseCapacityHost {
       // Guarded: a SIGTERMed hung child that exits after a restart spawned
       // its replacement must not kill the new host.
       if (!this.isCurrentChild(child)) return;
+      if (KEYCHAIN_UNREADABLE_RE.test(this.stderrTail)) {
+        this.startFailure = "keychain_unreadable";
+      } else if (AUTH_FAILURE_RE.test(this.stderrTail)) {
+        this.startFailure = "auth_rejected";
+      } else if (this.startFailure === null) {
+        this.startFailure = "host_exited";
+      }
       this.killChild();
     });
 
@@ -618,7 +667,13 @@ export class MuseCapacityHost {
       if (init?.error) {
         const kind = museClassifyRpcError(init.error);
         this.startFailure =
-          kind === "auth" ? "auth" : kind === "unsupported" ? "unsupported" : null;
+          kind === "auth"
+            ? "auth_rejected"
+            : kind === "unsupported"
+              ? "unsupported"
+              : "handshake_rejected";
+      } else if (this.startFailure === null) {
+        this.startFailure = this.dead ? "host_exited" : "handshake_timeout";
       }
       this.killChild();
       return false;
@@ -632,7 +687,7 @@ export class MuseCapacityHost {
     return true;
   }
 
-  private startFailure: "auth" | "unsupported" | null = null;
+  private startFailure: MuseHostStartFailure | null = null;
 
   /**
    * Final `usage/read` on the owned host. Single-flight: concurrent
@@ -667,15 +722,21 @@ export class MuseCapacityHost {
     this.startFailure = null;
     const started = await this.ensureStarted();
     if (!started) {
-      if (this.startFailure === "unsupported") {
+      // `ensureStarted` records the failure asynchronously. TypeScript does
+      // not model that mutation across the awaited call, so widen the field
+      // back to its declared type before selecting the fallback category.
+      const diagnostic =
+        (this.startFailure as MuseHostStartFailure | null) ?? "spawn_failed";
+      if (diagnostic === "unsupported" || diagnostic === "binary_missing") {
+        console.error(`[muse-capacity] host start failed: ${diagnostic}`);
         await noteMuseCapacityFailure("unsupported");
-        return { status: "failure", reason: "unsupported" };
+        return { status: "failure", reason: "unsupported", diagnostic };
       }
       // No credential, spawn failure, timeout, or bad exit before the
       // handshake: honest `missing`, last-good rows preserved.
-      console.error("[muse-capacity] host start failed: missing");
+      console.error(`[muse-capacity] host start failed: ${diagnostic}`);
       await noteMuseCapacityFailure("missing");
-      return { status: "missing" };
+      return { status: "missing", diagnostic };
     }
     this.readSeq += 1;
     const id = `muse-capacity-${this.connectionEpoch}-${this.readSeq}`;
@@ -691,23 +752,23 @@ export class MuseCapacityHost {
       // later read finds the connection idle.
       if (!this.hasInflightExecution()) this.killChild();
       await noteMuseCapacityFailure("missing");
-      return { status: "missing" };
+      return { status: "missing", diagnostic: "read_timeout" };
     }
     if (res.error) {
       const kind = museClassifyRpcError(res.error);
       if (kind === "auth") {
         console.error("[muse-capacity] host read failed: unauthenticated");
         await noteMuseCapacityFailure("missing");
-        return { status: "missing" };
+        return { status: "missing", diagnostic: "auth_rejected" };
       }
       if (kind === "unsupported") {
         console.error("[muse-capacity] host read failed: unsupported");
         await noteMuseCapacityFailure("unsupported");
-        return { status: "failure", reason: "unsupported" };
+        return { status: "failure", reason: "unsupported", diagnostic: "unsupported" };
       }
       console.error("[muse-capacity] host read failed: malformed");
       await noteMuseCapacityFailure("unparsable");
-      return { status: "failure", reason: "unparsable" };
+      return { status: "failure", reason: "unparsable", diagnostic: "read_rejected" };
     }
     let payload = res.result;
     if (
@@ -725,7 +786,7 @@ export class MuseCapacityHost {
       // Fresh/unobserved host: `usage` omitted — honest `missing`, never a
       // write, so a newer known pair is never overwritten or deleted.
       await noteMuseCapacityFailure("missing");
-      return { status: "missing" };
+      return { status: "missing", diagnostic: "unobserved" };
     }
     return { status: "observed", written: outcome.written, skippedStale: outcome.skippedStale };
   }
