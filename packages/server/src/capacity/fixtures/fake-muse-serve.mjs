@@ -31,6 +31,8 @@
 // `serve-turn-failed` completes the turn as failed; `serve-turn-hang` acks
 // the turn but never completes until `turn/cancel`.
 //   FAKE_MSP_RECORD: path of a file to append one JSON line per received message
+//   FAKE_MSP_RECORD_CONFIG: path to write one JSON line at startup with the
+//     observed XDG homes, parsed settings.json, and auth-link state
 //   FAKE_MSP_NOW_MS: fixed clock for deterministic resetsAtMs (default Date.now())
 //
 // `full` mirrors the stable shape: observedAtMs, tier, a rolling `window`
@@ -45,6 +47,7 @@
 // late `close` cannot kill its replacement.
 
 import fs from "node:fs";
+import path from "node:path";
 
 // The shipped `muse serve` takes no `--protocol` flag: reject it with the
 // same usage error and exit code 2 production reports.
@@ -56,6 +59,48 @@ if (process.argv.includes("--protocol")) {
 const mode = process.env.FAKE_MSP_MODE ?? "full";
 const recordPath = process.env.FAKE_MSP_RECORD;
 const nowMs = Number(process.env.FAKE_MSP_NOW_MS ?? Date.now());
+
+// NOT-270 serve-lane posture: the owned host must launch under a
+// server-owned XDG home (worker settings + auth link), never the ambient
+// operator config. When FAKE_MSP_RECORD_CONFIG is set, record the observed
+// XDG homes plus the parsed settings.json and auth-link state at startup so
+// tests can prove the launch env without a live binary.
+if (process.env.FAKE_MSP_RECORD_CONFIG) {
+  try {
+    const configHome = process.env.XDG_CONFIG_HOME ?? null;
+    let settings = null;
+    let settingsError = null;
+    try {
+      settings = JSON.parse(
+        fs.readFileSync(path.join(configHome ?? "", "muse", "settings.json"), "utf8")
+      );
+    } catch (e) {
+      settingsError = String(e?.message ?? e);
+    }
+    let authExists = false;
+    let authIsLink = false;
+    try {
+      const st = fs.lstatSync(path.join(configHome ?? "", "muse", "auth.json"));
+      authExists = true;
+      authIsLink = st.isSymbolicLink();
+    } catch {
+      // Absent (API-key auth) — recorded as-is.
+    }
+    fs.writeFileSync(
+      process.env.FAKE_MSP_RECORD_CONFIG,
+      `${JSON.stringify({
+        configHome,
+        dataHome: process.env.XDG_DATA_HOME ?? null,
+        settings,
+        settingsError,
+        authExists,
+        authIsLink,
+      })}\n`
+    );
+  } catch {
+    // Recording is test assistance only — never break the fake over it.
+  }
+}
 
 if (mode === "slow-term-full") {
   // Linger after SIGTERM so the stale child's `close` lands after a restart.

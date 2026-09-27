@@ -21,6 +21,14 @@
 //   read — an unobserved host holds no state, so releasing it loses
 //   nothing, and production keeps no lifetime child that can only answer
 //   `missing`. The next throttled refresh transparently respawns it.
+//   The release never fires while an execution turn is using the
+//   connection (`hasInflightExecution`): a capacity read must not SIGTERM
+//   an admitted turn.
+// - The host launches under a server-owned XDG home
+//   (`prepareMuseServeHome`): the same worker posture as the exec lane's
+//   per-attempt settings (no MCP servers, no subagents, no workflows, no
+//   reminders) plus a symlink to the ambient login, so serve-lane turns
+//   never inherit the operator's ambient config.
 // - `usage/changed` is ingested as soon as received; the throttled
 //   on-demand `usage/read` on the same host is the final read.
 // - Restart/crash: usage state is process-local to the host, so a dead host
@@ -79,8 +87,12 @@
 // resolved both times); the decision above is final for NOT-270's scope.
 
 import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { CapacityUnavailableReason, RuntimeCapacityResponse } from "@agent-dealer/shared";
 import { MUSE_CLI_ENV, resolveMuseAuthFile, resolveMuseBin } from "../cli-env.js";
+import { buildMuseDeveloperSettings } from "../runners/muse-code-settings.js";
 import {
   MSP_USAGE_CHANGED,
   MUSE_CLIENT_INFO,
@@ -111,6 +123,57 @@ export interface MuseHostOptions {
   timeoutMs?: number;
   /** Muse login file (existence only, never read). Defaults to resolveMuseAuthFile(). */
   authFilePath?: string;
+}
+
+export interface MuseServeHome {
+  /** Server-owned XDG_CONFIG_HOME for the host: worker settings + auth link. */
+  configHome: string;
+  /** Server-owned XDG_DATA_HOME for the host (isolated session/state dir). */
+  dataHome: string;
+  /** True when the ambient login was linked in (false under META_API_KEY auth). */
+  authLinked: boolean;
+}
+
+/**
+ * NOT-270 serve lane: the owned host must run workers under the same
+ * posture as the exec lane's per-attempt settings — no MCP servers, no
+ * subagent delegation, no workflows, no reminder child runs — so serve-lane
+ * turns never inherit the operator's ambient MCP/subagent config. Builds a
+ * server-owned config home carrying `buildMuseDeveloperSettings()` plus a
+ * symlink to the ambient login (linked, never read or copied; absent when
+ * the operator authenticates with META_API_KEY), and an isolated data home
+ * for the host's own session/state. Mirrors the exec lane's per-attempt
+ * dirs (`coordinator/muse-spawn.ts`), but process-scoped: one home per host
+ * instance, reused across restarts, removed on shutdown.
+ */
+export function prepareMuseServeHome(
+  ambientAuthFile: string = resolveMuseAuthFile()
+): MuseServeHome {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-serve-"));
+  const configHome = path.join(root, "config");
+  const dataHome = path.join(root, "data");
+  fs.mkdirSync(path.join(configHome, "muse"), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(dataHome, { recursive: true, mode: 0o700 });
+  // mkdir's mode is masked by the umask; the home holds a login symlink.
+  fs.chmodSync(root, 0o700);
+  fs.chmodSync(configHome, 0o700);
+  fs.chmodSync(dataHome, 0o700);
+  fs.writeFileSync(
+    path.join(configHome, "muse", "settings.json"),
+    `${JSON.stringify(buildMuseDeveloperSettings(), null, 2)}\n`,
+    { mode: 0o600 }
+  );
+  let authLinked = false;
+  try {
+    if (fs.existsSync(ambientAuthFile)) {
+      fs.symlinkSync(ambientAuthFile, path.join(configHome, "muse", "auth.json"));
+      authLinked = true;
+    }
+  } catch {
+    // Best-effort: the credential check in start() decides admission, and
+    // API-key auth needs no link at all.
+  }
+  return { configHome, dataHome, authLinked };
 }
 
 export type MuseHostReadOutcome =
@@ -184,6 +247,12 @@ export class MuseCapacityHost {
   private observedOnConnection = false;
   /** Increments on every spawn — tests use it to prove host reuse/restart. */
   connectionEpoch = 0;
+  /**
+   * Server-owned XDG home for the host (worker settings + auth link).
+   * Built lazily on first spawn, reused across restarts, removed on
+   * shutdown.
+   */
+  private serveHome: MuseServeHome | null = null;
 
   constructor(opts: MuseHostOptions = {}) {
     this.opts = { ...opts };
@@ -207,8 +276,33 @@ export class MuseCapacityHost {
     return this.pending.size > 0 || this.notifWaiters.size > 0;
   }
 
+  /**
+   * Env for the host subprocess: the server-owned XDG home always wins over
+   * inherited ambient config (the server process itself may run under an
+   * operator XDG home), so serve-lane workers never inherit ambient MCP
+   * servers, subagents, or workflows. Only an explicit XDG override in
+   * `opts.env` (tests) still wins.
+   */
   private mergedEnv(): NodeJS.ProcessEnv {
-    return { ...process.env, ...this.opts.env };
+    const home = this.ensureServeHome();
+    const env = { ...process.env, ...this.opts.env };
+    if (this.opts.env?.XDG_CONFIG_HOME === undefined) env.XDG_CONFIG_HOME = home.configHome;
+    if (this.opts.env?.XDG_DATA_HOME === undefined) env.XDG_DATA_HOME = home.dataHome;
+    return env;
+  }
+
+  /** Lazily built server-owned home; rebuilt if removed (e.g. after shutdown). */
+  private ensureServeHome(): MuseServeHome {
+    const home = this.serveHome;
+    if (home) {
+      try {
+        if (fs.existsSync(path.join(home.configHome, "muse", "settings.json"))) return home;
+      } catch {
+        // Fall through and rebuild.
+      }
+    }
+    this.serveHome = prepareMuseServeHome();
+    return this.serveHome;
   }
 
   /**
@@ -649,6 +743,17 @@ export class MuseCapacityHost {
     this.killChild();
     this.starting = null;
     this.inflightRead = null;
+    // The serve home is per-instance: remove it so restarts and test resets
+    // leave no litter. A later ensureStarted() transparently rebuilds it.
+    const home = this.serveHome;
+    this.serveHome = null;
+    if (home) {
+      try {
+        fs.rmSync(path.dirname(home.configHome), { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup only.
+      }
+    }
     if (!child || child.exitCode !== null) return;
     const closed = await new Promise<boolean>((resolve) => {
       if (child.exitCode !== null) {

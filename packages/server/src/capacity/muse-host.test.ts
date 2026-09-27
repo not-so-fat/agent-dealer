@@ -27,6 +27,7 @@ import {
   getMuseCapacityHost,
   maybeRefreshMuseCapacityFromHost,
   MuseCapacityHost,
+  prepareMuseServeHome,
   refreshMuseCapacityFromHost,
   resetMuseCapacityHostForTests,
   resetMuseCapacityRefreshState,
@@ -446,6 +447,79 @@ test("production refresh is throttled and can be disabled", async () => {
     await resetMuseCapacityHostForTests();
   }
   await shutdownMuseCapacityHost();
+});
+
+test("serve host launches under a server-owned config home with worker settings", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-config-"));
+  const configRecord = path.join(dir, "config.json");
+  const host = new MuseCapacityHost(
+    hostOpts("persistent-full", { env: { FAKE_MSP_RECORD_CONFIG: configRecord } })
+  );
+  try {
+    assert.equal((await host.readUsage()).status, "observed");
+    const rec = JSON.parse(fs.readFileSync(configRecord, "utf8")) as {
+      configHome: string | null;
+      dataHome: string | null;
+      settings: Record<string, unknown> | null;
+      settingsError: string | null;
+      authExists: boolean;
+      authIsLink: boolean;
+    };
+    const ambient = process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config");
+    assert.ok(rec.configHome, "host launches with an XDG config home");
+    assert.notEqual(rec.configHome, ambient, "config home is server-owned, not ambient");
+    assert.ok(
+      String(rec.configHome).includes("dealer-muse-serve"),
+      `server-owned home, got ${rec.configHome}`
+    );
+    assert.ok(rec.dataHome, "host launches with an isolated data home");
+    assert.ok(!String(rec.dataHome).includes(".config"), "data home is not the operator's");
+    assert.equal(rec.settingsError, null, "settings.json parses on the launched host");
+    const settings = rec.settings!;
+    // Same worker posture as the exec lane's per-attempt settings: no MCP
+    // servers, no subagent delegation, no workflows, no reminder child runs.
+    assert.ok(!("mcpServers" in settings), "workers get no MCP servers");
+    const run = settings.run as Record<string, unknown>;
+    assert.equal(run.workflow_trigger_mode, "off");
+    assert.equal(run.subagent_delegation_mode, "off");
+    const caps = settings.runtime_capabilities as Record<string, { enabled: boolean }>;
+    assert.ok(Object.keys(caps).length > 0, "reminder switches are present");
+    for (const [name, cap] of Object.entries(caps)) {
+      assert.equal(cap.enabled, false, `${name} stays disabled`);
+    }
+  } finally {
+    await host.shutdown();
+  }
+});
+
+test("prepareMuseServeHome links the ambient login, or records API-key auth", async () => {
+  // File-backed login: linked, never copied.
+  const ambientRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-ambient-"));
+  const ambientAuth = path.join(ambientRoot, "muse", "auth.json");
+  fs.mkdirSync(path.dirname(ambientAuth), { recursive: true });
+  fs.writeFileSync(ambientAuth, "{}\n");
+  const home = prepareMuseServeHome(ambientAuth);
+  try {
+    assert.equal(home.authLinked, true);
+    const linkPath = path.join(home.configHome, "muse", "auth.json");
+    assert.ok(fs.lstatSync(linkPath).isSymbolicLink(), "login is a symlink, never a copy");
+    assert.equal(fs.readlinkSync(linkPath), ambientAuth);
+  } finally {
+    fs.rmSync(path.dirname(home.configHome), { recursive: true, force: true });
+  }
+  // API-key auth: no link, still a complete home.
+  const keyHome = prepareMuseServeHome(path.join(ambientRoot, "no-such-auth.json"));
+  try {
+    assert.equal(keyHome.authLinked, false);
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(keyHome.configHome, "muse", "settings.json"), "utf8")
+    ) as Record<string, unknown>;
+    assert.equal((settings.run as Record<string, unknown>).workflow_trigger_mode, "off");
+    assert.ok(!("mcpServers" in settings));
+  } finally {
+    fs.rmSync(path.dirname(keyHome.configHome), { recursive: true, force: true });
+  }
+  fs.rmSync(ambientRoot, { recursive: true, force: true });
 });
 
 test("no credential short-circuits to missing without spawning", async () => {
