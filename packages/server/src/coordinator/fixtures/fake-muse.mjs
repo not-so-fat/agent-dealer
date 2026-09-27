@@ -108,6 +108,18 @@ switch (scenario) {
     completed("Created hello.txt.");
     break;
   }
+  case "capability-shell":
+  case "capability-no-shell": {
+    // NOT-277: the developer-capability probe (adapters/muse-capability.ts). A capable build runs
+    // its shell command; a build that lost shell access just answers without a tool call.
+    if (scenario === "capability-shell") {
+      tool("bash", "call-1");
+      execFileSync("sh", ["probe.sh"]);
+    }
+    writeSessionLog({ usage: USAGE });
+    completed("DONE");
+    break;
+  }
   case "cron": {
     tool("cron_create", "call-1");
     commitFeature();

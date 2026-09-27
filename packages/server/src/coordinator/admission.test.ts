@@ -496,6 +496,91 @@ test("NOT-178: a Muse Code developer without credentials is refused at admission
   }
 });
 
+// NOT-277: a Muse Code auto-update is re-validated automatically. A version whose developer
+// shell/write check passes is admitted with no manual step; one that lost it is refused with the
+// versions and capability named; one whose check could not complete is refused, never assumed ok.
+test("NOT-277: a Muse Code update is admitted when capable, refused by name when not", async () => {
+  const { clearAgentHealthCaches, runtimeIssuesUncached } = await import("../adapters/agent-health.js");
+  const { setMuseCapabilityProbeForTests, settleMuseCapabilityCheckForTests } = await import(
+    "../adapters/muse-capability.js"
+  );
+  const OLD = "1.3.0-R3401.1";
+  const NEW = "1.4.0-R4161.1";
+  const BROKEN = "1.4.0-R4302.1";
+  const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-stub-"));
+  const versionFile = path.join(stubDir, "version");
+  const stub = path.join(stubDir, "muse");
+  fs.writeFileSync(stub, `#!/bin/sh\ncat ${JSON.stringify(versionFile)}\n`);
+  fs.chmodSync(stub, 0o755);
+  const probed: string[] = [];
+  setMuseCapabilityProbeForTests(async (version) => {
+    probed.push(version);
+    if (version === BROKEN) return { status: "missing", detail: "probe session completed without running its shell command" };
+    if (version === "9.9.9-R1") throw new Error("probe session timed out");
+    return { status: "capable" };
+  });
+
+  const saved = {
+    MUSE_CLI: process.env.MUSE_CLI,
+    META_API_KEY: process.env.META_API_KEY,
+    SKIP: process.env.AGENT_DEALER_SKIP_AGENT_HEALTH,
+  };
+  process.env.MUSE_CLI = stub;
+  process.env.META_API_KEY = "k";
+  delete process.env.AGENT_DEALER_SKIP_AGENT_HEALTH;
+  setAdmissionHealthCheckerForTests(null);
+  clearAgentHealthCaches();
+  /** Muse reports `version`; the next health read sees it and its one-time check settles. */
+  const museReports = async (version: string) => {
+    fs.writeFileSync(versionFile, `Muse Code ${version.split("-")[0]} (${version})\n`);
+    await runtimeIssuesUncached("muse_code");
+    await settleMuseCapabilityCheckForTests();
+  };
+  try {
+    const issue = readyIssue("muse-updated", { runtimes: { dev: "muse_code", rev: "codex_local" } });
+    const developerHealth = () => checkRoleAgentHealthy(issue, "developer", { deckOnline: true });
+
+    await museReports(OLD);
+    assert.deepEqual(await developerHealth(), { ok: true });
+    await museReports(NEW);
+    assert.deepEqual(await developerHealth(), { ok: true });
+    assert.deepEqual(probed, [OLD, NEW]);
+
+    await museReports(BROKEN);
+    enqueueIssue(issue.id);
+    assert.equal(await admitNext(), null);
+    assert.equal(getIssue(issue.id)!.status, "ready");
+    assert.equal(getActiveWorkflowInstance(issue.id), null);
+    const reason = getQueuedEntryForIssue(issue.id)!.waitReason!;
+    assert.match(reason, /developer unhealthy/);
+    assert.match(
+      reason,
+      new RegExp(`Muse Code updated ${NEW} → ${BROKEN}: developer sessions no longer get shell/write access`)
+    );
+
+    await museReports("9.9.9-R1");
+    const unverified = await developerHealth();
+    assert.equal(unverified.ok, false);
+    assert.match(
+      (unverified as { reason: string }).reason,
+      new RegExp(`Could not verify Muse Code developer shell/write access after version change \\(${NEW} → 9\\.9\\.9-R1\\)`)
+    );
+    assert.deepEqual(probed, [OLD, NEW, BROKEN, "9.9.9-R1"]);
+  } finally {
+    for (const [key, value] of Object.entries({
+      MUSE_CLI: saved.MUSE_CLI,
+      META_API_KEY: saved.META_API_KEY,
+      AGENT_DEALER_SKIP_AGENT_HEALTH: saved.SKIP,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    setMuseCapabilityProbeForTests(null);
+    clearAgentHealthCaches();
+    setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
+  }
+});
+
 // NOT-178: Muse Code is developer-only, so it is never a healthy reviewer — even with the
 // unit-test health skip on, and without probing the CLI.
 test("NOT-178: a Muse Code reviewer is refused regardless of CLI health", async () => {

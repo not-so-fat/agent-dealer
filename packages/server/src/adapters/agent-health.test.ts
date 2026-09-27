@@ -29,8 +29,13 @@ const {
   setCursorProbeTimingForTests,
   setRunCommandForTests,
 } = await import("./agent-health.js");
+const { setMuseCapabilityProbeForTests, settleMuseCapabilityCheckForTests } = await import(
+  "./muse-capability.js"
+);
 
 migrate();
+// NOT-277: health never runs the real (billed) Muse capability probe in tests.
+setMuseCapabilityProbeForTests(async () => ({ status: "capable" }));
 
 const FAILURE: DeckAccessResult = { ok: false, code: "DECK_UNAVAILABLE", message: "Agent Deck API error: 502" };
 
@@ -521,16 +526,20 @@ test("muse_code is healthy with a saved login file or a META_API_KEY", async () 
   const withLogin = emptyConfigHome();
   fs.mkdirSync(path.join(withLogin, "muse"));
   fs.writeFileSync(path.join(withLogin, "muse", "auth.json"), "{}");
+  // NOT-277: the first read of a version starts its one-time capability check; healthy once settled.
+  const settledIssues = async () => {
+    await runtimeIssuesUncached("muse_code");
+    await settleMuseCapabilityCheckForTests();
+    return runtimeIssuesUncached("muse_code");
+  };
   assert.deepEqual(
-    await withMuseEnv({ MUSE_CLI: stub.bin, configHome: withLogin }, () =>
-      runtimeIssuesUncached("muse_code")
-    ),
+    await withMuseEnv({ MUSE_CLI: stub.bin, configHome: withLogin }, settledIssues),
     []
   );
   assert.deepEqual(
     await withMuseEnv(
       { MUSE_CLI: stub.bin, META_API_KEY: "k", configHome: emptyConfigHome() },
-      () => runtimeIssuesUncached("muse_code")
+      settledIssues
     ),
     []
   );
@@ -568,6 +577,53 @@ test("a muse probe that hangs past the timeout is runtime_unknown", async () => 
     assert.match(issues[0]!.message, /timed out/);
   } finally {
     setCursorProbeTimingForTests(null);
+  }
+});
+
+// NOT-277: through the cached health path the agent list / admission read — a Muse auto-update
+// fires the capability check exactly once for the new version, and the result (not a generic
+// symptom) is what the unhealthy agent shows.
+test("a Muse version change is capability-checked once and its named result surfaces on the agent", async () => {
+  const OLD = "1.3.0-R3401.1";
+  const NEW = "1.4.0-R4161.1";
+  const versionFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-ver-")), "v");
+  fs.writeFileSync(versionFile, `Muse Code 1.3.0 (${OLD})\n`);
+  const stub = stubMuse(`cat ${JSON.stringify(versionFile)}`);
+  const calls: string[] = [];
+  setMuseCapabilityProbeForTests(async (version) => {
+    calls.push(version);
+    return version === OLD
+      ? { status: "capable" }
+      : { status: "missing", detail: "probe session completed without running its shell command" };
+  });
+  const agent = createAgent({ name: "muse-updated", runtime: "muse_code", deckId: randomUUID() });
+  const health = () => healthForAgent(agent, true, undefined, true, null, NO_GITHUB);
+  try {
+    await withMuseEnv({ MUSE_CLI: stub.bin, META_API_KEY: "k", configHome: emptyConfigHome() }, async () => {
+      // The stub probe settles within this read; the health read must not cache its stale
+      // "verifying" block (the in-flight block itself is covered in muse-capability.test.ts).
+      await health();
+      await settleMuseCapabilityCheckForTests();
+      for (let i = 0; i < 3; i++) assert.deepEqual((await health()).issues, []);
+      assert.deepEqual(calls, [OLD]);
+
+      // Muse auto-updates. The 60s runtime cache notices on its next miss.
+      fs.writeFileSync(versionFile, `Muse Code 1.4.0 (${NEW})\n`);
+      await runtimeIssuesUncached("muse_code");
+      await settleMuseCapabilityCheckForTests();
+      for (let i = 0; i < 3; i++) {
+        const after = await health();
+        assert.equal(after.healthy, false);
+        assert.deepEqual(after.issues.map((x) => x.code), ["runtime_capability"]);
+        assert.match(
+          after.issues[0]!.message,
+          new RegExp(`Muse Code updated ${OLD} → ${NEW}: developer sessions no longer get shell/write access`)
+        );
+      }
+      assert.deepEqual(calls, [OLD, NEW]);
+    });
+  } finally {
+    setMuseCapabilityProbeForTests(async () => ({ status: "capable" }));
   }
 });
 

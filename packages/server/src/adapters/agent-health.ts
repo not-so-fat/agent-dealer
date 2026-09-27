@@ -31,6 +31,7 @@ import { runtimeAvailability } from "../repository/runtime-availability.js";
 import {
   museCapabilityCheckInFlight,
   museCapabilityIssues,
+  museCapabilitySettleCount,
   parseMuseVersion,
   resetMuseCapabilityStateForTests,
 } from "./muse-capability.js";
@@ -562,8 +563,13 @@ async function runtimeIssues(runtime: Runtime): Promise<AgentHealthIssue[]> {
   if (cached && Date.now() - cached.at < ttl) {
     return [...capIssues, ...cached.issues];
   }
+  const museSettles = museCapabilitySettleCount();
   const issues = await runtimeIssuesUncached(runtime);
   const nonCap = issues.filter((i) => i.code !== "usage_capped");
+  // NOT-277: a capability check that settled during this read already superseded what it returned.
+  if (runtime === "muse_code" && museCapabilitySettleCount() !== museSettles) {
+    return runtimeIssues(runtime);
+  }
   // Soft fail (published or grace-held) uses a short TTL so a wake retry can clear quickly;
   // a sticky 60s cache of "Could not confirm" is what parked the queue after sleep (NOT-157).
   const softProbeFailure =

@@ -21,6 +21,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentHealthIssue } from "@agent-dealer/shared";
 import { DEVELOPER_ROLE_CEILING } from "@agent-dealer/shared";
+import { getDataDir } from "../db/index.js";
 
 export type MuseCapabilityProbeResult =
   | { status: "capable" }
@@ -46,13 +47,14 @@ const CAPABILITY = "shell/write access";
 
 let state: PersistedState | null = null;
 let inFlight: { version: string; promise: Promise<void> } | null = null;
+/** Bumped whenever a check settles, so callers can tell a result landed mid-read. */
+let settledCount = 0;
 /** Bumped by resets so a probe started before a reset cannot write into the fresh state. */
 let generation = 0;
 let probeImpl: MuseCapabilityProbe = defaultMuseCapabilityProbe;
 
 function statePath(): string {
-  const home = process.env.AGENT_DEALER_HOME ?? path.join(os.homedir(), ".agent-dealer");
-  return path.join(home, STATE_FILE);
+  return path.join(getDataDir(), STATE_FILE);
 }
 
 function loadState(): PersistedState {
@@ -72,7 +74,6 @@ function loadState(): PersistedState {
 function saveState(next: PersistedState): void {
   state = next;
   try {
-    fs.mkdirSync(path.dirname(statePath()), { recursive: true });
     fs.writeFileSync(statePath(), `${JSON.stringify(next, null, 2)}\n`);
   } catch (err) {
     // In-memory state still gates this process; only restart persistence is lost.
@@ -140,6 +141,7 @@ function startCheck(version: string, onSettled: () => void): void {
     }
   })().finally(() => {
     if (inFlight?.promise === promise) inFlight = null;
+    settledCount += 1;
     if (gen === generation) onSettled();
   });
   inFlight = { version, promise };
@@ -171,6 +173,14 @@ export function museCapabilityIssues(version: string, onSettled: () => void = ()
 /** True while a capability check is running (callers use a short health-cache TTL meanwhile). */
 export function museCapabilityCheckInFlight(): boolean {
   return inFlight !== null;
+}
+
+/**
+ * Changes each time a check settles. A health read that spans a settle must not cache what it
+ * read — it may be the "verifying" block the settle just superseded.
+ */
+export function museCapabilitySettleCount(): number {
+  return settledCount;
 }
 
 /** Tests: resolve once any in-flight capability check has settled. */
