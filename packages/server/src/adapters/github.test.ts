@@ -500,7 +500,16 @@ test("NOT-252: extractActionsRunId and sanitizeUrl helpers", async () => {
 // thousands of passing-test lines. Under the old last-20K-chars pre-truncation
 // the failure sat outside the kept tail and the excerpt showed only passing
 // tail noise; with search-before-truncate it must surface the failure instead.
+// Passing lines deliberately include realistic failure-pattern words in their
+// test names (real TAP `ok` lines do this — e.g. "handles error ..."), so this
+// also proves ordinary pattern-matching passing lines don't break it. NOTE on
+// scale: only a handful of pre-failure pattern hits fit in the 80-line budget
+// alongside the failure window — see the product-call note in the round conclusion.
 test("NOT-276: failure line before the last 20K chars still reaches the excerpt", async () => {
+  const preface = [
+    "ok 353 - reports error when child fails to spawn",
+    "ok 354 - cleans up after failure",
+  ].join("\n");
   const failureBlock = [
     "not ok 355 - coordinator spawns child with explicit cwd",
     "  ---",
@@ -512,8 +521,12 @@ test("NOT-276: failure line before the last 20K chars still reaches the excerpt"
     "  failureType: 'cancelledByParent'",
     "  ---",
   ].join("\n");
-  const filler = Array.from({ length: 1000 }, (_, i) => `ok ${1000 + i} - passing test number ${1000 + i}`).join("\n");
-  const log = `${failureBlock}\n${filler}`;
+  const filler = Array.from({ length: 1000 }, (_, i) => {
+    const n = 1000 + i;
+    if (i % 200 === 0) return `ok ${n} - handles error output for test ${n}`;
+    return `ok ${n} - passing test number ${n}`;
+  }).join("\n");
+  const log = `${preface}\n${failureBlock}\n${filler}`;
   // Guard the test's premise: the failure really does sit outside the old 20K tail window.
   assert.ok(log.indexOf("not ok 355") < log.length - 20_000);
   const { exec } = queuedExec([
@@ -524,11 +537,14 @@ test("NOT-276: failure line before the last 20K chars still reaches the excerpt"
   assert.ok(evidence);
   assert.match(evidence.excerpt, /not ok 355/);
   assert.match(evidence.excerpt, /cancelledByParent/);
+  assert.match(evidence.excerpt, /reports error when child fails to spawn/);
+  assert.match(evidence.excerpt, /handles error output/);
   assert.doesNotMatch(evidence.excerpt, /passing test number 1999/);
   assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
 });
 
 test("NOT-276: log with no failure-pattern hits still falls back to the tail, unchanged", async () => {
+  // NB: this filler must stay free of FAILURE_LINE_PATTERN words — that absence is the no-hit premise.
   const log = Array.from({ length: 200 }, (_, i) => `ok ${i + 1} - passing test number ${i + 1}`).join("\n");
   const { exec } = queuedExec([
     { stdout: prViewWithRollup([actionsCheck("verify", "FAILURE", "111")]) },
