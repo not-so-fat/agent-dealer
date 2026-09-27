@@ -572,6 +572,73 @@ test("NOT-276: dense failure cluster outranks sparse earlier weak hits (unit lev
   assert.match(excerpt, /cancelledByParent/);
 });
 
+// NOT-276 round 3 (real PR #163 review, verified against the actual saved
+// `gh run view 36330128633 --log-failed` output): plain hit-density ranking still
+// missed the real failure two different ways. (1) `gh run view --log-failed`
+// prefixes every line with `<job>\t<step>\t<timestamp> ` before the tool's own
+// output, so an anchored `^\s*not ok\b` pattern never matches the real thing — only
+// an unanchored one does. (2) This repo's own coordinator tests are *about*
+// escalation/conflict/timeout handling, so a cluster of unrelated passing tests can
+// out-rank the real (sparse) failure under density alone; an explicit marker
+// (`not ok`, `##[error]`) must dominate ranking regardless of density.
+test("NOT-276 round 3: a GitHub Actions log-line prefix must not hide the `not ok` marker", async () => {
+  const prefix = (ts: string) => `verify\tUnit tests\t${ts}Z `;
+  const early = Array.from(
+    { length: 60 },
+    (_, i) => `${prefix(`2026-09-27T16:07:${String(i).padStart(2, "0")}.0000000`)}ok ${i + 1} - passing test number ${i + 1}`
+  ).join("\n");
+  const failureBlock = [
+    `${prefix("2026-09-27T16:07:31.3990644")}not ok 355 - NOT-273: the serve child spawns with an explicit cwd`,
+    `${prefix("2026-09-27T16:07:31.3991406")}  failureType: 'cancelledByParent'`,
+    `${prefix("2026-09-27T16:07:31.3992743")}not ok 356 - no credential short-circuits to missing without spawning`,
+    `${prefix("2026-09-27T16:07:31.3993384")}  failureType: 'cancelledByParent'`,
+  ].join("\n");
+  const late = Array.from(
+    { length: 60 },
+    (_, i) => `${prefix(`2026-09-27T16:08:${String(i).padStart(2, "0")}.0000000`)}ok ${357 + i} - passing test number ${357 + i}`
+  ).join("\n");
+  const log = `${early}\n${failureBlock}\n${late}\n${prefix("2026-09-27T16:09:02.6611414")}##[error]Process completed with exit code 1.`;
+  const { excerpt } = buildFailureExcerpt(log);
+  assert.match(excerpt, /not ok 355/);
+  assert.match(excerpt, /not ok 356/);
+  assert.match(excerpt, /cancelledByParent/);
+});
+
+// NOT-276 round 3: a lower-ranked region taken first can still be chronologically
+// *earlier* than a higher-ranked one; if the excerpt were char-capped by slicing
+// the reassembled string's tail (ignoring rank), the earlier low-priority region
+// could crowd the later high-priority region's content out of the character
+// budget even though line-budget ranking correctly preferred the real failure.
+test("NOT-276 round 3: an earlier low-priority region must not crowd the real failure out of the character budget", async () => {
+  // ~12 weak hits (one per line, "failed"/"error"), long lines: ~12 * 460 ≈ 5500 chars.
+  const earlyWeakCluster = Array.from(
+    { length: 12 },
+    (_, i) => `ok ${i + 1} - reports a handled failure/error path for scenario ${i + 1} ` + "x".repeat(400)
+  ).join("\n");
+  // The real failure: 2 strong `not ok` hits, short lines (~450 chars total).
+  const realFailure = [
+    "not ok 999 - the real failure",
+    "  failureType: 'cancelledByParent'",
+    "not ok 1000 - a second real failure",
+    "  failureType: 'cancelledByParent'",
+  ].join("\n");
+  // A gap of ordinary passing lines keeps the two clusters as separate merged
+  // windows (matching the real incident: the weak cluster and the real failure
+  // sat ~2300 lines apart) rather than merging into one oversized window, which
+  // would exercise a different, narrower edge case than the one under test here.
+  const gap = Array.from({ length: 20 }, (_, i) => `ok ${900 + i} - passing test number ${900 + i}`).join("\n");
+  const log = `${earlyWeakCluster}\n${gap}\n${realFailure}`;
+  assert.ok(
+    earlyWeakCluster.length + realFailure.length > CHECKS_EVIDENCE_MAX_EXCERPT_CHARS,
+    "test premise: both regions together exceed the char budget"
+  );
+  const { excerpt } = buildFailureExcerpt(log);
+  assert.match(excerpt, /not ok 999/);
+  assert.match(excerpt, /not ok 1000/);
+  assert.match(excerpt, /cancelledByParent/);
+  assert.ok(excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+});
+
 test("NOT-276: log with no failure-pattern hits still falls back to the tail, unchanged", async () => {
   // NB: this filler must stay free of FAILURE_LINE_PATTERN words — that absence is the no-hit premise.
   const log = Array.from({ length: 200 }, (_, i) => `ok ${i + 1} - passing test number ${i + 1}`).join("\n");

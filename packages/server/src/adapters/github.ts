@@ -224,23 +224,48 @@ const FAILURE_LINE_PATTERN =
   /error|err!|e404|fail|fatal|exception|traceback|assert|not found|cannot |can't |unable |conflict|reject|denied|panic|timed?\s*out|npm ERR!/i;
 
 /**
+ * Explicit failure markers, not just failure-adjacent vocabulary: TAP's own `not ok`
+ * result line (the TAP spec's standard fail marker, used by many test harnesses beyond
+ * `node:test` — not a runner-specific parser) and GitHub Actions' own `##[error]`
+ * workflow-command annotation (emitted by the platform itself for a genuinely failed
+ * step, regardless of what tool ran in it). A coordinator/CI-tooling repo's own test
+ * suite is full of passing tests *about* failure handling — "conflict", "timeout",
+ * "denied", "escalates" — so `FAILURE_LINE_PATTERN` density alone is not reliable
+ * (NOT-276 round 3: verified against the real run-36330128633 log, a cluster of
+ * passing tests named around escalation/conflict/timeout out-ranked the actual
+ * `not ok 355`/`356` failure under pure density ranking). These two markers get a
+ * large ranking bonus below so a window that contains one always wins.
+ */
+// Not anchored to line start: `gh run view --log-failed` prefixes every line with
+// `<job>\t<step>\t<timestamp> ` before the actual tool output, so the TAP/annotation
+// text never starts at column 0.
+const STRONG_FAILURE_LINE_PATTERN = /\bnot ok\b|##\[error\]/i;
+const STRONG_HIT_WEIGHT = 1000;
+
+/**
  * Focus a (sanitized) log around its useful failure/error lines: keep a small context
  * window around each matching line, merge overlapping windows, rank merged regions by
- * hit density (most failure-pattern hits first, ties in log order) so an early real
- * failure cluster is not crowded out of the line budget by sparse isolated mentions
- * in passing-test names (NOT-276 round 2: `node:test` runs to completion, so the real
- * failure can sit at test 355/1667 with dozens of weak `error`/`fail` hits before it),
- * then collapse long runs of identical lines (CI setup spam) and enforce the global
- * line/char caps. With no matching line, the tail is the most likely failure site.
- * Never returns unsanitized text.
+ * weighted hit density (explicit failure markers far outweigh failure-adjacent
+ * vocabulary; ties break on density, then log order) so an early real failure cluster
+ * is not crowded out of the line budget by sparse isolated mentions in passing-test
+ * names, or by a *dense* but merely topical cluster of passing tests about failure
+ * handling itself (NOT-276 round 2 found the former, round 3 the latter — see
+ * `STRONG_FAILURE_LINE_PATTERN`'s comment), then collapse long runs of identical lines
+ * (CI setup spam) and enforce the global line/char caps. With no matching line, the
+ * tail is the most likely failure site. Never returns unsanitized text.
  */
 export function buildFailureExcerpt(combinedLog: string): { excerpt: string; truncated: boolean } {
   const sanitized = sanitizeCiText(combinedLog);
   const lines = sanitized.split("\n");
   if (lines.every((l) => !l.trim())) return { excerpt: "", truncated: false };
   const hits: number[] = [];
+  const strongHits = new Set<number>();
   lines.forEach((line, i) => {
-    if (FAILURE_LINE_PATTERN.test(line)) hits.push(i);
+    const strong = STRONG_FAILURE_LINE_PATTERN.test(line);
+    if (strong || FAILURE_LINE_PATTERN.test(line)) {
+      hits.push(i);
+      if (strong) strongHits.add(i);
+    }
   });
   let selected: string[];
   let truncated = false;
@@ -256,34 +281,49 @@ export function buildFailureExcerpt(combinedLog: string): { excerpt: string; tru
       if (last && w[0] <= last[1] + 1) last[1] = Math.max(last[1], w[1]);
       else merged.push([w[0], w[1]]);
     }
-    // Rank merged regions by hit density so the excerpt budget goes to the most
-    // failure-indicative clusters first. Format-agnostic: no TAP-specific patterns,
-    // just "more pattern hits in one window = more likely the real failure".
+    // Rank merged regions by weighted hit density so the excerpt budget goes to the
+    // most failure-indicative clusters first: an explicit failure marker (`not ok`,
+    // `##[error]`) counts for STRONG_HIT_WEIGHT, everything else for 1 — a window
+    // with one real marker always outranks a window with many topical-only hits.
     // Ties keep log order, and output is re-sorted to log order for readability.
     // `hits` is ascending (built in line order) and `merged` is ascending by `from`,
-    // so a single linear pass counts hits per region.
+    // so a single linear pass sums weight per region.
     let hi = 0;
     const ranked = merged.map(([from, to]) => {
       while (hi < hits.length && hits[hi] < from) hi++;
-      let count = 0;
+      let weight = 0;
       let k = hi;
       while (k < hits.length && hits[k] <= to) {
-        count++;
+        weight += strongHits.has(hits[k]) ? STRONG_HIT_WEIGHT : 1;
         k++;
       }
-      return { from, to, count };
+      return { from, to, weight };
     });
-    ranked.sort((a, b) => b.count - a.count || a.from - b.from);
+    ranked.sort((a, b) => b.weight - a.weight || a.from - b.from);
     const taken: Array<[number, number]> = [];
     let used = 0;
+    let usedChars = 0;
     for (const w of ranked) {
       const size = w.to - w.from + 1 + (taken.length > 0 ? 1 : 0);
-      // Skip regions that no longer fit so a smaller later region can still fill
-      // the budget — but always take the top-ranked region even if it alone
-      // exceeds the budget (the caps below truncate it, as before).
-      if (taken.length > 0 && used + size > CHECKS_EVIDENCE_MAX_EXCERPT_LINES) continue;
+      let chars = taken.length > 0 ? 3 : 0; // "...\n" separator
+      for (let i = w.from; i <= w.to; i++) chars += lines[i].length + 1;
+      // Skip regions that no longer fit — by line count or by character count, since
+      // the final excerpt is char-capped too (NOT-276 round 3: a lower-ranked but
+      // verbose region taken first would otherwise still crowd a higher-ranked
+      // region's content out of the *character* budget after chronological
+      // reassembly below, even though ranking correctly gave the real failure
+      // priority for line-budget inclusion). A smaller later region can still fill
+      // whatever budget remains — but always take the top-ranked region even if it
+      // alone exceeds either budget (the caps below truncate it, as before).
+      if (
+        taken.length > 0 &&
+        (used + size > CHECKS_EVIDENCE_MAX_EXCERPT_LINES || usedChars + chars > CHECKS_EVIDENCE_MAX_EXCERPT_CHARS)
+      ) {
+        continue;
+      }
       taken.push([w.from, w.to]);
       used += size;
+      usedChars += chars;
       if (used >= CHECKS_EVIDENCE_MAX_EXCERPT_LINES) break;
     }
     taken.sort((a, b) => a[0] - b[0]);
