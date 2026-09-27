@@ -10,12 +10,16 @@
 #
 # The script re-runs each failing file in a disposable git worktree checked out
 # at the baseline commit (default: `git merge-base origin/main HEAD`,
-# override with BASELINE_REF=<commit> for manual replays) and then:
-#   exit 0 — every failing file also fails at the baseline (pre-existing confirmed).
-#            Prints the baseline commit plus the confirmed test name(s).
-#   exit 1 — at least one failing file PASSES at the baseline (real regression),
-#            or is missing there (new file, so not pre-existing).
-#            Prints the failing test name and both commits (HEAD vs baseline).
+# override with BASELINE_REF=<commit> for manual replays) and then, comparing
+# individual failing TEST NAMES per file (not whole-file pass/fail, so a new
+# failing test in an already-red file is still caught):
+#   exit 0 — every test failing on HEAD also fails at the baseline
+#            (pre-existing confirmed). Prints the baseline commit plus the
+#            confirmed test name(s).
+#   exit 1 — at least one test failing on HEAD does NOT fail at the baseline:
+#            the file passes there, the file is new there (absent at baseline),
+#            or the specific test name is new. Prints the failing test name(s)
+#            and both commits (HEAD vs baseline).
 #
 # Fail-closed: if no current-branch failure can be reproduced, the script exits
 # non-zero rather than blessing an unknown state.
@@ -127,6 +131,14 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[verify-baseline] HEAD=$HEAD baseline=$BASE"
+# On PRs actions/checkout leaves HEAD on the temporary merge commit
+# (refs/pull/N/merge), not the PR head itself — print both when known so
+# readers are not confused by an unfamiliar HEAD SHA.
+if [[ -n "${PR_HEAD_SHA:-}" ]]; then
+  echo "[verify-baseline] PR head=${PR_HEAD_SHA} (HEAD is the merge commit)"
+elif [[ -n "${GITHUB_SHA:-}" ]]; then
+  echo "[verify-baseline] GITHUB_SHA=${GITHUB_SHA}"
+fi
 git -C "$ROOT" worktree add --detach --quiet "$WORKTREE" "$BASE"
 echo "[verify-baseline] Setting up baseline worktree (npm ci + shared build)..."
 (cd "$WORKTREE" && npm ci --no-audit --no-fund --quiet)
@@ -134,21 +146,41 @@ echo "[verify-baseline] Setting up baseline worktree (npm ci + shared build)..."
 
 declare -a PREEXISTING=()
 declare -a REGRESSIONS=()
+# Per-test comparison: a file that fails at baseline for ANY reason does not
+# bless every HEAD failure in it. Only test names failing in BOTH runs are
+# pre-existing; a name failing only on HEAD is a regression.
 for f in "${FAIL_FILES[@]}"; do
   if [[ ! -f "$WORKTREE/$f" ]]; then
     echo "[verify-baseline] REGRESSION (new file, absent at baseline): $f" >&2
     REGRESSIONS+=("$f")
     continue
   fi
-  log="$(mktemp)"
-  if run_suite_file "$WORKTREE" "$f" "$log"; then
+  blog="$(mktemp)"
+  if run_suite_file "$WORKTREE" "$f" "$blog"; then
     echo "[verify-baseline] REGRESSION (passes at baseline, fails on HEAD): $f" >&2
     REGRESSIONS+=("$f")
-    rm -f "$log"
+    rm -f "$blog"
+    continue
+  fi
+  head_names="$(failing_test_names "$(log_for "$f")")"
+  base_names="$(failing_test_names "$blog")"
+  rm -f "$blog"
+  if [[ -z "$head_names" || -z "$base_names" ]]; then
+    # No parseable TAP "not ok" names on one side (e.g. harness/setup error):
+    # fall back to file-level verdict — both runs failed, so pre-existing.
+    echo "[verify-baseline] pre-existing confirmed (unparseable test names, both runs failed): $f" >&2
+    PREEXISTING+=("$f")
+    continue
+  fi
+  # Names failing on HEAD but not at the baseline are regressions.
+  new_names="$(comm -23 <(printf '%s\n' "$head_names") <(printf '%s\n' "$base_names"))"
+  if [[ -n "$new_names" ]]; then
+    echo "[verify-baseline] REGRESSION (new failing test(s) not failing at baseline): $f" >&2
+    echo "$new_names" | sed 's/^/[verify-baseline]   /' >&2
+    REGRESSIONS+=("$f")
   else
     echo "[verify-baseline] pre-existing confirmed: $f" >&2
     PREEXISTING+=("$f")
-    rm -f "$log"
   fi
 done
 
@@ -166,7 +198,7 @@ if [[ ${#PREEXISTING[@]} -gt 0 ]]; then
 fi
 
 if [[ ${#REGRESSIONS[@]} -gt 0 ]]; then
-  echo "[verify-baseline] REGRESSIONS (fail on HEAD=$HEAD but pass at baseline=$BASE):"
+  echo "[verify-baseline] REGRESSIONS (fail on HEAD=$HEAD but not at baseline=$BASE):"
   for f in "${REGRESSIONS[@]}"; do
     echo "  - $f"
     if [[ -f "$(log_for "$f")" ]]; then
@@ -179,4 +211,4 @@ if [[ ${#REGRESSIONS[@]} -gt 0 ]]; then
   exit 1
 fi
 
-echo "[verify-baseline] OK: all ${#PREEXISTING[@]} failing file(s) also fail at baseline $BASE."
+echo "[verify-baseline] OK: all failing test name(s) in ${#PREEXISTING[@]} file(s) also fail at baseline $BASE."

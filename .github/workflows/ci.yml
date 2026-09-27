@@ -39,8 +39,14 @@ jobs:
 
       # NOT-274: verify "pre-existing failure" claims against the merge-base.
       # Gated on the Unit tests outcome: skipped (zero cost/noise) on green.
+      # failure() is required: without a status function the default success()
+      # check makes `steps.unit.outcome == 'failure'` unreachable dead code.
+      # PR-only: on push to main the merge-base is HEAD itself, so every
+      # failure would trivially compare "pre-existing" and the gate checks nothing.
       - name: Verify baseline failures
-        if: steps.unit.outcome == 'failure'
+        if: failure() && steps.unit.outcome == 'failure' && github.event_name == 'pull_request'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash scripts/verify-baseline-failures.sh
 
       # NOT-71: flow:verify drove the deleted plan/execute product. The boot + /health
