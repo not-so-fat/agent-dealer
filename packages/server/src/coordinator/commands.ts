@@ -79,6 +79,7 @@ import {
   MERGE_FAILURE_RESPONSE_OPTIONS,
   PUSH_DIVERGENCE_EVIDENCE_KEY,
   PUSH_DIVERGENCE_RESPONSE_OPTIONS,
+  normalizeResolutionNote,
   parseHumanResolution,
   resolveHumanActionOutcome,
   type HumanResolution,
@@ -297,7 +298,10 @@ export function activeWorkflowConflictMessage(issueId: string): string {
  * the gate stays on startWorkflow; clearing a stale gate after AC lands lives here so
  * admitNext cannot leave it dangling.
  */
-export function startWorkflowCore(issueId: string): { instance: WorkflowInstance; workItem: WorkItem } {
+export function startWorkflowCore(
+  issueId: string,
+  opts?: { scopeDecisionNote?: string }
+): { instance: WorkflowInstance; workItem: WorkItem } {
   const issue = getIssue(issueId);
   if (!issue) throw new StartPreconditionError(404, "Issue not found");
   if (issue.status !== "ready" && issue.status !== "needs_human") {
@@ -334,7 +338,12 @@ export function startWorkflowCore(issueId: string): { instance: WorkflowInstance
     workflowInstanceId: instance.id,
     kind: "developer",
     round: 1,
-    payload: { profileSnapshot: queuedProfileSnapshot(issue, "developer") },
+    payload: {
+      profileSnapshot: queuedProfileSnapshot(issue, "developer"),
+      // NOT-272: carry the scope decision only on this first round's payload — later
+      // rounds never see it (the prompt reads it from here, not from the DB).
+      ...(opts?.scopeDecisionNote ? { scopeDecisionNote: opts.scopeDecisionNote } : {}),
+    },
     idempotencyKey: `${instance.id}:developer:1`,
   });
   // NOT-103: every successful start is a force-admit — keep queue state in sync whether
@@ -1246,16 +1255,30 @@ export function resolveHumanActionAndAdvance(
   actionId: string,
   resolvedBy: string,
   choice: string,
-  opts?: { resumeLiveHeadSha?: string | null; externalMergeState?: ExternalMergeState }
+  opts?: { resumeLiveHeadSha?: string | null; externalMergeState?: ExternalMergeState; note?: unknown }
 ): ResolveResult {
   const action = getHumanAction(actionId);
   if (!action) return { ok: false, code: 404, error: "Human action not found" };
   if (action.status !== "open") return { ok: false, code: 409, error: "Human action already resolved" };
 
-  const resolution = parseHumanResolution(action.actionType, choice);
+  // NOT-272: same shape validation as the HTTP route (which already applied it) —
+  // defense in depth for direct/CLI callers of this sync entry point.
+  const normalizedNote = normalizeResolutionNote(opts?.note);
+  if (!normalizedNote.ok) return { ok: false, code: 400, error: normalizedNote.error };
+
+  const resolution = parseHumanResolution(action.actionType, choice, normalizedNote.note);
   if (!resolution) {
     return { ok: false, code: 400, error: `Invalid choice "${choice}" for ${action.actionType}` };
   }
+  // NOT-272: the typed resolution carries the note only for product_scope_decision
+  // (parseHumanResolution drops it for every other action type).
+  const scopeDecisionNote =
+    resolution.actionType === "product_scope_decision" && "note" in resolution
+      ? resolution.note
+      : undefined;
+  const storedResolution: Record<string, unknown> = scopeDecisionNote
+    ? { choice, note: scopeDecisionNote }
+    : { choice };
   // NOT-194: narrow policy_escalation choices per action. A merge-failure action offers
   // retry_merge/repair/close only (resume would re-run development on approved work);
   // every other policy_escalation keeps resume/close only. Pre-NOT-194 open merge-failure
@@ -1350,7 +1373,7 @@ export function resolveHumanActionAndAdvance(
     }
     try {
       return getDb().transaction((): ResolveResult => {
-        resolveHumanAction(actionId, resolvedBy, { choice });
+        resolveHumanAction(actionId, resolvedBy, storedResolution);
         appendWorkflowEvent({
           issueId: issue.id,
           type: "human_action.resolved",
@@ -1359,7 +1382,10 @@ export function resolveHumanActionAndAdvance(
           stage: issue.status,
           payload: { actionType: action.actionType, choice },
         });
-        const { workItem } = startWorkflowCore(issue.id);
+        // NOT-272: this branch is always product_scope_decision (legacy terminal
+        // actions returned above) — the note rides the round-1 payload so the very
+        // next developer round reads it in its prompt.
+        const { workItem } = startWorkflowCore(issue.id, { scopeDecisionNote: scopeDecisionNote });
         return {
           ok: true,
           issueStatus: getIssue(issue.id)!.status,
@@ -1448,7 +1474,7 @@ export function resolveHumanActionAndAdvance(
 
   return getDb().transaction((): ResolveResult => {
     resolveHumanAction(actionId, resolvedBy, {
-      choice,
+      ...storedResolution,
       // NOT-226: record the re-pin so the resolved action itself shows which head the
       // reviewer was re-queued at when the branch had moved while parked.
       ...(rePinnedResumeHeadSha
@@ -1567,7 +1593,12 @@ export function resolveHumanActionAndAdvance(
           workflowInstanceId: instance.id,
           kind: "developer",
           round: issueNow.currentRound,
-          payload: { profileSnapshot: queuedProfileSnapshot(issue, "developer") },
+          payload: {
+            profileSnapshot: queuedProfileSnapshot(issue, "developer"),
+            // NOT-272: a product_scope_decision note rides only this next round's
+            // payload — later rounds never see it.
+            ...(scopeDecisionNote ? { scopeDecisionNote } : {}),
+          },
           idempotencyKey: `${instance.id}:developer:resume:${action.id}`,
         });
     return {
@@ -1589,7 +1620,7 @@ export async function resolveHumanActionAndAdvanceAsync(
   actionId: string,
   resolvedBy: string,
   choice: string,
-  opts?: { resumeLiveHeadSha?: string | null }
+  opts?: { resumeLiveHeadSha?: string | null; note?: unknown }
 ): Promise<ResolveResult> {
   // NOT-221: the lease push runs before anything resolves — a failed lease must leave
   // the action open with the fresh tip, which the sync core below cannot do.
@@ -1635,6 +1666,7 @@ export async function resolveHumanActionAndAdvanceAsync(
   const result = resolveHumanActionAndAdvance(actionId, resolvedBy, choice, {
     resumeLiveHeadSha,
     externalMergeState,
+    note: opts?.note,
   });
   if (!result.ok || !result.pendingMerge) return result;
 

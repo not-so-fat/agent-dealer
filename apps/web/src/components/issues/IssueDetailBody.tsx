@@ -191,6 +191,8 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   const [closeConfirming, setCloseConfirming] = useState(false);
   /** NOT-239 unambiguous result banner after a successful close. */
   const [closeNotice, setCloseNotice] = useState<string | null>(null);
+  /** NOT-272: optional per-action decision note for a product_scope_decision resolve. */
+  const [scopeNotes, setScopeNotes] = useState<Record<string, string>>({});
 
   const fail = (e: unknown) => onError(String(e));
 
@@ -368,11 +370,11 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
     }
   };
 
-  const resolveActionChoice = async (actionId: string, choice: string) => {
+  const resolveActionChoice = async (actionId: string, choice: string, note?: string) => {
     setBusy(true);
     onError(null);
     try {
-      await resolveHumanAction(actionId, RESOLVED_BY, choice);
+      await resolveHumanAction(actionId, RESOLVED_BY, choice, note);
       onHumanActionsChanged();
       refresh();
     } catch (e) {
@@ -578,14 +580,24 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
                   <p className="text-sm text-white/80">{a.question}</p>
                   {scopeDecision ? (
                     readiness.ok && (
-                      <button
-                        type="button"
-                        className="btn-gold px-3 py-1 text-xs"
-                        disabled={busy}
-                        onClick={() => resolveActionChoice(a.id, "resume")}
-                      >
-                        Resume
-                      </button>
+                      <div className="space-y-1">
+                        <textarea
+                          className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm text-white/85 placeholder:text-white/30"
+                          rows={2}
+                          placeholder="Decision note (optional) — shown to the next developer round"
+                          value={scopeNotes[a.id] ?? ""}
+                          disabled={busy}
+                          onChange={(e) => setScopeNotes((prev) => ({ ...prev, [a.id]: e.target.value }))}
+                        />
+                        <button
+                          type="button"
+                          className="btn-gold px-3 py-1 text-xs"
+                          disabled={busy}
+                          onClick={() => resolveActionChoice(a.id, "resume", scopeNotes[a.id])}
+                        >
+                          Resume
+                        </button>
+                      </div>
                     )
                   ) : (
                     <HumanActionChoices

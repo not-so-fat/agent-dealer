@@ -14,7 +14,7 @@ const { createHumanAction, getHumanAction, listHumanActionsForIssue } = await im
 const { registerHumanActionRoutes } = await import("./human-actions.js");
 const { startWorkflow, applyCompletion } = await import("../coordinator/commands.js");
 const { ReviewerResult } = await import("../coordinator/reviewer-result.js");
-const { claimWorkItem } = await import("../repository/work-items.js");
+const { claimWorkItem, getWorkItem } = await import("../repository/work-items.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { createRun, getRun, transitionRun, addArtifact, updateRunFields } = await import("../repository/runs.js");
 const { pendingSendCount, getPendingOutboundDraft } = await import("../repository/outbound-drafts.js");
@@ -305,5 +305,133 @@ test("POST resolve 400s on a choice not valid for reflection_interaction_require
     ]});
   const res = await app.inject({ method: "POST", url: `/api/human-actions/${reflectAction.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "close" } });
   assert.equal(res.statusCode, 400);
+  await app.close();
+});
+
+// NOT-272: seeds.
+function seedPreStartScopeDecision() {
+  const issue = createIssue({ title: "Scope gated", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
+  const action = createHumanAction({
+    issueId: issue.id,
+    actionType: "product_scope_decision",
+    reason: "Scope unclear before start",
+    question: "Is this in scope?",
+    responseOptions: [{ choice: "resume", label: "Resume development" }],
+  });
+  return { issue, action };
+}
+
+/** Drives a real issue to a mid-workflow product_scope_decision via a reviewer
+ * escalate verdict carrying a productScopeQuestion (NOT-150 routing). */
+async function seedMidWorkflowScopeDecision(): Promise<{ issueId: string; actionId: string }> {
+  const issue = createIssue({ title: "Scope escalated", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
+  const start = startWorkflow(issue.id);
+  assert.equal(start.ok, true);
+
+  const devItem = claimWorkItem(`scope-note-test-${issue.id}-dev`, { leaseMs: 60_000 })!;
+  await applyCompletion(devItem.id, devItem.leaseToken!, {
+    kind: "clean_handoff",
+    branch: `issue-${issue.id}`,
+    headSha: "a".repeat(40),
+    baseSha: "b".repeat(40),
+    prNumber: 1,
+    prUrl: "https://gh/pr/1"});
+
+  const reviewItem = claimWorkItem(`scope-note-test-${issue.id}-rev`, { leaseMs: 60_000 })!;
+  await applyCompletion(reviewItem.id, reviewItem.leaseToken!, {
+    kind: "verdict",
+    result: ReviewerResult.parse({
+      verdict: "escalated",
+      baseSha: "b".repeat(40),
+      headSha: "a".repeat(40),
+      acceptanceCriteriaAssessment: "unclear scope",
+      evidenceAssessment: "fine",
+      findings: [],
+      risks: [],
+      productScopeQuestion: "Is the runner migration in scope?"})});
+
+  const humanAction = listHumanActionsForIssue(issue.id).find((a) => a.actionType === "product_scope_decision")!;
+  assert.ok(humanAction, "expected a product_scope_decision human action");
+  return { issueId: issue.id, actionId: humanAction.id };
+}
+
+test("NOT-272: POST resolve 400s (not 500) on a non-string note", async () => {
+  const app = await buildApp();
+  const { action } = seedPreStartScopeDecision();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "resume", note: 123 } });
+  assert.equal(res.statusCode, 400);
+  assert.match((res.json() as { error: string }).error, /note must be a string/);
+  assert.equal(getHumanAction(action.id)!.status, "open", "a rejected resolve must leave the action open");
+  await app.close();
+});
+
+test("NOT-272: POST resolve 400s on an over-long note", async () => {
+  const app = await buildApp();
+  const { action } = seedPreStartScopeDecision();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "resume", note: "x".repeat(4001) } });
+  assert.equal(res.statusCode, 400);
+  assert.match((res.json() as { error: string }).error, /at most 4000/);
+  assert.equal(getHumanAction(action.id)!.status, "open");
+  await app.close();
+});
+
+test("NOT-272: pre-start product_scope_decision resolve with a note persists it and carries it on the round-1 payload", async () => {
+  const app = await buildApp();
+  const { action } = seedPreStartScopeDecision();
+  const note = "The runner migration IS in scope — proceed with it.";
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "resume", note: `  ${note}  ` } });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { nextWorkItemId: string | null; restarted: boolean };
+  assert.equal(body.restarted, true);
+  assert.ok(body.nextWorkItemId);
+
+  const stored = getHumanAction(action.id)!;
+  assert.equal(stored.status, "resolved");
+  assert.deepEqual(JSON.parse(stored.resolutionJson!), { choice: "resume", note }, "note round-trips exactly (trimmed)");
+
+  const payload = JSON.parse(getWorkItem(body.nextWorkItemId!)!.payloadJson!) as { scopeDecisionNote?: string };
+  assert.equal(payload.scopeDecisionNote, note, "the very next round's payload carries the note");
+  await app.close();
+});
+
+test("NOT-272: mid-workflow product_scope_decision resolve with a note persists it and carries it on the next developer payload", async () => {
+  const app = await buildApp();
+  const { issueId, actionId } = await seedMidWorkflowScopeDecision();
+  const note = "Out of scope for this ticket — finish the runner work already here, nothing more.";
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${actionId}/resolve`, payload: { resolvedBy: "yusuke", choice: "resume", note } });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { issueStatus: string; nextWorkItemId: string | null };
+  assert.equal(body.issueStatus, "developing");
+  assert.ok(body.nextWorkItemId);
+
+  const stored = getHumanAction(actionId)!;
+  assert.deepEqual(JSON.parse(stored.resolutionJson!), { choice: "resume", note });
+
+  const payload = JSON.parse(getWorkItem(body.nextWorkItemId!)!.payloadJson!) as { scopeDecisionNote?: string };
+  assert.equal(payload.scopeDecisionNote, note);
+  assert.equal(getIssue(issueId)!.status, "developing");
+  await app.close();
+});
+
+test("NOT-272: resolving a product_scope_decision without a note stores exactly today's record and queues a noteless payload", async () => {
+  const app = await buildApp();
+  const { action } = seedPreStartScopeDecision();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${action.id}/resolve`, payload: { resolvedBy: "yusuke", choice: "resume" } });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { nextWorkItemId: string | null };
+  const stored = getHumanAction(action.id)!;
+  assert.equal(stored.resolutionJson, JSON.stringify({ choice: "resume" }));
+  const payload = JSON.parse(getWorkItem(body.nextWorkItemId!)!.payloadJson!) as { scopeDecisionNote?: string };
+  assert.ok(!("scopeDecisionNote" in payload), "no new payload key without a note");
+  await app.close();
+});
+
+test("NOT-272: a note sent with any other action type is dropped, never stored", async () => {
+  const app = await buildApp();
+  const { actionId } = await seedRealIssueAwaitingFinalReview();
+  const res = await app.inject({ method: "POST", url: `/api/human-actions/${actionId}/resolve`, payload: { resolvedBy: "yusuke", choice: "close", note: "should not persist" } });
+  assert.equal(res.statusCode, 200);
+  const stored = getHumanAction(actionId)!;
+  assert.equal(stored.resolutionJson, JSON.stringify({ choice: "close" }));
   await app.close();
 });

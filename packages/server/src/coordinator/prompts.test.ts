@@ -141,6 +141,31 @@ test("no guidance section when there is none", () => {
   assert.doesNotMatch(prompt, /## Guidance from the team/);
 });
 
+// NOT-272: a product_scope_decision note reaches the very next developer round verbatim
+// under its own heading, positioned before the task so it is read before acting.
+test("NOT-272: scope decision note renders verbatim under its own heading before the task", () => {
+  const note = "The muse_code runner migration IS in scope for this ticket — proceed with it.";
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 2, scopeDecisionNote: note });
+  assert.match(prompt, /## Human decision/);
+  assert.ok(prompt.includes(note), "note text must appear verbatim");
+  assert.ok(
+    prompt.indexOf("## Human decision") < prompt.indexOf("## Task"),
+    "Human decision section must precede the task"
+  );
+  assert.match(prompt, /do not re-escalate the same question/i);
+});
+
+// NOT-272: resolving without a note changes nothing — absent, empty, and blank notes all
+// produce byte-for-byte the prompt built before this change.
+test("NOT-272: no scope decision note produces byte-for-byte the same prompt as before", () => {
+  const base = { taskSnapshot, round: 2 as const, findings: [{ fingerprint: "f1", severity: "blocking", title: "Bug", rationale: "It breaks", file: "a.ts", line: 10, status: "open", firstRound: 1, lastRound: 1, issueId: "i" } as never], guidance: ["Use the new logging util instead."] };
+  const without = buildDeveloperPrompt(base);
+  assert.doesNotMatch(without, /## Human decision/);
+  assert.equal(buildDeveloperPrompt({ ...base, scopeDecisionNote: undefined }), without);
+  assert.equal(buildDeveloperPrompt({ ...base, scopeDecisionNote: "" }), without);
+  assert.equal(buildDeveloperPrompt({ ...base, scopeDecisionNote: "   \n  " }), without);
+});
+
 test("guidance since the last session is surfaced in the reviewer prompt", () => {
   const prompt = buildReviewerPrompt({
     taskSnapshot,

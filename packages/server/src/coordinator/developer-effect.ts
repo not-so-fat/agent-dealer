@@ -696,6 +696,7 @@ export async function runDeveloperEffect(
     retryReason?: string | null;
     publishOnly?: boolean;
     branch?: string;
+    scopeDecisionNote?: string | null;
   } = {};
   try {
     if (workItem.payloadJson) payload = JSON.parse(workItem.payloadJson);
@@ -904,6 +905,12 @@ export async function runDeveloperEffect(
     );
     const guidance = guidanceForNextSession(issue.id, sessionId);
     const retryReason = payload.retryReason ?? undefined;
+    // NOT-272: the scope note rides only the work item queued by the resolution —
+    // exactly this round reads it; nothing is re-read from the DB.
+    const scopeDecisionNote =
+      typeof payload.scopeDecisionNote === "string" && payload.scopeDecisionNote.trim()
+        ? payload.scopeDecisionNote.trim()
+        : undefined;
     let priorConclusion: string | undefined;
     let priorVerificationReceipt: VerificationReceipt | undefined;
     if (retryReason) {
@@ -937,6 +944,7 @@ export async function runDeveloperEffect(
       deckId: isMuse ? null : (snapshot?.deckId ?? null),
       noAgentDeck: isMuse,
       guidance: guidance.length ? guidance : undefined,
+      scopeDecisionNote,
     });
 
     // NOT-83 review finding: the session is marked `running` (worker-loop.ts) before this
