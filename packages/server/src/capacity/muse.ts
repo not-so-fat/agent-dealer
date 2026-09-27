@@ -3,16 +3,20 @@
 // NOT-247: Muse Code capacity adapter — read stable MSP usage windows.
 // NOT-263: handshake repaired against the stable schema embedded in the
 // shipped binary (`muse schema generate-json-schema`).
+// NOT-270: production reads go through the server-owned long-lived host
+// (`./muse-host.js`). NOT-269 proved a fresh `muse serve` host is
+// structurally unobserved, so the old spawn → `usage/read` → exit poll is
+// retired: only a host that observed the account's provider traffic can
+// answer `usage/read` / emit `usage/changed`.
 //
 // Reads observed capacity through the stable Muse Session Protocol without
-// sending a prompt and without consuming model tokens: `muse serve` over a
-// one-shot managed stdio connection, then `initialize` → `initialized` → one
-// `usage/read`, then shutdown. `usage/changed` notifications received while
-// the connection is alive are recorded. The client enforces a read-only
+// sending a prompt and without consuming model tokens: `initialize` →
+// `initialized` → `usage/read` on the owned host, with `usage/changed`
+// notifications ingested as received. The client enforces a read-only
 // allowlist (`initialize`, `initialized`, `usage/read`) — any other method
-// throws before it is written, so polling can never start a session, send a
-// prompt, or run model work. It never touches the Keychain or undocumented
-// endpoints.
+// throws before it is written, so a capacity read can never start a
+// session, send a prompt, or run model work. It never touches the Keychain
+// or undocumented endpoints.
 //
 // Stable `usage/read` shape:
 //   result: {
@@ -40,6 +44,7 @@
 // session) and evidence refs are static strings.
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import type { CapacityUnavailableReason, Runtime } from "@agent-dealer/shared";
 import { MUSE_CLI_ENV, resolveMuseAuthFile, resolveMuseBin } from "../cli-env.js";
@@ -57,6 +62,23 @@ export const MUSE_RUNTIME: Runtime = "muse_code";
 /** Methods this client may ever send. Anything else throws before write. */
 export const MSP_READ_ONLY_METHODS = ["initialize", "initialized", "usage/read"] as const;
 export type MspReadOnlyMethod = (typeof MSP_READ_ONLY_METHODS)[number];
+
+/**
+ * NOT-270: execution methods for REAL Dealer work through the server-owned
+ * serve host (the NOT-269 proven lifecycle: only a host that observes the
+ * account's provider traffic can answer `usage/read`). This is a separate
+ * allowlist from the read-only one above — a capacity read still never sends
+ * these. `session/resume` stays forbidden (state-changing, carries no usage
+ * per NOT-269 leg 2); `turn/steer` and approval writes are never sent by the
+ * headless runner, so they are refused here too.
+ */
+export const MSP_EXEC_METHODS = [
+  "session/start",
+  "turn/start",
+  "turn/cancel",
+  "session/read",
+] as const;
+export type MspExecMethod = (typeof MSP_EXEC_METHODS)[number];
 
 /**
  * Client identity sent in the `initialize` handshake. The stable schema
@@ -85,6 +107,30 @@ export function assertMuseReadOnlyMethod(method: string): asserts method is MspR
   }
 }
 
+export function assertMuseExecMethod(method: string): asserts method is MspExecMethod {
+  if (!(MSP_EXEC_METHODS as readonly string[]).includes(method)) {
+    throw new Error(`muse-serve: refusing non-execution method ${method}`);
+  }
+}
+
+/**
+ * UUIDv7 for MSP `commandId` idempotency handles (session/start, turn/start,
+ * turn/cancel require UUIDv7). Time-ordered; randomness from crypto.
+ */
+export function museUuidv7(nowMs = Date.now()): string {
+  const b = Buffer.alloc(16);
+  const ts = BigInt(nowMs) & ((1n << 48n) - 1n);
+  for (let i = 0; i < 6; i++) b[i] = Number((ts >> BigInt(40 - 8 * i)) & 0xffn);
+  randomBytes(10).copy(b, 6);
+  b[6] = 0x70 | (b[6] & 0x0f);
+  b[8] = 0x80 | (b[8] & 0x3f);
+  const hex = b.toString("hex");
+  return (
+    `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-` +
+    `${hex.slice(16, 20)}-${hex.slice(20)}`
+  );
+}
+
 function readOnlyRequest(id: string, method: MspReadOnlyMethod, params: unknown): string {
   assertMuseReadOnlyMethod(method);
   return `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`;
@@ -98,9 +144,17 @@ function readOnlyNotification(method: MspReadOnlyMethod, params: unknown): strin
 /**
  * Stable Session Protocol argv. Fixed: capacity reads never `exec`, and the
  * host takes no `--protocol` flag — `muse serve` with that flag exits 2
- * against the shipped binary, so this stays exactly `["serve"]`.
+ * against the shipped binary.
+ *
+ * NOT-270: the owned host is also the execution host for real Dealer Muse
+ * turns (the NOT-269 precondition — only a host that observes provider
+ * traffic can answer `usage/read`). Sandbox posture is fixed at host
+ * startup and applies to every session on the host, so the host carries the
+ * same `--sandbox-network restricted` every `muse exec` developer invocation
+ * already passes (see runners/muse-code-args.ts — a fixed constant, no
+ * per-session variation). Approval mode stays per-session on the wire.
  */
-export const MUSE_SERVE_ARGV: readonly string[] = ["serve"];
+export const MUSE_SERVE_ARGV: readonly string[] = ["serve", "--sandbox-network", "restricted"];
 
 /** JSON-RPC request ids for the one-shot read (init handshake, then usage). */
 export const MSP_INITIALIZE_ID = "muse-capacity-init";
@@ -297,7 +351,10 @@ interface RpcResponse {
   error?: { code?: unknown; message?: unknown };
 }
 
-function parseRpcLine(line: string): (RpcResponse & { method?: unknown; params?: unknown }) | null {
+/** Parse one stdio JSON-RPC line; null for blank/non-JSON chatter. Shared with the owned host. */
+export function parseMuseRpcLine(
+  line: string
+): (RpcResponse & { method?: unknown; params?: unknown }) | null {
   const t = line.trim();
   if (!t) return null;
   try {
@@ -315,8 +372,21 @@ function errorLooksAuth(error: unknown): boolean {
   return AUTH_RE.test(String(e.message ?? "")) || e.code === 401 || e.code === 403;
 }
 
+/** Classify an MSP RPC error for the owned host: auth, missing method, or other. */
+export function museClassifyRpcError(error: unknown): "auth" | "unsupported" | "other" {
+  if (errorLooksAuth(error)) return "auth";
+  if (
+    error !== null &&
+    typeof error === "object" &&
+    (error as { code?: unknown }).code === -32601
+  ) {
+    return "unsupported";
+  }
+  return "other";
+}
+
 /** The only credential signals the repo knows (cf. agent-health): env key or login file. */
-function hasMuseCredential(env: NodeJS.ProcessEnv, authFilePath: string): boolean {
+export function hasMuseCredential(env: NodeJS.ProcessEnv, authFilePath: string): boolean {
   const key = env.META_API_KEY;
   if (typeof key === "string" && key.length > 0) return true;
   try {
@@ -330,8 +400,11 @@ function hasMuseCredential(env: NodeJS.ProcessEnv, authFilePath: string): boolea
  * Spawn `muse serve`, run the stable handshake (`initialize` with a
  * `clientInfo` identity, then the `initialized` notification), send one
  * `usage/read`, record any `usage/changed` notifications, then shut the
- * connection down. Never throws for provider-side failures — those come back
- * as `failure.kind`. Never sends anything outside MSP_READ_ONLY_METHODS.
+ * connection down. Low-level primitive (unit-tested); production uses the
+ * owned long-lived host (`./muse-host.js`) — a fresh connection is
+ * unobserved by construction (NOT-269). Never throws for provider-side
+ * failures — those come back as `failure.kind`. Never sends anything
+ * outside MSP_READ_ONLY_METHODS.
  */
 export function requestMuseUsage(opts: MuseServeOptions = {}): Promise<MuseUsageRead> {
   const command = opts.command ?? resolveMuseBin();
@@ -366,7 +439,7 @@ export function requestMuseUsage(opts: MuseServeOptions = {}): Promise<MuseUsage
     };
 
     const onLine = (line: string) => {
-      const msg = parseRpcLine(line);
+      const msg = parseMuseRpcLine(line);
       if (!msg) return; // Tolerate non-JSON chatter; malformed verdict comes from the payload.
       if (typeof msg.method === "string" && msg.id === undefined) {
         if (msg.method === MSP_USAGE_CHANGED) updates.push(msg.params ?? null);
@@ -530,8 +603,269 @@ function failureToUnavailable(nowMs: number, kind: FailureKind): AdapterReadResu
 }
 
 /** Evidence refs are static — the failure kind only, never tokens or payloads. */
-export function museEvidenceRef(kind: FailureKind | "read"): string {
-  return `muse-serve:${kind === "read" ? "usage/read" : kind}`;
+export function museEvidenceRef(kind: FailureKind | "read" | "changed"): string {
+  if (kind === "read") return "muse-serve:usage/read";
+  if (kind === "changed") return "muse-serve:usage/changed";
+  return `muse-serve:${kind}`;
+}
+
+/** Window keys that carry real Muse capacity (NOT-266: never the sentinel). */
+export const MUSE_KNOWN_WINDOW_KEYS = ["rolling_all_models", "weekly_all_models"] as const;
+
+function observedMs(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+export interface MuseIngestOutcome {
+  /** Window keys written by this observation. */
+  written: string[];
+  /** Window keys skipped because stored rows are strictly newer. */
+  skippedStale: string[];
+}
+
+/**
+ * The payload's own arrival stamp (`usage.observedAtMs`), mirroring
+ * `museUsageToReadings` — per-window diagnostics share it so a
+ * present-but-malformed sibling never outranks a valid row by wall clock.
+ */
+export function musePayloadObservedAt(payload: unknown, fallback: string): string {
+  if (payload && typeof payload === "object") {
+    const result = payload as Record<string, unknown>;
+    const usage =
+      "usage" in result && result.usage !== null && typeof result.usage === "object"
+        ? (result.usage as Record<string, unknown>)
+        : result;
+    const ms = usage.observedAtMs;
+    if (typeof ms === "number" && Number.isFinite(ms)) {
+      return new Date(ms).toISOString();
+    }
+  }
+  return fallback;
+}
+
+/**
+ * NOT-270: newest-`observedAtMs`-wins ingest for Muse usage observations.
+ * Accepts a `usage/read` result envelope or a bare `usage/changed` params
+ * object (the stable schema carries `SubscriptionUsage` directly in the
+ * notification). Every window compares its `observedAt` against the stored
+ * row for the same key: an older observation never overwrites or deletes a
+ * newer one, so a slow finishing read cannot clobber rows a newer
+ * notification already wrote, and a fresh-host `missing` (no `usage`)
+ * never touches stored rows at all.
+ *
+ * A fully-observed pair also deletes the `muse_account_usage` failure
+ * sentinel; per-window `unparsable` diagnostics apply the same newest-wins
+ * rule and never sit beside a newer valid row for the same window.
+ */
+export async function ingestMuseUsagePayload(
+  payload: unknown,
+  opts: { fallbackObservedAt?: string; evidenceRef?: string } = {}
+): Promise<MuseIngestOutcome> {
+  const { recordCapacitySnapshots, listCapacitySnapshots, deleteCapacitySnapshots } = await import(
+    "../repository/runtime-capacity.js"
+  );
+  const nowMs = Date.now();
+  const fallback = opts.fallbackObservedAt ?? new Date(nowMs).toISOString();
+  const evidenceRef = opts.evidenceRef ?? museEvidenceRef("read");
+  const stored = new Map(listCapacitySnapshots(MUSE_RUNTIME).map((w) => [w.windowKey, w]));
+  const outcome: MuseIngestOutcome = { written: [], skippedStale: [] };
+
+  const consider = (input: {
+    windowKey: string;
+    providerBucket: string;
+    durationMinutes?: number | null;
+    displayLabel: string;
+    usedValue?: number | null;
+    usedUnit?: string | null;
+    remainingPercent?: number | null;
+    resetAt?: string | null;
+    observedAt: string;
+    freshUntil?: string | null;
+    expiresAt?: string | null;
+    source: "supported_protocol" | "unavailable";
+    unavailableReason?: CapacityUnavailableReason | null;
+    criticalRole?: import("@agent-dealer/shared").CapacityCriticalRole | null;
+  }): void => {
+    const prev = stored.get(input.windowKey);
+    const prevMs = prev ? observedMs(prev.observedAt) : null;
+    const nextMs = observedMs(input.observedAt);
+    if (prevMs !== null && nextMs !== null) {
+      if (nextMs < prevMs) {
+        // Strictly older observation — never clobbers a newer row.
+        outcome.skippedStale.push(input.windowKey);
+        return;
+      }
+      if (nextMs === prevMs && input.source === "unavailable") {
+        // Same-stamp diagnostic — never relabels the stored row (a
+        // same-stamp `usage/changed` + final `usage/read` pair must not
+        // let the diagnostic half win; recovery at a newer stamp still
+        // applies through the strictly-newer path).
+        outcome.skippedStale.push(input.windowKey);
+        return;
+      }
+      // Same-stamp good observation: the final `usage/read` is
+      // authoritative over the earlier `usage/changed` for the same
+      // arrival stamp — rewrite idempotently.
+    }
+    recordCapacitySnapshots(MUSE_RUNTIME, [
+      {
+        windowKey: input.windowKey,
+        providerBucket: input.providerBucket,
+        durationMinutes: input.durationMinutes ?? null,
+        displayLabel: input.displayLabel,
+        usedValue: input.usedValue ?? null,
+        usedUnit: input.usedUnit ?? null,
+        remainingPercent: input.remainingPercent ?? null,
+        resetAt: input.resetAt ?? null,
+        observedAt: input.observedAt,
+        freshUntil: input.freshUntil ?? null,
+        expiresAt: input.expiresAt ?? null,
+        source: input.source,
+        unavailableReason: input.unavailableReason ?? null,
+        evidenceRef,
+        criticalRole: input.criticalRole ?? null,
+      },
+    ]);
+    stored.delete(input.windowKey);
+    outcome.written.push(input.windowKey);
+  };
+
+  const payloadObservedAt = musePayloadObservedAt(payload, fallback);
+  let parsed: MuseUsageReadings | null = null;
+  try {
+    parsed = museUsageToReadings(payload, fallback);
+  } catch {
+    parsed = null;
+  }
+  if (parsed && parsed.windows.length > 0) {
+    const normalized = parsed.windows.map((w) => normalizeAdapterWindow(MUSE_RUNTIME, w, nowMs));
+    for (let i = 0; i < parsed.windows.length; i++) {
+      const n = normalized[i]!;
+      if (n.unavailableReason !== null || n.remainingPercent === null) {
+        consider({
+          windowKey: n.windowKey,
+          providerBucket: n.providerBucket,
+          durationMinutes: n.durationMinutes,
+          displayLabel: n.displayLabel,
+          observedAt: n.observedAt,
+          source: "unavailable",
+          unavailableReason: "unparsable",
+          criticalRole: n.criticalRole,
+        });
+      } else {
+        const raw = parsed.windows[i]!;
+        consider({
+          windowKey: raw.windowKey,
+          providerBucket: raw.providerBucket,
+          durationMinutes: raw.durationMinutes,
+          displayLabel: n.displayLabel,
+          usedValue: raw.usedValue,
+          usedUnit: raw.usedUnit,
+          remainingPercent: n.remainingPercent,
+          resetAt: n.resetAt,
+          observedAt: raw.observedAt ?? fallback,
+          freshUntil: n.freshUntil,
+          expiresAt: n.expiresAt,
+          source: "supported_protocol",
+          criticalRole: raw.criticalRole,
+        });
+      }
+    }
+    for (const kind of museBadWindowKinds(payload)) {
+      const key = kind === "rolling" ? "rolling_all_models" : "weekly_all_models";
+      if (outcome.written.includes(key) || outcome.skippedStale.includes(key)) continue;
+      consider({
+        windowKey: key,
+        providerBucket: "all_models",
+        durationMinutes: kind === "weekly" ? MUSE_WEEKLY_DURATION_MINUTES : null,
+        displayLabel: kind,
+        observedAt: payloadObservedAt,
+        source: "unavailable",
+        unavailableReason: "unparsable",
+        criticalRole: kind === "rolling" ? "five_hour" : "weekly",
+      });
+    }
+    if (outcome.written.some((k) => (MUSE_KNOWN_WINDOW_KEYS as readonly string[]).includes(k))) {
+      deleteCapacitySnapshots(MUSE_RUNTIME, [SENTINEL_WINDOW_KEY]);
+    }
+    return outcome;
+  }
+  if (parsed && museBadWindowKinds(payload).length > 0) {
+    for (const kind of museBadWindowKinds(payload)) {
+      const key = kind === "rolling" ? "rolling_all_models" : "weekly_all_models";
+      consider({
+        windowKey: key,
+        providerBucket: "all_models",
+        durationMinutes: kind === "weekly" ? MUSE_WEEKLY_DURATION_MINUTES : null,
+        displayLabel: kind,
+        observedAt: payloadObservedAt,
+        source: "unavailable",
+        unavailableReason: "unparsable",
+        criticalRole: kind === "rolling" ? "five_hour" : "weekly",
+      });
+    }
+    if (outcome.written.length > 0) {
+      deleteCapacitySnapshots(MUSE_RUNTIME, [SENTINEL_WINDOW_KEY]);
+    }
+    return outcome;
+  }
+  // No observation in the payload (fresh/unobserved host reads `missing`):
+  // never overwrite or delete stored rows.
+  return outcome;
+}
+
+/**
+ * NOT-270: record a host-level failure without touching last-good rows. A
+ * failure diagnostic (the `muse_account_usage` sentinel) is written only
+ * when no per-window row exists — it must never sit beside or relabel
+ * valid windows, nor beside per-window `unparsable` diagnostics (those
+ * already describe the 5H/1W entry; a sentinel next to them would mix two
+ * diagnostics for the same entry). A stored sentinel alone is refreshed in
+ * place.
+ */
+export async function noteMuseCapacityFailure(
+  reason: CapacityUnavailableReason,
+  nowMs = Date.now()
+): Promise<"sentinel" | "preserved"> {
+  const { recordCapacitySnapshots, listCapacitySnapshots } = await import(
+    "../repository/runtime-capacity.js"
+  );
+  const stored = listCapacitySnapshots(MUSE_RUNTIME);
+  if (
+    stored.some(
+      (w) => (MUSE_KNOWN_WINDOW_KEYS as readonly string[]).includes(w.windowKey)
+    )
+  )
+    return "preserved";
+  const normalized = normalizeUnavailableWindow(
+    MUSE_RUNTIME,
+    {
+      windowKey: SENTINEL_WINDOW_KEY,
+      providerBucket: "account",
+      providerLabel: "account_usage",
+      reason,
+      observedAt: new Date(nowMs).toISOString(),
+    },
+    nowMs
+  );
+  recordCapacitySnapshots(MUSE_RUNTIME, [
+    {
+      windowKey: normalized.windowKey,
+      providerBucket: normalized.providerBucket,
+      durationMinutes: normalized.durationMinutes,
+      displayLabel: normalized.displayLabel,
+      observedAt: normalized.observedAt,
+      freshUntil: normalized.freshUntil,
+      expiresAt: normalized.expiresAt,
+      source: "unavailable",
+      unavailableReason: normalized.unavailableReason,
+      evidenceRef: normalized.evidenceRef,
+      criticalRole: normalized.criticalRole,
+    },
+  ]);
+  return "sentinel";
 }
 
 /**
@@ -626,31 +960,15 @@ export function createMuseCapacityAdapter(opts: MuseServeOptions = {}): Capacity
 }
 
 /**
- * Bounded refresh: run the live adapter and ingest into normalized snapshots.
- * Reuses the shared ingest path; failures persist as N/A windows, never as
- * health rows. Imported lazily to keep the adapter module free of DB binds.
- *
- * A successful read (real windows or per-window unparsable rows) deletes
- * the failure sentinel (`muse_account_usage`): snapshot writes are
- * per-window upserts that never delete siblings, so without this a stale
- * N/A sentinel would linger next to the recovered rows indefinitely.
+ * NOT-270: the one-shot production poll (`refreshMuseCapacityFromServe` /
+ * `maybeRefreshMuseCapacityFromServe`) is retired. NOT-269 proved a fresh
+ * `muse serve` host is structurally unobserved: spawn → `usage/read` →
+ * exit can only ever read `missing`, so polling it could never refresh
+ * capacity. Production refreshes go through the server-owned long-lived
+ * host (`./muse-host.js`), which holds one connection open, ingests
+ * `usage/changed` as received, and runs throttled `usage/read` on that
+ * same observed host.
  */
-export async function refreshMuseCapacityFromServe(
-  opts: MuseServeOptions = {}
-): Promise<import("@agent-dealer/shared").RuntimeCapacityResponse> {
-  const { ingestAdapterResult, getRuntimeCapacitySnapshot } = await import("./service.js");
-  const { deleteCapacitySnapshots } = await import("../repository/runtime-capacity.js");
-  const nowMs = opts.nowMs ?? Date.now();
-  const result = await readMuseCapacity({ ...opts, nowMs });
-  await ingestAdapterResult(result);
-  const hasRealRows =
-    result.windows.length > 0 ||
-    result.unavailable.some((u) => u.windowKey !== SENTINEL_WINDOW_KEY);
-  if (hasRealRows) {
-    deleteCapacitySnapshots(MUSE_RUNTIME, [SENTINEL_WINDOW_KEY]);
-  }
-  return getRuntimeCapacitySnapshot(nowMs);
-}
 
 /** Default minimum gap between production Muse refreshes (5 minutes). */
 export const MUSE_REFRESH_THROTTLE_MS_DEFAULT = 5 * 60 * 1000;
@@ -659,6 +977,7 @@ export const MUSE_REFRESH_THROTTLE_MS_DEFAULT = 5 * 60 * 1000;
  * Throttle bound for production refreshes. Override with
  * `AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS` (milliseconds); `off` disables
  * refresh entirely. Non-positive or unparsable values fall back to the default.
+ * Shared with the owned host (`./muse-host.js`).
  */
 export function museRefreshThrottleMs(): number {
   const raw = process.env.AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS;
@@ -667,34 +986,6 @@ export function museRefreshThrottleMs(): number {
   const n = Number(raw);
   if (Number.isFinite(n) && n > 0) return n;
   return MUSE_REFRESH_THROTTLE_MS_DEFAULT;
-}
-
-let lastMuseRefreshMs = 0;
-
-/** Test helper — reset the refresh throttle so the next refresh runs. */
-export function resetMuseCapacityRefreshState(): void {
-  lastMuseRefreshMs = 0;
-}
-
-/**
- * Production trigger for the Muse adapter: throttled, bounded, best-effort.
- * Returns the refreshed snapshot, or null when throttled/disabled. Never
- * throws — a failed refresh persists as N/A through the shared ingest path,
- * and any unexpected error resolves to null so callers (routes) can still
- * serve the last-known snapshot.
- */
-export async function maybeRefreshMuseCapacityFromServe(
-  opts: MuseServeOptions = {},
-  nowMs = Date.now()
-): Promise<import("@agent-dealer/shared").RuntimeCapacityResponse | null> {
-  const throttle = museRefreshThrottleMs();
-  if (!Number.isFinite(throttle) || nowMs - lastMuseRefreshMs < throttle) return null;
-  lastMuseRefreshMs = nowMs;
-  try {
-    return await refreshMuseCapacityFromServe({ ...opts, nowMs });
-  } catch {
-    return null;
-  }
 }
 
 /** Normalize one unavailable Muse reading for direct persistence (tests/tools). */

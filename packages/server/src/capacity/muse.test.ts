@@ -24,21 +24,15 @@ import {
   MSP_FORBIDDEN_MODEL_METHODS,
   MUSE_CLIENT_INFO,
   MUSE_SERVE_ARGV,
-  museRefreshThrottleMs,
   museUsageToReadings,
-  maybeRefreshMuseCapacityFromServe,
   normalizeMuseResetsAt,
   normalizeMuseUnavailable,
   readMuseCapacity,
-  refreshMuseCapacityFromServe,
   requestMuseUsage,
-  resetMuseCapacityRefreshState,
 } from "./muse.js";
 import { normalizeAdapterWindow, normalizeUnavailableWindow } from "./adapter.js";
 const { migrate } = await import("../db/index.js");
-const { clearAllCapacitySnapshots, listCapacitySnapshots } = await import(
-  "../repository/runtime-capacity.js"
-);
+const { clearAllCapacitySnapshots } = await import("../repository/runtime-capacity.js");
 const {
   clearAllRuntimeAvailability,
   runtimeAvailability,
@@ -70,8 +64,8 @@ function fakeOpts(mode: string, extra: Record<string, unknown> = {}) {
   };
 }
 
-test("serve argv is the shipping contract: no --protocol flag", () => {
-  assert.deepEqual([...MUSE_SERVE_ARGV], ["serve"]);
+test("serve argv is the shipping contract: no --protocol flag, restricted network", () => {
+  assert.deepEqual([...MUSE_SERVE_ARGV], ["serve", "--sandbox-network", "restricted"]);
   assert.ok(!MUSE_SERVE_ARGV.includes("--protocol"), "muse serve takes no --protocol flag");
 });
 
@@ -368,60 +362,10 @@ test("no credential short-circuits to missing without spawning", async () => {
   assert.equal(result.unavailable[0]!.reason, "missing");
 });
 
-test("a successful refresh clears the failure sentinel", async () => {
-  clearAllCapacitySnapshots();
-  await refreshMuseCapacityFromServe(fakeOpts("crash").opts);
-  assert.deepEqual(
-    listCapacitySnapshots("muse_code").map((w) => w.windowKey),
-    ["muse_account_usage"]
-  );
-  const snap = await refreshMuseCapacityFromServe(fakeOpts("full").opts);
-  const keys = listCapacitySnapshots("muse_code")
-    .map((w) => w.windowKey)
-    .sort();
-  assert.deepEqual(keys, ["rolling_all_models", "weekly_all_models"]);
-  const muse = snap.runtimes.find((r) => r.runtime === "muse_code")!;
-  assert.ok(muse);
-  assert.equal(muse.windows.length, 2);
-  assert.equal(muse.unavailableReason, null);
-});
-
-test("a read with every window unparsable clears the stale sentinel", async () => {
-  clearAllCapacitySnapshots();
-  await refreshMuseCapacityFromServe(fakeOpts("crash").opts);
-  assert.deepEqual(
-    listCapacitySnapshots("muse_code").map((w) => w.windowKey),
-    ["muse_account_usage"]
-  );
-  const result = await readMuseCapacity(fakeOpts("all-bad-windows").opts);
-  assert.equal(result.windows.length, 0);
-  assert.ok(result.unavailable.length > 0);
-  assert.ok(result.unavailable.every((u) => u.windowKey !== "muse_account_usage"));
-  await refreshMuseCapacityFromServe(fakeOpts("all-bad-windows").opts);
-  const keys = listCapacitySnapshots("muse_code").map((w) => w.windowKey);
-  assert.ok(!keys.includes("muse_account_usage"), `stale sentinel cleared, got ${keys}`);
-  assert.ok(keys.length > 0, "per-window unparsable rows persist");
-});
-
-test("production refresh is throttled and can be disabled", async () => {
-  clearAllCapacitySnapshots();
-  resetMuseCapacityRefreshState();
-  const { opts } = fakeOpts("full");
-  try {
-    assert.equal(museRefreshThrottleMs(), 5 * 60 * 1000);
-    const first = await maybeRefreshMuseCapacityFromServe(opts);
-    assert.ok(first, "first refresh runs");
-    assert.equal(await maybeRefreshMuseCapacityFromServe(opts), null, "second refresh throttled");
-    process.env.AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS = "off";
-    resetMuseCapacityRefreshState();
-    assert.equal(await maybeRefreshMuseCapacityFromServe(opts), null, "refresh disabled");
-    process.env.AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS = "garbage";
-    assert.equal(museRefreshThrottleMs(), 5 * 60 * 1000);
-  } finally {
-    delete process.env.AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS;
-    resetMuseCapacityRefreshState();
-  }
-});
+// NOT-270: the one-shot production poll is retired (see muse-host.test.ts
+// for the owned-host refresh, sentinel, and throttle coverage). The adapter
+// read primitive above stays unit-tested; production ingest moved to
+// `ingestMuseUsagePayload` newest-observedAtMs-wins.
 
 test("no token, tier, or raw account payload reaches the adapter output", async () => {
   const { opts } = fakeOpts("full");

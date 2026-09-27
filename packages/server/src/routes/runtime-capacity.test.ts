@@ -24,7 +24,7 @@ const { clearAllCapacitySnapshots, listCapacitySnapshots, recordCapacitySnapshot
 );
 const { fixtureMultiWindowAdapter, normalizeAdapterWindow } = await import("../capacity/adapter.js");
 const { refreshCapacityFromAdapters } = await import("../capacity/service.js");
-const { resetMuseCapacityRefreshState } = await import("../capacity/muse.js");
+const { resetMuseCapacityHostForTests } = await import("../capacity/muse-host.js");
 const { refreshCodexCapacityFromAppServer } = await import("../capacity/codex-app-server.js");
 const { registerRoutes } = await import("./index.js");
 const { RuntimeCapacityResponse } = await import("@agent-dealer/shared");
@@ -68,11 +68,12 @@ test("GET /api/runtime-capacity returns normalized entries without evidence", as
 });
 
 test("GET triggers the Muse refresh when muse_code is configured", async () => {
-  // NOT-247: the route is the only production trigger for the Muse adapter.
-  // No credential here (env key removed, empty login dir), so the refresh
-  // short-circuits to a `missing` sentinel without spawning anything live.
+  // NOT-270: the route is the only production trigger for Muse capacity
+  // (owned host). No credential here (env key removed, empty login dir),
+  // so the refresh short-circuits to a `missing` sentinel without spawning
+  // anything live.
   clearAllCapacitySnapshots();
-  resetMuseCapacityRefreshState();
+  await resetMuseCapacityHostForTests();
   const prevKey = process.env.META_API_KEY;
   const prevXdg = process.env.XDG_CONFIG_HOME;
   delete process.env.META_API_KEY;
@@ -112,7 +113,7 @@ test("GET triggers the Muse refresh when muse_code is configured", async () => {
     else process.env.META_API_KEY = prevKey;
     if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = prevXdg;
-    resetMuseCapacityRefreshState();
+    await resetMuseCapacityHostForTests();
   }
 });
 

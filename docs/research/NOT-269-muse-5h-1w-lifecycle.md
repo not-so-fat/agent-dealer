@@ -154,12 +154,20 @@ stays exactly 5H + 1W (`window` → `rolling_all_models`/5H-class label derived
 from `windowDurationMins`, `weekly` → `weekly_all_models`/1W); a host that has
 not yet observed reads `missing` (N/A), never a fabricated pair.
 
-**If the runner migration is rejected, the honest alternative is: supported
-no-cost acquisition is unavailable** with the current exec-based runner — keep
-the one-shot `usage/read` (which can only ever return `missing`) or remove it,
-and do not ship a paid/synthetic probe. Either way the NOT-247 child contract
-must change: delete the "one-shot serve answers usage/read" assumption and
-replace it with the owned-host precondition above.
+**Product decision (2026-09-26, resolved via human_action on NOT-270): the
+runner migration above is accepted, in scope for NOT-270 itself.** Supporting
+facts: `--sandbox-network restricted` is a fixed constant across every
+existing developer/reviewer invocation today (`muse-code-args.ts`) — no
+per-session posture is lost moving it to a host-launch flag; approval mode is
+already wire-selectable per session (`session/start.approvalMode`); the
+NOT-177/179/181 sandbox contracts can be re-verified against the owned host
+using a free `--provider echo` session/turn, not a live paid Meta turn. The
+one accepted, explicit tradeoff: `muse serve` has no wire- or host-level
+equivalent to `--disable-web-tools` or `--no-foreign-personal-context` in
+Muse 1.4.0, so real turns routed through the owned host run without those two
+specific restrictions — everything else (network sandbox, approval mode,
+write/shell restriction) is unaffected. This question was escalated twice on
+NOT-270 and resolved both times; it is closed for this ticket's scope.
 
 ## Contract delta for the blocked implementation ticket (NOT-247 child)
 

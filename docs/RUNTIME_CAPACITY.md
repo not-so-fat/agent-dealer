@@ -127,23 +127,82 @@ generic icon, announced as "Unknown runtime capacity" — the fallback is
 selected by membership of the raw key in the shared `Runtime` enum, never
 by matching the human-readable label.
 
-## Provider: Muse Code (NOT-247)
+## Provider: Muse Code (NOT-247, NOT-269, NOT-270)
 
 Sources: the Muse Code docs (`https://dev.meta.ai/docs/muse-code`) and the
 subscriptions reference (`https://dev.meta.ai/docs/muse-code/subscriptions`),
 plus the stable schema embedded in the shipped binary (regenerable offline
-with `muse schema generate-json-schema`). The adapter speaks the stable
-Session Protocol over a managed `muse serve` subprocess (no `--protocol`
-flag — the shipped binary exits 2 on it): the `initialize` handshake with a
-`clientInfo` identity (`name` matching `^[a-z0-9_]+$`, currently
+with `muse schema generate-json-schema`). Full lifecycle evidence lives in
+`docs/research/NOT-269-muse-5h-1w-lifecycle.md` (Muse Code 1.4.0).
+
+The server owns one `muse serve` host per process (no
+`--protocol` flag — the shipped binary exits 2 on it), started at first
+demand. The `initialize` handshake
+carries a `clientInfo` identity (`name` matching `^[a-z0-9_]+$`, currently
 `agent_dealer`, plus a version), then the `initialized` notification, then
-exactly one `usage/read`, then shutdown. `usage/changed` notifications
-received while the connection is alive are recorded. The client enforces a
-read-only allowlist (`initialize`, `initialized`, `usage/read`) — any other
-method throws before it is written, so polling can never start a session,
-send a prompt, or consume model tokens. It is bounded (default 15 s overall,
-`AGENT_DEALER_MUSE_CAPACITY_TIMEOUT_MS` override) and never billed.
-No Keychain access, no undocumented endpoints.
+the connection stays open: `usage/changed` is ingested as soon as received
+and a throttled on-demand `usage/read` on that same host is the final read.
+NOT-269 proved only a host that observed the account's provider traffic
+(a real session's turn flow on that same host) can answer — a fresh host
+reads `usage` omitted, `session/resume` carries no usage, and no
+`muse exec --json` event carries quota, so the old spawn → `usage/read` →
+exit poll is retired. The client enforces a read-only allowlist
+(`initialize`, `initialized`, `usage/read`) — any other method throws
+before it is written, so a capacity read can never start a session, send a
+prompt, or consume model tokens. Reads are bounded (default 15 s per read,
+`AGENT_DEALER_MUSE_CAPACITY_TIMEOUT_MS` override), single-flight across
+concurrent requests (never a second host), and never billed.
+No Keychain access, no undocumented endpoints. The host is held open only
+once it has observed provider traffic; a host that reads `missing` is
+released right after the read (it holds no state, so nothing is lost) and
+the next throttled refresh respawns it — production keeps no lifetime
+child that can only answer `missing`.
+
+Execution lane (NOT-270 runner migration, product decision 2026-09-26):
+real Dealer Muse turns run through the owned host — `session/start` +
+`turn/start` on it (`runners/muse-serve-session.ts`, driven by
+`coordinator/muse-spawn.ts`). That traffic IS the observation, so the
+session-boundary refresh hook (`refreshMuseCapacityAfterSession`, still
+read-only and never a model turn) is the final `usage/read` that populates
+5H/1W. No synthetic model prompt is ever issued to refresh capacity. When
+the serve lane cannot admit a turn (host unavailable, rejected start, no
+credential), the session falls back to the legacy `muse exec` subprocess
+before any model work starts — the host then stays unobserved by
+construction and the read stays honest N/A with last-good rows preserved.
+After admission there is no fallback: an admitted turn's verdict is
+reported honestly (a post-admission error fails loudly rather than
+executing the work twice). `AGENT_DEALER_MUSE_RUNNER=exec` forces the exec
+lane (operator escape hatch). Both lanes write identical normalized log
+evidence, so downstream log readers work unchanged either way.
+Posture (scope decision recorded in `capacity/muse-host.ts`, 2026-09-26):
+the decision accepts exactly two gaps — `--disable-web-tools` and
+`--no-foreign-personal-context` have no wire- or host-level equivalent in
+this Muse version (1.4.0). Everything else claimed here matches: the owned
+host starts with `--sandbox-network restricted` (the same constant every
+exec invocation passes), and worker posture matches via the host's
+server-owned XDG home (`prepareMuseServeHome` — the same
+`buildMuseDeveloperSettings()` worker switches as the exec per-attempt
+settings.json plus a symlink to the ambient login, so serve-lane turns
+never inherit the operator's ambient MCP servers, subagents, or
+workflows). Known deltas OUTSIDE the recorded decision (not accepted —
+need product sign-off or a wire equivalent): approval is per-session on
+the wire as `denyUnmatched` (the wire enum has no `never`; never-prompts
+behavior unverified live), and `--approval-judge off` /
+`--max-model-steps` have no wire equivalent at all (runaway loops are
+bounded only by the attempt wall-clock timeout + `turn/cancel`). All of
+the above is re-verifiable with a free `--provider echo` session/turn.
+Server shutdown (`SIGINT`/`SIGTERM` in `packages/server/src/index.ts`)
+releases the owned host before exiting, so no `muse serve` child leaks;
+shutdown is graceful-first (a host that exits on `SIGTERM` is never
+signalled again) and a wedged host that ignores `SIGTERM` is escalated to
+`SIGKILL` after a bounded grace window (same backstop as the Codex
+adapter). A capacity read never releases the host while an execution turn
+is using the connection, so a concurrent refresh cannot SIGTERM an
+admitted turn. The session-boundary refresh hook
+(`refreshMuseCapacityAfterSession`) calls `refreshMuseCapacityFromHost`
+directly — it deliberately bypasses the GET-route throttle so the final
+read at the proven safe point is contractual even when the Agents page
+polled seconds earlier.
 
 Normalization keeps the two stable windows independently:
 
@@ -173,19 +232,27 @@ server-side as a static string; no credential, tier, or raw account payload
 reaches the browser, the API, or the logs — evidence refs are static
 (`muse-serve:usage/read`).
 
-Refresh via `refreshMuseCapacityFromServe()` (bounded ingest through the
-shared service path). The only production trigger is `GET
-/api/runtime-capacity`: when `muse_code` is configured it runs
-`maybeRefreshMuseCapacityFromServe()` first — throttled (default 5 min,
+Refresh via `refreshMuseCapacityFromHost()` (bounded read on the owned
+host, newest-`observedAtMs`-wins ingest). The only production trigger is
+`GET /api/runtime-capacity`: when `muse_code` is configured it runs
+`maybeRefreshMuseCapacityFromHost()` first — throttled (default 5 min,
 `AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS` override, `off` disables),
-best-effort, never failing the read. A successful refresh deletes the
-`muse_account_usage` failure sentinel so a stale N/A window cannot linger
-next to recovered windows. Tests use the committed fake MSP server
+best-effort, never failing the read. Last-good rows survive transient
+host/auth/timeout failures (a failure diagnostic never sits beside valid
+windows); a successful recovery clears the `muse_account_usage` failure
+sentinel so a stale N/A window cannot linger next to recovered windows.
+After a host restart the owned host reads `missing` until fresh provider
+traffic is observed on it — state is never backfilled from another host.
+Tests use the committed fake MSP server
 (`packages/server/src/capacity/fixtures/fake-muse-serve.mjs`), which
 enforces the stable contract: it rejects the removed `--protocol` argv,
-requires `initialize` (with a valid `clientInfo`) → `initialized` → exactly
-one `usage/read`, and serves the stable `usage.window` / `usage.weekly`
-fields; CI performs no live Muse request.
+requires `initialize` (with a valid `clientInfo`) → `initialized` →
+`usage/read`, serves the stable `usage.window` / `usage.weekly` fields,
+and replays persistent-host and restart modes for the owned-host tests;
+execution modes additionally answer `session/start` / `turn/start` /
+`turn/cancel` / `session/read` (full, rejected, failed, and hanging turns)
+for the serve-lane tests in `runners/muse-serve-session.test.ts`;
+CI performs no live Muse request.
 
 ## Provider: Codex App Server (NOT-246)
 
