@@ -13,6 +13,8 @@ import {
   buildFailureExcerpt,
   formatChecksFailureDetails,
   CHECKS_EVIDENCE_MAX_EXCERPT_CHARS,
+  CHECKS_EVIDENCE_MAX_EXCERPT_LINES,
+  CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN,
   CHECKS_FAILURE_GENERIC_REASON,
   PR_VIEW_FIELDS,
   type GithubAdapter,
@@ -489,6 +491,77 @@ test("NOT-252: extractActionsRunId and sanitizeUrl helpers", async () => {
   assert.equal(extractActionsRunId(undefined), null);
   assert.equal(sanitizeUrl("https://example.com/a?b=1#c"), "https://example.com/a");
   assert.equal(sanitizeUrl("https://example.com/a"), "https://example.com/a");
+});
+
+// --- NOT-276: search-before-truncate — an early failure must survive excerpt building ---
+
+// Replays the NOT-273 incident shape (Actions run 36330128633 "Unit tests" step):
+// `not ok 355/356` + `cancelledByParent` near the head of the log, followed by
+// thousands of passing-test lines. Under the old last-20K-chars pre-truncation
+// the failure sat outside the kept tail and the excerpt showed only passing
+// tail noise; with search-before-truncate it must surface the failure instead.
+test("NOT-276: failure line before the last 20K chars still reaches the excerpt", async () => {
+  const failureBlock = [
+    "not ok 355 - coordinator spawns child with explicit cwd",
+    "  ---",
+    "  failureType: 'cancelledByParent'",
+    "  error: test cancelled by parent",
+    "  ---",
+    "not ok 356 - coordinator spawns child with explicit cwd (2)",
+    "  ---",
+    "  failureType: 'cancelledByParent'",
+    "  ---",
+  ].join("\n");
+  const filler = Array.from({ length: 1000 }, (_, i) => `ok ${1000 + i} - passing test number ${1000 + i}`).join("\n");
+  const log = `${failureBlock}\n${filler}`;
+  // Guard the test's premise: the failure really does sit outside the old 20K tail window.
+  assert.ok(log.indexOf("not ok 355") < log.length - 20_000);
+  const { exec } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("verify", "FAILURE", "36330128633")]) },
+    { stdout: log },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 160, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  assert.match(evidence.excerpt, /not ok 355/);
+  assert.match(evidence.excerpt, /cancelledByParent/);
+  assert.doesNotMatch(evidence.excerpt, /passing test number 1999/);
+  assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+});
+
+test("NOT-276: log with no failure-pattern hits still falls back to the tail, unchanged", async () => {
+  const log = Array.from({ length: 200 }, (_, i) => `ok ${i + 1} - passing test number ${i + 1}`).join("\n");
+  const { exec } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("verify", "FAILURE", "111")]) },
+    { stdout: log },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  // The fetch path must feed the full log through exactly as buildFailureExcerpt sees it.
+  assert.equal(evidence.excerpt, buildFailureExcerpt(log).excerpt);
+  const excerptLines = evidence.excerpt.split("\n");
+  assert.equal(excerptLines.length, CHECKS_EVIDENCE_MAX_EXCERPT_LINES);
+  assert.match(excerptLines[0] ?? "", /passing test number 121/);
+  assert.match(excerptLines[excerptLines.length - 1] ?? "", /passing test number 200/);
+  assert.equal(evidence.excerptTruncated, true);
+  assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+});
+
+test("NOT-276: log larger than the raw memory ceiling stays bounded without crashing", async () => {
+  const line = (i: number) => `ok ${i} - passing test output line with padding pad pad ${i}`;
+  const targetLen = CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN + 500_000;
+  const count = Math.ceil(targetLen / 50);
+  const parts = new Array<string>(count);
+  for (let i = 0; i < count; i++) parts[i] = line(i);
+  const log = parts.join("\n");
+  assert.ok(log.length > CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN);
+  const { exec } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("verify", "FAILURE", "111")]) },
+    { stdout: log },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+  assert.match(evidence.excerpt, new RegExp(`passing test output line with padding pad pad ${count - 1}`));
 });
 
 test("NOT-252: formatChecksFailureDetails labels the excerpt as untrusted, not instructions", async () => {

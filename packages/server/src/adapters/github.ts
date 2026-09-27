@@ -109,8 +109,14 @@ export const CHECKS_FAILURE_GENERIC_REASON = "Developer's PR checks failed.";
 export const CHECKS_EVIDENCE_MAX_FAILED_CHECKS = 10;
 /** Max distinct Actions runs whose logs are fetched (one `gh run view` per run). */
 export const CHECKS_EVIDENCE_MAX_RUNS = 5;
-/** Per-run cap on fetched log text before excerpt focusing (tail kept — failures surface last). */
-export const CHECKS_EVIDENCE_MAX_LOG_CHARS_PER_RUN = 20_000;
+/**
+ * NOT-276: raw per-run ceiling (2MB) on fetched log text actually held in
+ * memory — purely a guard against pathologically huge logs, NOT a "search only
+ * the tail" window. `fetchChecksFailureEvidence` passes everything under this
+ * ceiling untruncated into `buildFailureExcerpt`, whose failure-pattern search
+ * plus the per-excerpt line/char caps already bound the output.
+ */
+export const CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN = 2_000_000;
 /** Single global cap on the focused excerpt threaded into the retry prompt. */
 export const CHECKS_EVIDENCE_MAX_EXCERPT_CHARS = 4_000;
 /** Max lines in the focused excerpt; context lines kept around each failure line. */
@@ -514,11 +520,16 @@ export async function fetchChecksFailureEvidence(
   for (const runId of runIds) {
     try {
       const { stdout } = await exec(["run", "view", runId, "--log-failed"], { cwd: opts.cwd });
-      const tail =
-        stdout.length > CHECKS_EVIDENCE_MAX_LOG_CHARS_PER_RUN
-          ? stdout.slice(-CHECKS_EVIDENCE_MAX_LOG_CHARS_PER_RUN)
+      // NOT-276: search before truncating — the full fetched log feeds
+      // `buildFailureExcerpt`'s failure-pattern search, so an early failure is
+      // never discarded by a small tail window. Only logs beyond the raw memory
+      // ceiling are cut at all (tail kept), and the excerpt caps still bound
+      // the final output.
+      const full =
+        stdout.length > CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN
+          ? stdout.slice(-CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN)
           : stdout;
-      logsByRun.set(runId, tail);
+      logsByRun.set(runId, full);
     } catch {
       logsUnavailable = true;
       for (const c of failedChecks) {
