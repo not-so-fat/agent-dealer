@@ -529,14 +529,25 @@ test("NOT-273: the serve child spawns with an explicit cwd under the managed dat
   const seen: Array<{ command: string; args: string[]; options: { cwd?: unknown } }> = [];
   const hangingChild = () => {
     const events = new EventEmitter();
-    return {
+    const fake = {
       stdin: { write: () => true, on: () => ({}) },
       stdout: { on: () => ({}) },
       stderr: { on: () => ({}) },
       on: events.on.bind(events),
-      kill: () => true,
-      exitCode: null,
-    } as unknown as import("node:child_process").ChildProcess;
+      // The handshake never answers, but a kill() must still settle the
+      // child like a real process would — otherwise shutdown()'s teardown
+      // has nothing but its 2s unref'd SIGKILL-escalation timer to resolve
+      // on, which races the test runner's own event-loop bookkeeping and
+      // can cancel the test outright (see the child-ticket playbook gotcha:
+      // never await an infinite fake handler).
+      kill: () => {
+        fake.exitCode = 0;
+        queueMicrotask(() => events.emit("close"));
+        return true;
+      },
+      exitCode: null as number | null,
+    };
+    return fake as unknown as import("node:child_process").ChildProcess;
   };
   const host = new MuseCapacityHost({
     command: process.execPath,
