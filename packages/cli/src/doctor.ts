@@ -291,9 +291,10 @@ export async function checkCursorIndividualLogin(): Promise<CursorIndividualLogi
 
 /** Env override for the Claude cache file (tests/smoke). */
 export const CLAUDE_CAPACITY_CACHE_FILE_ENV = "AGENT_DEALER_CLAUDE_CACHE_FILE";
-/** Paid-fallback opt-in env and its only enabling value. */
+/** Paid-fallback setting: enabled by default; `off` disables it. */
 export const CLAUDE_CAPACITY_REFRESH_ENV = "AGENT_DEALER_CLAUDE_CAPACITY_REFRESH";
 export const CLAUDE_CAPACITY_REFRESH_PAID_VALUE = "paid-after-1h";
+export const CLAUDE_CAPACITY_REFRESH_OFF_VALUE = "off";
 
 /** Which local 5H/1W cache state the capacity ladder would read. */
 export type ClaudeCapacitySourceKind = "fresh" | "stale" | "missing";
@@ -339,15 +340,15 @@ function formatCacheAge(ageMs: number): string {
 }
 
 /**
- * Map the paid-fallback setting to an opt-in warning line, or null when the
- * probe is disabled (the quiet default — no spend possible, nothing to say).
+ * Map the paid-fallback setting to its warning line, or null when explicitly
+ * disabled (or unrecognized). Unset/empty is the paid-after-1h default.
  * Pure (no I/O): unit tests pin both states here.
  */
 export function describeClaudeProbeOptIn(setting: string | undefined): string | null {
-  if (setting === CLAUDE_CAPACITY_REFRESH_PAID_VALUE) {
+  if (setting === undefined || setting === "" || setting === CLAUDE_CAPACITY_REFRESH_PAID_VALUE) {
     return (
-      "⚠ Claude capacity paid fallback: armed (one ≤$0.01 Haiku probe after 1h stale — " +
-        `unset ${CLAUDE_CAPACITY_REFRESH_ENV} to disable)`
+      "⚠ Claude capacity paid fallback: enabled (one ≤$0.01 Haiku probe after 1h stale — " +
+        `set ${CLAUDE_CAPACITY_REFRESH_ENV}=${CLAUDE_CAPACITY_REFRESH_OFF_VALUE} to disable)`
     );
   }
   return null;

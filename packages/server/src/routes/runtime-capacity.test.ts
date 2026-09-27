@@ -16,6 +16,9 @@ process.env.AGENT_DEALER_SKIP_AGENT_HEALTH = "1";
 // Never spawn a real provider from route tests: the on-demand Codex refresh is
 // covered against the fake App Server in codex-app-server.test.ts.
 process.env.AGENT_DEALER_CODEX_CAPACITY_REFRESH = "off";
+// Claude's paid-after-1h fallback is default-on in production. Route tests
+// exercise stored/read behavior only and must never launch a real paid probe.
+process.env.AGENT_DEALER_CLAUDE_CAPACITY_REFRESH = "off";
 // NOT-268: the route also ingests the real ~/.claude.json cache on every read. Point it at a
 // path that never exists so a developer's own Claude usage never leaks extra windows into the
 // fixture-controlled assertions below (this passed in CI, which has no such file, but failed

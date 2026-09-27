@@ -101,9 +101,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // Claude Code's own free cache (plain file read, never a spawn) and then
   // considers the paid probe without blocking the read: a bounded Haiku
   // probe fires at most once per hour and only under the explicit
-  // `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=paid-after-1h` opt-in when every
-  // valid 5H/1W observation is older than 60 minutes. Disabled is a strict
-  // no-op (no spawn, no spend). Failures never break the read below.
+  // valid 5H/1W observation is older than 60 minutes. This is the default;
+  // `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` is a strict no-op (no spawn,
+  // no spend). Failures never break the read below.
   app.get("/api/runtime-capacity", async () => {
     try {
       void refreshClaudeCapacityIfStale().catch(() => {

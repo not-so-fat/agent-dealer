@@ -213,15 +213,16 @@ test("describe maps each cache state to its static line", () => {
   }
 });
 
-test("probe opt-in line appears only under the exact paid value", () => {
-  assert.equal(describeClaudeProbeOptIn(undefined), null);
-  assert.equal(describeClaudeProbeOptIn(""), null);
+test("probe warning appears for the default and explicit paid value", () => {
+  for (const setting of [undefined, "", CLAUDE_CAPACITY_REFRESH_PAID_VALUE]) {
+    const armed = describeClaudeProbeOptIn(setting);
+    assert.ok(armed);
+    assert.match(armed!, /enabled/);
+    assert.match(armed!, /≤\$0\.01/);
+    assert.match(armed!, /=off/);
+  }
   assert.equal(describeClaudeProbeOptIn("off"), null);
   assert.equal(describeClaudeProbeOptIn("auto"), null);
-  const armed = describeClaudeProbeOptIn(CLAUDE_CAPACITY_REFRESH_PAID_VALUE);
-  assert.ok(armed);
-  assert.match(armed!, /armed/);
-  assert.match(armed!, /≤\$0\.01/);
 });
 
 test("check reads fetchedAtMs from the config key, never mtime or the real home", async () => {

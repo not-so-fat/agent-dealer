@@ -398,10 +398,10 @@ this source ladder and the freshest valid observation wins per window:
    config keys (accountUuid, email, credentials, projects) are never
    retained.
 3. One minimal bounded paid probe, only when every valid 5H/1W observation
-   is older than 60 minutes AND
-   `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=paid-after-1h` is set. Any other
-   value disables paid probing entirely — reading capacity then never starts
-   Claude or spends money.
+   is older than 60 minutes. This is the default behavior. Set
+   `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` to disable paid probing
+   entirely — reading capacity then never starts Claude or spends money.
+   Unrecognized values also fail closed.
 
 Cache parsing (`parseClaudeCachedUtilization`, via
 `extractClaudeCacheSubtree`): only the `cachedUsageUtilization` subtree is
@@ -427,7 +427,7 @@ sources share the `claude_unified_*` window keys through the newer-wins
 Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
 
 - Trigger: `claude_code` configured, no valid 5H/1W sample newer than 60
-  minutes, opt-in set. Single-flight across concurrent readers; at most one
+  minutes, and the fallback is not explicitly disabled. Single-flight across concurrent readers; at most one
   attempt per account per 60 minutes, backing off exponentially
   (60m → 2h → 4h → 8h cap) on failure. Never retried per UI poll.
 - Argv (verified live at 2.1.283 — `claude -p --max-turns 1 --model
@@ -445,14 +445,14 @@ Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
   critical roles; anything else keeps last-good rows. Every attempt appends
   one JSON line (timestamps, model, budget, exit, cost, windows, outcome —
   never prompt/output/credentials) to `<data-dir>/capacity/claude-probe.log`.
-  A `no_windows` streak means the probe is a paid no-op: disable the opt-in
+  A `no_windows` streak means the probe is a paid no-op: set the fallback to `off`
   and revise the ticket instead of shipping it.
 
 `GET /api/runtime-capacity` runs one background refresh (free cache
 ingest, then the probe gate) without blocking the read. `doctor` reports
 the cache age from `cachedUsageUtilization.fetchedAtMs` — never file mtime
-(`fresh` < 60m / `stale` / `missing`) — and warns only when the paid
-fallback is armed — age labels only, never values or ids. Tests inject a
+(`fresh` < 60m / `stale` / `missing`) — and warns whenever the default-on
+paid fallback is enabled — age labels only, never values or ids. Tests inject a
 fake probe runner; CI performs no live provider request.
 
 Live proofs (require a real account, never CI): (a) DONE 2026-09-26 —
@@ -464,9 +464,9 @@ honest age at read time and `doctor` agrees (`stale`, `7d old`). No ids,
 emails, or spend values were printed or persisted. (b) Paid-fallback smoke
 proving the minimal probe emits 5H/1W, with its actual cost in the
 diagnostic log — NOT RUN: spending money needs explicit operator
-acknowledgement, unavailable inside this spawn. The opt-in stays documented
-but unproven; obtain acknowledgement and run the smoke separately before
-anyone arms it in production.
+acknowledgement, unavailable inside this spawn. The default-on fallback stays
+documented but the live paid smoke remains unproven; obtain acknowledgement
+and run that smoke separately.
 
 ## Provider: Cursor Team Admin API (NOT-249)
 

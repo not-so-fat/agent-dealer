@@ -16,9 +16,9 @@
 //      `~/.claude.json` (this module — free, ingested on every capacity
 //      read; only that subtree is ever parsed, the rest of the config —
 //      accountUuid, email, credentials, projects — is never retained).
-//   3. One minimal bounded paid probe, only when every valid 5H/1W
-//      observation is older than 60 minutes AND the explicit opt-in
-//      `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=paid-after-1h` is set.
+//   3. One minimal bounded paid probe when every valid 5H/1W observation is
+//      older than 60 minutes. This is the default; operators can explicitly
+//      disable it with `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off`.
 //
 // Both file sources write the same `claude_unified_five_hour` /
 // `claude_unified_seven_day` window keys through the shared
@@ -68,7 +68,7 @@
 //
 // If a live proof ever shows the minimal probe does not reliably emit 5H/1W
 // (neither in its stream nor via the cache side effect), the probe is a
-// recurring paid no-op: disable the opt-in and revise this ticket instead of
+// recurring paid no-op: disable the fallback and revise this ticket instead of
 // shipping it. The `no_windows` diagnostic below exists to make that visible.
 
 import { spawn } from "node:child_process";
@@ -92,9 +92,10 @@ import type { AdapterReadResult, AdapterWindowReading } from "./adapter.js";
 /** Override for the Claude cache file (tests, smoke). */
 export const CLAUDE_CACHE_FILE_ENV = "AGENT_DEALER_CLAUDE_CACHE_FILE";
 
-/** Paid-fallback opt-in. Any value other than PAID_AFTER_1H disables probing. */
+/** Paid-fallback setting. Unset defaults to PAID_AFTER_1H; `off` disables it. */
 export const CLAUDE_CAPACITY_REFRESH_ENV = "AGENT_DEALER_CLAUDE_CAPACITY_REFRESH";
 export const CLAUDE_CAPACITY_REFRESH_PAID_VALUE = "paid-after-1h";
+export const CLAUDE_CAPACITY_REFRESH_OFF_VALUE = "off";
 
 /** Upper bound for one probe spawn (ms). */
 export const CLAUDE_CAPACITY_PROBE_TIMEOUT_ENV = "AGENT_DEALER_CLAUDE_PROBE_TIMEOUT_MS";
@@ -435,12 +436,17 @@ export function ingestClaudeLocalCache(nowMs = Date.now()): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// Paid fallback probe (explicit opt-in only)
+// Paid fallback probe (enabled by default, explicit off switch)
 // ---------------------------------------------------------------------------
 
-/** True only under the exact opt-in; any other value disables paid probing. */
+/**
+ * Paid probing defaults on when the setting is absent/empty. The documented
+ * `paid-after-1h` value is accepted explicitly; `off` and unrecognized values
+ * disable spending so a typo never silently changes the configured policy.
+ */
 export function isClaudePaidFallbackEnabled(): boolean {
-  return process.env[CLAUDE_CAPACITY_REFRESH_ENV] === CLAUDE_CAPACITY_REFRESH_PAID_VALUE;
+  const setting = process.env[CLAUDE_CAPACITY_REFRESH_ENV];
+  return setting === undefined || setting === "" || setting === CLAUDE_CAPACITY_REFRESH_PAID_VALUE;
 }
 
 export interface ProbeSpawnResult {
@@ -798,8 +804,8 @@ function probeCooldownMs(): number {
  * On-demand paid fallback: when `claude_code` is configured and no valid
  * 5H/1W observation is newer than 60 minutes, run one minimal bounded probe
  * (single-flight across concurrent readers; at most one attempt per account
- * per 60 minutes, backing off exponentially on failure). Disabled is a
- * strict no-op — no spawn, no spend. Never throws, never touches Dealer
+ * per 60 minutes, backing off exponentially on failure). Explicitly disabled
+ * is a strict no-op — no spawn, no spend. Never throws, never touches Dealer
  * workflow/session state or `runtime_availability`.
  */
 export async function maybeProbeClaudeCapacity(
@@ -874,4 +880,3 @@ export async function refreshClaudeCapacityIfStale(
   }
   return maybeProbeClaudeCapacity(nowMs, opts);
 }
-
