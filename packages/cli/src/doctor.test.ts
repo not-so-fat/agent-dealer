@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 // Local mirror of the server module's env/key contract
 // (packages/server/src/capacity/cursor-individual-credentials.ts). A static
@@ -49,11 +50,15 @@ import {
   CLAUDE_CAPACITY_REFRESH_ENV,
   CLAUDE_CAPACITY_REFRESH_PAID_VALUE,
   CURSOR_INDIVIDUAL_LOGIN_LINES,
+  MUSE_CAPACITY_REFRESH_ENV,
+  MUSE_CAPACITY_REFRESH_MS_ENV,
+  MUSE_CAPACITY_REFRESH_PAID_VALUE,
   checkClaudeCapacitySource,
   checkCursorIndividualLogin,
   describeClaudeCapacitySource,
   describeClaudeProbeOptIn,
   describeCursorIndividualLogin,
+  describeMuseProbeOptIn,
 } from "./doctor.js";
 
 const SECRET = "doctor-fixture-secret-must-never-print";
@@ -223,6 +228,39 @@ test("probe warning appears for the default and explicit paid value", () => {
   }
   assert.equal(describeClaudeProbeOptIn("off"), null);
   assert.equal(describeClaudeProbeOptIn("auto"), null);
+});
+
+test("Muse paid-fallback warning matches server defaults and legacy no-spend precedence", () => {
+  for (const setting of [undefined, "", MUSE_CAPACITY_REFRESH_PAID_VALUE]) {
+    const armed = describeMuseProbeOptIn(setting, undefined);
+    assert.ok(armed);
+    assert.match(armed!, /Muse capacity paid fallback: enabled/);
+    assert.match(armed!, /restricted contributor-model turn/);
+    assert.match(armed!, new RegExp(`${MUSE_CAPACITY_REFRESH_ENV}=off`));
+  }
+  assert.equal(describeMuseProbeOptIn("off", undefined), null);
+  assert.equal(describeMuseProbeOptIn("auto", undefined), null);
+  assert.equal(describeMuseProbeOptIn(undefined, "off"), null);
+  assert.equal(describeMuseProbeOptIn("", "off"), null);
+  assert.ok(
+    describeMuseProbeOptIn(MUSE_CAPACITY_REFRESH_PAID_VALUE, "off"),
+    "the explicit new paid value overrides the legacy free-refresh switch"
+  );
+});
+
+test("Muse doctor env names and paid value match the server contract", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(here, "..", "..", "server", "src", "capacity", "muse-probe.ts"),
+    path.resolve(here, "..", "..", "server", "dist", "capacity", "muse-probe.js"),
+  ];
+  const src = candidates.find((file) => fs.existsSync(file));
+  assert.ok(src, "the server Muse probe module must exist for the contract pin");
+  const text = fs.readFileSync(src!, "utf8");
+  assert.ok(text.includes(`"${MUSE_CAPACITY_REFRESH_ENV}"`));
+  assert.ok(text.includes(`"${MUSE_CAPACITY_REFRESH_PAID_VALUE}"`));
+  assert.ok(text.includes("AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS"));
+  assert.equal(MUSE_CAPACITY_REFRESH_MS_ENV, "AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS");
 });
 
 test("check reads fetchedAtMs from the config key, never mtime or the real home", async () => {

@@ -129,6 +129,11 @@ export async function runDoctor(): Promise<number> {
       console.log((await checkClaudeCapacitySource()).line);
       const probe = describeClaudeProbeOptIn(process.env.AGENT_DEALER_CLAUDE_CAPACITY_REFRESH);
       if (probe) console.warn(probe);
+      const museProbe = describeMuseProbeOptIn(
+        process.env.AGENT_DEALER_MUSE_CAPACITY_REFRESH,
+        process.env.AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS
+      );
+      if (museProbe) console.warn(museProbe);
     } catch {
       // Informational only: a broken probe must never fail doctor.
     }
@@ -352,6 +357,39 @@ export function describeClaudeProbeOptIn(setting: string | undefined): string | 
     );
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Muse capacity paid-fallback reporting for doctor.
+// ---------------------------------------------------------------------------
+
+/** Paid-fallback setting: enabled by default; `off` disables it. */
+export const MUSE_CAPACITY_REFRESH_ENV = "AGENT_DEALER_MUSE_CAPACITY_REFRESH";
+export const MUSE_CAPACITY_REFRESH_PAID_VALUE = "paid-after-1h";
+export const MUSE_CAPACITY_REFRESH_OFF_VALUE = "off";
+/** Legacy free-read throttle; `off` also preserves no-spend behavior when the
+ * new setting is absent. */
+export const MUSE_CAPACITY_REFRESH_MS_ENV = "AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS";
+
+/**
+ * Match the server's Muse paid-fallback precedence exactly. The explicit new
+ * paid value overrides a legacy free-refresh `off`; otherwise that legacy
+ * switch remains no-spend for backward compatibility. Unknown new values
+ * fail closed. Pure (no I/O) so doctor never risks a provider request.
+ */
+export function describeMuseProbeOptIn(
+  setting: string | undefined,
+  legacyRefreshMs: string | undefined
+): string | null {
+  const enabled =
+    setting === MUSE_CAPACITY_REFRESH_PAID_VALUE ||
+    ((setting === undefined || setting === "") && legacyRefreshMs !== "off");
+  if (!enabled) return null;
+  return (
+    "⚠ Muse capacity paid fallback: enabled when Muse is configured " +
+    "(one restricted contributor-model turn after 1h stale — " +
+    `set ${MUSE_CAPACITY_REFRESH_ENV}=${MUSE_CAPACITY_REFRESH_OFF_VALUE} to disable)`
+  );
 }
 
 /**
