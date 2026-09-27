@@ -547,9 +547,12 @@ test("NOT-276: log with no failure-pattern hits still falls back to the tail, un
 });
 
 test("NOT-276: log larger than the raw memory ceiling stays bounded without crashing", async () => {
-  const line = (i: number) => `ok ${i} - passing test output line with padding pad pad ${i}`;
+  // Short lines on purpose: the 80-line tail must fit under the 4,000-char
+  // excerpt cap, otherwise the char cap (not the memory ceiling) would cut the
+  // asserted last line and the test would prove nothing about the tail.
+  const line = (i: number) => `ok ${i} - pad pad ${i}`;
   const targetLen = CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN + 500_000;
-  const count = Math.ceil(targetLen / 50);
+  const count = Math.ceil(targetLen / 20);
   const parts = new Array<string>(count);
   for (let i = 0; i < count; i++) parts[i] = line(i);
   const log = parts.join("\n");
@@ -561,7 +564,9 @@ test("NOT-276: log larger than the raw memory ceiling stays bounded without cras
   const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
   assert.ok(evidence);
   assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
-  assert.match(evidence.excerpt, new RegExp(`passing test output line with padding pad pad ${count - 1}`));
+  // The excerpt is built from the kept tail portion, never the discarded head.
+  assert.equal(evidence.excerpt, buildFailureExcerpt(log.slice(-CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN)).excerpt);
+  assert.match(evidence.excerpt, new RegExp(`pad pad ${count - 1}`));
 });
 
 test("NOT-252: formatChecksFailureDetails labels the excerpt as untrusted, not instructions", async () => {
