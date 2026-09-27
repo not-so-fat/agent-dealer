@@ -14,8 +14,7 @@
 // - the first observation arrives as a `usage/changed` notification;
 // - a fresh/unobserved host reads `missing` (restart is fresh — the client
 //   holds no cross-process usage state);
-// - resume/turn methods are refused before write, so refresh can never
-//   manufacture a billable call.
+// - resume/turn methods are refused before write on the free adapter path.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -106,7 +105,7 @@ test("lifecycle: a fresh host with no observation reads missing — twice", asyn
   }
 });
 
-test("lifecycle: refresh can never manufacture a session, turn, or prompt", () => {
+test("lifecycle: the free read adapter cannot manufacture a session, turn, or prompt", () => {
   for (const m of ["session/start", "session/resume", "session/prompt", "turn/start", "exec"]) {
     assert.throws(() => assertMuseReadOnlyMethod(m), /refusing non-read method/);
   }

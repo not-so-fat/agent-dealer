@@ -337,10 +337,14 @@ test("a 2-hour-old cache ingests with its true age and reads expired, never live
   }
 });
 
-test("disabled fallback never spawns: every non-opt-in value is a strict no-op", async () => {
-  for (const value of [undefined, "", "off", "auto", "paid-after-1h "] as const) {
+test("paid fallback defaults on; explicit off and unrecognized values never spawn", async () => {
+  for (const value of [undefined, "", "paid-after-1h"] as const) {
     if (value === undefined) delete process.env[CLAUDE_CAPACITY_REFRESH_ENV];
     else process.env[CLAUDE_CAPACITY_REFRESH_ENV] = value;
+    assert.equal(isClaudePaidFallbackEnabled(), true);
+  }
+  for (const value of ["off", "auto", "paid-after-1h "] as const) {
+    process.env[CLAUDE_CAPACITY_REFRESH_ENV] = value;
     assert.equal(isClaudePaidFallbackEnabled(), false);
     const outcome = await maybeProbeClaudeCapacity(NOW_MS, { runner: throwingRunner });
     assert.deepEqual(outcome, { probed: false, reason: "disabled" });
@@ -349,8 +353,8 @@ test("disabled fallback never spawns: every non-opt-in value is a strict no-op",
   assert.equal(isClaudePaidFallbackEnabled(), true);
 });
 
-test("fresh sample suppresses the probe; stale data triggers exactly one", async () => {
-  process.env[CLAUDE_CAPACITY_REFRESH_ENV] = "paid-after-1h";
+test("default-on fallback suppresses a fresh sample; stale data triggers exactly one", async () => {
+  delete process.env[CLAUDE_CAPACITY_REFRESH_ENV];
   fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS - 10 * 60_000));
   assert.equal(ingestClaudeLocalCache(NOW_MS), 2);
   assert.ok((newestValidClaudeObservationMs(NOW_MS) ?? 0) > NOW_MS - 60 * 60_000);

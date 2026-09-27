@@ -148,8 +148,9 @@ initialize {clientInfo:{name:"agent_dealer",version:"<server>"}}
 
 Ownership: server singleton per account; the runner's real `session/start` +
 `turn/start` traffic MUST flow through this host (otherwise it stays
-unobserved by construction). No synthetic/polling turn is ever sent — only
-genuine Dealer work populates usage, so reads stay free. Muse primary capacity
+unobserved by construction). At the time of this research decision, no
+synthetic/polling turn was sent — only genuine Dealer work populated usage,
+so reads stayed free. Muse primary capacity
 stays exactly 5H + 1W (`window` → `rolling_all_models`/5H-class label derived
 from `windowDurationMins`, `weekly` → `weekly_all_models`/1W); a host that has
 not yet observed reads `missing` (N/A), never a fabricated pair.
@@ -168,6 +169,13 @@ Muse 1.4.0, so real turns routed through the owned host run without those two
 specific restrictions — everything else (network sandbox, approval mode,
 write/shell restriction) is unaffected. This question was escalated twice on
 NOT-270 and resolved both times; it is closed for this ticket's scope.
+
+Implementation follow-up (2026-09-27): the product subsequently chose a
+default-on paid fallback for the no-genuine-work case. The evidence above
+still defines why a paid turn is necessary: after the free same-host read, a
+dedicated restricted host runs one fixed bounded turn only when the complete
+5H/1W pair has been unavailable for an hour, then reads usage from that exact
+host. `AGENT_DEALER_MUSE_CAPACITY_REFRESH=off` retains the strictly free mode.
 
 ## Contract delta for the blocked implementation ticket (NOT-247 child)
 

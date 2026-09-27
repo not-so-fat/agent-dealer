@@ -135,7 +135,7 @@ plus the stable schema embedded in the shipped binary (regenerable offline
 with `muse schema generate-json-schema`). Full lifecycle evidence lives in
 `docs/research/NOT-269-muse-5h-1w-lifecycle.md` (Muse Code 1.4.0).
 
-The server owns one `muse serve` host per process (no
+The free path uses one server-owned `muse serve` host per process (no
 `--protocol` flag — the shipped binary exits 2 on it), started at first
 demand. The `initialize` handshake
 carries a `clientInfo` identity (`name` matching `^[a-z0-9_]+$`, currently
@@ -148,8 +148,8 @@ reads `usage` omitted, `session/resume` carries no usage, and no
 `muse exec --json` event carries quota, so the old spawn → `usage/read` →
 exit poll is retired. The client enforces a read-only allowlist
 (`initialize`, `initialized`, `usage/read`) — any other method throws
-before it is written, so a capacity read can never start a session, send a
-prompt, or consume model tokens. Reads are bounded (default 15 s per read,
+before it is written, so this free read phase can never start a session, send
+a prompt, or consume model tokens. Reads are bounded (default 15 s per read,
 `AGENT_DEALER_MUSE_CAPACITY_TIMEOUT_MS` override), single-flight across
 concurrent requests (never a second host), and never billed.
 No Keychain access, no undocumented endpoints. The host is held open only
@@ -164,7 +164,7 @@ real Dealer Muse turns run through the owned host — `session/start` +
 `coordinator/muse-spawn.ts`). That traffic IS the observation, so the
 session-boundary refresh hook (`refreshMuseCapacityAfterSession`, still
 read-only and never a model turn) is the final `usage/read` that populates
-5H/1W. No synthetic model prompt is ever issued to refresh capacity. When
+5H/1W. When
 the serve lane cannot admit a turn (host unavailable, rejected start, no
 credential), the session falls back to the legacy `muse exec` subprocess
 before any model work starts — the host then stays unobserved by
@@ -204,6 +204,32 @@ directly — it deliberately bypasses the GET-route throttle so the final
 read at the proven safe point is contractual even when the Agents page
 polled seconds earlier.
 
+Reliable fallback: `GET /api/runtime-capacity` always attempts the free path
+first. If either tagged 5H or 1W value is missing, invalid, expired, or at
+least 60 minutes old after that read, a default-on background fallback runs
+one fixed prompt (`Reply with exactly: OK`) through a dedicated `muse serve`
+host, then reads `usage/read` from that exact host. The request itself never
+waits for this work; it serves last-good data immediately and a later poll
+sees the refreshed pair. The fallback is single-flight and tries no more than
+once per hour, with failure backoff of 2h, 4h, then 8h; failures never replace
+last-good rows. Set `AGENT_DEALER_MUSE_CAPACITY_REFRESH=off` for a strict
+no-paid-turn mode (unset or `paid-after-1h` enables the default). An
+unrecognized value fails closed. `AGENT_DEALER_MUSE_CAPACITY_PROBE_TIMEOUT_MS`
+sets the turn wall-clock limit (default 60000 ms).
+For backward compatibility, the legacy
+`AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS=off` also prohibits the paid fallback
+when the new setting is unset; explicitly setting the new value to
+`paid-after-1h` overrides that legacy switch.
+
+The fallback host starts with `--sandbox-network restricted`,
+`--disable-write`, and `--disable-shell`, uses the contributor model, and is
+always shut down after the read. Muse 1.4 has no serve-protocol equivalent for
+a per-turn model-step cap or disabled web tools, so the fixed one-line prompt,
+restricted host, wall-clock timeout, and `turn/cancel` are the strongest
+available bounds. Only static outcome/control metadata is written to
+`capacity/muse-probe.log`; prompts, output, credentials, tier, and raw account
+payloads are not logged.
+
 Normalization keeps the two stable windows independently:
 
 - `window` → window key `rolling_all_models` (`providerBucket`
@@ -232,12 +258,13 @@ server-side as a static string; no credential, tier, or raw account payload
 reaches the browser, the API, or the logs — evidence refs are static
 (`muse-serve:usage/read`).
 
-Refresh via `refreshMuseCapacityFromHost()` (bounded read on the owned
-host, newest-`observedAtMs`-wins ingest). The only production trigger is
+Refresh starts via `refreshMuseCapacityFromHost()` (bounded free read on the
+owned host, newest-`observedAtMs`-wins ingest). The production trigger is
 `GET /api/runtime-capacity`: when `muse_code` is configured it runs
 `maybeRefreshMuseCapacityFromHost()` first — throttled (default 5 min,
-`AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS` override, `off` disables),
-best-effort, never failing the read. Last-good rows survive transient
+`AGENT_DEALER_MUSE_CAPACITY_REFRESH_MS` override, `off` disables the free read),
+then evaluates the one-hour paid fallback described above. Both are
+best-effort and never fail or block the API read. Last-good rows survive transient
 host/auth/timeout failures (a failure diagnostic never sits beside valid
 windows); a successful recovery clears the `muse_account_usage` failure
 sentinel so a stale N/A window cannot linger next to recovered windows.
@@ -249,10 +276,10 @@ enforces the stable contract: it rejects the removed `--protocol` argv,
 requires `initialize` (with a valid `clientInfo`) → `initialized` →
 `usage/read`, serves the stable `usage.window` / `usage.weekly` fields,
 and replays persistent-host and restart modes for the owned-host tests;
-execution modes additionally answer `session/start` / `turn/start` /
+execution and probe modes additionally answer `session/start` / `turn/start` /
 `turn/cancel` / `session/read` (full, rejected, failed, and hanging turns)
 for the serve-lane tests in `runners/muse-serve-session.test.ts`;
-CI performs no live Muse request.
+CI performs no live Muse request or paid model turn.
 
 ## Provider: Codex App Server (NOT-246)
 
@@ -398,10 +425,10 @@ this source ladder and the freshest valid observation wins per window:
    config keys (accountUuid, email, credentials, projects) are never
    retained.
 3. One minimal bounded paid probe, only when every valid 5H/1W observation
-   is older than 60 minutes AND
-   `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=paid-after-1h` is set. Any other
-   value disables paid probing entirely — reading capacity then never starts
-   Claude or spends money.
+   is older than 60 minutes. This is the default behavior. Set
+   `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` to disable paid probing
+   entirely — reading capacity then never starts Claude or spends money.
+   Unrecognized values also fail closed.
 
 Cache parsing (`parseClaudeCachedUtilization`, via
 `extractClaudeCacheSubtree`): only the `cachedUsageUtilization` subtree is
@@ -427,7 +454,7 @@ sources share the `claude_unified_*` window keys through the newer-wins
 Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
 
 - Trigger: `claude_code` configured, no valid 5H/1W sample newer than 60
-  minutes, opt-in set. Single-flight across concurrent readers; at most one
+  minutes, and the fallback is not explicitly disabled. Single-flight across concurrent readers; at most one
   attempt per account per 60 minutes, backing off exponentially
   (60m → 2h → 4h → 8h cap) on failure. Never retried per UI poll.
 - Argv (verified live at 2.1.283 — `claude -p --max-turns 1 --model
@@ -445,14 +472,14 @@ Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
   critical roles; anything else keeps last-good rows. Every attempt appends
   one JSON line (timestamps, model, budget, exit, cost, windows, outcome —
   never prompt/output/credentials) to `<data-dir>/capacity/claude-probe.log`.
-  A `no_windows` streak means the probe is a paid no-op: disable the opt-in
+  A `no_windows` streak means the probe is a paid no-op: set the fallback to `off`
   and revise the ticket instead of shipping it.
 
 `GET /api/runtime-capacity` runs one background refresh (free cache
 ingest, then the probe gate) without blocking the read. `doctor` reports
 the cache age from `cachedUsageUtilization.fetchedAtMs` — never file mtime
-(`fresh` < 60m / `stale` / `missing`) — and warns only when the paid
-fallback is armed — age labels only, never values or ids. Tests inject a
+(`fresh` < 60m / `stale` / `missing`) — and warns whenever the default-on
+paid fallback is enabled — age labels only, never values or ids. Tests inject a
 fake probe runner; CI performs no live provider request.
 
 Live proofs (require a real account, never CI): (a) DONE 2026-09-26 —
@@ -464,9 +491,9 @@ honest age at read time and `doctor` agrees (`stale`, `7d old`). No ids,
 emails, or spend values were printed or persisted. (b) Paid-fallback smoke
 proving the minimal probe emits 5H/1W, with its actual cost in the
 diagnostic log — NOT RUN: spending money needs explicit operator
-acknowledgement, unavailable inside this spawn. The opt-in stays documented
-but unproven; obtain acknowledgement and run the smoke separately before
-anyone arms it in production.
+acknowledgement, unavailable inside this spawn. The default-on fallback stays
+documented but the live paid smoke remains unproven; obtain acknowledgement
+and run that smoke separately.
 
 ## Provider: Cursor Team Admin API (NOT-249)
 

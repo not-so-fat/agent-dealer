@@ -16,6 +16,12 @@ process.env.AGENT_DEALER_SKIP_AGENT_HEALTH = "1";
 // Never spawn a real provider from route tests: the on-demand Codex refresh is
 // covered against the fake App Server in codex-app-server.test.ts.
 process.env.AGENT_DEALER_CODEX_CAPACITY_REFRESH = "off";
+// Claude's paid-after-1h fallback is default-on in production. Route tests
+// exercise stored/read behavior only and must never launch a real paid probe.
+process.env.AGENT_DEALER_CLAUDE_CAPACITY_REFRESH = "off";
+// Muse's one-hour fallback is also default-on; route tests cover the free
+// host trigger only and must never run a real model turn.
+process.env.AGENT_DEALER_MUSE_CAPACITY_REFRESH = "off";
 // NOT-268: the route also ingests the real ~/.claude.json cache on every read. Point it at a
 // path that never exists so a developer's own Claude usage never leaks extra windows into the
 // fixture-controlled assertions below (this passed in CI, which has no such file, but failed
@@ -72,9 +78,10 @@ test("GET /api/runtime-capacity returns normalized entries without evidence", as
   await app.close();
 });
 
-test("GET triggers the Muse refresh when muse_code is configured", async () => {
-  // NOT-270: the route is the only production trigger for Muse capacity
-  // (owned host). No credential here (env key removed, empty login dir),
+test("GET triggers the free Muse refresh when muse_code is configured", async () => {
+  // The route is the production trigger for Muse capacity. This suite sets
+  // the paid fallback off, so it exercises only the free owned-host read.
+  // No credential here (env key removed, empty login dir),
   // so the refresh short-circuits to a `missing` sentinel without spawning
   // anything live.
   clearAllCapacitySnapshots();

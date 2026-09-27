@@ -18,7 +18,7 @@ import { getLinearUsageSnapshot } from "../adapters/linear-graphql.js";
 import { listRuntimeModels } from "../runners/models.js";
 import { configuredCapacityRuntimes, getRuntimeCapacitySnapshot } from "../capacity/service.js";
 import { refreshClaudeCapacityIfStale } from "../capacity/claude-local-cache.js";
-import { maybeRefreshMuseCapacityFromHost } from "../capacity/muse-host.js";
+import { refreshMuseCapacityIfStale } from "../capacity/muse-probe.js";
 import { refreshCodexCapacityIfStale } from "../capacity/codex-app-server.js";
 import {
   getCursorTeamBillingSnapshot,
@@ -85,13 +85,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // NOT-245: provider-neutral capacity read model — one entry per configured
   // runtime account with its windows, freshness, and explicit unavailable
   // reasons. Normalized snapshots only; evidence stays server-side.
-  // NOT-270: the only production trigger for Muse capacity — a throttled
-  // (default 5 min), bounded, best-effort refresh through the server-owned
-  // long-lived `muse serve` host when `muse_code` is configured. The
-  // refresh runs in the background without blocking the read: GET serves
-  // the last-known snapshot immediately so a slow or hanging host (bounded
-  // by the capacity timeout) can never stall the Agents page. Failures
-  // preserve last-good rows as N/A and never fail the read.
+  // Muse capacity: first take the free throttled read from the server-owned
+  // execution host. If there is still no complete observation under an hour
+  // old, the default-on bounded fallback runs one minimal turn on a dedicated
+  // restricted host and reads 5H/1W from that same host. This stays in the
+  // background: GET serves last-good immediately and never waits on model
+  // work. `AGENT_DEALER_MUSE_CAPACITY_REFRESH=off` disables paid fallback.
   // NOT-246: on-demand Codex refresh — when the stored Codex snapshot is
   // stale the read triggers one bounded, non-billable App Server poll
   // (single-flight, never health rows, never throws); fresh snapshots and
@@ -101,9 +100,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // Claude Code's own free cache (plain file read, never a spawn) and then
   // considers the paid probe without blocking the read: a bounded Haiku
   // probe fires at most once per hour and only under the explicit
-  // `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=paid-after-1h` opt-in when every
-  // valid 5H/1W observation is older than 60 minutes. Disabled is a strict
-  // no-op (no spawn, no spend). Failures never break the read below.
+  // valid 5H/1W observation is older than 60 minutes. This is the default;
+  // `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` is a strict no-op (no spawn,
+  // no spend). Failures never break the read below.
   app.get("/api/runtime-capacity", async () => {
     try {
       void refreshClaudeCapacityIfStale().catch(() => {
@@ -114,7 +113,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     try {
       if (configuredCapacityRuntimes().includes("muse_code")) {
-        void maybeRefreshMuseCapacityFromHost().catch(() => {
+        void refreshMuseCapacityIfStale().catch(() => {
           // Best-effort: failures preserve last-good rows via the ingest path.
         });
       }
