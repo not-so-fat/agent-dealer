@@ -58,8 +58,14 @@ at `857f6b1`), and override the baseline explicitly:
 git checkout 857f6b1
 # copy scripts/verify-baseline-failures.sh from a checkout that has it into
 # scripts/verify-baseline-failures.sh here
+# The script installs/builds only the baseline worktree; the HEAD checkout
+# must already be able to run tests (mirrors `npm run test:unit`, which
+# builds @agent-dealer/shared first — runtime-capacity.test.ts imports it):
+npm ci
+npm run build -w @agent-dealer/shared
 BASELINE_REF=v1.2.2 bash scripts/verify-baseline-failures.sh \
   packages/server/src/routes/runtime-capacity.test.ts
+echo "exit=$?"
 ```
 
 Two preconditions matter: a real developer `~/.claude.json` must be present (the
@@ -69,8 +75,10 @@ fresh container with no such file, which is why CI stayed green), and HEAD must 
 
 Expected: non-zero exit naming the failing test with HEAD (`857f6b1`) vs baseline
 (`v1.2.2`) — i.e. CI would have failed loudly at NOT-268/269/270 time instead of
-letting the "pre-existing, verified on the clean tree" claim through. Paste this
-output as verification evidence in the PR description.
+letting the "pre-existing, verified on the clean tree" claim through. Paste the
+verbatim output plus the `exit=` line as verification evidence in the PR
+description (AC4) — the finding is only closed by an actually-run transcript,
+not by this procedure text.
 
 Note: on PR runs, `HEAD` as printed by the script is GitHub's temporary merge commit
 (`refs/pull/N/merge`), not the PR head — the script also prints `PR head` (from the
