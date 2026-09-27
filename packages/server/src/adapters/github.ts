@@ -328,6 +328,7 @@ export function buildFailureExcerpt(combinedLog: string): { excerpt: string; tru
         taken.length > 0 &&
         (used + size > CHECKS_EVIDENCE_MAX_EXCERPT_LINES || usedChars + chars > CHECKS_EVIDENCE_MAX_EXCERPT_CHARS)
       ) {
+        truncated = true;
         continue;
       }
       taken.push([w.from, w.to]);

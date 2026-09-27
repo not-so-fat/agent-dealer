@@ -709,11 +709,12 @@ test("NOT-276 round 3: an earlier low-priority region must not crowd the real fa
     earlyWeakCluster.length + realFailure.length > CHECKS_EVIDENCE_MAX_EXCERPT_CHARS,
     "test premise: both regions together exceed the char budget"
   );
-  const { excerpt } = buildFailureExcerpt(log);
+  const { excerpt, truncated } = buildFailureExcerpt(log);
   assert.match(excerpt, /not ok 999/);
   assert.match(excerpt, /not ok 1000/);
   assert.match(excerpt, /cancelledByParent/);
   assert.ok(excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+  assert.equal(truncated, true, "dropping the lower-ranked region must be reported as truncation");
 });
 
 test("NOT-276: log with no failure-pattern hits still falls back to the tail, unchanged", async () => {
