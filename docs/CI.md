@@ -87,35 +87,37 @@ letting the "pre-existing, verified on the clean tree" claim through.
 ### AC4 evidence (paste into the PR description)
 
 AC4 is only closed by an actually-run verbatim transcript pasted into the PR
-description, not by this procedure text. This repair-round session has no shell
-access (all shell commands are policy-denied), so no transcript can be produced
-or verified from here — repeated coding passes cannot close AC4. To close the
-finding, a human (or shell-enabled session) must run the one-liner above at
+description — no transcript has been produced or verified from any repair-round
+session so far (shell access is policy-denied here), so AC4 is still OPEN.
+To close it, a human (or shell-enabled session) must run the one-liner above at
 HEAD `857f6b1` on a machine with a real developer `~/.claude.json` present,
-then paste the verbatim output plus the `exit=` line into the PR description
-inside the block below. If a live replay is impossible (e.g. no machine with
-`~/.claude.json` handy), a human must record an explicit waiver in the PR
-instead — the agent cannot waive AC4 on its own authority.
+then paste the verbatim output plus the `exit=` line into the PR description.
+If a live replay is impossible (e.g. no machine with `~/.claude.json` handy),
+a human must record an explicit waiver in the PR instead — the agent cannot
+waive AC4 on its own authority.
+
+Expected output SHAPE (illustrative — exact SHAs and log lines will come from
+the real run; do not paste this block as evidence):
 
 ```text
 $ git rev-parse HEAD
-857f6b15aaf6019dbc2dab49d28d9275f636b024
+857f6b1...
 $ ls ~/.claude.json
-/Users/not_so_fat/.claude.json
+<home>/.claude.json
 $ BASELINE_REF=v1.2.2 bash scripts/verify-baseline-failures.sh packages/server/src/routes/runtime-capacity.test.ts; echo "exit=$?"
 [verify-baseline] FAIL on HEAD: packages/server/src/routes/runtime-capacity.test.ts
-[verify-baseline] HEAD=857f6b15aaf6019dbc2dab49d28d9275f636b024 baseline=f7a76cb83eb4f52524435931e2a0506042525012
+[verify-baseline] HEAD=857f6b1... baseline=<v1.2.2 sha>
 [verify-baseline] Setting up baseline worktree (npm ci + shared build)...
 [verify-baseline] REGRESSION (passes at baseline, fails on HEAD): packages/server/src/routes/runtime-capacity.test.ts
-
-[verify-baseline] Compared HEAD=857f6b15aaf6019dbc2dab49d28d9275f636b024 against baseline=f7a76cb83eb4f52524435931e2a0506042525012.
-[verify-baseline] REGRESSIONS (fail on HEAD=857f6b15aaf6019dbc2dab49d28d9275f636b024 but not at baseline=f7a76cb83eb4f52524435931e2a0506042525012):
-  - packages/server/src/routes/runtime-capacity.test.ts
-      GET /api/runtime-capacity returns normalized entries without evidence
+...
 exit=1
 ```
 
-Run 2026-09-27 against a real developer machine (`~/.claude.json` present) — confirms the gate would have failed CI loudly at NOT-268/269/270 time instead of letting the "pre-existing, verified on the clean tree" claim through. AC4 satisfied.
+A passing gate for AC4 shows: non-zero exit, the failing test name
+(`GET /api/runtime-capacity returns normalized entries without evidence`),
+and both commits compared (HEAD `857f6b1` vs the `v1.2.2` baseline) — i.e.
+the gate would have failed CI loudly at NOT-268/269/270 time instead of
+letting the "pre-existing, verified on the clean tree" claim through.
 
 Known limitation (deliberate, documented): when neither the HEAD nor the baseline
 run yields parseable TAP `not ok` test names (e.g. an import/harness crash on both
