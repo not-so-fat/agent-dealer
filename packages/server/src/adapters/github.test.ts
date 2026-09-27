@@ -553,6 +553,61 @@ test("NOT-276: failure line before the last 20K chars still reaches the excerpt"
   assert.ok(evidence.excerpt.split("\n").length <= CHECKS_EVIDENCE_MAX_EXCERPT_LINES);
 });
 
+// NOT-276 round-2 replay stand-in (blocking finding: the real `gh run view
+// 36330128633 --log-failed` replay needs network/gh, unavailable in CI/sandbox,
+// so this mirrors its exact byte shape at faithful scale instead): every line
+// carries the real `<job>\t<step>\t<timestamp> ` prefix, 1667 TAP results with
+// `not ok 355`/`356` + `cancelledByParent` at ~21% through, ~24 passing lines
+// before the failure carrying failure-pattern words in their names, and >20K
+// chars of passing-test tail after it. The excerpt must surface the failure,
+// not the tail.
+test("NOT-276 round-2 replay: full-scale Actions-prefixed log with an early `not ok` failure", async () => {
+  const bodies: string[] = [];
+  for (let n = 1; n <= 354; n++) {
+    if (n % 16 === 0) bodies.push(`ok ${n} - handles error output for test ${n}`);
+    else if (n === 353) bodies.push("ok 353 - reports error when child fails to spawn");
+    else if (n === 354) bodies.push("ok 354 - cleans up after failure");
+    else bodies.push(`ok ${n} - passing test number ${n}`);
+  }
+  bodies.push(
+    "not ok 355 - coordinator spawns child with explicit cwd",
+    "  ---",
+    "  failureType: 'cancelledByParent'",
+    "  error: test cancelled by parent",
+    "  ---",
+    "not ok 356 - coordinator spawns child with explicit cwd (2)",
+    "  ---",
+    "  failureType: 'cancelledByParent'",
+    "  ---"
+  );
+  for (let n = 357; n <= 1667; n++) {
+    const i = n - 357;
+    if (i % 200 === 0) bodies.push(`ok ${n} - handles error output for test ${n}`);
+    else if (i % 150 === 0) bodies.push(`ok ${n} - cleans up after failure ${n}`);
+    else bodies.push(`ok ${n} - passing test number ${n}`);
+  }
+  const log = bodies
+    .map(
+      (b, i) =>
+        `verify\tUnit tests\t2026-09-27T16:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z ${b}`
+    )
+    .join("\n");
+  // Guard the test's premise: the failure really does sit outside the old 20K tail window.
+  assert.ok(log.indexOf("not ok 355") < log.length - 20_000);
+  const { exec } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("verify", "FAILURE", "36330128633")]) },
+    { stdout: log },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 160, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  assert.match(evidence.excerpt, /not ok 355/);
+  assert.match(evidence.excerpt, /not ok 356/);
+  assert.match(evidence.excerpt, /cancelledByParent/);
+  assert.doesNotMatch(evidence.excerpt, /passing test number 1667/);
+  assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+  assert.ok(evidence.excerpt.split("\n").length <= CHECKS_EVIDENCE_MAX_EXCERPT_LINES);
+});
+
 test("NOT-276: dense failure cluster outranks sparse earlier weak hits (unit level)", async () => {
   // Minimal direct proof of the round-2 ranking: 30 isolated weak hits precede one
   // dense 3-hit failure cluster; the excerpt must contain the cluster.
