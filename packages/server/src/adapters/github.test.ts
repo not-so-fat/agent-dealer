@@ -13,6 +13,9 @@ import {
   buildFailureExcerpt,
   formatChecksFailureDetails,
   CHECKS_EVIDENCE_MAX_EXCERPT_CHARS,
+  CHECKS_EVIDENCE_MAX_EXCERPT_LINES,
+  CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN,
+  CHECKS_EVIDENCE_GH_LOG_MAX_BUFFER,
   CHECKS_FAILURE_GENERIC_REASON,
   PR_VIEW_FIELDS,
   type GithubAdapter,
@@ -55,16 +58,22 @@ test("summarizeChecks accepts neutral/skipped as success but fails closed on an 
 });
 
 /** Records every `gh` invocation and returns responses off a queue — never calls real `gh`. */
-function queuedExec(responses: Array<{ stdout?: string; error?: string }>): { exec: GhExec; calls: string[][] } {
+function queuedExec(responses: Array<{ stdout?: string; error?: string }>): {
+  exec: GhExec;
+  calls: string[][];
+  execOpts: Array<{ cwd: string; maxBuffer?: number }>;
+} {
   const calls: string[][] = [];
+  const execOpts: Array<{ cwd: string; maxBuffer?: number }> = [];
   const queue = [...responses];
-  const exec: GhExec = async (args) => {
+  const exec: GhExec = async (args, opts) => {
     calls.push(args);
+    execOpts.push(opts);
     const next = queue.shift() ?? { stdout: "" };
     if (next.error != null) throw Object.assign(new Error(next.error), { stderr: next.error });
     return { stdout: next.stdout ?? "" };
   };
-  return { exec, calls };
+  return { exec, calls, execOpts };
 }
 
 test("viewPr looks up the PR explicitly by branch, never a bare `gh pr view`", async () => {
@@ -489,6 +498,312 @@ test("NOT-252: extractActionsRunId and sanitizeUrl helpers", async () => {
   assert.equal(extractActionsRunId(undefined), null);
   assert.equal(sanitizeUrl("https://example.com/a?b=1#c"), "https://example.com/a");
   assert.equal(sanitizeUrl("https://example.com/a"), "https://example.com/a");
+});
+
+// --- NOT-276: search-before-truncate — an early failure must survive excerpt building ---
+
+// Replays the NOT-273 incident shape (Actions run 36330128633 "Unit tests" step):
+// 1667 TAP lines, `not ok 355/356` + `cancelledByParent` at ~21% through the log,
+// followed by ~1300 passing-test lines. Under the old last-20K-chars pre-truncation
+// the failure sat outside the kept tail and the excerpt showed only passing
+// tail noise; with search-before-truncate it must surface the failure instead.
+// Faithful-scale substitute for the real `gh run view 36330128633 --log-failed`
+// replay (no network/gh in this sandbox — the PR description must still record a
+// replay against the saved real "Unit tests" log showing `not ok 355`/`356`).
+// Crucially, ~21 passing lines BEFORE the failure carry realistic
+// failure-pattern words in their test names (real TAP `ok` lines do this — e.g.
+// "handles error ..."), spaced >13 lines apart so each is an isolated hit region:
+// without hit-density ranking, those early weak hits fill the 80-line budget
+// ahead of the real failure cluster (round-2 blocking finding). The dense
+// failure block (failureType x2 + error: x1 within 9 lines) must outrank them.
+test("NOT-276: failure line before the last 20K chars still reaches the excerpt", async () => {
+  const early: string[] = [];
+  for (let n = 1; n <= 354; n++) {
+    // Isolated pattern hits every 16 lines (> 2x the 6-line context radius, so
+    // windows never merge): ~22 weak hits precede the real failure.
+    if (n % 16 === 0) early.push(`ok ${n} - handles error output for test ${n}`);
+    else if (n === 353) early.push("ok 353 - reports error when child fails to spawn");
+    else if (n === 354) early.push("ok 354 - cleans up after failure");
+    else early.push(`ok ${n} - passing test number ${n}`);
+  }
+  const failureBlock = [
+    "not ok 355 - coordinator spawns child with explicit cwd",
+    "  ---",
+    "  failureType: 'cancelledByParent'",
+    "  error: test cancelled by parent",
+    "  ---",
+    "not ok 356 - coordinator spawns child with explicit cwd (2)",
+    "  ---",
+    "  failureType: 'cancelledByParent'",
+    "  ---",
+  ].join("\n");
+  const filler = Array.from({ length: 1667 - 356 }, (_, i) => {
+    const n = 357 + i;
+    if (i % 200 === 0) return `ok ${n} - handles error output for test ${n}`;
+    if (i % 150 === 0) return `ok ${n} - cleans up after failure ${n}`;
+    return `ok ${n} - passing test number ${n}`;
+  }).join("\n");
+  const log = `${early.join("\n")}\n${failureBlock}\n${filler}`;
+  // Guard the test's premise: the failure really does sit outside the old 20K tail window.
+  assert.ok(log.indexOf("not ok 355") < log.length - 20_000);
+  const { exec } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("verify", "FAILURE", "36330128633")]) },
+    { stdout: log },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 160, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  assert.match(evidence.excerpt, /not ok 355/);
+  assert.match(evidence.excerpt, /not ok 356/);
+  assert.match(evidence.excerpt, /cancelledByParent/);
+  assert.doesNotMatch(evidence.excerpt, /passing test number 1667/);
+  assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+  assert.ok(evidence.excerpt.split("\n").length <= CHECKS_EVIDENCE_MAX_EXCERPT_LINES);
+});
+
+// NOT-276 round-2 replay stand-in (blocking finding: the real `gh run view
+// 36330128633 --log-failed` replay needs network/gh, unavailable in CI/sandbox,
+// so this mirrors its exact byte shape at faithful scale instead): every line
+// carries the real `<job>\t<step>\t<timestamp> ` prefix, 1667 TAP results with
+// `not ok 355`/`356` + `cancelledByParent` at ~21% through, ~24 passing lines
+// before the failure carrying failure-pattern words in their names, >20K
+// chars of passing-test tail after it, and the node:test TAP summary block at
+// the true end of the log (the root-cause mechanism: node:test runs to
+// completion, so `# fail 2` — a weak tail hit — sits after thousands of passing
+// lines). The excerpt must surface the early strong failure, not the tail.
+test("NOT-276 round-2 replay: full-scale Actions-prefixed log with an early `not ok` failure", async () => {
+  const bodies: string[] = [];
+  for (let n = 1; n <= 354; n++) {
+    if (n % 16 === 0) bodies.push(`ok ${n} - handles error output for test ${n}`);
+    else if (n === 353) bodies.push("ok 353 - reports error when child fails to spawn");
+    else if (n === 354) bodies.push("ok 354 - cleans up after failure");
+    else bodies.push(`ok ${n} - passing test number ${n}`);
+  }
+  bodies.push(
+    "not ok 355 - coordinator spawns child with explicit cwd",
+    "  ---",
+    "  failureType: 'cancelledByParent'",
+    "  error: test cancelled by parent",
+    "  ---",
+    "not ok 356 - coordinator spawns child with explicit cwd (2)",
+    "  ---",
+    "  failureType: 'cancelledByParent'",
+    "  ---"
+  );
+  for (let n = 357; n <= 1667; n++) {
+    const i = n - 357;
+    if (i % 200 === 0) bodies.push(`ok ${n} - handles error output for test ${n}`);
+    else if (i % 150 === 0) bodies.push(`ok ${n} - cleans up after failure ${n}`);
+    else bodies.push(`ok ${n} - passing test number ${n}`);
+  }
+  // node:test's own end-of-run TAP summary, as in the real incident log — its
+  // `# fail 2` line is a weak failure-pattern hit in the tail that must not
+  // outrank the early strong `not ok` failure (round-2 blocking finding).
+  bodies.push(
+    "# tests 1667",
+    "# suites 4",
+    "# pass 1663",
+    "# fail 2",
+    "# cancelled 2",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 184213.015"
+  );
+  const log = bodies
+    .map(
+      (b, i) =>
+        `verify\tUnit tests\t2026-09-27T16:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z ${b}`
+    )
+    .join("\n");
+  // Guard the test's premise: the failure really does sit outside the old 20K tail window.
+  assert.ok(log.indexOf("not ok 355") < log.length - 20_000);
+  const { exec } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("verify", "FAILURE", "36330128633")]) },
+    { stdout: log },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 160, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  assert.match(evidence.excerpt, /not ok 355/);
+  assert.match(evidence.excerpt, /not ok 356/);
+  assert.match(evidence.excerpt, /cancelledByParent/);
+  assert.doesNotMatch(evidence.excerpt, /passing test number 1667/);
+  assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+  assert.ok(evidence.excerpt.split("\n").length <= CHECKS_EVIDENCE_MAX_EXCERPT_LINES);
+});
+
+test("NOT-276: dense failure cluster outranks sparse earlier weak hits (unit level)", async () => {
+  // Minimal direct proof of the round-2 ranking: 30 isolated weak hits precede one
+  // dense 3-hit failure cluster; the excerpt must contain the cluster.
+  const lines: string[] = [];
+  for (let g = 0; g < 30; g++) {
+    for (let k = 0; k < 15; k++) lines.push(`ok ${g * 16 + k + 1} - passing test number ${g * 16 + k + 1}`);
+    lines.push(`ok ${g * 16 + 16} - handles error output for test ${g * 16 + 16}`);
+  }
+  lines.push(
+    "not ok 999 - real failure here",
+    "  failureType: 'cancelledByParent'",
+    "  error: test cancelled by parent"
+  );
+  for (let n = 1000; n < 1100; n++) lines.push(`ok ${n} - passing test number ${n}`);
+  const { excerpt } = buildFailureExcerpt(lines.join("\n"));
+  assert.match(excerpt, /not ok 999/);
+  assert.match(excerpt, /cancelledByParent/);
+});
+
+// NOT-276 round 3 (real PR #163 review, verified against the actual saved
+// `gh run view 36330128633 --log-failed` output): plain hit-density ranking still
+// missed the real failure two different ways. (1) `gh run view --log-failed`
+// prefixes every line with `<job>\t<step>\t<timestamp> ` before the tool's own
+// output, so an anchored `^\s*not ok\b` pattern never matches the real thing — only
+// an unanchored one does. (2) This repo's own coordinator tests are *about*
+// escalation/conflict/timeout handling, so a cluster of unrelated passing tests can
+// out-rank the real (sparse) failure under density alone; an explicit marker
+// (`not ok`, `##[error]`) must dominate ranking regardless of density.
+test("NOT-276 round 3: a GitHub Actions log-line prefix must not hide the `not ok` marker", async () => {
+  const prefix = (ts: string) => `verify\tUnit tests\t${ts}Z `;
+  const early = Array.from(
+    { length: 60 },
+    (_, i) => `${prefix(`2026-09-27T16:07:${String(i).padStart(2, "0")}.0000000`)}ok ${i + 1} - passing test number ${i + 1}`
+  ).join("\n");
+  const failureBlock = [
+    `${prefix("2026-09-27T16:07:31.3990644")}not ok 355 - NOT-273: the serve child spawns with an explicit cwd`,
+    `${prefix("2026-09-27T16:07:31.3991406")}  failureType: 'cancelledByParent'`,
+    `${prefix("2026-09-27T16:07:31.3992743")}not ok 356 - no credential short-circuits to missing without spawning`,
+    `${prefix("2026-09-27T16:07:31.3993384")}  failureType: 'cancelledByParent'`,
+  ].join("\n");
+  const late = Array.from(
+    { length: 60 },
+    (_, i) => `${prefix(`2026-09-27T16:08:${String(i).padStart(2, "0")}.0000000`)}ok ${357 + i} - passing test number ${357 + i}`
+  ).join("\n");
+  const log = `${early}\n${failureBlock}\n${late}\n${prefix("2026-09-27T16:09:02.6611414")}##[error]Process completed with exit code 1.`;
+  const { excerpt } = buildFailureExcerpt(log);
+  assert.match(excerpt, /not ok 355/);
+  assert.match(excerpt, /not ok 356/);
+  assert.match(excerpt, /cancelledByParent/);
+});
+
+// NOT-276 round 3: a lower-ranked region taken first can still be chronologically
+// *earlier* than a higher-ranked one; if the excerpt were char-capped by slicing
+// the reassembled string's tail (ignoring rank), the earlier low-priority region
+// could crowd the later high-priority region's content out of the character
+// budget even though line-budget ranking correctly preferred the real failure.
+test("NOT-276 round 3: an earlier low-priority region must not crowd the real failure out of the character budget", async () => {
+  // ~12 weak hits (one per line, "failed"/"error"), long lines: ~12 * 460 ≈ 5500 chars.
+  const earlyWeakCluster = Array.from(
+    { length: 12 },
+    (_, i) => `ok ${i + 1} - reports a handled failure/error path for scenario ${i + 1} ` + "x".repeat(400)
+  ).join("\n");
+  // The real failure: 2 strong `not ok` hits, short lines (~450 chars total).
+  const realFailure = [
+    "not ok 999 - the real failure",
+    "  failureType: 'cancelledByParent'",
+    "not ok 1000 - a second real failure",
+    "  failureType: 'cancelledByParent'",
+  ].join("\n");
+  // A gap of ordinary passing lines keeps the two clusters as separate merged
+  // windows (matching the real incident: the weak cluster and the real failure
+  // sat ~2300 lines apart) rather than merging into one oversized window, which
+  // would exercise a different, narrower edge case than the one under test here.
+  const gap = Array.from({ length: 20 }, (_, i) => `ok ${900 + i} - passing test number ${900 + i}`).join("\n");
+  const log = `${earlyWeakCluster}\n${gap}\n${realFailure}`;
+  assert.ok(
+    earlyWeakCluster.length + realFailure.length > CHECKS_EVIDENCE_MAX_EXCERPT_CHARS,
+    "test premise: both regions together exceed the char budget"
+  );
+  const { excerpt, truncated } = buildFailureExcerpt(log);
+  assert.match(excerpt, /not ok 999/);
+  assert.match(excerpt, /not ok 1000/);
+  assert.match(excerpt, /cancelledByParent/);
+  assert.ok(excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+  assert.equal(truncated, true, "dropping the lower-ranked region must be reported as truncation");
+});
+
+test("NOT-276: an exact line-budget fill still reports a later failure region as truncated", async () => {
+  // The A and B windows contain 39 and 40 lines respectively. With the separator
+  // between them, taking both fills the 80-line budget exactly. Region C is a real
+  // failure that must be omitted, and that omission must set truncated=true.
+  const ordinary = (label: string, count: number) =>
+    Array.from({ length: count }, (_, i) => `ok ${label}-${i + 1} - passing test`);
+  const regionA = Array.from({ length: 27 }, (_, i) => `not ok A-${i + 1} - strong failure A`);
+  const regionB = Array.from({ length: 28 }, (_, i) => `not ok B-${i + 1} - strong failure B`);
+  const lines = [
+    ...ordinary("prefix", 6),
+    ...regionA,
+    ...ordinary("gap-a-b", 13),
+    ...regionB,
+    ...ordinary("gap-b-c", 13),
+    "not ok C-1 - later real failure",
+    ...ordinary("suffix", 6),
+  ];
+
+  const { excerpt, truncated } = buildFailureExcerpt(lines.join("\n"));
+  assert.equal(excerpt.split("\n").length, CHECKS_EVIDENCE_MAX_EXCERPT_LINES);
+  assert.match(excerpt, /not ok A-1/);
+  assert.match(excerpt, /not ok B-1/);
+  assert.doesNotMatch(excerpt, /not ok C-1/);
+  assert.equal(truncated, true, "the omitted third failure region must be reported as truncation");
+});
+
+test("NOT-276: log with no failure-pattern hits still falls back to the tail, unchanged", async () => {
+  // NB: this filler must stay free of FAILURE_LINE_PATTERN words — that absence is the no-hit premise.
+  const log = Array.from({ length: 200 }, (_, i) => `ok ${i + 1} - passing test number ${i + 1}`).join("\n");
+  const { exec } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("verify", "FAILURE", "111")]) },
+    { stdout: log },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  // The fetch path must feed the full log through exactly as buildFailureExcerpt sees it.
+  assert.equal(evidence.excerpt, buildFailureExcerpt(log).excerpt);
+  const excerptLines = evidence.excerpt.split("\n");
+  assert.equal(excerptLines.length, CHECKS_EVIDENCE_MAX_EXCERPT_LINES);
+  assert.match(excerptLines[0] ?? "", /passing test number 121/);
+  assert.match(excerptLines[excerptLines.length - 1] ?? "", /passing test number 200/);
+  assert.equal(evidence.excerptTruncated, true);
+  assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+});
+
+test("NOT-276: log larger than the raw memory ceiling stays bounded without crashing", async () => {
+  // Short lines on purpose: the 80-line tail must fit under the 4,000-char
+  // excerpt cap, otherwise the char cap (not the memory ceiling) would cut the
+  // asserted last line and the test would prove nothing about the tail.
+  const line = (i: number) => `ok ${i} - pad pad ${i}`;
+  const targetLen = CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN + 500_000;
+  const count = Math.ceil(targetLen / 20);
+  const parts = new Array<string>(count);
+  for (let i = 0; i < count; i++) parts[i] = line(i);
+  const log = parts.join("\n");
+  assert.ok(log.length > CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN);
+  const { exec } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("verify", "FAILURE", "111")]) },
+    { stdout: log },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  assert.ok(evidence.excerpt.length <= CHECKS_EVIDENCE_MAX_EXCERPT_CHARS);
+  // The excerpt is built from the kept tail portion, never the discarded head.
+  assert.equal(evidence.excerpt, buildFailureExcerpt(log.slice(-CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN)).excerpt);
+  assert.match(evidence.excerpt, new RegExp(`pad pad ${count - 1}`));
+});
+
+test("NOT-276 round 3: run-log fetch carries an explicit maxBuffer above the raw ceiling", async () => {
+  // Node's execFile defaults to ~1 MiB maxBuffer, which would reject any larger
+  // --log-failed output with ERR_CHILD_PROCESS_STDIO_MAXBUFFER before the 2MB
+  // raw-log ceiling applies. The fetch must pass an explicit buffer above the
+  // ceiling so the ceiling — not the process buffer — bounds memory.
+  assert.ok(
+    CHECKS_EVIDENCE_GH_LOG_MAX_BUFFER > CHECKS_EVIDENCE_MAX_RAW_LOG_CHARS_PER_RUN,
+    "maxBuffer must sit above the raw-log ceiling"
+  );
+  const { exec, calls, execOpts } = queuedExec([
+    { stdout: prViewWithRollup([actionsCheck("verify", "FAILURE", "111")]) },
+    { stdout: "verify log\nError: boom\n" },
+  ]);
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  assert.deepEqual(calls[1], ["run", "view", "111", "--log-failed"]);
+  assert.equal(execOpts[1]?.maxBuffer, CHECKS_EVIDENCE_GH_LOG_MAX_BUFFER);
+  // The small pr-view lookup needs no oversized buffer.
+  assert.ok(execOpts[0]?.maxBuffer == null, "pr view must not carry the log buffer");
 });
 
 test("NOT-252: formatChecksFailureDetails labels the excerpt as untrusted, not instructions", async () => {
