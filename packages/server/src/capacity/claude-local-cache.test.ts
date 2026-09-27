@@ -68,17 +68,39 @@ function fullCacheFixture(fetchedAtMs: number): string {
   });
 }
 
-function probeStreamFixture(observedIso: string, costUsd = 0.0003): string {
+// Mirrors a real `claude -p "/usage"` stream at 2.1.283: a local-command
+// result event carrying `usage_report.rate_limits.limits[]` (verified live
+// 2026-09-27 — see claude-local-cache.ts module header), followed by the
+// terminal `result` event. Real runs cost $0 (no model call); `costUsd`
+// defaults to 0 but stays overridable for the cost-plumbing assertions.
+function probeStreamFixture(observedIso: string, costUsd = 0): string {
   return [
     JSON.stringify({
-      type: "rate_limit_event",
+      type: "assistant",
       timestamp: observedIso,
-      rate_limit_info: {
-        status: "allowed",
-        unifiedWindows: [
-          { window: "five_hour", utilization: 0.2, resetsAt: FIVE_HOUR_RESET_SEC },
-          { window: "seven_day", utilization: 0.4, resetsAt: SEVEN_DAY_RESET_SEC },
-        ],
+      local_command_run: { command: "usage", args: "" },
+      usage_report: {
+        session: { total_cost_usd: 0 },
+        rate_limits: {
+          limits: [
+            {
+              kind: "session",
+              group: "session",
+              percent: 20,
+              resets_at: new Date(FIVE_HOUR_RESET_SEC * 1000).toISOString(),
+              severity: "normal",
+              is_active: false,
+            },
+            {
+              kind: "weekly_all",
+              group: "weekly",
+              percent: 40,
+              resets_at: new Date(SEVEN_DAY_RESET_SEC * 1000).toISOString(),
+              severity: "normal",
+              is_active: true,
+            },
+          ],
+        },
       },
     }),
     JSON.stringify({
@@ -337,7 +359,7 @@ test("a 2-hour-old cache ingests with its true age and reads expired, never live
   }
 });
 
-test("paid fallback defaults on; explicit off and unrecognized values never spawn", async () => {
+test("refresh defaults on; explicit off and unrecognized values never spawn", async () => {
   for (const value of [undefined, "", "paid-after-1h"] as const) {
     if (value === undefined) delete process.env[CLAUDE_CAPACITY_REFRESH_ENV];
     else process.env[CLAUDE_CAPACITY_REFRESH_ENV] = value;
@@ -349,12 +371,28 @@ test("paid fallback defaults on; explicit off and unrecognized values never spaw
     const outcome = await maybeProbeClaudeCapacity(NOW_MS, { runner: throwingRunner });
     assert.deepEqual(outcome, { probed: false, reason: "disabled" });
   }
-  process.env[CLAUDE_CAPACITY_REFRESH_ENV] = "paid-after-1h";
+  delete process.env[CLAUDE_CAPACITY_REFRESH_ENV];
   assert.equal(isClaudePaidFallbackEnabled(), true);
 });
 
-test("default-on fallback suppresses a fresh sample; stale data triggers exactly one", async () => {
-  delete process.env[CLAUDE_CAPACITY_REFRESH_ENV];
+test("extractClaudeUsageReportLimits reads the /usage local-command result", async () => {
+  const { extractClaudeUsageReportLimits } = await import("./claude-local-cache.js");
+  const observedIso = new Date(NOW_MS).toISOString();
+  const events = probeStreamFixture(observedIso).split("\n").map((l) => JSON.parse(l));
+  const readings = extractClaudeUsageReportLimits(events, NOW_MS);
+  assert.ok(readings);
+  assert.equal(readings!.length, 2);
+  const fiveHour = readings!.find((w) => w.criticalRole === "five_hour")!;
+  const weekly = readings!.find((w) => w.criticalRole === "weekly")!;
+  assert.equal(fiveHour.usedPercent, 20);
+  assert.equal(weekly.usedPercent, 40);
+  assert.equal(fiveHour.observedAt, observedIso);
+  assert.equal(fiveHour.evidenceRef, "claude-probe:usage-command");
+  // No usage_report anywhere in the stream — nothing fabricated.
+  assert.equal(extractClaudeUsageReportLimits([{ type: "result" }], NOW_MS), null);
+});
+
+test("default-on refresh suppresses a fresh sample; stale data triggers exactly one", async () => {
   fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS - 10 * 60_000));
   assert.equal(ingestClaudeLocalCache(NOW_MS), 2);
   assert.ok((newestValidClaudeObservationMs(NOW_MS) ?? 0) > NOW_MS - 60 * 60_000);
@@ -381,8 +419,7 @@ test("default-on fallback suppresses a fresh sample; stale data triggers exactly
   assert.ok(outcomes.every((o) => o.probed && o.ok));
 });
 
-test("probe argv pins the fixed prompt, cheapest model, no tools/MCP, one turn, ≤$0.01", async () => {
-  process.env[CLAUDE_CAPACITY_REFRESH_ENV] = "paid-after-1h";
+test("probe argv pins the fixed /usage command, no MCP, no session, stream JSON, ≤$0.01 defensive cap", async () => {
   fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS - 61 * 60_000));
   assert.equal(ingestClaudeLocalCache(NOW_MS), 2);
   let seenBin = "";
@@ -399,13 +436,7 @@ test("probe argv pins the fixed prompt, cheapest model, no tools/MCP, one turn, 
   assert.equal(seenBin, "/fake/claude");
   assert.deepEqual(seenArgv, [
     "-p",
-    "Reply with exactly: ok",
-    "--model",
-    "haiku",
-    "--max-turns",
-    "1",
-    "--tools",
-    "",
+    "/usage",
     "--strict-mcp-config",
     "--no-session-persistence",
     "--output-format",
@@ -414,13 +445,12 @@ test("probe argv pins the fixed prompt, cheapest model, no tools/MCP, one turn, 
     "--max-budget-usd",
     "0.01",
   ]);
-  // Semantic pins behind the exact match: cheapest model, hard one-turn
-  // bound, tools fully off, MCP restricted to none passed, stream JSON,
-  // hard budget cap.
-  assert.equal(seenArgv[seenArgv.indexOf("--model") + 1], "haiku");
-  assert.equal(seenArgv[seenArgv.indexOf("--max-turns") + 1], "1");
-  assert.equal(seenArgv[seenArgv.indexOf("--tools") + 1], "");
+  // Semantic pins behind the exact match: no MCP config passed, no model
+  // turn flags (unnecessary — /usage never reaches the model), hard
+  // defensive budget cap.
   assert.ok(!seenArgv.includes("--mcp-config"));
+  assert.ok(!seenArgv.includes("--model"));
+  assert.ok(!seenArgv.includes("--max-turns"));
   const budget = Number(seenArgv[seenArgv.indexOf("--max-budget-usd") + 1]);
   assert.ok(Number.isFinite(budget) && budget <= 0.01);
   assert.equal(seenArgv.filter((a) => a === "-p").length, 1);

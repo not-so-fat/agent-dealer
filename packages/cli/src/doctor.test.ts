@@ -218,16 +218,17 @@ test("describe maps each cache state to its static line", () => {
   }
 });
 
-test("probe warning appears for the default and explicit paid value", () => {
+test("refresh note is silent by default; appears only when explicitly disabled", () => {
   for (const setting of [undefined, "", CLAUDE_CAPACITY_REFRESH_PAID_VALUE]) {
-    const armed = describeClaudeProbeOptIn(setting);
-    assert.ok(armed);
-    assert.match(armed!, /enabled/);
-    assert.match(armed!, /≤\$0\.01/);
-    assert.match(armed!, /=off/);
+    assert.equal(describeClaudeProbeOptIn(setting), null);
   }
-  assert.equal(describeClaudeProbeOptIn("off"), null);
-  assert.equal(describeClaudeProbeOptIn("auto"), null);
+  for (const setting of ["off", "auto"]) {
+    const note = describeClaudeProbeOptIn(setting);
+    assert.ok(note);
+    assert.match(note!, /disabled/);
+    assert.match(note!, /free/);
+    assert.match(note!, new RegExp(`${CLAUDE_CAPACITY_REFRESH_ENV}=${setting}`));
+  }
 });
 
 test("Muse paid-fallback warning matches server defaults and legacy no-spend precedence", () => {

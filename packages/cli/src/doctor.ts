@@ -122,9 +122,9 @@ export async function runDoctor(): Promise<number> {
     }
     // NOT-268: Claude account capacity source status (informational only —
     // never fails doctor). Reports whether Claude Code's own local 5H/1W
-    // cache exists and how old it is, plus whether the paid fallback probe
-    // is armed. Age labels only: never utilization values, prompts, tokens,
-    // or account ids.
+    // cache exists and how old it is, plus whether the free `/usage` refresh
+    // is disabled. Age labels only: never utilization values, prompts,
+    // tokens, or account ids.
     try {
       console.log((await checkClaudeCapacitySource()).line);
       const probe = describeClaudeProbeOptIn(process.env.AGENT_DEALER_CLAUDE_CAPACITY_REFRESH);
@@ -296,7 +296,7 @@ export async function checkCursorIndividualLogin(): Promise<CursorIndividualLogi
 
 /** Env override for the Claude cache file (tests/smoke). */
 export const CLAUDE_CAPACITY_CACHE_FILE_ENV = "AGENT_DEALER_CLAUDE_CACHE_FILE";
-/** Paid-fallback setting: enabled by default; `off` disables it. */
+/** Refresh setting: enabled by default (free `/usage` check); `off` disables it. */
 export const CLAUDE_CAPACITY_REFRESH_ENV = "AGENT_DEALER_CLAUDE_CAPACITY_REFRESH";
 export const CLAUDE_CAPACITY_REFRESH_PAID_VALUE = "paid-after-1h";
 export const CLAUDE_CAPACITY_REFRESH_OFF_VALUE = "off";
@@ -326,7 +326,7 @@ export function describeClaudeCapacitySource(
     }
     return {
       kind: "stale",
-      line: `⚠ Claude capacity: local 5H/1W cache stale (${formatCacheAge(status.ageMs)} old — refreshes on the next Claude run)`,
+      line: `⚠ Claude capacity: local 5H/1W cache stale (${formatCacheAge(status.ageMs)} old — Dealer refreshes it for free on the next capacity check, unless AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off)`,
     };
   }
   return {
@@ -345,18 +345,23 @@ function formatCacheAge(ageMs: number): string {
 }
 
 /**
- * Map the paid-fallback setting to its warning line, or null when explicitly
- * disabled (or unrecognized). Unset/empty is the paid-after-1h default.
+ * Map the refresh setting to a note, or null when it's enabled (the default
+ * — nothing to flag: the refresh is a free `/usage` local-command call, not
+ * a paid probe, since a 2026-09-27 live proof found and fixed the original
+ * paid-turn design; see docs/RUNTIME_CAPACITY.md). Only when explicitly
+ * disabled (`off`, or any unrecognized value) does this return a note that
+ * the capacity strip may go stale between Dealer-managed runs without it.
  * Pure (no I/O): unit tests pin both states here.
  */
 export function describeClaudeProbeOptIn(setting: string | undefined): string | null {
-  if (setting === undefined || setting === "" || setting === CLAUDE_CAPACITY_REFRESH_PAID_VALUE) {
-    return (
-      "⚠ Claude capacity paid fallback: enabled (one ≤$0.01 Haiku probe after 1h stale — " +
-        `set ${CLAUDE_CAPACITY_REFRESH_ENV}=${CLAUDE_CAPACITY_REFRESH_OFF_VALUE} to disable)`
-    );
-  }
-  return null;
+  const enabled =
+    setting === undefined || setting === "" || setting === CLAUDE_CAPACITY_REFRESH_PAID_VALUE;
+  if (enabled) return null;
+  return (
+    "⚠ Claude capacity auto-refresh disabled " +
+    `(${CLAUDE_CAPACITY_REFRESH_ENV}=${setting}) — the strip may go stale between ` +
+    "Dealer-managed runs; the refresh itself is free (one local `/usage` check, no model call)"
+  );
 }
 
 // ---------------------------------------------------------------------------

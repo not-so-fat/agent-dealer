@@ -409,14 +409,14 @@ verified against a captured real Dealer-managed Claude log — confirm the
 real event carries `unifiedWindows` in these shapes on one live session
 after landing; if it does not, nothing persists and the strip stays N/A.
 
-## Provider: Claude local cache + one-hour paid fallback (NOT-268)
+## Provider: Claude local cache + free `/usage` refresh (NOT-268)
 
 `packages/server/src/capacity/claude-local-cache.ts`. The NOT-248 event path
 only observes Dealer-managed sessions, so the strip stays N/A when no recent
-Dealer run completed. Claude Code itself maintains exact provider usage in
-the `cachedUsageUtilization` key of `~/.claude.json` on every run —
-including interactive runs outside Dealer — so the capacity read consults
-this source ladder and the freshest valid observation wins per window:
+Dealer run completed. Claude Code maintains exact provider usage in the
+`cachedUsageUtilization` key of `~/.claude.json`, so the capacity read also
+consults this source ladder and the freshest valid observation wins per
+window:
 
 1. Dealer `rate_limit_event` ingestion (NOT-248, session-end, kept as-is).
 2. Read-only local cache: only the `cachedUsageUtilization` subtree of
@@ -424,11 +424,52 @@ this source ladder and the freshest valid observation wins per window:
    background refresh on every `GET /api/runtime-capacity`); the other 70+
    config keys (accountUuid, email, credentials, projects) are never
    retained.
-3. One minimal bounded paid probe, only when every valid 5H/1W observation
-   is older than 60 minutes. This is the default behavior. Set
-   `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` to disable paid probing
-   entirely — reading capacity then never starts Claude or spends money.
-   Unrecognized values also fail closed.
+3. One minimal **free** refresh when every valid 5H/1W observation is older
+   than 60 minutes: `claude -p "/usage"`. Default is **on**; set
+   `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` to disable it entirely.
+   Unrecognized values also fail closed (stay disabled).
+
+### 2026-09-27 correction: from a paid model-turn probe to a free `/usage` command
+
+The original rung 3 spawned a real one-turn model prompt (`claude -p "Reply
+with exactly: ok" --model haiku --max-turns 1 ...`), on the assumption that
+any `claude` invocation would either emit a `rate_limit_event` Dealer could
+ingest via rung 1, or refresh rung 2's cache file. **Live proof #1** (three
+real attempts against a real account, plus one manual re-run of the exact
+argv, all with operator acknowledgement of spend) falsified both:
+
+- Every attempt spent $0.017–$0.024 — over the fixed $0.01 cap, purely on
+  this repo's ambient context (~11K cache-creation tokens before the model
+  could even answer) — and ended `error_max_budget_usd`/`nonzero_exit`.
+- None produced a `rate_limit_event` in the stream.
+- `cachedUsageUtilization.fetchedAtMs` in `~/.claude.json` was unchanged
+  afterward. A decompiled trace of the installed CLI (2.1.283) explained why:
+  the cache write (`Juo()`) lives behind the interactive usage/plan-limits
+  fetch (telemetry event `usage_plan_limits`), never the ordinary chat-turn
+  path — a headless one-turn prompt structurally cannot reach it.
+
+That looked like a dead end for a headless integration — until **live proof
+#2** found the actual trigger: passing the **local slash-command** `/usage`
+itself as the `-p` prompt (`claude -p "/usage" --output-format stream-json
+--verbose --strict-mcp-config --no-session-persistence`). Claude Code
+resolves `/usage` as a local command:
+
+- `total_cost_usd: 0`, `num_turns: 0` — no model is called at all.
+- ~300ms wall clock, reproduced across multiple separate live invocations.
+- The NDJSON assistant event carries `local_command_run: {"command":
+  "usage", ...}` and a `usage_report.rate_limits.limits[]` array in exactly
+  the shape rung 2 already parses from the cache file (`{ kind:
+  "session"|"weekly_all", percent, resets_at, ... }`) — Dealer reads this
+  directly (`extractClaudeUsageReportLimits`), no cache re-read or
+  `rate_limit_event` needed as the primary signal.
+- It also performs the identical write rung 2 reads:
+  `cachedUsageUtilization.fetchedAtMs` changes on every run, confirmed twice.
+
+`/usage` is listed in the session's own `slash_commands` — a documented,
+user-facing CLI feature, not an internal/undocumented surface — so the
+refresh went back to default-on. `doctor` no longer warns about spend
+(there isn't any); it only notes when the operator has explicitly disabled
+the refresh, since the strip may then go stale between Dealer-managed runs.
 
 Cache parsing (`parseClaudeCachedUtilization`, via
 `extractClaudeCacheSubtree`): only the `cachedUsageUtilization` subtree is
@@ -449,51 +490,60 @@ entries are dropped. Future `fetchedAtMs`, malformed scales, and expired
 resets are rejected; a stale cache ingests with its true age (read-time
 rules render it N/A) and an older cache never overwrites a newer row — both
 sources share the `claude_unified_*` window keys through the newer-wins
-`recordClaudeWindowReadings` path.
+`recordClaudeWindowReadings` path. The `/usage` probe's
+`usage_report.rate_limits.limits[]` entries share this exact same parsing
+(`limitEntryRole`, `cacheWindowReading`) — one code path, two callers.
 
 Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
 
 - Trigger: `claude_code` configured, no valid 5H/1W sample newer than 60
-  minutes, and the fallback is not explicitly disabled. Single-flight across concurrent readers; at most one
-  attempt per account per 60 minutes, backing off exponentially
-  (60m → 2h → 4h → 8h cap) on failure. Never retried per UI poll.
-- Argv (verified live at 2.1.283 — `claude -p --max-turns 1 --model
-  <bogus>` parses flags and fails only on model resolution, spending
-  nothing, even though `--help` hides the flag): `claude -p <fixed prompt>
-  --model haiku --max-turns 1 --tools "" --strict-mcp-config
+  minutes, and the refresh is enabled (default on;
+  `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` disables it). Single-flight
+  across concurrent readers; at most one attempt per account per 60 minutes,
+  backing off exponentially (60m → 2h → 4h → 8h cap) on failure. Never
+  retried per UI poll.
+- Argv (verified live at 2.1.283): `claude -p "/usage" --strict-mcp-config
   --no-session-persistence --output-format stream-json --verbose
-  --max-budget-usd 0.01`. `--bare` is deliberately avoided so the account's
-  ambient login applies.
-  The probe spawns `claude` directly in the OS temp dir — never the
-  coordinator, so no Dealer workflow/session row, worktree, commit, PR, or
-  queue event is created.
-- Success ingests the stream's `rate_limit_event`s plus a re-read of the
-  local cache (the probe run refreshes Claude's own file) and requires both
-  critical roles; anything else keeps last-good rows. Every attempt appends
-  one JSON line (timestamps, model, budget, exit, cost, windows, outcome —
-  never prompt/output/credentials) to `<data-dir>/capacity/claude-probe.log`.
-  A `no_windows` streak means the probe is a paid no-op: set the fallback to `off`
-  and revise the ticket instead of shipping it.
+  --max-budget-usd 0.01`. No `--model`/`--max-turns`/`--tools` — `/usage`
+  never reaches the model, so those flags are meaningless; `--max-budget-usd`
+  stays as a defensive cap only. `--bare` is deliberately avoided so the
+  account's ambient OAuth login applies (the probe must read the capacity of
+  the account it measures). The probe spawns `claude` directly in the OS
+  temp dir — never the coordinator, so no Dealer workflow/session row,
+  worktree, commit, PR, or queue event is created.
+- Success reads `usage_report.rate_limits.limits[]` directly from the stream
+  (primary signal, present on every successful run) plus, as non-exclusive
+  corroboration, any `rate_limit_event` and a re-read of the local cache
+  (the probe run refreshes Claude's own file); the union must cover both
+  critical roles, or last-good rows are kept. Every attempt appends one JSON
+  line (timestamps, budget, exit, cost, windows, outcome — never
+  prompt/output/credentials) to `<data-dir>/capacity/claude-probe.log`.
 
 `GET /api/runtime-capacity` runs one background refresh (free cache
 ingest, then the probe gate) without blocking the read. `doctor` reports
 the cache age from `cachedUsageUtilization.fetchedAtMs` — never file mtime
-(`fresh` < 60m / `stale` / `missing`) — and warns whenever the default-on
-paid fallback is enabled — age labels only, never values or ids. Tests inject a
-fake probe runner; CI performs no live provider request.
+(`fresh` < 60m / `stale` / `missing`) — and notes when the free refresh has
+been explicitly disabled — age labels only, never values or ids. Tests
+inject a fake probe runner; CI performs no live provider request.
 
 Live proofs (require a real account, never CI): (a) DONE 2026-09-26 —
 read-only smoke of the operator's real `~/.claude.json` through the shipped
 parser: 73 top-level keys ignored, both windows normalize
 (`claude_unified_five_hour` / `claude_unified_seven_day`, percent scale,
 observed 2026-09-19T15:30:48Z); the 7-day-old sample renders N/A with
-honest age at read time and `doctor` agrees (`stale`, `7d old`). No ids,
-emails, or spend values were printed or persisted. (b) Paid-fallback smoke
-proving the minimal probe emits 5H/1W, with its actual cost in the
-diagnostic log — NOT RUN: spending money needs explicit operator
-acknowledgement, unavailable inside this spawn. The default-on fallback stays
-documented but the live paid smoke remains unproven; obtain acknowledgement
-and run that smoke separately.
+honest age at read time and `doctor` agrees (`stale`, `7d old`). (b) DONE
+2026-09-27, proof #1 (paid-turn design, superseded) — three real production
+probe attempts against the same real account, plus one manual re-run of the
+exact argv, all with operator acknowledgement of spend: every attempt
+overspent the $0.01 cap on context alone, no `rate_limit_event` in any
+stream, no change to `cachedUsageUtilization.fetchedAtMs` — the paid design
+never worked. (c) DONE 2026-09-27, proof #2 (`/usage` command, current
+design) — the same account, `claude -p "/usage"` run three separate times:
+`total_cost_usd: 0` every time, ~300ms each, `usage_report.rate_limits.
+limits[]` present with `session`/`weekly_all` percentages every time, and
+`cachedUsageUtilization.fetchedAtMs` advancing to the run's own timestamp
+every time. No ids, emails, prompts, or raw payload values were printed or
+persisted by any of the three proofs.
 
 ## Provider: Cursor Team Admin API (NOT-249)
 

@@ -4,6 +4,10 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+### Fixes
+
+- **Claude capacity refresh is now a free `/usage` command instead of a paid model turn — and it actually works** — 1.2.4's paid fallback (`claude -p "Reply with exactly: ok" --model haiku ...`) was proven a recurring paid no-op: three live attempts each overspent the $0.01 cap on ambient context alone, never emitted a usable signal, and never refreshed Claude Code's own `~/.claude.json` cache (which, per a decompiled trace, is written only by the interactive `/usage` view). A second live proof found the real fix: `claude -p "/usage"` resolves as a **local slash-command** — no model call, $0 cost, ~300ms — and returns exact 5H/1W percentages directly in its output while also refreshing the cache file, reproduced across multiple runs. The probe now uses this, default-on again (`AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` to disable); `doctor` only speaks up when you've explicitly turned it off. See `docs/RUNTIME_CAPACITY.md` for both live proofs.
+
 ## 1.2.4 — 2026-09-27
 
 Patch over 1.2.3: Claude and Muse capacity refresh reliability fix.
