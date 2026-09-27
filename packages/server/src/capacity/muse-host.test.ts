@@ -560,6 +560,14 @@ test("NOT-273: the serve child spawns with an explicit cwd under the managed dat
       return hangingChild();
     }) as unknown as typeof import("node:child_process").spawn,
   });
+  // This test's fake spawn has no real child process, so nothing else keeps
+  // the event loop busy while the production code's handshake/kill timers
+  // (deliberately unref'd — a real server must never block on them) are
+  // pending. With zero other ref'd handles, some Node versions' test runner
+  // treats the loop as "drained" before those timers fire and cancels the
+  // test outright (cancelledByParent). A trivial ref'd keepalive avoids the
+  // race without touching the production unref'd-timer behavior being tested.
+  const keepalive = setInterval(() => {}, 10);
   try {
     // Missing (handshake timeout), not a spawn failure — the spawn happened.
     assert.equal((await host.readUsage()).status, "missing");
@@ -578,6 +586,7 @@ test("NOT-273: the serve child spawns with an explicit cwd under the managed dat
     assert.equal(resolveMuseHostCwd(), dir, "default cwd is the dedicated data-dir home");
   } finally {
     await host.shutdown();
+    clearInterval(keepalive);
   }
 });
 
