@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import React from "react";
+import type { AgentWithHealth } from "@agent-dealer/shared";
 // node --import tsx compiles JSX in classic mode: components reference the
 // React global at render time.
 (globalThis as { React?: unknown }).React ??= React;
@@ -45,13 +46,77 @@ function renderPage(entry: string): string {
   );
 }
 
-function renderStrip(agentCount: number): string {
+function seedAgent(extra: Partial<AgentWithHealth> = {}): AgentWithHealth {
+  return {
+    id: "00000000-0000-4000-a000-000000000001",
+    name: "Claude",
+    runtime: "claude_code",
+    workspaceRoot: null,
+    deckId: null,
+    deckName: null,
+    playbookId: null,
+    defaultPlanModel: null,
+    defaultExecuteModel: null,
+    defaultPlanBudgetJson: null,
+    defaultExecuteBudgetJson: null,
+    defaultModel: null,
+    defaultEffort: null,
+    defaultBudgetJson: null,
+    purpose: null,
+    playbookIdsJson: null,
+    externalMemoryRefsJson: null,
+    permissionPolicyJson: null,
+    isBuiltin: false,
+    createdAt: "2026-09-20T09:00:00.000Z",
+    updatedAt: "2026-09-20T10:00:00.000Z",
+    healthy: false,
+    issues: [
+      {
+        code: "deck_missing",
+        message: "Set an Agent Deck on the Agents page — workers never start without one",
+      },
+    ],
+    ...extra,
+  };
+}
+
+/** Fresh-install rows from seedBuiltinAgents: three agents, no deck, unhealthy. */
+function freshSeedAgents(): AgentWithHealth[] {
+  return [
+    seedAgent({ name: "Claude", runtime: "claude_code" }),
+    seedAgent({
+      id: "00000000-0000-4000-a000-000000000002",
+      name: "Cursor",
+      runtime: "cursor_local",
+    }),
+    seedAgent({
+      id: "00000000-0000-4000-a000-000000000003",
+      name: "Codex",
+      runtime: "codex_local",
+    }),
+  ];
+}
+
+function healthyAgent(extra: Partial<AgentWithHealth> = {}): AgentWithHealth {
+  return seedAgent({
+    id: "11111111-1111-4111-8111-111111111111",
+    name: "Cursor Dev",
+    runtime: "cursor_local",
+    deckId: "11111111-1111-4111-8111-111111111111",
+    deckName: "Deck",
+    healthy: true,
+    issues: [],
+    ...extra,
+  });
+}
+
+function renderStrip(agents: AgentWithHealth[]): string {
   return renderToStaticMarkup(
     React.createElement(
       MemoryRouter,
       { initialEntries: ["/issues"] },
       React.createElement(FirstIssueStrip, {
-        agentCount,
+        agents,
         onStartIssue: () => {},
         onDismiss: () => {},
       })
@@ -123,16 +188,24 @@ test("dismissal persists per local profile and creating removes the strip", () =
 });
 
 test("next step routes to Agents when empty, New issue once configured", () => {
-  const noAgents = renderStrip(0);
+  const noAgents = renderStrip([]);
   assert.ok(noAgents.includes('href="/agents"'), "no agents → primary action goes to Agents");
   assert.ok(noAgents.includes("Configure agents"), "agents step labels its action");
-  const withAgents = renderStrip(2);
+  const withAgents = renderStrip([healthyAgent()]);
   assert.ok(withAgents.includes('data-testid="first-issue-primary"'), "primary action present");
   assert.ok(!withAgents.includes('href="/agents"'), "configured agents → primary starts the issue, not Agents");
 });
 
+test("fresh seeded agents (no deck) still route to Agents", () => {
+  // seedBuiltinAgents inserts three unconfigured rows on every fresh install —
+  // row count alone must not send them to New issue.
+  const html = renderStrip(freshSeedAgents());
+  assert.ok(html.includes('href="/agents"'), "seeded no-deck agents → primary action goes to Agents");
+  assert.ok(html.includes("Configure agents"), "agents step labels its action");
+});
+
 test("strip copy names the smallest path and never blocks on capacity", () => {
-  const html = renderStrip(0);
+  const html = renderStrip([]);
   assert.ok(html.includes("Create your first issue"), "compact title");
   assert.ok(html.includes("GitHub repository"), "repository step named");
   assert.ok(html.includes("developer") && html.includes("reviewer"), "agent steps named");

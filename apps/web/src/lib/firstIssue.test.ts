@@ -3,6 +3,7 @@
 // rule and per-profile dismissal persistence. Pure logic (no React/DOM).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { AgentWithHealth } from "@agent-dealer/shared";
 import {
   FIRST_ISSUE_DISMISS_KEY,
   dismissFirstIssue,
@@ -10,6 +11,64 @@ import {
   nextFirstIssueStep,
   shouldShowFirstIssueStrip,
 } from "./firstIssue.js";
+
+let agentSeq = 0;
+/** Minimal AgentWithHealth — mirrors the seeded builtin shape (deck_id NULL,
+ * deck_missing, unhealthy) unless overridden. */
+function agentFixture(extra: Partial<AgentWithHealth> = {}): AgentWithHealth {
+  agentSeq += 1;
+  return {
+    id: `00000000-0000-4000-a000-00000000000${agentSeq}`,
+    name: `Seeded ${agentSeq}`,
+    runtime: "claude_code",
+    workspaceRoot: null,
+    deckId: null,
+    deckName: null,
+    playbookId: null,
+    defaultPlanModel: null,
+    defaultExecuteModel: null,
+    defaultPlanBudgetJson: null,
+    defaultExecuteBudgetJson: null,
+    defaultModel: null,
+    defaultEffort: null,
+    defaultBudgetJson: null,
+    purpose: null,
+    playbookIdsJson: null,
+    externalMemoryRefsJson: null,
+    permissionPolicyJson: null,
+    isBuiltin: false,
+    createdAt: "2026-09-20T09:00:00.000Z",
+    updatedAt: "2026-09-20T10:00:00.000Z",
+    healthy: false,
+    issues: [
+      {
+        code: "deck_missing",
+        message: "Set an Agent Deck on the Agents page — workers never start without one",
+      },
+    ],
+    ...extra,
+  };
+}
+
+/** Exactly what seedBuiltinAgents inserts on a fresh install: three rows, no
+ * deck, unhealthy with deck_missing. */
+function freshSeedAgents(): AgentWithHealth[] {
+  return [
+    agentFixture({ name: "Claude", runtime: "claude_code" }),
+    agentFixture({ name: "Cursor", runtime: "cursor_local" }),
+    agentFixture({ name: "Codex", runtime: "codex_local" }),
+  ];
+}
+
+function healthyAgent(extra: Partial<AgentWithHealth> = {}): AgentWithHealth {
+  return agentFixture({
+    deckId: "11111111-1111-4111-8111-111111111111",
+    deckName: "Deck",
+    healthy: true,
+    issues: [],
+    ...extra,
+  });
+}
 
 function memoryStore(initial: Record<string, string> = {}): Storage {
   const data = new Map(Object.entries(initial));
@@ -66,10 +125,37 @@ test("loading history hides the strip so onboarding never flashes", () => {
   );
 });
 
-test("next step is agents until at least one agent is configured", () => {
-  assert.equal(nextFirstIssueStep(0), "agents");
-  assert.equal(nextFirstIssueStep(1), "new-issue");
-  assert.equal(nextFirstIssueStep(3), "new-issue");
+test("next step is agents when no agent rows exist", () => {
+  assert.equal(nextFirstIssueStep([]), "agents");
+});
+
+test("fresh seeded agents (no deck, deck_missing) still route to Agents", () => {
+  // seedBuiltinAgents always inserts these three rows, so row count alone
+  // would wrongly send a fresh profile to New issue.
+  assert.equal(nextFirstIssueStep(freshSeedAgents()), "agents");
+});
+
+test("next step is new-issue once a healthy developer and reviewer exist", () => {
+  // One healthy non-Muse agent covers both roles.
+  assert.equal(nextFirstIssueStep([healthyAgent()]), "new-issue");
+  assert.equal(
+    nextFirstIssueStep([...freshSeedAgents(), healthyAgent()]),
+    "new-issue"
+  );
+  assert.equal(
+    nextFirstIssueStep([
+      healthyAgent({ runtime: "muse_code" }),
+      healthyAgent({ runtime: "cursor_local" }),
+    ]),
+    "new-issue"
+  );
+});
+
+test("healthy Muse Code alone cannot review, so Agents stays the step", () => {
+  assert.equal(
+    nextFirstIssueStep([healthyAgent({ runtime: "muse_code" })]),
+    "agents"
+  );
 });
 
 test("dismissal persists under a stable per-profile key", () => {

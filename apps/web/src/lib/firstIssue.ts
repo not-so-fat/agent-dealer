@@ -5,13 +5,33 @@
 // happens to show zero results must never trigger onboarding, and creating
 // the first issue removes the strip via the history count.
 
+import type { AgentWithHealth } from "@agent-dealer/shared";
+
 export const FIRST_ISSUE_DISMISS_KEY = "agent-dealer:first-issue-dismissed:v1";
 
 export type FirstIssueStep = "agents" | "new-issue";
 
-/** Next incomplete step: configure agents first, otherwise create the issue. */
-export function nextFirstIssueStep(agentCount: number): FirstIssueStep {
-  return agentCount > 0 ? "new-issue" : "agents";
+/** An agent can develop when it is healthy (any runtime runs a session). */
+export function canDevelop(agent: AgentWithHealth): boolean {
+  return agent.healthy;
+}
+
+/** Muse Code is developer-only — the server refuses it as a reviewer at
+ * admission — so every other healthy agent can review. */
+export function canReview(agent: AgentWithHealth): boolean {
+  return agent.healthy && agent.runtime !== "muse_code";
+}
+
+/** Next incomplete step from agent health, not row count: a fresh install
+ * always seeds unconfigured Claude/Cursor/Codex rows (deck_id NULL, unhealthy
+ * with deck_missing), so counting rows would send a fresh profile to New
+ * issue. The issue needs a developer and a reviewer, so the step stays on
+ * Agents until at least one healthy agent can develop and one can review
+ * (one healthy non-Muse agent covers both roles). */
+export function nextFirstIssueStep(agents: AgentWithHealth[]): FirstIssueStep {
+  const developer = agents.some(canDevelop);
+  const reviewer = agents.some(canReview);
+  return developer && reviewer ? "new-issue" : "agents";
 }
 
 export interface FirstIssueVisibility {

@@ -4,16 +4,17 @@
 // step, and a dismiss control. Capacity status is informational copy here —
 // never a prerequisite that blocks the first issue.
 import { Link } from "react-router-dom";
+import type { AgentWithHealth } from "@agent-dealer/shared";
 import { nextFirstIssueStep } from "../../lib/firstIssue";
 
 type Props = {
-  agentCount: number;
+  agents: AgentWithHealth[];
   onStartIssue: () => void;
   onDismiss: () => void;
 };
 
-export default function FirstIssueStrip({ agentCount, onStartIssue, onDismiss }: Props) {
-  const step = nextFirstIssueStep(agentCount);
+export default function FirstIssueStrip({ agents, onStartIssue, onDismiss }: Props) {
+  const step = nextFirstIssueStep(agents);
   return (
     <section
       aria-label="Create your first issue"

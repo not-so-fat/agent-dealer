@@ -437,7 +437,7 @@ export default function IssuesListPage({
 
       {showFirstIssue && (
         <FirstIssueStrip
-          agentCount={agents.length}
+          agents={agents}
           onStartIssue={() => setShowCreate(true)}
           onDismiss={dismissStrip}
         />
