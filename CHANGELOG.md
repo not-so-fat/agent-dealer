@@ -4,6 +4,10 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.6 — 2026-09-28
+
+Patch over 1.2.5: Claude capacity refresh timing fix and managed-update version-switch safety.
+
 ### Fixes
 
 - **Claude capacity refreshes before the 15-minute freshness deadline (NOT-281)** — the free `claude -p "/usage"` refresh now triggers when either 5H or 1W window is missing or at least 14 minutes old (previously only when every observation was older than 60 minutes), at most once per 14 minutes, so the async refresh normally completes before the UI marks the reading stale. Requires restarting the deployed server after upgrade to load the new trigger.
