@@ -20,8 +20,8 @@ import IssueStatusBadge from "./IssueStatusBadge";
 import IssueConfigurationSection from "./IssueConfiguration";
 import IssueTimeline from "./IssueTimeline";
 import ExecutionAnalysisSection from "./ExecutionAnalysisSection";
-import HumanActionChoices from "./HumanActionChoices";
-import { parseResponseOptions } from "../../lib/humanActions";
+import HumanActionCard from "./HumanActionCard";
+import { summarizeHumanAction } from "@agent-dealer/shared";
 
 type Props = {
   issueId: string;
@@ -151,10 +151,11 @@ export function CloseIssueConfirmation({
 }
 
 /** The next allowed action, per the ticket's workflow rail: an open human action's own
- * response options when one exists, otherwise a derived "waiting on X" from currentOwner. */
+ * compact summary question when one exists (NOT-288 — never a folded git command
+ * block), otherwise a derived "waiting on X" from currentOwner. */
 function nextActionLabel(detail: IssueDetail): string {
   const open = detail.humanActions.find((a) => a.status === "open");
-  if (open) return open.question;
+  if (open) return summarizeHumanAction(open).title;
   switch (detail.issue.currentOwner) {
     case "developer":
       return "Waiting on the developer";
@@ -573,40 +574,40 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
               // (policy_escalation, attempts_exhausted, final_review,
               // deck_interaction_required, …) has no such precondition — render the
               // server's own response options generically rather than hardcoding choices
-              // per type.
+              // per type. NOT-288: every action renders through HumanActionCard so the
+              // detail agrees with the Issues home on the compact question, choice
+              // labels, and Details content.
               const scopeDecision = a.actionType === "product_scope_decision";
-              return (
-                <div key={a.id} className="space-y-1">
-                  <p className="text-sm text-white/80">{a.question}</p>
-                  {scopeDecision ? (
-                    readiness.ok && (
-                      <div className="space-y-1">
-                        <textarea
-                          className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm text-white/85 placeholder:text-white/30"
-                          rows={2}
-                          placeholder="Decision note (optional) — shown to the next developer round"
-                          value={scopeNotes[a.id] ?? ""}
-                          disabled={busy}
-                          onChange={(e) => setScopeNotes((prev) => ({ ...prev, [a.id]: e.target.value }))}
-                        />
-                        <button
-                          type="button"
-                          className="btn-gold px-3 py-1 text-xs"
-                          disabled={busy}
-                          onClick={() => resolveActionChoice(a.id, "resume", scopeNotes[a.id])}
-                        >
-                          Resume
-                        </button>
-                      </div>
-                    )
-                  ) : (
-                    <HumanActionChoices
-                      options={parseResponseOptions(a)}
-                      disabled={busy}
-                      onChoose={(choice) => resolveActionChoice(a.id, choice)}
-                    />
+              return scopeDecision ? (
+                <HumanActionCard key={a.id} action={a} hideChoicesHint>
+                  {readiness.ok && (
+                    <div className="space-y-1">
+                      <textarea
+                        className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm text-white/85 placeholder:text-white/30"
+                        rows={2}
+                        placeholder="Decision note (optional) — shown to the next developer round"
+                        value={scopeNotes[a.id] ?? ""}
+                        disabled={busy}
+                        onChange={(e) => setScopeNotes((prev) => ({ ...prev, [a.id]: e.target.value }))}
+                      />
+                      <button
+                        type="button"
+                        className="btn-gold px-3 py-1 text-xs"
+                        disabled={busy}
+                        onClick={() => resolveActionChoice(a.id, "resume", scopeNotes[a.id])}
+                      >
+                        Resume
+                      </button>
+                    </div>
                   )}
-                </div>
+                </HumanActionCard>
+              ) : (
+                <HumanActionCard
+                  key={a.id}
+                  action={a}
+                  disabled={busy}
+                  onChoose={(choice) => resolveActionChoice(a.id, choice)}
+                />
               );
             })}
           </div>
