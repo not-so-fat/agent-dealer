@@ -4,6 +4,17 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.7 — 2026-09-28
+
+Patch over 1.2.6: friend-path dashboard polish (guided first issue, concise recovery actions, capacity severity colors) and a README landing refresh.
+
+### Changes
+
+- **Guided first-issue strip and calmer Issues home (NOT-287)** — a fresh profile (zero issues, including closed) sees a compact, dismissible strip above the Issues list pointing to the next step: Agents until a healthy developer and a healthy reviewer exist, then New issue. Filtered-empty lists never trigger it; dismissal persists per local profile and creating the first issue retires it. Empty admission collapses to one muted status line while queued entries, errors and human actions keep full presentation. The shell subtitle now maps the products (Agent Deck carries the method; Agent Dealer runs the issue queue).
+- **Concise, safe worktree and policy recovery actions (NOT-288)** — a shared action-presentation layer and compact action card (with Details) now render human actions consistently in the home Needs-attention panel and the issue detail view.
+- **Top-bar capacity numbers use shared severity colors (NOT-290)** — capacity values are colored at the same thresholds as the rest of the capacity UI.
+- **README landing refresh (NOT-283)** — GTM one-liner and overview video.
+
 ## 1.2.6 — 2026-09-28
 
 Patch over 1.2.5: Claude capacity refresh timing fix and managed-update version-switch safety.
