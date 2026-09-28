@@ -145,7 +145,8 @@ test("checkDeveloperWorktreeOwnerLiveness: terminal session with a dead pid is d
   recordSessionProcess(session.id, pid, COORDINATOR_PROCESS_OWNER, startTime);
   completeSession(session.id, { status: "failed", errorJson: JSON.stringify({ reason: "gone" }) });
 
-  assert.deepEqual(checkDeveloperWorktreeOwnerLiveness(wt), { state: "dead" });
+  // NOT-280: a proven-dead owner is named so a resume salvage can be tied to it.
+  assert.deepEqual(checkDeveloperWorktreeOwnerLiveness(wt), { state: "dead", sessionId: session.id });
 });
 
 test("checkDeveloperWorktreeOwnerLiveness: unknown path with no session is dead", () => {

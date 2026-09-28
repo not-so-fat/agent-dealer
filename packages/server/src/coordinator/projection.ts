@@ -41,6 +41,8 @@ export type NextEffect =
       reason: string;
       /** NOT-221: diverged-push facts from the route — the action stores them as evidence. */
       pushDivergence?: PushDivergenceEvidence;
+      /** NOT-280: worktree blocker fingerprint from the route — used to dedupe the action. */
+      blockerFingerprint?: string;
     }
   /** NOT-102: merge the PR after approve, then complete or escalate — runs after the
    * routing transaction so `gh` never holds the SQLite write lock. */
@@ -121,6 +123,7 @@ export function projectDeveloperRoute(
           ...("pushDivergence" in route && route.pushDivergence
             ? { pushDivergence: route.pushDivergence }
             : {}),
+          ...(route.blockerFingerprint ? { blockerFingerprint: route.blockerFingerprint } : {}),
         },
         advance: "none",
       };

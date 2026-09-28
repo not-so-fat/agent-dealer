@@ -26,7 +26,14 @@ export type DeveloperOutcome =
     }
   /** A prior round's worktree still holds the issue branch and can't be safely reused/removed
    * (dirty/unpushed, or not coordinator-managed) — see git-worktree.ts's resolveDeveloperWorktree. */
-  | { kind: "worktree_conflict"; path: string; reason: string; recoveryCommands: string[] }
+  | {
+      kind: "worktree_conflict";
+      path: string;
+      reason: string;
+      recoveryCommands: string[];
+      /** NOT-280: stable blocker identity — an unchanged blocker reuses its human action. */
+      fingerprint?: string;
+    }
   /** NOT-127: leftover worktree still has a live owning process — do not adopt or treat as conflict. */
   | { kind: "live_owner"; path: string; ownerSessionId: string; reason: string }
   /** NOT-181: a Muse session's tool activity included `cron_create`/`cron_list`/`cron_delete`, which
@@ -146,6 +153,9 @@ export type DeveloperRouteResult =
       /** NOT-221: divergence facts for a rejected push — carried to the action's
        * evidence so the operator gets a one-click lease-pinned push. */
       pushDivergence?: PushDivergenceEvidence;
+      /** NOT-280: a worktree blocker's fingerprint — the same unchanged blocker lands on
+       * its existing action instead of opening an identical one. */
+      blockerFingerprint?: string;
     }
   /** `until` is only known up front when the blocker reports its own reset time (a usage
    * cap). An unreachable Agent Deck gives no ETA, so its retry time comes from the deferral
@@ -213,6 +223,7 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
         next: "human_action",
         actionType: "policy_escalation",
         reason: `${outcome.reason} Recovery:\n${outcome.recoveryCommands.join("\n")}`,
+        ...(outcome.fingerprint ? { blockerFingerprint: outcome.fingerprint } : {}),
       };
     case "muse_cron_used":
       // Spends no budget and never retries: a policy breach the operator must look at, like a

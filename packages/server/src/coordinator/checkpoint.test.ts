@@ -194,3 +194,28 @@ test("checkpoints attribute per session across attempts of one issue", async () 
     [COMMIT_SHA, "c".repeat(40)].sort()
   );
 });
+
+test("NOT-280: resume-salvage checkpoints dedupe per issue on restart but never collide across issues with an identical commit SHA", async () => {
+  const a = await setup();
+  const b = await setup();
+  const emit = (ctx: { issueId: string; instanceId: string; sessionId: string }) =>
+    emitCheckpointObserved({
+      issueId: ctx.issueId,
+      workflowInstanceId: ctx.instanceId,
+      workerSessionId: ctx.sessionId,
+      role: "developer",
+      stage: "developing",
+      round: 1,
+      kind: "commit",
+      observedSha: COMMIT_SHA,
+      origin: "salvage",
+      resumeSalvage: true,
+    });
+  emit(a);
+  emit(a); // restart re-detecting the same saved tip
+  emit(b); // another issue whose salvage produced the identical commit object
+  assert.equal(checkpointsOf(a.issueId, "commit").length, 1, "restart never duplicates the row");
+  assert.equal(checkpointsOf(b.issueId, "commit").length, 1, "the second issue still gets its own checkpoint");
+  const [row] = listWorkflowEventsForIssue(b.issueId).filter((e) => e.type === "checkpoint.observed");
+  assert.equal(row.workerSessionId, b.sessionId, "tied to its own predecessor session");
+});

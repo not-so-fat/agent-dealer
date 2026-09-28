@@ -118,6 +118,28 @@ test("worktree conflict always escalates immediately — never retried, regardle
   assert.match(reason, /git status/);
 });
 
+test("NOT-280: worktree_conflict carries its blocker fingerprint through routing and projection to the action effect", async () => {
+  const { projectDeveloperRoute } = await import("./projection.js");
+  const outcome: DeveloperOutcome = {
+    kind: "worktree_conflict",
+    path: "/data/worktrees/old-session-developer",
+    reason: "Automatic salvage failed: git commit failed: hook rejected",
+    recoveryCommands: ["git status"],
+    fingerprint: "fp-1",
+  };
+  const result = routeDeveloperOutcome(outcome, REVIEW_ROUNDS_LEFT);
+  assert.equal(result.next, "human_action");
+  assert.equal((result as { blockerFingerprint?: string }).blockerFingerprint, "fp-1");
+  const { effect, advance } = projectDeveloperRoute(result, "developing", 1);
+  assert.equal(advance, "none", "a worktree blocker never spends any budget");
+  assert.equal(effect.kind, "human_action");
+  assert.equal((effect as { blockerFingerprint?: string }).blockerFingerprint, "fp-1");
+
+  const { fingerprint: _omit, ...legacy } = outcome;
+  const plain = routeDeveloperOutcome(legacy, REVIEW_ROUNDS_LEFT);
+  assert.equal("blockerFingerprint" in plain, false);
+});
+
 test("NOT-127: live_owner retries on the infra budget — never escalates as worktree_conflict", () => {
   const outcome: DeveloperOutcome = {
     kind: "live_owner",

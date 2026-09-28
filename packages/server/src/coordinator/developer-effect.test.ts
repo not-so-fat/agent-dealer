@@ -1187,6 +1187,7 @@ test("NOT-88: a leftover dirty worktree escalates as an actionable worktree_conf
   const round1Session = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
   const leftoverPath = roleWorktreePath(repo, round1Session.id, "developer");
   assert.ok(fs.existsSync(path.join(leftoverPath, "scratch.txt")), "the dirty leftover must be preserved");
+  const statusBeforeResume = git(leftoverPath, "status", "--porcelain");
 
   const firstAction = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation" && a.status === "open")!;
   assert.ok(firstAction);
@@ -1209,6 +1210,21 @@ test("NOT-88: a leftover dirty worktree escalates as an actionable worktree_conf
   assert.ok(secondAction, "a fresh, actionable escalation — not silence and not a crash");
   assert.match(secondAction.reason, /uncommitted changes/);
   assert.match(secondAction.reason, new RegExp(leftoverPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  // NOT-280: the dead predecessor's dirt was salvage-attempted; the escalation names the
+  // actual git failure, and the checkout is left exactly as found.
+  assert.match(secondAction.reason, /Automatic salvage/);
+  assert.match(secondAction.reason, /git .*commit .*failed: .*salvage-blocked/s);
+  assert.equal(git(leftoverPath, "status", "--porcelain"), statusBeforeResume, "index and files left as found");
+
+  // NOT-280: a second Resume with nothing changed lands on the SAME action — reopened,
+  // never an identical copy.
+  resolveHumanActionAndAdvance(secondAction.id, "test", "resume");
+  await pump(1);
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  const afterRepeat = listHumanActionsForIssue(issueId);
+  assert.equal(afterRepeat.length, 2, "no duplicate action for an unchanged blocker");
+  const reopened = afterRepeat.find((a) => a.id === secondAction.id)!;
+  assert.equal(reopened.status, "open");
 
   // Cleanup the salvage-blocking hook too (worktrees share .git/hooks via the
   // common dir — leaving it would reject commits in every later test).
@@ -1217,6 +1233,175 @@ test("NOT-88: a leftover dirty worktree escalates as an actionable worktree_conf
   fs.rmSync(path.join(hooksDir, "pre-commit"), { force: true });
   fs.rmSync(leftoverPath, { recursive: true, force: true });
   await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+test("NOT-280: Resume salvages a dead predecessor's dirty managed checkout once, records one checkpoint, and continues from that tip — no worktree_conflict", async () => {
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  const commonDir = git(repo, "rev-parse", "--git-common-dir");
+  const hooksDir = path.isAbsolute(commonDir) ? path.join(commonDir, "hooks") : path.join(repo, commonDir, "hooks");
+
+  // Round 1 = the older backend: ticket-scoped edits (tracked + untracked), no commit, and
+  // its own session-end salvage blocked — so the dirty checkout is preserved.
+  let call = 0;
+  const heads: string[] = [];
+  const spawn: SpawnFn = async (input) => {
+    call++;
+    if (call === 1) {
+      fs.appendFileSync(path.join(input.cwd, "README.md"), "ticket edit\n");
+      fs.writeFileSync(path.join(input.cwd, "widget.txt"), "widget\n");
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(path.join(hooksDir, "pre-commit"), "#!/bin/sh\necho blocked >&2\nexit 1\n", { mode: 0o755 });
+      return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false };
+    }
+    heads.push(git(input.cwd, "rev-parse", "HEAD"));
+    return noopSpawn(input);
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github: fakeGithub() }));
+  startWorkflow(issueId);
+  await pump(1);
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  const round1 = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  const leftoverPath = roleWorktreePath(repo, round1.id, "developer");
+  const tipBefore = git(leftoverPath, "rev-parse", "HEAD");
+
+  // The hook is gone now (the environment that blocked the old backend changed); the
+  // dirty checkout still holds the branch. Resume must salvage it — not escalate.
+  fs.rmSync(path.join(hooksDir, "pre-commit"), { force: true });
+  const firstAction = listHumanActionsForIssue(issueId).find((a) => a.status === "open")!;
+  resolveHumanActionAndAdvance(firstAction.id, "test", "resume");
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "the pending attempt continued from the saved tip and handed off");
+  assert.equal(issue.currentRound, 1, "no review round spent");
+  const actions = listHumanActionsForIssue(issueId);
+  assert.equal(actions.length, 1, "no worktree_conflict human action");
+
+  // Exactly one salvage commit carrying both changes, and the attempt started on it.
+  const salvageSha = heads[0];
+  assert.equal(git(repo, "rev-list", "--count", `${tipBefore}..${salvageSha}`), "1");
+  assert.equal(git(repo, "log", "-1", "--format=%s", salvageSha), "wip: resume salvage");
+  assert.deepEqual(git(repo, "show", "--name-only", "--format=", salvageSha).split("\n").sort(), ["README.md", "widget.txt"]);
+  assert.equal(git(remote, "rev-parse", branch), salvageSha, "the salvaged tip is what was published");
+
+  const checkpoints = listWorkflowEventsForIssue(issueId).filter((e) => {
+    if (e.type !== "checkpoint.observed") return false;
+    const p = JSON.parse(e.payloadJson ?? "{}");
+    return p.origin === "salvage" && p.observedSha === salvageSha;
+  });
+  assert.equal(checkpoints.length, 1, "one durable salvage checkpoint");
+  assert.equal(checkpoints[0].workerSessionId, round1.id, "tied to the predecessor session");
+});
+
+test("NOT-280: a salvage checkpoint that cannot be persisted blocks before spawning, keeps the checkout, and never duplicates its action", async () => {
+  const issueId = await makeIssue();
+  const commonDir = git(repo, "rev-parse", "--git-common-dir");
+  const hooksDir = path.isAbsolute(commonDir) ? path.join(commonDir, "hooks") : path.join(repo, commonDir, "hooks");
+
+  let call = 0;
+  const heads: string[] = [];
+  const spawn: SpawnFn = async (input) => {
+    call++;
+    if (call === 1) {
+      fs.writeFileSync(path.join(input.cwd, "persist.txt"), "ticket work\n");
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(path.join(hooksDir, "pre-commit"), "#!/bin/sh\necho blocked >&2\nexit 1\n", { mode: 0o755 });
+      return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false };
+    }
+    heads.push(git(input.cwd, "rev-parse", "HEAD"));
+    return noopSpawn(input);
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github: fakeGithub() }));
+  startWorkflow(issueId);
+  await pump(1);
+  const round1 = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  const leftoverPath = roleWorktreePath(repo, round1.id, "developer");
+  const tipBefore = git(leftoverPath, "rev-parse", "HEAD");
+  fs.rmSync(path.join(hooksDir, "pre-commit"), { force: true });
+
+  // The Dealer database rejects the resume-salvage checkpoint row.
+  getDb().exec(`CREATE TRIGGER not280_block_salvage_checkpoint BEFORE INSERT ON workflow_events
+    WHEN NEW.idempotency_key LIKE 'checkpoint:resume-salvage:%'
+    BEGIN SELECT RAISE(ABORT, 'checkpoint store unavailable'); END`);
+  try {
+    const firstAction = listHumanActionsForIssue(issueId).find((a) => a.status === "open")!;
+    resolveHumanActionAndAdvance(firstAction.id, "test", "resume");
+    await pump(1);
+
+    assert.equal(getIssue(issueId)!.status, "needs_human", "no attempt proceeds without its durable checkpoint");
+    assert.equal(heads.length, 0, "nothing spawned");
+    const blocker = listHumanActionsForIssue(issueId).find((a) => a.status === "open")!;
+    assert.match(blocker.reason, /durable checkpoint could not be recorded/);
+    assert.match(blocker.reason, /checkpoint store unavailable/);
+    assert.ok(blocker.reason.includes(leftoverPath));
+    const salvageSha = git(leftoverPath, "rev-parse", "HEAD");
+    assert.equal(git(repo, "rev-list", "--count", `${tipBefore}..${salvageSha}`), "1", "the salvage commit is kept");
+    assert.equal(git(leftoverPath, "status", "--porcelain"), "", "checkout left intact on its salvage tip");
+
+    // Unchanged blocker: Resume reuses the same action, and never re-commits.
+    const countBefore = listHumanActionsForIssue(issueId).length;
+    resolveHumanActionAndAdvance(blocker.id, "test", "resume");
+    await pump(1);
+    assert.equal(listHumanActionsForIssue(issueId).length, countBefore, "no duplicate action");
+    assert.equal(git(leftoverPath, "rev-parse", "HEAD"), salvageSha, "no duplicate commit");
+
+    // Store fixed: the next Resume records the checkpoint and continues from the saved tip.
+    getDb().exec("DROP TRIGGER not280_block_salvage_checkpoint");
+    const reopened = listHumanActionsForIssue(issueId).find((a) => a.status === "open")!;
+    resolveHumanActionAndAdvance(reopened.id, "test", "resume");
+    await pump(1);
+    assert.equal(getIssue(issueId)!.status, "reviewing");
+    assert.equal(heads[0], salvageSha);
+    const checkpoints = listWorkflowEventsForIssue(issueId).filter((e) => {
+      if (e.type !== "checkpoint.observed") return false;
+      const p = JSON.parse(e.payloadJson ?? "{}");
+      return p.origin === "salvage" && p.observedSha === salvageSha;
+    });
+    assert.equal(checkpoints.length, 1, "exactly one durable salvage checkpoint once the store recovers");
+    assert.equal(checkpoints[0].workerSessionId, round1.id);
+  } finally {
+    getDb().exec("DROP TRIGGER IF EXISTS not280_block_salvage_checkpoint");
+  }
+});
+
+test("NOT-280: a restart after the salvage commit (before cleanup) detects the saved tip — no duplicate commit or checkpoint", async () => {
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  // A dead predecessor's checkout whose resume salvage already landed — the state a
+  // coordinator crash between the salvage commit and the attempt leaves behind.
+  git(repo, "branch", branch, "main");
+  const predecessor = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: 1,
+    agentId: getIssue(issueId)!.developerAgentId!,
+    runtime: "claude_code",
+  });
+  const leftoverPath = roleWorktreePath(repo, predecessor.id, "developer");
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "add", "-q", leftoverPath, branch], { cwd: repo }));
+  fs.writeFileSync(path.join(leftoverPath, "saved.txt"), "work\n");
+  git(leftoverPath, "add", "-A");
+  git(leftoverPath, "-c", "user.email=agent-dealer@localhost", "-c", "user.name=Agent Dealer", "commit", "-q", "-m", "wip: resume salvage");
+  const salvageSha = git(leftoverPath, "rev-parse", "HEAD");
+
+  const heads: string[] = [];
+  const spawn: SpawnFn = async (input) => {
+    heads.push(git(input.cwd, "rev-parse", "HEAD"));
+    return noopSpawn(input);
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github: fakeGithub() }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.equal(heads[0], salvageSha, "continued from the saved tip, not a new commit");
+  assert.equal(git(repo, "rev-parse", `refs/heads/${branch}`), salvageSha);
+  assert.equal(getIssue(issueId)!.status, "reviewing");
+  const checkpoints = listWorkflowEventsForIssue(issueId).filter(
+    (e) => e.type === "checkpoint.observed" && JSON.parse(e.payloadJson ?? "{}").origin === "salvage" && JSON.parse(e.payloadJson ?? "{}").observedSha === salvageSha
+  );
+  assert.equal(checkpoints.length, 1);
+  assert.equal(checkpoints[0].workerSessionId, predecessor.id);
 });
 
 test("baseSha is resolved against the fetched base ref, not a stale local branch", async () => {

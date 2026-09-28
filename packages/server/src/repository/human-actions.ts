@@ -208,6 +208,22 @@ export function updateOpenHumanAction(
   return getHumanAction(id);
 }
 
+/**
+ * NOT-280: put a resolved action back to open, unchanged — used when a Resume ran into the
+ * exact same blocker again, so the operator keeps one action instead of an identical copy.
+ * Only touches resolved rows; returns null otherwise.
+ */
+export function reopenHumanAction(id: string): HumanAction | null {
+  const info = getDb()
+    .prepare(
+      `UPDATE human_actions SET
+        status = 'open', resolution_json = NULL, resolved_by = NULL, resolved_at = NULL
+      WHERE id = ? AND status = 'resolved'`
+    )
+    .run(id);
+  return info.changes === 0 ? null : getHumanAction(id);
+}
+
 /** Run-scoped equivalent of `findOpenHumanAction` (NOT-95 — outbound-draft delivery
  * parking has no Issue). */
 export function findOpenHumanActionForRun(runId: string, actionType: HumanActionType): HumanAction | null {

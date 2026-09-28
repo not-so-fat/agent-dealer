@@ -9,6 +9,7 @@
 // Lifted from archive/not-57-full-p0-slice and extended with role-aware creation,
 // safe (non-destructive) removal, and leftover inspection for crash recovery.
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -227,19 +228,35 @@ export async function removeWorktree(opts: { repo: string; path: string; force?:
   await git(opts.repo, args);
 }
 
+/**
+ * NOT-280: `git status --porcelain` without the opportunistic index refresh — plain status
+ * rewrites a stale-stat index, which would mutate a checkout a refusal path must leave
+ * untouched (outside root, wrong branch, unknown owner).
+ */
+async function readOnlyStatus(worktreePath: string): Promise<string> {
+  return (await git(worktreePath, ["--no-optional-locks", "status", "--porcelain"])).stdout;
+}
+
 export async function isWorktreeClean(worktreePath: string): Promise<boolean> {
-  const { stdout } = await git(worktreePath, ["status", "--porcelain"]);
-  return stdout.trim().length === 0;
+  return (await readOnlyStatus(worktreePath)).trim().length === 0;
 }
 
 /** Commit message for a timeout salvage tip (NOT-145). */
 export const SALVAGE_TIMEOUT_MESSAGE = "wip: timeout salvage";
 /** Commit message for a crash/non-zero exit salvage tip (NOT-145). */
 export const SALVAGE_CRASH_MESSAGE = "wip: crash salvage";
+/** Commit message for a dead predecessor's dirt salvaged before a new attempt (NOT-280). */
+export const SALVAGE_RESUME_MESSAGE = "wip: resume salvage";
 
 export type SalvageResult =
   | { ok: true; commitSha: string; message: string }
   | { ok: false; reason: string };
+
+const SALVAGE_MESSAGES = {
+  timeout: SALVAGE_TIMEOUT_MESSAGE,
+  crash: SALVAGE_CRASH_MESSAGE,
+  resume: SALVAGE_RESUME_MESSAGE,
+} as const;
 
 /**
  * NOT-145: stage everything and commit a clearly marked salvage tip so a timeout/crash
@@ -249,9 +266,9 @@ export type SalvageResult =
  */
 export async function salvageDirtyWorktree(
   worktreePath: string,
-  kind: "timeout" | "crash"
+  kind: keyof typeof SALVAGE_MESSAGES
 ): Promise<SalvageResult> {
-  const message = kind === "timeout" ? SALVAGE_TIMEOUT_MESSAGE : SALVAGE_CRASH_MESSAGE;
+  const message = SALVAGE_MESSAGES[kind];
   try {
     await git(worktreePath, ["add", "-A"]);
     // Explicit identity: coordinator-managed worktrees may lack user.name/email, and a
@@ -853,8 +870,18 @@ export type DeveloperWorktreeResolution =
    * a fresh checkout of an already-existing branch for a retry.
    */
   | { kind: "created"; path: string; baseSha: string | null; baseRef: string | null }
-  | { kind: "reused"; path: string }
-  | { kind: "conflict"; path: string; reason: string; recoveryCommands: string[] }
+  /**
+   * `salvage` (NOT-280) is set when the reused checkout's tip is a resume-salvage commit of
+   * a proven-dead predecessor's dirt — either landed just now, or (`recovered`) found
+   * already landed by an earlier resolution that died before the attempt continued.
+   */
+  | { kind: "reused"; path: string; salvage?: PredecessorSalvage }
+  /**
+   * `fingerprint` (NOT-280) identifies the blocker's exact state (path, failing step/stderr,
+   * HEAD, status) so an unchanged blocker on a repeated Resume can land on the same human
+   * action instead of opening an identical one.
+   */
+  | { kind: "conflict"; path: string; reason: string; recoveryCommands: string[]; fingerprint?: string }
   /** NOT-127: leftover is still owned by a session whose CLI is live — do not adopt or escalate. */
   | { kind: "live_owner"; path: string; ownerSessionId: string; reason: string }
   /**
@@ -880,8 +907,115 @@ export function sessionIdFromRoleWorktreePath(worktreePath: string): string | nu
 
 /** Whether a leftover worktree's owning session still has a live process (NOT-127). */
 export type WorktreeOwnerLiveness =
-  | { state: "dead" }
+  /** `sessionId` (NOT-280) names a known Dealer session proven to own the path and be
+   * dead. Absent means no owner was found at all — dirt then stays fail-closed. */
+  | { state: "dead"; sessionId?: string }
   | { state: "alive"; sessionId: string };
+
+/** NOT-280: a dead predecessor's dirt committed on the issue branch before a new attempt. */
+export type PredecessorSalvage = {
+  commitSha: string;
+  message: string;
+  predecessorSessionId: string;
+  /** True when the commit was found already landed (restart after salvage), not made now. */
+  recovered: boolean;
+};
+
+function sha256Hex(parts: string[]): string {
+  return createHash("sha256").update(parts.join("\0")).digest("hex");
+}
+
+/**
+ * NOT-280: stable identity of a leftover's blocking state. Best-effort reads of HEAD and
+ * status: an unreadable checkout still fingerprints (by path + reason), so repeated
+ * Resumes against the same corrupt tree dedupe too.
+ */
+export async function leftoverFingerprint(worktreePath: string, reason: string): Promise<string> {
+  const head = await git(worktreePath, ["rev-parse", "HEAD"]).then((r) => r.stdout.trim(), () => "");
+  const status = await readOnlyStatus(worktreePath).catch(() => "");
+  return sha256Hex([tryRealpath(worktreePath), reason, head, status]);
+}
+
+/** Unmerged index entries (`git status --porcelain` XY codes) — a half-resolved merge. */
+const UNMERGED_STATUS = /^(DD|AU|UD|UA|DU|AA|UU) /m;
+
+type PredecessorSalvageAttempt =
+  | { ok: true; commitSha: string; message: string }
+  | { ok: false; reason: string };
+
+/**
+ * NOT-280: commit a proven-dead predecessor's dirty managed checkout on the issue branch
+ * so the next attempt can continue from that tip. Inspects before touching anything:
+ * the checkout must be on exactly `refs/heads/<branch>` with no in-progress merge/
+ * cherry-pick/revert and no unmerged entries — anything else fails closed. A failed
+ * commit (e.g. a rejecting hook) restores the index it staged, so the checkout is left
+ * exactly as found.
+ */
+export async function salvagePredecessorWorktree(
+  worktreePath: string,
+  branchName: string
+): Promise<PredecessorSalvageAttempt> {
+  let headRef: string;
+  let status: string;
+  let indexTree: string;
+  // Branch identity first, so a wrong-branch checkout is refused before any status read.
+  try {
+    headRef = (await git(worktreePath, ["symbolic-ref", "-q", "HEAD"])).stdout.trim();
+  } catch (err) {
+    return { ok: false, reason: `inspection failed: ${(err as Error).message}` };
+  }
+  if (headRef !== `refs/heads/${branchName}`) {
+    return { ok: false, reason: `checkout is on ${headRef || "a detached HEAD"}, not refs/heads/${branchName}` };
+  }
+  try {
+    status = await readOnlyStatus(worktreePath);
+  } catch (err) {
+    return { ok: false, reason: `inspection failed: ${(err as Error).message}` };
+  }
+  if (UNMERGED_STATUS.test(status)) {
+    return { ok: false, reason: "checkout has unmerged paths (an unfinished merge/rebase)" };
+  }
+  for (const marker of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"]) {
+    if (await refExists(worktreePath, marker)) {
+      return { ok: false, reason: `checkout has an in-progress operation (${marker} exists)` };
+    }
+  }
+  try {
+    indexTree = (await git(worktreePath, ["write-tree"])).stdout.trim();
+  } catch (err) {
+    return { ok: false, reason: `inspection failed: ${(err as Error).message}` };
+  }
+  const headBefore = await revParseHead(worktreePath);
+  const salvaged = await salvageDirtyWorktree(worktreePath, "resume");
+  if (salvaged.ok) return salvaged;
+  // Undo the `git add -A` staging when the commit itself did not land; a landed commit
+  // with residual dirt keeps its commit (the work is saved) and still fails closed.
+  // A failed rollback leaves the salvage's staging in place, so it is reported alongside
+  // the commit failure rather than claiming the checkout was left as found.
+  const headAfter = await revParseHead(worktreePath).catch(() => null);
+  if (headAfter === headBefore) {
+    try {
+      await git(worktreePath, ["read-tree", indexTree]);
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `${salvaged.reason}; restoring the index afterwards also failed (git read-tree ${indexTree}): ${(err as Error).message} — files in ${worktreePath} are untouched but \`git add -A\` staging remains`,
+      };
+    }
+  }
+  return { ok: false, reason: salvaged.reason };
+}
+
+/** Whether HEAD's subject is a resume-salvage tip (restart after the commit landed). */
+async function headIsResumeSalvage(worktreePath: string): Promise<string | null> {
+  try {
+    const { stdout } = await git(worktreePath, ["log", "-1", "--format=%H%x00%s"]);
+    const [sha, subject] = stdout.trim().split("\0");
+    return subject === SALVAGE_RESUME_MESSAGE && sha ? sha : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The developer-setup half of design §"Worktree lifecycle and concurrency"'s crash-recovery
@@ -919,31 +1053,41 @@ export async function resolveDeveloperWorktree(opts: {
   fetchTimeoutMs?: number;
 }): Promise<DeveloperWorktreeResolution> {
   return withRepoLock(opts.repo, async () => {
-    await pruneWorktrees(opts.repo);
-    // NOT-219: a repair round reuses an existing issue branch, so first fetch
+    // NOT-280: no up-front `git worktree prune` — it deletes `.git/worktrees/*` admin
+    // entries, so it runs only once no refusal (outside root, live owner, dirt, unreadable
+    // checkout) applies: for a vanished leftover here, otherwise right before the add below.
+    // NOT-219: a repair round reuses an existing issue branch, so fetch
     // `origin/<branch>` — the worktree must start at exactly what Dealer pushed,
     // never the managed clone's possibly-stale local ref. A failed fetch defers the
     // start (`base_unavailable`) instead of falling back to the stale local branch.
+    // NOT-280: the fetch runs only once every refusal check (outside root, live owner,
+    // unknown-owner dirt, unreadable checkout) has passed, so a refused leftover leaves
+    // the shared repository's refs, FETCH_HEAD and objects untouched.
+    const fetchReuse = async (): Promise<ReusedBranchFetch> =>
+      opts.reuseBranch
+        ? fetchReusedBranch(opts.repo, opts.branchName, opts.fetchTimeoutMs)
+        : { ok: true, remoteSha: null };
     let reuseRemoteSha: string | null = null;
-    if (opts.reuseBranch) {
-      const reused = await fetchReusedBranch(opts.repo, opts.branchName, opts.fetchTimeoutMs);
-      if (!reused.ok) {
-        return { kind: "base_unavailable", reason: reused.reason };
-      }
-      reuseRemoteSha = reused.remoteSha;
+    let existing = await findWorktreeForBranch(opts.repo, opts.branchName);
+    if (existing && !fs.existsSync(existing)) {
+      // A registered checkout whose directory is gone is a stale administrative entry
+      // (pre-NOT-280 this was pruned before the lookup): prune it and look again.
+      await pruneWorktrees(opts.repo);
+      existing = await findWorktreeForBranch(opts.repo, opts.branchName);
     }
-    const existing = await findWorktreeForBranch(opts.repo, opts.branchName);
     if (existing) {
       const managedRoot = opts.worktreePath
         ? tryRealpath(path.dirname(opts.worktreePath))
         : tryRealpath(worktreesRoot(opts.repo));
       const underRoot = tryRealpath(existing).startsWith(managedRoot + path.sep);
       if (!underRoot) {
+        const reason = `Branch ${opts.branchName} is already checked out at ${existing}, outside the coordinator's managed worktrees — it cannot be safely reused or removed automatically.`;
         return {
           kind: "conflict",
           path: existing,
-          reason: `Branch ${opts.branchName} is already checked out at ${existing}, outside the coordinator's managed worktrees — it cannot be safely reused or removed automatically.`,
+          reason,
           recoveryCommands: [`git -C ${opts.repo} worktree list`, `# free the branch, then Resume: cd ${existing} && git status`],
+          fingerprint: await leftoverFingerprint(existing, reason),
         };
       }
       // Live owner first — clean/dirty are only meaningful once the predecessor is gone.
@@ -956,8 +1100,43 @@ export async function resolveDeveloperWorktree(opts: {
           reason: `Developer worktree for branch ${opts.branchName} at ${existing} is still in use by session ${owner.sessionId} (live process) — refusing to adopt it or escalate as a worktree conflict.`,
         };
       }
-      const state = await inspectLeftoverWorktree(existing);
+      // NOT-280: only a known Dealer session proven dead may have its dirt salvaged.
+      const deadPredecessor = owner.state === "dead" ? (owner.sessionId ?? null) : null;
+      let state = await inspectLeftoverWorktree(existing);
+      let salvage: PredecessorSalvage | undefined;
+      let salvageFailure: string | null = null;
+      if (state === "dirty_or_unpushed" && deadPredecessor) {
+        const salvaged = await salvagePredecessorWorktree(existing, opts.branchName);
+        if (salvaged.ok) {
+          salvage = {
+            commitSha: salvaged.commitSha,
+            message: salvaged.message,
+            predecessorSessionId: deadPredecessor,
+            recovered: false,
+          };
+          state = await inspectLeftoverWorktree(existing);
+        } else {
+          salvageFailure = salvaged.reason;
+        }
+      } else if (state === "clean" && deadPredecessor) {
+        // Restart after the salvage commit landed but before the attempt continued: the
+        // saved tip is detected, never re-committed.
+        const landed = await headIsResumeSalvage(existing);
+        if (landed) {
+          salvage = {
+            commitSha: landed,
+            message: SALVAGE_RESUME_MESSAGE,
+            predecessorSessionId: deadPredecessor,
+            recovered: true,
+          };
+        }
+      }
       if (state === "clean") {
+        const reused = await fetchReuse();
+        if (!reused.ok) {
+          return { kind: "base_unavailable", reason: reused.reason };
+        }
+        reuseRemoteSha = reused.remoteSha;
         // NOT-219: a clean leftover holding a stale local branch advances to the
         // fetched remote tip when that is a strict fast-forward (nothing unique to
         // lose — the local tip is already an ancestor of the remote one). Any other
@@ -972,19 +1151,26 @@ export async function resolveDeveloperWorktree(opts: {
             await git(existing, ["merge", "--ff-only", "-q", `origin/${opts.branchName}`]).catch(() => null);
           }
         }
-        return { kind: "reused", path: tryRealpath(existing) };
+        return { kind: "reused", path: tryRealpath(existing), ...(salvage ? { salvage } : {}) };
       }
       if (state === "dirty_or_unpushed") {
+        const base = `A previous developer worktree for branch ${opts.branchName} still holds it at ${existing} with uncommitted changes.`;
+        const reason = salvageFailure
+          ? `${base} Automatic salvage of dead session ${deadPredecessor}'s work failed and the checkout was preserved (not removed or reset): ${salvageFailure}`
+          : salvage
+            ? `${base} Salvage tip ${salvage.commitSha.slice(0, 7)} landed but the checkout is still dirty.`
+            : base;
         return {
           kind: "conflict",
           path: existing,
-          reason: `A previous developer worktree for branch ${opts.branchName} still holds it at ${existing} with uncommitted changes.`,
+          reason,
           recoveryCommands: [
             `cd ${existing}`,
             "git status",
             "git log --oneline -5",
             `# once the work there is safe (pushed or intentionally discarded): git -C ${opts.repo} worktree remove ${existing} --force`,
           ],
+          fingerprint: await leftoverFingerprint(existing, reason),
         };
       }
       // inspectLeftoverWorktree reports "missing" for ANY `git status` failure, not just a
@@ -994,23 +1180,34 @@ export async function resolveDeveloperWorktree(opts: {
       // below — a narrower repeat of the exact loop this function exists to close). Only a
       // truly gone directory is safe to treat as a stale administrative entry.
       if (fs.existsSync(existing)) {
+        const reason = `A previous developer worktree for branch ${opts.branchName} exists at ${existing} but its status could not be determined.`;
         return {
           kind: "conflict",
           path: existing,
-          reason: `A previous developer worktree for branch ${opts.branchName} exists at ${existing} but its status could not be determined.`,
+          reason,
           recoveryCommands: [
             `cd ${existing}`,
             "git status",
             `# once resolved: git -C ${opts.repo} worktree remove ${existing} --force`,
           ],
+          fingerprint: await leftoverFingerprint(existing, reason),
         };
       }
-      await pruneWorktrees(opts.repo);
     }
+    // Clear stale registrations (e.g. a vanished checkout at the target path) before the
+    // add — every refusal path above has already returned without mutating anything.
+    await pruneWorktrees(opts.repo);
     // NOT-197: a fresh issue branch starts from the freshly fetched
     // `origin/<baseBranch>` tip — never the cached clone's possibly-stale local base.
     // A failed fetch returns `base_unavailable` (no branch is created) instead of
     // silently falling back to the stale local branch.
+    if (opts.reuseBranch) {
+      const reused = await fetchReuse();
+      if (!reused.ok) {
+        return { kind: "base_unavailable", reason: reused.reason };
+      }
+      reuseRemoteSha = reused.remoteSha;
+    }
     let ref: string;
     let newBranch: string | undefined;
     let baseSha: string | null = null;

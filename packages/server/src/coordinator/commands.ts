@@ -41,6 +41,7 @@ import {
   findOpenHumanAction,
   getHumanAction,
   listHumanActionsForIssue,
+  reopenHumanAction,
   resolveHumanAction,
   updateOpenHumanAction,
 } from "../repository/human-actions.js";
@@ -79,6 +80,7 @@ import {
   MERGE_FAILURE_RESPONSE_OPTIONS,
   PUSH_DIVERGENCE_EVIDENCE_KEY,
   PUSH_DIVERGENCE_RESPONSE_OPTIONS,
+  WORKTREE_BLOCKER_EVIDENCE_KEY,
   normalizeResolutionNote,
   parseHumanResolution,
   resolveHumanActionOutcome,
@@ -1018,6 +1020,19 @@ function applyEffect(
       actionType === "policy_escalation" && !resumeAsReviewer
         ? (effect.pushDivergence ?? null)
         : null;
+    // NOT-280: an unchanged worktree blocker (same fingerprint) lands on the action it
+    // already raised — still open, or reopened when a Resume changed nothing — instead of
+    // opening an identical one on every Resume.
+    const blockerFingerprint = effect.kind === "human_action" ? (effect.blockerFingerprint ?? null) : null;
+    if (blockerFingerprint) {
+      const same = sameBlockerAction(issue.id, blockerFingerprint);
+      if (same) {
+        ev.emit("human_action.requested", {
+          payload: { actionType: same.actionType, actionId: same.id, reopened: true, blockerFingerprint },
+        });
+        return { ...base, humanActionId: same.id };
+      }
+    }
     const action = createHumanAction({
       issueId: issue.id,
       workflowInstanceId: instance.id,
@@ -1029,7 +1044,9 @@ function applyEffect(
           ? { review: reviewerOutcome.result, ...(nonConvergence ? { nonConvergence } : {}) }
           : pushDivergence
             ? { [PUSH_DIVERGENCE_EVIDENCE_KEY]: pushDivergence }
-            : undefined,
+            : blockerFingerprint
+              ? { [WORKTREE_BLOCKER_EVIDENCE_KEY]: { fingerprint: blockerFingerprint } }
+              : undefined,
       // issueNow.headSha, not issue.headSha: a stale outcome that itself exhausted the
       // infra budget already patched the newly observed head onto the issue above — the
       // pre-transition issue param would still carry the stale SHA a "resume" must not reuse.
@@ -1052,6 +1069,45 @@ function applyEffect(
   }
 
   return base;
+}
+
+/**
+ * NOT-280: an action reopened for an unchanged blocker (`sameBlockerAction`) can be
+ * resumed again — each Resume of it needs its own work item, so later resolutions of the
+ * same action get an ordinal suffix. The first Resume keeps the plain action-keyed name.
+ */
+function resumeWorkItemKey(issueId: string, baseKey: string): string {
+  const taken = new Set(listWorkItemsForIssue(issueId).map((w) => w.idempotencyKey));
+  if (!taken.has(baseKey)) return baseKey;
+  let n = 2;
+  while (taken.has(`${baseKey}:${n}`)) n++;
+  return `${baseKey}:${n}`;
+}
+
+/**
+ * NOT-280: the issue's most recent action, when it was raised for exactly this worktree
+ * blocker fingerprint and is either still open or was resolved by a Resume — reopened in
+ * that case. Anything else in between (another action, a different choice, a changed
+ * blocker) means state moved, so the caller raises a fresh action.
+ */
+function sameBlockerAction(issueId: string, fingerprint: string): HumanAction | null {
+  const actions = listHumanActionsForIssue(issueId);
+  const latest = actions[actions.length - 1];
+  if (!latest?.evidenceJson) return null;
+  try {
+    const evidence = JSON.parse(latest.evidenceJson) as Record<string, { fingerprint?: unknown } | undefined>;
+    if (evidence[WORKTREE_BLOCKER_EVIDENCE_KEY]?.fingerprint !== fingerprint) return null;
+  } catch {
+    return null;
+  }
+  if (latest.status === "open") return latest;
+  try {
+    const resolution = latest.resolutionJson ? (JSON.parse(latest.resolutionJson) as { choice?: unknown }) : null;
+    if (resolution?.choice !== "resume") return null;
+  } catch {
+    return null;
+  }
+  return reopenHumanAction(latest.id);
 }
 
 /**
@@ -1579,6 +1635,7 @@ export function resolveHumanActionAndAdvance(
     // Keyed on the resolved human action, not the round/attempt counters: a
     // "infra" resume resets infra_attempts to 0 every time, so a counter-based key would
     // collide across repeated escalate→resume cycles within the same round.
+    const resumeKey = resumeWorkItemKey(issue.id, `${instance.id}:${resumeAsReviewer ? "reviewer" : "developer"}:resume:${action.id}`);
     const next = resumeAsReviewer
       ? enqueueWorkItem({
           issueId: issue.id,
@@ -1586,7 +1643,7 @@ export function resolveHumanActionAndAdvance(
           kind: "reviewer",
           round: issueNow.currentRound,
           payload: { inputSha: effectiveResumeHeadSha!, profileSnapshot: queuedProfileSnapshot(issue, "reviewer") },
-          idempotencyKey: `${instance.id}:reviewer:resume:${action.id}`,
+          idempotencyKey: resumeKey,
         })
       : enqueueWorkItem({
           issueId: issue.id,
@@ -1599,7 +1656,7 @@ export function resolveHumanActionAndAdvance(
             // payload — later rounds never see it.
             ...(scopeDecisionNote ? { scopeDecisionNote } : {}),
           },
-          idempotencyKey: `${instance.id}:developer:resume:${action.id}`,
+          idempotencyKey: resumeKey,
         });
     return {
       ok: true,

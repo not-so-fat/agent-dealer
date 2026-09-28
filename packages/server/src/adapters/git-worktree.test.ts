@@ -955,6 +955,319 @@ test("NOT-127: resolveDeveloperWorktree still escalates a dirty leftover when th
   await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
 });
 
+// ---------------------------------------------------------------- NOT-280: dead-predecessor salvage
+
+async function dropWorktree(p: string): Promise<void> {
+  fs.rmSync(p, { recursive: true, force: true });
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+}
+
+/** A dirty managed leftover on its own branch: one tracked edit + one untracked file. */
+async function dirtyLeftover(branch: string, sessionId: string) {
+  git(repo, "branch", branch, "main");
+  const leftover = await createRoleWorktree({ repo, role: "developer", sessionId, ref: branch });
+  fs.writeFileSync(path.join(leftover.path, "README.md"), "hello\nedited by dead worker\n");
+  fs.writeFileSync(path.join(leftover.path, "new-file.txt"), "untracked ticket work\n");
+  return leftover;
+}
+
+function resolveFor(branch: string, sessionId: string, liveness: { state: "dead"; sessionId?: string } | { state: "alive"; sessionId: string }) {
+  return resolveDeveloperWorktree({
+    repo,
+    sessionId,
+    branchName: branch,
+    baseBranch: "main",
+    reuseBranch: true,
+    ownerLiveness: () => liveness,
+  });
+}
+
+test("NOT-280: a proven-dead predecessor's dirty checkout is salvaged once and reused from the saved tip", async () => {
+  const { SALVAGE_RESUME_MESSAGE } = await import("./git-worktree.js");
+  const leftover = await dirtyLeftover("issue-280-salvage", "s-280-dead");
+  const before = git(leftover.path, "rev-parse", "HEAD");
+
+  const resolved = await resolveFor("issue-280-salvage", "s-280-next", { state: "dead", sessionId: "s-280-dead" });
+  assert.equal(resolved.kind, "reused");
+  if (resolved.kind !== "reused") return;
+  assert.equal(resolved.path, leftover.path);
+  assert.ok(resolved.salvage, "salvage evidence is reported");
+  assert.equal(resolved.salvage!.predecessorSessionId, "s-280-dead");
+  assert.equal(resolved.salvage!.recovered, false);
+  assert.equal(resolved.salvage!.message, SALVAGE_RESUME_MESSAGE);
+
+  const head = git(leftover.path, "rev-parse", "HEAD");
+  assert.equal(head, resolved.salvage!.commitSha);
+  assert.equal(git(leftover.path, "rev-parse", "refs/heads/issue-280-salvage"), head, "the tip is on the issue branch");
+  assert.equal(git(repo, "rev-list", "--count", `${before}..${head}`), "1", "exactly one salvage commit");
+  const files = git(leftover.path, "show", "--name-only", "--format=", head).split("\n").sort();
+  assert.deepEqual(files, ["README.md", "new-file.txt"], "tracked and untracked work both land");
+  assert.equal(await isWorktreeClean(leftover.path), true);
+
+  // Restart after the commit landed, before the attempt continued: the saved tip is
+  // detected and never re-committed.
+  const again = await resolveFor("issue-280-salvage", "s-280-next-2", { state: "dead", sessionId: "s-280-dead" });
+  assert.equal(again.kind, "reused");
+  if (again.kind === "reused") {
+    assert.equal(again.salvage?.commitSha, head);
+    assert.equal(again.salvage?.recovered, true);
+  }
+  assert.equal(git(leftover.path, "rev-parse", "HEAD"), head, "no duplicate commit");
+  await dropWorktree(leftover.path);
+});
+
+/**
+ * Publish `branch` to origin with one extra commit the managed clone has never seen, so any
+ * `git fetch` during a refused resolution would leave a remote-tracking ref, a new object, and
+ * a rewritten FETCH_HEAD behind in the shared repository.
+ */
+function publishRemoteOnlyCommit(branch: string): string {
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-remote-"));
+  try {
+    execFileSync("git", ["clone", "-q", remote, other]);
+    git(other, "config", "user.email", "t@example.com");
+    git(other, "config", "user.name", "t");
+    git(other, "checkout", "-q", "-b", branch, git(repo, "rev-parse", "main"));
+    fs.writeFileSync(path.join(other, "remote-only.txt"), branch);
+    git(other, "add", "remote-only.txt");
+    git(other, "commit", "-q", "-m", "remote-only");
+    git(other, "push", "-q", "origin", `${branch}:refs/heads/${branch}`);
+    return git(other, "rev-parse", "HEAD");
+  } finally {
+    fs.rmSync(other, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Shared-repository state a refused resolution must not change: tracking ref, object store,
+ * FETCH_HEAD (a fetch), and the `.git/worktrees` administrative entries (a prune).
+ */
+function sharedRepoSnapshot(branch: string, remoteSha: string) {
+  const gitDir = git(repo, "rev-parse", "--absolute-git-dir");
+  const fetchHead = path.join(gitDir, "FETCH_HEAD");
+  const adminDir = path.join(gitDir, "worktrees");
+  let trackingRef: string | null = null;
+  try {
+    trackingRef = git(repo, "rev-parse", "--verify", "-q", `refs/remotes/origin/${branch}`);
+  } catch {
+    trackingRef = null;
+  }
+  let hasRemoteObject = true;
+  try {
+    git(repo, "cat-file", "-e", remoteSha);
+  } catch {
+    hasRemoteObject = false;
+  }
+  return {
+    trackingRef,
+    hasRemoteObject,
+    fetchHead: fs.existsSync(fetchHead) ? fs.readFileSync(fetchHead, "utf8") : null,
+    localRef: git(repo, "rev-parse", `refs/heads/${branch}`),
+    worktreeAdmin: fs.existsSync(adminDir) ? fs.readdirSync(adminDir).sort() : [],
+  };
+}
+
+/** A registered worktree whose directory is gone — exactly what `git worktree prune` deletes. */
+function staleAdminEntry(branch: string): string {
+  const stale = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-stale-")), "gone");
+  execFileSync("git", ["worktree", "add", "-q", "-b", branch, stale, "main"], { cwd: repo });
+  fs.rmSync(path.dirname(stale), { recursive: true, force: true });
+  return path.basename(stale);
+}
+
+test("NOT-280: live owner, unknown owner, and outside-root checkouts are never mutated", async () => {
+  const leftover = await dirtyLeftover("issue-280-live", "s-280-live");
+  const staleEntry = staleAdminEntry("issue-280-stale-admin");
+  const remoteSha = publishRemoteOnlyCommit("issue-280-live");
+  const head = git(leftover.path, "rev-parse", "HEAD");
+  const status = git(leftover.path, "status", "--porcelain");
+  const shared = sharedRepoSnapshot("issue-280-live", remoteSha);
+  assert.equal(shared.trackingRef, null, "precondition: the remote tip has never been fetched");
+  assert.equal(shared.hasRemoteObject, false, "precondition: the remote-only object is absent");
+  assert.ok(shared.worktreeAdmin.includes(staleEntry), "precondition: a prunable admin entry exists");
+
+  const live = await resolveFor("issue-280-live", "s-280-live-next", { state: "alive", sessionId: "s-280-live" });
+  assert.equal(live.kind, "live_owner");
+  const unknown = await resolveFor("issue-280-live", "s-280-live-next", { state: "dead" });
+  assert.equal(unknown.kind, "conflict");
+  assert.equal(git(leftover.path, "rev-parse", "HEAD"), head);
+  assert.equal(git(leftover.path, "status", "--porcelain"), status);
+  assert.deepEqual(
+    sharedRepoSnapshot("issue-280-live", remoteSha),
+    shared,
+    "no fetch or prune: refs, objects, FETCH_HEAD, .git/worktrees untouched"
+  );
+  fs.rmSync(leftover.path, { recursive: true, force: true });
+
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-external-"));
+  git(repo, "branch", "issue-280-external", "main");
+  const extRemoteSha = publishRemoteOnlyCommit("issue-280-external");
+  execFileSync("git", ["worktree", "add", external, "issue-280-external"], { cwd: repo });
+  try {
+    fs.writeFileSync(path.join(external, "outside.txt"), "not ours\n");
+    const extHead = git(external, "rev-parse", "HEAD");
+    const extShared = sharedRepoSnapshot("issue-280-external", extRemoteSha);
+    const resolved = await resolveFor("issue-280-external", "s-280-ext", { state: "dead", sessionId: "s-280-ext-owner" });
+    assert.equal(resolved.kind, "conflict");
+    assert.equal(git(external, "rev-parse", "HEAD"), extHead);
+    assert.equal(git(external, "status", "--porcelain"), "?? outside.txt");
+    assert.deepEqual(sharedRepoSnapshot("issue-280-external", extRemoteSha), extShared);
+    assert.ok(extShared.worktreeAdmin.includes(staleEntry), "stale admin entry survives the outside-root refusal");
+  } finally {
+    execFileSync("git", ["worktree", "remove", "--force", external], { cwd: repo });
+  }
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
+});
+
+test("NOT-280: salvagePredecessorWorktree refuses a checkout whose branch identity does not match, without mutating it", async () => {
+  const { salvagePredecessorWorktree } = await import("./git-worktree.js");
+  const leftover = await dirtyLeftover("issue-280-identity", "s-280-identity");
+  const head = git(leftover.path, "rev-parse", "HEAD");
+  const status = git(leftover.path, "status", "--porcelain");
+
+  const result = await salvagePredecessorWorktree(leftover.path, "issue-280-some-other-issue");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /not refs\/heads\/issue-280-some-other-issue/);
+  assert.equal(git(leftover.path, "rev-parse", "HEAD"), head);
+  assert.equal(git(leftover.path, "status", "--porcelain"), status);
+  await dropWorktree(leftover.path);
+});
+
+/**
+ * Commit a tracked `stat.txt` in `worktree`, refresh the index, then bump the file's mtime
+ * without changing its content: the index entry is now stat-stale, so a plain `git status`
+ * would rewrite the index. Returns a reader of the linked worktree's raw index bytes.
+ */
+function staleStatIndex(worktree: string): () => Buffer {
+  const file = path.join(worktree, "stat.txt");
+  fs.writeFileSync(file, "unchanged content\n");
+  git(worktree, "add", "stat.txt");
+  git(worktree, "commit", "-q", "-m", "stat fixture", "--", "stat.txt");
+  fs.utimesSync(file, new Date("2021-01-01T00:00:00Z"), new Date("2021-01-01T00:00:00Z"));
+  git(worktree, "update-index", "-q", "--refresh");
+  fs.utimesSync(file, new Date("2022-01-01T00:00:00Z"), new Date("2022-01-01T00:00:00Z"));
+  const indexPath = path.resolve(worktree, git(worktree, "rev-parse", "--git-path", "index"));
+  return () => fs.readFileSync(indexPath);
+}
+
+/** Proves the fixture is meaningful: an ordinary `git status` does rewrite this index. */
+function assertPlainStatusRewrites(worktree: string, readIndex: () => Buffer, untouched: Buffer): void {
+  git(worktree, "status", "--porcelain");
+  assert.notDeepEqual(readIndex(), untouched, "fixture: plain git status refreshes the stale stat entry");
+}
+
+test("NOT-280: refusals never refresh a stale-stat index (outside root, wrong branch, unknown owner)", async () => {
+  const { salvagePredecessorWorktree } = await import("./git-worktree.js");
+
+  // Wrong branch identity: refused before any status read.
+  const wrong = await dirtyLeftover("issue-280-stat-identity", "s-280-stat-identity");
+  const wrongIndex = staleStatIndex(wrong.path);
+  const wrongBefore = wrongIndex();
+  const refused = await salvagePredecessorWorktree(wrong.path, "issue-280-stat-other");
+  assert.equal(refused.ok, false);
+  assert.deepEqual(wrongIndex(), wrongBefore, "wrong-branch refusal left the index byte-identical");
+  assertPlainStatusRewrites(wrong.path, wrongIndex, wrongBefore);
+  await dropWorktree(wrong.path);
+
+  // Dirty leftover with no known owner: conflict + fingerprint, no index write.
+  const unknown = await dirtyLeftover("issue-280-stat-unknown", "s-280-stat-unknown");
+  const unknownIndex = staleStatIndex(unknown.path);
+  const unknownBefore = unknownIndex();
+  const unknownResolved = await resolveFor("issue-280-stat-unknown", "s-280-stat-unknown-next", { state: "dead" });
+  assert.equal(unknownResolved.kind, "conflict");
+  assert.deepEqual(unknownIndex(), unknownBefore, "unknown-owner refusal left the index byte-identical");
+  assertPlainStatusRewrites(unknown.path, unknownIndex, unknownBefore);
+  await dropWorktree(unknown.path);
+
+  // Outside the managed root: conflict + fingerprint, no index write.
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-stat-external-"));
+  git(repo, "branch", "issue-280-stat-external", "main");
+  execFileSync("git", ["worktree", "add", "-q", external, "issue-280-stat-external"], { cwd: repo });
+  try {
+    git(external, "config", "user.email", "t@example.com");
+    git(external, "config", "user.name", "t");
+    const extIndex = staleStatIndex(external);
+    const extBefore = extIndex();
+    const resolved = await resolveFor("issue-280-stat-external", "s-280-stat-ext", { state: "dead", sessionId: "s-280-stat-ext-owner" });
+    assert.equal(resolved.kind, "conflict");
+    if (resolved.kind === "conflict") assert.match(resolved.reason, /outside the coordinator/);
+    assert.deepEqual(extIndex(), extBefore, "outside-root refusal left the index byte-identical");
+    assertPlainStatusRewrites(external, extIndex, extBefore);
+  } finally {
+    execFileSync("git", ["worktree", "remove", "--force", external], { cwd: repo });
+  }
+});
+
+test("NOT-280: a rejecting commit hook leaves the checkout intact and names the git failure; the blocker fingerprint is stable", async () => {
+  const leftover = await dirtyLeftover("issue-280-hook", "s-280-hook");
+  // Partially staged state must survive the failed attempt exactly.
+  git(leftover.path, "add", "README.md");
+  const head = git(leftover.path, "rev-parse", "HEAD");
+  const status = git(leftover.path, "status", "--porcelain");
+  const hooksDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-hooks-"));
+  fs.writeFileSync(path.join(hooksDir, "pre-commit"), "#!/bin/sh\necho 'policy hook rejects this commit' >&2\nexit 1\n", { mode: 0o755 });
+  git(repo, "config", "core.hooksPath", hooksDir);
+  try {
+    const first = await resolveFor("issue-280-hook", "s-280-hook-next", { state: "dead", sessionId: "s-280-hook" });
+    assert.equal(first.kind, "conflict");
+    if (first.kind !== "conflict") return;
+    assert.match(first.reason, /policy hook rejects this commit/);
+    assert.match(first.reason, /git .*commit/);
+    assert.ok(first.reason.includes(leftover.path));
+    assert.ok(first.fingerprint);
+    assert.equal(git(leftover.path, "rev-parse", "HEAD"), head);
+    assert.equal(git(leftover.path, "status", "--porcelain"), status, "files and index left exactly as found");
+
+    const second = await resolveFor("issue-280-hook", "s-280-hook-next-2", { state: "dead", sessionId: "s-280-hook" });
+    assert.equal(second.kind, "conflict");
+    if (second.kind === "conflict") assert.equal(second.fingerprint, first.fingerprint, "unchanged blocker → same fingerprint");
+
+    fs.writeFileSync(path.join(leftover.path, "operator-touch.txt"), "changed\n");
+    const third = await resolveFor("issue-280-hook", "s-280-hook-next-3", { state: "dead", sessionId: "s-280-hook" });
+    if (third.kind === "conflict") assert.notEqual(third.fingerprint, first.fingerprint, "changed state → new fingerprint");
+  } finally {
+    git(repo, "config", "--unset", "core.hooksPath");
+    fs.rmSync(hooksDir, { recursive: true, force: true });
+  }
+  await dropWorktree(leftover.path);
+});
+
+test("NOT-280: a failed index rollback after a rejected salvage commit is reported, and the checkout is preserved", async () => {
+  const leftover = await dirtyLeftover("issue-280-rollback", "s-280-rollback");
+  const head = git(leftover.path, "rev-parse", "HEAD");
+  const worktreeGitDir = git(leftover.path, "rev-parse", "--absolute-git-dir");
+  const hooksDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-rollback-hooks-"));
+  // The hook rejects the commit AND leaves the worktree's git dir unwritable, so the
+  // salvage's `git read-tree` cannot take index.lock to restore the pre-salvage index.
+  fs.writeFileSync(
+    path.join(hooksDir, "pre-commit"),
+    `#!/bin/sh\nchmod a-w '${worktreeGitDir}'\necho 'hook rejects and locks the index' >&2\nexit 1\n`,
+    { mode: 0o755 }
+  );
+  git(repo, "config", "core.hooksPath", hooksDir);
+  try {
+    const resolved = await resolveFor("issue-280-rollback", "s-280-rollback-next", { state: "dead", sessionId: "s-280-rollback" });
+    assert.equal(resolved.kind, "conflict");
+    if (resolved.kind !== "conflict") return;
+    assert.match(resolved.reason, /hook rejects and locks the index/, "names the commit failure");
+    assert.match(resolved.reason, /restoring the index afterwards also failed \(git read-tree [0-9a-f]{40}\)/, "names the failing cleanup step");
+    assert.match(resolved.reason, /index\.lock/, "carries the read-tree stderr");
+    assert.match(resolved.reason, /staging remains/);
+    assert.ok(resolved.reason.includes(leftover.path));
+    assert.doesNotMatch(resolved.reason, /left intact/);
+    assert.ok(fs.existsSync(leftover.path), "checkout preserved, not removed");
+    assert.equal(git(leftover.path, "rev-parse", "HEAD"), head, "no commit landed");
+    assert.equal(fs.readFileSync(path.join(leftover.path, "README.md"), "utf8"), "hello\nedited by dead worker\n");
+    assert.equal(fs.readFileSync(path.join(leftover.path, "new-file.txt"), "utf8"), "untracked ticket work\n");
+  } finally {
+    fs.chmodSync(worktreeGitDir, 0o755);
+    fs.rmSync(path.join(worktreeGitDir, "index.lock"), { force: true });
+    git(repo, "config", "--unset", "core.hooksPath");
+    fs.rmSync(hooksDir, { recursive: true, force: true });
+  }
+  await dropWorktree(leftover.path);
+});
+
 // ---------------------------------------------------------------- NOT-197: fresh base
 
 /** An isolated repo + file remote pair, so tests can move or break origin without

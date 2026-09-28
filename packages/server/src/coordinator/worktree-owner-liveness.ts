@@ -85,6 +85,10 @@ function sessionLooksLive(session: WorkerSession): boolean {
  *
  * Returns alive if **any** candidate session for this path is live — basename predecessor
  * and every `worktree_path` match (see {@link listWorkerSessionsOwningWorktree}).
+ *
+ * NOT-280: a dead verdict names the most recently created candidate — the predecessor
+ * whose dirt a resume salvage is attributed to. No candidate at all stays a bare dead
+ * verdict (unknown owner), which keeps dirt on the fail-closed conflict path.
  */
 export function checkDeveloperWorktreeOwnerLiveness(worktreePath: string): WorktreeOwnerLiveness {
   const candidates = listWorkerSessionsOwningWorktree(worktreePath);
@@ -93,5 +97,6 @@ export function checkDeveloperWorktreeOwnerLiveness(worktreePath: string): Workt
       return { state: "alive", sessionId: session.id };
     }
   }
-  return { state: "dead" };
+  const latest = [...candidates].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  return latest ? { state: "dead", sessionId: latest.id } : { state: "dead" };
 }
