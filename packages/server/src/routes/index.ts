@@ -101,14 +101,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // NOT-268: Claude local-first ladder — one background refresh ingests
   // Claude Code's own free cache (plain file read, never a spawn) and then
   // considers the free `/usage` refresh without blocking the read: a
-  // bounded `claude -p "/usage"` call fires at most once per hour, only
-  // when every valid 5H/1W observation is older than 60 minutes, and only
-  // when enabled (default on; `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off`
-  // disables it). `/usage` is a local slash-command — no model call, $0
-  // cost, ~300ms, verified live 2026-09-27 (the original design spawned a
-  // real model turn and was fixed after a live proof showed it never
-  // worked; see docs/RUNTIME_CAPACITY.md). Failures never break the read
-  // below.
+  // bounded `claude -p "/usage"` call fires at most once per 14 minutes,
+  // only when either valid 5H/1W observation is missing or at least 14
+  // minutes old (NOT-281 — checked per window so a fresh sibling never
+  // suppresses its stale twin), and only when enabled (default on;
+  // `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` disables it). `/usage` is a
+  // local slash-command — no model call, $0 cost, ~300ms, verified live
+  // 2026-09-27 (the original design spawned a real model turn and was
+  // fixed after a live proof showed it never worked; see
+  // docs/RUNTIME_CAPACITY.md). Failures never break the read below.
   app.get("/api/runtime-capacity", async () => {
     try {
       void refreshClaudeCapacityIfStale().catch(() => {
