@@ -158,33 +158,26 @@ released right after the read (it holds no state, so nothing is lost) and
 the next throttled refresh respawns it — production keeps no lifetime
 child that can only answer `missing`.
 
-Execution lane (NOT-270 runner migration, product decision 2026-09-26):
-real Dealer Muse turns run through the owned host — `session/start` +
-`turn/start` on it (`runners/muse-serve-session.ts`, driven by
-`coordinator/muse-spawn.ts`). That traffic IS the observation, so the
-session-boundary refresh hook (`refreshMuseCapacityAfterSession`, still
-read-only and never a model turn) is the final `usage/read` that populates
-5H/1W. When
-the serve lane cannot admit a turn (host unavailable, rejected start, no
-credential), the session falls back to the legacy `muse exec` subprocess
-before any model work starts — the host then stays unobserved by
-construction and the read stays honest N/A with last-good rows preserved.
-After admission there is no fallback: an admitted turn's verdict is
-reported honestly (a post-admission error fails loudly rather than
-executing the work twice). `AGENT_DEALER_MUSE_RUNNER=exec` forces the exec
-lane (operator escape hatch). Both lanes write identical normalized log
-evidence, so downstream log readers work unchanged either way.
+Execution lane (NOT-278 isolated exec, supersedes the NOT-270 serve migration for
+developer turns): every deck-enabled Muse developer turn runs the isolated
+`muse exec` lane (`coordinator/muse-spawn.ts` via `prepareMuseAttempt`) — the
+shared serve host cannot carry per-session deck/workspace identity. Exec-lane
+turns leave the host unobserved by construction, so the session-boundary
+refresh hook (`refreshMuseCapacityAfterSession`, still read-only and never a
+model turn) stays honest N/A with last-good rows preserved. The exec lane
+writes the same normalized log evidence as before, so downstream log readers
+work unchanged.
 Posture (scope decision recorded in `capacity/muse-host.ts`, 2026-09-26):
 the decision accepts exactly two gaps — `--disable-web-tools` and
 `--no-foreign-personal-context` have no wire- or host-level equivalent in
 this Muse version (1.4.0). Everything else claimed here matches: the owned
 host starts with `--sandbox-network restricted` (the same constant every
 exec invocation passes), and worker posture matches via the host's
-server-owned XDG home (`prepareMuseServeHome` — the same
-`buildMuseDeveloperSettings()` worker switches as the exec per-attempt
-settings.json plus a symlink to the ambient login, so serve-lane turns
-never inherit the operator's ambient MCP servers, subagents, or
-workflows). Known deltas OUTSIDE the recorded decision (not accepted —
+server-owned XDG home (`prepareMuseServeHome` — the deckless
+`buildMuseBaseSettings()` worker switches plus a symlink to the ambient
+login, so the host never inherits the operator's ambient MCP servers,
+subagents, or workflows; deck-enabled developer turns each carry their own
+required `agent-deck` server on the exec lane). Known deltas OUTSIDE the recorded decision (not accepted —
 need product sign-off or a wire equivalent): approval is per-session on
 the wire as `denyUnmatched` (the wire enum has no `never`; never-prompts
 behavior unverified live), and `--approval-judge off` /

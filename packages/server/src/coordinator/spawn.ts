@@ -43,6 +43,18 @@ export interface DeveloperSpawnInput {
   effort?: ReasoningEffort | null;
   /** Frozen profile `maxTurns`; Muse's `--max-model-steps` (NOT-181). Other runtimes do not read it. */
   maxModelSteps?: number | null;
+  /**
+   * NOT-278: frozen profile `deckId` for the Muse exec attempt — `prepareMuseAttempt` headers
+   * plus the pre-spawn `verify()`. Other runtimes carry their deck via `mcpConfigPath`/`mcpEnv`
+   * and ignore this. Null/absent fails a Muse spawn before any process starts.
+   */
+  deckId?: string | null;
+  /**
+   * NOT-278: Agent Deck MCP endpoint (ending in `/mcp`) for the Muse exec attempt. Defaults
+   * to the configured endpoint; infra callers without a deck session (the capability probe)
+   * pass it explicitly so the spawn never needs the database. Other runtimes ignore this.
+   */
+  agentDeckUrl?: string | null;
   prompt: string;
   cwd: string;
   timeoutMs: number;
@@ -102,7 +114,8 @@ export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
   // any child process exists (the effect reports it as "could not start").
   assertWorktreeCwd(input.cwd);
   if (input.runtime === "muse_code") {
-    // Own argv, per-attempt XDG dirs and result parsing; deck/MCP are never wired for Muse.
+    // NOT-278: isolated deck-configured exec attempt (prepareMuseAttempt); the shared serve
+    // lane cannot carry per-session deck/workspace identity, so it is never used here.
     return runMuseDeveloperSession({
       ...input,
       maxModelSteps: input.maxModelSteps ?? undefined,

@@ -597,9 +597,9 @@ function agentSpecificIssues(
   deckAccessResult: DeckAccessResult | null
 ): AgentHealthIssue[] {
   const issues: AgentHealthIssue[] = [];
-  // NOT-181: a Muse Code worker gets no MCP servers and no Agent Deck, so a missing, offline or
-  // deleted deck cannot stop it. (The profile form still asks for one; Muse ignores it.)
-  if (agent.runtime === "muse_code") return issues;
+  // NOT-278: a Muse Code developer session receives the selected deck exactly like the other
+  // developer runtimes, so `deck_missing`, `deck_offline`, and `deck_unauthorized` apply to
+  // Muse too. Only the Claude-only `mcp_not_registered` check below stays Claude-only.
   if (!agent.deckId) {
     issues.push({
       code: "deck_missing",

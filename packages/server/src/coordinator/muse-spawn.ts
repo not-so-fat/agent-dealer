@@ -1,54 +1,38 @@
 // packages/server/src/coordinator/muse-spawn.ts
 //
-// NOT-181: the native Muse Code developer spawn. Wires the already-tested pieces — binary
-// resolution (cli-env.ts), argv (runners/muse-code-args.ts), JSONL/session-log parsing
-// (runners/muse-code-jsonl.ts) — into the existing developer-effect contract without changing
-// either side:
+// NOT-278: the native Muse Code developer spawn. Every deck-enabled Muse developer turn runs the
+// isolated `muse exec` lane: one exact, fail-closed per-attempt home built by
+// `prepareMuseAttempt` (runners/muse-config.ts) — settings.json with exactly one required
+// `agent-deck` server (deck/workspace headers), filtered env, stdin-only API key — verified
+// immediately before spawn and removed afterwards on every outcome.
 //
-//   1. a per-attempt config + data dir under the worktree (`.dealer-muse/<attempt>/`, kept out of
-//      git via info/exclude): `settings.json` with no MCP servers, a symlinked `auth.json`;
-//   2. `spawnCli` with `XDG_CONFIG_HOME`/`XDG_DATA_HOME` pointed at it;
-//   3. the on-disk session log (usage + confirmed model exist only there) read while the dir still
-//      exists, then the dir is removed on success *and* failure;
-//   4. the raw stdout archived next to the log, and the log itself rewritten as Claude/Cursor-shaped
-//      events, so every existing log reader (usage, result text, auth/usage-cap classification,
-//      activity strip) works unchanged.
+// The shared Muse serve host cannot carry per-session MCP configuration or deck/workspace
+// headers (`session/start` accepts only command, workspace, model, and approval mode), so the
+// serve lane is never used here. Fresh 5H/1W observation from the serve host is deliberately
+// suspended while deck-enabled work is forced to exec; capacity stays honest N/A/stale with
+// last-good rows preserved. Per-session Agent Deck support in the serve protocol is a non-goal.
 //
 // Muse cannot disable `cron_*` (NOT-177). The tool activity is checked here after the fact and
 // surfaced as `cronCalls`; the effect turns that into a `muse_cron_used` escalation. It detects,
 // it does not prevent.
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { MUSE_CODE_CONTRIBUTOR_MODEL } from "@agent-dealer/shared";
 import { resolveMuseAuthFile, resolveMuseBin } from "../cli-env.js";
-import { museVersionRequiredForWork } from "../adapters/muse-capability.js";
-import { ensureWorktreeExcluded } from "../adapters/worktree-exclude.js";
-import { buildMuseDeveloperInvocation } from "../runners/muse-code-args.js";
-import { buildMuseDeveloperSettings } from "../runners/muse-code-settings.js";
+import { getAgentDeckMcpUrl } from "../adapters/agent-deck.js";
+import { getWorkerMcpConfigDir } from "../paths.js";
 import {
-  normalizeMuseRun,
+  prepareMuseAttempt,
+  type MuseAttempt,
+  type MuseCredential,
+} from "../runners/muse-config.js";
+import {
   parseMuseRun,
   type MuseFailure,
   type MuseUsage,
 } from "../runners/muse-code-jsonl.js";
-import { runMuseServeTurn } from "../runners/muse-serve-session.js";
 import { spawnCli } from "../runners/spawn-cli.js";
 import type { DeveloperSpawnInput, DeveloperSpawnResult } from "./spawn.js";
-
-/**
- * NOT-270: execution lane selection. Default is the server-owned serve host
- * (real turns through it are the NOT-269 precondition for 5H/1W capacity).
- * `AGENT_DEALER_MUSE_RUNNER=exec` forces the legacy `muse exec` subprocess
- * lane — the operator escape hatch if the serve lane ever misbehaves in
- * production (capacity then reads honest N/A until serve runs again).
- */
-function museServeLaneEnabled(): boolean {
-  return process.env.AGENT_DEALER_MUSE_RUNNER !== "exec";
-}
-
-/** Worktree-relative home of every per-attempt Muse config/data dir. */
-export const MUSE_ATTEMPT_ROOT = ".dealer-muse";
 
 /**
  * Step cap when the profile sets no `maxTurns`. High on purpose (the PoC's value): the developer
@@ -107,35 +91,21 @@ function readSessionLog(dataDir: string, museSessionId: string): string | undefi
   return visit(root, 0);
 }
 
-function prepareAttemptDirs(worktreePath: string): { root: string; configHome: string; dataHome: string } {
-  ensureWorktreeExcluded(worktreePath, `/${MUSE_ATTEMPT_ROOT}/`);
-  const root = path.join(worktreePath, MUSE_ATTEMPT_ROOT, randomUUID());
-  const configHome = path.join(root, "config");
-  const dataHome = path.join(root, "data");
-  fs.mkdirSync(path.join(configHome, "muse"), { recursive: true, mode: 0o700 });
-  fs.mkdirSync(dataHome, { recursive: true, mode: 0o700 });
-  // mkdir's mode is masked by the umask; the dirs hold a login symlink and the session log.
-  fs.chmodSync(root, 0o700);
-  fs.chmodSync(configHome, 0o700);
-  fs.chmodSync(dataHome, 0o700);
-  fs.writeFileSync(
-    path.join(configHome, "muse", "settings.json"),
-    JSON.stringify(buildMuseDeveloperSettings(), null, 2) + "\n",
-    { mode: 0o600 }
-  );
-  // Linked, never read or copied. Absent when the operator authenticates with META_API_KEY.
-  const auth = resolveMuseAuthFile();
-  if (fs.existsSync(auth)) fs.symlinkSync(auth, path.join(configHome, "muse", "auth.json"));
-  return { root, configHome, dataHome };
-}
-
-function removeAttemptDirs(worktreePath: string, root: string): void {
-  fs.rmSync(root, { recursive: true, force: true });
+/**
+ * NOT-278: the attempt's credential. A saved login is linked, never read or copied; otherwise
+ * the API key travels on stdin only (`--api-key-stdin`, written once by the launcher and never
+ * logged). Missing credentials fail before spawn — nothing is written and no process starts.
+ */
+function resolveMuseCredential(): MuseCredential {
+  const authFile = resolveMuseAuthFile();
   try {
-    fs.rmdirSync(path.join(worktreePath, MUSE_ATTEMPT_ROOT)); // only when no sibling attempt remains
+    if (fs.existsSync(authFile)) return { kind: "auth-file", path: authFile };
   } catch {
-    // not empty or already gone
+    // An unreadable auth path is the same as a missing one: fall through to the API key.
   }
+  const apiKey = process.env.META_API_KEY;
+  if (apiKey !== undefined && apiKey.trim() !== "") return { kind: "api-key", apiKey };
+  throw new Error("Muse Code auth required: run `muse login` or set META_API_KEY");
 }
 
 function splitSpawnLog(raw: string): { stdout: string; stderr: string } {
@@ -154,11 +124,9 @@ function splitSpawnLog(raw: string): { stdout: string; stderr: string } {
  * safe point is contractual, not opportunistic — a recent Agents-page poll
  * must never skip it. This creates no model turn of its own (the capacity
  * client only ever sends the read-only handshake/`usage/read` allowlist)
- * and never affects the session result. Serve-lane turns observed the host,
- * so this hook is the final read that populates 5H/1W; after an exec-lane
- * fallback the host stays unobserved by construction (the NOT-269
- * structural precondition) and the read stays honest N/A with last-good
- * rows preserved.
+ * and never affects the session result. Exec-lane turns leave the host
+ * unobserved by construction (the NOT-269 structural precondition), so the
+ * read stays honest N/A with last-good rows preserved.
  */
 function refreshMuseCapacityAfterSession(): void {
   void (async () => {
@@ -174,153 +142,70 @@ function refreshMuseCapacityAfterSession(): void {
 }
 
 /**
- * NOT-270: run the real developer turn through the server-owned serve host.
- * Returns null when no turn was admitted (host unavailable, session/start
- * or turn/start rejected) — the caller then runs the legacy `muse exec`
- * lane. Never returns null after admission: an admitted turn is real work
- * and its verdict is reported honestly, never retried on the other lane.
+ * NOT-278: run the deck-enabled developer turn as one isolated `muse exec` attempt. Fails before
+ * spawn without a frozen profile deck (the effect already maps that to `deck_failure`; this is
+ * the defense in depth that keeps a deckless launch from ever reaching a child process).
  *
- * The serve lane needs no per-attempt XDG config/data dirs: the host runs
- * under its own server-owned home (`prepareMuseServeHome` in
- * capacity/muse-host.ts — same worker settings as the exec lane's
- * per-attempt settings.json plus a symlink to the ambient login, so runner
- * and capacity can never diverge on identity or posture). `onSpawn` is
- * deliberately not called: there is no per-attempt pid to persist, and
- * recovery must never treat the shared host as an attempt process.
+ * The attempt is built with `prepareMuseAttempt({ role: "developer", ... })` on a Dealer-owned
+ * base directory outside the worktree and outside OS temp (the worker MCP config root), with
+ * `agentDeck.url` set to the configured Agent Deck MCP endpoint ending in `/mcp` (overridable
+ * for deckless infra callers), `deckId` to the frozen profile value, and `workspace` to the
+ * real worktree path. Immediately before spawn the exact cwd/argv/env/stdin about to be
+ * launched is verified; the child receives exactly
+ * `attempt.env` (no `process.env` merge) and `attempt.stdin`, so ambient `META_API_KEY`,
+ * `MUSE_*`, `CODEX_HOME`, and unrelated variables can never reach it.
+ *
+ * Settings, data, and the auth link are removed in `finally` on success, Muse failure,
+ * timeout, abort, and spawn error — operator credentials are never touched.
  */
-async function runMuseServeLane(
-  input: DeveloperSpawnInput & { logPath: string },
-  model: string,
-  onAdmitted: () => void
-): Promise<DeveloperSpawnResult | null> {
-  const { getMuseCapacityHost } = await import("../capacity/muse-host.js");
-  const host = getMuseCapacityHost();
-  // NOT-277: admission gated on the capability check of the on-disk binary; a long-lived host can
-  // still run an older (possibly broken) build. Serve only on a host known to run the confirmed
-  // version (restarted onto it when idle); otherwise the work runs on the checked exec lane.
-  const required = museVersionRequiredForWork();
-  if (required === null) return null;
-  if (required !== undefined && !(await host.ensureStartedOnVersion(required))) return null;
-  // Only this call may fall back: it resolves `admitted:false` (or throws)
-  // strictly before any model work starts. Everything below runs after
-  // admission — the caller's no-double-execution rule (via onAdmitted)
-  // keeps those errors loud instead of falling back to exec.
-  const turn = await runMuseServeTurn({
-    host,
-    prompt: input.prompt,
-    model,
-    cwd: input.cwd,
-    timeoutMs: input.timeoutMs,
-    signal: input.signal,
-    onAdmitted: () => onAdmitted(),
-  });
-  if (!turn.admitted) return null;
-
-  const cronCalls = turn.tools
-    .map((t) => t.name)
-    .filter((n): n is string => n !== null && CRON_TOOL_RE.test(n));
-  const summary: MuseSessionSummary = {
-    museSessionId: turn.sessionId ?? randomUUID(),
-    confirmedModel: turn.confirmedModel,
-    usage: turn.usage,
-    failure: turn.failure,
-    cronCalls,
-    runCount: 1,
-    rawLogPath: null,
-  };
-
-  // Same normalized evidence both lanes write: the raw folded history, then
-  // the Claude/Cursor-shaped stream every existing log reader consumes.
-  const rawLogPath = `${input.logPath.replace(/\.ndjson$/, "")}.muse-raw.jsonl`;
-  try {
-    fs.writeFileSync(rawLogPath, `${turn.viewItems.map((i) => JSON.stringify(i)).join("\n")}\n`);
-    summary.rawLogPath = rawLogPath;
-  } catch {
-    // evidence copy is best-effort; the normalized log below still carries the outcome
-  }
-  const events = normalizeMuseRun({
-    sessionId: summary.museSessionId,
-    confirmedModel: turn.confirmedModel,
-    tools: turn.tools,
-    finalText: turn.finalText,
-    usage: turn.usage,
-    failure: turn.failure,
-  }).map((e) =>
-    e.type === "result" ? { ...e, muse: { ...summary, usage: turn.usage } } : e
-  );
-  fs.writeFileSync(input.logPath, `${events.map((e) => JSON.stringify(e)).join("\n")}\n`);
-
-  // The real session above is the observation opportunity: kick the
-  // best-effort capacity refresh (no synthetic turn, never throws, never
-  // blocks this result).
-  refreshMuseCapacityAfterSession();
-
-  // A failed session must not read as success. 124 mirrors spawn-cli's
-  // timeout exit so timeout handling downstream sees the same signal.
-  const exitCode = turn.timedOut ? 124 : turn.failure ? 1 : turn.terminal === "completed" ? 0 : 1;
-  return {
-    exitCode,
-    transcript: turn.finalText ?? "",
-    logPath: input.logPath,
-    timedOut: turn.timedOut,
-    muse: summary,
-  };
-}
-
 export async function runMuseDeveloperSession(
   input: DeveloperSpawnInput & {
     logPath: string;
     maxModelSteps?: number;
-    /**
-     * NOT-277: skip the shared serve host and spawn the on-disk binary. The capability probe
-     * needs this — a long-lived host may still be the build from before an auto-update.
-     */
-    execLaneOnly?: boolean;
   }
 ): Promise<DeveloperSpawnResult> {
-  const model = input.model ?? MUSE_CODE_CONTRIBUTOR_MODEL;
-  const museSessionId = randomUUID();
-
-  // Serve-first: real turns through the owned host observe it (NOT-269
-  // precondition for 5H/1W). Pre-admission failure falls back to exec; an
-  // admitted turn never falls back — its errors propagate loudly instead of
-  // executing the work a second time on the exec lane.
-  // `AGENT_DEALER_MUSE_RUNNER=exec` skips the serve lane entirely
-  // (operator escape hatch).
-  if (museServeLaneEnabled() && !input.execLaneOnly) {
-    let admitted = false;
-    try {
-      const served = await runMuseServeLane(input, model, () => {
-        admitted = true;
-      });
-      if (served) return served;
-    } catch (err) {
-      if (admitted) throw err;
-      // Pre-admission serve-lane error: fall through to the exec lane below.
-    }
+  const deckId = typeof input.deckId === "string" && input.deckId.trim() !== "" ? input.deckId : null;
+  if (!deckId) {
+    throw new Error("Muse developer session requires a frozen profile deckId — workers never start without one");
   }
-  const invocation = buildMuseDeveloperInvocation({
-    model,
-    maxModelSteps: input.maxModelSteps ?? DEFAULT_MUSE_MAX_MODEL_STEPS,
-    sessionId: museSessionId,
+  const model = input.model ?? MUSE_CODE_CONTRIBUTOR_MODEL;
+  const mcpUrl =
+    typeof input.agentDeckUrl === "string" && input.agentDeckUrl.trim() !== ""
+      ? input.agentDeckUrl
+      : `${getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "")}/mcp`;
+
+  // prepareMuseAttempt validates everything (role controls, deck identity, credential shape,
+  // unsafe paths) and writes the per-attempt dir; it removes its own dir when setup fails.
+  const attempt: MuseAttempt = prepareMuseAttempt({
+    role: "developer",
+    worktreePath: input.cwd,
+    baseDir: getWorkerMcpConfigDir(),
+    agentDeck: { url: mcpUrl, deckId, workspace: input.cwd },
+    credential: resolveMuseCredential(),
+    sessionId: input.sessionId,
     prompt: input.prompt,
+    maxModelSteps: input.maxModelSteps ?? DEFAULT_MUSE_MAX_MODEL_STEPS,
   });
   const { logPath } = input;
 
-  const dirs = prepareAttemptDirs(input.cwd);
   let spawned: { exitCode: number; transcript: string; timedOut: boolean };
   let sessionLog: string | undefined;
   try {
-    spawned = await spawnCli(input.sessionId, resolveMuseBin(), invocation.args, input.cwd, {
+    // The exact launch about to happen — a tampered settings file or a differing
+    // cwd/argv/env/stdin fails here, before any process exists.
+    attempt.verify({ cwd: attempt.cwd, argv: [...attempt.argv], env: { ...attempt.env }, stdin: attempt.stdin });
+    spawned = await spawnCli(input.sessionId, resolveMuseBin(), [...attempt.argv], attempt.cwd, {
       logPath,
       timeoutMs: input.timeoutMs,
-      env: { ...invocation.env, XDG_CONFIG_HOME: dirs.configHome, XDG_DATA_HOME: dirs.dataHome },
+      env: { ...attempt.env },
+      exactEnv: true,
+      stdin: attempt.stdin,
       signal: input.signal,
       onSpawn: input.onSpawn,
     });
-    sessionLog = readSessionLog(dirs.dataHome, museSessionId);
+    sessionLog = readSessionLog(attempt.env.XDG_DATA_HOME, input.sessionId);
   } finally {
-    removeAttemptDirs(input.cwd, dirs.root);
+    attempt.cleanup();
   }
 
   const rawLog = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : spawned.transcript;
@@ -335,7 +220,7 @@ export async function runMuseDeveloperSession(
   const cronCalls = run.tools.map((t) => t.name).filter((n): n is string => n !== null && CRON_TOOL_RE.test(n));
 
   const summary: MuseSessionSummary = {
-    museSessionId,
+    museSessionId: input.sessionId,
     confirmedModel: run.confirmedModel,
     usage: run.usage,
     failure: run.failure,

@@ -197,3 +197,82 @@ test("spawnCli runs normally when an un-aborted signal is supplied", { timeout: 
   assert.equal(result.timedOut, false);
   assert.match(result.transcript, /untouched/);
 });
+
+// NOT-278: the Muse exec lane passes the approved attempt.env exactly — ambient
+// META_API_KEY, MUSE_*, CODEX_HOME, and unrelated variables must not reach the child.
+test("spawnCli exactEnv delivers only the supplied environment", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-"));
+  const logPath = path.join(dir, "out.ndjson");
+  process.env.DEALER_SPAWN_CLI_AMBIENT_PROBE = "ambient-leaks";
+  process.env.MUSE_PROBE_SHOULD_NOT_ARRIVE = "1";
+  try {
+    const result = await spawnCli(
+      "test-run-exact-env",
+      process.execPath,
+      ["-e", "console.log(JSON.stringify(process.env))"],
+      process.cwd(),
+      { logPath, timeoutMs: 5000, env: { EXACT_ONLY: "yes" }, exactEnv: true }
+    );
+    assert.equal(result.exitCode, 0);
+    const childEnv = JSON.parse(result.transcript) as Record<string, string>;
+    assert.equal(childEnv.EXACT_ONLY, "yes");
+    assert.equal("DEALER_SPAWN_CLI_AMBIENT_PROBE" in childEnv, false);
+    assert.equal("MUSE_PROBE_SHOULD_NOT_ARRIVE" in childEnv, false);
+    assert.equal("META_API_KEY" in childEnv, false);
+    for (const key of Object.keys(childEnv)) {
+      assert.equal(key.startsWith("MUSE_"), false, key);
+      assert.equal(key.startsWith("CODEX_"), false, key);
+    }
+  } finally {
+    delete process.env.DEALER_SPAWN_CLI_AMBIENT_PROBE;
+    delete process.env.MUSE_PROBE_SHOULD_NOT_ARRIVE;
+  }
+});
+
+test("spawnCli merges process.env by default (existing callers unchanged)", async () => {
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+  process.env.DEALER_SPAWN_CLI_AMBIENT_PROBE = "ambient-present";
+  try {
+    const result = await spawnCli(
+      "test-run-merged-env",
+      process.execPath,
+      ["-e", "console.log(`${process.env.DEALER_SPAWN_CLI_AMBIENT_PROBE}|${process.env.MERGED_ONLY}`)"],
+      process.cwd(),
+      { logPath, timeoutMs: 5000, env: { MERGED_ONLY: "yes" } }
+    );
+    assert.equal(result.exitCode, 0);
+    assert.match(result.transcript, /ambient-present\|yes/);
+  } finally {
+    delete process.env.DEALER_SPAWN_CLI_AMBIENT_PROBE;
+  }
+});
+
+// NOT-278: the Muse API key travels on stdin only — written once, closed, never logged.
+test("spawnCli stdin payload is delivered on stdin and never logged", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-"));
+  const logPath = path.join(dir, "out.ndjson");
+  const secret = `mk-test-secret-${Date.now()}`;
+  const result = await spawnCli(
+    "test-run-stdin",
+    process.execPath,
+    ["-e", "let b='';process.stdin.on('data',c=>b+=c).on('end',()=>console.log('got:'+b.length))"],
+    process.cwd(),
+    { logPath, timeoutMs: 5000, stdin: `${secret}\n` }
+  );
+  assert.equal(result.exitCode, 0);
+  assert.match(result.transcript, new RegExp(`got:${secret.length + 1}`));
+  const logged = fs.readFileSync(logPath, "utf8");
+  assert.equal(logged.includes(secret), false);
+  assert.equal(result.transcript.includes(secret), false);
+});
+
+test("spawnCli stdin close on an instantly-exiting child still settles", async () => {
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+  const result = await spawnCli("test-run-stdin-early-exit", process.execPath, ["-e", "process.exit(3)"], process.cwd(), {
+    logPath,
+    timeoutMs: 5000,
+    stdin: "payload-that-nobody-reads\n",
+  });
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.timedOut, false);
+});

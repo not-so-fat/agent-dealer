@@ -25,10 +25,12 @@
 //   connection (`hasInflightExecution`): a capacity read must not SIGTERM
 //   an admitted turn.
 // - The host launches under a server-owned XDG home
-//   (`prepareMuseServeHome`): the same worker posture as the exec lane's
-//   per-attempt settings (no MCP servers, no subagents, no workflows, no
-//   reminders) plus a symlink to the ambient login, so serve-lane turns
-//   never inherit the operator's ambient config.
+//   (`prepareMuseServeHome`): the deckless worker base posture
+//   (`buildMuseBaseSettings` — no MCP servers, no subagents, no workflows,
+//   no reminders) plus a symlink to the ambient login, so the host never
+//   inherits the operator's ambient config. It runs no sessions; deck-enabled
+//   developer turns each carry their own required `agent-deck` server on the
+//   isolated exec lane.
 // - `usage/changed` is ingested as soon as received; the throttled
 //   on-demand `usage/read` on the same host is the final read.
 // - Restart/crash: usage state is process-local to the host, so a dead host
@@ -51,17 +53,16 @@
 //   for an hour.
 //
 // Execution precondition (NOT-269): only a host that observes the account's
-// provider traffic can answer `usage/read`. Real Dealer Muse turns run
-// through THIS host (`session/start` + `turn/start` via the execution lane
-// below, driven by runners/muse-serve-session.ts) — that traffic is the
-// observation, so the session-boundary refresh hook
-// (`refreshMuseCapacityAfterSession` in coordinator/muse-spawn.ts) is the
-// final `usage/read` that populates 5H/1W. If no genuine turn has populated
-// a complete current pair for an hour, `muse-probe.ts` may use its own host
-// for the bounded paid fallback. When the normal serve execution lane cannot
-// admit a developer turn, that session still falls back to the legacy
-// `muse exec` subprocess before any model work starts; last-good capacity
-// rows remain preserved.
+// provider traffic can answer `usage/read`. NOT-278 removed developer turns
+// from this host: every deck-enabled Muse developer turn runs the isolated
+// `muse exec` lane (coordinator/muse-spawn.ts), which cannot observe the
+// host, so the session-boundary refresh hook
+// (`refreshMuseCapacityAfterSession` in coordinator/muse-spawn.ts) stays
+// honest N/A with last-good rows preserved until a genuine turn observes
+// the host again. If no genuine turn has populated a complete current pair
+// for an hour, `muse-probe.ts` may use its own host for the bounded paid
+// fallback. Per-session Agent Deck support for the serve protocol is a
+// non-goal until the protocol can represent isolated session MCP identity.
 //
 // PRODUCT DECISION (2026-09-26, resolved via human_action on this ticket):
 // the runner migration is in scope for NOT-270, in this same PR, not a
@@ -96,7 +97,7 @@ import type { CapacityUnavailableReason, RuntimeCapacityResponse } from "@agent-
 import { MUSE_CLI_ENV, resolveMuseAuthFile, resolveMuseBin } from "../cli-env.js";
 import { getDataDir } from "../db/index.js";
 import { parseMuseVersion } from "../adapters/muse-capability.js";
-import { buildMuseDeveloperSettings } from "../runners/muse-code-settings.js";
+import { buildMuseBaseSettings } from "../runners/muse-config.js";
 import {
   MSP_USAGE_CHANGED,
   MUSE_CLIENT_INFO,
@@ -177,16 +178,16 @@ export interface MuseServeHome {
 }
 
 /**
- * NOT-270 serve lane: the owned host must run workers under the same
- * posture as the exec lane's per-attempt settings — no MCP servers, no
- * subagent delegation, no workflows, no reminder child runs — so serve-lane
- * turns never inherit the operator's ambient MCP/subagent config. Builds a
- * server-owned config home carrying `buildMuseDeveloperSettings()` plus a
- * symlink to the ambient login (linked, never read or copied; absent when
- * the operator authenticates with META_API_KEY), and an isolated data home
- * for the host's own session/state. Mirrors the exec lane's per-attempt
- * dirs (`coordinator/muse-spawn.ts`), but process-scoped: one home per host
- * instance, reused across restarts, removed on shutdown.
+ * NOT-278: the owned host never runs a session — it only serves the read-only
+ * handshake/`usage/read` allowlist for capacity, and it is shared across decks, so it
+ * carries the deckless worker base posture (`buildMuseBaseSettings()`: no MCP servers, no
+ * subagent delegation, no workflows, no reminder child runs) and never inherits the
+ * operator's ambient MCP/subagent config. Builds a server-owned config home carrying those
+ * base settings plus a symlink to the ambient login (linked, never read or copied; absent
+ * when the operator authenticates with META_API_KEY), and an isolated data home for the
+ * host's own session/state. Deck-enabled developer turns run on the isolated exec lane
+ * (`coordinator/muse-spawn.ts`), each with its own required `agent-deck` server. Process-
+ * scoped: one home per host instance, reused across restarts, removed on shutdown.
  */
 export function prepareMuseServeHome(
   ambientAuthFile: string = resolveMuseAuthFile()
@@ -202,7 +203,7 @@ export function prepareMuseServeHome(
   fs.chmodSync(dataHome, 0o700);
   fs.writeFileSync(
     path.join(configHome, "muse", "settings.json"),
-    `${JSON.stringify(buildMuseDeveloperSettings(), null, 2)}\n`,
+    `${JSON.stringify(buildMuseBaseSettings(), null, 2)}\n`,
     { mode: 0o600 }
   );
   let authLinked = false;
@@ -364,9 +365,9 @@ export class MuseCapacityHost {
   /**
    * Env for the host subprocess: the server-owned XDG home always wins over
    * inherited ambient config (the server process itself may run under an
-   * operator XDG home), so serve-lane workers never inherit ambient MCP
-   * servers, subagents, or workflows. Only an explicit XDG override in
-   * `opts.env` (tests) still wins.
+   * operator XDG home), so the host never inherits ambient MCP servers,
+   * subagents, or workflows. Only an explicit XDG override in `opts.env`
+   * (tests) still wins.
    */
   private mergedEnv(): NodeJS.ProcessEnv {
     const home = this.ensureServeHome();
@@ -632,8 +633,9 @@ export class MuseCapacityHost {
   /**
    * NOT-277: start (or reuse) the host, and report whether it runs `version`. A live host on any
    * other (or an unknown) version is restarted onto the current on-disk binary when it is idle;
-   * while real turns are using it, it is left alone and this returns false (the caller runs its
-   * work on the exec lane instead). Never true for a host not known to run `version`.
+   * while the connection is in use it is left alone and this returns false. Never true for a
+   * host not known to run `version`. (NOT-278: no developer turn runs on the host any more —
+   * this only gates capacity reads, which are version-independent.)
    */
   async ensureStartedOnVersion(version: string): Promise<boolean> {
     if (!(await this.ensureStarted())) return false;

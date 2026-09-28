@@ -48,7 +48,7 @@ import {
   resolveCheckoutBaseBranch,
 } from "../adapters/managed-repo.js";
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
-import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
+import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, verifyWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
 import { getWorkerSession, patchRunningSession, recordSessionProcess, setSessionInputSha } from "../repository/worker-sessions.js";
 import { COORDINATOR_PROCESS_OWNER, readProcessStartTime } from "./process-liveness.js";
@@ -849,8 +849,7 @@ export async function runDeveloperEffect(
   // agree by inspection — the exact shape this stack exists to remove (NOT-134 review).
   const policy = snapshot?.permissionPolicy ?? roleCeiling("developer");
 
-  // NOT-181: Muse Code workers get no MCP servers and no Agent Deck — nothing is materialized,
-  // verified or released for them, whatever deck the profile happens to carry.
+  // NOT-278: every runtime, Muse included, is fail-closed without a deck — nothing spawns.
   const isMuse = runtime === "muse_code";
   let workerAuthority: { mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   // NOT-225: marks the setup/spawn boundary for the outer catch below. Only a throw
@@ -859,14 +858,14 @@ export async function runDeveloperEffect(
   // adapter_failure path, since the session did start, run, and possibly commit.
   let sessionStarted = false;
   try {
-    if (!isMuse && !snapshot?.deckId) {
+    if (!snapshot?.deckId) {
       await bestEffortRemove(repoPath, worktreePath);
       return {
         kind: "deck_failure",
         reason: "Agent profile has no Agent Deck — workers never start without one",
       };
     }
-    if (!isMuse && snapshot?.deckId) {
+    if (!isMuse) {
       const prepared = await prepareWorkerDeckConnection({
         deckId: snapshot.deckId,
         worktreePath,
@@ -888,9 +887,28 @@ export async function runDeveloperEffect(
       milestone("deck.connected", `Developer · deck connected (round ${round})`, {
         deckId: snapshot.deckId,
       });
+    } else {
+      // NOT-278: Muse runs the same live deck preflight without materializing a runtime MCP
+      // config — its settings.json comes only from `prepareMuseAttempt` in the spawn path.
+      // Same mapping: silence is `deck_unavailable`, a bad answer is `deck_failure`.
+      const verified = await verifyWorkerDeckConnection({
+        deckId: snapshot.deckId,
+        worktreePath,
+        callTool: deps.deckCallTool,
+      });
+      if (!verified.ok) {
+        await bestEffortRemove(repoPath, worktreePath);
+        return verified.kind === "deck_unavailable"
+          ? { kind: "deck_unavailable", reason: verified.reason }
+          : { kind: "deck_failure", reason: verified.reason };
+      }
+      milestone("deck.connected", `Developer · deck connected (round ${round})`, {
+        deckId: snapshot.deckId,
+      });
     }
 
-    if (taskBriefIsComplete(taskSnapshot) || isMuse) {
+    // NOT-278: Muse is deck-bound like every other runtime, so the same brief rule applies.
+    if (taskBriefIsComplete(taskSnapshot)) {
       milestone("brief.resolved", `Developer · brief ready (Task/AC complete)`, {
         resolution: "task_complete",
       });
@@ -941,8 +959,8 @@ export async function runDeveloperEffect(
       priorConclusion,
       priorVerificationReceipt,
       worktreePath,
-      deckId: isMuse ? null : (snapshot?.deckId ?? null),
-      noAgentDeck: isMuse,
+      deckId: snapshot?.deckId ?? null,
+      museDeveloper: isMuse,
       guidance: guidance.length ? guidance : undefined,
       scopeDecisionNote,
     });
@@ -1044,6 +1062,9 @@ export async function runDeveloperEffect(
         effort: snapshot?.effort ?? null,
         // Frozen profile budget → Muse's `--max-model-steps`; the other runtimes ignore it.
         maxModelSteps: parsePhaseBudget(snapshot?.budgetJson)?.maxTurns ?? null,
+        // NOT-278: frozen profile deck → the Muse exec attempt (deck headers + pre-spawn
+        // verify). Other runtimes carry their deck via mcpConfigPath/mcpEnv and ignore this.
+        deckId: snapshot?.deckId ?? null,
         prompt,
         cwd: worktreePath,
         timeoutMs: developerEffectConfig.sessionTimeoutMs,

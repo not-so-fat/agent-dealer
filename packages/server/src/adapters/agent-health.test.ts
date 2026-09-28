@@ -58,18 +58,20 @@ test("missing deckId: reports deck_missing", async () => {
   assert.equal(result.healthy, false);
 });
 
-// NOT-181: a Muse Code worker gets no MCP servers and no Agent Deck, so no deck problem may park it.
-test("muse_code ignores deck state: no deck, offline deck or unreadable deck raises a deck issue", async () => {
+// NOT-278: a Muse Code developer session receives the selected deck exactly like the other
+// developer runtimes, so deck_missing, deck_offline, and deck_unauthorized apply to Muse too.
+test("muse_code reports deck state: missing deck, offline deck, and unreadable deck raise deck issues", async () => {
   const created = createAgent({ name: "muse-no-deck", runtime: "muse_code", deckId: randomUUID() });
   getDb().prepare("UPDATE agents SET deck_id = NULL WHERE id = ?").run(created.id);
-  for (const [agent, online] of [
-    [getAgent(created.id)!, true],
-    [createAgent({ name: "muse-offline", runtime: "muse_code", deckId: randomUUID() }), false],
-    [createAgent({ name: "muse-stale", runtime: "muse_code", deckId: randomUUID() }), true],
-  ] as const) {
+  const cases = [
+    { agent: getAgent(created.id)!, online: true, code: "deck_missing" },
+    { agent: createAgent({ name: "muse-offline", runtime: "muse_code", deckId: randomUUID() }), online: false, code: "deck_offline" },
+    { agent: createAgent({ name: "muse-stale", runtime: "muse_code", deckId: randomUUID() }), online: true, code: "deck_unauthorized" },
+  ] as const;
+  for (const { agent, online, code } of cases) {
     const result = await healthForAgent(agent, online, new Map(), true, FAILURE, NO_GITHUB);
-    assert.deepEqual(result.issues, [], agent.name);
-    assert.equal(result.healthy, true);
+    assert.equal(result.issues.some((i) => i.code === code), true, `${agent.name} reports ${code}`);
+    assert.equal(result.healthy, false);
   }
 });
 

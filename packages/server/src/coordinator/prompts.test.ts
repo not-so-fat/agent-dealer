@@ -248,18 +248,27 @@ test("reviewer prompt deck section requires bind_workspace first, matching the d
   assert.doesNotMatch(prompt, /get_playbook\(/);
 });
 
-// NOT-181: a Muse Code worker has no Agent Deck, so it must not be told the session is
-// misconfigured (the deckless default) nor to bind a deck; it is told never to touch cron_*.
-test("NOT-181: noAgentDeck prompt states there is no deck/MCP and forbids cron_* instead of the misconfigured stop", () => {
-  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, noAgentDeck: true, deckId: null, worktreePath: "/wt" });
-  assert.match(prompt, /no Agent Deck and no MCP servers/);
+// NOT-278: a Muse Code developer gets the standard Agent Deck bootstrap gate plus the
+// Muse-specific cron_* prohibition (detected post-run as muse_cron_used).
+test("NOT-278: museDeveloper prompt carries the standard deck bootstrap and forbids cron_*", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, deckId: "deck-1", worktreePath: "/wt", museDeveloper: true });
+  assert.match(prompt, /bind_workspace\(\{ deckId: "deck-1", workspaceRoot: "\/wt" \}\)/);
+  assert.match(prompt, /bootstrap is a hard gate/i);
+  assert.match(prompt, /do not improvise without the deck/i);
+  assert.match(prompt, /call_service_tool/);
   assert.match(prompt, /cron_create/);
-  assert.doesNotMatch(prompt, /misconfigured/);
-  assert.doesNotMatch(prompt, /bind_workspace/);
+  assert.match(prompt, /cron_list/);
+  assert.match(prompt, /cron_delete/);
   assert.match(prompt, /do NOT push and do NOT open a pull request/);
 });
 
-test("NOT-181: without noAgentDeck a deckless prompt still fails closed", () => {
+test("NOT-278: a non-Muse developer prompt has the deck bootstrap but no cron prohibition", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, deckId: "deck-1", worktreePath: "/wt" });
+  assert.match(prompt, /bind_workspace/);
+  assert.doesNotMatch(prompt, /cron_create/);
+});
+
+test("a deckless developer prompt still fails closed", () => {
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, deckId: null });
   assert.match(prompt, /misconfigured: Agent Deck is required but missing/);
 });

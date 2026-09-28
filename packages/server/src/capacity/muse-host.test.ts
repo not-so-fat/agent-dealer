@@ -538,9 +538,11 @@ test("serve host launches under a server-owned config home with worker settings"
     assert.ok(!String(rec.dataHome).includes(".config"), "data home is not the operator's");
     assert.equal(rec.settingsError, null, "settings.json parses on the launched host");
     const settings = rec.settings!;
-    // Same worker posture as the exec lane's per-attempt settings: no MCP
-    // servers, no subagent delegation, no workflows, no reminder child runs.
-    assert.ok(!("mcpServers" in settings), "workers get no MCP servers");
+    // NOT-278: the host runs no sessions, so it carries the deckless worker base posture
+    // (`buildMuseBaseSettings`): no MCP servers, no subagent delegation, no workflows, no
+    // reminder child runs. Deck-enabled developer turns each carry their own required
+    // `agent-deck` server on the isolated exec lane.
+    assert.ok(!("mcpServers" in settings), "the host carries no MCP servers");
     const run = settings.run as Record<string, unknown>;
     assert.equal(run.workflow_trigger_mode, "off");
     assert.equal(run.subagent_delegation_mode, "off");
