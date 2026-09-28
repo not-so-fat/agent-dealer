@@ -13,8 +13,10 @@
 //      `~/.claude.json` (this module — free, ingested on every capacity
 //      read; only that subtree is ever parsed, the rest of the config —
 //      accountUuid, email, credentials, projects — is never retained).
-//   3. One minimal FREE refresh when every valid 5H/1W observation is older
-//      than 60 minutes: `claude -p "/usage"`. This is the default behavior.
+//   3. One minimal FREE refresh when either valid 5H/1W observation is
+//      missing or at least 14 minutes old: `claude -p "/usage"` (NOT-281 —
+//      the 15-minute display freshness would otherwise lapse into N/A while
+//      the old 60-minute trigger waited). This is the default behavior.
 //      Set `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` to disable it entirely
 //      — reading capacity then never spawns Claude. Unrecognized values also
 //      fail closed (stay disabled).
@@ -147,10 +149,20 @@ export const CLAUDE_PROBE_MODEL = "haiku";
 /** Defensive spend cap (USD) — normal cost is $0; see module header. */
 export const CLAUDE_PROBE_MAX_BUDGET_USD = 0.01;
 
-/** A 5H/1W observation newer than this suppresses the refresh. */
-export const CLAUDE_PROBE_STALE_AFTER_MS = 60 * 60 * 1000;
-/** Minimum gap between probe attempts (per account); failures back off. */
-export const CLAUDE_PROBE_ATTEMPT_COOLDOWN_MS = 60 * 60 * 1000;
+/**
+ * Either critical window (5H or 1W) at least this old triggers the refresh.
+ * 14 minutes — one minute inside the 15-minute display `freshUntil` (NOT-281)
+ * so the asynchronous single-flight `/usage` run normally completes before
+ * the UI would mark the reading stale. Checked per window, never as a
+ * newest-of-pair: one fresh sibling must not suppress its stale twin.
+ */
+export const CLAUDE_PROBE_STALE_AFTER_MS = 14 * 60 * 1000;
+/**
+ * Minimum gap between probe attempts (per account). Aligned with the trigger
+ * above: a healthy observation causes at most one refresh per 14 minutes;
+ * failures back off exponentially (14m → 28m → 56m → ~2h, capped at 8h).
+ */
+export const CLAUDE_PROBE_ATTEMPT_COOLDOWN_MS = 14 * 60 * 1000;
 export const CLAUDE_PROBE_BACKOFF_CAP_MS = 8 * 60 * 60 * 1000;
 
 /** Account-wide window identities for the local cache (exact, lowercase). */
@@ -787,7 +799,7 @@ export async function runClaudeCapacityProbe(
     appendProbeDiagnostic({
       ts: new Date(nowMs).toISOString(),
       event: "claude_capacity_probe",
-      trigger: "stale_60m",
+      trigger: "stale_14m",
       probeCommand: CLAUDE_PROBE_PROMPT,
       budgetUsd: CLAUDE_PROBE_MAX_BUDGET_USD,
       ...out,
@@ -886,7 +898,7 @@ export async function runClaudeCapacityProbe(
   appendProbeDiagnostic({
     ts: new Date(nowMs).toISOString(),
     event: "claude_capacity_probe",
-    trigger: "stale_60m",
+    trigger: "stale_14m",
     probeCommand: CLAUDE_PROBE_PROMPT,
     budgetUsd: CLAUDE_PROBE_MAX_BUDGET_USD,
     ...out,
@@ -898,14 +910,24 @@ export async function runClaudeCapacityProbe(
 // Freshness gate, single-flight, backoff
 // ---------------------------------------------------------------------------
 
+export type ClaudeCriticalWindowRole = "five_hour" | "weekly";
+
 /**
- * Newest valid account-wide 5H/1W observation (event or cache — both share
- * window keys and critical roles). A row counts when it carries a remaining
- * %, its reset is absent or future, and its observed time is not in the
- * future. Returns null when no such sample exists.
+ * Newest valid account-wide observation per critical window (event or cache
+ * — both share window keys and critical roles). A row counts when it
+ * carries a remaining %, its reset is absent or future, and its observed
+ * time is not in the future. A role maps to null when it has no such
+ * sample (missing, expired, or unparsable). Split per window on purpose
+ * (NOT-281): the refresh gate must see a stale twin hiding behind a fresh
+ * sibling, which a newest-of-pair maximum cannot show.
  */
-export function newestValidClaudeObservationMs(nowMs = Date.now()): number | null {
-  let max: number | null = null;
+export function newestValidClaudeObservationMsByRole(
+  nowMs = Date.now()
+): Record<ClaudeCriticalWindowRole, number | null> {
+  const out: Record<ClaudeCriticalWindowRole, number | null> = {
+    five_hour: null,
+    weekly: null,
+  };
   for (const row of listCapacitySnapshots(CLAUDE_RUNTIME)) {
     if (row.criticalRole !== "five_hour" && row.criticalRole !== "weekly") continue;
     if (row.remainingPercent === null) continue;
@@ -915,9 +937,21 @@ export function newestValidClaudeObservationMs(nowMs = Date.now()): number | nul
     }
     const observedMs = Date.parse(row.observedAt);
     if (!Number.isFinite(observedMs) || observedMs > nowMs) continue;
-    max = max === null ? observedMs : Math.max(max, observedMs);
+    const prev = out[row.criticalRole];
+    out[row.criticalRole] = prev === null ? observedMs : Math.max(prev, observedMs);
   }
-  return max;
+  return out;
+}
+
+/**
+ * Newest valid account-wide 5H/1W observation across both critical windows.
+ * Kept for diagnostics; the refresh gate uses the per-role variant above.
+ */
+export function newestValidClaudeObservationMs(nowMs = Date.now()): number | null {
+  const byRole = newestValidClaudeObservationMsByRole(nowMs);
+  if (byRole.five_hour === null) return byRole.weekly;
+  if (byRole.weekly === null) return byRole.five_hour;
+  return Math.max(byRole.five_hour, byRole.weekly);
 }
 
 export type ProbeSkipReason = "disabled" | "unconfigured" | "fresh" | "backoff" | "error";
@@ -964,12 +998,14 @@ function probeCooldownMs(): number {
 }
 
 /**
- * On-demand free `/usage` refresh: when `claude_code` is configured and no
- * valid 5H/1W observation is newer than 60 minutes, run one minimal bounded
- * probe (single-flight across concurrent readers; at most one attempt per
- * account per 60 minutes, backing off exponentially on failure). Explicitly
- * disabled is a strict no-op — no spawn at all. Never throws, never touches
- * Dealer workflow/session state or `runtime_availability`.
+ * On-demand free `/usage` refresh: when `claude_code` is configured and
+ * either critical window (5H or 1W) is missing or at least 14 minutes old,
+ * run one minimal bounded probe (single-flight across concurrent readers;
+ * at most one attempt per account per 14 minutes while healthy, backing
+ * off exponentially on failure). Per-window on purpose (NOT-281): a fresh
+ * sibling must never suppress its stale twin. Explicitly disabled is a
+ * strict no-op — no spawn at all. Never throws, never touches Dealer
+ * workflow/session state or `runtime_availability`.
  */
 export async function maybeProbeClaudeCapacity(
   nowMs = Date.now(),
@@ -980,8 +1016,12 @@ export async function maybeProbeClaudeCapacity(
     if (!configuredCapacityRuntimes().includes(CLAUDE_RUNTIME)) {
       return { probed: false, reason: "unconfigured" };
     }
-    const newest = newestValidClaudeObservationMs(nowMs);
-    if (newest !== null && nowMs - newest < CLAUDE_PROBE_STALE_AFTER_MS) {
+    const byRole = newestValidClaudeObservationMsByRole(nowMs);
+    const fiveFresh =
+      byRole.five_hour !== null && nowMs - byRole.five_hour < CLAUDE_PROBE_STALE_AFTER_MS;
+    const weeklyFresh =
+      byRole.weekly !== null && nowMs - byRole.weekly < CLAUDE_PROBE_STALE_AFTER_MS;
+    if (fiveFresh && weeklyFresh) {
       return { probed: false, reason: "fresh" };
     }
     // Single-flight first: readers arriving while a probe runs share it

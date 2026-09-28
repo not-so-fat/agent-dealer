@@ -1,14 +1,17 @@
 // packages/server/src/capacity/claude-local-cache.test.ts
 //
 // NOT-268: Claude capacity local-first ladder — local cache 5H/1W plus a
-// free `/usage` refresh after one hour stale. No test here performs a live
-// provider request: every probe spawn goes through an injected fake runner.
+// free `/usage` refresh; NOT-281 retargeted the trigger to either window at
+// least 14 minutes old (per-window, inside the 15-minute display freshness).
+// No test here performs a live provider request: every probe spawn goes
+// through an injected fake runner.
 import { test, before, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ProbeRunner } from "./claude-local-cache.js";
+import type { AdapterWindowReading } from "./adapter.js";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-claude-cache-"));
 
@@ -20,10 +23,13 @@ const {
 } = await import("../repository/runtime-capacity.js");
 const { parseNdjson } = await import("../runners/stream-json.js");
 const { getRuntimeCapacitySnapshot } = await import("./service.js");
-const { recordClaudeCapacityFromEvents } = await import("./claude-events.js");
+const { recordClaudeCapacityFromEvents, recordClaudeWindowReadings } = await import(
+  "./claude-events.js"
+);
 const {
   CLAUDE_CACHE_FILE_ENV,
   CLAUDE_CAPACITY_REFRESH_ENV,
+  CLAUDE_PROBE_STALE_AFTER_MS,
   buildClaudeProbeArgv,
   claudeCacheFilePath,
   extractClaudeCacheSubtree,
@@ -31,6 +37,7 @@ const {
   isClaudePaidFallbackEnabled,
   maybeProbeClaudeCapacity,
   newestValidClaudeObservationMs,
+  newestValidClaudeObservationMsByRole,
   parseClaudeCachedUtilization,
   probeDiagnosticLogPath,
   readClaudeLocalCache,
@@ -115,6 +122,46 @@ function probeStreamFixture(observedIso: string, costUsd = 0): string {
 const throwingRunner: ProbeRunner = () => {
   throw new Error("probe runner must not be called while disabled/fresh");
 };
+
+/**
+ * Seed the snapshot store with per-window ages (NOT-281): the shared cache
+ * fixture always stamps both windows together, so split-freshness cases
+ * need direct per-role rows. Resets stay in the future so rows count as
+ * valid observations at NOW_MS.
+ */
+function seedWindowAges(
+  fiveHourAgeMs: number | null,
+  weeklyAgeMs: number | null,
+  nowMs: number = NOW_MS
+): void {
+  const readings: AdapterWindowReading[] = [];
+  const role = (five: boolean, ageMs: number): AdapterWindowReading => ({
+    windowKey: five ? "claude_unified_five_hour" : "claude_unified_seven_day",
+    providerBucket: five ? "five_hour" : "seven_day",
+    durationMinutes: five ? 300 : 10080,
+    providerLabel: five ? "five_hour" : "seven_day",
+    usedValue: five ? 0.17 : 0.42,
+    usedUnit: "fraction",
+    usedFraction: five ? 0.17 : 0.42,
+    resetAt: new Date((five ? FIVE_HOUR_RESET_SEC : SEVEN_DAY_RESET_SEC) * 1000).toISOString(),
+    observedAt: new Date(nowMs - ageMs).toISOString(),
+    source: "observed_event",
+    evidenceRef: "test:split-window-seed",
+    criticalRole: five ? "five_hour" : "weekly",
+  });
+  if (fiveHourAgeMs !== null) readings.push(role(true, fiveHourAgeMs));
+  if (weeklyAgeMs !== null) readings.push(role(false, weeklyAgeMs));
+  assert.equal(recordClaudeWindowReadings(readings, "claude_code", nowMs), readings.length);
+}
+
+function successRunner(atMs: number = NOW_MS): ProbeRunner {
+  return async () => ({
+    stdout: probeStreamFixture(new Date(atMs).toISOString()),
+    exitCode: 0,
+    timedOut: false,
+    spawnError: null,
+  });
+}
 
 before(() => {
   migrate();
@@ -393,13 +440,14 @@ test("extractClaudeUsageReportLimits reads the /usage local-command result", asy
 });
 
 test("default-on refresh suppresses a fresh sample; stale data triggers exactly one", async () => {
+  assert.equal(CLAUDE_PROBE_STALE_AFTER_MS, 14 * 60_000);
   fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS - 10 * 60_000));
   assert.equal(ingestClaudeLocalCache(NOW_MS), 2);
-  assert.ok((newestValidClaudeObservationMs(NOW_MS) ?? 0) > NOW_MS - 60 * 60_000);
+  assert.ok((newestValidClaudeObservationMs(NOW_MS) ?? 0) > NOW_MS - CLAUDE_PROBE_STALE_AFTER_MS);
   const fresh = await maybeProbeClaudeCapacity(NOW_MS, { runner: throwingRunner });
   assert.deepEqual(fresh, { probed: false, reason: "fresh" });
 
-  // All samples ≥60 minutes old: five concurrent readers share one probe.
+  // All samples past the 14-minute trigger: five concurrent readers share one probe.
   clearAllCapacitySnapshots();
   resetClaudeCapacityRefreshState();
   fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS - 61 * 60_000));
@@ -417,6 +465,129 @@ test("default-on refresh suppresses a fresh sample; stale data triggers exactly 
   assert.equal(outcomes.filter((o) => o.reason === "completed").length, 1);
   assert.equal(outcomes.filter((o) => o.reason === "shared").length, 4);
   assert.ok(outcomes.every((o) => o.probed && o.ok));
+});
+
+test("a stale twin triggers one refresh even when its sibling is newer", async () => {
+  // NOT-281: the old newest-of-pair gate let one fresh window suppress the
+  // refresh while its sibling went stale. Freshness is per window now.
+  seedWindowAges(5 * 60_000, 20 * 60_000);
+  const byRole = newestValidClaudeObservationMsByRole(NOW_MS);
+  assert.equal(byRole.five_hour, NOW_MS - 5 * 60_000);
+  assert.equal(byRole.weekly, NOW_MS - 20 * 60_000);
+
+  let calls = 0;
+  const runner: ProbeRunner = async () => {
+    calls++;
+    return {
+      stdout: probeStreamFixture(new Date(NOW_MS).toISOString()),
+      exitCode: 0,
+      timedOut: false,
+      spawnError: null,
+    };
+  };
+  const outcome = await maybeProbeClaudeCapacity(NOW_MS, { runner });
+  assert.equal(calls, 1);
+  assert.equal(outcome.probed, true);
+  assert.equal(outcome.reason, "completed");
+  assert.equal(outcome.ok, true);
+
+  // On success both windows are fresh again …
+  const after = newestValidClaudeObservationMsByRole(NOW_MS);
+  assert.equal(after.five_hour, NOW_MS);
+  assert.equal(after.weekly, NOW_MS);
+  // … and the next API/UI poll (a minute later, well inside the ordinary
+  // 15-minute stale boundary) reports known values with no new spawn.
+  const poll = await maybeProbeClaudeCapacity(NOW_MS + 60_000, { runner: throwingRunner });
+  assert.deepEqual(poll, { probed: false, reason: "fresh" });
+  const snap = getRuntimeCapacitySnapshot(NOW_MS + 60_000);
+  const claude = snap.runtimes.find((r) => r.runtime === "claude_code")!;
+  assert.equal(claude.windows.find((w) => w.displayLabel === "5H")!.remainingPercent, 80);
+  assert.equal(claude.windows.find((w) => w.displayLabel === "1W")!.remainingPercent, 60);
+});
+
+test("a missing window triggers a refresh even when the sibling is newer", async () => {
+  seedWindowAges(5 * 60_000, null);
+  assert.deepEqual(newestValidClaudeObservationMsByRole(NOW_MS), {
+    five_hour: NOW_MS - 5 * 60_000,
+    weekly: null,
+  });
+  let calls = 0;
+  const runner: ProbeRunner = async () => {
+    calls++;
+    return {
+      stdout: probeStreamFixture(new Date(NOW_MS).toISOString()),
+      exitCode: 0,
+      timedOut: false,
+      spawnError: null,
+    };
+  };
+  const outcome = await maybeProbeClaudeCapacity(NOW_MS, { runner });
+  assert.equal(calls, 1);
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(newestValidClaudeObservationMsByRole(NOW_MS), {
+    five_hour: NOW_MS,
+    weekly: NOW_MS,
+  });
+});
+
+test("the freshness boundary is 14 minutes: just under stays quiet, exactly at triggers", async () => {
+  seedWindowAges(13 * 60_000, 13 * 60_000);
+  const fresh = await maybeProbeClaudeCapacity(NOW_MS, { runner: throwingRunner });
+  assert.deepEqual(fresh, { probed: false, reason: "fresh" });
+
+  clearAllCapacitySnapshots();
+  resetClaudeCapacityRefreshState();
+  seedWindowAges(14 * 60_000, 0);
+  const stale = await maybeProbeClaudeCapacity(NOW_MS, { runner: successRunner() });
+  assert.equal(stale.probed, true);
+  assert.equal(stale.reason, "completed");
+  assert.equal(stale.ok, true);
+});
+
+test("a healthy refresh buys 14 minutes: no second attempt inside the interval", async () => {
+  seedWindowAges(20 * 60_000, 20 * 60_000);
+  let calls = 0;
+  const runner: ProbeRunner = async () => {
+    calls++;
+    return {
+      stdout: probeStreamFixture(new Date(NOW_MS).toISOString()),
+      exitCode: 0,
+      timedOut: false,
+      spawnError: null,
+    };
+  };
+  const first = await maybeProbeClaudeCapacity(NOW_MS, { runner });
+  assert.equal(first.ok, true);
+  assert.equal(calls, 1);
+  // A 5-second-poll cadence sees fresh rows and spawns nothing.
+  const poll = await maybeProbeClaudeCapacity(NOW_MS + 5_000, { runner: throwingRunner });
+  assert.deepEqual(poll, { probed: false, reason: "fresh" });
+  // Even if the rows go missing mid-interval (e.g. a reset passes), the
+  // attempt cooldown stamped by the healthy run holds — at most one
+  // refresh per 14 minutes, never a retry per poll.
+  clearAllCapacitySnapshots();
+  const missing = await maybeProbeClaudeCapacity(NOW_MS + 5 * 60_000, { runner: throwingRunner });
+  assert.deepEqual(missing, { probed: false, reason: "backoff" });
+  assert.equal(calls, 1);
+  // Past the interval the gate opens again.
+  const later = await maybeProbeClaudeCapacity(NOW_MS + 15 * 60_000, { runner });
+  assert.equal(later.probed, true);
+  assert.equal(calls, 2);
+});
+
+test("disabled refresh never spawns and stale readings stay honestly N/A", async () => {
+  process.env[CLAUDE_CAPACITY_REFRESH_ENV] = "off";
+  // 20 minutes old: past the 15-minute display freshness, inside expiry.
+  fs.writeFileSync(cacheFile, fullCacheFixture(NOW_MS - 20 * 60_000));
+  assert.equal(ingestClaudeLocalCache(NOW_MS), 2);
+  const outcome = await maybeProbeClaudeCapacity(NOW_MS, { runner: throwingRunner });
+  assert.deepEqual(outcome, { probed: false, reason: "disabled" });
+  const snap = getRuntimeCapacitySnapshot(NOW_MS);
+  const claude = snap.runtimes.find((r) => r.runtime === "claude_code")!;
+  for (const w of claude.windows) {
+    assert.equal(w.remainingPercent, null);
+    assert.equal(w.unavailableReason, "stale");
+  }
 });
 
 test("probe argv pins the fixed /usage command plus structural model-turn safeguards", async () => {
@@ -645,10 +816,10 @@ test("probe failure preserves last-good rows and enters bounded backoff", async 
   const second = await maybeProbeClaudeCapacity(NOW_MS + 60_000, { runner: failing });
   assert.deepEqual(second, { probed: false, reason: "backoff" });
   assert.equal(calls, 1);
-  // Exponential backoff: one failure doubles the 60-minute cooldown.
-  const during = await maybeProbeClaudeCapacity(NOW_MS + 61 * 60_000, { runner: failing });
+  // Exponential backoff: one failure doubles the 14-minute cooldown (28m).
+  const during = await maybeProbeClaudeCapacity(NOW_MS + 15 * 60_000, { runner: failing });
   assert.deepEqual(during, { probed: false, reason: "backoff" });
-  const after = await maybeProbeClaudeCapacity(NOW_MS + 121 * 60_000, { runner: failing });
+  const after = await maybeProbeClaudeCapacity(NOW_MS + 29 * 60_000, { runner: failing });
   assert.equal(after.probed, true);
   assert.equal(calls, 2);
 });

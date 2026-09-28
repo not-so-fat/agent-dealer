@@ -417,8 +417,12 @@ window:
    background refresh on every `GET /api/runtime-capacity`); the other 70+
    config keys (accountUuid, email, credentials, projects) are never
    retained.
-3. One minimal **free** refresh when every valid 5H/1W observation is older
-   than 60 minutes: `claude -p "/usage"`. Default is **on**; set
+3. One minimal **free** refresh when **either** valid 5H/1W observation
+   is missing or at least 14 minutes old (NOT-281 — checked per window, so
+   a fresh sibling never suppresses its stale twin; 14 minutes sits one
+   minute inside the 15-minute display freshness so the background refresh
+   normally completes before the strip would read stale): `claude -p
+   "/usage"`. Default is **on**; set
    `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` to disable it entirely.
    Unrecognized values also fail closed (stay disabled).
 
@@ -489,12 +493,13 @@ sources share the `claude_unified_*` window keys through the newer-wins
 
 Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
 
-- Trigger: `claude_code` configured, no valid 5H/1W sample newer than 60
-  minutes, and the refresh is enabled (default on;
+- Trigger: `claude_code` configured, **either** valid 5H/1W sample
+  missing or at least 14 minutes old (per-window — NOT-281), and the
+  refresh is enabled (default on;
   `AGENT_DEALER_CLAUDE_CAPACITY_REFRESH=off` disables it). Single-flight
-  across concurrent readers; at most one attempt per account per 60 minutes,
-  backing off exponentially (60m → 2h → 4h → 8h cap) on failure. Never
-  retried per UI poll.
+  across concurrent readers; at most one attempt per account per 14 minutes
+  while healthy, backing off exponentially (14m → 28m → 56m → ~2h, 8h cap)
+  on failure. Never retried per UI poll.
 - Argv (verified live at 2.1.283): `claude -p "/usage" --model haiku
   --max-turns 1 --tools "" --strict-mcp-config --no-session-persistence
   --output-format stream-json --verbose --max-budget-usd 0.01`. `--bare` is
@@ -534,9 +539,15 @@ Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
 `GET /api/runtime-capacity` runs one background refresh (free cache
 ingest, then the probe gate) without blocking the read. `doctor` reports
 the cache age from `cachedUsageUtilization.fetchedAtMs` — never file mtime
-(`fresh` < 60m / `stale` / `missing`) — and notes when the free refresh has
-been explicitly disabled — age labels only, never values or ids. Tests
-inject a fake probe runner; CI performs no live provider request.
+(`fresh` < 14m / `stale` / `missing`, matching the refresh trigger) — and
+notes when the free refresh has been explicitly disabled — age labels only,
+never values or ids. Tests inject a fake probe runner; CI performs no live
+provider request.
+
+Upgrade note: the refresh runs inside the deployed server process, so
+restart the server after upgrading — a still-running pre-upgrade server
+keeps the old refresh timing (and, before 1.2.5, the old paid prompt)
+until it is restarted.
 
 Live proofs (require a real account, never CI): (a) DONE 2026-09-26 —
 read-only smoke of the operator's real `~/.claude.json` through the shipped

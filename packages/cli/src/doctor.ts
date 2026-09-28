@@ -318,7 +318,10 @@ export function describeClaudeCapacitySource(
   status: { present: boolean; ageMs: number | null } | null | undefined
 ): ClaudeCapacitySourceReport {
   if (status?.present === true && typeof status.ageMs === "number" && status.ageMs >= 0) {
-    if (status.ageMs < 60 * 60 * 1000) {
+    // NOT-281: matches the server's per-window refresh trigger — a cache at
+    // least 14 minutes old is refreshed for free on the next capacity check,
+    // so it must not be reported as fresh.
+    if (status.ageMs < 14 * 60 * 1000) {
       return {
         kind: "fresh",
         line: `✓ Claude capacity: local 5H/1W cache fresh (${formatCacheAge(status.ageMs)} old)`,
