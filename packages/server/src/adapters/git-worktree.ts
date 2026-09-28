@@ -228,9 +228,17 @@ export async function removeWorktree(opts: { repo: string; path: string; force?:
   await git(opts.repo, args);
 }
 
+/**
+ * NOT-280: `git status --porcelain` without the opportunistic index refresh — plain status
+ * rewrites a stale-stat index, which would mutate a checkout a refusal path must leave
+ * untouched (outside root, wrong branch, unknown owner).
+ */
+async function readOnlyStatus(worktreePath: string): Promise<string> {
+  return (await git(worktreePath, ["--no-optional-locks", "status", "--porcelain"])).stdout;
+}
+
 export async function isWorktreeClean(worktreePath: string): Promise<boolean> {
-  const { stdout } = await git(worktreePath, ["status", "--porcelain"]);
-  return stdout.trim().length === 0;
+  return (await readOnlyStatus(worktreePath)).trim().length === 0;
 }
 
 /** Commit message for a timeout salvage tip (NOT-145). */
@@ -924,7 +932,7 @@ function sha256Hex(parts: string[]): string {
  */
 export async function leftoverFingerprint(worktreePath: string, reason: string): Promise<string> {
   const head = await git(worktreePath, ["rev-parse", "HEAD"]).then((r) => r.stdout.trim(), () => "");
-  const status = await git(worktreePath, ["status", "--porcelain"]).then((r) => r.stdout, () => "");
+  const status = await readOnlyStatus(worktreePath).catch(() => "");
   return sha256Hex([tryRealpath(worktreePath), reason, head, status]);
 }
 
@@ -950,14 +958,19 @@ export async function salvagePredecessorWorktree(
   let headRef: string;
   let status: string;
   let indexTree: string;
+  // Branch identity first, so a wrong-branch checkout is refused before any status read.
   try {
     headRef = (await git(worktreePath, ["symbolic-ref", "-q", "HEAD"])).stdout.trim();
-    status = (await git(worktreePath, ["status", "--porcelain"])).stdout;
   } catch (err) {
     return { ok: false, reason: `inspection failed: ${(err as Error).message}` };
   }
   if (headRef !== `refs/heads/${branchName}`) {
     return { ok: false, reason: `checkout is on ${headRef || "a detached HEAD"}, not refs/heads/${branchName}` };
+  }
+  try {
+    status = await readOnlyStatus(worktreePath);
+  } catch (err) {
+    return { ok: false, reason: `inspection failed: ${(err as Error).message}` };
   }
   if (UNMERGED_STATUS.test(status)) {
     return { ok: false, reason: "checkout has unmerged paths (an unfinished merge/rebase)" };

@@ -1133,6 +1133,71 @@ test("NOT-280: salvagePredecessorWorktree refuses a checkout whose branch identi
   await dropWorktree(leftover.path);
 });
 
+/**
+ * Commit a tracked `stat.txt` in `worktree`, refresh the index, then bump the file's mtime
+ * without changing its content: the index entry is now stat-stale, so a plain `git status`
+ * would rewrite the index. Returns a reader of the linked worktree's raw index bytes.
+ */
+function staleStatIndex(worktree: string): () => Buffer {
+  const file = path.join(worktree, "stat.txt");
+  fs.writeFileSync(file, "unchanged content\n");
+  git(worktree, "add", "stat.txt");
+  git(worktree, "commit", "-q", "-m", "stat fixture", "--", "stat.txt");
+  fs.utimesSync(file, new Date("2021-01-01T00:00:00Z"), new Date("2021-01-01T00:00:00Z"));
+  git(worktree, "update-index", "-q", "--refresh");
+  fs.utimesSync(file, new Date("2022-01-01T00:00:00Z"), new Date("2022-01-01T00:00:00Z"));
+  const indexPath = path.resolve(worktree, git(worktree, "rev-parse", "--git-path", "index"));
+  return () => fs.readFileSync(indexPath);
+}
+
+/** Proves the fixture is meaningful: an ordinary `git status` does rewrite this index. */
+function assertPlainStatusRewrites(worktree: string, readIndex: () => Buffer, untouched: Buffer): void {
+  git(worktree, "status", "--porcelain");
+  assert.notDeepEqual(readIndex(), untouched, "fixture: plain git status refreshes the stale stat entry");
+}
+
+test("NOT-280: refusals never refresh a stale-stat index (outside root, wrong branch, unknown owner)", async () => {
+  const { salvagePredecessorWorktree } = await import("./git-worktree.js");
+
+  // Wrong branch identity: refused before any status read.
+  const wrong = await dirtyLeftover("issue-280-stat-identity", "s-280-stat-identity");
+  const wrongIndex = staleStatIndex(wrong.path);
+  const wrongBefore = wrongIndex();
+  const refused = await salvagePredecessorWorktree(wrong.path, "issue-280-stat-other");
+  assert.equal(refused.ok, false);
+  assert.deepEqual(wrongIndex(), wrongBefore, "wrong-branch refusal left the index byte-identical");
+  assertPlainStatusRewrites(wrong.path, wrongIndex, wrongBefore);
+  await dropWorktree(wrong.path);
+
+  // Dirty leftover with no known owner: conflict + fingerprint, no index write.
+  const unknown = await dirtyLeftover("issue-280-stat-unknown", "s-280-stat-unknown");
+  const unknownIndex = staleStatIndex(unknown.path);
+  const unknownBefore = unknownIndex();
+  const unknownResolved = await resolveFor("issue-280-stat-unknown", "s-280-stat-unknown-next", { state: "dead" });
+  assert.equal(unknownResolved.kind, "conflict");
+  assert.deepEqual(unknownIndex(), unknownBefore, "unknown-owner refusal left the index byte-identical");
+  assertPlainStatusRewrites(unknown.path, unknownIndex, unknownBefore);
+  await dropWorktree(unknown.path);
+
+  // Outside the managed root: conflict + fingerprint, no index write.
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-stat-external-"));
+  git(repo, "branch", "issue-280-stat-external", "main");
+  execFileSync("git", ["worktree", "add", "-q", external, "issue-280-stat-external"], { cwd: repo });
+  try {
+    git(external, "config", "user.email", "t@example.com");
+    git(external, "config", "user.name", "t");
+    const extIndex = staleStatIndex(external);
+    const extBefore = extIndex();
+    const resolved = await resolveFor("issue-280-stat-external", "s-280-stat-ext", { state: "dead", sessionId: "s-280-stat-ext-owner" });
+    assert.equal(resolved.kind, "conflict");
+    if (resolved.kind === "conflict") assert.match(resolved.reason, /outside the coordinator/);
+    assert.deepEqual(extIndex(), extBefore, "outside-root refusal left the index byte-identical");
+    assertPlainStatusRewrites(external, extIndex, extBefore);
+  } finally {
+    execFileSync("git", ["worktree", "remove", "--force", external], { cwd: repo });
+  }
+});
+
 test("NOT-280: a rejecting commit hook leaves the checkout intact and names the git failure; the blocker fingerprint is stable", async () => {
   const leftover = await dirtyLeftover("issue-280-hook", "s-280-hook");
   // Partially staged state must survive the failed attempt exactly.
