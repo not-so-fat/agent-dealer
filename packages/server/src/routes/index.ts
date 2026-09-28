@@ -29,6 +29,7 @@ import {
   refreshCursorIndividualBillingIfStale,
   refreshCursorIndividualCapacityIfStale,
 } from "../capacity/cursor-individual.js";
+import { registerVersionRoute } from "./version.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
   if (!deckId) return null;
@@ -39,6 +40,7 @@ async function resolveDeckName(deckId?: string): Promise<string | null> {
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => ({ ok: true }));
+  registerVersionRoute(app);
 
   // NOT-159: process-lifetime Linear GraphQL counters (API-key bucket diagnostics).
   app.get("/api/debug/linear-usage", async () => getLinearUsageSnapshot());
