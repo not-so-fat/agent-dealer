@@ -73,7 +73,8 @@ const FORBIDDEN_FLAGS = [
 /** Which ambient env vars reach Muse. Everything else (META_API_KEY, MUSE_*, CODEX_HOME, ...) is dropped. */
 const ENV_ALLOWLIST = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR"];
 /** Test-only harness vars for the fake `muse` fixture (fixtures/fake-muse.mjs), which can only be
- * selected via the operator/test `MUSE_CLI` override. Inert to the real binary. */
+ * selected via the operator/test `MUSE_CLI` override — and passed through only when that
+ * override is set, so production runs of the default binary never carry them. */
 const FAKE_HARNESS_PREFIX = "FAKE_MUSE_";
 
 const ATTEMPT_PREFIX = "muse-attempt-";
@@ -348,10 +349,13 @@ export function buildMuseEnv(
   }
   // Test-only seam: the fake fixture is driven by FAKE_MUSE_* (scenario, record path, version
   // pins) and the exec lane is exact, so without this the fixture cannot be driven at all.
-  // These vars join attempt.env, so the pre-spawn verify() snapshot covers them exactly like
-  // every other approved var; the real binary ignores unknown FAKE_MUSE_* vars.
-  for (const [key, value] of Object.entries(ambient)) {
-    if (key.startsWith(FAKE_HARNESS_PREFIX) && value !== undefined) env[key] = value;
+  // These vars join attempt.env only when the operator/test MUSE_CLI override selects the
+  // binary — i.e. only the fixture can ever receive them, never the default real binary —
+  // and the pre-spawn verify() snapshot covers them exactly like every other approved var.
+  if (ambient.MUSE_CLI?.trim()) {
+    for (const [key, value] of Object.entries(ambient)) {
+      if (key.startsWith(FAKE_HARNESS_PREFIX) && value !== undefined) env[key] = value;
+    }
   }
   env.MUSE_NO_AUTO_UPDATE = "1";
   env.XDG_CONFIG_HOME = path.join(root, "config");

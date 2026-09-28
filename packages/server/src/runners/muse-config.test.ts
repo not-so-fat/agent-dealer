@@ -293,6 +293,7 @@ test("test-only FAKE_MUSE_* harness vars reach the child; credentials and unrela
       env: {
         PATH: "/usr/bin",
         HOME: os.homedir(),
+        MUSE_CLI: "/operator/fake-muse.mjs",
         META_API_KEY: API_KEY,
         MUSE_SENTINEL: "must-not-reach-child",
         CODEX_HOME: "/operator/codex",
@@ -303,8 +304,8 @@ test("test-only FAKE_MUSE_* harness vars reach the child; credentials and unrela
     })
   );
   try {
-    // The fake fixture (selected via MUSE_CLI) is driven by FAKE_MUSE_*; the real binary
-    // ignores them. They join attempt.env, so the pre-spawn verify() snapshot covers them.
+    // The fake fixture (selected via MUSE_CLI) is driven by FAKE_MUSE_*; they join
+    // attempt.env only under that override, so the pre-spawn verify() snapshot covers them.
     assert.equal(attempt.env.FAKE_MUSE_SCENARIO, "success");
     assert.equal(attempt.env.FAKE_MUSE_RECORD, "/tmp/record.json");
     assert.doesNotThrow(() =>
@@ -313,6 +314,26 @@ test("test-only FAKE_MUSE_* harness vars reach the child; credentials and unrela
     for (const dropped of ["META_API_KEY", "MUSE_SENTINEL", "CODEX_HOME", "DEALER_MUSE_SENTINEL"]) {
       assert.equal(dropped in attempt.env, false, dropped);
     }
+  } finally {
+    attempt.cleanup();
+  }
+});
+
+test("FAKE_MUSE_* harness vars never reach the default real binary (no MUSE_CLI override)", () => {
+  const fx = fixture();
+  const attempt = prepareMuseAttempt(
+    input(fx, "developer", {
+      env: {
+        PATH: "/usr/bin",
+        HOME: os.homedir(),
+        FAKE_MUSE_SCENARIO: "success",
+        FAKE_MUSE_RECORD: "/tmp/record.json",
+      },
+    })
+  );
+  try {
+    assert.equal("FAKE_MUSE_SCENARIO" in attempt.env, false);
+    assert.equal("FAKE_MUSE_RECORD" in attempt.env, false);
   } finally {
     attempt.cleanup();
   }
