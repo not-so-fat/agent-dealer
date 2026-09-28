@@ -19,6 +19,7 @@ import type {
 } from "@agent-dealer/shared";
 import { fetchRuntimeCapacity } from "../../api";
 import { runtimeLabel } from "../../lib/display";
+import { capacitySeverity, type CapacitySeverity } from "./capacitySeverity";
 
 const REASON_TEXT: Record<CapacityUnavailableReason, string> = {
   unsupported: "not reported by provider",
@@ -28,16 +29,7 @@ const REASON_TEXT: Record<CapacityUnavailableReason, string> = {
   stale: "stale",
 };
 
-/** Remaining-capacity severity thresholds for the Agents-page strip: under
- * 10% is critical (red, bold), under 30% is a warning (yellow). */
-type CapacitySeverity = "critical" | "warning" | "normal";
-
-function capacitySeverity(remainingPercent: number): CapacitySeverity {
-  if (remainingPercent < 10) return "critical";
-  if (remainingPercent < 30) return "warning";
-  return "normal";
-}
-
+/** Strip-specific styling for the shared severity (see capacitySeverity). */
 const SEVERITY_CLASSNAME: Record<CapacitySeverity, string> = {
   critical: "font-bold text-red-400",
   warning: "text-yellow-400",

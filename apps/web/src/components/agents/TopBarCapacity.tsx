@@ -39,6 +39,7 @@ import type {
 import { Runtime as RuntimeSchema, isWindowKnown } from "@agent-dealer/shared";
 import { runtimeLabel } from "../../lib/display";
 import { AgentRuntimeIcon } from "./AgentIcon";
+import { capacitySeverity, type CapacitySeverity } from "./capacitySeverity";
 
 export type TopBarCapacityState =
   | { status: "loading" }
@@ -91,6 +92,18 @@ const CURSOR_BILLING_LABEL = "1M";
  * never from the human-readable label, so relabeling the "No agent"
  * fallback cannot silently break the accessible name below. */
 const KNOWN_RUNTIME_KEYS: ReadonlySet<string> = new Set(RuntimeSchema.options);
+
+/** NOT-290: per-number styling for the shared severity. Critical keeps the
+ * existing top-bar red (`text-red-300`) so a true 0% reads exactly as
+ * before; warning uses the parallel yellow on the dark bar; normal keeps
+ * the existing white treatment. Only the number span takes this class —
+ * the runtime block and provider icon never change with severity (except
+ * the existing exhausted-block treatment at a true 0%). */
+const TOPBAR_SEVERITY_CLASSNAME: Record<CapacitySeverity, string> = {
+  critical: "font-medium text-red-300",
+  warning: "font-medium text-yellow-300",
+  normal: "font-medium text-white/75",
+};
 
 export type PerRuntimeSummary = {
   /** Human-readable provider label (e.g. "Muse Code") for tooltips and accessible names. */
@@ -392,15 +405,23 @@ export function TopBarCapacityView({
                     >
                       <span className="text-white/40">{w.label}</span>
                       {w.kind === "known" ? (
-                        <span
-                          className={
-                            w.isCritical && w.rawRemaining === 0
-                              ? "font-medium text-red-300"
-                              : "font-medium text-white/75"
-                          }
-                        >
-                          {w.remaining}%
-                        </span>
+                        (() => {
+                          // NOT-290: severity keys off the raw provider value,
+                          // never the rounded display value — 9.6% (shown as
+                          // 10%) stays critical and 29.6% (shown as 30%)
+                          // stays warning. A true 0% is critical, so it keeps
+                          // the existing red number plus the exhausted-block
+                          // treatment above.
+                          const severity = capacitySeverity(w.rawRemaining);
+                          return (
+                            <span
+                              data-severity={severity}
+                              className={TOPBAR_SEVERITY_CLASSNAME[severity]}
+                            >
+                              {w.remaining}%
+                            </span>
+                          );
+                        })()
                       ) : (
                         <span className="text-white/35">N/A</span>
                       )}
