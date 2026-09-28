@@ -3,10 +3,12 @@
 // NOT-277: Muse Code developer shell/write capability is re-validated once per newly reported
 // version — cached per version, auto-confirmed on success, blocked by name on loss, fail-closed
 // when the check cannot complete. The real probe runs against fixtures/fake-muse.mjs (never Meta).
-import { describe, test, beforeEach } from "node:test";
+import { describe, test, beforeEach, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -269,6 +271,49 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
     "../coordinator/fixtures/fake-muse.mjs"
   );
 
+  // A stub Agent Deck API: only `/health` matters to the probe's cheap pre-spawn gate
+  // (the fake muse never dials the deck). Started once for this block on an ephemeral port.
+  let deckApiUrl = "";
+  let deckServer: http.Server | null = null;
+  before(
+    () =>
+      new Promise<void>((resolve) => {
+        deckServer = http
+          .createServer((req, res) => {
+            if (req.url === "/health") {
+              res.writeHead(200, { "content-type": "text/plain" });
+              res.end("ok");
+            } else {
+              res.writeHead(404);
+              res.end();
+            }
+          })
+          .listen(0, "127.0.0.1", () => {
+            deckApiUrl = `http://127.0.0.1:${(deckServer!.address() as net.AddressInfo).port}`;
+            resolve();
+          });
+      })
+  );
+  // `closeAllConnections` first: fetch keep-alive sockets would otherwise hold the
+  // stub open and the runner would never exit.
+  after(
+    () =>
+      new Promise<void>((resolve) => {
+        if (!deckServer) return resolve();
+        deckServer.closeAllConnections();
+        deckServer.close(() => resolve());
+      })
+  );
+
+  /** A surely-closed loopback port: nothing answers, so the deck reads as unreachable. */
+  async function deadDeckApiUrl(): Promise<string> {
+    const srv = net.createServer();
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as net.AddressInfo).port;
+    await new Promise<void>((r) => srv.close(() => r()));
+    return `http://127.0.0.1:${port}`;
+  }
+
   async function probeWith(
     scenario: string,
     extraEnv: Record<string, string> = {},
@@ -279,8 +324,9 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
       FAKE_MUSE_SCENARIO: scenario,
       FAKE_MUSE_VERSION: NEW,
       // NOT-278: the probe runs the deck-required exec lane without a database — the endpoint
-      // comes from the env override and the credential from a fake API key on stdin.
-      AGENT_DECK_API_URL: "http://127.0.0.1:1111",
+      // comes from the env override and the credential from a fake API key on stdin. The
+      // stub above answers `/health`, so the cheap pre-spawn gate passes and the fake runs.
+      AGENT_DECK_API_URL: deckApiUrl,
       META_API_KEY: "mk-test-fake-key-0123456789abcdef",
       ...extraEnv,
     };
@@ -309,6 +355,20 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
   test("a session that fails to run at all is an error (could not verify), not missing", async () => {
     const result = await probeWith("auth");
     assert.equal(result.status, "error");
+  });
+
+  test("an unreachable deck fails closed before any model session is spent", async () => {
+    // The fixture would succeed and record under this scenario — an absent record proves no
+    // child ever spawned, so the deck outage cost a cheap health check, never a paid turn.
+    const record = path.join(process.env.AGENT_DEALER_HOME!, `no-spawn-${randomUUID()}.json`);
+    const result = await probeWith("capability-shell", {
+      AGENT_DECK_API_URL: await deadDeckApiUrl(),
+      FAKE_MUSE_RECORD: record,
+    });
+    assert.equal(result.status, "error");
+    assert.match((result as { detail: string }).detail, /Agent Deck is unreachable/);
+    assert.match((result as { detail: string }).detail, /no model session spent/);
+    assert.equal(fs.existsSync(record), false, "no child spawned, so the fixture never recorded");
   });
 
   test("a session that ran the shell but then timed out is could-not-verify, never capable", async () => {

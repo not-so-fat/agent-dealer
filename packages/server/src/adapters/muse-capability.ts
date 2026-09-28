@@ -22,7 +22,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { AgentHealthIssue } from "@agent-dealer/shared";
 import { DEVELOPER_ROLE_CEILING } from "@agent-dealer/shared";
@@ -288,15 +287,34 @@ function reportedMuseVersion(): string | null {
  *
  * NOT-278: the probe is not a deck session, but the exec lane always carries the selected
  * deck's required server, so the probe passes the configured Agent Deck endpoint with a
- * synthetic probe deck id. A future real probe against a reachable deck may need a real deck
- * here; until then a verdict about a changed build fails closed, never open. The probe repo
- * lives under the operator home scratch root, never OS temp (the attempt rejects temp dirs).
+ * synthetic probe deck id. The probe verdict is about the binary's shell/write capability,
+ * not about deck reachability: a cheap `/health` check runs first, and when the deck is
+ * down the probe fails closed WITHOUT spending a model session (admission already waits on
+ * the deck gate meanwhile; the retry is a cheap health check, not a paid turn). The probe
+ * repo lives under the Dealer data dir, never OS temp (the attempt rejects temp dirs) and
+ * never the operator home root.
  */
 export async function defaultMuseCapabilityProbe(
   version: string,
   opts: { timeoutMs?: number } = {}
 ): Promise<MuseCapabilityProbeResult> {
-  const dir = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-capability-"));
+  const [{ runMuseDeveloperSession }, { getAgentDeckMcpUrl, checkAgentDeckHealth }] = await Promise.all([
+    import("../coordinator/muse-spawn.js"),
+    import("./agent-deck.js"),
+  ]);
+  // Decouple the paid capability check from deck reachability: when the deck is down, fail
+  // closed here — before any child exists — instead of burning a model session that could
+  // only fail on its required deck server. The deck gate (`deck_offline`) already blocks
+  // admission meanwhile, and the error-retry path re-runs this cheap check, not a turn.
+  if (!(await checkAgentDeckHealth())) {
+    return {
+      status: "error",
+      detail: `Agent Deck is unreachable — capability check for ${version} not run (no model session spent)`,
+    };
+  }
+  const scratchParent = path.join(getDataDir(), ".temporal");
+  fs.mkdirSync(scratchParent, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(scratchParent, "muse-capability-"));
   try {
     execFileSync("git", ["init", "-q"], { cwd: dir, stdio: "ignore" });
     const nonce = randomUUID();
@@ -304,10 +322,6 @@ export async function defaultMuseCapabilityProbe(
       path.join(dir, "probe.sh"),
       `#!/bin/sh\nprintf '%s' '${nonce}' | git hash-object --stdin > result.txt\n`
     );
-    const [{ runMuseDeveloperSession }, { getAgentDeckMcpUrl }] = await Promise.all([
-      import("../coordinator/muse-spawn.js"),
-      import("./agent-deck.js"),
-    ]);
     const run = await runMuseDeveloperSession({
       sessionId: randomUUID(),
       runtime: "muse_code",

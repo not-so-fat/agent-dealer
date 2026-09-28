@@ -414,6 +414,7 @@ test("a usage cap defers the work item and records Muse availability, spending n
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.currentRound, 1);
+  assert.equal(issue.infraAttempts, 0, "a usage cap defers without spending an attempt");
   const item = listWorkItemsForIssue(issueId)[0]!;
   assert.equal(item.status, "pending");
   assert.ok(Date.parse(item.availableAt) > Date.now());
