@@ -268,7 +268,7 @@ test("NOT-278: a non-Muse developer prompt has the deck bootstrap but no cron pr
   assert.doesNotMatch(prompt, /cron_create/);
 });
 
-test("NOT-181: without noAgentDeck a deckless prompt still fails closed", () => {
+test("a deckless developer prompt still fails closed", () => {
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, deckId: null });
   assert.match(prompt, /misconfigured: Agent Deck is required but missing/);
 });
