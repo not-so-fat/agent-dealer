@@ -17,11 +17,12 @@ export { installCliVersionToPrefix, PACKAGE_NAME } from "./npm-prefix-install.js
 export { compareSemver } from "./semver.js";
 export { readUpdateState, writeUpdateState, type UpdateState } from "./update-state.js";
 export {
+  activatePendingVersion,
   ensurePendingDownload,
   fetchLatestVersion,
   isAutoupdaterDisabled,
-  maybeActivatePendingVersion,
   readCurrentManagedVersion,
+  readPendingManagedVersion,
   runManagedCliEntryHooks,
   scheduleBackgroundUpdateCheck,
 } from "./updater.js";

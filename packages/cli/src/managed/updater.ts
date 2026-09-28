@@ -28,17 +28,32 @@ export function readCurrentManagedVersion(): string | null {
   return path.basename(real);
 }
 
-export function maybeActivatePendingVersion(): { activated: string | null } {
-  if (isAutoupdaterDisabled()) return { activated: null };
-  if (detectInstallKind() !== "managed") return { activated: null };
+/**
+ * A downloaded managed version that has not been activated yet (NOT-279). Downloading is
+ * safe while Dealer runs; activation is not — see activatePendingVersion.
+ */
+export function readPendingManagedVersion(): string | null {
+  if (isAutoupdaterDisabled()) return null;
+  if (detectInstallKind() !== "managed") return null;
 
-  const state = readUpdateState();
-  const pending = state?.pendingVersion;
+  const pending = readUpdateState()?.pendingVersion;
+  if (!pending) return null;
+  if (!fs.existsSync(cliEntryInVersionDir(versionDir(pending)))) return null;
+  if (pending === readCurrentManagedVersion()) return null;
+  return pending;
+}
+
+/**
+ * Switch `current` to the pending version. Callers must first prove no backend is live
+ * (NOT-279): swapping `current` under a running server makes the installed CLI report a
+ * version the backend is not actually running. Only `agent-dealer start` calls this, after
+ * its stop/liveness checks.
+ */
+export function activatePendingVersion(): { activated: string | null } {
+  const pending = readPendingManagedVersion();
   if (!pending) return { activated: null };
 
-  const dir = versionDir(pending);
-  if (!fs.existsSync(cliEntryInVersionDir(dir))) return { activated: null };
-
+  const state = readUpdateState();
   activateVersion(pending);
   writeUpdateState({
     checkedAt: state?.checkedAt ?? new Date().toISOString(),
@@ -110,15 +125,16 @@ export function scheduleBackgroundUpdateCheck(
   })();
 }
 
-export function runManagedCliEntryHooks(options: {
-  allowActivate: boolean;
-  fetchLatest?: () => Promise<string | null>;
-  installVersion?: typeof installCliVersionToPrefix;
-}): { activated: string | null } {
-  const activated = options.allowActivate ? maybeActivatePendingVersion().activated : null;
+/** Entry hooks for managed installs: only a background check/download. Never activates —
+ * activation waits for a safe `agent-dealer start` (NOT-279). */
+export function runManagedCliEntryHooks(
+  options: {
+    fetchLatest?: () => Promise<string | null>;
+    installVersion?: typeof installCliVersionToPrefix;
+  } = {},
+): void {
   scheduleBackgroundUpdateCheck({
     fetchLatest: options.fetchLatest,
     installVersion: options.installVersion,
   });
-  return { activated };
 }

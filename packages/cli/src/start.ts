@@ -15,7 +15,13 @@ import {
 } from "./daemon-logs.js";
 import { formatPortConflict, isTcpPortOpen, probeAgentDealer } from "./ports.js";
 import { resolveServerEntry, resolveUiDist } from "./paths.js";
-import { clearRunState, writeRunState } from "./runtime-state.js";
+import { clearRunState, isBackendLive, writeRunState } from "./runtime-state.js";
+import {
+  activatePendingVersion,
+  cliEntryInVersionDir,
+  readPendingManagedVersion,
+  versionDir,
+} from "./managed/index.js";
 import { runStop } from "./stop.js";
 import { getVersion } from "./version.js";
 
@@ -118,7 +124,11 @@ function printRunningEndpoints(base: string, uiDist: string | undefined): void {
 }
 
 function buildSupervisorArgs(options: StartOptions): string[] {
-  const args = ["start", "--_supervisor"];
+  return ["start", "--_supervisor", ...buildStartFlags(options)];
+}
+
+function buildStartFlags(options: StartOptions): string[] {
+  const args: string[] = [];
   if (options.open) {
     args.push("--open");
   }
@@ -161,6 +171,60 @@ async function runDaemonLauncher(options: StartOptions): Promise<number> {
   console.log("");
 
   return 0;
+}
+
+function printPendingWhileRunning(): void {
+  const pending = readPendingManagedVersion();
+  if (!pending) return;
+  console.log(
+    `Managed version ${pending} is downloaded but not active while this backend runs. ` +
+      "Restart after current execution finishes: agent-dealer start --force",
+  );
+}
+
+/** Runs `start` from the freshly activated version's CLI so its own server bundle is spawned. */
+function reexecStart(cliEntry: string, args: string[]): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [cliEntry, ...args], { stdio: "inherit", env: process.env });
+    const forward = (signal: NodeJS.Signals) => () => {
+      if (!child.killed) child.kill(signal);
+    };
+    process.on("SIGINT", forward("SIGINT"));
+    process.on("SIGTERM", forward("SIGTERM"));
+    child.on("error", (err) => {
+      console.error(`[agent-dealer] Could not launch ${cliEntry}: ${err.message}`);
+      resolve(1);
+    });
+    child.on("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+  });
+}
+
+/**
+ * NOT-279: a managed update downloaded while Dealer ran stays pending until here — after the
+ * already-running check and any `--force` stop succeeded. Re-checks liveness (health probe +
+ * the server's own pid marker) so `current` never switches under a live backend, then hands
+ * off to the new version's CLI. Returns null when there is nothing to activate (continue in
+ * this process), otherwise the exit code to return.
+ */
+async function activatePendingBeforeSpawn(host: string, port: number, options: StartOptions): Promise<number | null> {
+  if (isSupervisorMode(options)) return null;
+  const pending = readPendingManagedVersion();
+  if (!pending) return null;
+
+  if (await isBackendLive(host, port)) {
+    console.error(
+      `[agent-dealer] Managed version ${pending} is pending, but a backend is still live for this home — not activating.`,
+    );
+    console.error("[agent-dealer] Stop it first (agent-dealer stop) or restart with: agent-dealer start --force");
+    return 1;
+  }
+
+  const { activated } = activatePendingVersion();
+  if (!activated) return null;
+  console.log(`[agent-dealer] Activated managed version ${activated}`);
+  const args = ["start", ...buildStartFlags(options)];
+  if (options.daemon) args.push("--daemon");
+  return reexecStart(cliEntryInVersionDir(versionDir(activated)), args);
 }
 
 async function ensurePortAvailable(host: string, port: number, probe: AgentDealerProbe): Promise<number | null> {
@@ -223,6 +287,7 @@ export async function runStart(options: StartOptions = {}): Promise<number> {
       } else {
         printRunningEndpoints(base, uiDist);
         console.log("Already running. Use `agent-dealer stop` or `agent-dealer start --daemon --force` to restart.");
+        printPendingWhileRunning();
         return 0;
       }
     }
@@ -230,6 +295,11 @@ export async function runStart(options: StartOptions = {}): Promise<number> {
     const portError = await ensurePortAvailable(host, port, options.force ? await probeAgentDealer(host, port) : probe);
     if (portError !== null) {
       return portError;
+    }
+
+    const handoff = await activatePendingBeforeSpawn(host, port, options);
+    if (handoff !== null) {
+      return handoff;
     }
 
     return runDaemonLauncher(options);
@@ -247,6 +317,7 @@ export async function runStart(options: StartOptions = {}): Promise<number> {
     } else {
       printRunningEndpoints(base, uiDist);
       console.log("Already running. Use `agent-dealer stop` or `agent-dealer start --force` to restart.");
+      printPendingWhileRunning();
       return 0;
     }
   }
@@ -254,6 +325,11 @@ export async function runStart(options: StartOptions = {}): Promise<number> {
   const portError = await ensurePortAvailable(host, port, options.force ? await probeAgentDealer(host, port) : probe);
   if (portError !== null) {
     return portError;
+  }
+
+  const handoff = await activatePendingBeforeSpawn(host, port, options);
+  if (handoff !== null) {
+    return handoff;
   }
 
   if (!uiDist) {

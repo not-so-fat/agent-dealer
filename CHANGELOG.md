@@ -4,6 +4,10 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+### Fixes
+
+- **Managed updates no longer switch versions under a running backend, and `status` shows what is actually running (NOT-279)** — a background-downloaded managed version used to activate on the next `start`/`doctor` even while an older server kept serving, so the installed CLI version claimed fixes that were not live. The backend now reports its own version at `GET /api/version`; `agent-dealer status` shows the running backend version (or "running version unknown" for older backends — never the installed CLI version), the installed CLI version, any pending download, and "restart after current execution finishes: agent-dealer start --force" when they differ. A pending version activates only in `agent-dealer start` once no backend is live (health probe and the server's `server.pid` marker), or after `start --force` has successfully stopped the old one; a failed forced stop leaves it pending and starts nothing. `doctor` and other commands only download.
+
 ## 1.2.5 — 2026-09-27
 
 Patch over 1.2.4: Claude capacity refresh reliability fix, CI-failure escalation and merge-base regression gate fixes, Muse developer-capability auto re-validation, and two coordinator hardening fixes.
