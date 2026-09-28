@@ -9,6 +9,7 @@ import {
 import {
   createIssue,
   dequeueIssue,
+  fetchIssuesHistoryTotal,
   fetchIssuesPage,
   executeIssue,
   fetchIssueDetail,
@@ -41,6 +42,8 @@ import {
   type IssuesFilterForm,
 } from "../lib/issuesList";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
+import FirstIssueStrip from "../components/issues/FirstIssueStrip";
+import { dismissFirstIssue, isFirstIssueDismissed, shouldShowFirstIssueStrip } from "../lib/firstIssue";
 import RepositoryPicker from "../components/issues/RepositoryPicker";
 import RepositoryMappingsEditor from "../components/issues/RepositoryMappingsEditor";
 import AgentAssignmentEditor from "../components/issues/AgentAssignmentEditor";
@@ -117,6 +120,12 @@ export default function IssuesListPage({
   const [queue, setQueue] = useState<QueueEntryRow[]>([]);
   const [admission, setAdmission] = useState<AdmissionStatus | null>(null);
   const [limitBusy, setLimitBusy] = useState(false);
+  // NOT-287: truly-fresh history (including closed) for the first-issue
+  // strip — null while loading so onboarding never flashes. Dismissal
+  // persists per local profile; creating the first issue clears the strip
+  // via the refreshed history count.
+  const [historyTotal, setHistoryTotal] = useState<number | null>(null);
+  const [firstIssueDismissed, setFirstIssueDismissed] = useState(() => isFirstIssueDismissed());
   /** NOT-217 queued reassignment: the row being edited plus its live assignments. */
   const [editTarget, setEditTarget] = useState<{
     issueId: string;
@@ -145,6 +154,26 @@ export default function IssuesListPage({
   /** Queue panel, Needs-attention panel, and historical list stay in sync.
    * The queue/admission panels are global and unfiltered; applied URL filters
    * scope only the historical list below them. */
+  /** NOT-287: unfiltered history count (closed included) — the only input
+   * the first-issue strip trusts. Filtered list totals must never decide it. */
+  const refreshHistory = () => {
+    fetchIssuesHistoryTotal([...ISSUE_STATUS_OPTIONS])
+      .then(setHistoryTotal)
+      .catch(() => undefined);
+  };
+
+  /** Dismiss the first-issue strip for this local profile. */
+  const dismissStrip = () => {
+    dismissFirstIssue();
+    setFirstIssueDismissed(true);
+  };
+
+  const showFirstIssue = shouldShowFirstIssueStrip({
+    historyTotal,
+    filtersActive,
+    dismissed: firstIssueDismissed,
+  });
+
   const refresh = () => {
     refreshIssues(appliedRef.current);
     fetchQueue()
@@ -153,6 +182,7 @@ export default function IssuesListPage({
     fetchQueueStatus()
       .then(setAdmission)
       .catch(() => undefined);
+    refreshHistory();
   };
 
   /** NOT-215: operator-chosen active-issue limit (persisted server-side). */
@@ -282,6 +312,11 @@ export default function IssuesListPage({
     fetchQueue()
       .then(setQueue)
       .catch(() => undefined);
+    // NOT-287: history stays fresh on mount and navigation so creating the
+    // first issue (here or elsewhere) retires the strip without a reload.
+    fetchIssuesHistoryTotal([...ISSUE_STATUS_OPTIONS])
+      .then(setHistoryTotal)
+      .catch(() => undefined);
     const poll = setInterval(() => {
       refreshIssues(appliedRef.current);
       fetchQueue()
@@ -399,6 +434,14 @@ export default function IssuesListPage({
       </div>
 
       {error && <p className="text-sm text-red-300 mb-3">{error}</p>}
+
+      {showFirstIssue && (
+        <FirstIssueStrip
+          agentCount={agents.length}
+          onStartIssue={() => setShowCreate(true)}
+          onDismiss={dismissStrip}
+        />
+      )}
 
       {showCreate && (
         <div className="mb-4 p-4 rounded border border-white/10 bg-panel-elevated/60 space-y-2">
@@ -604,7 +647,11 @@ export default function IssuesListPage({
         </div>
       )}
 
-      {(queue.length > 0 || admission) && (
+      {/* NOT-287: the full admission panel renders only when entries wait —
+          an empty queue collapses to one muted status line so empty chrome
+          never dominates the first screen. Real entries, errors, and human
+          actions always keep their full presentation. */}
+      {queue.length > 0 ? (
         <div className="mb-4 rounded border border-cyber-teal/25 bg-cyber-teal/5">
           <div className="px-4 py-2 border-b border-cyber-teal/20 flex items-center justify-between gap-3">
             <span className="font-ui-display text-sm font-medium text-cyber-teal">Admission queue</span>
@@ -783,7 +830,35 @@ export default function IssuesListPage({
             ))}
           </div>
         </div>
-      )}
+      ) : admission ? (
+        <p data-testid="admission-idle-status" className="mb-4 text-xs text-white/35 tabular-nums">
+          Admission: {admission.active} active · {admission.waiting} waiting · limit{" "}
+          {admission.limit}
+          {admission.overCap ? " · over capacity" : ""}
+          {admission.options.length > 0 && (
+            <label className="ml-2 inline-flex items-center gap-1">
+              <span>limit</span>
+              <select
+                className="bg-black/30 border border-white/10 rounded px-1.5 py-0.5 text-xs text-white/60 disabled:opacity-50"
+                value={admission.options.includes(admission.maxActiveIssues) ? admission.maxActiveIssues : admission.limit}
+                disabled={limitBusy}
+                title={
+                  admission.ceiling < 2
+                    ? `Capped by the worker/spawn ceiling (${admission.ceiling})`
+                    : "How many issues may execute in parallel (max one per repository)"
+                }
+                onChange={(e) => void changeLimit(Number(e.target.value))}
+              >
+                {admission.options.map((o) => (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </p>
+      ) : null}
 
       <NeedsAttentionPanel
         actions={humanActions}

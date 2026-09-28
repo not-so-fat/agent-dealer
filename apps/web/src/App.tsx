@@ -84,7 +84,7 @@ export function ShellHeader({
             >
               AgentDealer
             </h1>
-            <p className="text-sm text-cyber-teal">One issue, one durable coordination record</p>
+            <p className="text-sm text-cyber-teal">Agent Deck carries the method; Agent Dealer runs the issue queue.</p>
           </div>
         </Link>
         <nav className="flex gap-1">

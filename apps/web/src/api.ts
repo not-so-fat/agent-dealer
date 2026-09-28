@@ -281,6 +281,25 @@ export interface IssuesListQuery {
   page?: number;
 }
 
+/**
+ * NOT-287: total historical issues, including closed. The paginated list
+ * default excludes `closed`, so the fresh-history decision cannot reuse the
+ * filtered list total — it names every status explicitly instead. Limit 1
+ * keeps the payload to one row; `total` still describes the full cohort.
+ */
+export async function fetchIssuesHistoryTotal(allStatuses: string[]): Promise<number> {
+  const qs = new URLSearchParams();
+  const statuses = allStatuses.map((s) => s.trim()).filter(Boolean);
+  if (statuses.length > 0) qs.set("status", statuses.join(","));
+  qs.set("page", "1");
+  qs.set("limit", "1");
+  qs.sort();
+  const res = await fetch(`${API}/api/issues?${qs.toString()}`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  const json = (await res.json()) as { total?: number };
+  return typeof json.total === "number" ? json.total : 0;
+}
+
 export async function fetchIssuesPage(query: IssuesListQuery): Promise<IssuesListPageResult> {
   const qs = new URLSearchParams();
   if (query.q?.trim()) qs.set("q", query.q.trim());
