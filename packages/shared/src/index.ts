@@ -20,6 +20,7 @@ export * from "./attempt-waste.js";
 export * from "./profile-snapshot.js";
 export * from "./workflow.js";
 export * from "./human-actions.js";
+export * from "./action-presentation.js";
 export * from "./findings.js";
 export * from "./usage-events.js";
 export * from "./runtime-availability.js";
