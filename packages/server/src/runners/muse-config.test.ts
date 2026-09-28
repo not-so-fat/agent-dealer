@@ -286,6 +286,38 @@ test("ambient Muse config, env, and workspace files cannot expand the attempt", 
   assert.equal(fs.readFileSync(ambientSettings, "utf8"), ambientBody);
 });
 
+test("test-only FAKE_MUSE_* harness vars reach the child; credentials and unrelated vars do not", () => {
+  const fx = fixture();
+  const attempt = prepareMuseAttempt(
+    input(fx, "developer", {
+      env: {
+        PATH: "/usr/bin",
+        HOME: os.homedir(),
+        META_API_KEY: API_KEY,
+        MUSE_SENTINEL: "must-not-reach-child",
+        CODEX_HOME: "/operator/codex",
+        DEALER_MUSE_SENTINEL: "must-not-reach-child",
+        FAKE_MUSE_SCENARIO: "success",
+        FAKE_MUSE_RECORD: "/tmp/record.json",
+      },
+    })
+  );
+  try {
+    // The fake fixture (selected via MUSE_CLI) is driven by FAKE_MUSE_*; the real binary
+    // ignores them. They join attempt.env, so the pre-spawn verify() snapshot covers them.
+    assert.equal(attempt.env.FAKE_MUSE_SCENARIO, "success");
+    assert.equal(attempt.env.FAKE_MUSE_RECORD, "/tmp/record.json");
+    assert.doesNotThrow(() =>
+      attempt.verify({ cwd: attempt.cwd, argv: [...attempt.argv], env: { ...attempt.env }, stdin: attempt.stdin })
+    );
+    for (const dropped of ["META_API_KEY", "MUSE_SENTINEL", "CODEX_HOME", "DEALER_MUSE_SENTINEL"]) {
+      assert.equal(dropped in attempt.env, false, dropped);
+    }
+  } finally {
+    attempt.cleanup();
+  }
+});
+
 test("required Agent Deck server: optional mode, bad url, and missing identity fail before spawn", () => {
   const fx = fixture();
   const attempt = prepareMuseAttempt(input(fx, "developer"));

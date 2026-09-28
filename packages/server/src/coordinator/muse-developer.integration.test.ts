@@ -108,14 +108,16 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 before(() => {
-  repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-repo-"));
+  // Home scratch, never OS temp: the per-attempt guard refuses temp-dir worktrees, and the
+  // coordinator worktree lives beside the repo it was cloned from.
+  repo = fs.mkdtempSync(path.join(HOME_SCRATCH, "dealer-muse-repo-"));
   git(repo, "init", "-q", "-b", "main");
   git(repo, "config", "user.email", "test@example.com");
   git(repo, "config", "user.name", "Test");
   fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "init");
-  remote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-remote-"));
+  remote = fs.mkdtempSync(path.join(HOME_SCRATCH, "dealer-muse-remote-"));
   execFileSync("git", ["init", "-q", "--bare", "-b", "main", remote]);
   git(repo, "remote", "add", "origin", remote);
   git(repo, "push", "-q", "origin", "main");
@@ -127,11 +129,16 @@ after(() => {
 
 function makeMuseIssue(opts: { maxInfraAttempts?: number; deckId?: string | null } = {}): string {
   // The Agents form requires a deck; the Muse developer session receives it on the exec lane.
+  // A null deckId simulates a legacy deck-less profile: the form can no longer produce one,
+  // so create with a deck and clear the column directly.
   const dev = createAgent({
     name: `muse-${Math.random()}`,
     runtime: "muse_code",
-    ...(opts.deckId === null ? {} : { deckId: opts.deckId ?? TEST_DECK_ID }),
+    deckId: opts.deckId ?? TEST_DECK_ID,
   });
+  if (opts.deckId === null) {
+    getDb().prepare("UPDATE agents SET deck_id = NULL WHERE id = ?").run(dev.id);
+  }
   const rev = createAgent({ name: `rev-${Math.random()}`, runtime: "codex_local", deckId: TEST_DECK_ID });
   return createIssue({
     title: "Add widget",
@@ -208,6 +215,7 @@ async function pump(max = 1): Promise<void> {
 function recorded(): {
   argv: string[];
   cwd: string;
+  cwdReal: string;
   xdgConfigHome: string;
   xdgDataHome: string;
   noAutoUpdate: string;
@@ -231,15 +239,17 @@ function expectDeckSettings(rec: ReturnType<typeof recorded>, deckId: string = T
   assert.equal(server.type, "streamable-http");
   assert.equal(server.url, expectedMcpUrl());
   assert.equal(server.mode, "required");
+  // cwdReal was resolved by the fixture at spawn time: the coordinator removes the
+  // worktree after the turn, so resolving rec.cwd here would race cleanup.
   assert.deepEqual(server.headers, {
     "x-agent-deck-deck-id": deckId,
-    "x-agent-deck-workspace": fs.realpathSync(rec.cwd),
+    "x-agent-deck-workspace": rec.cwdReal,
   });
   assert.equal("enabled_tools" in server, false, "developers are unfiltered: no allowlist claim");
   assert.equal("disabled_tools" in server, false, "developers are unfiltered: no denylist claim");
   assertMuseSettings(
     settings,
-    { url: expectedMcpUrl(), deckId, workspace: fs.realpathSync(rec.cwd) },
+    { url: expectedMcpUrl(), deckId, workspace: rec.cwdReal },
     "developer"
   );
   return settings;

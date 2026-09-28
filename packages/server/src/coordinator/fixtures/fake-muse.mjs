@@ -61,6 +61,9 @@ if (process.env.FAKE_MUSE_RECORD) {
     JSON.stringify({
       argv,
       cwd: process.cwd(),
+      // The coordinator removes the worktree after the turn, so resolve the real path now,
+      // while it still exists — assertions run after cleanup.
+      cwdReal: fs.realpathSync(process.cwd()),
       xdgConfigHome: cfg,
       xdgDataHome: process.env.XDG_DATA_HOME,
       noAutoUpdate: process.env.MUSE_NO_AUTO_UPDATE,
