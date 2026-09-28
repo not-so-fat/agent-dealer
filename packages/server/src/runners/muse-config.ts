@@ -12,6 +12,7 @@ export {
   assertMuseArgv,
   assertMuseSettings,
   buildMuseArgv,
+  buildMuseBaseSettings,
   buildMuseEnv,
   buildMuseSettings,
   createRedactor,

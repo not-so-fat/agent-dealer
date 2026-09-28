@@ -75,6 +75,19 @@ export async function spawnCli(
     timeoutMs: number;
     env?: Record<string, string>;
     /**
+     * NOT-278: when true, the child receives exactly `opts.env` — `process.env` is not
+     * merged back in. The Muse exec lane uses this with the approved `attempt.env` so ambient
+     * `META_API_KEY`, `MUSE_*`, `CODEX_HOME`, and unrelated variables can never reach the
+     * child. Defaults to false (merge), preserving every existing caller.
+     */
+    exactEnv?: boolean;
+    /**
+     * NOT-278: payload written once to the child's stdin, then closed. Carries the Muse
+     * API key (`--api-key-stdin`) without touching argv, environment, settings, or logs.
+     * Never logged or echoed; defaults to no stdin payload (`stdio: ["ignore", ...]`).
+     */
+    stdin?: string;
+    /**
      * Aborting terminates the spawned CLI (NOT-126). Without this, an attempt that loses
      * its lease leaves its agent process running: still editing the worktree, still
      * spending tokens, under a session the DB has already marked failed — and the
@@ -116,10 +129,24 @@ export async function spawnCli(
         cwd,
         // Extra vars (e.g. codex's bearer-token env var for its per-attempt CODEX_HOME
         // MCP config, agent-deck-bind.ts) are added on top of, never in place of, the
-        // process env the CLI itself needs to run.
-        env: { ...process.env, ...opts.env },
-        stdio: ["ignore", "pipe", "pipe"],
+        // process env the CLI itself needs to run — unless the caller asked for the exact
+        // environment (NOT-278: the Muse exec lane's approved attempt.env, stdin key).
+        env: opts.exactEnv ? { ...opts.env } : { ...process.env, ...opts.env },
+        stdio: opts.stdin === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
       });
+      // NOT-278: the stdin payload (Muse API key) is written once and closed right after
+      // spawn. It never reaches the log stream, the transcript, or any error below.
+      if (opts.stdin !== undefined) {
+        const payload = opts.stdin;
+        const stdin = child.stdin;
+        if (stdin) {
+          stdin.on("error", () => {
+            // The child exited before reading (e.g. instant spawn error) — the 'error'/'close'
+            // handlers below still settle the promise; a broken pipe must not throw here.
+          });
+          stdin.end(payload);
+        }
+      }
       registerChild(runId, child, opts.logPath);
       // Best-effort bookkeeping: a throwing callback must never take down the spawn.
       if (child.pid !== undefined) {

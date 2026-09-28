@@ -32,7 +32,11 @@ export const NOT_177_EVIDENCE: Readonly<MuseEnforcementEvidence> = Object.freeze
 export const MUSE_MODEL = "muse-spark-1.3-contributor";
 export const AGENT_DECK_SERVER = "agent-deck";
 
-/** Deck reads a worker needs. `call_service_tool` (outbound mutation) is never in this list. */
+/**
+ * NOT-278: the read-only allowlist is a reviewer requirement, not a developer requirement.
+ * Developers receive the selected deck's full surface, including `call_service_tool`. These
+ * lists only ever materialize for a reviewer build that proves allowlist enforcement.
+ */
 export const AGENT_DECK_READ_TOOLS = [
   "get_bound_deck",
   "get_playbook",
@@ -151,13 +155,19 @@ interface MuseMcpServer {
   disabled_tools?: string[];
 }
 
-/** Capabilities a role needs that the evidence does not prove. Both roles need both today. */
+/**
+ * NOT-278: capabilities a role needs that the evidence does not prove. Developers receive the
+ * selected deck's full surface (including `call_service_tool`), so no allowlist enforcement is
+ * required; `cron_*` stays prohibited by the developer prompt and is detected post-run
+ * (`muse_cron_used`), not mechanically disabled. Reviewers still need both controls proven.
+ */
 export function unenforceableRestrictions(
-  _role: MuseRole,
+  role: MuseRole,
   evidence: MuseEnforcementEvidence = NOT_177_EVIDENCE
 ): MuseCapability[] {
+  if (role === "developer") return [];
   const missing: MuseCapability[] = [];
-  // Outbound mutation (`call_service_tool`) must stay denied for every role, and Muse only
+  // Outbound mutation (`call_service_tool`) must stay denied for reviewers, and Muse only
   // stores enabled_tools/disabled_tools unless this is proven.
   if (!evidence.mcp_tool_allowlist_enforcement) missing.push("mcp_tool_allowlist_enforcement");
   // cron jobs are background orchestration that fired a second agent run inside the process.
@@ -165,17 +175,44 @@ export function unenforceableRestrictions(
   return missing;
 }
 
-export function buildMuseSettings(
-  agentDeck: MuseAttemptInput["agentDeck"],
+/**
+ * NOT-278: the deckless worker posture shared by every Muse settings.json — workflows and
+ * subagents off, reminder child runs off, plus `cron_*` only when proven mechanically
+ * disableable. The capacity serve host (which is shared across decks and never runs a
+ * session) uses this directly; per-attempt sessions add the required `agent-deck` server
+ * below. Exported only for that host — it is not a session attempt and `assertMuseSettings`
+ * rejects it (exactly one required `agent-deck` server is mandatory for a launch).
+ */
+export function buildMuseBaseSettings(
+  role: MuseRole = "developer",
   evidence: MuseEnforcementEvidence = NOT_177_EVIDENCE
-): MuseSettings {
+): Omit<MuseSettings, "mcpServers"> {
   const runtime_capabilities: MuseSettings["runtime_capabilities"] = {};
   for (const name of REMINDERS) {
     runtime_capabilities[`plugin:tbh-reminders:reminder:${name}`] = { enabled: false };
   }
-  if (evidence.cron_tool_disable) {
+  // NOT-278: `cron_*` can only be claimed disabled for reviewers on a build that proves it.
+  // Developers are prohibited by prompt and detected post-run; their settings never claim it.
+  if (role === "reviewer" && evidence.cron_tool_disable) {
     for (const tool of CRON_TOOLS) runtime_capabilities[`tool:${tool}`] = { enabled: false };
   }
+  return {
+    schema_version: 1,
+    run: { workflow_trigger_mode: "off", subagent_delegation_mode: "off" },
+    runtime_capabilities,
+  };
+}
+
+/**
+ * NOT-278: developers always receive the selected deck's full surface unfiltered — their
+ * settings never carry `enabled_tools`/`disabled_tools` claims. The read-only allowlist only
+ * materializes for reviewers on a build that proves enforcement.
+ */
+export function buildMuseSettings(
+  agentDeck: MuseAttemptInput["agentDeck"],
+  role: MuseRole = "developer",
+  evidence: MuseEnforcementEvidence = NOT_177_EVIDENCE
+): MuseSettings {
   const server: MuseMcpServer = {
     type: "streamable-http",
     url: agentDeck.url,
@@ -186,14 +223,12 @@ export function buildMuseSettings(
     // `mode`, not `required`: writing both drops the whole MCP block. Never "optional".
     mode: "required",
   };
-  if (evidence.mcp_tool_allowlist_enforcement) {
+  if (role === "reviewer" && evidence.mcp_tool_allowlist_enforcement) {
     server.enabled_tools = [...AGENT_DECK_READ_TOOLS];
     server.disabled_tools = [...AGENT_DECK_DENIED_TOOLS];
   }
   return {
-    schema_version: 1,
-    run: { workflow_trigger_mode: "off", subagent_delegation_mode: "off" },
-    runtime_capabilities,
+    ...buildMuseBaseSettings(role, evidence),
     mcpServers: { [AGENT_DECK_SERVER]: server },
   };
 }
@@ -202,9 +237,10 @@ export function buildMuseSettings(
 export function assertMuseSettings(
   settings: unknown,
   agentDeck: MuseAttemptInput["agentDeck"],
+  role: MuseRole = "developer",
   evidence: MuseEnforcementEvidence = NOT_177_EVIDENCE
 ): void {
-  const expected = buildMuseSettings(agentDeck, evidence);
+  const expected = buildMuseSettings(agentDeck, role, evidence);
   if (JSON.stringify(sortKeys(settings)) !== JSON.stringify(sortKeys(expected))) {
     throw new MuseIsolationError(
       "invalid_settings",
@@ -449,7 +485,8 @@ function sameJson(a: unknown, b: unknown): boolean {
  * Validates, refuses unenforceable restrictions, then writes the per-attempt dir (0700) with
  * settings.json (0600) and an auth link. Throws before spawn; leaves nothing behind on failure.
  *
- * Always uses the pinned `NOT_177_EVIDENCE`, under which both roles are currently refused. There is
+ * Always uses the pinned `NOT_177_EVIDENCE`, under which developers are admitted unfiltered
+ * (NOT-278: the full deck surface, no allowlist claims) and reviewers are still refused. There is
  * deliberately no runtime seam that accepts other evidence: the enforced-path tests load a
  * source-rewritten copy of this file instead (see muse-config.test.ts).
  */
@@ -472,8 +509,8 @@ function prepareWithEvidence(rawInput: MuseAttemptInput, evidence: MuseEnforceme
   const { worktree, baseDir } = validateInput(input);
   const agentDeck = input.agentDeck;
   const credentialKind = input.credential.kind;
-  const settings = deepFreeze(buildMuseSettings(agentDeck, evidence));
-  assertMuseSettings(settings, agentDeck, evidence);
+  const settings = deepFreeze(buildMuseSettings(agentDeck, input.role, evidence));
+  assertMuseSettings(settings, agentDeck, input.role, evidence);
   const apiKey = input.credential.kind === "api-key" ? input.credential.apiKey : undefined;
   const argv = buildMuseArgv({
     role: input.role,
@@ -558,7 +595,7 @@ function prepareWithEvidence(rawInput: MuseAttemptInput, evidence: MuseEnforceme
       if (err instanceof MuseIsolationError) throw err;
       throw new MuseIsolationError("invalid_settings", "Muse settings.json is missing or unreadable");
     }
-    assertMuseSettings(onDisk, agentDeck, evidence);
+    assertMuseSettings(onDisk, agentDeck, input.role, evidence);
     const entries = fs.readdirSync(path.dirname(settingsPath)).sort();
     const allowed = credentialKind === "auth-file" ? ["auth.json", "settings.json"] : ["settings.json"];
     if (entries.join() !== allowed.join()) {

@@ -249,8 +249,9 @@ async function materializeWorkerMcpConfig(opts: {
   const mcpUrl = `${mcpBase}/mcp`;
   const headers = deckLaunchHeaders(opts.deckId, opts.worktreePath);
 
-  // Muse Code has no Agent Deck / MCP wiring (NOT-178 non-goal; NOT-181 owns it). Refuse before
-  // anything is written rather than fall through to the Claude config below.
+  // NOT-278: Muse Code settings come only from `prepareMuseAttempt`
+  // (runners/muse-config-core.ts) — never emit a Claude/Codex/Cursor config for Muse. Refuse
+  // before anything is written rather than fall through to the Claude config below.
   if (opts.runtime === "muse_code") {
     throw new Error("Muse Code does not support Agent Deck MCP configuration");
   }
@@ -449,6 +450,43 @@ async function verifyDeckConnection(opts: {
   }
 }
 
+export type WorkerDeckVerificationOutcome =
+  | { ok: true }
+  | { ok: false; kind: "infra_failure" | "deck_unavailable"; reason: string };
+
+function toVerificationOutcome(verified: VerifyDeckResult): WorkerDeckVerificationOutcome {
+  if (verified.ok) return { ok: true };
+  return verified.kind === "deck_unavailable"
+    ? { ok: false, kind: "deck_unavailable", reason: `Agent Deck is unreachable — ${verified.reason}` }
+    : { ok: false, kind: "infra_failure", reason: `preflight failed: ${verified.reason}` };
+}
+
+/**
+ * NOT-278: live `get_bound_deck` (+ configured-playbook) preflight without materializing any
+ * runtime MCP config. Muse Code sessions use this: their settings.json comes only from
+ * `prepareMuseAttempt` (runners/muse-config-core.ts), so the shared materializer below must
+ * never run for them. Same result mapping as the materializing path: no response is
+ * `deck_unavailable`; a response that fails validation is `infra_failure` (surfaced by the
+ * effect as `deck_failure`).
+ */
+export async function verifyWorkerDeckConnection(opts: {
+  deckId: string;
+  worktreePath: string;
+  playbookIds?: string[];
+  callTool?: DeckToolCaller;
+  timeoutMs?: number;
+}): Promise<WorkerDeckVerificationOutcome> {
+  const timeoutMs = opts.timeoutMs ?? Number(process.env.DECK_BIND_TIMEOUT_MS ?? 30_000);
+  const verified = await verifyDeckConnection({
+    deckId: opts.deckId,
+    worktreePath: opts.worktreePath,
+    playbookIds: opts.playbookIds ?? [],
+    callTool: opts.callTool,
+    timeoutMs,
+  });
+  return toVerificationOutcome(verified);
+}
+
 /**
  * Materialize a per-attempt MCP config for the profile's deck and verify with
  * `get_bound_deck` and every configured playbook before spawn. No mint, no ledger, no
@@ -496,9 +534,7 @@ export async function prepareWorkerDeckConnection(opts: {
     } catch {
       // best-effort
     }
-    return verified.kind === "deck_unavailable"
-      ? { ok: false, kind: "deck_unavailable", reason: `Agent Deck is unreachable — ${verified.reason}` }
-      : { ok: false, kind: "infra_failure", reason: `preflight failed: ${verified.reason}` };
+    return toVerificationOutcome(verified);
   }
 
   return { ok: true, mcpConfigPath: materialized.mcpConfigPath, mcpEnv: materialized.mcpEnv };

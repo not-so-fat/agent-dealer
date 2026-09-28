@@ -14,7 +14,7 @@ import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamable
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deckbind-"));
 
 const { migrate } = await import("../db/index.js");
-const { prepareWorkerDeckConnection, releaseWorkerDeckConnection, parseDeckToolResult, isDeckUnreachableError } =
+const { prepareWorkerDeckConnection, releaseWorkerDeckConnection, parseDeckToolResult, isDeckUnreachableError, verifyWorkerDeckConnection } =
   await import("./agent-deck-bind.js");
 const { codexScopedConfigDeniesSendGate } = await import("./codex-scoped-config.js");
 const { roleCeiling } = await import("@agent-dealer/shared");
@@ -71,7 +71,49 @@ test("prepareWorkerDeckConnection verifies and writes a claude MCP config with d
   }
 });
 
-test("prepareWorkerDeckConnection refuses Muse Code before writing any MCP config or verifying (NOT-178)", async () => {
+// NOT-278: Muse Code settings come only from prepareMuseAttempt — the shared materializer
+// must never run for Muse. Muse preflights through verifyWorkerDeckConnection instead.
+test("verifyWorkerDeckConnection preflights Muse without materializing any MCP config", async () => {
+  const calls: string[] = [];
+  const result = await verifyWorkerDeckConnection({
+    deckId: DECK,
+    worktreePath: WT,
+    callTool: async (name, args) => {
+      calls.push(name);
+      if (name === "get_bound_deck") return textResult({ id: DECK, name: "personal-dev" });
+      return textResult({ id: args.playbook_id });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, ["get_bound_deck"]);
+});
+
+test("verifyWorkerDeckConnection maps a wrong deck to infra_failure and silence to deck_unavailable", async () => {
+  const wrong = await verifyWorkerDeckConnection({
+    deckId: DECK,
+    worktreePath: WT,
+    callTool: async () => textResult({ id: "some-other-deck-id" }),
+  });
+  assert.equal(wrong.ok, false);
+  if (!wrong.ok) {
+    assert.equal(wrong.kind, "infra_failure");
+    assert.match(wrong.reason, /returned deck some-other-deck-id, expected/);
+  }
+  const silent = await verifyWorkerDeckConnection({
+    deckId: DECK,
+    worktreePath: WT,
+    callTool: async () => {
+      throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1110"), { code: "ECONNREFUSED" });
+    },
+  });
+  assert.equal(silent.ok, false);
+  if (!silent.ok) {
+    assert.equal(silent.kind, "deck_unavailable");
+    assert.match(silent.reason, /unreachable/);
+  }
+});
+
+test("prepareWorkerDeckConnection refuses Muse Code before writing any MCP config or verifying (NOT-278)", async () => {
   let verifyCalled = false;
   const result = await prepareWorkerDeckConnection({
     policy: DENIED,

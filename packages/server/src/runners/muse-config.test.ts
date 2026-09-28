@@ -7,6 +7,7 @@ import {
   assertMuseArgv,
   buildMuseArgv,
   MuseIsolationError,
+  NOT_177_EVIDENCE,
   prepareMuseAttempt as prepareMuseAttemptPinned,
   unenforceableRestrictions,
   type MuseAttempt,
@@ -92,26 +93,55 @@ function walk(dir: string): string[] {
   });
 }
 
-test("with NOT-177 evidence both roles fail before anything is written", () => {
-  for (const role of ["developer", "reviewer"] as const) {
-    const fx = fixture();
-    let thrown: MuseIsolationError | undefined;
-    try {
-      prepareMuseAttemptPinned(input(fx, role));
-    } catch (err) {
-      thrown = err as MuseIsolationError;
+// NOT-278: developers get the selected deck's full surface unfiltered, so the pinned evidence
+// admits them; reviewers still need both controls proven and fail before anything is written.
+test("with NOT-177 evidence the developer is admitted unfiltered and the reviewer still fails closed", () => {
+  const fx = fixture();
+  const attempt = prepareMuseAttemptPinned(input(fx, "developer"));
+  try {
+    const onDisk = JSON.parse(fs.readFileSync(attempt.settingsPath, "utf8"));
+    assert.deepEqual(Object.keys(onDisk.mcpServers), ["agent-deck"]);
+    assert.equal(onDisk.mcpServers["agent-deck"].mode, "required");
+    assert.deepEqual(onDisk.mcpServers["agent-deck"].headers, {
+      "x-agent-deck-deck-id": "deck-123",
+      "x-agent-deck-workspace": fs.realpathSync(fx.worktree),
+    });
+    assert.equal("enabled_tools" in onDisk.mcpServers["agent-deck"], false);
+    assert.equal("disabled_tools" in onDisk.mcpServers["agent-deck"], false);
+    for (const tool of ["cron_create", "cron_list", "cron_delete"]) {
+      assert.equal(`tool:${tool}` in onDisk.runtime_capabilities, false, tool);
     }
-    assert.equal(thrown?.code, "unenforceable_restriction", role);
-    assert.deepEqual([...thrown!.capabilities], ["mcp_tool_allowlist_enforcement", "cron_tool_disable"]);
-    assert.deepEqual(fs.readdirSync(fx.baseDir), []);
+    assert.doesNotThrow(() => attempt.verify());
+  } finally {
+    attempt.cleanup();
   }
+
+  const fxReviewer = fixture();
+  let thrown: MuseIsolationError | undefined;
+  try {
+    prepareMuseAttemptPinned(input(fxReviewer, "reviewer"));
+  } catch (err) {
+    thrown = err as MuseIsolationError;
+  }
+  assert.equal(thrown?.code, "unenforceable_restriction");
+  assert.deepEqual([...thrown!.capabilities], ["mcp_tool_allowlist_enforcement", "cron_tool_disable"]);
+  assert.deepEqual(fs.readdirSync(fxReviewer.baseDir), []);
+
+  assert.deepEqual(unenforceableRestrictions("developer", NOT_177_EVIDENCE), []);
+  assert.deepEqual(unenforceableRestrictions("reviewer", NOT_177_EVIDENCE), [
+    "mcp_tool_allowlist_enforcement",
+    "cron_tool_disable",
+  ]);
   assert.deepEqual(unenforceableRestrictions("developer", ENFORCED), []);
+  assert.deepEqual(unenforceableRestrictions("reviewer", ENFORCED), []);
   assert.deepEqual(unenforceableRestrictions("reviewer", { ...ENFORCED, cron_tool_disable: false }), [
     "cron_tool_disable",
   ]);
 });
 
-test("developer: only the assigned Agent Deck surface, sandbox on, no unrestricted flags", () => {
+// NOT-278: the developer's deck surface is the full one — exactly one required server, no
+// allowlist claims even when enforcement is proven (the enforced-core copy below proves it).
+test("developer: the full assigned Agent Deck surface, sandbox on, no unrestricted flags", () => {
   const fx = fixture();
   const attempt = prepareMuseAttempt(input(fx, "developer"));
   try {
@@ -126,11 +156,11 @@ test("developer: only the assigned Agent Deck surface, sandbox on, no unrestrict
       "x-agent-deck-deck-id": "deck-123",
       "x-agent-deck-workspace": fs.realpathSync(fx.worktree),
     });
-    assert.deepEqual(server.enabled_tools, ["get_bound_deck", "get_playbook", "list_service_tools", "bind_workspace"]);
-    assert.deepEqual(server.disabled_tools, ["call_service_tool"]);
+    assert.equal("enabled_tools" in server, false, "developers are unfiltered: no allowlist claim");
+    assert.equal("disabled_tools" in server, false, "developers are unfiltered: no denylist claim");
     assert.deepEqual(onDisk.run, { workflow_trigger_mode: "off", subagent_delegation_mode: "off" });
     for (const tool of ["cron_create", "cron_list", "cron_delete"]) {
-      assert.deepEqual(onDisk.runtime_capabilities[`tool:${tool}`], { enabled: false });
+      assert.equal(`tool:${tool}` in onDisk.runtime_capabilities, false, tool);
     }
 
     const flag = (f: string) => attempt.argv[attempt.argv.indexOf(f) + 1];
@@ -155,16 +185,25 @@ test("developer: only the assigned Agent Deck surface, sandbox on, no unrestrict
   }
 });
 
-test("reviewer: read-only flags and the same deck reads, mutation denied", () => {
+test("reviewer: read-only flags and the allowlisted deck reads, mutation denied", () => {
   const fx = fixture();
   const attempt = prepareMuseAttempt(input(fx, "reviewer"));
   try {
     assert.ok(attempt.argv.includes("--disable-write"));
     assert.ok(attempt.argv.includes("--disable-shell"));
     const server = attempt.settings.mcpServers["agent-deck"]!;
+    assert.deepEqual(server.enabled_tools, ["get_bound_deck", "get_playbook", "list_service_tools", "bind_workspace"]);
     assert.equal(server.enabled_tools?.includes("call_service_tool"), false);
     assert.deepEqual(server.disabled_tools, ["call_service_tool"]);
     assert.deepEqual(Object.keys(attempt.settings.mcpServers), ["agent-deck"]);
+    for (const tool of ["cron_create", "cron_list", "cron_delete"]) {
+      assert.deepEqual(
+        (attempt.settings.runtime_capabilities as Record<string, unknown>)[`tool:${tool}`],
+        { enabled: false },
+        tool
+      );
+    }
+    assert.doesNotThrow(() => attempt.verify());
   } finally {
     attempt.cleanup();
   }
@@ -426,11 +465,9 @@ test("api key never reaches argv, env, disk, or error text; redact scrubs it", (
   } finally {
     attempt.cleanup();
   }
-  for (const over of [{ sessionId: "bad" }, { prompt: "-x" }, {}] as Partial<MuseAttemptInput>[]) {
+  for (const over of [{ sessionId: "bad" }, { prompt: "-x" }] as Partial<MuseAttemptInput>[]) {
     try {
-      // The `{}` case goes through the pinned entry point, which refuses on NOT-177 evidence.
-      const prepare = Object.keys(over).length === 0 ? prepareMuseAttemptPinned : prepareMuseAttempt;
-      prepare(input(fx, "developer", { credential: { kind: "api-key", apiKey: API_KEY }, ...over }));
+      prepareMuseAttempt(input(fx, "developer", { credential: { kind: "api-key", apiKey: API_KEY }, ...over }));
       assert.fail("expected refusal");
     } catch (err) {
       assert.ok(err instanceof Error && err.name === "MuseIsolationError");
@@ -438,16 +475,43 @@ test("api key never reaches argv, env, disk, or error text; redact scrubs it", (
       assert.ok(!String(err.stack).includes(API_KEY));
     }
   }
+  // The pinned entry point admits developers too: a valid api-key input succeeds there as well,
+  // and its errors never carry the key either.
+  {
+    let created: MuseAttempt | undefined;
+    try {
+      created = prepareMuseAttemptPinned(
+        input(fx, "developer", { credential: { kind: "api-key", apiKey: API_KEY }, sessionId: "bad" })
+      );
+      assert.fail("expected refusal");
+    } catch (err) {
+      assert.ok(err instanceof Error && err.name === "MuseIsolationError");
+      assert.ok(!err.message.includes(API_KEY));
+      assert.ok(!String(err.stack).includes(API_KEY));
+    } finally {
+      created?.cleanup();
+    }
+  }
   assert.deepEqual(fs.readdirSync(fx.baseDir), []);
 });
 
 test("callers cannot supply enforcement evidence: an injected evidence field is ignored", () => {
-  for (const role of ["developer", "reviewer"] as const) {
-    const fx = fixture();
-    const forged = { ...input(fx, role), evidence: ENFORCED } as MuseAttemptInput;
-    assert.equal(code(() => prepareMuseAttemptPinned(forged)), "unenforceable_restriction", role);
-    assert.deepEqual(fs.readdirSync(fx.baseDir), []);
+  // The pinned entry point ignores the forged field: the developer is still admitted unfiltered.
+  const fx = fixture();
+  const forged = { ...input(fx, "developer"), evidence: ENFORCED } as MuseAttemptInput;
+  const attempt = prepareMuseAttemptPinned(forged);
+  try {
+    assert.equal("enabled_tools" in attempt.settings.mcpServers["agent-deck"]!, false);
+    assert.equal("disabled_tools" in attempt.settings.mcpServers["agent-deck"]!, false);
+    assert.doesNotThrow(() => attempt.verify());
+  } finally {
+    attempt.cleanup();
   }
+  // ... and the reviewer is still refused.
+  const fxReviewer = fixture();
+  const forgedReviewer = { ...input(fxReviewer, "reviewer"), evidence: ENFORCED } as MuseAttemptInput;
+  assert.equal(code(() => prepareMuseAttemptPinned(forgedReviewer)), "unenforceable_restriction");
+  assert.deepEqual(fs.readdirSync(fxReviewer.baseDir), []);
 });
 
 test("launch contract: cwd is the real worktree and argv/env/cwd/stdin must match exactly", () => {
@@ -530,10 +594,10 @@ test("no runtime export can produce a launchable attempt from caller-supplied ev
       if (typeof value === "function" && /^prepare/.test(name)) assert.equal(value.length, 1, `${mod}#${name}`);
     }
   }
-  // The pinned core cannot be talked into success with a forged evidence argument or field.
+  // The pinned core cannot be talked into reviewer success with a forged evidence argument or field.
   const core = (await import("./muse-config-core.js")) as { prepareMuseAttempt: (...a: unknown[]) => unknown };
   const fx = fixture();
-  const forged = () => core.prepareMuseAttempt(input(fx, "developer"), ENFORCED);
+  const forged = () => core.prepareMuseAttempt(input(fx, "reviewer"), ENFORCED);
   assert.equal(code(forged), "unenforceable_restriction");
   assert.deepEqual(fs.readdirSync(fx.baseDir), []);
 });
