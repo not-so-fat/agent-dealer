@@ -53,7 +53,7 @@ function buildArgs(
   effort?: ReasoningEffort | null
 ): string[] {
   if (runtime === "muse_code") {
-    // Muse's developer argv is built by runners/muse-config-core.ts (`prepareMuseAttempt`,
+    // Muse's developer argv is built by runners/muse-config.ts (`prepareMuseAttempt`,
     // NOT-278) inside coordinator/muse-spawn.ts; it needs a per-attempt deck, session id, and
     // XDG dirs this pure builder has no place for. Falling through to the Claude arm below
     // would spawn `muse` with Claude flags.

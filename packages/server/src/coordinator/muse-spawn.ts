@@ -2,7 +2,7 @@
 //
 // NOT-278: the native Muse Code developer spawn. Every deck-enabled Muse developer turn runs the
 // isolated `muse exec` lane: one exact, fail-closed per-attempt home built by
-// `prepareMuseAttempt` (runners/muse-config-core.ts) — settings.json with exactly one required
+// `prepareMuseAttempt` (runners/muse-config.ts) — settings.json with exactly one required
 // `agent-deck` server (deck/workspace headers), filtered env, stdin-only API key — verified
 // immediately before spawn and removed afterwards on every outcome.
 //

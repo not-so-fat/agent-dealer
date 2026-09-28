@@ -250,7 +250,7 @@ async function materializeWorkerMcpConfig(opts: {
   const headers = deckLaunchHeaders(opts.deckId, opts.worktreePath);
 
   // NOT-278: Muse Code settings come only from `prepareMuseAttempt`
-  // (runners/muse-config-core.ts) — never emit a Claude/Codex/Cursor config for Muse. Refuse
+  // (runners/muse-config.ts) — never emit a Claude/Codex/Cursor config for Muse. Refuse
   // before anything is written rather than fall through to the Claude config below.
   if (opts.runtime === "muse_code") {
     throw new Error(
@@ -466,7 +466,7 @@ function toVerificationOutcome(verified: VerifyDeckResult): WorkerDeckVerificati
 /**
  * NOT-278: live `get_bound_deck` (+ configured-playbook) preflight without materializing any
  * runtime MCP config. Muse Code sessions use this: their settings.json comes only from
- * `prepareMuseAttempt` (runners/muse-config-core.ts), so the shared materializer below must
+ * `prepareMuseAttempt` (runners/muse-config.ts), so the shared materializer below must
  * never run for them. Same result mapping as the materializing path: no response is
  * `deck_unavailable`; a response that fails validation is `infra_failure` (surfaced by the
  * effect as `deck_failure`).
@@ -536,7 +536,12 @@ export async function prepareWorkerDeckConnection(opts: {
     } catch {
       // best-effort
     }
-    return toVerificationOutcome(verified);
+    // Same mapping as toVerificationOutcome, inlined so the result carries the
+    // materializing-path type (the shared helper's `ok: true` variant has no
+    // mcpConfigPath and is unreachable in this branch).
+    return verified.kind === "deck_unavailable"
+      ? { ok: false, kind: "deck_unavailable", reason: `Agent Deck is unreachable — ${verified.reason}` }
+      : { ok: false, kind: "infra_failure", reason: `preflight failed: ${verified.reason}` };
   }
 
   return { ok: true, mcpConfigPath: materialized.mcpConfigPath, mcpEnv: materialized.mcpEnv };
