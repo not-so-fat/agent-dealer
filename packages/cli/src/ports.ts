@@ -83,3 +83,14 @@ export function formatPortConflict(port: number, label: string, host: string, is
     `  • Free the port, or start on a different port: agent-dealer start --port <port>`
   );
 }
+
+/**
+ * NOT-279: the version the live backend reports about itself, or null when it is down, the
+ * request fails, or it predates `/api/version`. Callers must show "unknown" for null —
+ * never substitute the installed CLI version, which may be ahead of the running server.
+ */
+export async function fetchRunningBackendVersion(host: string, port: number): Promise<string | null> {
+  const body = await fetchJson(`http://${host}:${port}/api/version`);
+  const version = body?.version;
+  return typeof version === "string" && version.trim() ? version : null;
+}

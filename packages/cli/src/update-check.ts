@@ -52,12 +52,9 @@ function writeCache(next: { checkedAt?: number; latestVersion?: string; prompted
 /** npm-global / unknown path — keep TTY prompt behavior. Managed uses hooks instead. */
 export async function maybeCheckForUpdateOnRun(): Promise<UpdateCheckResult> {
   if (detectInstallKind() === "managed") {
-    const { activated } = runManagedCliEntryHooks({ allowActivate: true });
-    if (activated) {
-      console.log(`[agent-dealer] Activated managed version ${activated}`);
-      console.log("Re-run your command to use the new version.");
-      return { upgraded: true };
-    }
+    // NOT-279: download only. A pending version activates in `agent-dealer start`, once no
+    // backend is live — never from an arbitrary command while Dealer may be serving work.
+    runManagedCliEntryHooks();
     return { upgraded: false };
   }
 
