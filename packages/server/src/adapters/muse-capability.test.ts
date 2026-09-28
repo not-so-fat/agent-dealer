@@ -14,8 +14,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 // NOT-278: the worker MCP config root (the per-attempt base dir) refuses temp dirs, so the
-// dealer home for this file is a home scratch root, never OS temp.
+// dealer home for this file is a home scratch root, never OS temp. Removed in `after`
+// below so local runs do not clutter $HOME.
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-capability-"));
+after(() => {
+  try {
+    fs.rmSync(process.env.AGENT_DEALER_HOME!, { recursive: true, force: true });
+  } catch {
+    // best-effort — a failed rm must not fail the suite
+  }
+});
 
 const {
   museCapabilityIssues,
@@ -314,10 +322,24 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
     return `http://127.0.0.1:${port}`;
   }
 
+  // The probe binds a real listed deck and preflights it before spawning; there is no
+  // live deck/MCP here, so tests substitute both steps (production defaults hit the live
+  // `fetchDecks` + `verifyWorkerDeckConnection`). Overrides exercise the fail-closed paths.
+  const PROBE_DECK_ID = "11111111-1111-4111-8111-111111111111";
   async function probeWith(
     scenario: string,
     extraEnv: Record<string, string> = {},
-    opts: { timeoutMs?: number } = {}
+    opts: {
+      timeoutMs?: number;
+      listDecks?: () => Promise<
+        | { ok: true; decks: Array<{ id: string; name: string }> }
+        | { ok: false; code: string; message: string }
+      >;
+      verifyDeck?: (args: { deckId: string; worktreePath: string }) => Promise<
+        | { ok: true }
+        | { ok: false; kind: "infra_failure" | "deck_unavailable"; reason: string }
+      >;
+    } = {}
   ): Promise<ProbeResult> {
     const env: Record<string, string> = {
       MUSE_CLI: FAKE_MUSE,
@@ -334,7 +356,11 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
     const prev = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
     Object.assign(process.env, env);
     try {
-      return await defaultMuseCapabilityProbe(NEW, opts);
+      return await defaultMuseCapabilityProbe(NEW, {
+        timeoutMs: opts.timeoutMs,
+        listDecks: opts.listDecks ?? (async () => ({ ok: true as const, decks: [{ id: PROBE_DECK_ID, name: "probe" }] })),
+        verifyDeck: opts.verifyDeck ?? (async () => ({ ok: true as const })),
+      });
     } finally {
       for (const k of keys) {
         if (prev[k] === undefined) delete process.env[k];
@@ -367,6 +393,41 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
     });
     assert.equal(result.status, "error");
     assert.match((result as { detail: string }).detail, /Agent Deck is unreachable/);
+    assert.match((result as { detail: string }).detail, /no model session spent/);
+    assert.equal(fs.existsSync(record), false, "no child spawned, so the fixture never recorded");
+  });
+
+  test("the probe binds the listed real deck id, never a synthetic one", async () => {
+    const record = path.join(process.env.AGENT_DEALER_HOME!, `deck-id-${randomUUID()}.json`);
+    const result = await probeWith("capability-shell", { FAKE_MUSE_RECORD: record });
+    assert.deepEqual(result, { status: "capable" });
+    const seen = JSON.parse(fs.readFileSync(record, "utf8")) as { settings: string };
+    assert.match(seen.settings, new RegExp(PROBE_DECK_ID));
+    assert.doesNotMatch(seen.settings, /00000000-0000-4000-a000-000000000000/);
+  });
+
+  test("a deck that responds but rejects the probe deck fails closed without a model session", async () => {
+    const record = path.join(process.env.AGENT_DEALER_HOME!, `rejected-${randomUUID()}.json`);
+    const result = await probeWith(
+      "capability-shell",
+      { FAKE_MUSE_RECORD: record },
+      { verifyDeck: async () => ({ ok: false, kind: "infra_failure", reason: "get_bound_deck returned deck other, expected probe" }) }
+    );
+    assert.equal(result.status, "error");
+    assert.match((result as { detail: string }).detail, /rejected probe deck/);
+    assert.match((result as { detail: string }).detail, /no model session spent/);
+    assert.equal(fs.existsSync(record), false, "no child spawned, so the fixture never recorded");
+  });
+
+  test("an empty deck list fails closed without a model session", async () => {
+    const record = path.join(process.env.AGENT_DEALER_HOME!, `no-decks-${randomUUID()}.json`);
+    const result = await probeWith(
+      "capability-shell",
+      { FAKE_MUSE_RECORD: record },
+      { listDecks: async () => ({ ok: true, decks: [] }) }
+    );
+    assert.equal(result.status, "error");
+    assert.match((result as { detail: string }).detail, /no decks/);
     assert.match((result as { detail: string }).detail, /no model session spent/);
     assert.equal(fs.existsSync(record), false, "no child spawned, so the fixture never recorded");
   });

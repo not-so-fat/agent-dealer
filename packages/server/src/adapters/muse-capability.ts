@@ -285,23 +285,45 @@ function reportedMuseVersion(): string | null {
  * fresh nonce to result.txt — the model cannot produce that value without a shell call, and the
  * file only exists if the shell could write the workspace.
  *
- * NOT-278: the probe is not a deck session, but the exec lane always carries the selected
- * deck's required server, so the probe passes the configured Agent Deck endpoint with a
- * synthetic probe deck id. The probe verdict is about the binary's shell/write capability,
- * not about deck reachability: a cheap `/health` check runs first, and when the deck is
- * down the probe fails closed WITHOUT spending a model session (admission already waits on
- * the deck gate meanwhile; the retry is a cheap health check, not a paid turn). The probe
- * repo lives under the Dealer data dir, never OS temp (the attempt rejects temp dirs) and
- * never the operator home root.
+ * NOT-278: the probe is not a deck session, but the exec lane always carries the
+ * selected deck's required server, so the probe binds a real listed deck and preflights it
+ * with `get_bound_deck` before spawning — a synthetic id could never pass that identity
+ * check. The probe verdict is about the binary's shell/write capability, not about deck
+ * reachability: a cheap `/health` check, the deck list, and the preflight run first, and
+ * when the deck is down or rejects the probe deck the probe fails closed WITHOUT spending
+ * a model session (admission already waits on the deck gate meanwhile; the retry is a
+ * cheap health check, not a paid turn). The probe repo lives under the Dealer data dir,
+ * never OS temp (the attempt rejects temp dirs) and never the operator home root.
  */
+export type MuseCapabilityProbeHooks = {
+  timeoutMs?: number;
+  /** Tests: substitute deck discovery (defaults to the live `fetchDecks`). */
+  listDecks?: () => Promise<
+    | { ok: true; decks: Array<{ id: string; name: string }> }
+    | { ok: false; code: string; message: string }
+  >;
+  /** Tests: substitute the live `get_bound_deck` preflight (defaults to `verifyWorkerDeckConnection`). */
+  verifyDeck?: (args: { deckId: string; worktreePath: string }) => Promise<
+    | { ok: true }
+    | { ok: false; kind: "infra_failure" | "deck_unavailable"; reason: string }
+  >;
+};
+
 export async function defaultMuseCapabilityProbe(
   version: string,
-  opts: { timeoutMs?: number } = {}
+  opts: MuseCapabilityProbeHooks = {}
 ): Promise<MuseCapabilityProbeResult> {
-  const [{ runMuseDeveloperSession }, { getAgentDeckMcpUrl, checkAgentDeckHealth }] = await Promise.all([
-    import("../coordinator/muse-spawn.js"),
-    import("./agent-deck.js"),
-  ]);
+  const [{ runMuseDeveloperSession }, { getAgentDeckMcpUrl, checkAgentDeckHealth, fetchDecks }] =
+    await Promise.all([
+      import("../coordinator/muse-spawn.js"),
+      import("./agent-deck.js"),
+    ]);
+  const { verifyWorkerDeckConnection } = await import("./agent-deck-bind.js");
+  const listDecks = opts.listDecks ?? fetchDecks;
+  const verifyDeck =
+    opts.verifyDeck ??
+    ((args: { deckId: string; worktreePath: string }) =>
+      verifyWorkerDeckConnection({ deckId: args.deckId, worktreePath: args.worktreePath, playbookIds: [] }));
   // Decouple the paid capability check from deck reachability: when the deck is down, fail
   // closed here — before any child exists — instead of burning a model session that could
   // only fail on its required deck server. The deck gate (`deck_offline`) already blocks
@@ -322,12 +344,41 @@ export async function defaultMuseCapabilityProbe(
       path.join(dir, "probe.sh"),
       `#!/bin/sh\nprintf '%s' '${nonce}' | git hash-object --stdin > result.txt\n`
     );
+    // The probe session must bind a real deck: a synthetic id could never pass the
+    // production `get_bound_deck` identity check, so it would either burn a paid turn
+    // that only fails on its required deck server, or run on an unselected deck. List
+    // the live decks and preflight the bound one before spawning — a deck that answers
+    // but rejects this id fails closed here, with no model session spent.
+    const listed = await listDecks();
+    if (!listed.ok) {
+      return {
+        status: "error",
+        detail: `Agent Deck deck list unavailable (${listed.message}) — capability check for ${version} not run (no model session spent)`,
+      };
+    }
+    const probeDeckId = listed.decks[0]?.id;
+    if (!probeDeckId) {
+      return {
+        status: "error",
+        detail: `Agent Deck listed no decks — capability check for ${version} not run (no model session spent)`,
+      };
+    }
+    const verified = await verifyDeck({ deckId: probeDeckId, worktreePath: dir });
+    if (!verified.ok) {
+      return {
+        status: "error",
+        detail:
+          verified.kind === "deck_unavailable"
+            ? `Agent Deck is unreachable for deck ${probeDeckId} (${verified.reason}) — capability check for ${version} not run (no model session spent)`
+            : `Agent Deck rejected probe deck ${probeDeckId} (${verified.reason}) — capability check for ${version} not run (no model session spent)`,
+      };
+    }
     const run = await runMuseDeveloperSession({
       sessionId: randomUUID(),
       runtime: "muse_code",
       policy: DEVELOPER_ROLE_CEILING,
       model: null,
-      deckId: "00000000-0000-4000-a000-000000000000",
+      deckId: probeDeckId,
       agentDeckUrl: `${getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "")}/mcp`,
       maxModelSteps: PROBE_MAX_MODEL_STEPS,
       prompt:

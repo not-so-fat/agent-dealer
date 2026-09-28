@@ -21,6 +21,7 @@ import os from "node:os";
 import path from "node:path";
 import { MUSE_CODE_CONTRIBUTOR_MODEL } from "@agent-dealer/shared";
 import { runMuseDeveloperSession } from "../packages/server/src/coordinator/muse-spawn.js";
+import { buildDeveloperPrompt } from "../packages/server/src/coordinator/prompts.js";
 
 if (process.env.MUSE_SMOKE !== "1") {
   console.error("Refusing to run: this starts a paid Muse Code session. Re-run with MUSE_SMOKE=1 npm run smoke:muse");
@@ -33,20 +34,6 @@ if (!deckId) {
   process.exit(2);
 }
 
-const PROMPT = [
-  "Implement this issue on a fresh branch off main.",
-  "",
-  "## Task",
-  "Add a greeting file",
-  "Create hello.txt in the repository root containing exactly the line: hello from muse",
-  "",
-  "## Acceptance criteria",
-  "- hello.txt exists and contains exactly that one line.",
-  "",
-  "This session has no Agent Deck bootstrap beyond the deck bound to it — use only that deck's service tools. Never call `cron_create`, `cron_list` or `cron_delete`.",
-  "Commit your change with git — do NOT push and do NOT open a pull request. End with a one-line conclusion.",
-].join("\n");
-
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
 const root = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-smoke-"));
@@ -58,6 +45,25 @@ git(worktree, "config", "user.name", "Muse smoke");
 fs.writeFileSync(path.join(worktree, "README.md"), "smoke\n");
 git(worktree, "add", ".");
 git(worktree, "commit", "-q", "-m", "init");
+
+// The real developer bootstrap + Muse cron prohibition, so the smoke exercises the prompt
+// production deck-enabled turns receive.
+const PROMPT = buildDeveloperPrompt({
+  taskSnapshot: {
+    title: "Add a greeting file",
+    description: "Create hello.txt in the repository root containing exactly the line: hello from muse",
+    acceptanceCriteria: "- hello.txt exists and contains exactly that one line.",
+    repo: "muse-smoke",
+    baseBranch: "main",
+  },
+  round: 1,
+  worktreePath: worktree,
+  deckId,
+  museDeveloper: true,
+  guidance: [
+    "Commit your change with git — do NOT push and do NOT open a pull request. End with a one-line conclusion.",
+  ],
+});
 
 const checks: Array<[string, boolean]> = [];
 const started = Date.now();
