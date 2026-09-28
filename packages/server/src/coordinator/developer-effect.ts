@@ -794,7 +794,13 @@ export async function runDeveloperEffect(
       return { kind: "base_fetch_failed", reason: resolved.reason };
     }
     if (resolved.kind === "conflict") {
-      return { kind: "worktree_conflict", path: resolved.path, reason: resolved.reason, recoveryCommands: resolved.recoveryCommands };
+      return {
+        kind: "worktree_conflict",
+        path: resolved.path,
+        reason: resolved.reason,
+        recoveryCommands: resolved.recoveryCommands,
+        ...(resolved.fingerprint ? { fingerprint: resolved.fingerprint } : {}),
+      };
     }
     if (resolved.kind === "live_owner") {
       return {
@@ -806,6 +812,31 @@ export async function runDeveloperEffect(
     }
     worktreePath = resolved.path;
     worktreeReused = resolved.kind === "reused";
+    if (resolved.kind === "reused" && resolved.salvage) {
+      // NOT-280: a dead predecessor's dirt was committed on the issue branch (or found
+      // already committed after a restart) — one durable checkpoint per salvage commit,
+      // tied to the predecessor session when Dealer still has its row.
+      const salvage = resolved.salvage;
+      try {
+        emitCheckpointObserved({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          workerSessionId: getWorkerSession(salvage.predecessorSessionId)
+            ? salvage.predecessorSessionId
+            : sessionId,
+          role: "developer",
+          stage,
+          round,
+          kind: "commit",
+          observedSha: salvage.commitSha,
+          origin: "salvage",
+          branch: branchName,
+          resumeSalvage: true,
+        });
+      } catch {
+        // checkpoint evidence must never fail the attempt itself
+      }
+    }
     if (resolved.kind === "created" && resolved.baseSha) {
       // NOT-197: record the true branch point while it is known — the verified handoff
       // re-checks it via merge-base, but crash/timeout progress inspection below already

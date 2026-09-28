@@ -56,6 +56,9 @@ export interface PushDivergenceEvidence {
 /** Evidence key marking a policy_escalation as a NOT-221 diverged-push escalation. */
 export const PUSH_DIVERGENCE_EVIDENCE_KEY = "pushDivergence";
 
+/** NOT-280: evidence key holding a worktree blocker's `{ fingerprint }` for action dedupe. */
+export const WORKTREE_BLOCKER_EVIDENCE_KEY = "worktreeBlocker";
+
 /**
  * NOT-221: the stored response options for a diverged-push policy_escalation. The label
  * names the recovery so the dashboard button is self-explanatory next to the SHAs the
