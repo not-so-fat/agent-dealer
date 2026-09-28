@@ -1,14 +1,12 @@
 # agent-dealer
 
-**Queue the issue. Check back when it needs you.**
+A governed way of working that travels with every new agent worker — playbooks, tools, and credentials in a deck; queue the issues and only show up for real decisions.
+
+[![Agent Deck + Agent Dealer](https://img.youtube.com/vi/zkQcCT0tZeo/maxresdefault.jpg)](https://www.youtube.com/watch?v=zkQcCT0tZeo)
+
+[Watch the 2-min overview](https://www.youtube.com/watch?v=zkQcCT0tZeo) — portable decks, then a governed issue queue.
 
 agent-dealer is an issue queue and execution control plane for coding agents: bind an **Agent profile**, run an **issue** through one **workflow template** on the **Task coordinator**, and monitor or approve via the **GUI / API** (or CLI). Today the shipping coding path is Dev-review — a developer agent implements in its own git worktree and opens a pull request, a reviewer agent reviews the diff, and the loop repeats until the work merges or something genuinely needs a human. Every session, finding, cost, and decision lands on one durable issue record in SQLite. Pair it with [Agent Deck](https://github.com/not-so-fat/agent_deck) and every session starts with the right tools, keys, and playbooks.
-
-<!-- DEMO VIDEO — drop the 2-min demo here.
-     On github.com, drag the .mp4 into the README editor to get a user-attachments URL,
-     then paste it on its own line. GIF fallback:
-<img src="docs/assets/demo.gif" alt="Queue an issue, check back when it needs you" width="80%" />
--->
 
 ## Architecture (three modules)
 
