@@ -253,7 +253,9 @@ async function materializeWorkerMcpConfig(opts: {
   // (runners/muse-config-core.ts) — never emit a Claude/Codex/Cursor config for Muse. Refuse
   // before anything is written rather than fall through to the Claude config below.
   if (opts.runtime === "muse_code") {
-    throw new Error("Muse Code does not support Agent Deck MCP configuration");
+    throw new Error(
+      "Muse Code does not support Agent Deck MCP configuration via the shared materializer — its settings come only from prepareMuseAttempt"
+    );
   }
 
   if (opts.runtime === "codex_local") {

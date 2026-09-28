@@ -5,12 +5,15 @@
 // when the check cannot complete. The real probe runs against fixtures/fake-muse.mjs (never Meta).
 import { describe, test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-capability-"));
+// NOT-278: the worker MCP config root (the per-attempt base dir) refuses temp dirs, so the
+// dealer home for this file is a home scratch root, never OS temp.
+process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-capability-"));
 
 const {
   museCapabilityIssues,
@@ -275,13 +278,15 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
       MUSE_CLI: FAKE_MUSE,
       FAKE_MUSE_SCENARIO: scenario,
       FAKE_MUSE_VERSION: NEW,
+      // NOT-278: the probe runs the deck-required exec lane without a database — the endpoint
+      // comes from the env override and the credential from a fake API key on stdin.
+      AGENT_DECK_API_URL: "http://127.0.0.1:1111",
+      META_API_KEY: "mk-test-fake-key-0123456789abcdef",
       ...extraEnv,
     };
-    const keys = [...Object.keys(env), "AGENT_DEALER_MUSE_RUNNER"];
+    const keys = [...Object.keys(env)];
     const prev = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
     Object.assign(process.env, env);
-    // The serve lane is the production default; the probe must bypass it on its own.
-    delete process.env.AGENT_DEALER_MUSE_RUNNER;
     try {
       return await defaultMuseCapabilityProbe(NEW, opts);
     } finally {
@@ -318,7 +323,7 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
     assert.match((result as { detail: string }).detail, /probe session (failed|exited)/);
   });
 
-  test("the probe never runs on the shared serve host (it may still be the pre-update build)", async () => {
+  test("the probe never runs on the shared serve host (deck-enabled turns are always isolated exec)", async () => {
     const { getMuseCapacityHost, resetMuseCapacityHostForTests } = await import("../capacity/muse-host.js");
     await resetMuseCapacityHostForTests();
     let serveSpawns = 0;
@@ -348,53 +353,55 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
   });
 });
 
-// Admission checks the on-disk binary; developer work must not then run on a serve host that is
-// still an older (possibly broken) build. A capable → B broken → C capable, host restarted onto B.
-describe("developer sessions run only on the capability-checked build", { concurrency: false }, () => {
+// NOT-278: deck-enabled developer turns always run the isolated `muse exec` lane — the shared
+// serve host cannot carry per-session deck/workspace identity, so no version check can route a
+// session onto it. The capability gate still admits (or blocks) the on-disk binary; the lane is
+// always exec.
+describe("deck-enabled developer sessions always use the isolated exec lane", { concurrency: false }, () => {
   const FAKE_MUSE = path.join(
     path.dirname(fileURLToPath(import.meta.url)),
     "../coordinator/fixtures/fake-muse.mjs"
   );
-  const B = NEW;
-  const C = "1.4.0-R4302.1";
 
-  /** One developer session with the shared host reporting `hostVersion`; returns the RPCs sent to it. */
-  async function sessionWithHostOn(hostVersion: string): Promise<string[]> {
+  /** One deck-enabled developer session while a serve host exists; returns host spawn attempts. */
+  async function sessionBesideServeHost(): Promise<{ exitCode: number; serveSpawns: number }> {
     const { getMuseCapacityHost, resetMuseCapacityHostForTests } = await import("../capacity/muse-host.js");
     const { runMuseDeveloperSession } = await import("../coordinator/muse-spawn.js");
     await resetMuseCapacityHostForTests();
-    const host = getMuseCapacityHost({
-      command: process.execPath,
-      args: [path.join(path.dirname(fileURLToPath(import.meta.url)), "../capacity/fixtures/fake-muse-serve.mjs")],
-      env: { META_API_KEY: "test-fake-key", FAKE_MSP_MODE: "persistent-full" },
-      readVersion: async () => hostVersion,
+    let serveSpawns = 0;
+    getMuseCapacityHost({
+      spawnImpl: (() => {
+        serveSpawns += 1;
+        throw new Error("serve host must not be used by a deck-enabled developer session");
+      }) as never,
     });
-    const sent: string[] = [];
-    const execRequest = host.execRequest.bind(host);
-    host.execRequest = (id, method, params, timeoutMs) => {
-      sent.push(method);
-      return execRequest(id, method, params, timeoutMs);
-    };
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-bound-"));
-    const keys = ["MUSE_CLI", "FAKE_MUSE_SCENARIO", "FAKE_MUSE_VERSION", "AGENT_DEALER_MUSE_RUNNER"];
+    // NOT-278: home scratch, never OS temp (the attempt rejects temp dirs).
+    const dir = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-exec-"));
+    const configHome = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-exec-cfg-"));
+    const keys = ["MUSE_CLI", "FAKE_MUSE_SCENARIO", "META_API_KEY", "XDG_CONFIG_HOME"];
     const prev = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
-    Object.assign(process.env, { MUSE_CLI: FAKE_MUSE, FAKE_MUSE_SCENARIO: "success", FAKE_MUSE_VERSION: C });
-    delete process.env.AGENT_DEALER_MUSE_RUNNER;
+    Object.assign(process.env, {
+      MUSE_CLI: FAKE_MUSE,
+      FAKE_MUSE_SCENARIO: "success",
+      META_API_KEY: "mk-test-fake-key-0123456789abcdef",
+      XDG_CONFIG_HOME: configHome,
+    });
     try {
       const { execFileSync } = await import("node:child_process");
       execFileSync("git", ["init", "-q"], { cwd: dir });
       const run = await runMuseDeveloperSession({
-        sessionId: "bound-session",
+        sessionId: randomUUID(),
         runtime: "muse_code",
         policy: {} as never,
         model: null,
+        deckId: "00000000-0000-4000-a000-000000000099",
+        agentDeckUrl: "http://127.0.0.1:1110/mcp",
         prompt: "implement",
         cwd: dir,
         timeoutMs: 30_000,
         logPath: path.join(dir, "session.ndjson"),
       });
-      assert.equal(run.exitCode, 0);
-      return sent;
+      return { exitCode: run.exitCode, serveSpawns };
     } finally {
       for (const k of keys) {
         if (prev[k] === undefined) delete process.env[k];
@@ -402,31 +409,13 @@ describe("developer sessions run only on the capability-checked build", { concur
       }
       await resetMuseCapacityHostForTests();
       fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(configHome, { recursive: true, force: true });
     }
   }
 
-  beforeEach(() => {
-    resetMuseCapabilityStateForTests();
-    stubProbe({ [OLD]: { status: "capable" }, [B]: { status: "missing", detail: "no shell" }, [C]: { status: "capable" } });
-  });
-
-  test("C confirmed but the host still runs broken B: the session never reaches the host", async () => {
-    await check(OLD);
-    await check(B);
-    const { settled } = await check(C);
-    assert.deepEqual(settled, []);
-    assert.deepEqual(await sessionWithHostOn(B), [], "work ran on the checked exec lane, not the B host");
-  });
-
-  test("a host running the confirmed version serves the session", async () => {
-    await check(C);
-    const sent = await sessionWithHostOn(C);
-    assert.ok(sent.includes("session/start"), "serve lane used when the host runs the checked build");
-  });
-
-  test("while the reported version is not confirmed, no session reaches the host", async () => {
-    await check(OLD);
-    await check(B);
-    assert.deepEqual(await sessionWithHostOn(OLD), []);
+  test("the session runs on the exec lane and never touches the serve host", async () => {
+    const { exitCode, serveSpawns } = await sessionBesideServeHost();
+    assert.equal(exitCode, 0);
+    assert.equal(serveSpawns, 0, "no serve-host spawn for a deck-enabled developer turn");
   });
 });

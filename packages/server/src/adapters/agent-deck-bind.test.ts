@@ -113,6 +113,23 @@ test("verifyWorkerDeckConnection maps a wrong deck to infra_failure and silence 
   }
 });
 
+test("verifyWorkerDeckConnection maps a missing configured playbook to infra_failure (NOT-278)", async () => {
+  const missing = await verifyWorkerDeckConnection({
+    deckId: DECK,
+    worktreePath: WT,
+    playbookIds: ["pb-required"],
+    callTool: async (name, args) => {
+      if (name === "get_bound_deck") return textResult({ id: DECK, name: "personal-dev" });
+      return errorResult(`playbook ${(args as { playbook_id: string }).playbook_id} not found`);
+    },
+  });
+  assert.equal(missing.ok, false);
+  if (!missing.ok) {
+    assert.equal(missing.kind, "infra_failure");
+    assert.match(missing.reason, /preflight failed/);
+  }
+});
+
 test("prepareWorkerDeckConnection refuses Muse Code before writing any MCP config or verifying (NOT-278)", async () => {
   let verifyCalled = false;
   const result = await prepareWorkerDeckConnection({

@@ -40,6 +40,22 @@ const RUN = "run-primary";
 if (process.env.FAKE_MUSE_RECORD) {
   const cfg = process.env.XDG_CONFIG_HOME;
   const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, "utf8") : null);
+  // NOT-278: stdin is drained to a length only (an API key delivered via --api-key-stdin must
+  // never land in the record), and ambient env is recorded as presence booleans — the exec lane
+  // passes the exact attempt env, so sentinel vars set by the test must be absent here.
+  let stdinBytes = 0;
+  try {
+    stdinBytes = process.stdin.isTTY ? 0 : fs.readFileSync(0, "utf8").length;
+  } catch {
+    stdinBytes = 0;
+  }
+  const authPath = cfg ? path.join(cfg, "muse", "auth.json") : null;
+  let authSymlink = false;
+  try {
+    authSymlink = authPath ? fs.lstatSync(authPath).isSymbolicLink() : false;
+  } catch {
+    authSymlink = false;
+  }
   fs.writeFileSync(
     process.env.FAKE_MUSE_RECORD,
     JSON.stringify({
@@ -49,7 +65,16 @@ if (process.env.FAKE_MUSE_RECORD) {
       xdgDataHome: process.env.XDG_DATA_HOME,
       noAutoUpdate: process.env.MUSE_NO_AUTO_UPDATE,
       settings: cfg ? read(path.join(cfg, "muse", "settings.json")) : null,
-      authLinked: cfg ? fs.existsSync(path.join(cfg, "muse", "auth.json")) : false,
+      authLinked: authPath ? fs.existsSync(authPath) : false,
+      authSymlink,
+      apiKeyStdin: argv.includes("--api-key-stdin"),
+      stdinBytes,
+      envLeak: {
+        META_API_KEY: "META_API_KEY" in process.env,
+        MUSE_SENTINEL: "MUSE_SENTINEL" in process.env,
+        CODEX_HOME: "CODEX_HOME" in process.env,
+        DEALER_MUSE_SENTINEL: "DEALER_MUSE_SENTINEL" in process.env,
+      },
       porcelain: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }),
     })
   );

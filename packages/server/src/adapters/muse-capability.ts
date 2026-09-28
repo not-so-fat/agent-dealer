@@ -219,19 +219,6 @@ export function museCapabilityIssues(version: string, onSettled: () => void = ()
   return verifyingIssue(version, from);
 }
 
-/**
- * NOT-277: the Muse version developer work may run on outside the on-disk binary (i.e. on the
- * long-lived serve host). `undefined` when no version has been observed yet — nothing to bind to;
- * `null` when the reported version is not confirmed capable (only the on-disk binary, which
- * admission gates on, may run work then); otherwise the reported, confirmed-capable version.
- */
-export function museVersionRequiredForWork(): string | null | undefined {
-  const s = loadState();
-  if (!s.current) return undefined;
-  const checked = s.lastChecked;
-  return checked?.status === "capable" && checked.version === s.current.version ? checked.version : null;
-}
-
 /** True while a capability check is running (callers use a short health-cache TTL meanwhile). */
 export function museCapabilityCheckInFlight(): boolean {
   return inFlight !== null;
@@ -292,17 +279,24 @@ function reportedMuseVersion(): string | null {
 
 /**
  * One real developer session (same posture and model a developer round uses) in a throwaway
- * git repo. Always a fresh `muse exec` of the on-disk binary — never the shared serve host, which
- * may still be the pre-update build — and the binary must still report `version` afterwards, so
- * the verdict is about the build that was probed. Its only path to success is running `sh probe.sh`, which writes a git blob hash of a
+ * git repo. Always a fresh isolated `muse exec` of the on-disk binary — deck-enabled developer
+ * turns never use the shared serve host, which may still be the pre-update build — and the
+ * binary must still report `version` afterwards, so the verdict is about the build that was
+ * probed. Its only path to success is running `sh probe.sh`, which writes a git blob hash of a
  * fresh nonce to result.txt — the model cannot produce that value without a shell call, and the
  * file only exists if the shell could write the workspace.
+ *
+ * NOT-278: the probe is not a deck session, but the exec lane always carries the selected
+ * deck's required server, so the probe passes the configured Agent Deck endpoint with a
+ * synthetic probe deck id. A future real probe against a reachable deck may need a real deck
+ * here; until then a verdict about a changed build fails closed, never open. The probe repo
+ * lives under the operator home scratch root, never OS temp (the attempt rejects temp dirs).
  */
 export async function defaultMuseCapabilityProbe(
   version: string,
   opts: { timeoutMs?: number } = {}
 ): Promise<MuseCapabilityProbeResult> {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-capability-"));
+  const dir = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-capability-"));
   try {
     execFileSync("git", ["init", "-q"], { cwd: dir, stdio: "ignore" });
     const nonce = randomUUID();
@@ -310,12 +304,17 @@ export async function defaultMuseCapabilityProbe(
       path.join(dir, "probe.sh"),
       `#!/bin/sh\nprintf '%s' '${nonce}' | git hash-object --stdin > result.txt\n`
     );
-    const { runMuseDeveloperSession } = await import("../coordinator/muse-spawn.js");
+    const [{ runMuseDeveloperSession }, { getAgentDeckMcpUrl }] = await Promise.all([
+      import("../coordinator/muse-spawn.js"),
+      import("./agent-deck.js"),
+    ]);
     const run = await runMuseDeveloperSession({
       sessionId: randomUUID(),
       runtime: "muse_code",
       policy: DEVELOPER_ROLE_CEILING,
       model: null,
+      deckId: "00000000-0000-4000-a000-000000000000",
+      agentDeckUrl: `${getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "")}/mcp`,
       maxModelSteps: PROBE_MAX_MODEL_STEPS,
       prompt:
         "Dealer capability check. Using your shell tool, run exactly this command in the current " +
@@ -324,7 +323,6 @@ export async function defaultMuseCapabilityProbe(
       cwd: dir,
       timeoutMs: opts.timeoutMs ?? PROBE_TIMEOUT_MS,
       logPath: path.join(dir, "probe.ndjson"),
-      execLaneOnly: true,
     });
     const after = reportedMuseVersion();
     if (after !== version) {

@@ -172,8 +172,9 @@ export default function AgentConfigFields({ value, onChange, agentDeckOnline, di
         </div>
         {value.runtime === "muse_code" && (
           <p className="text-xs text-white/40">
-            Developer role only — keep a Claude or Codex agent as the reviewer. Contributor-tier
-            content may be used for product improvement; use it on non-sensitive tickets.
+            Developer role only — keep a Claude or Codex agent as the reviewer. The developer
+            session receives the selected deck above. Contributor-tier content may be used for
+            product improvement; use it on non-sensitive tickets.
           </p>
         )}
         {value.runtime === "cursor_local" && (

@@ -49,6 +49,12 @@ export interface DeveloperSpawnInput {
    * and ignore this. Null/absent fails a Muse spawn before any process starts.
    */
   deckId?: string | null;
+  /**
+   * NOT-278: Agent Deck MCP endpoint (ending in `/mcp`) for the Muse exec attempt. Defaults
+   * to the configured endpoint; infra callers without a deck session (the capability probe)
+   * pass it explicitly so the spawn never needs the database. Other runtimes ignore this.
+   */
+  agentDeckUrl?: string | null;
   prompt: string;
   cwd: string;
   timeoutMs: number;
