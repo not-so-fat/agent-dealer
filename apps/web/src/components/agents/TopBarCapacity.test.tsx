@@ -908,3 +908,126 @@ test("summary stays aligned and usable across widths: wraps, runtime blocks stay
   );
   assert.ok(header.includes("flex-wrap"), "header still wraps on narrow widths");
 });
+
+// NOT-290: top-bar numbers share the Agents-strip severity, keyed off the
+// raw unrounded remaining percent: <10% critical red, 10-<30% warning
+// yellow, >=30% normal. Cursor 1M follows the same rule.
+test("NOT-290: known raw 9/10/29/30% render red, yellow, yellow, normal", () => {
+  const cases = [
+    { raw: 9, severity: "critical", cls: "text-red-300" },
+    { raw: 10, severity: "warning", cls: "text-yellow-300" },
+    { raw: 29, severity: "warning", cls: "text-yellow-300" },
+    { raw: 30, severity: "normal", cls: "text-white/75" },
+  ];
+  for (const c of cases) {
+    // One known 5H row beside a missing 1W half so only one number carries
+    // severity in the markup.
+    const data = dataWith({
+      runtimes: [
+        { runtime: "claude_code", unavailableReason: null, windows: [window({ remainingPercent: c.raw })] },
+      ],
+    });
+    const html = render({ status: "ready", data });
+    assert.match(
+      html,
+      new RegExp(`data-window="5H"[\\s\\S]*?data-severity="${c.severity}"`),
+      `${c.raw}% classifies as ${c.severity}`
+    );
+    assert.ok(html.includes(c.cls), `${c.raw}% renders ${c.cls}`);
+    if (c.severity === "critical") {
+      assert.ok(!html.includes("text-yellow-300"), `${c.raw}% is not yellow`);
+    } else if (c.severity === "warning") {
+      assert.ok(!html.includes("text-red-300"), `${c.raw}% is not red`);
+    } else {
+      assert.ok(!html.includes("text-red-300"), "30% is not red");
+      assert.ok(!html.includes("text-yellow-300"), "30% is not yellow");
+    }
+    // No exhausted-block treatment for nonzero values.
+    assert.ok(!html.includes('data-exhausted="true"'), `${c.raw}% does not exhaust the block`);
+  }
+  // Cursor 1M follows the same rule: 15% warns, 80% stays normal.
+  for (const c of [
+    { raw: 15, severity: "warning", cls: "text-yellow-300" },
+    { raw: 80, severity: "normal", cls: "text-white/75" },
+  ]) {
+    const data = dataWith({
+      runtimes: [{ runtime: "cursor_local", unavailableReason: null, windows: [billingCycle({ remainingPercent: c.raw })] }],
+    });
+    const html = render({ status: "ready", data });
+    assert.match(html, new RegExp(`data-window="1M"[\\s\\S]*?data-severity="${c.severity}"`), `Cursor ${c.raw}% is ${c.severity}`);
+    assert.ok(html.includes(c.cls), `Cursor ${c.raw}% renders ${c.cls}`);
+  }
+});
+
+test("NOT-290: severity is decided before rounding — 9.6% stays red, 29.6% stays yellow", () => {
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "claude_code",
+        unavailableReason: null,
+        windows: [window({ remainingPercent: 9.6 }), weekly({ remainingPercent: 29.6 })],
+      },
+    ],
+  });
+  const html = render({ status: "ready", data });
+  // Display rounds to 10% / 30% but severity stays critical / warning.
+  assert.match(html, />10%</, "9.6% displays as 10%");
+  assert.match(html, />30%</, "29.6% displays as 30%");
+  assert.match(html, /data-window="5H"[\s\S]*?data-severity="critical"/, "9.6% stays critical");
+  assert.match(html, /data-window="1W"[\s\S]*?data-severity="warning"/, "29.6% stays warning");
+  assert.ok(html.includes("text-red-300"), "critical red present");
+  assert.ok(html.includes("text-yellow-300"), "warning yellow present");
+  assert.ok(!html.includes('data-exhausted="true"'), "rounding never exhausts the block");
+});
+
+test("NOT-290: only the warning number in a 5H/1W pair turns yellow — icon and other number stay normal", () => {
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "claude_code",
+        unavailableReason: null,
+        windows: [window({ remainingPercent: 15 }), weekly({ remainingPercent: 80 })],
+      },
+    ],
+  });
+  const html = render({ status: "ready", data });
+  assert.match(html, /data-window="5H"[\s\S]*?data-severity="warning"/, "low 5H warns");
+  assert.match(html, /data-window="1W"[\s\S]*?data-severity="normal"/, "healthy 1W stays normal");
+  assert.equal((html.match(/data-severity="warning"/g) ?? []).length, 1, "exactly one warning number");
+  assert.equal((html.match(/data-severity="normal"/g) ?? []).length, 1, "exactly one normal number");
+  assert.ok(html.includes("text-yellow-300"), "warning number is yellow");
+  assert.ok(!html.includes('data-exhausted="true"'), "warning never takes the exhausted-block treatment");
+  assert.ok(!html.includes("border-red-400/40"), "no exhausted border for a warning pair");
+  // Provider icon keeps its normal treatment: exactly one 16x16 logo, no
+  // severity color on the icon element itself.
+  assert.equal((html.match(/<img/g) ?? []).length, 1, "one provider logo");
+  assert.ok(html.includes("h-4 w-4"), "logo stays 16x16");
+  const iconTag = html.match(/<img[^>]*>/)?.[0] ?? "";
+  assert.ok(!iconTag.includes("yellow") && !iconTag.includes("red-300"), "icon carries no severity color");
+});
+
+test("NOT-290: true 0% keeps the red number plus exhausted-block style; neutral states stay neutral", () => {
+  const exhausted = dataWith({
+    runtimes: [
+      { runtime: "claude_code", unavailableReason: null, windows: [window({ remainingPercent: 0 }), weekly({ remainingPercent: 80 })] },
+    ],
+  });
+  const exhaustedHtml = render({ status: "ready", data: exhausted });
+  assert.match(exhaustedHtml, /data-exhausted="true"/, "true 0% exhausts the block");
+  assert.match(exhaustedHtml, /border-red-400\/40/, "exhausted-block border retained");
+  assert.match(exhaustedHtml, /data-window="5H"[\s\S]*?data-severity="critical"/, "0% number is critical");
+  assert.ok(exhaustedHtml.includes("text-red-300"), "0% number stays red");
+
+  // Unknown / N/A rows, loading, and unavailable carry no severity color.
+  const unknown = dataWith({
+    runtimes: [{ runtime: "claude_code", unavailableReason: null, windows: [window({ remainingPercent: 80 })] }],
+  });
+  const unknownHtml = render({ status: "ready", data: unknown });
+  assert.match(unknownHtml, /N\/A/, "missing half reads N/A");
+  const loadingHtml = render({ status: "loading" });
+  assert.ok(!loadingHtml.includes("text-red-300") && !loadingHtml.includes("text-yellow-300"), "loading stays neutral");
+  assert.ok(!loadingHtml.includes("data-severity"), "loading carries no severity");
+  const unavailableHtml = render({ status: "unavailable" });
+  assert.ok(!unavailableHtml.includes("text-red-300") && !unavailableHtml.includes("text-yellow-300"), "unavailable stays neutral");
+  assert.ok(!unavailableHtml.includes("data-severity"), "unavailable carries no severity");
+});
