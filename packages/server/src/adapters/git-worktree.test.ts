@@ -1016,10 +1016,59 @@ test("NOT-280: a proven-dead predecessor's dirty checkout is salvaged once and r
   await dropWorktree(leftover.path);
 });
 
+/**
+ * Publish `branch` to origin with one extra commit the managed clone has never seen, so any
+ * `git fetch` during a refused resolution would leave a remote-tracking ref, a new object, and
+ * a rewritten FETCH_HEAD behind in the shared repository.
+ */
+function publishRemoteOnlyCommit(branch: string): string {
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-remote-"));
+  try {
+    execFileSync("git", ["clone", "-q", remote, other]);
+    git(other, "config", "user.email", "t@example.com");
+    git(other, "config", "user.name", "t");
+    git(other, "checkout", "-q", "-b", branch, git(repo, "rev-parse", "main"));
+    fs.writeFileSync(path.join(other, "remote-only.txt"), branch);
+    git(other, "add", "remote-only.txt");
+    git(other, "commit", "-q", "-m", "remote-only");
+    git(other, "push", "-q", "origin", `${branch}:refs/heads/${branch}`);
+    return git(other, "rev-parse", "HEAD");
+  } finally {
+    fs.rmSync(other, { recursive: true, force: true });
+  }
+}
+
+/** Shared-repository state a fetch would change: tracking ref, object store, FETCH_HEAD. */
+function sharedRepoSnapshot(branch: string, remoteSha: string) {
+  const fetchHead = path.join(git(repo, "rev-parse", "--absolute-git-dir"), "FETCH_HEAD");
+  let trackingRef: string | null = null;
+  try {
+    trackingRef = git(repo, "rev-parse", "--verify", "-q", `refs/remotes/origin/${branch}`);
+  } catch {
+    trackingRef = null;
+  }
+  let hasRemoteObject = true;
+  try {
+    git(repo, "cat-file", "-e", remoteSha);
+  } catch {
+    hasRemoteObject = false;
+  }
+  return {
+    trackingRef,
+    hasRemoteObject,
+    fetchHead: fs.existsSync(fetchHead) ? fs.readFileSync(fetchHead, "utf8") : null,
+    localRef: git(repo, "rev-parse", `refs/heads/${branch}`),
+  };
+}
+
 test("NOT-280: live owner, unknown owner, and outside-root checkouts are never mutated", async () => {
   const leftover = await dirtyLeftover("issue-280-live", "s-280-live");
+  const remoteSha = publishRemoteOnlyCommit("issue-280-live");
   const head = git(leftover.path, "rev-parse", "HEAD");
   const status = git(leftover.path, "status", "--porcelain");
+  const shared = sharedRepoSnapshot("issue-280-live", remoteSha);
+  assert.equal(shared.trackingRef, null, "precondition: the remote tip has never been fetched");
+  assert.equal(shared.hasRemoteObject, false, "precondition: the remote-only object is absent");
 
   const live = await resolveFor("issue-280-live", "s-280-live-next", { state: "alive", sessionId: "s-280-live" });
   assert.equal(live.kind, "live_owner");
@@ -1027,18 +1076,22 @@ test("NOT-280: live owner, unknown owner, and outside-root checkouts are never m
   assert.equal(unknown.kind, "conflict");
   assert.equal(git(leftover.path, "rev-parse", "HEAD"), head);
   assert.equal(git(leftover.path, "status", "--porcelain"), status);
+  assert.deepEqual(sharedRepoSnapshot("issue-280-live", remoteSha), shared, "no fetch: refs, objects, FETCH_HEAD untouched");
   await dropWorktree(leftover.path);
 
   const external = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-external-"));
   git(repo, "branch", "issue-280-external", "main");
+  const extRemoteSha = publishRemoteOnlyCommit("issue-280-external");
   execFileSync("git", ["worktree", "add", external, "issue-280-external"], { cwd: repo });
   try {
     fs.writeFileSync(path.join(external, "outside.txt"), "not ours\n");
     const extHead = git(external, "rev-parse", "HEAD");
+    const extShared = sharedRepoSnapshot("issue-280-external", extRemoteSha);
     const resolved = await resolveFor("issue-280-external", "s-280-ext", { state: "dead", sessionId: "s-280-ext-owner" });
     assert.equal(resolved.kind, "conflict");
     assert.equal(git(external, "rev-parse", "HEAD"), extHead);
     assert.equal(git(external, "status", "--porcelain"), "?? outside.txt");
+    assert.deepEqual(sharedRepoSnapshot("issue-280-external", extRemoteSha), extShared);
   } finally {
     execFileSync("git", ["worktree", "remove", "--force", external], { cwd: repo });
   }

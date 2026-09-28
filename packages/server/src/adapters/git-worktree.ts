@@ -1032,18 +1032,18 @@ export async function resolveDeveloperWorktree(opts: {
 }): Promise<DeveloperWorktreeResolution> {
   return withRepoLock(opts.repo, async () => {
     await pruneWorktrees(opts.repo);
-    // NOT-219: a repair round reuses an existing issue branch, so first fetch
+    // NOT-219: a repair round reuses an existing issue branch, so fetch
     // `origin/<branch>` — the worktree must start at exactly what Dealer pushed,
     // never the managed clone's possibly-stale local ref. A failed fetch defers the
     // start (`base_unavailable`) instead of falling back to the stale local branch.
+    // NOT-280: the fetch runs only once every refusal check (outside root, live owner,
+    // unknown-owner dirt, unreadable checkout) has passed, so a refused leftover leaves
+    // the shared repository's refs, FETCH_HEAD and objects untouched.
+    const fetchReuse = async (): Promise<ReusedBranchFetch> =>
+      opts.reuseBranch
+        ? fetchReusedBranch(opts.repo, opts.branchName, opts.fetchTimeoutMs)
+        : { ok: true, remoteSha: null };
     let reuseRemoteSha: string | null = null;
-    if (opts.reuseBranch) {
-      const reused = await fetchReusedBranch(opts.repo, opts.branchName, opts.fetchTimeoutMs);
-      if (!reused.ok) {
-        return { kind: "base_unavailable", reason: reused.reason };
-      }
-      reuseRemoteSha = reused.remoteSha;
-    }
     const existing = await findWorktreeForBranch(opts.repo, opts.branchName);
     if (existing) {
       const managedRoot = opts.worktreePath
@@ -1102,6 +1102,11 @@ export async function resolveDeveloperWorktree(opts: {
         }
       }
       if (state === "clean") {
+        const reused = await fetchReuse();
+        if (!reused.ok) {
+          return { kind: "base_unavailable", reason: reused.reason };
+        }
+        reuseRemoteSha = reused.remoteSha;
         // NOT-219: a clean leftover holding a stale local branch advances to the
         // fetched remote tip when that is a strict fast-forward (nothing unique to
         // lose — the local tip is already an ancestor of the remote one). Any other
@@ -1164,6 +1169,13 @@ export async function resolveDeveloperWorktree(opts: {
     // `origin/<baseBranch>` tip — never the cached clone's possibly-stale local base.
     // A failed fetch returns `base_unavailable` (no branch is created) instead of
     // silently falling back to the stale local branch.
+    if (opts.reuseBranch) {
+      const reused = await fetchReuse();
+      if (!reused.ok) {
+        return { kind: "base_unavailable", reason: reused.reason };
+      }
+      reuseRemoteSha = reused.remoteSha;
+    }
     let ref: string;
     let newBranch: string | undefined;
     let baseSha: string | null = null;
