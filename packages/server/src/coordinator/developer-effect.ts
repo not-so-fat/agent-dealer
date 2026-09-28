@@ -40,6 +40,7 @@ import {
   salvageDirtyWorktree,
   dirtyWorktreeRecoveryCommands,
   withRepoLock,
+  leftoverFingerprint,
 } from "../adapters/git-worktree.js";
 import { recordIssueBaseSha } from "../repository/issues.js";
 import {
@@ -816,8 +817,13 @@ export async function runDeveloperEffect(
       // NOT-280: a dead predecessor's dirt was committed on the issue branch (or found
       // already committed after a restart) — one durable checkpoint per salvage commit,
       // tied to the predecessor session when Dealer still has its row.
+      // Unlike ordinary checkpoint evidence, this row is a deliverable: if it cannot be
+      // persisted (after one retry) the attempt stops before spawning, leaving the clean
+      // checkout and its salvage tip in place. The next Resume re-detects that tip
+      // (`recovered`) and retries the idempotent insert; an unchanged failure keeps the
+      // same fingerprint, so it reuses its human action instead of opening another.
       const salvage = resolved.salvage;
-      try {
+      const recordSalvage = () =>
         emitCheckpointObserved({
           issueId: issue.id,
           workflowInstanceId: instance.id,
@@ -833,8 +839,29 @@ export async function runDeveloperEffect(
           branch: branchName,
           resumeSalvage: true,
         });
-      } catch {
-        // checkpoint evidence must never fail the attempt itself
+      let checkpointError: unknown = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          recordSalvage();
+          checkpointError = null;
+          break;
+        } catch (err) {
+          checkpointError = err;
+        }
+      }
+      if (checkpointError !== null) {
+        const reason =
+          `Salvage tip ${salvage.commitSha.slice(0, 7)} of dead session ${salvage.predecessorSessionId}'s work ` +
+          `was committed on ${branchName} at ${worktreePath}, but its durable checkpoint could not be recorded: ` +
+          `${checkpointError instanceof Error ? checkpointError.message : String(checkpointError)}. ` +
+          "The checkout was left intact; Resume retries the checkpoint without re-committing.";
+        return {
+          kind: "worktree_conflict",
+          path: worktreePath,
+          reason,
+          recoveryCommands: [`cd ${worktreePath}`, "git log --oneline -3", "# fix the Dealer database, then Resume"],
+          fingerprint: await leftoverFingerprint(worktreePath, reason),
+        };
       }
     }
     if (resolved.kind === "created" && resolved.baseSha) {

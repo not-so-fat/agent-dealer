@@ -36,9 +36,11 @@ export interface CheckpointEvidence {
   samplingPrecisionMs?: number | null;
   branch?: string | null;
   /**
-   * NOT-280: a resume salvage of a dead predecessor's dirt is keyed on its commit SHA —
-   * a restart that re-detects the same saved tip never records a second checkpoint,
-   * and it never collides with the predecessor's own session-end salvage row.
+   * NOT-280: a resume salvage of a dead predecessor's dirt is keyed on its issue and
+   * commit SHA — a restart that re-detects the same saved tip never records a second
+   * checkpoint, it never collides with the predecessor's own session-end salvage row,
+   * and another issue whose salvage happens to produce an identical commit object (same
+   * parent, content, fixed author/message and second) still gets its own row.
    */
   resumeSalvage?: boolean;
 }
@@ -71,7 +73,7 @@ export function emitCheckpointObserved(ev: CheckpointEvidence): void {
     },
     idempotencyKey:
       ev.resumeSalvage && ev.observedSha
-        ? `checkpoint:resume-salvage:${ev.observedSha}`
+        ? `checkpoint:resume-salvage:${ev.issueId}:${ev.observedSha}`
         : ev.kind === "commit" && ev.origin === "salvage"
           ? `checkpoint:${ev.workerSessionId}:commit:salvage`
           : `checkpoint:${ev.workerSessionId}:${ev.kind}`,

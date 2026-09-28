@@ -1072,6 +1072,19 @@ function applyEffect(
 }
 
 /**
+ * NOT-280: an action reopened for an unchanged blocker (`sameBlockerAction`) can be
+ * resumed again — each Resume of it needs its own work item, so later resolutions of the
+ * same action get an ordinal suffix. The first Resume keeps the plain action-keyed name.
+ */
+function resumeWorkItemKey(issueId: string, baseKey: string): string {
+  const taken = new Set(listWorkItemsForIssue(issueId).map((w) => w.idempotencyKey));
+  if (!taken.has(baseKey)) return baseKey;
+  let n = 2;
+  while (taken.has(`${baseKey}:${n}`)) n++;
+  return `${baseKey}:${n}`;
+}
+
+/**
  * NOT-280: the issue's most recent action, when it was raised for exactly this worktree
  * blocker fingerprint and is either still open or was resolved by a Resume — reopened in
  * that case. Anything else in between (another action, a different choice, a changed
@@ -1622,6 +1635,7 @@ export function resolveHumanActionAndAdvance(
     // Keyed on the resolved human action, not the round/attempt counters: a
     // "infra" resume resets infra_attempts to 0 every time, so a counter-based key would
     // collide across repeated escalate→resume cycles within the same round.
+    const resumeKey = resumeWorkItemKey(issue.id, `${instance.id}:${resumeAsReviewer ? "reviewer" : "developer"}:resume:${action.id}`);
     const next = resumeAsReviewer
       ? enqueueWorkItem({
           issueId: issue.id,
@@ -1629,7 +1643,7 @@ export function resolveHumanActionAndAdvance(
           kind: "reviewer",
           round: issueNow.currentRound,
           payload: { inputSha: effectiveResumeHeadSha!, profileSnapshot: queuedProfileSnapshot(issue, "reviewer") },
-          idempotencyKey: `${instance.id}:reviewer:resume:${action.id}`,
+          idempotencyKey: resumeKey,
         })
       : enqueueWorkItem({
           issueId: issue.id,
@@ -1642,7 +1656,7 @@ export function resolveHumanActionAndAdvance(
             // payload — later rounds never see it.
             ...(scopeDecisionNote ? { scopeDecisionNote } : {}),
           },
-          idempotencyKey: `${instance.id}:developer:resume:${action.id}`,
+          idempotencyKey: resumeKey,
         });
     return {
       ok: true,

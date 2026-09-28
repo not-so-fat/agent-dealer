@@ -922,7 +922,7 @@ function sha256Hex(parts: string[]): string {
  * status: an unreadable checkout still fingerprints (by path + reason), so repeated
  * Resumes against the same corrupt tree dedupe too.
  */
-async function leftoverFingerprint(worktreePath: string, reason: string): Promise<string> {
+export async function leftoverFingerprint(worktreePath: string, reason: string): Promise<string> {
   const head = await git(worktreePath, ["rev-parse", "HEAD"]).then((r) => r.stdout.trim(), () => "");
   const status = await git(worktreePath, ["status", "--porcelain"]).then((r) => r.stdout, () => "");
   return sha256Hex([tryRealpath(worktreePath), reason, head, status]);

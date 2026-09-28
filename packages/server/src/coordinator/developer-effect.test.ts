@@ -1294,6 +1294,77 @@ test("NOT-280: Resume salvages a dead predecessor's dirty managed checkout once,
   assert.equal(checkpoints[0].workerSessionId, round1.id, "tied to the predecessor session");
 });
 
+test("NOT-280: a salvage checkpoint that cannot be persisted blocks before spawning, keeps the checkout, and never duplicates its action", async () => {
+  const issueId = await makeIssue();
+  const commonDir = git(repo, "rev-parse", "--git-common-dir");
+  const hooksDir = path.isAbsolute(commonDir) ? path.join(commonDir, "hooks") : path.join(repo, commonDir, "hooks");
+
+  let call = 0;
+  const heads: string[] = [];
+  const spawn: SpawnFn = async (input) => {
+    call++;
+    if (call === 1) {
+      fs.writeFileSync(path.join(input.cwd, "persist.txt"), "ticket work\n");
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(path.join(hooksDir, "pre-commit"), "#!/bin/sh\necho blocked >&2\nexit 1\n", { mode: 0o755 });
+      return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false };
+    }
+    heads.push(git(input.cwd, "rev-parse", "HEAD"));
+    return noopSpawn(input);
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github: fakeGithub() }));
+  startWorkflow(issueId);
+  await pump(1);
+  const round1 = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  const leftoverPath = roleWorktreePath(repo, round1.id, "developer");
+  const tipBefore = git(leftoverPath, "rev-parse", "HEAD");
+  fs.rmSync(path.join(hooksDir, "pre-commit"), { force: true });
+
+  // The Dealer database rejects the resume-salvage checkpoint row.
+  getDb().exec(`CREATE TRIGGER not280_block_salvage_checkpoint BEFORE INSERT ON workflow_events
+    WHEN NEW.idempotency_key LIKE 'checkpoint:resume-salvage:%'
+    BEGIN SELECT RAISE(ABORT, 'checkpoint store unavailable'); END`);
+  try {
+    const firstAction = listHumanActionsForIssue(issueId).find((a) => a.status === "open")!;
+    resolveHumanActionAndAdvance(firstAction.id, "test", "resume");
+    await pump(1);
+
+    assert.equal(getIssue(issueId)!.status, "needs_human", "no attempt proceeds without its durable checkpoint");
+    assert.equal(heads.length, 0, "nothing spawned");
+    const blocker = listHumanActionsForIssue(issueId).find((a) => a.status === "open")!;
+    assert.match(blocker.reason, /durable checkpoint could not be recorded/);
+    assert.match(blocker.reason, /checkpoint store unavailable/);
+    assert.ok(blocker.reason.includes(leftoverPath));
+    const salvageSha = git(leftoverPath, "rev-parse", "HEAD");
+    assert.equal(git(repo, "rev-list", "--count", `${tipBefore}..${salvageSha}`), "1", "the salvage commit is kept");
+    assert.equal(git(leftoverPath, "status", "--porcelain"), "", "checkout left intact on its salvage tip");
+
+    // Unchanged blocker: Resume reuses the same action, and never re-commits.
+    const countBefore = listHumanActionsForIssue(issueId).length;
+    resolveHumanActionAndAdvance(blocker.id, "test", "resume");
+    await pump(1);
+    assert.equal(listHumanActionsForIssue(issueId).length, countBefore, "no duplicate action");
+    assert.equal(git(leftoverPath, "rev-parse", "HEAD"), salvageSha, "no duplicate commit");
+
+    // Store fixed: the next Resume records the checkpoint and continues from the saved tip.
+    getDb().exec("DROP TRIGGER not280_block_salvage_checkpoint");
+    const reopened = listHumanActionsForIssue(issueId).find((a) => a.status === "open")!;
+    resolveHumanActionAndAdvance(reopened.id, "test", "resume");
+    await pump(1);
+    assert.equal(getIssue(issueId)!.status, "reviewing");
+    assert.equal(heads[0], salvageSha);
+    const checkpoints = listWorkflowEventsForIssue(issueId).filter((e) => {
+      if (e.type !== "checkpoint.observed") return false;
+      const p = JSON.parse(e.payloadJson ?? "{}");
+      return p.origin === "salvage" && p.observedSha === salvageSha;
+    });
+    assert.equal(checkpoints.length, 1, "exactly one durable salvage checkpoint once the store recovers");
+    assert.equal(checkpoints[0].workerSessionId, round1.id);
+  } finally {
+    getDb().exec("DROP TRIGGER IF EXISTS not280_block_salvage_checkpoint");
+  }
+});
+
 test("NOT-280: a restart after the salvage commit (before cleanup) detects the saved tip — no duplicate commit or checkpoint", async () => {
   const issueId = await makeIssue();
   const branch = issueBranchName(issueId);
