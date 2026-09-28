@@ -977,9 +977,18 @@ export async function salvagePredecessorWorktree(
   if (salvaged.ok) return salvaged;
   // Undo the `git add -A` staging when the commit itself did not land; a landed commit
   // with residual dirt keeps its commit (the work is saved) and still fails closed.
+  // A failed rollback leaves the salvage's staging in place, so it is reported alongside
+  // the commit failure rather than claiming the checkout was left as found.
   const headAfter = await revParseHead(worktreePath).catch(() => null);
   if (headAfter === headBefore) {
-    await git(worktreePath, ["read-tree", indexTree]).catch(() => null);
+    try {
+      await git(worktreePath, ["read-tree", indexTree]);
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `${salvaged.reason}; restoring the index afterwards also failed (git read-tree ${indexTree}): ${(err as Error).message} — files in ${worktreePath} are untouched but \`git add -A\` staging remains`,
+      };
+    }
   }
   return { ok: false, reason: salvaged.reason };
 }
@@ -1031,7 +1040,9 @@ export async function resolveDeveloperWorktree(opts: {
   fetchTimeoutMs?: number;
 }): Promise<DeveloperWorktreeResolution> {
   return withRepoLock(opts.repo, async () => {
-    await pruneWorktrees(opts.repo);
+    // NOT-280: no up-front `git worktree prune` — it deletes `.git/worktrees/*` admin
+    // entries, so it runs only once no refusal (outside root, live owner, dirt, unreadable
+    // checkout) applies: for a vanished leftover here, otherwise right before the add below.
     // NOT-219: a repair round reuses an existing issue branch, so fetch
     // `origin/<branch>` — the worktree must start at exactly what Dealer pushed,
     // never the managed clone's possibly-stale local ref. A failed fetch defers the
@@ -1044,7 +1055,13 @@ export async function resolveDeveloperWorktree(opts: {
         ? fetchReusedBranch(opts.repo, opts.branchName, opts.fetchTimeoutMs)
         : { ok: true, remoteSha: null };
     let reuseRemoteSha: string | null = null;
-    const existing = await findWorktreeForBranch(opts.repo, opts.branchName);
+    let existing = await findWorktreeForBranch(opts.repo, opts.branchName);
+    if (existing && !fs.existsSync(existing)) {
+      // A registered checkout whose directory is gone is a stale administrative entry
+      // (pre-NOT-280 this was pruned before the lookup): prune it and look again.
+      await pruneWorktrees(opts.repo);
+      existing = await findWorktreeForBranch(opts.repo, opts.branchName);
+    }
     if (existing) {
       const managedRoot = opts.worktreePath
         ? tryRealpath(path.dirname(opts.worktreePath))
@@ -1126,7 +1143,7 @@ export async function resolveDeveloperWorktree(opts: {
       if (state === "dirty_or_unpushed") {
         const base = `A previous developer worktree for branch ${opts.branchName} still holds it at ${existing} with uncommitted changes.`;
         const reason = salvageFailure
-          ? `${base} Automatic salvage of dead session ${deadPredecessor}'s work failed and the checkout was left intact: ${salvageFailure}`
+          ? `${base} Automatic salvage of dead session ${deadPredecessor}'s work failed and the checkout was preserved (not removed or reset): ${salvageFailure}`
           : salvage
             ? `${base} Salvage tip ${salvage.commitSha.slice(0, 7)} landed but the checkout is still dirty.`
             : base;
@@ -1163,8 +1180,10 @@ export async function resolveDeveloperWorktree(opts: {
           fingerprint: await leftoverFingerprint(existing, reason),
         };
       }
-      await pruneWorktrees(opts.repo);
     }
+    // Clear stale registrations (e.g. a vanished checkout at the target path) before the
+    // add — every refusal path above has already returned without mutating anything.
+    await pruneWorktrees(opts.repo);
     // NOT-197: a fresh issue branch starts from the freshly fetched
     // `origin/<baseBranch>` tip — never the cached clone's possibly-stale local base.
     // A failed fetch returns `base_unavailable` (no branch is created) instead of

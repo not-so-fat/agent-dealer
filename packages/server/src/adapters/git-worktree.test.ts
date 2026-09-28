@@ -1038,9 +1038,14 @@ function publishRemoteOnlyCommit(branch: string): string {
   }
 }
 
-/** Shared-repository state a fetch would change: tracking ref, object store, FETCH_HEAD. */
+/**
+ * Shared-repository state a refused resolution must not change: tracking ref, object store,
+ * FETCH_HEAD (a fetch), and the `.git/worktrees` administrative entries (a prune).
+ */
 function sharedRepoSnapshot(branch: string, remoteSha: string) {
-  const fetchHead = path.join(git(repo, "rev-parse", "--absolute-git-dir"), "FETCH_HEAD");
+  const gitDir = git(repo, "rev-parse", "--absolute-git-dir");
+  const fetchHead = path.join(gitDir, "FETCH_HEAD");
+  const adminDir = path.join(gitDir, "worktrees");
   let trackingRef: string | null = null;
   try {
     trackingRef = git(repo, "rev-parse", "--verify", "-q", `refs/remotes/origin/${branch}`);
@@ -1058,17 +1063,28 @@ function sharedRepoSnapshot(branch: string, remoteSha: string) {
     hasRemoteObject,
     fetchHead: fs.existsSync(fetchHead) ? fs.readFileSync(fetchHead, "utf8") : null,
     localRef: git(repo, "rev-parse", `refs/heads/${branch}`),
+    worktreeAdmin: fs.existsSync(adminDir) ? fs.readdirSync(adminDir).sort() : [],
   };
+}
+
+/** A registered worktree whose directory is gone — exactly what `git worktree prune` deletes. */
+function staleAdminEntry(branch: string): string {
+  const stale = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-stale-")), "gone");
+  execFileSync("git", ["worktree", "add", "-q", "-b", branch, stale, "main"], { cwd: repo });
+  fs.rmSync(path.dirname(stale), { recursive: true, force: true });
+  return path.basename(stale);
 }
 
 test("NOT-280: live owner, unknown owner, and outside-root checkouts are never mutated", async () => {
   const leftover = await dirtyLeftover("issue-280-live", "s-280-live");
+  const staleEntry = staleAdminEntry("issue-280-stale-admin");
   const remoteSha = publishRemoteOnlyCommit("issue-280-live");
   const head = git(leftover.path, "rev-parse", "HEAD");
   const status = git(leftover.path, "status", "--porcelain");
   const shared = sharedRepoSnapshot("issue-280-live", remoteSha);
   assert.equal(shared.trackingRef, null, "precondition: the remote tip has never been fetched");
   assert.equal(shared.hasRemoteObject, false, "precondition: the remote-only object is absent");
+  assert.ok(shared.worktreeAdmin.includes(staleEntry), "precondition: a prunable admin entry exists");
 
   const live = await resolveFor("issue-280-live", "s-280-live-next", { state: "alive", sessionId: "s-280-live" });
   assert.equal(live.kind, "live_owner");
@@ -1076,8 +1092,12 @@ test("NOT-280: live owner, unknown owner, and outside-root checkouts are never m
   assert.equal(unknown.kind, "conflict");
   assert.equal(git(leftover.path, "rev-parse", "HEAD"), head);
   assert.equal(git(leftover.path, "status", "--porcelain"), status);
-  assert.deepEqual(sharedRepoSnapshot("issue-280-live", remoteSha), shared, "no fetch: refs, objects, FETCH_HEAD untouched");
-  await dropWorktree(leftover.path);
+  assert.deepEqual(
+    sharedRepoSnapshot("issue-280-live", remoteSha),
+    shared,
+    "no fetch or prune: refs, objects, FETCH_HEAD, .git/worktrees untouched"
+  );
+  fs.rmSync(leftover.path, { recursive: true, force: true });
 
   const external = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-external-"));
   git(repo, "branch", "issue-280-external", "main");
@@ -1092,9 +1112,11 @@ test("NOT-280: live owner, unknown owner, and outside-root checkouts are never m
     assert.equal(git(external, "rev-parse", "HEAD"), extHead);
     assert.equal(git(external, "status", "--porcelain"), "?? outside.txt");
     assert.deepEqual(sharedRepoSnapshot("issue-280-external", extRemoteSha), extShared);
+    assert.ok(extShared.worktreeAdmin.includes(staleEntry), "stale admin entry survives the outside-root refusal");
   } finally {
     execFileSync("git", ["worktree", "remove", "--force", external], { cwd: repo });
   }
+  await withRepoLock(repo, async () => execFileSync("git", ["worktree", "prune"], { cwd: repo }));
 });
 
 test("NOT-280: salvagePredecessorWorktree refuses a checkout whose branch identity does not match, without mutating it", async () => {
@@ -1139,6 +1161,42 @@ test("NOT-280: a rejecting commit hook leaves the checkout intact and names the 
     const third = await resolveFor("issue-280-hook", "s-280-hook-next-3", { state: "dead", sessionId: "s-280-hook" });
     if (third.kind === "conflict") assert.notEqual(third.fingerprint, first.fingerprint, "changed state → new fingerprint");
   } finally {
+    git(repo, "config", "--unset", "core.hooksPath");
+    fs.rmSync(hooksDir, { recursive: true, force: true });
+  }
+  await dropWorktree(leftover.path);
+});
+
+test("NOT-280: a failed index rollback after a rejected salvage commit is reported, and the checkout is preserved", async () => {
+  const leftover = await dirtyLeftover("issue-280-rollback", "s-280-rollback");
+  const head = git(leftover.path, "rev-parse", "HEAD");
+  const worktreeGitDir = git(leftover.path, "rev-parse", "--absolute-git-dir");
+  const hooksDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-wt-280-rollback-hooks-"));
+  // The hook rejects the commit AND leaves the worktree's git dir unwritable, so the
+  // salvage's `git read-tree` cannot take index.lock to restore the pre-salvage index.
+  fs.writeFileSync(
+    path.join(hooksDir, "pre-commit"),
+    `#!/bin/sh\nchmod a-w '${worktreeGitDir}'\necho 'hook rejects and locks the index' >&2\nexit 1\n`,
+    { mode: 0o755 }
+  );
+  git(repo, "config", "core.hooksPath", hooksDir);
+  try {
+    const resolved = await resolveFor("issue-280-rollback", "s-280-rollback-next", { state: "dead", sessionId: "s-280-rollback" });
+    assert.equal(resolved.kind, "conflict");
+    if (resolved.kind !== "conflict") return;
+    assert.match(resolved.reason, /hook rejects and locks the index/, "names the commit failure");
+    assert.match(resolved.reason, /restoring the index afterwards also failed \(git read-tree [0-9a-f]{40}\)/, "names the failing cleanup step");
+    assert.match(resolved.reason, /index\.lock/, "carries the read-tree stderr");
+    assert.match(resolved.reason, /staging remains/);
+    assert.ok(resolved.reason.includes(leftover.path));
+    assert.doesNotMatch(resolved.reason, /left intact/);
+    assert.ok(fs.existsSync(leftover.path), "checkout preserved, not removed");
+    assert.equal(git(leftover.path, "rev-parse", "HEAD"), head, "no commit landed");
+    assert.equal(fs.readFileSync(path.join(leftover.path, "README.md"), "utf8"), "hello\nedited by dead worker\n");
+    assert.equal(fs.readFileSync(path.join(leftover.path, "new-file.txt"), "utf8"), "untracked ticket work\n");
+  } finally {
+    fs.chmodSync(worktreeGitDir, 0o755);
+    fs.rmSync(path.join(worktreeGitDir, "index.lock"), { force: true });
     git(repo, "config", "--unset", "core.hooksPath");
     fs.rmSync(hooksDir, { recursive: true, force: true });
   }
