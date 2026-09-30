@@ -268,6 +268,58 @@ test("NOT-278: a non-Muse developer prompt has the deck bootstrap but no cron pr
   assert.doesNotMatch(prompt, /cron_create/);
 });
 
+// NOT-303: a Muse developer prompt carries the screenshot-path preflight verdict.
+// Default (no headless shell installed): unusable, naming the Chrome.app abort and
+// requiring an explicit `Visual QA: not run` conclusion line — never sandbox
+// widening. Env is scrubbed so the test is hermetic.
+test("NOT-303: museDeveloper prompt carries the visual-QA preflight (unusable by default)", () => {
+  const saved = process.env.MUSE_HEADLESS_SHELL_BIN;
+  delete process.env.MUSE_HEADLESS_SHELL_BIN;
+  try {
+    const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, deckId: "deck-1", worktreePath: "/wt", museDeveloper: true });
+    assert.match(prompt, /## Visual QA/);
+    assert.match(prompt, /Google Chrome\.app/);
+    assert.match(prompt, /RegisterApplication/);
+    assert.match(prompt, /do not spend steps probing/i);
+    assert.match(prompt, /Visual QA: not run/);
+    assert.doesNotMatch(prompt, /--disable-sandbox/);
+    assert.doesNotMatch(prompt, /--yolo/);
+  } finally {
+    if (saved !== undefined) process.env.MUSE_HEADLESS_SHELL_BIN = saved;
+  }
+});
+
+test("NOT-303: museDeveloper prompt names the pre-installed headless shell when injected", () => {
+  const prompt = buildDeveloperPrompt({
+    taskSnapshot,
+    round: 1,
+    deckId: "deck-1",
+    worktreePath: "/wt",
+    museDeveloper: true,
+    museVisualQa: {
+      usable: true,
+      binary: "/opt/headless/chrome-headless-shell",
+      args: ["--screenshot=<png>", "--window-size=1280,800"],
+      reason: "pre-installed headless shell",
+    },
+  });
+  assert.match(prompt, /\/opt\/headless\/chrome-headless-shell/);
+  assert.match(prompt, /--screenshot=<png>/);
+  assert.match(prompt, /Google Chrome\.app/);
+});
+
+test("NOT-303: a non-Muse developer prompt has no visual-QA section", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, deckId: "deck-1", worktreePath: "/wt" });
+  assert.doesNotMatch(prompt, /## Visual QA/);
+});
+
+test("NOT-303: reviewer prompt states a missing screenshot is never a pass", () => {
+  const prompt = buildReviewerPrompt(reviewerBase);
+  assert.match(prompt, /missing screenshot/i);
+  assert.match(prompt, /visual QA not run/);
+  assert.match(prompt, /do not read the absence as a pass/);
+});
+
 test("a deckless developer prompt still fails closed", () => {
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, deckId: null });
   assert.match(prompt, /misconfigured: Agent Deck is required but missing/);

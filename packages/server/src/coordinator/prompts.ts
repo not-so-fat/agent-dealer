@@ -11,6 +11,11 @@
 // every artifact it needs to judge must already be in the prompt.
 import type { Finding } from "@agent-dealer/shared";
 import {
+  checkMuseVisualQa,
+  museVisualQaPromptSection,
+  type MuseVisualQaStatus,
+} from "../adapters/muse-visual-qa.js";
+import {
   formatVerificationReceiptSection,
   type VerificationReceipt,
 } from "./verification-receipt.js";
@@ -45,6 +50,10 @@ export interface DeveloperPromptInput {
    * Muse-specific `cron_*` prohibition (Muse cannot hide those tools; use is detected
    * post-run as `muse_cron_used`). */
   museDeveloper?: boolean;
+  /** NOT-303: resolved screenshot path for a Muse developer session. Defaults to the
+   * coordinator-side `checkMuseVisualQa()` preflight when `museDeveloper` is set;
+   * tests inject a fixed status. Ignored for non-Muse developers. */
+  museVisualQa?: MuseVisualQaStatus;
   /** Human guidance markdown added since this issue's previous worker session (design
    * doc "Guidance semantics") — a one-shot CLI process never inherits a running session,
    * so this is how guidance actually reaches the next developer/reviewer input. */
@@ -172,6 +181,12 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
   parts.push(...guidanceSection(input.guidance));
   parts.push(...agentDeckSection(input.worktreePath, input.deckId));
   if (input.museDeveloper) parts.push(...museCronProhibitionSection());
+  // NOT-303: the screenshot-path preflight verdict is embedded before the session
+  // starts, so the worker reads it instead of discovering the Chrome.app abort
+  // mid-session. Non-Muse developers are untouched.
+  if (input.museDeveloper) {
+    parts.push(...museVisualQaPromptSection(input.museVisualQa ?? checkMuseVisualQa()));
+  }
 
   parts.push(
     `## Required`,
@@ -222,6 +237,10 @@ function reviewerContractSection(baseSha: string, headSha: string): string[] {
     `- "approved": AC met for this tip and no finding is "blocking" (non_blocking nits allowed).`,
     `- "changes_requested": any "blocking" finding a coding pass can address — including incomplete review because AC-critical files were omitted/truncated from the diff. List omitted paths in a blocking finding.`,
     `- "escalated": only when acceptance criteria / product scope are ambiguous, contradictory, or need a human product call — not ordinary code defects, not "diff too large". You MUST set non-empty "productScopeQuestion"; omit the field otherwise.`,
+    // NOT-303: a missing screenshot is never a pass. Some runtimes (Muse Code: the
+    // Chrome.app headless abort) cannot do visual QA in-session and say so in the
+    // conclusion — echo that as "visual QA not run" in "evidenceAssessment".
+    `- A missing screenshot or DOM capture is never verification: if the change has UI-visible effects and no visual evidence is in the diff, the conclusion, or the checks, state "visual QA not run" in "evidenceAssessment" — do not read the absence as a pass.`,
     `- You cannot edit files, push, or publish anything — you only return this JSON. The coordinator publishes it to GitHub on your behalf.`,
   ];
 }
