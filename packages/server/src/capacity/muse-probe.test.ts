@@ -8,7 +8,9 @@ import path from "node:path";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-probe-"));
 
+import { MUSE_CODE_CONTRIBUTOR_MODEL } from "@agent-dealer/shared";
 import { MuseCapacityHost } from "./muse-host.js";
+import type { MuseCapacityHost as MuseCapacityHostType } from "./muse-host.js";
 import {
   hasFreshMuseCapacityPair,
   isMusePaidFallbackEnabled,
@@ -20,7 +22,7 @@ import {
 } from "./muse-probe.js";
 import { ingestMuseUsagePayload } from "./muse.js";
 
-const { migrate } = await import("../db/index.js");
+const { migrate, getDataDir } = await import("../db/index.js");
 const { createAgent } = await import("../repository/agents.js");
 const { clearAllCapacitySnapshots, listCapacitySnapshots } = await import(
   "../repository/runtime-capacity.js"
@@ -206,4 +208,201 @@ test("direct probe success requires the complete pair", async () => {
   } finally {
     await host.shutdown();
   }
+});
+
+// NOT-300: the probe log must explain the next failure. A stub host drives
+// runMuseServeTurn to the exact turn outcome — no live model call.
+function stubProbeHost(opts: {
+  turnParams?: Record<string, unknown>;
+  failStart?: Error;
+  hangTurnMs?: number;
+} = {}): MuseCapacityHostType {
+  const sessionId = "sess-stub-1";
+  const session = { sessionId, modelId: MUSE_CODE_CONTRIBUTOR_MODEL };
+  let notifications = 0;
+  return {
+    ensureStarted: async () => {
+      if (opts.failStart) throw opts.failStart;
+      return true;
+    },
+    execRequest: async (_id: string, method: string) => {
+      if (method === "session/start") return { result: { session } };
+      if (method === "turn/start") return { result: { turnId: "turn-stub-1" } };
+      if (method === "session/read") {
+        return { result: { session, history: { items: [] } } };
+      }
+      return { result: {} };
+    },
+    waitForHostNotification: async () => {
+      notifications += 1;
+      if (opts.hangTurnMs !== undefined && notifications === 1) {
+        await new Promise((r) => setTimeout(r, opts.hangTurnMs));
+        return null;
+      }
+      if (opts.turnParams !== undefined || opts.hangTurnMs === undefined) {
+        return {
+          method: "turn/completed",
+          params:
+            opts.turnParams ??
+            ({
+              sessionId,
+              terminal: "failed",
+              error: { kind: "other", message: "boom" },
+              durationMs: 982,
+            } satisfies Record<string, unknown>),
+        };
+      }
+      return {
+        method: "turn/completed",
+        params: { sessionId, terminal: "cancelled", reason: "cancel requested" },
+      };
+    },
+    isConnected: () => true,
+    cancelExecTurn: async () => {},
+    readUsage: async () => ({ ok: false as const, reason: "missing" }),
+    shutdown: async () => {},
+  } as unknown as MuseCapacityHostType;
+}
+
+function probeLogPath(): string {
+  return path.join(getDataDir(), "capacity", "muse-probe.log");
+}
+
+function probeLogSize(): number {
+  return fs.existsSync(probeLogPath()) ? fs.statSync(probeLogPath()).size : 0;
+}
+
+function probeLogLinesSince(bytes: number): Array<Record<string, unknown>> {
+  const text = fs.existsSync(probeLogPath())
+    ? fs.readFileSync(probeLogPath(), "utf8").slice(bytes)
+    : "";
+  return text
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+}
+
+const PROBE_LOG_ALLOWED_KEYS = [
+  "admitted",
+  "durationMs",
+  "event",
+  "failureDetail",
+  "failureKind",
+  "model",
+  "ok",
+  "terminal",
+  "trigger",
+  "ts",
+  "windowsUpdated",
+];
+
+function assertProbeLogShape(line: Record<string, unknown>): void {
+  assert.deepEqual(Object.keys(line).sort(), [...PROBE_LOG_ALLOWED_KEYS].sort());
+  const detail = line.failureDetail as { kind?: unknown; message?: unknown } | null;
+  if (detail !== null) {
+    assert.deepEqual(Object.keys(detail).sort(), ["kind", "message"]);
+  }
+  const raw = JSON.stringify(line);
+  for (const secret of ["Reply with exactly", "transcript", "META_API_KEY", "password"]) {
+    assert.ok(!raw.includes(secret), `log line leaks ${secret}`);
+  }
+}
+
+test("failed turn records failureDetail kind+message in the probe log", async () => {
+  const before = probeLogSize();
+  const stderr: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => {
+    stderr.push(args.map(String).join(" "));
+  };
+  try {
+    const host = stubProbeHost();
+    const result = await runMuseCapacityProbe(Date.now(), { host, timeoutMs: 10_000 });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureKind, "turn_failed");
+    assert.deepEqual(result.failureDetail, { kind: "other", message: "boom" });
+  } finally {
+    console.error = origError;
+  }
+  assert.match(stderr.join("\n"), /fallback failed: turn_failed \(other: boom\)/);
+  const lines = probeLogLinesSince(before);
+  assert.equal(lines.length, 1);
+  assertProbeLogShape(lines[0]!);
+  assert.equal(lines[0]!.failureKind, "turn_failed");
+  assert.deepEqual(lines[0]!.failureDetail, { kind: "other", message: "boom" });
+});
+
+test("thrown probe error records failureDetail with the error message", async () => {
+  const before = probeLogSize();
+  const host = stubProbeHost({ failStart: new Error("x") });
+  const result = await runMuseCapacityProbe(Date.now(), { host, timeoutMs: 10_000 });
+  assert.equal(result.ok, false);
+  assert.equal(result.failureKind, "exception");
+  assert.equal(result.failureDetail?.kind, "exception");
+  assert.ok(result.failureDetail?.message.includes("x"));
+  const lines = probeLogLinesSince(before);
+  assert.equal(lines.length, 1);
+  assertProbeLogShape(lines[0]!);
+  assert.equal(lines[0]!.failureKind, "exception");
+  assert.ok(String((lines[0]!.failureDetail as { message: string }).message).includes("x"));
+});
+
+test("timed-out turn records the timeout failureDetail", async () => {
+  const before = probeLogSize();
+  const host = stubProbeHost({ hangTurnMs: 400 });
+  const result = await runMuseCapacityProbe(Date.now(), { host, timeoutMs: 200 });
+  assert.equal(result.ok, false);
+  assert.equal(result.failureKind, "timeout");
+  assert.deepEqual(result.failureDetail, {
+    kind: "other",
+    message: "turn timed out and was cancelled",
+  });
+  const lines = probeLogLinesSince(before);
+  assert.equal(lines.length, 1);
+  assertProbeLogShape(lines[0]!);
+  assert.equal(lines[0]!.failureKind, "timeout");
+  assert.deepEqual(lines[0]!.failureDetail, result.failureDetail);
+});
+
+test("failureDetail message is truncated to 300 chars with controls stripped", async () => {
+  const before = probeLogSize();
+  const long = `AB\nCD\t${"x".repeat(1000)}\u0000\u001f END`;
+  const host = stubProbeHost({
+    turnParams: {
+      sessionId: "sess-stub-1",
+      terminal: "failed",
+      error: { kind: "other", message: long },
+      durationMs: 5,
+    },
+  });
+  const result = await runMuseCapacityProbe(Date.now(), { host, timeoutMs: 10_000 });
+  assert.equal(result.failureKind, "turn_failed");
+  const message = result.failureDetail?.message ?? "";
+  assert.equal(message.length, 300);
+  assert.ok(!/[\x00-\x1f\x7f]/.test(message));
+  assert.ok(message.startsWith("ABCD"));
+  const lines = probeLogLinesSince(before);
+  assert.equal(lines.length, 1);
+  assertProbeLogShape(lines[0]!);
+  assert.equal((lines[0]!.failureDetail as { message: string }).message, message);
+});
+
+test("successful probe logs failureDetail null with existing fields unchanged", async () => {
+  const before = probeLogSize();
+  const host = new MuseCapacityHost(hostOpts("serve-turn-full"));
+  try {
+    const result = await runMuseCapacityProbe(Date.now(), { host, timeoutMs: 10_000 });
+    assert.equal(result.ok, true);
+    assert.equal(result.failureDetail, null);
+  } finally {
+    await host.shutdown();
+  }
+  const lines = probeLogLinesSince(before);
+  assert.equal(lines.length, 1);
+  assertProbeLogShape(lines[0]!);
+  assert.equal(lines[0]!.failureDetail, null);
+  assert.equal(lines[0]!.event, "muse_capacity_probe");
+  assert.equal(lines[0]!.trigger, "stale_60m");
+  assert.equal(lines[0]!.failureKind, null);
+  assert.equal(lines[0]!.ok, true);
 });

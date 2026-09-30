@@ -55,11 +55,20 @@ export type MuseProbeFailureKind =
   | "timeout"
   | "exception";
 
+export interface MuseProbeFailureDetail {
+  kind: string;
+  message: string;
+}
+
 export interface MuseProbeResult {
   ok: boolean;
   admitted: boolean;
   terminal: "completed" | "failed" | "cancelled" | null;
   failureKind: MuseProbeFailureKind | null;
+  /** Underlying turn failure or thrown error, sanitized for the diagnostic
+   * log. Carries only kind + message — never prompt, transcript, credential,
+   * or account payload. */
+  failureDetail: MuseProbeFailureDetail | null;
   windowsUpdated: string[];
   durationMs: number;
 }
@@ -136,6 +145,45 @@ function museProbeDiagnosticLogPath(): string {
   return path.join(getDataDir(), "capacity", "muse-probe.log");
 }
 
+const MUSE_PROBE_FAILURE_MESSAGE_MAX = 300;
+const MUSE_PROBE_FAILURE_KIND_MAX = 100;
+
+/** Keep the diagnostic log one JSON object per line and free of anything
+ * beyond kind + message: strip control characters, then truncate. */
+function sanitizeFailureText(value: string, max: number): string {
+  return value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, max);
+}
+
+function failureDetailFromTurn(
+  failure: { kind: string; message: string } | null
+): MuseProbeFailureDetail | null {
+  if (!failure) return null;
+  return {
+    kind: sanitizeFailureText(failure.kind, MUSE_PROBE_FAILURE_KIND_MAX),
+    message: sanitizeFailureText(failure.message, MUSE_PROBE_FAILURE_MESSAGE_MAX),
+  };
+}
+
+function failureDetailFromError(err: unknown): MuseProbeFailureDetail {
+  let message: string;
+  if (err instanceof Error) {
+    message = err.message;
+  } else if (typeof err === "string") {
+    message = err;
+  } else {
+    try {
+      message = JSON.stringify(err) ?? "unknown error";
+    } catch {
+      message = "unknown error";
+    }
+  }
+  if (!message) message = "unknown error";
+  return {
+    kind: "exception",
+    message: sanitizeFailureText(message, MUSE_PROBE_FAILURE_MESSAGE_MAX),
+  };
+}
+
 function appendMuseProbeDiagnostic(nowMs: number, result: MuseProbeResult): void {
   try {
     const file = museProbeDiagnosticLogPath();
@@ -186,6 +234,7 @@ export async function runMuseCapacityProbe(
         admitted: false,
         terminal: null,
         failureKind: "unadmitted",
+        failureDetail: null,
         windowsUpdated: [],
         durationMs: Date.now() - startedRealMs,
       };
@@ -193,27 +242,33 @@ export async function runMuseCapacityProbe(
       await host.readUsage();
       const checkNowMs = Math.max(nowMs, Date.now());
       const ok = hasFreshMuseCapacityPair(checkNowMs);
+      const failureKind: MuseProbeFailureKind | null = ok
+        ? null
+        : turn.timedOut
+          ? "timeout"
+          : turn.failure !== null
+            ? "turn_failed"
+            : "no_windows";
       result = {
         ok,
         admitted: true,
         terminal: turn.terminal,
-        failureKind: ok
-          ? null
-          : turn.timedOut
-            ? "timeout"
-            : turn.failure !== null
-              ? "turn_failed"
-              : "no_windows",
+        failureKind,
+        failureDetail:
+          failureKind === "turn_failed" || failureKind === "timeout"
+            ? failureDetailFromTurn(turn.failure)
+            : null,
         windowsUpdated: ok ? ["rolling_all_models", "weekly_all_models"] : [],
         durationMs: Date.now() - startedRealMs,
       };
     }
-  } catch {
+  } catch (err) {
     result = {
       ok: false,
       admitted: false,
       terminal: null,
       failureKind: "exception",
+      failureDetail: failureDetailFromError(err),
       windowsUpdated: [],
       durationMs: Date.now() - startedRealMs,
     };
@@ -221,7 +276,11 @@ export async function runMuseCapacityProbe(
     if (ownsHost) await host.shutdown().catch(() => undefined);
   }
   appendMuseProbeDiagnostic(nowMs, result);
-  const outcome = result.ok ? "ok" : `failed: ${result.failureKind ?? "unknown"}`;
+  const detail =
+    result.failureDetail !== null
+      ? ` (${result.failureDetail.kind}: ${result.failureDetail.message})`
+      : "";
+  const outcome = result.ok ? "ok" : `failed: ${result.failureKind ?? "unknown"}${detail}`;
   console.error(`[muse-capacity] fallback ${outcome}`);
   return result;
 }
