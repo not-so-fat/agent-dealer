@@ -143,6 +143,7 @@ function sessionFixture(extra: Partial<WorkerSession> = {}): WorkerSession {
     sessionRef: null,
     logPath: "/tmp/logs/session-1.log",
     exitCode: null,
+    deckCorrelationId: null,
     errorJson: null,
     metadataJson: null,
     profileSnapshotJson: null,
