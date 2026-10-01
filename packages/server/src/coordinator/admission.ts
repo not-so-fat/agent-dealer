@@ -23,6 +23,7 @@ import {
 } from "../repository/admission-settings.js";
 import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
 import { healthForAgent } from "../adapters/agent-health.js";
+import { ensureMuseCapabilityEscalation } from "../adapters/muse-capability.js";
 import { getDb } from "../db/index.js";
 import { getAgent } from "../repository/agents.js";
 import { getIssue, listIssues } from "../repository/issues.js";
@@ -244,7 +245,18 @@ export async function checkRoleAgentHealthy(
   if (!agent) return { ok: false, reason: `${role} agent not found` };
   const check =
     healthChecker ?? ((a: AgentProfile, r: AgentRole) => defaultAgentHealth(a, r, ctx.deckOnline));
-  return check(agent, role);
+  const result = await check(agent, role);
+  // NOT-308: a Muse verdict the gate cannot clear by itself (`missing`, or an exhausted
+  // `error`) must reach the operator as a human action on this issue — deduped per
+  // version, so repeated polls never pile up. Best-effort: escalation never fails health.
+  if (role === "developer" && agent.runtime === "muse_code") {
+    try {
+      ensureMuseCapabilityEscalation(issue.id);
+    } catch {
+      // The gate already reported; a failed escalation must not flip it.
+    }
+  }
+  return result;
 }
 
 async function checkAgentsHealthy(issue: Issue, ctx: EligibilityContext): Promise<EligibilityResult> {

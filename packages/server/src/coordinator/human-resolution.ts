@@ -133,6 +133,10 @@ const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
   deck_interaction_required: ["resume", "close"],
   reflection_interaction_required: ["retry", "dismiss"],
   outbound_delivery_interaction_required: ["retry_send", "reject"],
+  // NOT-308: listed only so the map stays total over HumanActionType — parse rejects it
+  // below and the only legal resolver is commands.ts's dedicated muse_capability branch
+  // (acknowledge records a per-version override; there is no workflow outcome to map).
+  muse_capability: ["acknowledge"],
 };
 
 /**
@@ -147,9 +151,16 @@ const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
  * `outbound_delivery_interaction_required` is rejected for the same reason (NOT-95): it is
  * Run-scoped, has no Issue/workflow_instance to advance, and its only legal resolver is
  * `resolveOutboundDeliveryAction` (queue/approve-deliver.ts).
+ * `muse_capability` is rejected the same way (NOT-308): acknowledging it records a
+ * per-version capability override, not a workflow outcome, and its only legal resolver
+ * is commands.ts's dedicated branch.
  */
 export function parseHumanResolution(actionType: string, choice: string, note?: string): HumanResolution | null {
-  if (actionType === "reflection_interaction_required" || actionType === "outbound_delivery_interaction_required") {
+  if (
+    actionType === "reflection_interaction_required" ||
+    actionType === "outbound_delivery_interaction_required" ||
+    actionType === "muse_capability"
+  ) {
     return null;
   }
   if (!(actionType in VALID_CHOICES)) return null;
