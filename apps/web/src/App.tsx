@@ -63,7 +63,7 @@ export function ShellHeader({
   capacity?: TopBarCapacityState;
 }) {
   return (
-    <header className="px-6 py-4 border-b border-white/10 flex flex-wrap gap-4 items-center justify-between glass-header shrink-0">
+    <header className="px-6 py-3 border-b border-white/10 flex flex-wrap gap-4 items-center justify-between glass-header shrink-0">
       <div className="flex items-center gap-6">
         <Link
           to="/issues"
@@ -72,20 +72,17 @@ export function ShellHeader({
           title="AgentDealer — go to Issues"
         >
           <Logo size={40} />
-          <div>
-            <h1
-              className="font-mono text-xl font-bold sm:text-2xl"
-              style={{
-                background: "linear-gradient(to right, #C4B643, #D4C760)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                backgroundClip: "text",
-              }}
-            >
-              AgentDealer
-            </h1>
-            <p className="text-sm text-cyber-teal">Agent Deck carries the method; Agent Dealer runs the issue queue.</p>
-          </div>
+          <h1
+            className="font-mono text-xl font-bold sm:text-2xl"
+            style={{
+              background: "linear-gradient(to right, #C4B643, #D4C760)",
+              WebkitBackgroundClip: "text",
+              WebkitTextFillColor: "transparent",
+              backgroundClip: "text",
+            }}
+          >
+            AgentDealer
+          </h1>
         </Link>
         <nav className="flex gap-1">
           <NavLink to="/issues" className={navClass}>
