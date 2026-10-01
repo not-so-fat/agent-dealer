@@ -116,6 +116,16 @@ function safeCompleteSession(sessionId: string, status: "done" | "failed" | "tim
   } catch (err) {
     console.error("[coordinator] completeSession", sessionId, err);
   }
+  // NOT-305: best-effort actual-use receipt the moment the session goes terminal — a
+  // later issue-completion trigger re-attempts anything still missing, so this never
+  // throws and never changes the session outcome or the issue state.
+  try {
+    void import("./playbook-feedback.js").then(({ collectPlaybookUseReceipt }) =>
+      collectPlaybookUseReceipt(sessionId).catch(() => {})
+    );
+  } catch (err) {
+    console.error("[coordinator] playbook receipt", sessionId, err);
+  }
 }
 
 /**

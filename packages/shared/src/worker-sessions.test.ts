@@ -24,6 +24,7 @@ test("WorkerSession schema parses a queued developer session", () => {
     processPid: null,
     processOwner: null,
     processStartedAt: null,
+    deckCorrelationId: null,
     createdAt: new Date().toISOString(),
     startedAt: null,
     heartbeatAt: null,

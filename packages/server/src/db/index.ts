@@ -156,6 +156,11 @@ export function migrate(): void {
   if (!workerSessionCols.some((c) => c.name === "process_started_at")) {
     db.exec("ALTER TABLE worker_sessions ADD COLUMN process_started_at TEXT");
   }
+  // NOT-305: opaque Deck correlation UUID per session. Pre-feature rows stay NULL,
+  // which readers treat as "no correlation" (receipt records a skip, never a guess).
+  if (!workerSessionCols.some((c) => c.name === "deck_correlation_id")) {
+    db.exec("ALTER TABLE worker_sessions ADD COLUMN deck_correlation_id TEXT");
+  }
 
   // NOT-181: the model a session actually ran (Muse's server-confirmed one). Existing rows stay
   // NULL, which every reader treats as "not recorded".

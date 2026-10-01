@@ -109,7 +109,16 @@ export interface MuseAttemptInput {
   worktreePath: string;
   /** Parent of the per-attempt dir. Must be outside the worktree and outside any temp dir. */
   baseDir: string;
-  agentDeck: { url: string; deckId: string; workspace: string };
+  agentDeck: {
+    url: string;
+    deckId: string;
+    workspace: string;
+    /**
+     * NOT-305: the worker session's opaque Deck correlation UUID, carried as the
+     * `x-agent-deck-correlation-id` observability header on the agent-deck MCP server.
+     */
+    correlationId?: string | null;
+  };
   credential: MuseCredential;
   sessionId: string;
   prompt: string;
@@ -223,6 +232,8 @@ export function buildMuseSettings(
     headers: {
       "x-agent-deck-deck-id": agentDeck.deckId,
       "x-agent-deck-workspace": agentDeck.workspace,
+      // NOT-305: opaque per-session correlation UUID — observability metadata, not authority.
+      ...(agentDeck.correlationId ? { "x-agent-deck-correlation-id": agentDeck.correlationId } : {}),
     },
     // `mode`, not `required`: writing both drops the whole MCP block. Never "optional".
     mode: "required",
@@ -423,6 +434,14 @@ function validateInput(input: MuseAttemptInput): { worktree: string; baseDir: st
   if (!deckId?.trim() || !workspace?.trim()) {
     throw new MuseIsolationError("invalid_input", "agentDeck.deckId and agentDeck.workspace are required");
   }
+  // NOT-305: when a correlation UUID rides the launch config it must be opaque-UUID
+  // shaped — anything else is a caller bug, refused before anything is written.
+  const correlationId = input.agentDeck?.correlationId;
+  if (correlationId !== undefined && correlationId !== null) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(correlationId)) {
+      throw new MuseIsolationError("invalid_input", "agentDeck.correlationId must be a UUID");
+    }
+  }
   let workspaceReal: string | undefined;
   try {
     workspaceReal = fs.realpathSync(workspace);
@@ -485,7 +504,14 @@ function snapshotInput(raw: MuseAttemptInput): MuseAttemptInput {
   const cred = raw.credential && typeof raw.credential === "object" ? raw.credential : undefined;
   return deepFreeze({
     ...raw,
-    agentDeck: deck ? { url: deck.url, deckId: deck.deckId, workspace: deck.workspace } : (raw.agentDeck as never),
+    agentDeck: deck
+      ? {
+          url: deck.url,
+          deckId: deck.deckId,
+          workspace: deck.workspace,
+          ...(deck.correlationId !== undefined ? { correlationId: deck.correlationId } : {}),
+        }
+      : (raw.agentDeck as never),
     credential: cred ? ({ ...cred } as MuseCredential) : (raw.credential as never),
     env: raw.env ? { ...raw.env } : undefined,
   });

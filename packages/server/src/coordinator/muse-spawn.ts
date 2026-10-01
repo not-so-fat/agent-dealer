@@ -180,7 +180,8 @@ export async function runMuseDeveloperSession(
     role: "developer",
     worktreePath: input.cwd,
     baseDir: getWorkerMcpConfigDir(),
-    agentDeck: { url: mcpUrl, deckId, workspace: input.cwd },
+    // NOT-305: opaque per-session correlation UUID — observability metadata, not authority.
+    agentDeck: { url: mcpUrl, deckId, workspace: input.cwd, correlationId: input.deckCorrelationId ?? null },
     credential: resolveMuseCredential(),
     sessionId: input.sessionId,
     prompt: input.prompt,

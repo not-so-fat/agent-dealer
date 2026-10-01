@@ -24,6 +24,7 @@ interface WorkerSessionRow {
   process_pid: number | null;
   process_owner: string | null;
   process_started_at: string | null;
+  deck_correlation_id: string | null;
   created_at: string;
   started_at: string | null;
   heartbeat_at: string | null;
@@ -53,6 +54,7 @@ function rowToSession(row: WorkerSessionRow): WorkerSession {
     processPid: row.process_pid,
     processOwner: row.process_owner,
     processStartedAt: row.process_started_at,
+    deckCorrelationId: row.deck_correlation_id ?? null,
     createdAt: row.created_at,
     startedAt: row.started_at,
     heartbeatAt: row.heartbeat_at,
@@ -85,6 +87,9 @@ export function createWorkerSession(input: CreateWorkerSessionInput): WorkerSess
     process_pid: null,
     process_owner: null,
     process_started_at: null,
+    // NOT-305: one opaque Deck correlation UUID per session, persisted before spawn so
+    // every runtime launch config can carry it as observability metadata.
+    deck_correlation_id: uuid(),
     created_at: now,
     started_at: null,
     heartbeat_at: null,
@@ -95,16 +100,33 @@ export function createWorkerSession(input: CreateWorkerSessionInput): WorkerSess
     INSERT INTO worker_sessions (
       id, issue_id, role, round, agent_id, runtime, model, budget_json, worktree_path,
       input_sha, status, session_ref, log_path, exit_code, error_json, metadata_json,
-      profile_snapshot_json, process_pid, process_owner, process_started_at, created_at, started_at, heartbeat_at,
+      profile_snapshot_json, process_pid, process_owner, process_started_at, deck_correlation_id, created_at, started_at, heartbeat_at,
       completed_at, updated_at
     ) VALUES (
       @id, @issue_id, @role, @round, @agent_id, @runtime, @model, @budget_json, @worktree_path,
       @input_sha, @status, @session_ref, @log_path, @exit_code, @error_json, @metadata_json,
-      @profile_snapshot_json, @process_pid, @process_owner, @process_started_at, @created_at, @started_at, @heartbeat_at,
+      @profile_snapshot_json, @process_pid, @process_owner, @process_started_at, @deck_correlation_id, @created_at, @started_at, @heartbeat_at,
       @completed_at, @updated_at
     )
   `).run(row);
   return rowToSession(row);
+}
+
+/**
+ * NOT-305: returns the session's Deck correlation UUID, assigning and persisting one
+ * when a pre-feature row has none. New rows always carry one from creation; this only
+ * repairs rows written before the column existed so their launch configs and receipts
+ * still correlate. Returns null when the session does not exist.
+ */
+export function getOrAssignSessionCorrelationId(id: string): string | null {
+  const current = getWorkerSession(id);
+  if (!current) return null;
+  if (current.deckCorrelationId) return current.deckCorrelationId;
+  const correlationId = uuid();
+  getDb()
+    .prepare("UPDATE worker_sessions SET deck_correlation_id = ?, updated_at = ? WHERE id = ?")
+    .run(correlationId, new Date().toISOString(), id);
+  return correlationId;
 }
 
 export function getWorkerSession(id: string): WorkerSession | null {
