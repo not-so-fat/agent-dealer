@@ -91,11 +91,12 @@ function parseReceiptContent(contentJson: string | null): PlaybookUseReceipt | n
 }
 
 /** Latest receipt recorded for one session — readers take the latest; a retry after an
- * earlier `error`/`skipped` row appends a fresh row rather than rewriting history. */
+ * earlier `error`/`skipped` row appends a fresh row rather than rewriting history.
+ * (`listArtifactsForIssueByKind` orders newest-first, so the first match wins.) */
 export function latestReceiptForSession(issueId: string, workerSessionId: string): PlaybookUseReceipt | null {
   const rows = listArtifactsForIssueByKind(issueId, PLAYBOOK_USE_RECEIPT_KIND);
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const receipt = parseReceiptContent(rows[i]!.contentJson);
+  for (const row of rows) {
+    const receipt = parseReceiptContent(row.contentJson);
     if (receipt?.workerSessionId === workerSessionId) return receipt;
   }
   return null;
@@ -345,10 +346,14 @@ export function signalSourceKey(issueId: string, trigger: DeckSignalTrigger, key
   return `dealer:${issueId}:${trigger}:${key}`;
 }
 
-function humanRetryCandidates(issueId: string): SignalCandidate[] {
+function humanRetryCandidates(issueId: string, alreadyReferencedActionIds: Set<string>): SignalCandidate[] {
   const candidates: SignalCandidate[] = [];
   for (const action of listHumanActionsForIssue(issueId)) {
     if (action.status !== "resolved") continue;
+    // One action produces at most one signal, whichever trigger claims it first — a
+    // meaningful failure/correction appears once in Deck's feedback inbox, never once
+    // per trigger that describes the same human decision.
+    if (alreadyReferencedActionIds.has(action.id)) continue;
     const choice = resolutionChoice(action.resolutionJson);
     if (!choice) continue;
     if (!CORRECTION_CHOICES[action.actionType]?.includes(choice)) continue;
@@ -460,7 +465,7 @@ export async function reportDeckFailureSignals(
   const { keys: sentKeys, actionIds: signalledActions } = existingSignalKeys(issueId);
   const recurring = recurringBlockingCandidate(issueId);
   const allCandidates = [
-    ...humanRetryCandidates(issueId),
+    ...humanRetryCandidates(issueId, signalledActions),
     ...attemptsExhaustedCandidates(issueId, signalledActions),
     ...(recurring ? [recurring] : []),
   ];

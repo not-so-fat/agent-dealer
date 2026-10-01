@@ -411,6 +411,10 @@ test("a malformed correlation response records an error receipt, keeps state, re
     receiptsFor(issue.id).filter((r) => r.status === "collected").map((r) => r.playbookIds),
     [["pb-late"]]
   );
+  // Issue-level collection now reads the latest (collected) row — the healed gap
+  // does not count as an error and a later trigger is not stuck on "failed".
+  const healedIssue = await collectPlaybookUseReceiptsForIssue(issue.id, healed.deps);
+  assert.equal(healedIssue.errors, 0);
 });
 
 test("parseCorrelatedFetches rejects identity-less entries instead of guessing IDs", () => {

@@ -27,6 +27,7 @@ import type { Issue } from "@agent-dealer/shared";
 import { checkAgentDeckHealth } from "../adapters/agent-deck.js";
 import { callDeckTool } from "../adapters/reflect-authority.js";
 import { getIssue } from "../repository/issues.js";
+import { createIssueArtifact } from "../repository/artifacts.js";
 import {
   collectPlaybookUseReceiptsForIssue,
   reportDeckFailureSignals,
@@ -60,6 +61,22 @@ export async function triggerIssueReflect(
 
   const receipts = await collectPlaybookUseReceiptsForIssue(issueId, deps);
   const signals = await reportDeckFailureSignals(issueId, deps);
+
+  // A Deck outage during receipt collection is a visible, retryable issue-level
+  // status even when no signal candidate exists — otherwise an offline Deck leaves
+  // no trace that evidence is still missing. Never changes the issue outcome.
+  if (receipts.errors > 0) {
+    createIssueArtifact({
+      issueId,
+      kind: "reflect_status",
+      author: "system",
+      content: {
+        status: "failed",
+        reason: "Agent Deck offline — playbook-use receipt collection retryable on a later trigger",
+        pendingReceipts: receipts.pending,
+      },
+    });
+  }
 
   if (receipts.collected > 0 || signals.sent.length > 0) return "triggered";
   if (receipts.errors > 0 || signals.error) return "failed";

@@ -73,6 +73,8 @@ export const ArtifactKind = z.enum([
   "deliverable",
   "feedback",
   "playbook_patch",
+  "playbook_use_receipt",
+  "deck_feedback_signal",
   "reflect_status",
   "linear_sync",
   "send_receipt",
