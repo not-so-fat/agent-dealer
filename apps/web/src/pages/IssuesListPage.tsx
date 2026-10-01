@@ -69,14 +69,6 @@ function timeAgo(iso: string): string {
   return `${Math.floor(hr / 24)}d ago`;
 }
 
-/** Pull an Acceptance criteria section out of a Linear markdown body when present. */
-function extractAcceptanceFromLinear(description: string | undefined): string | undefined {
-  if (!description?.trim()) return undefined;
-  const match = description.match(/##\s*Acceptance criteria\s*\n([\s\S]*?)(?=\n##\s|$)/i);
-  const body = match?.[1]?.trim();
-  return body || undefined;
-}
-
 export default function IssuesListPage({
   agents,
   humanActions,
@@ -343,7 +335,11 @@ export default function IssuesListPage({
     if (!selectedLinear) return;
     setTitle(`${selectedLinear.identifier}: ${selectedLinear.title}`);
     setDescription(selectedLinear.description ?? "");
-    setAcceptanceCriteria(extractAcceptanceFromLinear(selectedLinear.description) ?? "");
+    // NOT-306: the ticket description is the untouched source of truth — the
+    // server compiles the execution contract (and derives acceptance criteria)
+    // from it with the shared compiler, so the page keeps no local extraction
+    // regex. An operator-typed override still sends when filled in below.
+    setAcceptanceCriteria("");
     // NOT-251: exactly one valid `repo:` label silently replaces the input
     // with its normalized identity; anything else preserves the current
     // value so a missing label never penalizes the normal flow.
@@ -534,7 +530,7 @@ export default function IssuesListPage({
           <textarea
             className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
             rows={3}
-            placeholder="Acceptance criteria"
+            placeholder="Acceptance criteria (derived from the ticket when left empty)"
             value={acceptanceCriteria}
             onChange={(e) => setAcceptanceCriteria(e.target.value)}
           />

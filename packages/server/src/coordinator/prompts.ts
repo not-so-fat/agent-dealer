@@ -9,7 +9,7 @@
 // the reviewer to run `git diff` itself: a claude reviewer's read-only tool set
 // (`READ_ONLY_BUILTIN_TOOLS` in args.ts) has no Bash at all, so it cannot shell out —
 // every artifact it needs to judge must already be in the prompt.
-import type { Finding } from "@agent-dealer/shared";
+import type { ExecutionContractV1, Finding } from "@agent-dealer/shared";
 import {
   checkMuseVisualQa,
   museVisualQaPromptSection,
@@ -26,6 +26,43 @@ export interface TaskSnapshot {
   acceptanceCriteria: string;
   repo: string;
   baseBranch: string;
+  /** NOT-306: frozen execution contract compiled from the ticket. Absent/null
+   * for legacy issues — prompts then render exactly what they always did. */
+  executionContract?: ExecutionContractV1 | null;
+}
+
+/**
+ * NOT-306: render the frozen execution contract as dedicated sections. These
+ * are the ticket's own execution semantics — the worker follows them as
+ * written and never goes back to the ticket (or anywhere else) to rediscover
+ * them. Empty/absent renders nothing so legacy prompts stay byte-for-byte.
+ */
+function executionContractSection(contract: ExecutionContractV1 | null | undefined): string[] {
+  if (!contract) return [];
+  const lines = [
+    `## Execution contract (frozen ${contract.version} — follow as written, do not rediscover)`,
+    `These execution semantics come from the Planner-authored ticket and are frozen for this workflow. Do not re-derive them, do not renegotiate scope, and do not ask the operator to restate them.`,
+    ``,
+    `### Execution mode`,
+    contract.executionMode,
+    ``,
+    `### Non-goals (out of scope — do not build these)`,
+    ...contract.nonGoals.map((goal) => `- ${goal}`),
+    ``,
+    `### Exit predicate (you are done only when this observably holds)`,
+    contract.exitPredicate,
+    ``,
+    `### One-PR stopping point (stop here even if more work suggests itself)`,
+    contract.onePrStoppingPoint,
+    ``,
+    `### Per-criterion evidence (verify each criterion exactly this way)`,
+  ];
+  for (const criterion of contract.acceptanceCriteria) {
+    lines.push(`- ${criterion.text}`);
+    if (criterion.evidence) lines.push(`  Evidence: ${criterion.evidence}`);
+  }
+  lines.push(``);
+  return lines;
 }
 
 export interface DeveloperPromptInput {
@@ -167,6 +204,7 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
     `## Acceptance criteria`,
     input.taskSnapshot.acceptanceCriteria,
     ``,
+    ...executionContractSection(input.taskSnapshot.executionContract),
   );
 
   if (input.findings?.length) {
@@ -222,7 +260,7 @@ export interface ReviewerPromptInput {
 }
 
 const REVIEWER_RESULT_SHAPE =
-  '{"verdict":"approved"|"changes_requested"|"escalated","baseSha":"...","headSha":"...","acceptanceCriteriaAssessment":"...","evidenceAssessment":"...","findings":[{"fingerprint":"stable-slug","severity":"blocking"|"non_blocking","title":"...","rationale":"...","file":"...","line":0}],"risks":["..."],"productScopeQuestion":"..."}';
+  '{"verdict":"approved"|"changes_requested"|"escalated","baseSha":"...","headSha":"...","acceptanceCriteriaAssessment":"...","evidenceAssessment":"...","exitPredicateAssessment":"...","findings":[{"fingerprint":"stable-slug","severity":"blocking"|"non_blocking","title":"...","rationale":"...","file":"...","line":0}],"risks":["..."],"productScopeQuestion":"..."}';
 
 function reviewerContractSection(baseSha: string, headSha: string): string[] {
   // Verdict table matches docs/PRD_ISSUE_COORDINATION.md §6.4 / design NOT-150 — do not drift.
@@ -234,6 +272,11 @@ function reviewerContractSection(baseSha: string, headSha: string): string[] {
     `- Set "baseSha" to exactly "${baseSha}" and "headSha" to exactly "${headSha}" — these are the coordinator-verified SHAs you were checked out at, not values you compute.`,
     `- "fingerprint" must be a short, stable slug for the finding (e.g. "missing-null-check-args-ts") so the same issue re-found next round is recognized as recurring, not duplicated.`,
     `- "findings" holds every blocking AND non-blocking observation; "risks" is uncertainties that are not findings tied to a location.`,
+    // NOT-306: the execution contract (when the task carries one) is judged,
+    // not just the prose criteria — the exit predicate and each criterion's
+    // stated evidence get their own assessments on top of the AC verdict.
+    `- "acceptanceCriteriaAssessment" judges the acceptance criteria; "evidenceAssessment" must judge EACH criterion's stated evidence (where to look, action/command, expected result) one by one — never a blanket "evidence looks good".`,
+    `- When the task carries an execution contract, set "exitPredicateAssessment" to whether the frozen exit predicate observably holds at this tip, and "approved" additionally requires the exit predicate to hold (AC met alone is not enough). Tasks without a contract omit "exitPredicateAssessment".`,
     `- "approved": AC met for this tip and no finding is "blocking" (non_blocking nits allowed).`,
     `- "changes_requested": any "blocking" finding a coding pass can address — including incomplete review because AC-critical files were omitted/truncated from the diff. List omitted paths in a blocking finding.`,
     `- "escalated": only when acceptance criteria / product scope are ambiguous, contradictory, or need a human product call — not ordinary code defects, not "diff too large". You MUST set non-empty "productScopeQuestion"; omit the field otherwise.`,
@@ -314,6 +357,7 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
     `## Acceptance criteria`,
     input.taskSnapshot.acceptanceCriteria,
     ``,
+    ...executionContractSection(input.taskSnapshot.executionContract),
     `## Diff (base ${input.baseSha.slice(0, 8)} → head ${input.headSha.slice(0, 8)})`,
     "```diff",
     formatDiffForPrompt(input.diff).text,

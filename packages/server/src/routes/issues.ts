@@ -3,6 +3,7 @@ import fs from "node:fs";
 import type { FastifyInstance } from "fastify";
 import {
   CreateIssueInput,
+  ExecutionContractError,
   type CreateIssueResult,
   type ExecuteIssueResponse,
   type ExistingIssueConflict,
@@ -261,7 +262,17 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
         } satisfies ExistingIssueConflict);
       }
     }
-    const issue = createIssue(input);
+    // NOT-306: an ambiguous/malformed execution contract in the ticket
+    // description is a 400 with an actionable message, never a silent drop.
+    let issue: Issue;
+    try {
+      issue = createIssue(input);
+    } catch (err) {
+      if (err instanceof ExecutionContractError) {
+        return reply.status(400).send({ error: err.message });
+      }
+      throw err;
+    }
     appendWorkflowEvent({ issueId: issue.id, type: "issue.created", actorType: "human", stage: issue.status });
     // NOT-118: create enqueues, it never starts. Server-side so the UI, CLI and agents all
     // behave the same — callers hold no workflow logic. `enqueue: false` creates a draft.
@@ -354,6 +365,12 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
         return next;
       })();
     } catch (err) {
+      // NOT-306: a contract edit that turns ambiguous/malformed is a 400 —
+      // the guard above already answered the 409s (wrong status / active
+      // workflow / parked-field allowlist).
+      if (err instanceof ExecutionContractError) {
+        return reply.status(400).send({ error: err.message });
+      }
       const code = (err as { code?: number }).code;
       const message = err instanceof Error ? err.message : String(err);
       if (code === 404) return reply.status(404).send({ error: message });

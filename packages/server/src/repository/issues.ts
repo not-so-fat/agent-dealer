@@ -1,8 +1,11 @@
 import {
   canTransitionIssue,
+  compileExecutionContract,
   CreateIssueInput,
   looksLikeLocalRepoPath,
   parseGitHubRepoInput,
+  resolveIssueContractFields,
+  tryCompileContract,
   type Issue,
   type IssueOwner,
   type IssueStatus,
@@ -54,6 +57,11 @@ function rowToIssue(row: IssueRow): Issue {
     title: row.title,
     description: row.description,
     acceptanceCriteria: row.acceptance_criteria,
+    // NOT-306: the contract is derived from the stored description on every
+    // read — the description stays the untouched source of truth, so no
+    // migration or second authoring surface exists. A description that fails
+    // validation (written before validation existed) reads as a legacy null.
+    executionContract: tryCompileContract(row.description),
     repo: row.repo,
     baseBranch: row.base_branch,
     status: row.status as IssueStatus,
@@ -94,6 +102,12 @@ export function createIssue(raw: CreateIssueRaw): Issue {
   const { repo: repoRaw, ...rest } = raw;
   const input = CreateIssueInput.omit({ repo: true }).parse(rest);
   const repo = normalizeStoredIssueRepo(repoRaw);
+  // NOT-306: validate the ticket's execution contract here so every creation
+  // path (web, API, CLI-via-API, Linear import) shares one compiler — an
+  // ambiguous/malformed contract throws instead of silently dropping fields.
+  // A missing explicit acceptanceCriteria is filled from the description; an
+  // explicit value always wins and the description is stored untouched.
+  const resolved = resolveIssueContractFields(input.description, input.acceptanceCriteria);
   const db = getDb();
   const now = new Date().toISOString();
   const id = uuid();
@@ -105,7 +119,7 @@ export function createIssue(raw: CreateIssueRaw): Issue {
     external_url: input.externalUrl ?? null,
     title: input.title,
     description: input.description ?? null,
-    acceptance_criteria: input.acceptanceCriteria ?? null,
+    acceptance_criteria: resolved.acceptanceCriteria,
     repo,
     base_branch: input.baseBranch,
     status: "ready",
@@ -374,6 +388,21 @@ export interface UpdateIssuePatch {
 export function updateIssue(id: string, patch: UpdateIssuePatch): Issue {
   const current = getIssue(id);
   if (!current) throw new Error(`Issue not found: ${id}`);
+  // NOT-306: an edited description recompiles through the same compiler as
+  // creation — an ambiguous/malformed contract throws instead of landing
+  // half-parsed. A missing acceptanceCriteria is backfilled from the new
+  // description only when the issue has none; an explicit value always wins.
+  // Validation runs only when the patch touches the description, so unrelated
+  // updates (e.g. a base-branch-only sync) never fail on a stored description
+  // that predates validation.
+  const nextDescription = patch.description !== undefined ? patch.description : current.description;
+  const compiled = patch.description !== undefined ? compileExecutionContract(nextDescription) : null;
+  const nextAcceptanceCriteria =
+    patch.acceptanceCriteria !== undefined
+      ? patch.acceptanceCriteria
+      : current.acceptanceCriteria?.trim()
+        ? current.acceptanceCriteria
+        : (compiled?.acceptanceCriteria ?? current.acceptanceCriteria);
   const now = new Date().toISOString();
   getDb()
     .prepare(`
@@ -394,9 +423,8 @@ export function updateIssue(id: string, patch: UpdateIssuePatch): Issue {
     .run({
       id,
       title: patch.title ?? current.title,
-      description: patch.description !== undefined ? patch.description : current.description,
-      acceptance_criteria:
-        patch.acceptanceCriteria !== undefined ? patch.acceptanceCriteria : current.acceptanceCriteria,
+      description: nextDescription,
+      acceptance_criteria: nextAcceptanceCriteria,
       repo: patch.repo !== undefined ? normalizeStoredIssueRepo(patch.repo) : current.repo,
       base_branch: patch.baseBranch ?? current.baseBranch,
       developer_agent_id: patch.developerAgentId ?? current.developerAgentId,

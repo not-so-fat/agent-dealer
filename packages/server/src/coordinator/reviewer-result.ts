@@ -19,6 +19,12 @@ export const ReviewerResult = z.object({
   headSha: z.string(),
   acceptanceCriteriaAssessment: z.string(),
   evidenceAssessment: z.string(),
+  /**
+   * NOT-306: whether the frozen exit predicate held at the reviewed tip. The
+   * reviewer sets this when the task carries an execution contract; legacy
+   * contract-free tasks omit it (optional so older outputs still parse).
+   */
+  exitPredicateAssessment: z.string().optional(),
   findings: z.array(ReviewerFinding),
   risks: z.array(z.string()),
   /** Present only when verdict is "escalated" and the reviewer identifies a missing product call. */

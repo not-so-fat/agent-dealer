@@ -33,6 +33,7 @@ test("Issue schema parses a well-formed issue", () => {
     title: "Fix login bug",
     description: null,
     acceptanceCriteria: null,
+    executionContract: null,
     repo: "acme/app",
     baseBranch: "main",
     status: "ready",
