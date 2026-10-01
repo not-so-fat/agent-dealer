@@ -28,6 +28,12 @@ export interface DeveloperSpawnResult {
   logPath: string;
   timedOut: boolean;
   /**
+   * NOT-307: true only when the idle watchdog (not the wall clock) killed the child.
+   * Set only by the Muse lane; other runtimes leave it absent. `timedOut` is true for
+   * either kill so salvage and infra-retry treat both identically.
+   */
+  idleTimedOut?: boolean;
+  /**
    * Set only for a `muse_code` session (NOT-181): the parsed outcome the effect needs beyond
    * exit code and transcript — confirmed model, nullable usage, failure kind, `cron_*` activity.
    */

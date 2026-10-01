@@ -376,6 +376,30 @@ test("spawnCli does not idle-kill a child that emits output more often than idle
   assert.ok(result.lastActivityAt !== null, "lastActivityAt is recorded");
 });
 
+// NOT-307: the line hook reports each stdout line with a non-decreasing arrival time —
+// the arrival stamps muse-spawn joins back to stream envelopes for per-event `ts`.
+test("spawnCli onStdoutLine reports every line with arrival times", async () => {
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+  const { cmd, args } = nodeChild(
+    "console.log('line-one'); setTimeout(() => console.log('line-two'), 120);"
+  );
+  const seen: Array<{ line: string; atMs: number }> = [];
+  const startedAt = Date.now();
+  const result = await spawnCli("test-run-lines", cmd, args, process.cwd(), {
+    logPath,
+    timeoutMs: 10_000,
+    onStdoutLine: (line, atMs) => seen.push({ line, atMs }),
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(
+    seen.map((s) => s.line),
+    ["line-one", "line-two"]
+  );
+  assert.ok(seen[0].atMs >= startedAt && seen[0].atMs <= Date.now());
+  assert.ok(seen[1].atMs >= seen[0].atMs, "arrival times never run backwards");
+  assert.ok(seen[1].atMs - seen[0].atMs >= 50, `the 120ms gap is visible, got ${seen[1].atMs - seen[0].atMs}ms`);
+});
+
 // NOT-307: with idleTimeoutMs unset the watchdog is disabled — a silent child runs to
 // the wall clock exactly as before, and idleTimedOut reads false.
 test("spawnCli without idleTimeoutMs times out on the wall clock with idleTimedOut false", async () => {

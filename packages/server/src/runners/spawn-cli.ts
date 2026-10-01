@@ -135,6 +135,16 @@ export async function spawnCli(
      * never breaks the spawn. Ignored unless `idleTimeoutMs` enables the watchdog.
      */
     progressSource?: () => number | null;
+    /**
+     * NOT-307: per-line stdout arrival hook for post-hoc timing. The child's stream
+     * envelopes carry no usable event time (`recorded_at` is batch-stamped — every
+     * envelope of a real session shares one ~40ms window), so per-event `ts` in the
+     * normalized log is stamped Dealer-side: each complete stdout line is reported
+     * with its arrival epoch milliseconds. Unset (every existing caller) means no
+     * line splitting happens at all. A throwing hook never breaks the spawn; a
+     * trailing partial line is flushed on child close.
+     */
+    onStdoutLine?: (line: string, atMs: number) => void;
   }
 ): Promise<SpawnCliResult> {
   await acquireSpawnSlot();
@@ -267,9 +277,27 @@ export async function spawnCli(
         else opts.signal.addEventListener("abort", onAbort, { once: true });
       }
 
+      // NOT-307: line splitter for onStdoutLine only — untouched when no hook is set.
+      // Declared before finish() so no path can observe the bindings uninitialized.
+      let lineTail = "";
+      const emitLine = (line: string) => {
+        const hook = opts.onStdoutLine;
+        if (!hook) return;
+        try {
+          hook(line, Date.now());
+        } catch (err) {
+          console.error(`[spawn-cli] onStdoutLine for ${runId}`, err);
+        }
+      };
       const finish = (exitCode: number) => {
         if (settled) return;
         settled = true;
+        // A final line without a trailing newline still arrived — report it at close time.
+        if (opts.onStdoutLine && lineTail !== "") {
+          const tail = lineTail;
+          lineTail = "";
+          emitLine(tail);
+        }
         clearTimeout(timer);
         clearIdle();
         cleanupAbort();
@@ -364,6 +392,14 @@ export async function spawnCli(
         // NOT-307: any stdout bytes are progress. (stderr deliberately does not count:
         // the contract defines progress as stdout bytes or the external source.)
         noteActivity();
+        if (opts.onStdoutLine) {
+          lineTail += chunk;
+          let idx: number;
+          while ((idx = lineTail.indexOf("\n")) >= 0) {
+            emitLine(lineTail.slice(0, idx));
+            lineTail = lineTail.slice(idx + 1);
+          }
+        }
       });
       child.stderr?.on("data", (buf: Buffer) => {
         stderrChunks.push(buf.toString());

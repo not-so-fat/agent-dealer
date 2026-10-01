@@ -40,6 +40,15 @@ export interface AttemptFailureInput {
   runtime?: Runtime | null;
   exitCode?: number | null;
   timedOut?: boolean;
+  /**
+   * NOT-307: the idle watchdog (not the wall clock) killed this session. Read back
+   * out of `worker_sessions.metadata_json` by the record/backfill paths below.
+   * `idleForMs` is silence observed at the kill when known; `lastToolName` the last
+   * tool intent in stream order (null when none was seen).
+   */
+  idleTimedOut?: boolean;
+  idleForMs?: number | null;
+  lastToolName?: string | null;
   /** Independent evidence a tool/test subprocess was in flight (timeout only). */
   toolInFlight?: boolean;
   /** A host.suspended event covers this session's lease window. */
@@ -408,6 +417,29 @@ export function classifyAttemptFailure(input: AttemptFailureInput): FailureCause
     });
   }
 
+  // NOT-307: an idle-watchdog kill is a specific, high-confidence infrastructure
+  // cause — never `unknown`. It sorts after log evidence (an auth/429 already on
+  // record names an earlier, more specific root cause for the same stall) but
+  // before the outcome-level timeout guess, so a hung tool/test in flight does not
+  // demote the stall to `tool_test_timeout`. The raw reason carries the idle
+  // minutes and the last tool name, reusing the recorded reason when it already
+  // names them (reasonForSessionCrash writes them at kill time).
+  if (input.idleTimedOut) {
+    const minutes =
+      typeof input.idleForMs === "number" && Number.isFinite(input.idleForMs) && input.idleForMs >= 0
+        ? Math.max(1, Math.round(input.idleForMs / 60_000))
+        : null;
+    const alreadySpecific = /made no progress/i.test(rawReason);
+    signals.push({
+      code: "muse_no_progress",
+      confidence: "high",
+      evidenceSource: "outcome_kind",
+      rawReason: alreadySpecific
+        ? rawReason
+        : `Muse developer session made no progress${minutes !== null ? ` for ${minutes} minute${minutes === 1 ? "" : "s"}` : ""} (last tool: ${input.lastToolName ?? "none"}).${rawReason ? ` ${rawReason}` : ""}`,
+    });
+  }
+
   const outcomeSignal = detectOutcomeSignal(outcomeKind, rawReason, {
     timedOut,
     toolInFlight,
@@ -499,6 +531,35 @@ function agentCompletedEvidence(
 }
 
 /**
+ * NOT-307: idle-watchdog evidence read back out of `worker_sessions.metadata_json`
+ * (written by the developer effect for every Muse session). Silence duration is
+ * measured against `occurredAtMs` — the kill/completion time — from the recorded
+ * `lastActivityAt`. Anything unparseable reads as no idle evidence, never a throw.
+ */
+export function museStallFromMetadata(
+  metadataJson: string | null | undefined,
+  occurredAtMs: number | null
+): { idleTimedOut: boolean; idleForMs: number | null; lastToolName: string | null } {
+  const none = { idleTimedOut: false, idleForMs: null as number | null, lastToolName: null as string | null };
+  if (!metadataJson) return none;
+  try {
+    const parsed: unknown = JSON.parse(metadataJson);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return none;
+    const rec = parsed as Record<string, unknown>;
+    if (rec.idleTimedOut !== true) return none;
+    const lastToolName = typeof rec.lastToolName === "string" ? rec.lastToolName : null;
+    let idleForMs: number | null = null;
+    if (occurredAtMs !== null && Number.isFinite(occurredAtMs) && typeof rec.lastActivityAt === "string") {
+      const at = Date.parse(rec.lastActivityAt);
+      if (Number.isFinite(at) && occurredAtMs >= at) idleForMs = occurredAtMs - at;
+    }
+    return { idleTimedOut: true, idleForMs, lastToolName };
+  } catch {
+    return none;
+  }
+}
+
+/**
  * Backfill-on-read for legacy rows: classify from existing session error/log
  * evidence without mutating any append-only event. Always quality "inferred" —
  * only newly recorded emissions are "exact".
@@ -512,6 +573,8 @@ export function backfillCausesForSession(
     exitCode: number | null;
     completedAt: string | null;
     updatedAt: string;
+    /** NOT-307: `worker_sessions.metadata_json` — carries idle-watchdog evidence. */
+    metadataJson?: string | null;
   },
   opts?: {
     outcomeKind?: string | null;
@@ -523,6 +586,12 @@ export function backfillCausesForSession(
 ): FailureCause[] {
   const agent = agentCompletedEvidence(session.id);
   const outcomeKind = opts?.outcomeKind ?? null;
+  const occurredAt = opts?.occurredAt ?? session.completedAt ?? session.updatedAt;
+  const occurredAtMs = occurredAt ? Date.parse(occurredAt) : NaN;
+  const stall = museStallFromMetadata(
+    session.metadataJson ?? null,
+    Number.isFinite(occurredAtMs) ? occurredAtMs : null
+  );
   return classifyAttemptFailure({
     outcomeKind,
     sessionErrorJson: session.errorJson,
@@ -530,8 +599,11 @@ export function backfillCausesForSession(
     runtime: session.runtime,
     exitCode: session.exitCode ?? agent.exitCode,
     timedOut: outcomeKind === "timed_out" || agent.timedOut,
+    idleTimedOut: stall.idleTimedOut || undefined,
+    idleForMs: stall.idleForMs,
+    lastToolName: stall.lastToolName,
     hostSuspended: agent.hostSuspended,
-    occurredAt: opts?.occurredAt ?? session.completedAt ?? session.updatedAt,
+    occurredAt,
     eventCursor: opts?.eventCursor ?? null,
     sessionId: session.id,
     eventId: opts?.eventId ?? null,
@@ -560,6 +632,12 @@ export function recordCausesForWorkerFailedEvent(opts: {
     const session = opts.event.workerSessionId ? getWorkerSession(opts.event.workerSessionId) : null;
     const agent = agentCompletedEvidence(opts.event.workerSessionId);
     const outcomeTimedOut = opts.outcomeKind === "timed_out";
+    const occurredAtMs = Date.parse(opts.event.ts);
+    // NOT-307: an idle kill's stall evidence rides on the session row's metadata.
+    const stall = museStallFromMetadata(
+      session?.metadataJson ?? null,
+      Number.isFinite(occurredAtMs) ? occurredAtMs : null
+    );
     const causes = classifyAttemptFailure({
       outcomeKind: opts.outcomeKind,
       outcomeReason: opts.outcomeReason,
@@ -569,6 +647,9 @@ export function recordCausesForWorkerFailedEvent(opts: {
       runtime: session?.runtime ?? undefined,
       exitCode: session?.exitCode ?? agent.exitCode,
       timedOut: outcomeTimedOut || agent.timedOut,
+      idleTimedOut: stall.idleTimedOut || undefined,
+      idleForMs: stall.idleForMs,
+      lastToolName: stall.lastToolName,
       hostSuspended: agent.hostSuspended,
       recovery: opts.recovery,
       occurredAt: opts.event.ts,

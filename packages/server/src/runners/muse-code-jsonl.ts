@@ -28,6 +28,17 @@ export interface MuseToolActivity {
   /** From `tool.result.correlation_facts.outcome`; null while no result was seen. */
   outcome: "success" | "failure" | null;
   error: string | null;
+  /**
+   * NOT-307: Dealer-observed ISO time of the intent line on stdout; null when the
+   * stream gave nothing usable (see `MuseRunInput.lineTs` / envelope time below).
+   */
+  startedAt: string | null;
+  /**
+   * NOT-307: intent-line arrival → result-line arrival in milliseconds. Present only
+   * when a matching result was seen AND both endpoints have usable times — a bare
+   * intent (still running at kill time) carries no duration.
+   */
+  durationMs: number | null;
 }
 
 /** Every field is null when Muse did not report it. Nothing is derived from the exit code. */
@@ -46,6 +57,22 @@ export interface MuseUsage {
 export interface MuseRunInput {
   /** `muse exec --json` stdout, one envelope per line. */
   stdout: string;
+  /**
+   * NOT-307: Dealer-observed arrival epoch milliseconds parallel to `stdout` lines
+   * (`stdout.split("\n")[i]` arrived at `lineTs[i]`), collected by `spawnCli`'s
+   * `onStdoutLine`. First timing source: the stream's own `recorded_at` is
+   * batch-stamped (a whole real session shares one ~40ms window), so it is used
+   * only when no arrival time exists for the line. Shorter arrays and null entries
+   * fall through to the next source; absent entirely means envelope time or `now`.
+   */
+  lineTs?: Array<number | null>;
+  /**
+   * NOT-307: ISO fallback stamped on normalized events that have no stream-derived
+   * time. `muse-spawn` passes the log-write time so every written event carries a
+   * `ts`; omitted (bare parser calls, fixtures) means unstamped events stay
+   * byte-stable.
+   */
+  now?: string;
   stderr?: string;
   exitCode: number | null;
   /**
@@ -110,23 +137,33 @@ interface Envelope {
   streamId?: string;
   payloadType: string;
   payload: Record<string, unknown>;
+  /** Raw `recorded_at` value as the stream sent it (number or string), if any. */
+  recordedAt: unknown;
+  /** Dealer-observed arrival epoch ms of this envelope's stdout line, if known. */
+  lineTs: number | null;
 }
 
-function toEnvelope(o: unknown): Envelope | undefined {
+function toEnvelope(o: unknown): Omit<Envelope, "recordedAt" | "lineTs"> | undefined {
   const rec = asRecord(o);
   const payloadType = str(rec?.payload_type);
   const payload = asRecord(rec?.payload);
   if (!rec || payloadType === undefined || !payload) return undefined;
   const stream = asRecord(rec.stream);
-  return { streamKind: str(stream?.kind), streamId: str(stream?.id), payloadType, payload };
+  return {
+    streamKind: str(stream?.kind),
+    streamId: str(stream?.id),
+    payloadType,
+    payload,
+  };
 }
 
 /** Envelopes plus the count of non-empty lines that were not a JSON envelope. */
-function readEnvelopes(raw: string): { envelopes: Envelope[]; malformed: number } {
+function readEnvelopes(raw: string, lineTs?: Array<number | null>): { envelopes: Envelope[]; malformed: number } {
   const envelopes: Envelope[] = [];
   let malformed = 0;
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
     if (!t) continue;
     let parsed: unknown;
     try {
@@ -136,10 +173,45 @@ function readEnvelopes(raw: string): { envelopes: Envelope[]; malformed: number 
       continue;
     }
     const env = toEnvelope(parsed);
-    if (env) envelopes.push(env);
-    else malformed++;
+    if (env) {
+      const at = lineTs && i < lineTs.length ? lineTs[i] : null;
+      envelopes.push({
+        ...env,
+        recordedAt: (parsed as Record<string, unknown>).recorded_at ?? null,
+        lineTs: typeof at === "number" && Number.isFinite(at) ? at : null,
+      });
+    } else malformed++;
   }
   return { envelopes, malformed };
+}
+
+/**
+ * NOT-307: usable event time for one envelope, epoch milliseconds. Dealer-observed
+ * arrival first; the stream's own `recorded_at` only as a fallback, and only when
+ * it parses — real sessions batch-stamp it (µs number, whole session in ~40ms),
+ * fixtures redact it to `<ts>`. Numbers above 1e14 are microseconds, below are
+ * milliseconds; strings go through Date.parse.
+ */
+function envelopeTimeMs(env: Envelope): number | null {
+  if (env.lineTs !== null) return env.lineTs;
+  const r = env.recordedAt;
+  if (typeof r === "number" && Number.isFinite(r)) {
+    return r > 1e14 ? Math.round(r / 1000) : Math.round(r);
+  }
+  if (typeof r === "string") {
+    const ms = Date.parse(r);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return null;
+}
+
+function isoOf(ms: number | null): string | null {
+  if (ms === null || !Number.isFinite(ms)) return null;
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return null;
+  }
 }
 
 interface ModelCompleted {
@@ -211,8 +283,13 @@ function classifyReason(reason: string): MuseFailure {
 }
 
 export function parseMuseRun(input: MuseRunInput): MuseRunResult {
-  const { envelopes, malformed } = readEnvelopes(input.stdout);
+  const { envelopes, malformed } = readEnvelopes(input.stdout, input.lineTs);
   const stderr = input.stderr ?? "";
+  // A garbage `now` must never stamp garbage: only a parseable ISO string qualifies.
+  const fallbackTs =
+    typeof input.now === "string" && input.now && Number.isFinite(Date.parse(input.now))
+      ? input.now
+      : null;
 
   let sessionId: string | null = null;
   const tools = new Map<string, MuseToolActivity>();
@@ -224,6 +301,16 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
   let primaryRunId: string | null = null;
   const runIds = new Set<string>();
 
+  // NOT-307: stream-derived per-event times. firstTs anchors the `system` event;
+  // terminalTs anchors `assistant`/`result`; per-tool intent/result endpoints make
+  // durationMs. All stay null when the stream gave nothing usable (fixtures redact
+  // recorded_at, no lineTs) so unstamped output stays byte-stable.
+  let firstTs: string | null = null;
+  let terminalTs: string | null = null;
+  const noteEnvelopeTime = (at: string | null) => {
+    if (at !== null && firstTs === null) firstTs = at;
+  };
+
   for (const env of envelopes) {
     const p = env.payload;
     if (sessionId === null && env.streamKind === "session" && env.streamId) sessionId = env.streamId;
@@ -231,8 +318,11 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
     const runId = runIdOf(p);
     if (runId !== undefined) runIds.add(runId);
     if (primaryRunId === null) primaryRunId = runId ?? null;
+    noteEnvelopeTime(isoOf(envelopeTimeMs(env)));
 
     if (env.payloadType === "run.terminal.completed" || env.payloadType === "run.terminal.failed") {
+      const at = isoOf(envelopeTimeMs(env));
+      if (at !== null && terminalTs === null) terminalTs = at;
       terminals.push({
         runId: runIdOf(p),
         terminal: env.payloadType === "run.terminal.completed" ? "completed" : "failed",
@@ -246,7 +336,17 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
       if (operation?.startsWith("tool:") && key?.startsWith("tool:")) {
         const callId = key.slice("tool:".length);
         const existing = tools.get(callId);
-        tools.set(callId, existing ?? { callId, name: operation.slice("tool:".length), outcome: null, error: null });
+        tools.set(
+          callId,
+          existing ?? {
+            callId,
+            name: operation.slice("tool:".length),
+            outcome: null,
+            error: null,
+            startedAt: isoOf(envelopeTimeMs(env)),
+            durationMs: null,
+          }
+        );
         const taskId = str(event?.task_id);
         if (taskId) toolByTask.set(taskId, callId);
       }
@@ -256,11 +356,18 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
       const facts = asRecord(p.correlation_facts);
       const outcome = facts?.outcome === "success" || facts?.outcome === "failure" ? facts.outcome : null;
       const prev = tools.get(callId);
+      const endMs = envelopeTimeMs(env);
+      const startMs = prev?.startedAt ? Date.parse(prev.startedAt) : NaN;
       tools.set(callId, {
         callId,
         name: str(facts?.tool_name) ?? prev?.name ?? null,
         outcome,
         error: prev?.error ?? null,
+        startedAt: prev?.startedAt ?? null,
+        // Present only when the matching result arrived with both endpoints timed —
+        // a bare intent (tool still running at kill time) carries no duration.
+        durationMs:
+          endMs !== null && Number.isFinite(startMs) && endMs >= startMs ? endMs - startMs : null,
       });
     } else if (env.payloadType === "task.lifecycle.failed") {
       const event = asRecord(p.event);
@@ -335,7 +442,17 @@ export function parseMuseRun(input: MuseRunInput): MuseRunResult {
     rateLimited,
     failure,
     exitCode: input.exitCode,
-    events: normalizeMuseRun({ sessionId, confirmedModel, tools: toolList, finalText, usage, failure }),
+    events: normalizeMuseRun({
+      sessionId,
+      confirmedModel,
+      tools: toolList,
+      finalText,
+      usage,
+      failure,
+      now: fallbackTs,
+      firstTs,
+      terminalTs,
+    }),
   };
 }
 
@@ -352,19 +469,42 @@ export function normalizeMuseRun(r: {
   finalText: string | null;
   usage: MuseUsage;
   failure: MuseFailure | null;
+  /**
+   * NOT-307: ISO fallback for events with no stream-derived time (and the `system`
+   * anchor when the stream's first envelope had none). When all three are absent,
+   * events carry no `ts` — the byte-stable path for fixtures and bare parser calls.
+   */
+  now?: string | null;
+  /** Stream-derived time of the first stdout envelope; anchors `system`. */
+  firstTs?: string | null;
+  /** Stream-derived time of the terminal envelope; anchors `assistant`/`result`. */
+  terminalTs?: string | null;
 }): StreamEvent[] {
   const out: StreamEvent[] = [];
+  const at = (ts: string | null | undefined): Record<string, string> =>
+    ts ? { ts } : r.now ? { ts: r.now } : {};
   if (r.sessionId) {
     out.push({
       type: "system",
       subtype: "init",
       session_id: r.sessionId,
       ...(r.confirmedModel ? { model: r.confirmedModel } : {}),
+      ...at(r.firstTs ?? null),
     });
   }
-  for (const t of r.tools) out.push({ type: "tool_call", name: t.name ?? "unknown" });
+  for (const t of r.tools)
+    out.push({
+      type: "tool_call",
+      name: t.name ?? "unknown",
+      ...at(t.startedAt),
+      ...(t.durationMs !== null ? { durationMs: t.durationMs } : {}),
+    });
   if (r.finalText) {
-    out.push({ type: "assistant", message: { content: [{ type: "text", text: r.finalText }] } });
+    out.push({
+      type: "assistant",
+      message: { content: [{ type: "text", text: r.finalText }] },
+      ...at(r.terminalTs ?? null),
+    });
   }
 
   const usage: Record<string, number> = {};
@@ -377,6 +517,7 @@ export function normalizeMuseRun(r: {
     type: "result",
     ...(r.failure ? { is_error: true, result: r.failure.message } : { result: r.finalText ?? "" }),
     ...(Object.keys(usage).length > 0 ? { usage } : {}),
+    ...at(r.terminalTs ?? null),
   });
   return out;
 }

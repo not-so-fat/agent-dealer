@@ -225,6 +225,32 @@ export function recordSessionProcess(
     .run(pid, owner, startTime, new Date().toISOString(), id);
 }
 
+/**
+ * NOT-307: shallow-merges `patch` into the session's `metadata_json` (read +
+ * JSON-merge + write; unparseable existing content restarts from `{}`). Works on
+ * any status — the Muse lane records stall evidence right after spawn, before the
+ * terminal `completeSession`. No-op for unknown ids; never throws for malformed
+ * JSON. Callers needing atomicity should not use this (it is best-effort evidence).
+ */
+export function mergeSessionMetadata(id: string, patch: Record<string, unknown>): void {
+  const current = getWorkerSession(id);
+  if (!current) return;
+  let base: Record<string, unknown> = {};
+  if (current.metadataJson) {
+    try {
+      const parsed: unknown = JSON.parse(current.metadataJson);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        base = parsed as Record<string, unknown>;
+      }
+    } catch {
+      base = {};
+    }
+  }
+  getDb()
+    .prepare("UPDATE worker_sessions SET metadata_json = ?, updated_at = ? WHERE id = ?")
+    .run(JSON.stringify({ ...base, ...patch }), new Date().toISOString(), id);
+}
+
 /** Most recent still-running session for an issue — drives the Issue Detail live strip. */
 export function getActiveWorkerSessionForIssue(issueId: string): WorkerSession | null {
   const row = getDb()

@@ -275,6 +275,30 @@ test("reasonForSessionCrash falls back when log is clean", () => {
   );
 });
 
+test("NOT-307: reasonForSessionCrash names the idle minutes and last tool on an idle kill", () => {
+  assert.equal(
+    reasonForSessionCrash({
+      timedOut: true,
+      logPath: writeLog('{"type":"result"}\n'),
+      idle: { minutes: 20, lastToolName: "npm_test" },
+    }),
+    "Developer session made no progress for 20 minutes. (last tool: npm_test) Killed on the idle timeout."
+  );
+  assert.equal(
+    reasonForSessionCrash({
+      timedOut: true,
+      logPath: writeLog('{"type":"result"}\n'),
+      idle: { minutes: null, lastToolName: null },
+    }),
+    "Developer session made no progress. (no tool call seen) Killed on the idle timeout."
+  );
+  // Wall-clock timeouts read exactly as before when no idle info is given.
+  assert.equal(
+    reasonForSessionCrash({ timedOut: true, logPath: writeLog('{"type":"result"}\n') }),
+    "Developer session timed out."
+  );
+});
+
 test("parseErrorJsonReason reads recovery presumed-dead shape", () => {
   assert.equal(
     parseErrorJsonReason(JSON.stringify({ reason: PRESUMED_DEAD_REASON })),

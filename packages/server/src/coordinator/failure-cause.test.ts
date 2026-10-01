@@ -331,6 +331,65 @@ test("reclaimed session with provider/auth log evidence keeps it primary", () =>
   );
 });
 
+// NOT-307: an idle-watchdog kill classifies as muse_no_progress (infrastructure,
+// high confidence) instead of unknown — with the idle minutes and last tool name
+// in the raw reason — even when a tool was in flight (a hung tool is still a stall).
+test("idle-watchdog kill classifies as muse_no_progress, not unknown", () => {
+  const idle = primary(
+    classifyAttemptFailure({
+      outcomeKind: "timed_out",
+      outcomeReason:
+        "Developer session made no progress for 20 minutes. (last tool: npm_test) Killed on the idle timeout.",
+      timedOut: true,
+      idleTimedOut: true,
+      idleForMs: 20 * 60_000,
+      lastToolName: "npm_test",
+    })
+  );
+  assert.equal(idle.code, "muse_no_progress");
+  assert.equal(idle.domain, "infrastructure");
+  assert.equal(idle.confidence, "high");
+  assert.match(idle.rawReason, /20 minutes/);
+  assert.match(idle.rawReason, /npm_test/);
+});
+
+test("idle kill beats the tool_test_timeout guess and the unknown fallback", () => {
+  // A hung test in flight plus an idle kill: still the stall, not the tool timeout.
+  const hungTool = primary(
+    classifyAttemptFailure({
+      outcomeKind: "timed_out",
+      outcomeReason: "vitest run timed out after 30000ms",
+      timedOut: true,
+      toolInFlight: true,
+      idleTimedOut: true,
+      idleForMs: 21 * 60_000,
+      lastToolName: "vitest",
+    })
+  );
+  assert.equal(hungTool.code, "muse_no_progress");
+
+  // A bare timed_out with no idle evidence still classifies as before (unknown here).
+  const plain = primary(classifyAttemptFailure({ outcomeKind: "timed_out", timedOut: true }));
+  assert.equal(plain.code, "unknown");
+});
+
+test("idle kill composes the reason when the recorded text lacks minutes and tool", () => {
+  const composed = primary(
+    classifyAttemptFailure({
+      outcomeKind: "timed_out",
+      outcomeReason: "Developer session timed out.",
+      timedOut: true,
+      idleTimedOut: true,
+      idleForMs: 22 * 60_000,
+      lastToolName: null,
+    })
+  );
+  assert.equal(composed.code, "muse_no_progress");
+  assert.match(composed.rawReason, /22 minutes/);
+  assert.match(composed.rawReason, /last tool: none/);
+  assert.match(composed.rawReason, /Developer session timed out\./);
+});
+
 test("usage-capped and tool-timeout evidence map to capacity/task", () => {
   const capped = primary(
     classifyAttemptFailure({ outcomeKind: "usage_capped", outcomeReason: "claude_code usage capped — plan limit rejected" })
