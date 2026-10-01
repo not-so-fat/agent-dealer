@@ -205,13 +205,13 @@ function deckLaunchHeaders(
 }
 
 /** claude's `--mcp-config` file schema — deck headers only, no Authorization. */
-function urlHeaderMcpConfig(mcpUrl: string, deckId: string, worktreePath: string) {
+function urlHeaderMcpConfig(mcpUrl: string, deckId: string, worktreePath: string, correlationId?: string | null) {
   return {
     mcpServers: {
       "agent-deck": {
         type: "http",
         url: mcpUrl,
-        headers: deckLaunchHeaders(deckId, worktreePath),
+        headers: deckLaunchHeaders(deckId, worktreePath, correlationId),
       },
     },
   };
@@ -330,7 +330,7 @@ async function materializeWorkerMcpConfig(opts: {
   const dir = getWorkerMcpConfigDir();
   const filePath = path.join(dir, `claude-mcp-${opts.deckId.slice(0, 8)}-${randomUUID()}.json`);
   try {
-    fs.writeFileSync(filePath, JSON.stringify(urlHeaderMcpConfig(mcpUrl, opts.deckId, opts.worktreePath)), { mode: 0o600 });
+    fs.writeFileSync(filePath, JSON.stringify(urlHeaderMcpConfig(mcpUrl, opts.deckId, opts.worktreePath, opts.correlationId)), { mode: 0o600 });
   } catch (err) {
     fs.rmSync(filePath, { force: true });
     throw err;

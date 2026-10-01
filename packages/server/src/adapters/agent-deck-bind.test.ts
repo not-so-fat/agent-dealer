@@ -586,3 +586,81 @@ test("a deck that loses the connection mid-playbook is deck_unavailable", async 
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.kind, "deck_unavailable");
 });
+
+// NOT-305: every new worker session persists an opaque Deck correlation UUID before
+// spawn, and every runtime launch config carries it as the exact
+// `x-agent-deck-correlation-id` observability header (never authority).
+const CORRELATION_ID = "aaaaaaaa-1111-4111-a111-aaaaaaaaaaaa";
+
+test("prepareWorkerDeckConnection writes the exact correlation header for claude_code", async () => {
+  const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    correlationId: CORRELATION_ID,
+    verifyCallTool: async (name) => {
+      assert.equal(name, "get_bound_deck");
+      return textResult({ id: DECK, name: "personal-dev" });
+    },
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    const written = JSON.parse(fs.readFileSync(result.mcpConfigPath, "utf8"));
+    const headers = written.mcpServers["agent-deck"].headers;
+    assert.equal(headers["x-agent-deck-correlation-id"], CORRELATION_ID);
+    await releaseWorkerDeckConnection({ mcpConfigPath: result.mcpConfigPath });
+  }
+});
+
+test("prepareWorkerDeckConnection omits the correlation header when the session has none", async () => {
+  const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    verifyCallTool: async () => textResult({ id: DECK, name: "personal-dev" }),
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    const written = JSON.parse(fs.readFileSync(result.mcpConfigPath, "utf8"));
+    const headers = written.mcpServers["agent-deck"].headers;
+    assert.equal("x-agent-deck-correlation-id" in headers, false);
+    await releaseWorkerDeckConnection({ mcpConfigPath: result.mcpConfigPath });
+  }
+});
+
+test("prepareWorkerDeckConnection writes the exact correlation header for codex_local", async () => {
+  const result = await prepareWorkerDeckConnection({
+    policy: DENIED,
+    ...BASE_OPTS,
+    runtime: "codex_local",
+    correlationId: CORRELATION_ID,
+    verifyCallTool: async () => textResult({ id: DECK }),
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    const toml = fs.readFileSync(path.join(result.mcpConfigPath, "config.toml"), "utf8");
+    assert.match(toml, new RegExp(`x-agent-deck-correlation-id = "${CORRELATION_ID}"`));
+    await releaseWorkerDeckConnection({ mcpConfigPath: result.mcpConfigPath });
+  }
+});
+
+test("prepareWorkerDeckConnection writes the exact correlation header for cursor_local", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cursor-correlation-"));
+  initGitRepo(repo);
+  try {
+    const result = await prepareWorkerDeckConnection({
+      policy: DENIED,
+      deckId: DECK,
+      worktreePath: repo,
+      runtime: "cursor_local",
+      correlationId: CORRELATION_ID,
+      verifyCallTool: async () => textResult({ id: DECK }),
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      const written = JSON.parse(fs.readFileSync(result.mcpConfigPath, "utf8"));
+      assert.equal(written.mcpServers["agent-deck"].headers["x-agent-deck-correlation-id"], CORRELATION_ID);
+      await releaseWorkerDeckConnection({ mcpConfigPath: result.mcpConfigPath });
+    }
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
