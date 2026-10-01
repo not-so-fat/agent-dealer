@@ -97,6 +97,19 @@ function stubMuseVersion(version: string): () => void {
   };
 }
 
+/** A real issue row — `muse_capability` escalations are FK-bound to issues. */
+function makeIssue(): string {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  getDb()
+    .prepare(
+      `INSERT INTO issues (id, source, title, repo, base_branch, status, current_owner, created_at, updated_at)
+       VALUES (?, 'manual', 'muse capability check', 'dealer-test', 'main', 'ready', 'dealer', ?, ?)`
+    )
+    .run(id, now, now);
+  return id;
+}
+
 /** A session-log file from JSON lines (plain strings pass through verbatim). */
 function writeLog(lines: unknown[]): string {
   const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-log-")), "session.ndjson");
@@ -182,7 +195,7 @@ describe("muse-capability", { concurrency: false }, () => {
     const calls = stubProbe({ [OLD]: { status: "capable" }, [NEW]: { status: "capable" } });
     await check(OLD);
     const { first, settled } = await check(NEW);
-    assert.match(first[0]!.message, new RegExp(`Muse Code updated ${OLD} → ${NEW}: verifying`));
+    assert.deepEqual(first, [], "the in-flight check does not block on a baseline");
     assert.deepEqual(settled, []);
     assert.equal(calls.get(NEW), 1);
     const saved = JSON.parse(fs.readFileSync(STATE, "utf8"));
@@ -299,7 +312,7 @@ describe("muse-capability", { concurrency: false }, () => {
     await check(OLD);
     await check(NEW);
     const { first, settled } = await check(LATER);
-    assert.match(first[0]!.message, new RegExp(`^Muse Code updated ${NEW} → ${LATER}: verifying`));
+    assert.deepEqual(first, [], "the in-flight check does not block on a baseline");
     assert.match(settled[0]!.message, new RegExp(`^Muse Code updated ${NEW} → ${LATER}: developer sessions no longer get`));
     assert.doesNotMatch(settled[0]!.message, new RegExp(OLD.replace(/\./g, "\\.")));
     assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).confirmedVersion, OLD);
@@ -351,7 +364,7 @@ describe("muse-capability", { concurrency: false }, () => {
     await exhaust(NEW);
     assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).lastChecked.attempts, 3);
 
-    const issueId = randomUUID();
+    const issueId = makeIssue();
     const first = ensureMuseCapabilityEscalation(issueId);
     assert.ok(first, "exhaustion raises an action");
     assert.equal(first.actionType, "muse_capability");
@@ -390,7 +403,7 @@ describe("muse-capability", { concurrency: false }, () => {
     const { settled } = await check(NEW);
     assert.deepEqual(settled.map((i) => i.code), ["runtime_capability"]);
 
-    const issueId = randomUUID();
+    const issueId = makeIssue();
     const action = ensureMuseCapabilityEscalation(issueId);
     assert.ok(action, "a missing verdict raises an action");
     assert.equal(action.actionType, "muse_capability");
@@ -431,7 +444,7 @@ describe("muse-capability", { concurrency: false }, () => {
     });
     await check(OLD);
     await check(NEW);
-    const issueId = randomUUID();
+    const issueId = makeIssue();
     ensureMuseCapabilityEscalation(issueId);
     recordMuseCapabilityOverride(NEW);
     assert.deepEqual(museCapabilityIssues(NEW), []);
@@ -487,7 +500,7 @@ describe("muse-capability", { concurrency: false }, () => {
     await check(OLD);
     const restore = stubMuseVersion(NEW);
     try {
-      const issueId = randomUUID();
+      const issueId = makeIssue();
       const log = writeLog([
         { type: "tool_call", name: "read_file" },
         { type: "assistant", message: { content: [{ type: "text", text: "edited" }] } },
