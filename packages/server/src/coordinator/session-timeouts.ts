@@ -22,13 +22,20 @@ export function reviewerSessionTimeoutMs(): number {
 
 /**
  * NOT-307: silent-child bound for the Muse developer lane only (other runtimes do
- * not read this). Undefined means the watchdog is disabled. The 20-minute default
- * exceeds the longest legitimate silent stretch observed in healthy Muse sessions
- * (~15.6 min between sampler-observed stream events in `session_activity_events`,
- * 2026-09/10 history including sessions that completed) with headroom for a full
- * `npm test` that prints nothing; `0` disables explicitly. A non-numeric or
- * negative value falls back to the default with a logged warning rather than
- * silently disabling the guard (or killing healthy sessions on a typo like `-1`).
+ * not read this). Undefined means the watchdog is disabled. Measured
+ * 2026-09/10 `session_activity_events` history: completed Muse sessions show up
+ * to ~39.8 min between sampler-persisted stream events (7 gaps over 20 min in 5
+ * sessions, max 39.8 min on 2026-10-01). Those gaps measure *recognized* stream
+ * events at 10s sampler ticks — true stdout-byte silence may be shorter (bytes
+ * the sampler does not recognize advance its offset silently) — while the
+ * watchdog watches a strictly more sensitive signal (any stdout bytes, plus
+ * `session.jsonl` mtime growth). The 20-minute default therefore stands as the
+ * prescribed bound, not as headroom above the longest observed gap: a healthy
+ * session quieter than its own history can be idle-killed, and the first idle
+ * kills (with their `lastActivityAt`/`lastToolName` evidence) calibrate it.
+ * `0` disables explicitly. A non-numeric or negative value falls back to the
+ * default with a logged warning rather than silently disabling the guard (or
+ * killing healthy sessions on a typo like `-1`).
  */
 export const DEFAULT_MUSE_IDLE_TIMEOUT_MS = 20 * 60_000;
 

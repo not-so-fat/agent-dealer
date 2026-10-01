@@ -54,6 +54,25 @@ test("non-numeric or negative MUSE_IDLE_TIMEOUT_MS falls back to the default", (
   withIdleEnv("Infinity", () => assert.equal(museIdleTimeoutMs(), DEFAULT_MUSE_IDLE_TIMEOUT_MS));
 });
 
+test("invalid MUSE_IDLE_TIMEOUT_MS logs a warning naming the value", () => {
+  const prev = process.env.MUSE_IDLE_TIMEOUT_MS;
+  const warnings: unknown[][] = [];
+  const orig = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args);
+  };
+  try {
+    process.env.MUSE_IDLE_TIMEOUT_MS = "soon";
+    assert.equal(museIdleTimeoutMs(), DEFAULT_MUSE_IDLE_TIMEOUT_MS);
+  } finally {
+    console.warn = orig;
+    if (prev === undefined) delete process.env.MUSE_IDLE_TIMEOUT_MS;
+    else process.env.MUSE_IDLE_TIMEOUT_MS = prev;
+  }
+  assert.equal(warnings.length, 1, `expected one warning, got ${warnings.length}`);
+  assert.match(String(warnings[0][0]), /MUSE_IDLE_TIMEOUT_MS/);
+});
+
 // ── session-log progress source ──────────────────────────────────────────────
 
 function writeSessionLog(dataDir: string, sessionId: string): string {

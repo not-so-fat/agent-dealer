@@ -10,7 +10,9 @@ import os from "node:os";
 import path from "node:path";
 import type { FailureCauseCode } from "@agent-dealer/shared";
 import {
+  backfillCausesForSession,
   classifyAttemptFailure,
+  museStallFromMetadata,
   orderAttemptCauses,
   type AttemptFailureInput,
 } from "./failure-cause.js";
@@ -388,6 +390,67 @@ test("idle kill composes the reason when the recorded text lacks minutes and too
   assert.match(composed.rawReason, /22 minutes/);
   assert.match(composed.rawReason, /last tool: none/);
   assert.match(composed.rawReason, /Developer session timed out\./);
+});
+
+// NOT-307: stall evidence round-trips through worker_sessions.metadata_json —
+// the record/backfill paths read the same five fields the developer effect wrote.
+test("museStallFromMetadata reads idle evidence, and ignores anything else", () => {
+  const at = Date.parse("2026-10-01T19:40:00.000Z");
+  const stall = museStallFromMetadata(
+    JSON.stringify({
+      lastActivityAt: "2026-10-01T19:20:00.000Z",
+      toolCallCount: 24,
+      lastToolName: "npm_test",
+      firstOutputMs: 900,
+      idleTimedOut: true,
+    }),
+    at
+  );
+  assert.equal(stall.idleTimedOut, true);
+  assert.equal(stall.idleForMs, 20 * 60_000);
+  assert.equal(stall.lastToolName, "npm_test");
+
+  assert.deepEqual(museStallFromMetadata(null, at).idleTimedOut, false);
+  assert.deepEqual(museStallFromMetadata("not-json{", at).idleTimedOut, false);
+  assert.deepEqual(
+    museStallFromMetadata(JSON.stringify({ idleTimedOut: false }), at).idleTimedOut,
+    false,
+    "a clean session's metadata is not idle evidence"
+  );
+  assert.deepEqual(
+    museStallFromMetadata(JSON.stringify({ idleTimedOut: true }), null).idleForMs,
+    null,
+    "no kill time means no measured silence"
+  );
+});
+
+test("backfill over an idle-kill row classifies muse_no_progress", () => {
+  const causes = backfillCausesForSession(
+    {
+      id: "s-idle-backfill",
+      errorJson: JSON.stringify({
+        reason:
+          "Developer session made no progress for 20 minutes. (last tool: npm_test) Killed on the idle timeout.",
+      }),
+      logPath: null,
+      runtime: "muse_code",
+      exitCode: 124,
+      completedAt: "2026-10-01T19:40:00.000Z",
+      updatedAt: "2026-10-01T19:40:00.000Z",
+      metadataJson: JSON.stringify({
+        lastActivityAt: "2026-10-01T19:20:00.000Z",
+        toolCallCount: 24,
+        lastToolName: "npm_test",
+        firstOutputMs: 900,
+        idleTimedOut: true,
+      }),
+    },
+    { outcomeKind: "timed_out" }
+  );
+  const found = primary(causes);
+  assert.equal(found.code, "muse_no_progress");
+  assert.equal(found.quality, "inferred");
+  assert.match(found.rawReason, /20 minutes/);
 });
 
 test("usage-capped and tool-timeout evidence map to capacity/task", () => {
