@@ -21,6 +21,25 @@ export interface RunnerResult {
 }
 
 /**
+ * NOT-307: what `spawnCli` reports about the child besides its exit.
+ * `idleTimedOut` is true only when the idle watchdog (not the wall clock) killed the
+ * child; `timedOut` is true for either kill so downstream timeout handling (salvage,
+ * infra-retry accounting) treats both identically. `firstOutputMs` is spawn → first
+ * stdout bytes (null when the child never wrote any); `lastActivityAt` is the last
+ * observed progress (stdout bytes, or `progressSource` when the caller supplies one).
+ */
+export interface SpawnCliResult {
+  exitCode: number;
+  transcript: string;
+  timedOut: boolean;
+  idleTimedOut: boolean;
+  firstOutputMs: number | null;
+  lastActivityAt: string | null;
+  /** Silence observed at an idle kill (now minus last activity); null otherwise. */
+  idleForMs: number | null;
+}
+
+/**
  * NOT-225: a NUL byte anywhere in argv makes `child_process.spawn` throw
  * `ERR_INVALID_ARG_VALUE` synchronously, before any process exists — so a reviewer
  * prompt embedding a PR diff with a raw NUL could never start, and the throw was
@@ -101,16 +120,77 @@ export async function spawnCli(
      * Never called when the spawn itself fails (no child, so nothing to prove alive).
      */
     onSpawn?: (pid: number) => void;
+    /**
+     * NOT-307: silent-child watchdog, Muse lane only for now (Codex/Claude/Cursor pass
+     * nothing and are unaffected). When set to a positive finite number of milliseconds,
+     * the child is killed exactly like a wall-clock timeout (SIGTERM via killRunProcess,
+     * `finish(124)` 500ms later) if neither stdout bytes nor `progressSource` report
+     * progress for that long. Undefined, non-numeric, or non-positive disables it.
+     */
+    idleTimeoutMs?: number;
+    /**
+     * NOT-307: extra progress source sampled by the idle watchdog — epoch milliseconds
+     * of the last externally observed activity (e.g. the Muse session-log mtime), or
+     * null when unknown. Throwing or returning a non-number is treated as unknown and
+     * never breaks the spawn. Ignored unless `idleTimeoutMs` enables the watchdog.
+     */
+    progressSource?: () => number | null;
   }
-): Promise<{ exitCode: number; transcript: string; timedOut: boolean }> {
+): Promise<SpawnCliResult> {
   await acquireSpawnSlot();
   try {
-    return await new Promise((resolve, reject) => {
+    return await new Promise<SpawnCliResult>((resolve, reject) => {
       const stdoutChunks: string[] = [];
       const stderrChunks: string[] = [];
       let timedOut = false;
       let settled = false;
       let killEscalation: ReturnType<typeof setTimeout> | undefined;
+
+      // NOT-307: idle watchdog state. lastActivityMs starts at spawn so a child that
+      // never emits anything is killed after exactly idleTimeoutMs. stdout bytes always
+      // count; progressSource (when supplied) can only move the mark forward, never back.
+      const spawnStartMs = Date.now();
+      let firstOutputMs: number | null = null;
+      let lastActivityMs = spawnStartMs;
+      let idleTimedOut = false;
+      let aborted = false;
+      const idleMs = opts.idleTimeoutMs;
+      const idleEnabled =
+        typeof idleMs === "number" && Number.isFinite(idleMs) && idleMs > 0;
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      let progressTimer: ReturnType<typeof setInterval> | undefined;
+      const clearIdle = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        if (progressTimer) clearInterval(progressTimer);
+        idleTimer = undefined;
+        progressTimer = undefined;
+      };
+      const rescheduleIdle = () => {
+        if (!idleEnabled || settled || aborted) return;
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(fireIdle, idleMs as number);
+        idleTimer.unref?.();
+      };
+      const noteActivity = (atMs?: number) => {
+        const now = typeof atMs === "number" && Number.isFinite(atMs) ? atMs : Date.now();
+        // A stale report (an old mtime re-read, a same-millisecond second chunk) leaves
+        // the deadline standing: only genuinely newer activity postpones the kill, so a
+        // source stuck on an old value can never hold the watchdog off indefinitely.
+        if (firstOutputMs === null) firstOutputMs = Math.max(0, now - spawnStartMs);
+        if (now <= lastActivityMs) return;
+        lastActivityMs = now;
+        rescheduleIdle();
+      };
+      // Mirror the wall-clock timeout path exactly (same SIGTERM, same finish(124) 500ms
+      // later) so salvage and infra-retry accounting treat an idle kill as a timeout.
+      // Never fires after an abort: a lost lease is not idleness.
+      function fireIdle() {
+        if (settled || aborted) return;
+        idleTimedOut = true;
+        timedOut = true;
+        killRunProcess(runId);
+        setTimeout(() => finish(124), 500);
+      }
 
       const logStream = fs.createWriteStream(opts.logPath, { flags: "w" });
       // A WriteStream's 'error' event has no default handler — left unguarded, any
@@ -159,6 +239,8 @@ export async function spawnCli(
 
       const onAbort = () => {
         if (settled) return;
+        aborted = true;
+        clearIdle();
         try {
           child.kill("SIGTERM");
         } catch {
@@ -189,6 +271,7 @@ export async function spawnCli(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        clearIdle();
         cleanupAbort();
         unregisterChild(runId);
         // Write any stderr BEFORE ending the stream — writing after end() throws
@@ -213,6 +296,10 @@ export async function spawnCli(
             exitCode,
             transcript: stdoutChunks.join(""),
             timedOut,
+            idleTimedOut,
+            firstOutputMs,
+            lastActivityAt: new Date(lastActivityMs).toISOString(),
+            idleForMs: idleTimedOut ? Math.max(0, Date.now() - lastActivityMs) : null,
           });
         };
         if (logStream.destroyed || logStream.errored) {
@@ -245,10 +332,38 @@ export async function spawnCli(
         setTimeout(() => finish(124), 500);
       }, opts.timeoutMs);
 
+      // NOT-307: arm the idle watchdog once the child exists. The first deadline is one
+      // full idle window after spawn (lastActivityMs starts at spawn), so a child that
+      // never emits anything is killed after exactly idleTimeoutMs.
+      if (idleEnabled) {
+        rescheduleIdle();
+        if (opts.progressSource) {
+          // Sample at most every 30s and at least every handful of ms: frequent enough
+          // that the kill lands near the bound, sparse enough to never matter for I/O.
+          const pollMs = Math.min(Math.max(Math.floor((idleMs as number) / 10), 50), 30_000);
+          progressTimer = setInterval(() => {
+            if (settled || aborted) return;
+            let at: number | null = null;
+            try {
+              at = opts.progressSource?.() ?? null;
+            } catch {
+              at = null;
+            }
+            if (typeof at === "number" && Number.isFinite(at) && at >= spawnStartMs) {
+              noteActivity(at);
+            }
+          }, pollMs);
+          progressTimer.unref?.();
+        }
+      }
+
       child.stdout?.on("data", (buf: Buffer) => {
         const chunk = buf.toString();
         stdoutChunks.push(chunk);
         logStream.write(buf);
+        // NOT-307: any stdout bytes are progress. (stderr deliberately does not count:
+        // the contract defines progress as stdout bytes or the external source.)
+        noteActivity();
       });
       child.stderr?.on("data", (buf: Buffer) => {
         stderrChunks.push(buf.toString());
@@ -257,6 +372,7 @@ export async function spawnCli(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        clearIdle();
         cleanupAbort();
         unregisterChild(runId);
         logStream.end();
