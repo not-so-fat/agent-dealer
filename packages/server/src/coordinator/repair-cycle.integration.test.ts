@@ -221,6 +221,7 @@ test("developer round 1 → reviewer changes_requested → developer round 2 on 
   assert.equal(issue.status, "final_review", "the cycle must end at a human final_review, not stuck or escalated");
   assert.equal(issue.currentRound, 2, "exactly one genuine repair round — changes_requested — was spent");
   assert.equal(issue.infraAttempts, 0, "nothing in this run was an infra failure");
+  assert.equal(issue.ciAttempts, 0, "nothing in this run was a CI failure either");
   assert.ok(listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review" && a.status === "open"));
 
   // Same branch reused across both rounds — never re-created.
