@@ -30,6 +30,7 @@ import { getIssue } from "../repository/issues.js";
 import { createIssueArtifact } from "../repository/artifacts.js";
 import {
   collectPlaybookUseReceiptsForIssue,
+  latestReceiptErrors,
   reportDeckFailureSignals,
   type PlaybookFeedbackDeps,
 } from "./playbook-feedback.js";
@@ -62,17 +63,25 @@ export async function triggerIssueReflect(
   const receipts = await collectPlaybookUseReceiptsForIssue(issueId, deps);
   const signals = await reportDeckFailureSignals(issueId, deps);
 
-  // A Deck outage during receipt collection is a visible, retryable issue-level
-  // status even when no signal candidate exists — otherwise an offline Deck leaves
-  // no trace that evidence is still missing. Never changes the issue outcome.
+  // Incomplete receipt collection is a visible issue-level status even when no
+  // signal candidate exists — otherwise missing evidence leaves no trace. The reason
+  // names the actual receipt errors (Deck offline vs. malformed correlation
+  // response), never a blanket "offline". Collection resumes the next time issue
+  // reflection runs — a later instance-completing trigger re-attempts every session
+  // still missing a receipt — or via an explicit reflection retry. Never changes
+  // the issue outcome.
   if (receipts.errors > 0) {
+    const details = latestReceiptErrors(issueId);
     createIssueArtifact({
       issueId,
       kind: "reflect_status",
       author: "system",
       content: {
         status: "failed",
-        reason: "Agent Deck offline — playbook-use receipt collection retryable on a later trigger",
+        reason:
+          details.length > 0
+            ? `playbook-use receipt collection incomplete — retried on the next reflection trigger: ${details.join("; ")}`
+            : "playbook-use receipt collection incomplete — retried on the next reflection trigger",
         pendingReceipts: receipts.pending,
       },
     });

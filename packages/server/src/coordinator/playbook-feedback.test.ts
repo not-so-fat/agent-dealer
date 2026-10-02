@@ -751,3 +751,69 @@ test("a crash between the Deck send and the sent-write reconciles to the same ke
   assert.deepStrictEqual(restart.sent, []);
   assert.equal(calls.filter((c) => c.toolName === "propose_playbook_patch").length, 1);
 });
+
+test("an empty collected receipt is provisional: the next trigger re-reads instead of freezing", async () => {
+  const agent = seedAgent();
+  const issue = seedIssue(agent.id);
+  const session = seedTerminalSession(issue.id, agent);
+
+  // Session-end probe runs before Deck ingested anything: empty but collected.
+  const early = makeDeps({ fetches: [] });
+  const first = await collectPlaybookUseReceipt(session.id, early.deps);
+  assert.equal(first.collected, true);
+  if (first.collected) {
+    assert.equal(first.duplicate, false);
+    assert.deepStrictEqual(first.receipt.playbookIds, []);
+  }
+
+  // Issue-level trigger re-reads rather than freezing the early empty list.
+  const late = makeDeps({ fetches: [{ playbook_id: "pb-late" }] });
+  const second = await collectPlaybookUseReceipt(session.id, late.deps);
+  assert.equal(second.collected, true);
+  if (second.collected) {
+    assert.equal(second.duplicate, false);
+    assert.deepStrictEqual(second.receipt.playbookIds, ["pb-late"]);
+  }
+  // The fresh row supersedes the provisional one; readers take the latest
+  // (newest-first, so index 0 is the superseding row).
+  assert.equal(receiptsFor(issue.id).length, 2);
+  assert.deepStrictEqual(receiptsFor(issue.id)[0]!.status, "collected");
+  assert.deepStrictEqual(receiptsFor(issue.id)[0]!.playbookIds, ["pb-late"]);
+
+  // A non-empty collected receipt IS terminal: no further Deck calls.
+  const third = await collectPlaybookUseReceipt(session.id, late.deps);
+  assert.equal(third.collected, true);
+  if (third.collected) assert.equal(third.duplicate, true);
+  assert.equal(late.calls.filter((c) => c.toolName === DECK_CORRELATION_TOOL).length, 1);
+});
+
+test("concurrent collection for one session shares a single Deck call", async () => {
+  const agent = seedAgent();
+  const issue = seedIssue(agent.id);
+  const session = seedTerminalSession(issue.id, agent);
+  let release!: (value: AuthorizedDeckCallResult<unknown>) => void;
+  const gate = new Promise<AuthorizedDeckCallResult<unknown>>((resolve) => {
+    release = resolve;
+  });
+  let correlationCalls = 0;
+  const deps: PlaybookFeedbackDeps = {
+    checkHealth: async () => true,
+    callTool: (async (call: { toolName: string }) => {
+      if (call.toolName === DECK_CORRELATION_TOOL) {
+        correlationCalls++;
+        return gate;
+      }
+      throw new Error(`unexpected tool call: ${call.toolName}`);
+    }) as PlaybookFeedbackDeps["callTool"],
+  };
+  // Session-end probe and issue-level trigger racing for the just-finished session.
+  const first = collectPlaybookUseReceipt(session.id, deps);
+  const second = collectPlaybookUseReceipt(session.id, deps);
+  release({ ok: true, data: { fetches: [{ playbook_id: "pb-shared" }] } });
+  const [r1, r2] = await Promise.all([first, second]);
+  assert.equal(r1.collected, true);
+  assert.equal(r2.collected, true);
+  assert.equal(correlationCalls, 1);
+  assert.equal(receiptsFor(issue.id).length, 1);
+  assert.deepStrictEqual(receiptsFor(issue.id)[0]!.playbookIds, ["pb-shared"]);
+});

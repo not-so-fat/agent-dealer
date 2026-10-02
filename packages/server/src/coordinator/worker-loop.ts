@@ -322,10 +322,6 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     safeCompleteSession(session.id, "cancelled", { reason: result.reason });
     return;
   }
-  if (result.triggerReflect) {
-    const { triggerIssueReflect } = await import("./reflect-trigger.js");
-    void triggerIssueReflect(claimed.issueId).catch(() => {});
-  }
   // NOT-136: a deck-unavailable session never spawned anything — `cancelled`, not `failed`
   // (which would read as a worker crash) and not `done` (which would claim it ran).
   // NOT-197: a base-fetch failure likewise never spawned (and created no branch).
@@ -352,7 +348,16 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
         }),
       }
     : undefined;
+  // NOT-305: the session row goes terminal BEFORE the issue-level reflect trigger
+  // below. triggerIssueReflect collects receipts for every terminal session, and
+  // completeSession writes the terminal status synchronously — firing reflect first
+  // would exclude this just-finished session from the signal's worker sessions and
+  // playbook evidence.
   safeCompleteSession(session.id, sessionStatus, errorPayload);
+  if (result.triggerReflect) {
+    const { triggerIssueReflect } = await import("./reflect-trigger.js");
+    void triggerIssueReflect(claimed.issueId).catch(() => {});
+  }
 }
 
 /**

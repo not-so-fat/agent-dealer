@@ -41,10 +41,10 @@ export function listArtifactsForIssue(
   const limit = opts?.limit ?? 50;
   const rows = opts?.before
     ? (getDb()
-        .prepare("SELECT * FROM artifacts WHERE issue_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?")
+        .prepare("SELECT * FROM artifacts WHERE issue_id = ? AND created_at < ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
         .all(issueId, opts.before, limit) as ArtifactRow[])
     : (getDb()
-        .prepare("SELECT * FROM artifacts WHERE issue_id = ? ORDER BY created_at DESC LIMIT ?")
+        .prepare("SELECT * FROM artifacts WHERE issue_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
         .all(issueId, limit) as ArtifactRow[]);
   return rows.map(rowToArtifact);
 }
@@ -55,7 +55,7 @@ export function listArtifactsForIssue(
  * scan) can't have an old row fall outside the window on an artifact-heavy issue. */
 export function listArtifactsForIssueByKind(issueId: string, kind: string): IssueArtifact[] {
   const rows = getDb()
-    .prepare("SELECT * FROM artifacts WHERE issue_id = ? AND kind = ? ORDER BY created_at DESC")
+    .prepare("SELECT * FROM artifacts WHERE issue_id = ? AND kind = ? ORDER BY created_at DESC, rowid DESC")
     .all(issueId, kind) as ArtifactRow[];
   return rows.map(rowToArtifact);
 }

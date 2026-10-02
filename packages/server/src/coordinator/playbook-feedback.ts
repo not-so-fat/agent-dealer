@@ -102,6 +102,21 @@ export function latestReceiptForSession(issueId: string, workerSessionId: string
   return null;
 }
 
+/**
+ * Distinct error texts on the latest receipt of each worker session still in
+ * `error` — so the issue-level `reflect_status` can name the actual failure (Deck
+ * offline vs. malformed correlation response) instead of blaming the network for
+ * every receipt error.
+ */
+export function latestReceiptErrors(issueId: string): string[] {
+  const errors = new Set<string>();
+  for (const session of listWorkerSessionsForIssue(issueId)) {
+    const receipt = latestReceiptForSession(issueId, session.id);
+    if (receipt?.status === "error" && receipt.error) errors.add(receipt.error);
+  }
+  return [...errors];
+}
+
 function recordReceipt(issueId: string, workerSessionId: string | null, receipt: PlaybookUseReceipt): PlaybookUseReceipt {
   createIssueArtifact({
     issueId,
@@ -188,14 +203,42 @@ export type CollectReceiptResult =
   | { collected: false; reason: string };
 
 /**
- * Records the actual-use receipt for one worker session. Never throws: Deck outages
- * and malformed responses become an `error`-status receipt (a visible, retryable
- * record), and non-terminal or unknown sessions return a reason without writing.
- * Idempotent: a `collected` receipt is returned as-is; an `error`/`skipped` row is
- * re-attempted and superseded by a fresh row, so a later trigger after a restart or
- * Deck recovery heals the gap without duplicating collected evidence.
+ * Same-process guard against concurrent duplicate collection: the session-end probe
+ * in worker-loop.ts and the issue-level trigger both collect for the just-finished
+ * session, and without this the check-then-write below races into two `collected`
+ * rows. Concurrent callers for one session share a single collection. (Cross-process
+ * races remain possible — there is no unique constraint on receipt rows — so readers
+ * always take the latest row per session.)
  */
+const receiptInflight = new Map<string, Promise<CollectReceiptResult>>();
+
 export async function collectPlaybookUseReceipt(
+  workerSessionId: string,
+  deps: PlaybookFeedbackDeps = defaultDeps
+): Promise<CollectReceiptResult> {
+  const inflight = receiptInflight.get(workerSessionId);
+  if (inflight) return inflight;
+  const task = collectPlaybookUseReceiptInner(workerSessionId, deps).finally(() => {
+    if (receiptInflight.get(workerSessionId) === task) receiptInflight.delete(workerSessionId);
+  });
+  receiptInflight.set(workerSessionId, task);
+  return task;
+}
+
+/**
+ * Records the actual-use receipt for one worker session. Never throws: Deck outages
+ * and malformed responses become an `error`-status receipt (a visible record,
+ * re-attempted by a later reflection trigger), and non-terminal or unknown sessions
+ * return a reason without writing.
+ * Idempotent: a non-empty `collected` receipt is returned as-is; an `error`/`skipped`
+ * row — or a `collected` row naming zero playbooks — is re-attempted and superseded
+ * by a fresh row. An empty list collected at session end is provisional: Deck may
+ * ingest usage asynchronously after the probe, so freezing it would permanently hide
+ * playbooks fetched moments later; the issue-level trigger re-reads until use shows
+ * up (or re-confirms genuinely empty). A later trigger after a restart or Deck
+ * recovery heals the gap without duplicating non-empty collected evidence.
+ */
+async function collectPlaybookUseReceiptInner(
   workerSessionId: string,
   deps: PlaybookFeedbackDeps = defaultDeps
 ): Promise<CollectReceiptResult> {
@@ -206,7 +249,7 @@ export async function collectPlaybookUseReceipt(
   }
 
   const existing = latestReceiptForSession(session.issueId, workerSessionId);
-  if (existing?.status === "collected") {
+  if (existing?.status === "collected" && existing.playbookIds.length > 0) {
     return { collected: true, receipt: existing, duplicate: true };
   }
 
@@ -247,7 +290,8 @@ export async function collectPlaybookUseReceipt(
     recordReceipt(session.issueId, workerSessionId, {
       ...base,
       status: "error",
-      error: "Agent Deck offline — receipt collection retryable on a later trigger",
+      error:
+        "Agent Deck offline — receipt collection resumes the next time issue reflection runs (a later completion trigger or an explicit reflection retry)",
     });
     return { collected: false, reason: "Agent Deck offline" };
   }
@@ -676,7 +720,8 @@ export async function reportDeckFailureSignals(
   if (!healthy) {
     recordStatus(issueId, {
       status: "failed",
-      reason: "Agent Deck offline — failure signals retryable on a later trigger",
+      reason:
+        "Agent Deck offline — failure signals resume the next time issue reflection runs (a later completion trigger or an explicit reflection retry)",
       pendingSignals: candidates.map((c) => c.sourceKey),
     });
     return { sent: [], skipped, error: "Agent Deck offline" };
@@ -696,6 +741,13 @@ export async function reportDeckFailureSignals(
     // key (embedded verbatim in the Deck-stored payload) instead of minting a
     // second report. A pending row without a sent row is retried, never duplicated
     // locally; a repeated send after that window carries the identical key.
+    //
+    // Residual risk: if the process dies after Deck ACCEPTED the report but before
+    // the sent row is written, the retry re-sends and Deck stores a duplicate —
+    // Deck does not dedupe on the embedded source key. True exactly-once needs a
+    // Deck-side idempotency key on propose_playbook_patch (follow-up against Deck,
+    // not Dealer); until then the identical key lets a human recognize the repeat
+    // as the same report.
     if (!pendingKeys.has(candidate.sourceKey)) {
       recordSignalIntent(issueId, candidate, { deckId, workerSessionIds, playbookIds });
       pendingKeys.add(candidate.sourceKey);

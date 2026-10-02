@@ -69,6 +69,7 @@ interface CallRecord {
 /** Default deps: healthy deck, correlation succeeds, signal_only succeeds. */
 function makeDeps(overrides: {
   fetches?: Array<{ playbook_id: string }>;
+  correlationData?: unknown;
   propose?: (args: Record<string, unknown>) => AuthorizedDeckCallResult<{ id: string }>;
   checkHealth?: ReflectDeps["checkHealth"];
 } = {}): { deps: ReflectDeps; calls: CallRecord[] } {
@@ -78,7 +79,7 @@ function makeDeps(overrides: {
     callTool: (async (opts: { toolName: string; arguments: Record<string, unknown> }) => {
       calls.push({ toolName: opts.toolName, args: opts.arguments });
       if (opts.toolName === DECK_CORRELATION_TOOL) {
-        return { ok: true, data: { fetches: overrides.fetches ?? [] } };
+        return { ok: true, data: overrides.correlationData ?? { fetches: overrides.fetches ?? [] } };
       }
       if (opts.toolName === "propose_playbook_patch") {
         if (opts.arguments.kind !== "signal_only") {
@@ -277,6 +278,36 @@ test("resolveReflectionInteractionAction rejects an invalid choice and already-r
   assert.equal(dismissed.ok, true);
   const alreadyResolved = resolveReflectionInteractionAction(parkedAction.id, "operator", "retry");
   assert.equal(alreadyResolved.ok, false);
+});
+
+test("reflect_status names a malformed correlation response instead of blaming an offline Deck", async () => {
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: DECK });
+  const issue = seedIssue(dev.id);
+  seedTerminalDeveloperSession(issue.id, dev);
+  const { deps } = makeDeps({ correlationData: { unexpected: "shape" } });
+
+  const result = await triggerIssueReflect(issue.id, deps);
+  assert.equal(result, "failed");
+  const statuses = listArtifactsForIssueByKind(issue.id, "reflect_status").map((a) =>
+    JSON.parse(a.contentJson!)
+  );
+  assert.ok(statuses.length > 0);
+  const text = statuses.map((s) => `${s.reason ?? ""} ${s.error ?? ""}`).join("\n");
+  assert.match(text, /malformed/i);
+  assert.doesNotMatch(text, /offline/i);
+});
+
+test("reflect_status still says offline when the receipt error really is a Deck outage", async () => {
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: DECK });
+  const issue = seedIssue(dev.id);
+  seedTerminalDeveloperSession(issue.id, dev);
+  const { deps } = makeDeps({ checkHealth: async () => false });
+
+  assert.equal(await triggerIssueReflect(issue.id, deps), "failed");
+  const statuses = listArtifactsForIssueByKind(issue.id, "reflect_status").map((a) =>
+    JSON.parse(a.contentJson!)
+  );
+  assert.ok(statuses.some((s) => /offline/i.test(`${s.reason ?? ""} ${s.error ?? ""}`)));
 });
 
 test("never calls propose_playbook_patch with kind:update and never writes Notes items", async () => {
