@@ -339,9 +339,24 @@ export interface SignalCandidate {
   sourceKey: string;
   humanActionId: string | null;
   failure: string;
-  /** Raw human-stated reason, kept separate so it lands in evidence.user_feedback_excerpt. */
+  /**
+   * Raw human-stated reason, kept separate so it lands in
+   * evidence.user_feedback_excerpt. Null (or blank) when no human stated a
+   * reason — buildSignalOnlyArgs then substitutes NO_HUMAN_FEEDBACK_EXCERPT,
+   * because Deck's propose_playbook_patch schema requires a non-empty
+   * user_feedback_excerpt on every signal_only report.
+   */
   userFeedback: string | null;
 }
+
+/**
+ * Explicit fallback excerpt when no human stated a reason (recurring blocking
+ * findings, blank retry reasons). Deck rejects a missing/blank
+ * user_feedback_excerpt, so a report must never omit it. Constant text keeps
+ * repeated sends byte-identical for crash-window idempotency.
+ */
+export const NO_HUMAN_FEEDBACK_EXCERPT =
+  "no human feedback — Dealer-observed failure (see failure_summary for observed evidence)";
 
 /**
  * Deck's `propose_playbook_patch` input schema (additionalProperties:false).
@@ -379,10 +394,17 @@ export function validateSignalOnlyArgs(args: Record<string, unknown>): string | 
   if (typeof evidence.failure_summary !== "string" || !evidence.failure_summary.trim()) {
     return "evidence.failure_summary must be a non-empty string";
   }
-  for (const key of ["user_feedback_excerpt", "corrected_output_hint"] as const) {
-    if (key in evidence && (typeof evidence[key] !== "string" || !evidence[key].trim())) {
-      return `evidence.${key} must be a non-empty string when present`;
-    }
+  // Deck's schema (shared PatchEvidenceContent) requires a non-empty
+  // user_feedback_excerpt on every report — recurring_blocking and blank-reason
+  // reports included. corrected_output_hint stays optional.
+  if (typeof evidence.user_feedback_excerpt !== "string" || !evidence.user_feedback_excerpt.trim()) {
+    return "evidence.user_feedback_excerpt must be a non-empty string";
+  }
+  if (
+    "corrected_output_hint" in evidence &&
+    (typeof evidence.corrected_output_hint !== "string" || !evidence.corrected_output_hint.trim())
+  ) {
+    return "evidence.corrected_output_hint must be a non-empty string when present";
   }
   if ("playbook_id" in args || "ops" in args) return "signal_only must not carry playbook_id or ops";
   return null;
@@ -410,6 +432,11 @@ export function buildSignalOnlyArgs(
   const sessionsLine = opts.workerSessionIds.length > 0 ? opts.workerSessionIds.join(", ") : "none";
   const playbooksLine =
     opts.playbookIds.length > 0 ? opts.playbookIds.join(", ") : "no observed playbook use";
+  // Deck requires user_feedback_excerpt on every report. Prefer the human's own
+  // words; otherwise the finding's rationale/title excerpt the candidate already
+  // selected; otherwise an explicit no-feedback line (never omitted, never blank).
+  const userFeedbackExcerpt =
+    candidate.userFeedback?.trim() ? candidate.userFeedback : NO_HUMAN_FEEDBACK_EXCERPT;
   return {
     kind: "signal_only",
     rationale:
@@ -423,7 +450,7 @@ export function buildSignalOnlyArgs(
         `Worker sessions: ${sessionsLine}\n` +
         `Playbooks observed in use: ${playbooksLine}\n` +
         `Source key: ${candidate.sourceKey}`,
-      ...(candidate.userFeedback ? { user_feedback_excerpt: candidate.userFeedback } : {}),
+      user_feedback_excerpt: userFeedbackExcerpt,
     },
   };
 }
@@ -492,13 +519,20 @@ function recurringBlockingCandidate(issueId: string): SignalCandidate | null {
   const lines = recurring.map(
     (f) => `- ${f.fingerprint} (rounds ${f.firstRound}–${f.lastRound}): ${excerpt(f.title, 200) ?? "(untitled)"}`
   );
+  // No human stated this failure — the closest thing to a feedback excerpt is the
+  // recurring finding's own rationale/title. When even that is blank the builder
+  // falls back to the explicit no-feedback line (Deck still requires the field).
+  const findingFeedback =
+    recurring
+      .map((f) => excerpt(f.rationale) ?? excerpt(f.title, 200))
+      .find((text): text is string => text !== null) ?? null;
   return {
     trigger: "recurring_blocking",
     sourceKey: signalSourceKey(issueId, "recurring_blocking", "issue"),
     humanActionId: null,
     failure:
       `${recurring.length} blocking finding(s) recurred across review rounds:\n${lines.join("\n")}`,
-    userFeedback: null,
+    userFeedback: findingFeedback,
   };
 }
 

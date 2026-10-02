@@ -35,6 +35,7 @@ const {
   validateSignalOnlyArgs,
   buildSignalOnlyArgs,
   DECK_CORRELATION_TOOL,
+  NO_HUMAN_FEEDBACK_EXCERPT,
 } = await import("./playbook-feedback.js");
 const { triggerIssueReflect } = await import("./reflect-trigger.js");
 
@@ -89,6 +90,53 @@ interface CallRecord {
   args: Record<string, unknown>;
 }
 
+/**
+ * Independent stand-in for Deck's real `propose_playbook_patch` input schema —
+ * built from Deck's actual contract (shared PatchEvidenceContent requires a
+ * NON-EMPTY user_feedback_excerpt on every report), deliberately NOT by calling
+ * Dealer's validateSignalOnlyArgs. If Dealer's validator ever drifts (e.g. treats
+ * the excerpt as optional), this fake still rejects the call exactly as a real
+ * Deck would, so the test fails instead of passing against its own assumption.
+ */
+function deckSchemaError(args: Record<string, unknown>): string | null {
+  const allowedTop = new Set([
+    "kind", "rationale", "evidence", "signal_ids", "supersedes", "ops", "playbook_id", "new_playbook",
+  ]);
+  for (const key of Object.keys(args)) {
+    if (!allowedTop.has(key)) return `unknown top-level field: ${key}`;
+  }
+  if (args.kind !== "signal_only") return `kind must be "signal_only"`;
+  if (typeof args.rationale !== "string" || !args.rationale.trim()) {
+    return "rationale must be a non-empty string";
+  }
+  const evidence =
+    typeof args.evidence === "object" && args.evidence !== null
+      ? (args.evidence as Record<string, unknown>)
+      : null;
+  if (!evidence) return "evidence must be an object";
+  for (const key of Object.keys(evidence)) {
+    if (key !== "failure_summary" && key !== "user_feedback_excerpt" && key !== "corrected_output_hint") {
+      return `unknown evidence field: ${key}`;
+    }
+  }
+  if (typeof evidence.failure_summary !== "string" || !evidence.failure_summary.trim()) {
+    return "evidence.failure_summary must be a non-empty string";
+  }
+  // Deck's PatchEvidenceContent: user_feedback_excerpt is z.string().min(1) —
+  // REQUIRED on every report, including recurring_blocking and blank reasons.
+  if (typeof evidence.user_feedback_excerpt !== "string" || !evidence.user_feedback_excerpt.trim()) {
+    return "evidence.user_feedback_excerpt must be a non-empty string";
+  }
+  if ("corrected_output_hint" in evidence) {
+    const hint = evidence.corrected_output_hint;
+    if (typeof hint !== "string" || !hint.trim()) {
+      return "evidence.corrected_output_hint must be a non-empty string when present";
+    }
+  }
+  if ("playbook_id" in args || "ops" in args) return "signal_only must not carry playbook_id or ops";
+  return null;
+}
+
 function makeDeps(
   opts: {
     fetches?: Array<{ playbook_id: string; first_fetched_at?: string; last_fetched_at?: string }>;
@@ -114,9 +162,10 @@ function makeDeps(
         };
       }
       if (call.toolName === "propose_playbook_patch") {
-        // Strict stand-in for Deck's schema (additionalProperties:false): reject
-        // anything the real Deck would reject, so tests prove schema compliance.
-        const schemaError = validateSignalOnlyArgs(call.arguments);
+        // Strict stand-in for Deck's schema (additionalProperties:false), checked
+        // against Deck's own contract above — reject anything the real Deck would
+        // reject, so tests prove schema compliance against an independent oracle.
+        const schemaError = deckSchemaError(call.arguments);
         if (schemaError) {
           return { ok: false, kind: "infra_failure", reason: `Deck rejected signal payload: ${schemaError}` };
         }
@@ -146,8 +195,8 @@ function pendingSignalsFor(issueId: string) {
   return signalsFor(issueId).filter((s) => s.status === "pending" || s.status === "sending");
 }
 
-function evidenceOf(args: Record<string, unknown>): { failure_summary: string; user_feedback_excerpt?: string } {
-  return args.evidence as { failure_summary: string; user_feedback_excerpt?: string };
+function evidenceOf(args: Record<string, unknown>): { failure_summary: string; user_feedback_excerpt: string } {
+  return args.evidence as { failure_summary: string; user_feedback_excerpt: string };
 }
 
 test("every new worker session persists a unique opaque correlation ID before spawn", () => {
@@ -265,8 +314,10 @@ test("human retry feedback creates one idempotent signal_only report with refs a
   assert.equal(proposes.length, 1);
   const args = proposes[0]!.args;
   // Only signal_only from this path — never an update proposal, never Notes ops —
-  // and only Deck-schema fields (the strict fake above already rejected the call
-  // otherwise, proving a real Deck would accept it).
+  // and only Deck-schema fields. The independent Deck-schema fake above already
+  // accepted the call (proving a real Deck would), and Dealer's own validator
+  // must agree with that independent oracle.
+  assert.equal(deckSchemaError(args), null);
   assert.equal(validateSignalOnlyArgs(args), null);
   assert.equal(args.kind, "signal_only");
   assert.equal("playbook_id" in args, false);
@@ -321,6 +372,7 @@ test("attempts exhaustion creates one signal; a retry choice is reported once, n
   assert.equal(result.sent.length, 1);
   assert.equal(result.sent[0]!.trigger, "attempts_exhausted");
   const args = calls.filter((c) => c.toolName === "propose_playbook_patch")[0]!.args;
+  assert.equal(deckSchemaError(args), null);
   assert.equal(validateSignalOnlyArgs(args), null);
   assert.equal(args.kind, "signal_only");
   const exhaustedEvidence = evidenceOf(args);
@@ -370,16 +422,55 @@ test("a recurring blocking finding creates one signal; non-blocking recurrence d
   assert.equal(result.sent.length, 1);
   assert.equal(result.sent[0]!.trigger, "recurring_blocking");
   const args = calls.filter((c) => c.toolName === "propose_playbook_patch")[0]!.args;
+  // The recurring_blocking report carries no human reason, yet Deck requires
+  // user_feedback_excerpt — both the independent Deck oracle and Dealer's
+  // validator must accept what the builder produced.
+  assert.equal(deckSchemaError(args), null);
   assert.equal(validateSignalOnlyArgs(args), null);
   assert.equal(args.kind, "signal_only");
   const recurringEvidence = evidenceOf(args);
   assert.match(recurringEvidence.failure_summary, /missing-null-check/);
   assert.doesNotMatch(recurringEvidence.failure_summary, /typo-in-comment/);
   assert.ok(recurringEvidence.failure_summary.includes("no observed playbook use"));
+  // The excerpt falls back to the recurring finding's own rationale.
+  assert.ok(recurringEvidence.user_feedback_excerpt.trim(), "recurring report carries a non-empty excerpt");
 
   const restart = await reportDeckFailureSignals(issue.id, deps);
   assert.deepStrictEqual(restart.sent, []);
   assert.equal(sentSignalsFor(issue.id).length, 1);
+});
+
+test("blank human reasons still produce Deck-acceptable signals with an explicit excerpt", async () => {
+  const agent = seedAgent();
+  const issue = seedIssue(agent.id);
+  seedTerminalSession(issue.id, agent);
+  // Whitespace-only reason: excerpt() degrades to null, so the builder must
+  // substitute the explicit no-feedback line — a real Deck rejects the omission.
+  const repair = createHumanAction({
+    issueId: issue.id, actionType: "final_review", reason: "   ", question: "Repair?",
+  });
+  resolveHumanAction(repair.id, "operator", { choice: "repair" });
+  const exhausted = createHumanAction({
+    issueId: issue.id, actionType: "attempts_exhausted", reason: "", question: "Retry?",
+  });
+  const { deps, calls } = makeDeps({ fetches: [] });
+
+  const result = await reportDeckFailureSignals(issue.id, deps);
+  // The attempts_exhausted action is still pending, so both triggers fire.
+  assert.equal(result.sent.length, 2);
+  const proposes = calls.filter((c) => c.toolName === "propose_playbook_patch");
+  assert.equal(proposes.length, 2);
+  for (const call of proposes) {
+    // Accepted by the independent Deck-schema oracle (not just Dealer's validator).
+    assert.equal(deckSchemaError(call.args), null);
+    assert.equal(validateSignalOnlyArgs(call.args), null);
+    assert.equal(evidenceOf(call.args).user_feedback_excerpt, NO_HUMAN_FEEDBACK_EXCERPT);
+  }
+
+  // Idempotent across restart: no duplicates.
+  const restart = await reportDeckFailureSignals(issue.id, deps);
+  assert.deepStrictEqual(restart.sent, []);
+  assert.equal(calls.filter((c) => c.toolName === "propose_playbook_patch").length, 2);
 });
 
 test("all three triggers together send three signal_only reports, never an update", async () => {
@@ -409,6 +500,7 @@ test("all three triggers together send three signal_only reports, never an updat
   assert.equal(proposes.length, 3);
   for (const call of proposes) {
     assert.equal(call.args.kind, "signal_only");
+    assert.equal(deckSchemaError(call.args), null);
     assert.equal(validateSignalOnlyArgs(call.args), null);
     assert.equal("ops" in call.args, false);
     assert.equal("playbook_id" in call.args, false);
@@ -505,6 +597,7 @@ test("buildSignalOnlyArgs emits only Deck-schema fields with refs in Deck-stored
     },
     { issueId: "issue-1", workerSessionIds: ["ws-1"], playbookIds: ["pb-a", "pb-b"] }
   );
+  assert.equal(deckSchemaError(args), null);
   assert.equal(validateSignalOnlyArgs(args), null);
   assert.ok((args.rationale as string).includes("dealer:issue-1:human_retry:act-1"));
   const evidence = evidenceOf(args);
@@ -513,7 +606,9 @@ test("buildSignalOnlyArgs emits only Deck-schema fields with refs in Deck-stored
   assert.ok(evidence.failure_summary.includes("pb-a") && evidence.failure_summary.includes("pb-b"));
   assert.equal(evidence.user_feedback_excerpt, "broken");
 
-  // No observed use is explicit, never a legacy fallback.
+  // No observed use is explicit, never a legacy fallback — and with no human
+  // reason the builder still emits the explicit no-feedback excerpt, because
+  // Deck rejects a missing user_feedback_excerpt.
   const noneArgs = buildSignalOnlyArgs(
     {
       trigger: "attempts_exhausted" as "attempts_exhausted",
@@ -524,9 +619,35 @@ test("buildSignalOnlyArgs emits only Deck-schema fields with refs in Deck-stored
     },
     { issueId: "issue-1", workerSessionIds: [], playbookIds: [] }
   );
+  assert.equal(deckSchemaError(noneArgs), null);
   assert.equal(validateSignalOnlyArgs(noneArgs), null);
   assert.match(evidenceOf(noneArgs).failure_summary, /no observed playbook use/);
-  assert.equal("user_feedback_excerpt" in evidenceOf(noneArgs), false);
+  assert.equal(evidenceOf(noneArgs).user_feedback_excerpt, NO_HUMAN_FEEDBACK_EXCERPT);
+
+  // A blank/whitespace-only reason degrades to the same explicit fallback.
+  const blankArgs = buildSignalOnlyArgs(
+    {
+      trigger: "human_retry" as "human_retry",
+      sourceKey: "dealer:issue-1:human_retry:act-3",
+      humanActionId: "act-3",
+      failure: "Human repair on final_review (action act-3).",
+      userFeedback: "   ",
+    },
+    { issueId: "issue-1", workerSessionIds: ["ws-1"], playbookIds: [] }
+  );
+  assert.equal(deckSchemaError(blankArgs), null);
+  assert.equal(validateSignalOnlyArgs(blankArgs), null);
+  assert.equal(evidenceOf(blankArgs).user_feedback_excerpt, NO_HUMAN_FEEDBACK_EXCERPT);
+
+  // Dealer's validator agrees with Deck's contract: a missing excerpt is rejected.
+  assert.match(
+    validateSignalOnlyArgs({
+      kind: "signal_only",
+      rationale: "r",
+      evidence: { failure_summary: "f" },
+    })!,
+    /user_feedback_excerpt/
+  );
 
   // The validator rejects every Dealer-only smuggled field a real Deck would drop.
   for (const extra of ["source_key", "trigger", "issue_ref", "failure", "playbook_ids", "observed_playbook_use"]) {
