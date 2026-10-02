@@ -39,6 +39,8 @@ export const ExecutionFailureCode = z.enum([
   "provider_capacity_rate_limit",
   "agent_cli_crash",
   "tool_test_timeout",
+  // NOT-307: an idle-watchdog kill, not an ambiguous timeout (docs/EXECUTION_ANALYSIS.md §7).
+  "muse_no_progress",
   "coordinator_crash",
   "validation_failure",
   "publish_git_failure",

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { GitHubRepoInput } from "./github-repo.js";
+import { ExecutionContractV1 } from "./execution-contract.js";
 
 export const IssueStatus = z.enum([
   "ready",
@@ -29,6 +30,13 @@ export const Issue = z.object({
   title: z.string(),
   description: z.string().nullable(),
   acceptanceCriteria: z.string().nullable(),
+  /**
+   * NOT-306: compiled execution contract derived from the ticket description
+   * (canonical `##` headings). Derived data — the description stays the source
+   * of truth — null for legacy/contract-free issues. Optional so previously
+   * stored rows and existing fixtures parse unchanged.
+   */
+  executionContract: ExecutionContractV1.nullable().optional(),
   /**
    * Portable GitHub identity (`github.com/owner/repo`) for new issues (NOT-149).
    * Legacy rows may still hold a local filesystem path until explicitly migrated —

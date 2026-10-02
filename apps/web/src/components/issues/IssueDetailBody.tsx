@@ -18,6 +18,7 @@ import {
 } from "../../api";
 import IssueStatusBadge from "./IssueStatusBadge";
 import IssueConfigurationSection from "./IssueConfiguration";
+import ExecutionContractSummary from "./ExecutionContractSummary";
 import IssueTimeline from "./IssueTimeline";
 import ExecutionAnalysisSection from "./ExecutionAnalysisSection";
 import HumanActionCard from "./HumanActionCard";
@@ -446,6 +447,11 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
           onSave={(repo, dev, rev) => void saveConfig(repo, dev, rev)}
           onCancel={() => setConfigEditing(false)}
         />
+
+        {/* NOT-306: frozen execution contract, read-only — the ticket
+            description stays the only authoring surface, so this renders no
+            inputs. Absent for legacy/contract-free issues. */}
+        {issue.executionContract && <ExecutionContractSummary contract={issue.executionContract} />}
 
         {/* Workflow rail: current node/owner is above; next allowed action here. */}
         <div className="mb-4 p-3 rounded border border-white/10 bg-panel-elevated/40 flex items-start justify-between gap-3">

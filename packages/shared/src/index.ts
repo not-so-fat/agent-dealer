@@ -25,6 +25,7 @@ export * from "./findings.js";
 export * from "./usage-events.js";
 export * from "./runtime-availability.js";
 export * from "./runtime-capacity.js";
+export * from "./execution-contract.js";
 export * from "./queue-entries.js";
 export * from "./execution-analysis.js";
 export * from "./execution-report.js";

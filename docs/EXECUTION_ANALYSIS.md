@@ -148,7 +148,7 @@ Consequences for this contract:
 
 ### Codes
 
-`authentication_configuration`, `provider_capacity_rate_limit`, `agent_cli_crash`, `tool_test_timeout`, `coordinator_crash`, `validation_failure`, `publish_git_failure`, `agent_deck_unavailable`, `host_sleep_liveness`, `unknown`.
+`authentication_configuration`, `provider_capacity_rate_limit`, `agent_cli_crash`, `tool_test_timeout`, `muse_no_progress`, `coordinator_crash`, `validation_failure`, `publish_git_failure`, `agent_deck_unavailable`, `host_sleep_liveness`, `unknown`.
 
 ### Classification record
 
@@ -170,7 +170,8 @@ confidence:  "high" | "medium" | "low"
   - `infrastructure` — transport, auth, provider, coordinator, Deck, and publish failures: the work may have been fine.
   - `unknown` — ambiguous evidence.
 - **Ambiguous timeouts remain `unknown`.** A timeout is `tool_test_timeout` (domain `task`) only when evidence shows a tool/test was in flight; a timeout with no such evidence stays `unknown` (domain `unknown`). Do not guess.
-- Suggested default domain per code: `validation_failure` → `task`; `tool_test_timeout` → `task` when a tool/test was in flight; `authentication_configuration`, `provider_capacity_rate_limit`, `agent_cli_crash`, `coordinator_crash`, `publish_git_failure`, `agent_deck_unavailable`, `host_sleep_liveness` → `infrastructure`; `unknown` → `unknown`. Evidence may override with lower confidence.
+- **Idle-watchdog kills are `muse_no_progress`.** A session the idle watchdog killed (no stdout bytes and no session-log growth for the bound) is `muse_no_progress` (domain `infrastructure`, confidence `high`) — never `unknown`, and never demoted to `tool_test_timeout` by a tool that happened to be in flight when the stall was detected. The raw reason carries the idle minutes and the last tool name.
+- Suggested default domain per code: `validation_failure` → `task`; `tool_test_timeout` → `task` when a tool/test was in flight; `authentication_configuration`, `provider_capacity_rate_limit`, `agent_cli_crash`, `muse_no_progress`, `coordinator_crash`, `publish_git_failure`, `agent_deck_unavailable`, `host_sleep_liveness` → `infrastructure`; `unknown` → `unknown`. Evidence may override with lower confidence.
 - Classification is a derived view; the raw reason text stays as recorded and is referenced, not replaced.
 
 ## 8. Backfill and missing data

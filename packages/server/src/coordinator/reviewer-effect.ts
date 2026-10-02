@@ -246,6 +246,11 @@ function renderReviewBody(result: ReviewerResult, marker: string): string {
     `**Evidence assessment**`,
     result.evidenceAssessment,
   ];
+  // NOT-306: the exit-predicate verdict rides with the review when the task
+  // carried an execution contract; legacy reviews simply omit the section.
+  if (result.exitPredicateAssessment?.trim()) {
+    lines.push(``, `**Exit predicate assessment**`, result.exitPredicateAssessment);
+  }
   if (result.findings.length) {
     lines.push(``, `**Findings**`);
     for (const f of result.findings) {

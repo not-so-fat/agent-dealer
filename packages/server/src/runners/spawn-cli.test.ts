@@ -276,3 +276,139 @@ test("spawnCli stdin close on an instantly-exiting child still settles", async (
   assert.equal(result.exitCode, 3);
   assert.equal(result.timedOut, false);
 });
+
+// NOT-307: a child that prints nothing for longer than idleTimeoutMs is killed like a
+// wall-clock timeout (timedOut true) with the idle flag set — well before timeoutMs.
+// Fake timers: the child is real (only the parent's clock is mocked), so the SIGTERM
+// kill and the close event need real event-loop turns between mock advances.
+test("spawnCli kills a silent child after idleTimeoutMs, well before timeoutMs", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  try {
+    const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+    const { cmd, args } = nodeChild("setInterval(() => {}, 1000);");
+    const promise = spawnCli("test-run-idle-kill", cmd, args, process.cwd(), {
+      logPath,
+      timeoutMs: 60_000,
+      idleTimeoutMs: 250,
+    });
+    const flushIo = async (rounds: number) => {
+      for (let i = 0; i < rounds; i++) await new Promise((r) => setImmediate(r));
+    };
+    t.mock.timers.tick(1000); // the 250ms idle bound fires; the 60s wall clock does not
+    await flushIo(50); // let the SIGTERM kill land and the close event arrive
+    t.mock.timers.tick(1000); // the finish(124) 500ms delay after the kill
+    const result = await promise;
+    assert.equal(result.timedOut, true, "an idle kill reads as a timeout downstream");
+    assert.equal(result.idleTimedOut, true);
+    assert.equal(result.transcript, "");
+    assert.equal(result.firstOutputMs, null, "a silent child never produced output");
+    assert.ok(
+      typeof result.idleForMs === "number" && result.idleForMs >= 250,
+      `idleForMs reports the observed silence, got ${result.idleForMs}`
+    );
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+// NOT-307: a progressSource that keeps reporting fresh activity holds the watchdog off.
+// The child prints once then idles forever; after forty idle windows of mock time it must
+// still be alive (the abort below ends it — an idle kill would have beaten the abort).
+test("spawnCli does not idle-kill while the progress source reports activity", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  try {
+    const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+    const { cmd, args } = nodeChild("console.log('started'); setInterval(() => {}, 1000);");
+    const controller = new AbortController();
+    const promise = spawnCli("test-run-idle-source", cmd, args, process.cwd(), {
+      logPath,
+      timeoutMs: 3_600_000,
+      idleTimeoutMs: 250,
+      progressSource: () => Date.now(),
+      signal: controller.signal,
+    });
+    // Real-time wait for the child to actually print (mock-safe: no timer calls) —
+    // otherwise the abort below can race child startup and prove nothing.
+    for (let i = 0; i < 20000; i++) {
+      try {
+        if (fs.readFileSync(logPath, "utf8").includes("started")) break;
+      } catch {
+        // The log file is created asynchronously by the write stream — keep polling.
+      }
+      if (i === 19999) throw new Error("child never reported that it had started");
+      await new Promise((r) => setImmediate(r));
+    }
+    for (let i = 0; i < 40; i++) {
+      t.mock.timers.tick(250);
+      await new Promise((r) => setImmediate(r));
+    }
+    controller.abort();
+    const result = await promise;
+    assert.equal(result.timedOut, false, "the abort ends it, not any timeout");
+    assert.equal(result.idleTimedOut, false, "forty idle windows passed with no idle kill");
+    assert.match(result.transcript, /started/);
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+// NOT-307: frequent stdout (faster than idleTimeoutMs, real timers) is progress — the
+// child is never killed and the timing fields are populated.
+test("spawnCli does not idle-kill a child that emits output more often than idleTimeoutMs", async () => {
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+  const { cmd, args } = nodeChild(
+    "let i = 0; const t = setInterval(() => { console.log('tick-' + i++); if (i >= 8) clearInterval(t); }, 50);"
+  );
+  const result = await spawnCli("test-run-idle-chatty", cmd, args, process.cwd(), {
+    logPath,
+    timeoutMs: 30_000,
+    idleTimeoutMs: 500,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.idleTimedOut, false);
+  assert.equal(result.idleForMs, null);
+  assert.match(result.transcript, /tick-7/);
+  assert.ok(
+    typeof result.firstOutputMs === "number" && result.firstOutputMs >= 0,
+    `firstOutputMs is measured, got ${result.firstOutputMs}`
+  );
+  assert.ok(result.lastActivityAt !== null, "lastActivityAt is recorded");
+});
+
+// NOT-307: the line hook reports each stdout line with a non-decreasing arrival time —
+// the arrival stamps muse-spawn joins back to stream envelopes for per-event `ts`.
+test("spawnCli onStdoutLine reports every line with arrival times", async () => {
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+  const { cmd, args } = nodeChild(
+    "console.log('line-one'); setTimeout(() => console.log('line-two'), 120);"
+  );
+  const seen: Array<{ line: string; atMs: number }> = [];
+  const startedAt = Date.now();
+  const result = await spawnCli("test-run-lines", cmd, args, process.cwd(), {
+    logPath,
+    timeoutMs: 10_000,
+    onStdoutLine: (line, atMs) => seen.push({ line, atMs }),
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(
+    seen.map((s) => s.line),
+    ["line-one", "line-two"]
+  );
+  assert.ok(seen[0].atMs >= startedAt && seen[0].atMs <= Date.now());
+  assert.ok(seen[1].atMs >= seen[0].atMs, "arrival times never run backwards");
+  assert.ok(seen[1].atMs - seen[0].atMs >= 50, `the 120ms gap is visible, got ${seen[1].atMs - seen[0].atMs}ms`);
+});
+
+// NOT-307: with idleTimeoutMs unset the watchdog is disabled — a silent child runs to
+// the wall clock exactly as before, and idleTimedOut reads false.
+test("spawnCli without idleTimeoutMs times out on the wall clock with idleTimedOut false", async () => {
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+  const { cmd, args } = nodeChild("setInterval(() => {}, 1000);");
+  const result = await spawnCli("test-run-no-idle", cmd, args, process.cwd(), {
+    logPath,
+    timeoutMs: 400,
+  });
+  assert.equal(result.timedOut, true);
+  assert.equal(result.idleTimedOut, false);
+});

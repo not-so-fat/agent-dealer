@@ -128,25 +128,18 @@ test("shell chrome preserves focus and responsive wrapping affordances", () => {
   assert.ok(html.includes("focus-visible:"), "wordmark link shows a focus ring");
 });
 
-// NOT-287: the shell carries the one-line Deck/Dealer mapping and stays
-// legible at desktop and narrow widths.
-test("shell subtitle maps Agent Deck to Agent Dealer in one line", () => {
+test("shell omits the product mapping subtitle", () => {
   const html = render();
   assert.ok(
-    html.includes("Agent Deck carries the method; Agent Dealer runs the issue queue."),
-    "subtitle shows the exact mapping line"
-  );
-  assert.ok(
-    !html.includes("One issue, one durable coordination record"),
-    "previous subtitle is replaced, not duplicated"
+    !html.includes("Agent Deck carries the method; Agent Dealer runs the issue queue."),
+    "top bar no longer includes the mapping blurb"
   );
 });
 
-test("mapping line stays legible at narrow widths", () => {
+test("shell header uses compact vertical padding", () => {
   const html = render();
-  assert.ok(html.includes("flex-wrap"), "header still wraps instead of clipping");
-  const sub = html.match(/<p class="([^"]*)">Agent Deck carries the method/);
-  assert.ok(sub, "subtitle renders as visible text");
-  assert.ok(!sub[1].includes("truncate"), "mapping line is never truncated");
-  assert.ok(!sub[1].includes("whitespace-nowrap"), "mapping line wraps on narrow screens");
+  const header = html.match(/<header class="([^"]*)"/);
+  assert.ok(header, "shell header renders");
+  assert.ok(header[1].split(/\s+/).includes("py-3"), "header uses compact vertical padding");
+  assert.ok(!header[1].split(/\s+/).includes("py-4"), "previous taller padding is removed");
 });

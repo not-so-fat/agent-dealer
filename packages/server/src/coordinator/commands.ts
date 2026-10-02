@@ -8,6 +8,7 @@
 // worker whose structured result comes back into applyCompletion.
 import fs from "node:fs";
 import type {
+  ExecutionContractV1,
   HumanAction,
   HumanActionType,
   Issue,
@@ -16,7 +17,7 @@ import type {
   WorkflowInstance,
   WorkflowEventType,
 } from "@agent-dealer/shared";
-import { canTransitionIssue } from "@agent-dealer/shared";
+import { canTransitionIssue, tryCompileContract } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 import {
   getIssue,
@@ -138,6 +139,13 @@ export interface TaskSnapshotContent {
   repo: string;
   baseBranch: string;
   workflowVersion: string;
+  /**
+   * NOT-306: the execution contract frozen at workflow start, alongside the
+   * source description it was compiled from. Later source edits never alter an
+   * active workflow — only an allowed parked re-freeze (NOT-185) writes a new
+   * snapshot. Null for legacy/contract-free issues.
+   */
+  executionContract: ExecutionContractV1 | null;
 }
 
 /** Reads the frozen snapshot back; falls back to live issue fields for an item queued before NOT-61. */
@@ -145,7 +153,13 @@ export function getTaskSnapshot(issue: Issue): TaskSnapshotContent {
   const artifact = latestIssueArtifact(issue.id, TASK_SNAPSHOT_ARTIFACT_KIND);
   if (artifact?.contentJson) {
     try {
-      return JSON.parse(artifact.contentJson) as TaskSnapshotContent;
+      const parsed = JSON.parse(artifact.contentJson) as TaskSnapshotContent;
+      // Snapshots frozen before NOT-306 carry no contract — derive it from the
+      // frozen source description so old workflows still render what they ran.
+      if (parsed.executionContract === undefined) {
+        return { ...parsed, executionContract: tryCompileContract(parsed.description) };
+      }
+      return parsed;
     } catch {
       // fall through to the live-field fallback below
     }
@@ -157,6 +171,7 @@ export function getTaskSnapshot(issue: Issue): TaskSnapshotContent {
     repo: issue.repo,
     baseBranch: issue.baseBranch,
     workflowVersion: WORKFLOW_VERSION,
+    executionContract: tryCompileContract(issue.description),
   };
 }
 
@@ -173,13 +188,22 @@ export function canEditParkedIssue(issue: Issue): boolean {
   return !listWorkItemsForIssue(issue.id).some((w) => w.status === "pending" || w.status === "leased");
 }
 
-/** Re-freezes the snapshot when the operator edited title/description/criteria; returns the changed fields (empty = no-op). */
+/**
+ * Re-freezes the snapshot when the operator edited title/description/criteria
+ * (or the contract compiled from the description); returns the changed fields
+ * (empty = no-op). Source and compiled contract always re-freeze atomically —
+ * one artifact write carries both, so they can never diverge.
+ */
 function refreshTaskSnapshotIfEdited(issue: Issue): string[] {
   const frozen = getTaskSnapshot(issue);
+  const liveContract = tryCompileContract(issue.description);
   const changed: string[] = [];
   if (frozen.title !== issue.title) changed.push("title");
   if (frozen.description !== (issue.description ?? "")) changed.push("description");
   if (frozen.acceptanceCriteria !== (issue.acceptanceCriteria ?? "")) changed.push("acceptanceCriteria");
+  if (JSON.stringify(frozen.executionContract ?? null) !== JSON.stringify(liveContract ?? null)) {
+    changed.push("executionContract");
+  }
   if (changed.length > 0) freezeTaskSnapshot(issue);
   return changed;
 }
@@ -196,6 +220,7 @@ function freezeTaskSnapshot(issue: Issue): void {
       repo: issue.repo,
       baseBranch: issue.baseBranch,
       workflowVersion: WORKFLOW_VERSION,
+      executionContract: tryCompileContract(issue.description),
     } satisfies TaskSnapshotContent,
   });
 }
