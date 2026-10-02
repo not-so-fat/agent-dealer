@@ -207,6 +207,25 @@ test("a failed base fetch defers instead of spending an infra attempt (NOT-197)"
   }
 });
 
+test("pending CI defers instead of spending an infra attempt (NOT-311)", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "checks_pending",
+    reason: "Waiting for CI (running) - no attempt spent",
+    branch: "issue-1",
+    prNumber: 7,
+    headSha: "abc123",
+    waitStartedAt: new Date(0).toISOString(),
+  };
+  // Even with the infra budget already exhausted it waits — the session ended
+  // cleanly, so there is no failure to charge and no review handoff to make.
+  for (const limits of [INFRA_ATTEMPTS_LEFT, INFRA_AT_LIMIT]) {
+    assert.deepStrictEqual(routeDeveloperOutcome(outcome, limits), {
+      next: "defer_work",
+      reason: "Waiting for CI (running) - no attempt spent",
+    });
+  }
+});
+
 test("adapter failure after push retries publish only (no full developer session)", () => {
   const outcome: DeveloperOutcome = {
     kind: "adapter_failure",

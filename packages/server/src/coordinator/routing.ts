@@ -42,6 +42,18 @@ export type DeveloperOutcome =
    * The worktree is left as it was (`path`) and `logPath` points at the normalized session log. */
   | { kind: "muse_cron_used"; reason: string; path?: string; logPath?: string }
   | { kind: "checks_failed"; details?: string }
+  /** NOT-311: CI still queued/running (or not yet registered) at the poll timeout.
+   * The developer session ended cleanly, so this never spends an infra attempt — the
+   * item waits on backoff and re-polls. `waitStartedAt` is the first poll's start,
+   * anchoring the overall wait ceiling across deferrals. */
+  | {
+      kind: "checks_pending";
+      reason: string;
+      branch: string;
+      prNumber: number;
+      headSha: string;
+      waitStartedAt: string;
+    }
   /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll.
    * NOT-147: `commitsAhead` (when known) feeds the empty-tip no-progress gate; optional
    * worktree/log pointers make the human escalation actionable. */
@@ -289,6 +301,11 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
     case "base_fetch_failed":
       // NOT-197: a hard-down network is not retryable on the infra-attempt timescale, and
       // nothing was spawned, so there is no attempt to charge. Wait for the network instead.
+      return { next: "defer_work", reason: outcome.reason };
+    case "checks_pending":
+      // NOT-311: slow or not-yet-registered CI is not a developer failure — the
+      // session ended cleanly with a pushed branch and an open PR. Wait on backoff
+      // and re-poll; the deferral path (not this route) enforces the wait ceiling.
       return { next: "defer_work", reason: outcome.reason };
   }
 }

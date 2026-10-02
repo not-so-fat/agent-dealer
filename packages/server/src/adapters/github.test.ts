@@ -5,6 +5,9 @@ import {
   parsePrView,
   summarizeChecks,
   pollPrChecks,
+  pollPrChecksDetailed,
+  baseRefHasPullRequestWorkflow,
+  workflowHasPullRequestTrigger,
   createGithubAdapter,
   fetchChecksFailureEvidence,
   sanitizeCiText,
@@ -250,6 +253,97 @@ test("pollPrChecks bails out as timeout immediately when the lease signal is alr
     signal: controller.signal,
   });
   assert.equal(result, "timeout");
+});
+
+test("NOT-311: pollPrChecksDetailed reports the last snapshot so a timeout can tell pending from abort", async () => {
+  const pending = await pollPrChecksDetailed(fakeAdapter(["pending", "pending", "pending", "pending"]), {
+    cwd: "/x",
+    timeoutMs: 20,
+    intervalMs: 10,
+  });
+  assert.deepEqual(pending, { result: "timeout", lastSnapshot: "pending", aborted: false });
+
+  const controller = new AbortController();
+  controller.abort();
+  const aborted = await pollPrChecksDetailed(fakeAdapter(["pending"]), {
+    cwd: "/x",
+    timeoutMs: 1000,
+    intervalMs: 5,
+    signal: controller.signal,
+  });
+  assert.deepEqual(aborted, { result: "timeout", lastSnapshot: null, aborted: true });
+
+  const none = await pollPrChecksDetailed(fakeAdapter(["none", "none"]), { cwd: "/x", timeoutMs: 1000, intervalMs: 5 });
+  assert.deepEqual(none, { result: "none", lastSnapshot: "none", aborted: false });
+
+  const incompleteNoneStreak = await pollPrChecksDetailed(fakeAdapter(["none"]), {
+    cwd: "/x",
+    timeoutMs: 0,
+    intervalMs: 10,
+  });
+  assert.deepEqual(incompleteNoneStreak, { result: "timeout", lastSnapshot: "none", aborted: false });
+});
+
+test("NOT-311: workflowHasPullRequestTrigger matches inline, list, and block on: forms", () => {
+  assert.equal(workflowHasPullRequestTrigger("on: pull_request\njobs:\n  x:\n    runs-on: ubuntu-latest\n"), true);
+  assert.equal(workflowHasPullRequestTrigger("on: [push, pull_request]\n"), true);
+  assert.equal(workflowHasPullRequestTrigger("on:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n"), true);
+  assert.equal(workflowHasPullRequestTrigger("on:\n  push:\n    branches: [main]\n"), false);
+  assert.equal(workflowHasPullRequestTrigger("on: push\n"), false);
+  assert.equal(workflowHasPullRequestTrigger("on:\n  schedule:\n    - cron: '0 0 * * *'\n"), false);
+  assert.equal(workflowHasPullRequestTrigger("jobs:\n  x:\n    runs-on: ubuntu-latest\n"), false);
+  // A pull_request mention outside `on:` (job name) must not qualify.
+  assert.equal(
+    workflowHasPullRequestTrigger("on: push\njobs:\n  pull_request_preview:\n    runs-on: ubuntu-latest\n"),
+    false
+  );
+});
+
+test("NOT-311: baseRefHasPullRequestWorkflow reads the base ref tree, false without workflows, null on unknown ref", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const setup = (files: Record<string, string>): { repo: string; remote: string } => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-gh-wf-repo-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+    git("init", "-q", "-b", "main");
+    git("config", "user.email", "test@example.com");
+    git("config", "user.name", "Test");
+    for (const [rel, content] of Object.entries(files)) {
+      fs.mkdirSync(path.join(repo, path.dirname(rel)), { recursive: true });
+      fs.writeFileSync(path.join(repo, rel), content);
+    }
+    git("add", ".");
+    git("commit", "-q", "-m", "init");
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-gh-wf-remote-"));
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", remote]);
+    git("remote", "add", "origin", remote);
+    git("push", "-q", "origin", "main");
+    git("fetch", "-q", "origin");
+    return { repo, remote };
+  };
+
+  const withCi = setup({
+    "README.md": "hi\n",
+    ".github/workflows/ci.yml": "name: ci\non:\n  pull_request:\n    branches: [main]\njobs:\n  x:\n    runs-on: ubuntu-latest\n",
+  });
+  const pushOnly = setup({
+    "README.md": "hi\n",
+    ".github/workflows/nightly.yml": "name: nightly\non:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  x:\n    runs-on: ubuntu-latest\n",
+  });
+  const bare = setup({ "README.md": "hi\n" });
+  try {
+    assert.equal(await baseRefHasPullRequestWorkflow(withCi.repo, "main"), true);
+    assert.equal(await baseRefHasPullRequestWorkflow(pushOnly.repo, "main"), false);
+    assert.equal(await baseRefHasPullRequestWorkflow(bare.repo, "main"), false);
+    assert.equal(await baseRefHasPullRequestWorkflow(bare.repo, "no-such-branch"), null);
+  } finally {
+    for (const { repo, remote } of [withCi, pushOnly, bare]) {
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(remote, { recursive: true, force: true });
+    }
+  }
 });
 
 // --- NOT-252: terminal checks_failed enrichment ---
