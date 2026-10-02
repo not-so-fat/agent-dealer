@@ -720,6 +720,7 @@ export async function runDeveloperEffect(
     publishOnly?: boolean;
     branch?: string;
     scopeDecisionNote?: string | null;
+    conflictRepair?: { baseBranch?: unknown; branch?: unknown; files?: unknown } | null;
   } = {};
   try {
     if (workItem.payloadJson) payload = JSON.parse(workItem.payloadJson);
@@ -1013,6 +1014,23 @@ export async function runDeveloperEffect(
       typeof payload.scopeDecisionNote === "string" && payload.scopeDecisionNote.trim()
         ? payload.scopeDecisionNote.trim()
         : undefined;
+    // NOT-310: the conflict directive rides only the work item queued by the merge
+    // path — exactly this round reads it; nothing is re-read from the DB. Shaped
+    // defensively: a malformed directive renders nothing rather than breaking the
+    // prompt (conflictRepairSection also guards on empty base/branch).
+    const conflictRepair =
+      payload.conflictRepair &&
+      typeof payload.conflictRepair === "object" &&
+      typeof payload.conflictRepair.baseBranch === "string" &&
+      typeof payload.conflictRepair.branch === "string"
+        ? {
+            baseBranch: payload.conflictRepair.baseBranch,
+            branch: payload.conflictRepair.branch,
+            files: Array.isArray(payload.conflictRepair.files)
+              ? payload.conflictRepair.files.filter((f): f is string => typeof f === "string")
+              : [],
+          }
+        : undefined;
     let priorConclusion: string | undefined;
     let priorVerificationReceipt: VerificationReceipt | undefined;
     if (retryReason) {
@@ -1047,6 +1065,7 @@ export async function runDeveloperEffect(
       museDeveloper: isMuse,
       guidance: guidance.length ? guidance : undefined,
       scopeDecisionNote,
+      conflictRepair,
     });
 
     // NOT-83 review finding: the session is marked `running` (worker-loop.ts) before this

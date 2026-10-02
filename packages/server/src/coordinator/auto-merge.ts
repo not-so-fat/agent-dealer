@@ -38,6 +38,7 @@ import {
   resolveHumanAction,
 } from "../repository/human-actions.js";
 import { MERGE_FAILURE_EVIDENCE_KEY, MERGE_FAILURE_RESPONSE_OPTIONS } from "./human-resolution.js";
+import { isMergeConflictFailure, runMergeConflictSync } from "./merge-conflict-sync.js";
 
 const run = promisify(execFile);
 
@@ -171,7 +172,8 @@ export function setMergePrForTests(fn: MergePr | null): void {
 export type AutoMergeFinalizeResult = {
   applied: true;
   issueStatus: Issue["status"];
-  nextWorkItemId: null;
+  /** NOT-310: the queued conflict-repair round, when the finalize queued one. */
+  nextWorkItemId: string | null;
   humanActionId: string | null;
   instanceCompleted: boolean;
   triggerReflect: boolean;
@@ -227,7 +229,39 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
     return escalateMergeFailure(issue, instance.id, `Auto-merge failed: ${resolvedCwd.reason}`);
   }
 
-  const merge = await mergePrImpl({ cwd: resolvedCwd.cwd, number: issue.prNumber });
+  let merge = await mergePrImpl({ cwd: resolvedCwd.cwd, number: issue.prNumber });
+  // NOT-310: a not-mergeable failure is staleness Dealer can resolve itself —
+  // sync the base, re-verify, retry — instead of escalating with no way forward.
+  // Anything the sync refuses or cannot fix degrades to today's escalation.
+  // retry_merge parks into this same finalize, so it is covered automatically.
+  if (!merge.ok && isMergeConflictFailure(merge.reason) && issue.branch) {
+    const sync = await runMergeConflictSync({
+      issueId: issue.id,
+      instanceId: instance.id,
+      repo: issue.repo,
+      branch: issue.branch,
+      baseBranch: issue.baseBranch,
+      prNumber: issue.prNumber,
+      mergeReason: merge.reason,
+      mergePr: mergePrImpl,
+    });
+    if (sync.outcome === "merged") {
+      merge = { ok: true };
+    } else if (sync.outcome === "repair_queued") {
+      return {
+        applied: true,
+        issueStatus: "repairing",
+        nextWorkItemId: sync.workItemId,
+        humanActionId: null,
+        instanceCompleted: false,
+        triggerReflect: false,
+      };
+    } else if (sync.outcome === "escalate") {
+      return escalateMergeFailure(issue, instance.id, sync.reason, sync.evidence);
+    } else {
+      return escalateMergeFailure(issue, instance.id, `Auto-merge failed: ${merge.reason}`);
+    }
+  }
   if (!merge.ok) {
     return escalateMergeFailure(issue, instance.id, `Auto-merge failed: ${merge.reason}`);
   }
@@ -296,7 +330,8 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
 function escalateMergeFailure(
   issue: Issue,
   workflowInstanceId: string,
-  reason: string
+  reason: string,
+  evidence: Record<string, unknown> = { [MERGE_FAILURE_EVIDENCE_KEY]: true }
 ): AutoMergeFinalizeResult {
   return getDb().transaction((): AutoMergeFinalizeResult => {
     const current = getIssue(issue.id)!;
@@ -350,7 +385,7 @@ function escalateMergeFailure(
       actionType: "policy_escalation",
       reason,
       question: `${reason} Retry the merge, queue another repair round, or close the issue?`,
-      evidence: { [MERGE_FAILURE_EVIDENCE_KEY]: true },
+      evidence,
       responseOptions: [...MERGE_FAILURE_RESPONSE_OPTIONS],
     });
     appendWorkflowEvent({

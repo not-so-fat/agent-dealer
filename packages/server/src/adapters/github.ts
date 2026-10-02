@@ -698,7 +698,9 @@ const NONE_STREAK_REQUIRED = 2;
  * poll fails closed as "timeout" rather than silently waving the handoff through.
  */
 export async function pollPrChecks(
-  adapter: GithubAdapter,
+  // NOT-310: narrowed to what the poll actually calls — the merge-conflict sync
+  // passes only a checks reader, and full adapters still satisfy this shape.
+  adapter: Pick<GithubAdapter, "checksSnapshot">,
   opts: { cwd: string; timeoutMs: number; intervalMs: number; signal?: AbortSignal; number?: number; branch?: string }
 ): Promise<PollChecksResult> {
   const deadline = Date.now() + opts.timeoutMs;

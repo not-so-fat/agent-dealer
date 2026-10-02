@@ -1825,7 +1825,9 @@ export async function resolveHumanActionAndAdvanceAsync(
   return {
     ok: true,
     issueStatus: merged.issueStatus,
-    nextWorkItemId: null,
+    // NOT-310: a retry_merge that hit a textual conflict queues a repair round —
+    // report it like any other queued round instead of dropping it.
+    nextWorkItemId: merged.nextWorkItemId,
     instanceCompleted: merged.instanceCompleted,
     restarted: false,
     triggerReflect: merged.triggerReflect,

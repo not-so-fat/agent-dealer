@@ -1,0 +1,757 @@
+// packages/server/src/coordinator/merge-conflict-sync.ts
+//
+// NOT-310: when an approved PR cannot merge because the base moved ("not
+// mergeable"), resolve it in the merge path instead of escalating with no way
+// forward: bring the PR branch up to date with the base in a coordinator-owned
+// worktree, wait for checks, and retry the merge once. A textual conflict aborts
+// the sync and queues one developer repair round whose prompt names the base and
+// the conflicting files; a still-conflicting merge after that round escalates
+// once with the file list.
+//
+// "Not mergeable" is broader than staleness (branch policy, dismissed
+// approvals), so a retry that still fails only earns the repair round when the
+// base actually advanced past the synced tip — otherwise the branch is already
+// up to date and Dealer escalates directly with the retry's reason instead of
+// spending a round on a false "base moved". Note the sync push itself can
+// dismiss the approval the merge depended on in repos with dismiss-stale-
+// approvals; that retry failure then takes this same direct-escalation path.
+//
+// Bound: at most one automatic sync + one conflict-repair round per
+// merge-failure episode. The episode resets on any resolved human action (a
+// retry_merge / repair click starts a fresh episode); the repair-spent marker is
+// the append-only `auto_merge.conflict_repair_queued` event, which no
+// requeue/defer can rewrite the way a work-item payload could be.
+//
+// Safety: the sync checkout starts at exactly what Dealer pushed (NOT-219 reuse
+// semantics) and is removed afterwards; the push is always a plain
+// `git push -u origin HEAD:refs/heads/<branch>` — never force, never a lease
+// retry, never a rebase. An existing checkout holding the branch belongs to
+// someone else and fails closed to today's escalation, except our own
+// merge-sync leftover from a crashed run (dead owner + clean tree), which is
+// adopted. Every refusal or infra failure degrades to today's escalation — the
+// sync only ever adds a self-resolution attempt, never removes an outcome.
+import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { promisify } from "node:util";
+import type { Issue } from "@agent-dealer/shared";
+import type { MergePr } from "./auto-merge.js";
+import type { ConflictRepairDirective } from "./prompts.js";
+import {
+  MERGE_CONFLICT_FILES_EVIDENCE_KEY,
+  MERGE_FAILURE_EVIDENCE_KEY,
+} from "./human-resolution.js";
+import { getAgent } from "../repository/agents.js";
+import { getDb } from "../db/index.js";
+import { getIssue, incrementIssueRound, transitionIssue } from "../repository/issues.js";
+import {
+  enqueueWorkItem,
+  listWorkItemsForIssue,
+} from "../repository/work-items.js";
+import {
+  appendWorkflowEvent,
+  getActiveWorkflowInstance,
+  listWorkflowEventsForIssue,
+} from "../repository/workflow-events.js";
+import {
+  addWorktree,
+  DEFAULT_BASE_FETCH_TIMEOUT_MS,
+  fastForwardLocalBranchToSha,
+  fetchFreshBase,
+  fetchReusedBranch,
+  findWorktreeForBranch,
+  isAncestor,
+  isWorktreeClean,
+  pruneWorktrees,
+  removeWorktree,
+  revParseHead,
+  safeRemoveWorktree,
+} from "../adapters/git-worktree.js";
+import {
+  classifyIssueRepo,
+  worktreesRootForResolution,
+} from "../adapters/managed-repo.js";
+import {
+  pollPrChecks,
+  realGithubAdapter,
+  type GithubAdapter,
+  type PollChecksResult,
+} from "../adapters/github.js";
+import { withRepoLock } from "../runners/process-registry.js";
+import { checkDeveloperWorktreeOwnerLiveness } from "./worktree-owner-liveness.js";
+import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
+
+const run = promisify(execFile);
+
+/** `gh pr merge` wording for a branch that no longer merges cleanly. */
+const NOT_MERGEABLE_PATTERN = /not mergeable/i;
+/** `gh`'s CONFLICTING mergeable state and conflict failure text. */
+const CONFLICT_PATTERN = /conflict/i;
+
+/**
+ * Whether a merge-failure reason means "the branch conflicts with the base"
+ * (worth a base sync) rather than an infra failure (timeout, missing cwd, auth)
+ * or a non-staleness rejection (protected branch, failed checks). Either signal
+ * from the ticket — `mergeable = CONFLICTING` or the `gh` message — classifies;
+ * the message alone suffices because a failed `gh pr merge` already reports it.
+ */
+export function isMergeConflictFailure(reason: string): boolean {
+  return NOT_MERGEABLE_PATTERN.test(reason) || CONFLICT_PATTERN.test(reason);
+}
+
+/** The sync's `git` shell-out, as a seam: production execFiles real git, tests
+ * inject a recorder (delegating or fake) to assert exact CLI args. */
+export type SyncGitExec = (
+  args: string[],
+  opts: { cwd: string; timeoutMs: number }
+) => Promise<{ stdout: string; stderr: string }>;
+
+/** Failure from {@link defaultSyncGitExec} — `killed` marks a timeout kill, as
+ * opposed to git itself exiting nonzero (a merge reporting conflicts). */
+export class SyncGitError extends Error {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly killed: boolean;
+  constructor(
+    message: string,
+    opts: { stdout: string; stderr: string; killed: boolean }
+  ) {
+    super(message);
+    this.name = "SyncGitError";
+    this.stdout = opts.stdout;
+    this.stderr = opts.stderr;
+    this.killed = opts.killed;
+  }
+}
+
+export const defaultSyncGitExec: SyncGitExec = async (args, opts) => {
+  try {
+    const { stdout, stderr } = await run("git", args, {
+      cwd: opts.cwd,
+      encoding: "utf8",
+      timeout: opts.timeoutMs,
+    });
+    return { stdout, stderr };
+  } catch (err) {
+    const e = err as {
+      stdout?: string;
+      stderr?: string;
+      message?: string;
+      killed?: boolean;
+    };
+    const stdout = typeof e.stdout === "string" ? e.stdout : "";
+    const stderr = typeof e.stderr === "string" ? e.stderr : "";
+    const detail = stderr.trim() || e.message || `git ${args.join(" ")} failed`;
+    throw new SyncGitError(detail, {
+      stdout,
+      stderr,
+      killed: e.killed === true,
+    });
+  }
+};
+
+let gitExecImpl: SyncGitExec = defaultSyncGitExec;
+
+/** Test hook — record or fake the sync's merge/push/abort shell-outs. */
+export function setConflictSyncGitExecForTests(exec: SyncGitExec | null): void {
+  gitExecImpl = exec ?? defaultSyncGitExec;
+}
+
+/** The checks poll only ever needs `checksSnapshot` — the seam takes that
+ * narrow slice so tests inject one function, while production passes the full
+ * real adapter. */
+export type ConflictSyncGithub = Pick<GithubAdapter, "checksSnapshot">;
+
+let githubImpl: ConflictSyncGithub = realGithubAdapter;
+
+/** Test hook — fake the post-push checks poll (never hits real `gh`). */
+export function setConflictSyncGithubForTests(adapter: ConflictSyncGithub | null): void {
+  githubImpl = adapter ?? realGithubAdapter;
+}
+
+function numEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  const n = raw == null || raw === "" ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * Sync bounds. The checks poll reads the same env as `developerEffectConfig`
+ * (one operator-facing knob for "how long CI may take"); the import is not
+ * shared because merge-conflict-sync → developer-effect would cycle through
+ * commands/auto-merge.
+ */
+export const mergeSyncConfig = {
+  get syncGitTimeoutMs(): number {
+    return numEnv("MERGE_SYNC_GIT_TIMEOUT_MS", DEFAULT_BASE_FETCH_TIMEOUT_MS);
+  },
+  get checksPollTimeoutMs(): number {
+    return numEnv("CHECKS_POLL_TIMEOUT_MS", 10 * 60_000);
+  },
+  get checksPollIntervalMs(): number {
+    return numEnv("CHECKS_POLL_INTERVAL_MS", 15_000);
+  },
+};
+
+/** Cap for the conflicting-file list in escalation text/evidence. */
+export const CONFLICTING_FILES_MAX = 20;
+
+/** Coordinator-owned sync checkout infix — adoption + stale-dir removal only
+ * ever touch paths under this name, never a worker session's checkout. */
+const SYNC_PATH_INFIX = "merge-sync-";
+
+/** Explicit identity for the sync's merge commit — coordinator checkouts must
+ * not depend on whatever a worker happened to configure (mirrors the salvage
+ * commit in git-worktree.ts). The squash-merge erases it anyway. */
+const SYNC_GIT_IDENTITY_ARGS = [
+  "-c",
+  "user.email=agent-dealer@localhost",
+  "-c",
+  "user.name=Agent Dealer",
+];
+
+export type ConflictSyncOutcome =
+  /** The post-sync merge retry succeeded — the caller runs its success txn. */
+  | { outcome: "merged" }
+  /** A conflict-repair developer round was queued; the caller reports repairing. */
+  | { outcome: "repair_queued"; workItemId: string; round: number }
+  /** Escalate with this reason/evidence (repair spent, or sync infra failed). */
+  | { outcome: "escalate"; reason: string; evidence: Record<string, unknown> }
+  /** The sync was not applicable — the caller escalates exactly as today. */
+  | { outcome: "skipped"; reason: string };
+
+function parseRepairFiles(payloadJson: string | null): string[] {
+  if (!payloadJson) return [];
+  try {
+    const parsed = JSON.parse(payloadJson) as { files?: unknown };
+    return Array.isArray(parsed.files)
+      ? parsed.files.filter((f): f is string => typeof f === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Whether a conflict-repair round already ran for this merge-failure episode:
+ * the latest `auto_merge.conflict_repair_queued` event for this instance with
+ * no `human_action.resolved` after it. A human resolution (retry_merge, repair,
+ * or anything else) starts a fresh episode. Returns the spent round's file list
+ * for the escalation.
+ */
+export function conflictRepairSpent(
+  issueId: string,
+  instanceId: string
+): { spent: boolean; files: string[] } {
+  const events = listWorkflowEventsForIssue(issueId).filter(
+    (e) => e.workflowInstanceId === instanceId
+  );
+  let lastRepair = -1;
+  let lastResolved = -1;
+  let files: string[] = [];
+  events.forEach((e, index) => {
+    if (e.type === "auto_merge.conflict_repair_queued") {
+      lastRepair = index;
+      files = parseRepairFiles(e.payloadJson);
+    } else if (e.type === "human_action.resolved") {
+      lastResolved = index;
+    }
+  });
+  return lastRepair > lastResolved
+    ? { spent: true, files }
+    : { spent: false, files: [] };
+}
+
+/**
+ * Mirrors commands.ts's `queuedProfileSnapshot` (kept local: auto-merge →
+ * commands would close an import cycle — commands already imports auto-merge).
+ */
+function queuedDeveloperProfileSnapshot(issue: Issue): string | null {
+  const agent = issue.developerAgentId ? getAgent(issue.developerAgentId) : null;
+  return agent ? serializeProfileSnapshot(buildProfileSnapshot(agent, "developer")) : null;
+}
+
+/** Mirrors commands.ts's `resumeWorkItemKey` collision scan for the same reason. */
+function conflictRepairWorkItemKey(issueId: string, instanceId: string, round: number): string {
+  const taken = new Set(listWorkItemsForIssue(issueId).map((w) => w.idempotencyKey));
+  const base = `${instanceId}:developer:conflict-repair:${round}`;
+  if (!taken.has(base)) return base;
+  let n = 2;
+  while (taken.has(`${base}:${n}`)) n++;
+  return `${base}:${n}`;
+}
+
+function auditSync(
+  input: { issueId: string; instanceId: string; branch: string; baseBranch: string },
+  outcome: string,
+  detail?: Record<string, unknown>
+): void {
+  try {
+    appendWorkflowEvent({
+      issueId: input.issueId,
+      workflowInstanceId: input.instanceId,
+      workerSessionId: null,
+      type: "auto_merge.conflict_sync",
+      actorType: "system",
+      stage: "final_review",
+      round: getIssue(input.issueId)?.currentRound ?? null,
+      payload: {
+        outcome,
+        branch: input.branch,
+        baseBranch: input.baseBranch,
+        ...(detail ?? {}),
+      },
+    });
+  } catch {
+    // Audit only — observability must never fail the merge path.
+  }
+}
+
+function formatFileList(files: string[]): string {
+  const shown = files.slice(0, CONFLICTING_FILES_MAX);
+  const extra = files.length - shown.length;
+  return shown.join(", ") + (extra > 0 ? ` (and ${extra} more)` : "");
+}
+
+/**
+ * Queues the conflict-repair developer round: final_review → repairing (a
+ * genuine repair cycle spending a review round, like merge-failure "repair"),
+ * with the conflict directive on the work-item payload for exactly this round.
+ * Null when the issue left the merge park first (a racer won) — the caller
+ * then falls back to today's escalation, which no-ops off-park itself.
+ */
+function queueConflictRepairRound(input: {
+  issueId: string;
+  instanceId: string;
+  baseBranch: string;
+  branch: string;
+  files: string[];
+}): { id: string; round: number } | null {
+  return getDb().transaction(() => {
+    const current = getIssue(input.issueId);
+    if (!current || current.status !== "final_review") return null;
+    const active = getActiveWorkflowInstance(input.issueId);
+    if (!active || active.id !== input.instanceId) return null;
+    const round = current.currentRound + 1;
+    incrementIssueRound(input.issueId);
+    transitionIssue(input.issueId, "repairing", {
+      currentOwner: "developer",
+      currentIntent: `Resolving merge conflict with ${input.baseBranch} (round ${round})`,
+    });
+    appendWorkflowEvent({
+      issueId: input.issueId,
+      workflowInstanceId: active.id,
+      workerSessionId: null,
+      type: "repair.started",
+      actorType: "system",
+      stage: "repairing",
+      round,
+    });
+    const directive: ConflictRepairDirective = {
+      baseBranch: input.baseBranch,
+      branch: input.branch,
+      files: input.files,
+    };
+    const item = enqueueWorkItem({
+      issueId: input.issueId,
+      workflowInstanceId: active.id,
+      kind: "developer",
+      round,
+      payload: {
+        profileSnapshot: queuedDeveloperProfileSnapshot(current),
+        conflictRepair: directive,
+      },
+      idempotencyKey: conflictRepairWorkItemKey(input.issueId, active.id, round),
+    });
+    appendWorkflowEvent({
+      issueId: input.issueId,
+      workflowInstanceId: active.id,
+      workerSessionId: null,
+      type: "auto_merge.conflict_repair_queued",
+      actorType: "system",
+      stage: "repairing",
+      round,
+      payload: {
+        baseBranch: input.baseBranch,
+        branch: input.branch,
+        files: input.files,
+        round,
+        workItemId: item.id,
+      },
+    });
+    return { id: item.id, round };
+  })();
+}
+
+function tryRealpath(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+async function listUnmergedFiles(syncPath: string, timeoutMs: number): Promise<string[]> {
+  const { stdout } = await gitExecImpl(["diff", "--name-only", "--diff-filter=U"], {
+    cwd: syncPath,
+    timeoutMs,
+  });
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/**
+ * Undo a failed merge. The sync checkout was verified clean with HEAD at the
+ * fetched origin tip before the merge, so it carries no unique commits and
+ * resetting its uncommitted merge state cannot lose work.
+ */
+async function abortMergeState(syncPath: string, timeoutMs: number): Promise<void> {
+  try {
+    await gitExecImpl(["merge", "--abort"], { cwd: syncPath, timeoutMs });
+    return;
+  } catch {
+    // No merge in progress (tool failure before git started merging), or an
+    // abort that itself failed — fall through to the equivalent reset.
+  }
+  await gitExecImpl(["reset", "--hard", "HEAD"], { cwd: syncPath, timeoutMs });
+}
+
+/**
+ * Whether `origin/<base>` advanced past the synced tip since the sync fetched
+ * it. Only a descendant counts — a rewritten base (force-push) is a human
+ * call, not new staleness a repair round should merge. A failed re-fetch
+ * fails closed to "not advanced": the repair round is the expensive action,
+ * so an unreadable base escalates instead of spending it.
+ */
+async function checkBaseAdvanced(
+  repoPath: string,
+  baseBranch: string,
+  syncedSha: string,
+  timeoutMs: number
+): Promise<{ advanced: boolean; freshSha: string | null; fetchFailed: boolean }> {
+  const fresh = await fetchFreshBase(repoPath, baseBranch, timeoutMs);
+  if (!fresh.ok) return { advanced: false, freshSha: null, fetchFailed: true };
+  if (fresh.sha === syncedSha) return { advanced: false, freshSha: fresh.sha, fetchFailed: false };
+  const advanced = await isAncestor(repoPath, syncedSha, fresh.sha).catch(() => false);
+  return { advanced, freshSha: fresh.sha, fetchFailed: false };
+}
+
+/** Best-effort removal of our own sync checkout. `branchPushed: true` is
+ * truthful on the abort path (the branch never moved off the fetched origin
+ * tip) and safe on the failed-push path (the only unpushed state possible is
+ * our own reproducible base merge, which the repair round re-does). */
+async function cleanupSyncCheckout(repoPath: string, syncPath: string): Promise<void> {
+  try {
+    await safeRemoveWorktree({ repo: repoPath, path: syncPath, role: "developer", branchPushed: true });
+  } catch {
+    // Leave it: the next repair round's worktree resolution reuses or reports it.
+  }
+}
+
+/**
+ * Runs the NOT-310 self-resolution for one not-mergeable failure. See the
+ * module doc for the bound, the safety invariant, and the fail-closed shape:
+ * every refusal returns `skipped` so the caller escalates exactly as today.
+ */
+export async function runMergeConflictSync(opts: {
+  issueId: string;
+  instanceId: string;
+  repo: string;
+  branch: string;
+  baseBranch: string;
+  prNumber: number;
+  mergeReason: string;
+  mergePr: MergePr;
+}): Promise<ConflictSyncOutcome> {
+  const auditInput = {
+    issueId: opts.issueId,
+    instanceId: opts.instanceId,
+    branch: opts.branch,
+    baseBranch: opts.baseBranch,
+  };
+  const skip = (reason: string): ConflictSyncOutcome => {
+    auditSync(auditInput, "skipped", { reason });
+    return { outcome: "skipped", reason };
+  };
+  const failed = (detail: string): ConflictSyncOutcome => {
+    auditSync(auditInput, "failed", { detail });
+    return {
+      outcome: "escalate",
+      reason: `Auto-merge failed: ${opts.mergeReason} (base sync ${opts.baseBranch}: ${detail})`,
+      evidence: { [MERGE_FAILURE_EVIDENCE_KEY]: true },
+    };
+  };
+
+  // The conflict-repair round already ran for this episode and the merge still
+  // conflicts — escalate once with the file list, never sync again.
+  const spent = conflictRepairSpent(opts.issueId, opts.instanceId);
+  if (spent.spent) {
+    auditSync(auditInput, "conflict_spent", { files: spent.files });
+    const filesText =
+      spent.files.length > 0
+        ? `Conflicting files: ${formatFileList(spent.files)}.`
+        : "The conflicting files are unknown — the retry failed without a local merge.";
+    return {
+      outcome: "escalate",
+      reason:
+        `Auto-merge failed: ${opts.mergeReason} ` +
+        `Dealer already synced ${opts.baseBranch} and ran one conflict-repair round; ` +
+        `the PR still conflicts. ${filesText}`,
+      evidence: {
+        [MERGE_FAILURE_EVIDENCE_KEY]: true,
+        [MERGE_CONFLICT_FILES_EVIDENCE_KEY]: spent.files,
+      },
+    };
+  }
+
+  if (!opts.branch.trim()) return skip("issue has no branch to sync");
+  let repoPath: string;
+  let syncPath: string;
+  try {
+    const resolution = classifyIssueRepo(opts.repo);
+    repoPath = resolution.repoPath;
+    syncPath = path.join(
+      worktreesRootForResolution(resolution),
+      `${SYNC_PATH_INFIX}${opts.issueId.slice(0, 8)}`
+    );
+  } catch (err) {
+    return skip(`repo did not classify: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const timeoutMs = mergeSyncConfig.syncGitTimeoutMs;
+
+  // An existing checkout holding the branch belongs to someone else — except
+  // our own merge-sync leftover from a crashed run, which a dead owner + clean
+  // tree lets us adopt instead of failing closed.
+  let existing: string | null;
+  try {
+    existing = await findWorktreeForBranch(repoPath, opts.branch);
+  } catch (err) {
+    return skip(`could not list worktrees: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  let adopted = false;
+  if (existing) {
+    if (tryRealpath(existing) !== tryRealpath(syncPath)) {
+      return skip(`branch already checked out at ${existing}`);
+    }
+    const liveness = checkDeveloperWorktreeOwnerLiveness(existing);
+    if (liveness.state === "alive") {
+      return skip(
+        `sync checkout owned by a live session${liveness.sessionId ? ` (${liveness.sessionId})` : ""}`
+      );
+    }
+    const clean = await isWorktreeClean(existing).catch(() => false);
+    if (!clean) return skip("sync checkout is dirty");
+    adopted = true;
+  }
+
+  // Start at exactly what Dealer pushed (NOT-219 reuse semantics): fetch
+  // origin/<branch> and fast-forward the local ref — never merge onto a stale
+  // or diverged local branch.
+  const reused = await fetchReusedBranch(repoPath, opts.branch, timeoutMs);
+  if (!reused.ok) return skip(`fetch origin/${opts.branch} failed: ${reused.reason}`);
+  if (reused.remoteSha == null) return skip(`origin/${opts.branch} does not exist`);
+  if (!adopted) {
+    const ff = await fastForwardLocalBranchToSha({
+      repo: repoPath,
+      branch: opts.branch,
+      sha: reused.remoteSha,
+    });
+    if (!ff) return skip(`local ${opts.branch} is ahead of or diverged from origin/${opts.branch}`);
+  } else {
+    // Never move a checked-out branch's ref — require the adopted checkout's
+    // HEAD to already equal the fetched tip (a crashed run's partial merge
+    // fails closed instead of being reinterpreted).
+    const head = await revParseHead(existing!).catch(() => null);
+    if (head !== reused.remoteSha) {
+      return skip("adopted sync checkout is not at the fetched tip");
+    }
+  }
+  const base = await fetchFreshBase(repoPath, opts.baseBranch, timeoutMs);
+  if (!base.ok) return skip(`fetch origin/${opts.baseBranch} failed: ${base.reason}`);
+
+  if (!adopted) {
+    try {
+      await withRepoLock(repoPath, async () => {
+        // Our deterministic path with no registered checkout (crashed cleanup):
+        // it can only hold a previous sync's reproducible state — clear it so
+        // the add below cannot collide on the directory.
+        if (fs.existsSync(syncPath)) fs.rmSync(syncPath, { recursive: true, force: true });
+        fs.mkdirSync(path.dirname(syncPath), { recursive: true });
+        await pruneWorktrees(repoPath);
+        await addWorktree({ repo: repoPath, path: syncPath, ref: opts.branch });
+      });
+    } catch (err) {
+      return skip(`could not create sync checkout: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Merge the freshly fetched base. A nonzero exit with unmerged entries is a
+  // textual conflict (repair round); a nonzero exit without them — or a
+  // timeout kill — is a tool failure (escalate with the detail). HEAD around
+  // the merge tells an "Already up to date" no-op from a real sync apart for
+  // the retry-failure decision below.
+  const headBeforeMerge = await revParseHead(syncPath).catch(() => null);
+  let mergeError: SyncGitError | null = null;
+  try {
+    await gitExecImpl([...SYNC_GIT_IDENTITY_ARGS, "merge", "--no-edit", base.ref], {
+      cwd: syncPath,
+      timeoutMs,
+    });
+  } catch (err) {
+    mergeError =
+      err instanceof SyncGitError
+        ? err
+        : new SyncGitError(err instanceof Error ? err.message : String(err), {
+            stdout: "",
+            stderr: "",
+            killed: false,
+          });
+  }
+  if (mergeError) {
+    const unmerged = await listUnmergedFiles(syncPath, timeoutMs).catch(() => null);
+    await abortMergeState(syncPath, timeoutMs).catch(() => {});
+    const clean = await isWorktreeClean(syncPath).catch(() => false);
+    if (!clean) {
+      // Unreachable in practice (the checkout was clean with no unique commits
+      // before the merge), but a conflict-marked leftover must never block the
+      // repair round's own worktree resolution — drop our checkout entirely.
+      try {
+        await withRepoLock(repoPath, async () => {
+          await removeWorktree({ repo: repoPath, path: syncPath, force: true });
+          await pruneWorktrees(repoPath);
+        });
+      } catch {
+        // Leave it; the repair round reports it through the normal path.
+      }
+    } else {
+      await cleanupSyncCheckout(repoPath, syncPath);
+    }
+    if (mergeError.killed) {
+      return failed(`merge of origin/${opts.baseBranch} timed out after ${timeoutMs}ms`);
+    }
+    if (unmerged === null) {
+      return failed(`merge failed and the conflict list was unreadable: ${mergeError.message}`);
+    }
+    if (unmerged.length === 0) {
+      return failed(`merge failed: ${mergeError.message}`);
+    }
+    const queued = queueConflictRepairRound({
+      issueId: opts.issueId,
+      instanceId: opts.instanceId,
+      baseBranch: opts.baseBranch,
+      branch: opts.branch,
+      files: unmerged.slice(0, CONFLICTING_FILES_MAX),
+    });
+    if (!queued) return skip("issue left the merge park before the repair round queued");
+    auditSync(auditInput, "repair_queued", { files: unmerged });
+    return { outcome: "repair_queued", workItemId: queued.id, round: queued.round };
+  }
+  const headAfterMerge = await revParseHead(syncPath).catch(() => null);
+  // Null when a rev-parse failed — unknown, never "unchanged". (A successful
+  // merge + push means the branch contains the base either way; only the
+  // already-up-to-date claim needs a verified-unchanged HEAD.)
+  const mergeChangedHead =
+    headBeforeMerge === null || headAfterMerge === null
+      ? null
+      : headBeforeMerge !== headAfterMerge;
+
+  // Plain push, never force — the refspec mirrors pushBranch exactly.
+  try {
+    await gitExecImpl(["push", "-u", "origin", `HEAD:refs/heads/${opts.branch}`], {
+      cwd: syncPath,
+      timeoutMs,
+    });
+  } catch (err) {
+    await cleanupSyncCheckout(repoPath, syncPath);
+    const detail = err instanceof Error ? err.message : String(err);
+    return failed(`could not push the synced branch: ${detail}`);
+  }
+
+  // Wait for checks on the new head exactly as the developer effect does, then
+  // retry the merge once. A failed/timed-out poll escalates directly — retrying
+  // the merge against red or unknown checks cannot succeed.
+  let checks: PollChecksResult;
+  try {
+    checks = await pollPrChecks(githubImpl, {
+      cwd: syncPath,
+      number: opts.prNumber,
+      timeoutMs: mergeSyncConfig.checksPollTimeoutMs,
+      intervalMs: mergeSyncConfig.checksPollIntervalMs,
+    });
+  } catch (err) {
+    await cleanupSyncCheckout(repoPath, syncPath);
+    const detail = err instanceof Error ? err.message : String(err);
+    return failed(`checks poll errored: ${detail}`);
+  }
+  if (checks === "failure") {
+    await cleanupSyncCheckout(repoPath, syncPath);
+    return failed(
+      `synced ${opts.baseBranch} ${base.sha.slice(0, 12)} but PR checks failed on the merged head`
+    );
+  }
+  if (checks === "timeout") {
+    await cleanupSyncCheckout(repoPath, syncPath);
+    return failed(
+      `synced ${opts.baseBranch} ${base.sha.slice(0, 12)} but timed out waiting for PR checks on the merged head`
+    );
+  }
+  await cleanupSyncCheckout(repoPath, syncPath);
+
+  const retry = await opts.mergePr({ cwd: repoPath, number: opts.prNumber });
+  if (retry.ok) {
+    auditSync(auditInput, "merged", { baseSha: base.sha });
+    return { outcome: "merged" };
+  }
+  if (isMergeConflictFailure(retry.reason)) {
+    // The retry failed the same way. Only a base that actually advanced past
+    // the synced tip is new staleness worth a repair round — anything else (a
+    // policy block, a dismissed approval, GitHub's stale mergeability cache)
+    // is not something a merge-resolve round can fix, so escalate directly
+    // with the retry's reason instead of spending a round on a false
+    // "base moved". This also covers the "Already up to date" no-op merge:
+    // the branch already contains the base, so there is nothing to resolve.
+    const advance = await checkBaseAdvanced(repoPath, opts.baseBranch, base.sha, timeoutMs);
+    if (!advance.advanced) {
+      const short = (sha: string) => sha.slice(0, 12);
+      const note = advance.fetchFailed
+        ? `could not re-check ${opts.baseBranch} after the retry, so no repair round was queued`
+        : advance.freshSha === base.sha
+          ? mergeChangedHead === false
+            ? `branch already contains ${opts.baseBranch} ${short(base.sha)} — not a staleness conflict`
+            : `branch now contains ${opts.baseBranch} ${short(base.sha)} — not a staleness conflict`
+          : `${opts.baseBranch} was rewritten since the sync (${short(base.sha)} → ${short(advance.freshSha!)}); needs a human look`;
+      auditSync(auditInput, "failed", {
+        detail: retry.reason,
+        mergeChangedHead,
+        baseSha: base.sha,
+        freshBaseSha: advance.freshSha,
+      });
+      return {
+        outcome: "escalate",
+        reason: `Auto-merge failed: ${retry.reason} (${note})`,
+        evidence: { [MERGE_FAILURE_EVIDENCE_KEY]: true },
+      };
+    }
+    // The base moved again under us — the one repair round re-syncs + resolves.
+    const queued = queueConflictRepairRound({
+      issueId: opts.issueId,
+      instanceId: opts.instanceId,
+      baseBranch: opts.baseBranch,
+      branch: opts.branch,
+      files: [],
+    });
+    if (!queued) return skip("issue left the merge park before the repair round queued");
+    auditSync(auditInput, "repair_queued", { files: [], baseMovedAgain: true });
+    return { outcome: "repair_queued", workItemId: queued.id, round: queued.round };
+  }
+  auditSync(auditInput, "failed", { detail: retry.reason });
+  return {
+    outcome: "escalate",
+    reason:
+      `Auto-merge failed: ${retry.reason} ` +
+      `(after syncing ${opts.baseBranch} ${base.sha.slice(0, 12)})`,
+    evidence: { [MERGE_FAILURE_EVIDENCE_KEY]: true },
+  };
+}
