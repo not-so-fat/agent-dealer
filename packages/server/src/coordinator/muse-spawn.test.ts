@@ -32,11 +32,11 @@ function withIdleEnv(raw: string | undefined, fn: () => void): void {
   }
 }
 
-test("museIdleTimeoutMs defaults to 20 minutes when unset or blank", () => {
+test("museIdleTimeoutMs defaults to 30 minutes when unset or blank", () => {
   withIdleEnv(undefined, () => assert.equal(museIdleTimeoutMs(), DEFAULT_MUSE_IDLE_TIMEOUT_MS));
   withIdleEnv("", () => assert.equal(museIdleTimeoutMs(), DEFAULT_MUSE_IDLE_TIMEOUT_MS));
   withIdleEnv("   ", () => assert.equal(museIdleTimeoutMs(), DEFAULT_MUSE_IDLE_TIMEOUT_MS));
-  assert.equal(DEFAULT_MUSE_IDLE_TIMEOUT_MS, 20 * 60_000);
+  assert.equal(DEFAULT_MUSE_IDLE_TIMEOUT_MS, 30 * 60_000);
 });
 
 test("museIdleTimeoutMs accepts an explicit bound", () => {

@@ -22,22 +22,21 @@ export function reviewerSessionTimeoutMs(): number {
 
 /**
  * NOT-307: silent-child bound for the Muse developer lane only (other runtimes do
- * not read this). Undefined means the watchdog is disabled. Measured
- * 2026-09/10 `session_activity_events` history: completed Muse sessions show up
- * to ~39.8 min between sampler-persisted stream events (7 gaps over 20 min in 5
- * sessions, max 39.8 min on 2026-10-01). Those gaps measure *recognized* stream
- * events at 10s sampler ticks — true stdout-byte silence may be shorter (bytes
- * the sampler does not recognize advance its offset silently) — while the
- * watchdog watches a strictly more sensitive signal (any stdout bytes, plus
- * `session.jsonl` mtime growth). The 20-minute default therefore stands as the
- * prescribed bound, not as headroom above the longest observed gap: a healthy
- * session quieter than its own history can be idle-killed, and the first idle
- * kills (with their `lastActivityAt`/`lastToolName` evidence) calibrate it.
- * `0` disables explicitly. A non-numeric or negative value falls back to the
- * default with a logged warning rather than silently disabling the guard (or
- * killing healthy sessions on a typo like `-1`).
+ * not read this). Undefined means the watchdog is disabled. The watchdog ships
+ * ENABLED with a 30-minute default: 20 min risks false kills against the
+ * reported ~39.8 min silent gap in completed-session history; 45 min saves only
+ * 15 of the 60-min wall-clock cap; disabled does not address the observed
+ * 1-hour stalls. The ~39.8 min figure could not be re-verified — historical raw
+ * logs carry replayed `recorded_at`, not arrival times, so it may overstate
+ * true stdout/session.jsonl silence. The value is env-tunable, and the new
+ * per-event `ts`/`durationMs` plus `metadata_json` stall fields will provide
+ * the real gap distribution to recalibrate; a false kill is bounded by timeout
+ * salvage + retry from the branch. `0` disables explicitly. A non-numeric or
+ * negative value falls back to the default with a logged warning rather than
+ * silently disabling the guard (or killing healthy sessions on a typo like
+ * `-1`).
  */
-export const DEFAULT_MUSE_IDLE_TIMEOUT_MS = 20 * 60_000;
+export const DEFAULT_MUSE_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 export function museIdleTimeoutMs(): number | undefined {
   const raw = process.env.MUSE_IDLE_TIMEOUT_MS;
