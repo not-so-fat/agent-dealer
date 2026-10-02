@@ -369,7 +369,7 @@ describe("muse-capability", { concurrency: false }, () => {
     assert.ok(first, "exhaustion raises an action");
     assert.equal(first.actionType, "muse_capability");
     assert.equal(first.issueId, issueId);
-    assert.equal(first.requestId, museCapabilityRequestId(NEW));
+    assert.equal(first.requestId, museCapabilityRequestId(NEW, "unverified"));
     assert.match(
       first.reason,
       new RegExp(`^Could not verify Muse Code developer shell/write access for ${NEW} after 3 inconclusive checks`)
@@ -384,7 +384,7 @@ describe("muse-capability", { concurrency: false }, () => {
     assert.equal(ensureMuseCapabilityEscalation(issueId)?.id, first.id);
     assert.equal(ensureMuseCapabilityEscalation(randomUUID())?.id, first.id);
     assert.equal(
-      listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW)).filter(
+      listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW, "unverified")).filter(
         (a) => a.status === "open"
       ).length,
       1
@@ -433,6 +433,107 @@ describe("muse-capability", { concurrency: false }, () => {
     assert.equal(ensureMuseCapabilityEscalation(issueId), null, "no re-raise after acknowledge");
   });
 
+  // NOT-308 repair round 2: one version can produce both verdicts — an exhausted error
+  // escalates "unverified", then a safety-net probe past exhaustion returns `missing`.
+  // The missing verdict must raise its own action naming from → to and the lost
+  // capability; dismissing the unverified action must never override the missing block.
+  test("a missing verdict after an unverified one raises its own action; dismissing unverified never lifts missing", async () => {
+    let verdict: ProbeResult = { status: "error", detail: "timed out" };
+    const calls = new Map<string, number>();
+    setMuseCapabilityProbeForTests(async (version) => {
+      calls.set(version, (calls.get(version) ?? 0) + 1);
+      if (version === OLD) return { status: "capable" };
+      return verdict;
+    });
+    await check(OLD);
+    await exhaust(NEW);
+    assert.equal(calls.get(NEW), 3);
+    const issueId = makeIssue();
+    const unverified = ensureMuseCapabilityEscalation(issueId);
+    assert.ok(unverified, "exhaustion raises the unverified action");
+    assert.equal(unverified.requestId, museCapabilityRequestId(NEW, "unverified"));
+
+    // The operator dismisses "could not verify" — records no override (dedicated path).
+    const { resolveHumanActionAndAdvance } = await import("../coordinator/commands.js");
+    assert.equal(resolveHumanActionAndAdvance(unverified.id, "test", "acknowledge").ok, true);
+
+    // Fresh evidence: a dirty, shell-less session forces a probe past exhaustion, which
+    // now returns `missing`.
+    verdict = { status: "missing", detail: "probe session completed without running its shell command" };
+    const restore = stubMuseVersion(NEW);
+    try {
+      const log = writeLog([{ type: "tool_call", name: "read_file" }]);
+      assert.equal(
+        museCapabilitySafetyNetAfterSession({ issueId, runtime: "muse_code", logPath: log, dirty: true }),
+        "probed"
+      );
+      await settleMuseCapabilityCheckForTests();
+      const missing = listHumanActionsByRequestId(
+        "muse_capability",
+        museCapabilityRequestId(NEW, "missing")
+      );
+      assert.equal(missing.length, 1, "the missing verdict raises its own action");
+      assert.equal(missing[0]!.status, "open");
+      assert.match(
+        missing[0]!.reason,
+        new RegExp(`^Muse Code updated ${OLD} → ${NEW}: developer sessions no longer get shell/write access`)
+      );
+      assert.match(missing[0]!.reason, new RegExp(`admission is blocked for ${NEW}`));
+      // The gate blocks, and the earlier dismissal did not override this verdict.
+      assert.deepEqual(museCapabilityIssues(NEW).map((i) => i.code), ["runtime_capability"]);
+      assert.ok(!JSON.parse(fs.readFileSync(STATE, "utf8")).overriddenVersions.includes(NEW));
+      // Polling finds the missing action — never the dismissed unverified one, and the
+      // resolved unverified row does not suppress the missing escalation.
+      assert.equal(ensureMuseCapabilityEscalation(issueId)?.id, missing[0]!.id);
+    } finally {
+      restore();
+    }
+  });
+
+  // NOT-308 repair round 2: with no confirmed baseline, an exhausted version keeps
+  // retrying at the maximum backoff — stopping would block admission permanently with
+  // no path to unblock — and the escalation says blocked, never "continues on none".
+  test("with no baseline, an exhausted version keeps retrying and says blocked", async () => {
+    const calls = stubProbe({ [NEW]: { status: "error", detail: "timed out" } });
+    await exhaust(NEW);
+    assert.equal(calls.get(NEW), 3);
+    assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).lastChecked.attempts, 3);
+
+    // Still blocked, but the message promises a retry — not "no further checks".
+    const blocked = museCapabilityIssues(NEW);
+    assert.deepEqual(blocked.map((i) => i.code), ["runtime_capability"]);
+    assert.match(blocked[0]!.message, /the check retries automatically/);
+    assert.doesNotMatch(blocked[0]!.message, /no further automatic checks/);
+
+    // Past exhaustion the check still re-fires once the maximum backoff elapses.
+    ageMuseCapabilityCheckForTests(241_000);
+    museCapabilityIssues(NEW);
+    await settleMuseCapabilityCheckForTests();
+    assert.equal(calls.get(NEW), 4, "no-baseline exhaustion keeps retrying at the maximum backoff");
+    assert.deepEqual(museCapabilityIssues(NEW).map((i) => i.code), ["runtime_capability"]);
+
+    const issueId = makeIssue();
+    const action = ensureMuseCapabilityEscalation(issueId);
+    assert.ok(action, "exhaustion still escalates for a human decision");
+    assert.equal(action.requestId, museCapabilityRequestId(NEW, "unverified"));
+    assert.match(action.reason, /admission is blocked \(no confirmed baseline yet\)/);
+    assert.doesNotMatch(action.reason, /continues on the last confirmed baseline/);
+    assert.doesNotMatch(action.question, /roll back to none/);
+    // Dedupe still holds: a second poll finds the open action, never a copy.
+    assert.equal(ensureMuseCapabilityEscalation(issueId)?.id, action.id);
+  });
+
+  // NOT-308 repair round 2: a fresh-install `missing` names no "none" rollback target.
+  test("a fresh-install missing escalation never suggests rolling back to none", async () => {
+    stubProbe({ [NEW]: { status: "missing", detail: "no shell" } });
+    const { settled } = await check(NEW);
+    assert.deepEqual(settled.map((i) => i.code), ["runtime_capability"]);
+    const action = ensureMuseCapabilityEscalation(makeIssue());
+    assert.ok(action);
+    assert.doesNotMatch(action.question, /to none/);
+    assert.match(action.question, /Pin\/roll back Muse outside Dealer to a working build/);
+  });
+
   // NOT-308: the override is version-scoped — a later regression still blocks and
   // escalates on its own.
   test("an acknowledged version stays overridden while a later regressed version still blocks", async () => {
@@ -456,7 +557,7 @@ describe("muse-capability", { concurrency: false }, () => {
     );
     const later = ensureMuseCapabilityEscalation(issueId);
     assert.ok(later, "the later regression raises its own action");
-    assert.equal(later.requestId, museCapabilityRequestId(LATER));
+    assert.equal(later.requestId, museCapabilityRequestId(LATER, "missing"));
     assert.match(later.reason, new RegExp(`admission is blocked for ${LATER}`));
   });
 
@@ -514,7 +615,7 @@ describe("muse-capability", { concurrency: false }, () => {
       assert.equal(result, "probed");
       assert.equal(calls.get(NEW), 1, "probes immediately — never waits out a backoff");
       await settleMuseCapabilityCheckForTests();
-      const actions = listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW));
+      const actions = listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW, "missing"));
       assert.equal(actions.length, 1, "the missing verdict escalates on the watched issue");
       assert.equal(actions[0]!.issueId, issueId);
       assert.equal(JSON.parse(actions[0]!.evidenceJson!).kind, "missing");
@@ -610,7 +711,8 @@ describe("muse-capability", { concurrency: false }, () => {
         "skipped"
       );
       assert.equal(calls.get(NEW), 1, "no safety-net probe fired");
-      assert.equal(listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW)).length, 0);
+      assert.equal(listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW, "missing")).length, 0);
+      assert.equal(listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW, "unverified")).length, 0);
     } finally {
       restore();
     }

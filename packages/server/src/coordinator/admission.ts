@@ -248,7 +248,7 @@ export async function checkRoleAgentHealthy(
   const result = await check(agent, role);
   // NOT-308: a Muse verdict the gate cannot clear by itself (`missing`, or an exhausted
   // `error`) must reach the operator as a human action on this issue — deduped per
-  // version, so repeated polls never pile up. Best-effort: escalation never fails health.
+  // version and verdict kind, so repeated polls never pile up. Best-effort: escalation never fails health.
   if (role === "developer" && agent.runtime === "muse_code") {
     try {
       ensureMuseCapabilityEscalation(issue.id);

@@ -573,7 +573,7 @@ test("NOT-277: a Muse Code update is admitted when capable, refused by name when
     const { listHumanActionsByRequestId } = await import("../repository/human-actions.js");
     const { museCapabilityRequestId } = await import("../adapters/muse-capability.js");
     const { resolveHumanActionAndAdvance } = await import("./commands.js");
-    const escalated = listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(BROKEN));
+    const escalated = listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(BROKEN, "missing"));
     assert.equal(escalated.filter((a) => a.status === "open").length, 1);
     assert.match(
       escalated[0]!.reason,
@@ -588,7 +588,7 @@ test("NOT-277: a Muse Code update is admitted when capable, refused by name when
     assert.deepEqual(await developerHealth(), { ok: true });
     assert.deepEqual(probed, [OLD, NEW, BROKEN, "9.9.9-R1"]);
     assert.equal(
-      listHumanActionsByRequestId("muse_capability", museCapabilityRequestId("9.9.9-R1")).length,
+      listHumanActionsByRequestId("muse_capability", museCapabilityRequestId("9.9.9-R1", "unverified")).length,
       0,
       "a first inconclusive result escalates nothing"
     );
@@ -773,7 +773,7 @@ test("NOT-308: three inconclusive polls escalate once, then stop probing, never 
       // The third poll settles exhausted, so the next polls escalate — exactly once.
       assert.deepEqual(await poll(), { ok: true }, "exhausted: still allowed");
       assert.deepEqual(await poll(), { ok: true }, "second post-exhaustion poll: still allowed");
-      const actions = listHumanActionsByRequestId("muse_capability", cap.museCapabilityRequestId(NEW));
+      const actions = listHumanActionsByRequestId("muse_capability", cap.museCapabilityRequestId(NEW, "unverified"));
       assert.equal(actions.filter((a) => a.status === "open").length, 1);
       assert.match(actions[0]!.reason, /Could not verify Muse Code developer shell\/write access/);
       assert.match(actions[0]!.reason, new RegExp(`for ${NEW} after 3 inconclusive checks`));

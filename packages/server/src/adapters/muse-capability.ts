@@ -14,8 +14,11 @@
 // in the background. Only a *confirmed* capability loss (`missing`) blocks admission,
 // and it escalates to exactly one human action per version (acknowledge/override, or pin
 // /roll back outside Dealer). Inconclusive results retry with backoff (1/2/4 min), at most
-// 3 attempts per version; then they escalate once as "could not verify" and stop probing.
-// A fresh install with no confirmed baseline at all keeps fail-closed behavior.
+// 3 attempts per version; then they escalate once as "could not verify" and stop probing
+// (while a confirmed baseline exists to work on). A fresh install with no confirmed
+// baseline at all keeps fail-closed behavior — and because nothing could ever unblock
+// it otherwise, its inconclusive checks keep retrying at the maximum backoff past
+// exhaustion until a version is confirmed.
 //
 // The probe is a fresh `muse exec` of the on-disk binary (never the long-lived serve host, which can
 // still be the pre-update build). Checks are serialized: a version reported mid-probe is checked
@@ -213,7 +216,8 @@ function issueFor(checked: CheckedVersion, from: string | null, exhausted = fals
     ];
   }
   // Reachable only with no confirmed baseline (fresh install): with a baseline, an
-  // inconclusive result never blocks. An exhausted check says so — it will not retry.
+  // inconclusive result never blocks. The check always retries (checkDue keeps an
+  // unconfirmed version on the maximum backoff), so there is no "will not retry" text.
   return [
     {
       code: "runtime_capability",
@@ -244,13 +248,25 @@ function isExhausted(checked: CheckedVersion): boolean {
   return checked.status === "error" && checked.attempts >= MAX_ERROR_ATTEMPTS;
 }
 
-/** Current version is unchecked, or its could-not-verify result is due its next backoff retry. */
+/**
+ * Current version is unchecked, or its could-not-verify result is due its next backoff
+ * retry. An exhausted version stops probing — unless there is no confirmed baseline at
+ * all (fresh install): then stopping would block admission permanently with no path to
+ * unblock (no session can be admitted, so the safety net can never fire), so retries
+ * continue at the maximum backoff until some version is confirmed.
+ */
 function checkDue(s: PersistedState): boolean {
   if (!s.current) return false;
   const checked = s.lastChecked;
   if (!checked) return true;
-  if (checked.status !== "error" || isExhausted(checked)) return false;
-  return Date.now() - checked.checkedAt >= ERROR_BACKOFF_MS[checked.attempts - 1]!;
+  if (checked.status !== "error") return false;
+  if (!isExhausted(checked)) {
+    return Date.now() - checked.checkedAt >= ERROR_BACKOFF_MS[checked.attempts - 1]!;
+  }
+  return (
+    s.confirmedVersion === null &&
+    Date.now() - checked.checkedAt >= ERROR_BACKOFF_MS[ERROR_BACKOFF_MS.length - 1]!
+  );
 }
 
 function startCheck(version: string): void {
@@ -294,18 +310,25 @@ function startCheck(version: string): void {
       console.warn(`[muse-capability] ${issueFor(checked, from)[0]!.message}`);
       escalateWatchedVersion(version);
     } else if (isExhausted(checked)) {
+      // With a baseline the version is done (escalated once, admission on the baseline);
+      // with none the checks continue at the maximum backoff — and admission stays
+      // blocked — until some version is confirmed.
       console.warn(
         `[muse-capability] Could not verify Muse Code developer ${CAPABILITY} for ${version} ` +
           `after ${checked.attempts} inconclusive checks (last probe ran ${formatDuration(checked.durationMs)}): ` +
-          `escalating once, no further automatic checks; admission continues on baseline ${prev.confirmedVersion ?? "none"}`
+          (prev.confirmedVersion
+            ? `escalating once, no further automatic checks; admission continues on baseline ${prev.confirmedVersion}`
+            : `escalated for a human decision; automatic checks continue at the maximum backoff; admission stays blocked (no confirmed baseline yet)`)
       );
       escalateWatchedVersion(version);
     } else if (checked.status === "error") {
       console.warn(
         `[muse-capability] Could not verify Muse Code developer ${CAPABILITY} for ${version} ` +
           `(attempt ${checked.attempts}/${MAX_ERROR_ATTEMPTS}, last probe ran ${formatDuration(checked.durationMs)}): ` +
-          `${checked.detail} — retrying in ${formatDuration(ERROR_BACKOFF_MS[checked.attempts - 1]!)}; ` +
-          `admission continues on baseline ${prev.confirmedVersion ?? "none"}`
+          `${checked.detail} — retrying in ${formatDuration(ERROR_BACKOFF_MS[Math.min(checked.attempts, ERROR_BACKOFF_MS.length) - 1]!)}; ` +
+          (prev.confirmedVersion
+            ? `admission continues on baseline ${prev.confirmedVersion}`
+            : `admission stays blocked (no confirmed baseline yet)`)
       );
     }
   })().finally(() => {
@@ -345,15 +368,43 @@ export function museCapabilityIssues(version: string, onSettled: () => void = ()
   if (checked.status === "missing") {
     return s.overriddenVersions.includes(checked.version) ? [] : issueFor(checked, from);
   }
-  // Inconclusive: never a block while any baseline exists to work on.
-  return s.confirmedVersion ? [] : issueFor(checked, from, isExhausted(checked));
+  // Inconclusive: never a block while any baseline exists to work on. With none, the
+  // block stands but the check keeps retrying at the maximum backoff (checkDue), so the
+  // message always says "retries" — never "no further automatic checks".
+  return s.confirmedVersion ? [] : issueFor(checked, from, false);
 }
 
-/** Dedupe key for the one human action per Muse version (NOT-308). Stored as the
- * action's request_id so same-issue races collapse on the existing partial unique
- * index, and so cross-issue lookups (`listHumanActionsByRequestId`) find it. */
-export function museCapabilityRequestId(version: string): string {
-  return `muse-capability:${version}`;
+/**
+ * Dedupe key for the one human action per Muse version *and verdict kind* (NOT-308).
+ * Stored as the action's request_id so same-issue races collapse on the existing partial
+ * unique index, and so cross-issue lookups (`listHumanActionsByRequestId`) find it.
+ *
+ * The kind is part of the key because one version can produce both verdicts in sequence:
+ * an exhausted `error` escalates as "unverified", and a later safety-net probe of the
+ * same version can still return `missing`. Sharing one key would let the still-open
+ * "unverified" action swallow the "missing" escalation (wrong text, and dismissing it
+ * would record an override for a verdict the operator never saw). The unkinded form is
+ * only for reading actions written before the key carried a kind.
+ */
+export function museCapabilityRequestId(version: string, kind?: "missing" | "unverified"): string {
+  return kind ? `muse-capability:${kind}:${version}` : `muse-capability:${version}`;
+}
+
+/** Which verdict kind a prior escalation action belongs to. Legacy rows (unkinded
+ * request_id) are classified by their evidence; a row with no parseable evidence is
+ * conservatively treated as the kind being raised (dedupe, never spam). */
+function actionKindOf(action: HumanAction, fallback: "missing" | "unverified"): "missing" | "unverified" {
+  try {
+    const evidence = action.evidenceJson
+      ? (JSON.parse(action.evidenceJson) as Partial<MuseCapabilityEvidence>)
+      : null;
+    if (evidence?.kind === "missing" || evidence?.kind === "unverified") return evidence.kind;
+  } catch {
+    // Fall through to the request_id prefix below.
+  }
+  const prefixed = /^muse-capability:(missing|unverified):/.exec(action.requestId ?? "");
+  if (prefixed) return prefixed[1] as "missing" | "unverified";
+  return fallback;
 }
 
 export interface MuseCapabilityEvidence {
@@ -372,6 +423,9 @@ function escalationFor(
   const from = s.current?.version === checked.version ? s.current.from : s.confirmedVersion;
   const baseline = s.confirmedVersion ?? "none";
   if (checked.status === "missing" && !s.overriddenVersions.includes(checked.version)) {
+    const rollback = from
+      ? `, or pin/roll back Muse to ${from} outside Dealer (the next version change is checked automatically)?`
+      : `. Pin/roll back Muse outside Dealer to a working build if needed (the next version change is checked automatically)?`;
     return {
       kind: "missing",
       reason:
@@ -381,23 +435,32 @@ function escalationFor(
         `Developer admission is blocked for ${checked.version}; last confirmed baseline is ${baseline}.`,
       question:
         `Muse Code ${checked.version} lost developer ${CAPABILITY}. Acknowledge to admit developers ` +
-        `on ${checked.version} anyway, or pin/roll back Muse to ${from ?? baseline} outside Dealer ` +
-        `(the next version change is checked automatically)?`,
+        `on ${checked.version} anyway${rollback}`,
     };
   }
   if (isExhausted(checked) && checked.status === "error") {
     const detail = checked.detail;
+    // With a baseline, admission proceeds on it and probing stops; with none (fresh
+    // install), admission is blocked and the checks continue at the maximum backoff —
+    // the text must say which, never "continues on baseline none".
+    const standing = s.confirmedVersion
+      ? `Developer admission continues on the last confirmed baseline ${baseline}; ` +
+        `no further automatic checks will run for ${checked.version}.`
+      : `Developer admission is blocked (no confirmed baseline yet); ` +
+        `automatic checks continue at the maximum backoff until a version is confirmed.`;
     return {
       kind: "unverified",
       reason:
         `Could not verify Muse Code developer ${CAPABILITY} for ${checked.version} after ` +
         `${checked.attempts} inconclusive checks (last: ${detail}; last probe ran ` +
         `${formatDuration(checked.durationMs)}, probe timeout ${formatDuration(PROBE_TIMEOUT_MS)}). ` +
-        `Developer admission continues on the last confirmed baseline ${baseline}; ` +
-        `no further automatic checks will run for ${checked.version}.`,
+        standing,
       question:
         `Muse Code ${checked.version} could not be verified. Acknowledge to dismiss, ` +
-        `or investigate the probe failures (roll back to ${baseline} outside Dealer if the new build is suspect)?`,
+        `or investigate the probe failures` +
+        (s.confirmedVersion
+          ? ` (roll back to ${baseline} outside Dealer if the new build is suspect)?`
+          : `?`),
     };
   }
   return null;
@@ -405,11 +468,14 @@ function escalationFor(
 
 /**
  * NOT-308: raise the human action for a version the gate cannot clear by itself —
- * exactly one per version, on whichever issue first observes the verdict. Later polls
- * (and other issues' admissions) find the open action and skip creation; a resolved one
- * means the operator already decided, so the override is recorded (if missing) and
- * nothing is re-raised. Returns the open action, or null when nothing was (re)raised.
- * Never blocks admission itself — the gate reads file state, not this.
+ * exactly one per version and verdict kind, on whichever issue first observes the
+ * verdict. Later polls (and other issues' admissions) find the open action and skip
+ * creation; a resolved one of the same kind means the operator already decided, so the
+ * override is recorded (if missing) and nothing is re-raised. An action of the *other*
+ * kind neither suppresses this escalation nor counts as a decision on it: dismissing
+ * "could not verify" must never read as overriding a later confirmed "missing".
+ * Returns the open action, or null when nothing was (re)raised. Never blocks admission
+ * itself — the gate reads file state, not this.
  */
 export function ensureMuseCapabilityEscalation(issueId: string): HumanAction | null {
   const s = loadState();
@@ -418,11 +484,18 @@ export function ensureMuseCapabilityEscalation(issueId: string): HumanAction | n
   const escalation = escalationFor(checked, s);
   if (!escalation || checked.status === "capable") return null;
   const detail = checked.detail;
-  const requestId = museCapabilityRequestId(checked.version);
-  const prior = listHumanActionsByRequestId("muse_capability", requestId);
-  const open = prior.find((a) => a.status === "open");
+  const requestId = museCapabilityRequestId(checked.version, escalation.kind);
+  // Same-kind rows under both the current key and the pre-kind legacy key.
+  const seen = new Map<string, HumanAction>();
+  for (const key of [requestId, museCapabilityRequestId(checked.version)]) {
+    for (const action of listHumanActionsByRequestId("muse_capability", key)) {
+      if (!seen.has(action.id)) seen.set(action.id, action);
+    }
+  }
+  const sameKind = [...seen.values()].filter((a) => actionKindOf(a, escalation.kind) === escalation.kind);
+  const open = sameKind.find((a) => a.status === "open");
   if (open) return open;
-  if (prior.length > 0) {
+  if (sameKind.length > 0) {
     // Resolved outside the dedicated path (or before this build learned overrides):
     // the operator's decision stands — record it so the gate agrees, never re-raise.
     if (escalation.kind === "missing") recordMuseCapabilityOverride(checked.version);
