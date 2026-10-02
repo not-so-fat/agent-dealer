@@ -1,5 +1,43 @@
 # CI
 
+## Visual screenshots job (NOT-312)
+
+Builder sandboxes cannot run a browser, so rendered evidence for UI acceptance
+criteria comes from CI instead of from the builder. The `Visual` workflow
+(`.github/workflows/visual.yml`, job `visual`) boots the real server with a
+temp `AGENT_DEALER_HOME`, seeds one deterministic draft issue through the
+public `POST /api/issues` API, and captures every route listed in
+`ui-screenshots.json` with Playwright (chromium) at 1280px and 320px widths.
+The PNGs are uploaded as the `ui-screenshots` artifact (one PNG per
+(route, width)), and the job summary links each image name to its route and
+width. The spec fails the job when a listed route does not render (empty body
+or the app's "not a destination" 404 page), so a typo'd route can never
+silently produce a blank screenshot. The job needs no secrets; workflow
+permissions stay `contents: read`.
+
+The workflow only triggers when a PR touches `apps/web/**` or
+`packages/shared/**` (plus its own inputs: `ui-screenshots.json`,
+`scripts/ci-visual/**`, the workflow file itself) via the `paths` filter — a
+PR changing neither tree skips the job instead of failing it.
+
+### Tagging a visual AC `[ci]`
+
+Write the AC so the route and width are explicit, e.g.
+`[ci] CI job `visual` uploads a screenshot of /reports/execution at 320px`.
+The evidence is the Actions run link plus the artifact file list in the job
+summary — no browser is ever required inside the builder sandbox.
+
+### Adding a route
+
+1. Add `{ "name": "<slug>", "path": "</path>" }` to the `routes` array in
+   `ui-screenshots.json`. The path must start with `/`; use the
+   `{{issueId}}` placeholder for a page needing the seeded fixture issue
+   (set `"needsSeededIssue": true` to document that).
+2. The route-list loader (`scripts/ci-visual/route-list.ts`) and plan builder
+   (`scripts/ci-visual/plan.ts`) are pure functions with unit tests
+   (`scripts/ci-visual/*.test.ts`, run under `npm run test:unit`) — extend
+   them, not the Playwright spec, when config semantics change.
+
 ## Baseline-failure gate (NOT-274)
 
 `scripts/verify-baseline-failures.sh`, run as the "Verify baseline failures" step in
