@@ -676,7 +676,9 @@ export async function fetchChecksFailureEvidence(
 export async function baseRefHasPullRequestWorkflow(cwd: string, baseRef: string): Promise<boolean | null> {
   let listing: string;
   try {
-    listing = (await run("git", ["ls-tree", `origin/${baseRef}`, "--name-only", ".github/workflows"], { cwd })).stdout;
+    // `-r`: without it ls-tree prints the workflows *directory* entry itself rather
+    // than the files under it, so the scan would never see a workflow (NOT-311).
+    listing = (await run("git", ["ls-tree", "-r", `origin/${baseRef}`, "--name-only", ".github/workflows"], { cwd })).stdout;
   } catch {
     return null;
   }
