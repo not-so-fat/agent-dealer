@@ -41,7 +41,9 @@ const {
   defaultMuseCapabilityProbe,
 } = await import("./muse-capability.js");
 const { migrate, getDb } = await import("../db/index.js");
-const { listHumanActionsByRequestId } = await import("../repository/human-actions.js");
+const { listHumanActionsByRequestId, resolveHumanAction } = await import(
+  "../repository/human-actions.js"
+);
 migrate();
 type ProbeResult = Awaited<ReturnType<typeof defaultMuseCapabilityProbe>>;
 
@@ -431,6 +433,57 @@ describe("muse-capability", { concurrency: false }, () => {
     recordMuseCapabilityOverride(NEW);
     assert.deepEqual(museCapabilityIssues(NEW), [], "acknowledge lifts the block");
     assert.equal(ensureMuseCapabilityEscalation(issueId), null, "no re-raise after acknowledge");
+  });
+
+  // NOT-308 repair round 3: aborting or closing the issue that holds a `missing`
+  // escalation resolves its open action with a lifecycle reason (never a choice) —
+  // that is not the operator's capability decision, so the next poll must re-raise
+  // a fresh action, never record a silent override that lifts the block.
+  test("a missing escalation closed by abort/close re-raises instead of overriding", async () => {
+    for (const reason of ["aborted_by_user", "closed_by_operator"]) {
+      resetMuseCapabilityStateForTests();
+      getDb().exec("DELETE FROM human_actions");
+      stubProbe({
+        [OLD]: { status: "capable" },
+        [NEW]: { status: "missing", detail: "probe session completed without running its shell command" },
+      });
+      await check(OLD);
+      await check(NEW);
+
+      const issueId = makeIssue();
+      const action = ensureMuseCapabilityEscalation(issueId);
+      assert.ok(action, `a missing verdict raises an action (${reason})`);
+      // What abortIssue / closeReadyIssue do to every open action on the issue.
+      resolveHumanAction(action.id, "test", { reason });
+
+      // No override recorded and the block still stands.
+      assert.ok(
+        !JSON.parse(fs.readFileSync(STATE, "utf8")).overriddenVersions.includes(NEW),
+        `no silent override after ${reason}`
+      );
+      assert.deepEqual(
+        museCapabilityIssues(NEW).map((i) => i.code),
+        ["runtime_capability"],
+        `block stands after ${reason}`
+      );
+
+      // The next poll — from another issue, as after the holding issue closes —
+      // raises a fresh action instead of admitting.
+      const fresh = ensureMuseCapabilityEscalation(makeIssue());
+      assert.ok(fresh, `re-raised after ${reason}`);
+      assert.notEqual(fresh.id, action.id, "a fresh action, not the resolved one");
+      assert.equal(fresh.status, "open");
+      assert.equal(fresh.requestId, museCapabilityRequestId(NEW, "missing"));
+      // And polling again dedupes onto the fresh open action, never a third copy.
+      assert.equal(ensureMuseCapabilityEscalation(makeIssue())?.id, fresh.id);
+      assert.equal(
+        listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW, "missing")).filter(
+          (a) => a.status === "open"
+        ).length,
+        1,
+        "exactly one open missing action"
+      );
+    }
   });
 
   // NOT-308 repair round 2: one version can produce both verdicts — an exhausted error

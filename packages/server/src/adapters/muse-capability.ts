@@ -407,6 +407,21 @@ function actionKindOf(action: HumanAction, fallback: "missing" | "unverified"): 
   return fallback;
 }
 
+/** The `choice` a resolved escalation action was resolved with, if parseable. The
+ * dedicated `muse_capability` resolve path always records `{choice: "acknowledge"}`;
+ * abort/close lifecycle resolutions record a `reason` instead and never a choice. */
+function resolutionChoiceOf(action: HumanAction): string | null {
+  try {
+    const resolution = action.resolutionJson ? (JSON.parse(action.resolutionJson) as unknown) : null;
+    return resolution && typeof resolution === "object" && "choice" in resolution &&
+        typeof (resolution as { choice: unknown }).choice === "string"
+      ? (resolution as { choice: string }).choice
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface MuseCapabilityEvidence {
   kind: "missing" | "unverified";
   version: string;
@@ -470,12 +485,20 @@ function escalationFor(
  * NOT-308: raise the human action for a version the gate cannot clear by itself —
  * exactly one per version and verdict kind, on whichever issue first observes the
  * verdict. Later polls (and other issues' admissions) find the open action and skip
- * creation; a resolved one of the same kind means the operator already decided, so the
- * override is recorded (if missing) and nothing is re-raised. An action of the *other*
+ * creation; a resolved one of the same kind whose resolution chose `acknowledge`
+ * means the operator already decided, so the override is recorded (if missing) and
+ * nothing is re-raised. An action of the *other*
  * kind neither suppresses this escalation nor counts as a decision on it: dismissing
  * "could not verify" must never read as overriding a later confirmed "missing".
  * Returns the open action, or null when nothing was (re)raised. Never blocks admission
  * itself — the gate reads file state, not this.
+ *
+ * Repair round 3: only a resolved action whose resolution chose `acknowledge` (the
+ * dedicated resolve path's choice) counts as the operator's decision on the verdict.
+ * Abort/close resolve every open action on the issue with `{reason:
+ * "aborted_by_user" | "closed_by_operator"}` — issue lifecycle, not a capability
+ * decision — so such a resolution re-raises a fresh action instead of recording an
+ * override that would silently lift the block.
  */
 export function ensureMuseCapabilityEscalation(issueId: string): HumanAction | null {
   const s = loadState();
@@ -495,9 +518,13 @@ export function ensureMuseCapabilityEscalation(issueId: string): HumanAction | n
   const sameKind = [...seen.values()].filter((a) => actionKindOf(a, escalation.kind) === escalation.kind);
   const open = sameKind.find((a) => a.status === "open");
   if (open) return open;
-  if (sameKind.length > 0) {
-    // Resolved outside the dedicated path (or before this build learned overrides):
-    // the operator's decision stands — record it so the gate agrees, never re-raise.
+  // Only an explicit `acknowledge` resolution is the operator's decision on this
+  // verdict — anything else (abort/close lifecycle reasons, legacy rows with no
+  // parseable choice) falls through and re-raises a fresh action below.
+  const acknowledged = sameKind.some(
+    (a) => a.status === "resolved" && resolutionChoiceOf(a) === "acknowledge"
+  );
+  if (acknowledged) {
     if (escalation.kind === "missing") recordMuseCapabilityOverride(checked.version);
     return null;
   }
