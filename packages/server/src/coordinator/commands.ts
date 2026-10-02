@@ -99,12 +99,16 @@ import {
 } from "./non-convergence.js";
 import {
   capEscalationEvents,
+  checksWaitDeferralStartedAt,
   deferLeasedWorkItemForBaseFetch,
+  deferLeasedWorkItemForChecksPending,
   deferLeasedWorkItemForDeckOutage,
   deferLeasedWorkItemForUsageCap,
   formatCapEscalationReason,
+  formatChecksWaitEscalationReason,
   usageCapDeferralStartedAt,
   type BaseFetchFailedOutcome,
+  type ChecksPendingOutcome,
   type DeckUnavailableOutcome,
   type DeferralOutcome,
   type DeferWorkItemResult,
@@ -460,6 +464,12 @@ export async function applyCompletion(
   if (outcome.kind === "base_fetch_failed") {
     return applyBaseFetchDeferralCompletion(workItemId, leaseToken, outcome);
   }
+  // NOT-311: CI still queued/running (or not yet registered) at the poll timeout —
+  // the session ended cleanly, so the item waits on backoff and re-polls instead of
+  // spending an infra attempt. Past the wait ceiling this escalates to a human.
+  if (outcome.kind === "checks_pending") {
+    return applyChecksPendingCompletion(workItemId, leaseToken, outcome);
+  }
 
   const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
@@ -579,6 +589,93 @@ function applyBaseFetchDeferralCompletion(
   return applyDeferralCompletion(workItemId, leaseToken, failure, (item, issue, instance) =>
     deferLeasedWorkItemForBaseFetch(item, leaseToken, failure, issue, instance)
   );
+}
+
+/**
+ * NOT-311: CI still pending at the poll timeout — defer with backoff, no attempt
+ * spent. Unlike a deck outage the wait has a ceiling, so the escalation arm raises a
+ * human action naming the stuck PR/SHA once CI has waited too long.
+ */
+function applyChecksPendingCompletion(
+  workItemId: string,
+  leaseToken: string,
+  pending: ChecksPendingOutcome
+): ApplyResult {
+  return applyDeferralCompletion(
+    workItemId,
+    leaseToken,
+    pending,
+    (item, issue, instance) => deferLeasedWorkItemForChecksPending(item, leaseToken, pending, issue, instance),
+    (issue, instance, item) => routeChecksWaitEscalation(issue, instance, item, pending)
+  );
+}
+
+/**
+ * NOT-311: the CI wait passed its ceiling — hand to a human with the PR and head SHA
+ * CI never proved, without spending infra attempts. Mirrors the usage-cap ceiling
+ * escalation (worker.failed + needs_human + policy_escalation).
+ */
+export function routeChecksWaitEscalation(
+  issue: Issue,
+  instance: WorkflowInstance,
+  item: WorkItem,
+  pending: ChecksPendingOutcome
+): ApplyResult {
+  const payload = parseWorkItemPayload(item.payloadJson);
+  const firstDeferredAt = checksWaitDeferralStartedAt(payload) ?? pending.waitStartedAt;
+  const reason = formatChecksWaitEscalationReason(pending, firstDeferredAt);
+  const role = item.kind === "developer" ? "developer" : "reviewer";
+
+  const ev = eventEmitter(issue, instance, item.workerSessionId, "needs_human", issue.currentRound);
+  for (const type of capEscalationEvents()) {
+    const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
+    ev.emit(type, {
+      actorType: role,
+      payload: {
+        ...workerSessionPayload({
+          runtime: session?.runtime ?? null,
+          model: session?.model ?? null,
+          sessionId: item.workerSessionId ?? "",
+          worktreePath: session?.worktreePath,
+        }),
+        outcome: "checks_pending",
+        reason: pending.reason,
+        branch: pending.branch,
+        prNumber: pending.prNumber,
+        headSha: pending.headSha,
+      },
+    });
+  }
+
+  applyProjectionTransition(
+    issue,
+    {
+      issueStatus: "needs_human",
+      currentOwner: "human",
+      currentIntent: reason,
+      events: capEscalationEvents(),
+    },
+    {}
+  );
+
+  const action = createHumanAction({
+    issueId: issue.id,
+    workflowInstanceId: instance.id,
+    actionType: "policy_escalation",
+    reason,
+    question: questionFor("policy_escalation", reason),
+    evidence: { checksPending: { ...pending, firstDeferredAt } },
+    responseOptions: responseOptionsFor("policy_escalation"),
+  });
+  ev.emit("human_action.requested", { payload: { actionType: "policy_escalation", actionId: action.id } });
+
+  return {
+    applied: true,
+    issueStatus: "needs_human",
+    nextWorkItemId: null,
+    humanActionId: action.id,
+    instanceCompleted: false,
+  };
 }
 
 /**
