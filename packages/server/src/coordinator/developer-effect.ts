@@ -50,7 +50,9 @@ import {
 } from "../adapters/managed-repo.js";
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, verifyWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
-import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
+import { realGithubAdapter, pollPrChecksDetailed, type GithubAdapter, type PollChecksDetail, type PrView } from "../adapters/github.js";
+import { checksWaitCeilingExceeded, checksWaitCeilingMs } from "./checks-wait-config.js";
+import type { ChecksCompletedWaitReason, ChecksPendingOutcome } from "./usage-cap-defer.js";
 import { museCapabilitySafetyNetAfterSession } from "../adapters/muse-capability.js";
 import { getOrAssignSessionCorrelationId, getWorkerSession, mergeSessionMetadata, patchRunningSession, recordSessionProcess, setSessionInputSha } from "../repository/worker-sessions.js";
 import { museIdleMinutes, museStallMetadata } from "./muse-spawn.js";
@@ -168,6 +170,10 @@ export const developerEffectConfig = {
   },
   get checksPollIntervalMs(): number {
     return num("CHECKS_POLL_INTERVAL_MS", 15_000);
+  },
+  /** NOT-311: overall CI-wait ceiling measured from the first poll, across deferrals. */
+  get checksWaitCeilingMs(): number {
+    return checksWaitCeilingMs();
   },
   /** NOT-197: bound for the pre-branch `git fetch origin <base>` on a fresh issue branch. */
   get baseFetchTimeoutMs(): number {
@@ -372,6 +378,79 @@ async function checksFailedOutcome(opts: {
     content: { ...baseContent, ...extra },
   });
   return details ? { kind: "checks_failed", details } : { kind: "checks_failed" };
+}
+
+/**
+ * NOT-311: the `checksWaitStartedAt` persisted by a prior `checks_pending` deferral,
+ * anchoring the overall wait ceiling across re-polls. Null on a first wait (or an
+ * unparseable payload) — the caller then anchors at its own poll start.
+ */
+function checksWaitStartedAtFromPayload(payloadJson: string | null): string | null {
+  if (!payloadJson) return null;
+  try {
+    const v = (JSON.parse(payloadJson) as { checksWaitStartedAt?: unknown }).checksWaitStartedAt;
+    return typeof v === "string" && v ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * NOT-311: decide what a finished checks poll means. Returns a `checks_pending`
+ * outcome when CI is still queued/running at the timeout (or reports no checks while
+ * the base branch has a `pull_request` workflow — "not yet registered", never "no
+ * CI"), and null when the caller stays on today's path (success, failure, an aborted
+ * wait, or `none` with no workflow configured). Also yields the `checks.completed`
+ * milestone reason for the wait cases.
+ *
+ * A missing/unknown workflow answer (no adapter method, unreadable base ref) waits
+ * fail-closed: sending an unverified PR to review is the outcome this exists to
+ * prevent, and the wait ceiling still bounds it.
+ */
+async function resolveChecksWait(opts: {
+  github: GithubAdapter;
+  cwd: string;
+  prNumber: number;
+  baseRef: string;
+  headSha: string;
+  branch: string;
+  poll: PollChecksDetail;
+  signal?: AbortSignal;
+  payloadJson: string | null;
+  pollStartedAt: string;
+}): Promise<{ pending: ChecksPendingOutcome | null; milestoneReason?: ChecksCompletedWaitReason }> {
+  const waitStartedAt = checksWaitStartedAtFromPayload(opts.payloadJson) ?? opts.pollStartedAt;
+  const base = {
+    kind: "checks_pending" as const,
+    branch: opts.branch,
+    prNumber: opts.prNumber,
+    headSha: opts.headSha,
+    waitStartedAt,
+  };
+  const noChecks = opts.poll.result === "none" || (opts.poll.result === "timeout" && opts.poll.lastSnapshot === "none");
+  if (noChecks) {
+    let hasWorkflow: boolean | null = null;
+    try {
+      hasWorkflow = (await opts.github.hasPullRequestWorkflow?.({ cwd: opts.cwd, baseRef: opts.baseRef })) ?? null;
+    } catch {
+      hasWorkflow = null;
+    }
+    if (hasWorkflow === false) {
+      return { pending: null, milestoneReason: "none_no_workflow" };
+    }
+    return {
+      pending: { ...base, reason: "Waiting for CI (queued) - no attempt spent" },
+      milestoneReason: "none_with_workflow",
+    };
+  }
+  if (opts.poll.result === "timeout" && opts.poll.lastSnapshot === "pending" && !opts.poll.aborted && !opts.signal?.aborted) {
+    const milestoneReason = checksWaitCeilingExceeded(waitStartedAt) ? ("pending_ceiling" as const) : undefined;
+    return {
+      pending: { ...base, reason: "Waiting for CI (running) - no attempt spent" },
+      ...(milestoneReason ? { milestoneReason } : {}),
+    };
+  }
+  return { pending: null };
 }
 
 /**
@@ -632,17 +711,35 @@ async function runPublishOnlyHandoff(
       prNumber: prView.number,
       headSha: prView.headRefOid,
     });
-    const checks = await pollPrChecks(deps.github, {
+    const pollStartedAt = new Date().toISOString();
+    const poll = await pollPrChecksDetailed(deps.github, {
       cwd,
       timeoutMs: developerEffectConfig.checksPollTimeoutMs,
       intervalMs: developerEffectConfig.checksPollIntervalMs,
       signal: ctx.signal,
       number: prView.number,
     });
+    // NOT-311: pending/queued CI at the timeout (or no checks yet with a
+    // `pull_request` workflow on the base) waits with backoff instead of spending
+    // an infra attempt — resolved here so the milestone carries the wait reason.
+    const wait = await resolveChecksWait({
+      github: deps.github,
+      cwd,
+      prNumber: prView.number,
+      baseRef: prView.baseRefName,
+      headSha: prView.headRefOid,
+      branch: branchName,
+      poll,
+      signal: ctx.signal,
+      payloadJson: workItem.payloadJson,
+      pollStartedAt,
+    });
+    const checks = poll.result;
     milestone("checks.completed", `Developer · checks ${checks}`, {
       snapshot: checks,
       prNumber: prView.number,
       headSha: prView.headRefOid,
+      ...(wait.milestoneReason ? { reason: wait.milestoneReason } : {}),
     });
 
     const postPollView = await deps.github.viewPr({ cwd, branch: branchName });
@@ -681,6 +778,9 @@ async function runPublishOnlyHandoff(
       author: "system",
       content: { snapshot: checks, prNumber: prView.number, headSha: prView.headRefOid },
     });
+    // NOT-311: still-waiting CI defers with backoff (no attempt spent) instead of
+    // timing out the session. An aborted wait keeps today's `timed_out`.
+    if (wait.pending) return wait.pending;
     if (checks === "timeout") return { kind: "timed_out" };
 
     await fetchRef(cwd, prView.baseRefName);
@@ -1749,7 +1849,8 @@ export async function runDeveloperEffect(
       prNumber: prView.number,
       headSha: prView.headRefOid,
     });
-    const checks = await pollPrChecks(deps.github, {
+    const pollStartedAt = new Date().toISOString();
+    const poll = await pollPrChecksDetailed(deps.github, {
       cwd: worktreePath,
       timeoutMs: developerEffectConfig.checksPollTimeoutMs,
       intervalMs: developerEffectConfig.checksPollIntervalMs,
@@ -1759,10 +1860,27 @@ export async function runDeveloperEffect(
       // back to a bare `gh pr view` either).
       number: prView.number,
     });
+    // NOT-311: pending/queued CI at the timeout (or no checks yet with a
+    // `pull_request` workflow on the base) waits with backoff instead of spending
+    // an infra attempt — resolved here so the milestone carries the wait reason.
+    const wait = await resolveChecksWait({
+      github: deps.github,
+      cwd: worktreePath,
+      prNumber: prView.number,
+      baseRef: prView.baseRefName,
+      headSha: prView.headRefOid,
+      branch: branchName,
+      poll,
+      signal: ctx.signal,
+      payloadJson: workItem.payloadJson,
+      pollStartedAt,
+    });
+    const checks = poll.result;
     milestone("checks.completed", `Developer · checks ${checks}`, {
       snapshot: checks,
       prNumber: prView.number,
       headSha: prView.headRefOid,
+      ...(wait.milestoneReason ? { reason: wait.milestoneReason } : {}),
     });
 
     // The poll can run for up to checksPollTimeoutMs (default 10 minutes) — re-fetch and
@@ -1812,6 +1930,12 @@ export async function runDeveloperEffect(
       author: "system",
       content: { snapshot: checks, prNumber: prView.number, headSha: prView.headRefOid },
     });
+    // NOT-311: still-waiting CI defers with backoff (no attempt spent) instead of
+    // timing out the session. An aborted wait keeps today's `timed_out`.
+    if (wait.pending) {
+      await bestEffortRemove(repoPath, worktreePath);
+      return wait.pending;
+    }
     if (checks === "timeout") {
       await bestEffortRemove(repoPath, worktreePath);
       return { kind: "timed_out" };

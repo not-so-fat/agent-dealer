@@ -17,6 +17,7 @@ import { deferWorkItem, getWorkItem, type WorkItem, type WorkItemKind } from "..
 import { getWorkerSession } from "../repository/worker-sessions.js";
 import { deckOutageBackoffMs, deckOutageProlongedAfterMs } from "./deck-outage-config.js";
 import { usageCapDeferralCeilingMs } from "./usage-cap-config.js";
+import { checksWaitCeilingExceeded } from "./checks-wait-config.js";
 import { workerSessionPayload } from "./session-progress.js";
 
 export interface UsageCappedOutcome {
@@ -55,7 +56,27 @@ export type DeferralOutcome =
   | UsageCappedOutcome
   | DeckUnavailableOutcome
   | AgentUnhealthyOutcome
-  | BaseFetchFailedOutcome;
+  | BaseFetchFailedOutcome
+  | ChecksPendingOutcome;
+
+/**
+ * NOT-311: CI was still queued/running (or not yet registered) when the checks poll
+ * timed out. The developer session already ended cleanly, so this is not an attempt
+ * to charge — the item waits on the same backoff as a deck outage and re-polls.
+ * `waitStartedAt` is the first poll's start (ISO); the deferral persists it as
+ * `checksWaitStartedAt` so the ceiling spans deferrals.
+ */
+export interface ChecksPendingOutcome {
+  kind: "checks_pending";
+  reason: string;
+  branch: string;
+  prNumber: number;
+  headSha: string;
+  waitStartedAt: string;
+}
+
+/** Reason values carried on the `checks.completed` milestone when CI was not proven. */
+export type ChecksCompletedWaitReason = "pending_ceiling" | "none_with_workflow" | "none_no_workflow";
 
 const roleFor: Record<WorkItemKind, "developer" | "reviewer"> = {
   developer: "developer",
@@ -361,6 +382,81 @@ export function deferLeasedWorkItemForAgentUnhealthy(
       intent: (_role, untilLabel) => `${unhealthy.reason} (retrying ${untilLabel})`,
     });
   })();
+}
+
+export function checksWaitDeferralStartedAt(payload: Record<string, unknown>): string | null {
+  const v = payload.checksWaitStartedAt;
+  return typeof v === "string" && v ? v : null;
+}
+
+/** How many times this item has already waited on CI — drives the backoff curve. */
+export function checksWaitDeferralCount(payload: Record<string, unknown>): number {
+  const v = payload.checksWaitDeferrals;
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+}
+
+/**
+ * NOT-311: CI was still pending when the poll timed out, so nothing about the work
+ * was proven or disproven. The item waits on the deck-outage backoff and re-polls —
+ * no infra attempt, and the claim-time attempt_count bump is reverted, exactly like a
+ * deck outage. Unlike an outage this wait has a ceiling: past it the deferral
+ * reports `escalated` so the caller raises a human action naming the stuck PR/SHA.
+ *
+ * The re-queued payload carries `publishOnly` + `branch` so the next run takes the
+ * no-agent publish path (push-if-behind, PR verify, re-poll) instead of spawning a
+ * fresh developer session to redo committed work.
+ */
+export function deferLeasedWorkItemForChecksPending(
+  item: WorkItem,
+  leaseToken: string,
+  pending: ChecksPendingOutcome,
+  issue: Issue,
+  instance: WorkflowInstance,
+  nowMs = Date.now()
+): DeferWorkItemResult {
+  return getDb().transaction(() => {
+    const live = liveLeasedItem(item.id, leaseToken);
+    if (!live) return { deferred: false, escalated: false, reason: "lease_lost" as const };
+
+    const payload = parsePayload(live.payloadJson);
+    const firstDeferredAt =
+      checksWaitDeferralStartedAt(payload) ?? pending.waitStartedAt ?? new Date(nowMs).toISOString();
+    if (checksWaitCeilingExceeded(firstDeferredAt, nowMs)) {
+      return { deferred: false, escalated: true };
+    }
+    const priorDeferrals = checksWaitDeferralCount(payload);
+    const until = new Date(nowMs + deckOutageBackoffMs(priorDeferrals)).toISOString();
+
+    return applyDeferral(live, leaseToken, issue, instance, {
+      until,
+      reason: pending.reason,
+      outcome: "checks_pending",
+      error: {
+        kind: "checks_pending",
+        until,
+        reason: pending.reason,
+        branch: pending.branch,
+        prNumber: pending.prNumber,
+        headSha: pending.headSha,
+      },
+      payloadJson: JSON.stringify({
+        ...payload,
+        publishOnly: true,
+        branch: pending.branch,
+        checksWaitStartedAt: firstDeferredAt,
+        checksWaitDeferrals: priorDeferrals + 1,
+      }),
+      intent: (_role, untilLabel) => `${pending.reason} (retrying ${untilLabel})`,
+    });
+  })();
+}
+
+/** NOT-311: ceiling escalation reason — names the PR and the head SHA CI never proved. */
+export function formatChecksWaitEscalationReason(pending: ChecksPendingOutcome, firstDeferredAt: string): string {
+  return (
+    `CI did not complete on ${pending.headSha} (PR #${pending.prNumber}, branch ${pending.branch}) — ` +
+    `waiting since ${firstDeferredAt}. ${pending.reason}`
+  );
 }
 
 export function formatCapEscalationReason(cap: UsageCappedOutcome, firstDeferredAt: string): string {

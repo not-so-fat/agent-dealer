@@ -140,8 +140,10 @@ const timedOutSpawn: SpawnFn = async () => ({ exitCode: 1, transcript: "", logPa
  * tolerated it would let a regression back in silently.
  */
 function fakeGithub(opts: {
-  checks?: "success" | "failure" | "pending";
+  checks?: "success" | "failure" | "pending" | "none" | (() => "success" | "failure" | "pending" | "none");
   createFails?: boolean | (() => boolean);
+  /** NOT-311: base-branch `pull_request` workflow answer; null (default) = unknown. */
+  pullRequestWorkflow?: boolean | null;
 } = {}): GithubFn {
   const prs = new Map<string, { number: number; url: string; base: string }>();
   let nextNumber = 100;
@@ -171,7 +173,12 @@ function fakeGithub(opts: {
       if (number == null && !branch) {
         throw new Error("fakeGithub.checksSnapshot requires an explicit number or branch — bare checks lookup is the NOT-82 bug");
       }
-      return opts.checks ?? "success";
+      // NOT-311: a function lets one test flip CI mid-wait (pending → success) so the
+      // deferred re-poll can prove the wait closes without a fresh agent session.
+      return typeof opts.checks === "function" ? opts.checks() : (opts.checks ?? "success");
+    },
+    async hasPullRequestWorkflow() {
+      return opts.pullRequestWorkflow ?? null;
     },
     async publishReview() {
       throw new Error("publishReview is unused by the developer effect");
@@ -638,13 +645,166 @@ test("checks_failed: CI failure after a clean push/PR retries without a human ac
   assert.ok(kinds.includes("developer_transcript"), "raw trace must survive a post-session verification failure");
 });
 
-test("timed_out (checks poll): checks stay pending past the poll deadline", async () => {
+test("NOT-311: checks_pending — checks still pending at the poll deadline defers, spending no attempt", async () => {
+  // Previously this returned `timed_out`, spending an infra attempt on a session that
+  // had already ended cleanly. Now the item waits on backoff and re-polls.
   const issueId = await makeIssue();
   registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub({ checks: "pending" }) }));
   startWorkflow(issueId);
   await pump(1);
 
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing");
+  assert.equal(issue.infraAttempts, 0, "a CI wait spends no infra attempt");
+  assert.equal(issue.currentRound, 1, "a CI wait must not spend a review round");
+  assert.match(issue.currentIntent ?? "", /Waiting for CI \(running\) - no attempt spent/);
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 0, "no review handoff on unverified CI");
+
+  const items = listWorkItemsForIssue(issueId);
+  assert.equal(items.length, 1);
+  assert.equal(items[0]!.status, "pending", "the item waits, it is not finished or dead-lettered");
+  assert.equal(items[0]!.attemptCount, 0, "the claim-time attempt bump is reverted");
+  assert.ok(Date.parse(items[0]!.availableAt) > Date.parse(items[0]!.updatedAt), "the re-poll is gated behind a backoff");
+  const deferredPayload = JSON.parse(items[0]!.payloadJson ?? "{}");
+  assert.equal(deferredPayload.publishOnly, true, "the re-poll takes the no-agent publish path, not a fresh spawn");
+  assert.equal(deferredPayload.branch, issueBranchName(issueId));
+  assert.ok(deferredPayload.checksWaitStartedAt, "the wait anchors its ceiling at the first poll");
+
+  assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
+  const events = listWorkflowEventsForIssue(issueId);
+  const deferrals = events.filter((e) => e.type === "worker.deferred");
+  assert.ok(deferrals.length > 0);
+  assert.equal(JSON.parse(deferrals[0]!.payloadJson ?? "{}").outcome, "checks_pending");
+  assert.equal(events.some((e) => e.type === "worker.failed"), false, "a CI wait is not a failure");
+  const completed = events.find((e) => e.type === "checks.completed");
+  assert.ok(completed, "the wait still records a checks.completed milestone");
+  assert.equal(JSON.parse(completed!.payloadJson ?? "{}").snapshot, "timeout");
+});
+
+test("NOT-311: the deferred CI wait re-polls through publish-only and hands off once CI passes", async () => {
+  // First run waits (pending), the deferred re-poll sees success and reaches review —
+  // all without spawning a second agent session and without spending infra attempts.
+  let ci: "pending" | "success" = "pending";
+  let spawns = 0;
+  const countingSpawn: SpawnFn = async (input) => {
+    spawns++;
+    return commitingSpawn(input);
+  };
+  // A short backoff (set before the first deferral computes its `until`) lets the
+  // second pump actually pick the waiting item back up.
+  const prevBase = process.env.DECK_OUTAGE_BACKOFF_BASE_MS;
+  const prevMax = process.env.DECK_OUTAGE_BACKOFF_MAX_MS;
+  process.env.DECK_OUTAGE_BACKOFF_BASE_MS = "10";
+  process.env.DECK_OUTAGE_BACKOFF_MAX_MS = "10";
+  try {
+    const issueId = await makeIssue();
+    registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: countingSpawn, github: fakeGithub({ checks: () => ci }) }));
+    startWorkflow(issueId);
+    await pump(1);
+
+    assert.equal(getIssue(issueId)!.status, "developing");
+    assert.equal(getIssue(issueId)!.infraAttempts, 0);
+    const deferred = listWorkItemsForIssue(issueId)[0]!;
+    assert.equal(deferred.status, "pending");
+
+    // Fast-forward past the deferral backoff, then let CI pass.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    ci = "success";
+    await pump(1);
+
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.status, "reviewing", "the re-poll hands off once CI passes");
+    assert.equal(issue.infraAttempts, 0, "waiting plus a passing re-poll still spends nothing");
+    assert.equal(spawns, 1, "the re-poll must not spawn a second agent session");
+    assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer" && i.status === "pending").length, 1);
+  } finally {
+    if (prevBase === undefined) delete process.env.DECK_OUTAGE_BACKOFF_BASE_MS;
+    else process.env.DECK_OUTAGE_BACKOFF_BASE_MS = prevBase;
+    if (prevMax === undefined) delete process.env.DECK_OUTAGE_BACKOFF_MAX_MS;
+    else process.env.DECK_OUTAGE_BACKOFF_MAX_MS = prevMax;
+  }
+});
+
+test("NOT-311: none with a pull_request workflow on the base waits (no review handoff)", async () => {
+  const issueId = await makeIssue();
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub({ checks: "none", pullRequestWorkflow: true }) }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing");
+  assert.equal(issue.infraAttempts, 0, "an unregistered-CI wait spends no infra attempt");
+  assert.match(issue.currentIntent ?? "", /Waiting for CI \(queued\) - no attempt spent/);
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 0, "no review handoff on 'no checks yet'");
+  const completed = listWorkflowEventsForIssue(issueId).find((e) => e.type === "checks.completed");
+  assert.ok(completed);
+  const payload = JSON.parse(completed!.payloadJson ?? "{}");
+  assert.equal(payload.snapshot, "none");
+  assert.equal(payload.reason, "none_with_workflow");
+});
+
+test("NOT-311: none with no pull_request workflow on the base proceeds as today", async () => {
+  const issueId = await makeIssue();
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub({ checks: "none", pullRequestWorkflow: false }) }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "no configured CI still hands off");
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer" && i.status === "pending").length, 1);
+  const completed = listWorkflowEventsForIssue(issueId).find((e) => e.type === "checks.completed");
+  assert.ok(completed);
+  const payload = JSON.parse(completed!.payloadJson ?? "{}");
+  assert.equal(payload.snapshot, "none");
+  assert.equal(payload.reason, "none_no_workflow");
+});
+
+test("NOT-311: none with an unknown workflow answer waits fail-closed", async () => {
+  // The adapter cannot read the base (or has no such method): 'no checks yet' must
+  // never read as a pass.
+  const issueId = await makeIssue();
+  const github = fakeGithub({ checks: "none", pullRequestWorkflow: null });
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+
   assert.equal(getIssue(issueId)!.status, "developing");
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 0);
+  const completed = listWorkflowEventsForIssue(issueId).find((e) => e.type === "checks.completed");
+  assert.equal(JSON.parse(completed!.payloadJson ?? "{}").reason, "none_with_workflow");
+});
+
+test("NOT-311: past CHECKS_WAIT_CEILING_MS the wait escalates naming the PR and head SHA", async () => {
+  // A zero ceiling makes the very first wait already past it — no clock to inject,
+  // no sleeping: the deferral reports escalated and a policy_escalation lands.
+  const prev = process.env.CHECKS_WAIT_CEILING_MS;
+  process.env.CHECKS_WAIT_CEILING_MS = "0";
+  try {
+    const issueId = await makeIssue();
+    registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub({ checks: "pending" }) }));
+    startWorkflow(issueId);
+    await pump(1);
+
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.status, "needs_human");
+    assert.equal(issue.infraAttempts, 0, "a ceiling escalation spends no infra attempt");
+    const actions = listHumanActionsForIssue(issueId).filter((a) => a.status === "open");
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0]!.actionType, "policy_escalation");
+    // The wait never hands off, so the issue row carries no PR/SHA — the milestone
+    // and the human action do.
+    const completed = listWorkflowEventsForIssue(issueId).find((e) => e.type === "checks.completed");
+    assert.ok(completed);
+    const msPayload = JSON.parse(completed!.payloadJson ?? "{}");
+    assert.equal(msPayload.reason, "pending_ceiling");
+    assert.ok(msPayload.prNumber, "the milestone names the PR");
+    assert.ok(msPayload.headSha, "the milestone names the head SHA");
+    assert.match(actions[0]!.reason, new RegExp(`CI did not complete on ${msPayload.headSha}`));
+    assert.match(actions[0]!.reason, new RegExp(`PR #${msPayload.prNumber}`));
+  } finally {
+    if (prev === undefined) delete process.env.CHECKS_WAIT_CEILING_MS;
+    else process.env.CHECKS_WAIT_CEILING_MS = prev;
+  }
 });
 
 test("NOT-255: a non-draft PR with otherwise-verified identity hands off cleanly (just-failed retry_merge)", async () => {

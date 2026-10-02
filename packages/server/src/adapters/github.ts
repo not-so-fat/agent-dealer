@@ -460,6 +460,17 @@ export interface GithubAdapter {
     prNumber?: number;
   }): Promise<ChecksFailureEvidence | null>;
   /**
+   * NOT-311: does the PR base ref carry a workflow triggered by `pull_request`?
+   * Lets the coordinator tell "CI not yet registered" (wait) from "no CI configured"
+   * (proceed). Reads the fetched `origin/<baseRef>` tree locally — no extra auth.
+   *
+   * Returns null when the answer is unknowable (base ref missing, git failure):
+   * callers fail closed and wait rather than sending an unverified PR to review.
+   * Optional so existing fakes keep compiling — a missing implementation reads as
+   * null (unknown), never as "no workflow".
+   */
+  hasPullRequestWorkflow?(opts: { cwd: string; baseRef: string }): Promise<boolean | null>;
+  /**
    * Publishes the reviewer's validated verdict against `number` explicitly — required for
    * a detached-HEAD reviewer worktree, same reason as `viewPr`'s `number`. `event`
    * "APPROVE"/"REQUEST_CHANGES" falls back to a plain comment review carrying the same
@@ -536,6 +547,14 @@ export function createGithubAdapter(exec: GhExec = defaultExec): GithubAdapter {
         return await fetchChecksFailureEvidence(exec, { cwd, number, branch, expectedHeadSha, prNumber });
       } catch {
         // Best-effort: any unexpected throw degrades to no enrichment, never a lost retry.
+        return null;
+      }
+    },
+
+    async hasPullRequestWorkflow({ cwd, baseRef }) {
+      try {
+        return await baseRefHasPullRequestWorkflow(cwd, baseRef);
+      } catch {
         return null;
       }
     },
@@ -649,6 +668,58 @@ export async function fetchChecksFailureEvidence(
   };
 }
 
+/**
+ * NOT-311: does `origin/<baseRef>` contain a workflow triggered by `pull_request`?
+ * False when the tree has no workflow files at all; null when the tree itself cannot
+ * be read (unknown base ref, unparsable git output) so the caller waits fail-closed.
+ */
+export async function baseRefHasPullRequestWorkflow(cwd: string, baseRef: string): Promise<boolean | null> {
+  let listing: string;
+  try {
+    // `-r`: without it ls-tree prints the workflows *directory* entry itself rather
+    // than the files under it, so the scan would never see a workflow (NOT-311).
+    listing = (await run("git", ["ls-tree", "-r", `origin/${baseRef}`, "--name-only", ".github/workflows"], { cwd })).stdout;
+  } catch {
+    return null;
+  }
+  const files = listing
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((f) => f && /\.(ya?ml)$/i.test(f));
+  if (files.length === 0) return false;
+  for (const file of files) {
+    let content: string;
+    try {
+      content = (await run("git", ["show", `origin/${baseRef}:${file}`], { cwd })).stdout;
+    } catch {
+      return null;
+    }
+    if (workflowHasPullRequestTrigger(content)) return true;
+  }
+  return false;
+}
+
+/**
+ * Heuristic `on:` trigger scan: matches inline (`on: pull_request`,
+ * `on: [push, pull_request]`) and block forms. Stops at the next top-level key so a
+ * later `pull_request` mention outside `on:` (a job name, a comment) cannot qualify.
+ * Leans toward waiting — a false positive only costs CI-wait backoff, while a false
+ * negative would send an unverified PR to review.
+ */
+export function workflowHasPullRequestTrigger(content: string): boolean {
+  const lines = content.split("\n");
+  const onIdx = lines.findIndex((l) => /^\s*on\s*:/.test(l));
+  if (onIdx < 0) return false;
+  const onLine = lines[onIdx]!;
+  if (/\bpull_request\b/.test(onLine.slice(onLine.indexOf("on") + 2))) return true;
+  for (let i = onIdx + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (/^\S/.test(line)) break;
+    if (/\bpull_request\b/.test(line.replace(/#.*$/, ""))) return true;
+  }
+  return false;
+}
+
 export const realGithubAdapter: GithubAdapter = createGithubAdapter();
 
 const REVIEW_FLAG: Record<ReviewEvent, string> = {
@@ -680,6 +751,21 @@ async function runReview(
 
 export type PollChecksResult = "success" | "failure" | "timeout" | "none";
 
+/**
+ * NOT-311: what a bounded poll actually observed, beyond the collapsed result. The
+ * collapsed `"timeout"` is ambiguous — the deadline may have hit while checks were
+ * still queued/running (`lastSnapshot: "pending"`), while no checks had registered
+ * yet (`lastSnapshot: "none"`), or because the lease was lost mid-poll (`aborted`).
+ * Callers that wait on CI instead of spending an attempt need that distinction.
+ */
+export interface PollChecksDetail {
+  result: PollChecksResult;
+  /** The most recent snapshot read before the poll returned; null when nothing was read. */
+  lastSnapshot: ChecksSnapshot | null;
+  /** True when the poll gave up because `signal` aborted rather than the deadline. */
+  aborted: boolean;
+}
+
 /** Consecutive "none" reads required before concluding no checks are configured at all. */
 const NONE_STREAK_REQUIRED = 2;
 
@@ -703,19 +789,33 @@ export async function pollPrChecks(
   adapter: Pick<GithubAdapter, "checksSnapshot">,
   opts: { cwd: string; timeoutMs: number; intervalMs: number; signal?: AbortSignal; number?: number; branch?: string }
 ): Promise<PollChecksResult> {
+  return (await pollPrChecksDetailed(adapter, opts)).result;
+}
+
+/**
+ * NOT-311: same bounded poll as {@link pollPrChecks}, but reporting what was last
+ * seen and whether an abort cut the wait short. `pollPrChecks` keeps the collapsed
+ * contract for callers that only branch on the result.
+ */
+export async function pollPrChecksDetailed(
+  adapter: Pick<GithubAdapter, "checksSnapshot">,
+  opts: { cwd: string; timeoutMs: number; intervalMs: number; signal?: AbortSignal; number?: number; branch?: string }
+): Promise<PollChecksDetail> {
   const deadline = Date.now() + opts.timeoutMs;
   let noneStreak = 0;
+  let lastSnapshot: ChecksSnapshot | null = null;
   for (;;) {
-    if (opts.signal?.aborted) return "timeout";
+    if (opts.signal?.aborted) return { result: "timeout", lastSnapshot, aborted: true };
     const snapshot = await adapter.checksSnapshot({ cwd: opts.cwd, number: opts.number, branch: opts.branch });
-    if (snapshot === "failure" || snapshot === "success") return snapshot;
+    lastSnapshot = snapshot;
+    if (snapshot === "failure" || snapshot === "success") return { result: snapshot, lastSnapshot, aborted: false };
     if (snapshot === "none") {
       noneStreak++;
-      if (noneStreak >= NONE_STREAK_REQUIRED) return "none";
+      if (noneStreak >= NONE_STREAK_REQUIRED) return { result: "none", lastSnapshot, aborted: false };
     } else {
       noneStreak = 0;
     }
-    if (Date.now() >= deadline) return "timeout";
+    if (Date.now() >= deadline) return { result: "timeout", lastSnapshot, aborted: false };
     await new Promise((resolve) => setTimeout(resolve, Math.min(opts.intervalMs, deadline - Date.now())));
   }
 }
