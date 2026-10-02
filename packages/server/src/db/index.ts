@@ -292,6 +292,20 @@ export function migrate(): void {
     db.exec("ALTER TABLE issues ADD COLUMN infra_attempts INTEGER NOT NULL DEFAULT 0");
   }
 
+  // NOT-313: CI-repair budget, separate from the infra-attempt budget above — a
+  // failing CI check is the expected feedback loop, not a crash/timeout/adapter
+  // failure, so `checks_failed` spends `ci_attempts` (bounded by
+  // `max_ci_attempts`) and never touches `infra_attempts`. Each column is guarded
+  // on its OWN presence (see the worker_sessions liveness comment above): the two
+  // ALTERs commit separately, so a kill between them must still repair on retry.
+  const issueColsForCi = db.prepare("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+  if (!issueColsForCi.some((c) => c.name === "max_ci_attempts")) {
+    db.exec("ALTER TABLE issues ADD COLUMN max_ci_attempts INTEGER NOT NULL DEFAULT 3");
+  }
+  if (!issueColsForCi.some((c) => c.name === "ci_attempts")) {
+    db.exec("ALTER TABLE issues ADD COLUMN ci_attempts INTEGER NOT NULL DEFAULT 0");
+  }
+
   // NOT-102: per-issue auto-merge after reviewer approve (kick UI defaults on; existing
   // rows stay off so in-flight workflows keep the human final_review path).
   const issueColsForAutoMerge = db.prepare("PRAGMA table_info(issues)").all() as Array<{ name: string }>;

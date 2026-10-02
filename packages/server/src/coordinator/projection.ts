@@ -50,7 +50,7 @@ export type NextEffect =
   | { kind: "none" };
 
 /** Which budget (if any) this transition spends before enqueueing the next effect. */
-export type BudgetAdvance = "review" | "infra" | "none";
+export type BudgetAdvance = "review" | "infra" | "ci" | "none";
 
 export interface DeveloperProjection {
   projection: IssueProjection;
@@ -77,19 +77,25 @@ export function projectDeveloperRoute(
         effect: { kind: "enqueue", workItem: "reviewer", atHeadSha: route.headSha },
         advance: "none",
       };
-    case "retry_developer":
+    case "retry_developer": {
+      // NOT-313: a CI-repair retry spends the CI budget, never the infra one —
+      // the route's budget marker (set only by the checks_failed path) decides.
+      const isCiRepair = route.budget === "ci";
       return {
         projection: {
           // developing → developing and repairing → repairing are both self-loops;
-          // an infra-retry developer failure stays in "repairing".
+          // a retried developer failure stays in "repairing".
           issueStatus: currentStatus === "repairing" ? "repairing" : "developing",
           currentOwner: "developer",
-          currentIntent: `Developer retrying (infra attempt) — ${route.reason}`,
+          currentIntent: isCiRepair
+            ? `Developer retrying (CI repair attempt) — ${route.reason}`
+            : `Developer retrying (infra attempt) — ${route.reason}`,
           events: ["worker.failed"],
         },
         effect: { kind: "enqueue", workItem: "developer", retryReason: route.reason },
-        advance: "infra",
+        advance: isCiRepair ? "ci" : "infra",
       };
+    }
     case "retry_publish":
       return {
         projection: {

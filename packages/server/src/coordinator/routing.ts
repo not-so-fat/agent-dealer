@@ -1,4 +1,5 @@
 // packages/server/src/coordinator/routing.ts
+import { DEFAULT_MAX_CI_ATTEMPTS } from "@agent-dealer/shared";
 import { normalizeReviewerResult, type ReviewerResult } from "./reviewer-result.js";
 import type { PushDivergenceEvidence } from "./human-resolution.js";
 import type { PushRejectionFacts } from "../adapters/git-worktree.js";
@@ -121,6 +122,14 @@ export interface RouteLimits {
   infraAttempts: number;
   maxInfraAttempts: number;
   /**
+   * NOT-313: CI-repair budget — only `checks_failed` spends it, bounded by
+   * `maxCiAttempts`. Optional so pre-existing literals keep compiling; absent
+   * reads as 0 spent of {@link DEFAULT_MAX_CI_ATTEMPTS}. commands.ts always
+   * passes the issue's real counters.
+   */
+  ciAttempts?: number;
+  maxCiAttempts?: number;
+  /**
    * NOT-147: after this many timeout/crash failures with still-zero commits ahead of base,
    * escalate instead of another full spawn. Counts the failure being routed
    * (`infraAttempts` already spent + 1). Default {@link DEFAULT_NO_PROGRESS_INFRA_ATTEMPTS}.
@@ -144,15 +153,28 @@ export function infraAttemptsRemain(
   return limits.infraAttempts < limits.maxInfraAttempts;
 }
 
+/**
+ * NOT-313: the one definition of "is there CI-repair budget left", mirroring
+ * {@link infraAttemptsRemain}. Absent counters read as a fresh default budget.
+ */
+export function ciAttemptsRemain(
+  limits: Pick<RouteLimits, "ciAttempts" | "maxCiAttempts">
+): boolean {
+  return (limits.ciAttempts ?? 0) < (limits.maxCiAttempts ?? DEFAULT_MAX_CI_ATTEMPTS);
+}
+
 export type DeveloperRouteResult =
   /** headSha is the coordinator-verified SHA (not agent self-report) the reviewer must be pinned to. */
   | { next: "spawn_reviewer"; headSha: string }
-  /** Bounded infra retry — a fresh developer session on the same branch, no review round
+  /** Bounded retry — a fresh developer session on the same branch, no review round
    * spent. `reason` carries WHY the prior attempt failed into the next session's prompt —
    * without it, a retried developer can't tell checks_failed from adapter_failure from a
    * plain crash, and (round 1 specifically) would be told to start on a "fresh branch"
-   * despite reusing one that already carries a failed attempt's commits. */
-  | { next: "retry_developer"; reason: string }
+   * despite reusing one that already carries a failed attempt's commits.
+   * NOT-313: `budget: "ci"` marks a CI-repair retry (spends `ci_attempts`);
+   * absent means an infra retry (spends `infra_attempts`). Only the CI path sets
+   * it, so existing infra routes keep their exact shape. */
+  | { next: "retry_developer"; reason: string; budget?: "ci" }
   /** Re-run the coordinator's own publish stage only — no agent spawn. Usually the branch is
    * already on origin and just gh/PR/checks is redone, but a recovered branch whose push has
    * not landed yet is pushed first (developer-effect's runPublishOnlyHandoff decides from the
@@ -266,7 +288,6 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
         : { next: "human_action", actionType: "policy_escalation", reason: `${reason} (infra-attempt limit reached).` };
     }
     case "no_pr":
-    case "checks_failed":
     case "deck_failure": {
       // Unified infra-failure policy: the session/environment failed to produce a
       // reviewable result at all — bounded auto-retry on max_infra_attempts, decoupled
@@ -275,6 +296,30 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
       return infraAttemptsRemain(limits)
         ? { next: "retry_developer", reason }
         : { next: "human_action", actionType: "policy_escalation", reason: `${reason} (infra-attempt limit reached).` };
+    }
+    case "checks_failed": {
+      // NOT-313: a failing CI check is the expected feedback loop, not an
+      // infrastructure failure — bounded on max_ci_attempts, never the infra
+      // budget. The retry reason names the attempt number so the next session's
+      // prompt reads "CI repair attempt N of M"; the escalation names the same
+      // count plus the failing checks (via the NOT-252 enrichment), never the
+      // infra-attempt text. policy_escalation (not attempts_exhausted) so a human
+      // "resume" resets budgets without spending a review round.
+      const spent = limits.ciAttempts ?? 0;
+      const max = limits.maxCiAttempts ?? DEFAULT_MAX_CI_ATTEMPTS;
+      const base = checksFailedDetails(outcome);
+      if (ciAttemptsRemain(limits)) {
+        return {
+          next: "retry_developer",
+          reason: `CI repair attempt ${spent + 1} of ${max}: ${base}`,
+          budget: "ci",
+        };
+      }
+      return {
+        next: "human_action",
+        actionType: "policy_escalation",
+        reason: `CI checks still failing after ${spent} repair attempts (limit ${max}). ${base}`,
+      };
     }
     case "session_failed":
     case "timed_out": {
@@ -310,7 +355,7 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
   }
 }
 
-function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "session_failed" | "timed_out" | "checks_failed" | "adapter_failure" | "deck_failure" }): string {
+function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "session_failed" | "timed_out" | "adapter_failure" | "deck_failure" }): string {
   switch (outcome.kind) {
     case "no_pr":
       return "Developer session produced no PR.";
@@ -318,16 +363,20 @@ function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "sessi
       return outcome.reason ?? "Developer session failed or crashed.";
     case "timed_out":
       return outcome.reason ?? "Developer session timed out.";
-    case "checks_failed":
-      // NOT-252: prefer the sanitized enrichment the effect threaded into `details`
-      // (failing check names + bounded untrusted excerpt at the verified head SHA).
-      // Blank/absent details keep today's exact generic reason.
-      return outcome.details?.trim() ? outcome.details : "Developer's PR checks failed.";
     case "adapter_failure":
       return `Git/GitHub verification failed: ${outcome.reason}`;
     case "deck_failure":
       return `Agent Deck ${outcome.reason}`;
   }
+}
+
+/**
+ * NOT-252: prefer the sanitized enrichment the effect threaded into `details`
+ * (failing check names + bounded untrusted excerpt at the verified head SHA).
+ * Blank/absent details keep the exact generic reason.
+ */
+function checksFailedDetails(outcome: DeveloperOutcome & { kind: "checks_failed" }): string {
+  return outcome.details?.trim() ? outcome.details : "Developer's PR checks failed.";
 }
 
 /**
