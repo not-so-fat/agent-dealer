@@ -238,6 +238,12 @@ export function classifyFailureReason(reason: string | null | undefined): {
 } {
   const text = (reason ?? "").trim();
   if (!text) return { code: "unknown", domain: "unknown", confidence: "low" };
+  // NOT-307: an idle-watchdog kill names itself ("made no progress … idle timeout").
+  // Checked before the timeout rules: the reason contains both "timeout" and "tool"
+  // ("last tool: …"), which would otherwise misread as tool_test_timeout.
+  if (/made no progress|killed on the idle timeout/i.test(text)) {
+    return { code: "muse_no_progress", domain: "infrastructure", confidence: "high" };
+  }
   // A bare timeout with no tool/test in flight is unknown by rule — do not guess.
   if (/timed? ?out|deadline/i.test(text) && !/tool|test|jest|vitest|pytest|subprocess|command/i.test(text)) {
     return { code: "unknown", domain: "unknown", confidence: "low" };

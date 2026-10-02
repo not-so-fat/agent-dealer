@@ -184,21 +184,34 @@ function readAmbientCodexAuthPolicy(ambientCodexHome: string): Record<string, un
   }
 }
 
-function deckLaunchHeaders(deckId: string, worktreePath: string): Record<string, string> {
-  return {
+/**
+ * NOT-305: header carrying the session's opaque Deck correlation UUID. Observability
+ * metadata only — Deck uses it to attribute its normalized playbook-fetch stream back
+ * to this durable Dealer session; it grants no authority.
+ */
+export const DECK_CORRELATION_HEADER = "x-agent-deck-correlation-id";
+
+function deckLaunchHeaders(
+  deckId: string,
+  worktreePath: string,
+  correlationId?: string | null
+): Record<string, string> {
+  const headers: Record<string, string> = {
     "x-agent-deck-deck-id": deckId,
     "x-agent-deck-workspace": worktreePath,
   };
+  if (correlationId) headers[DECK_CORRELATION_HEADER] = correlationId;
+  return headers;
 }
 
 /** claude's `--mcp-config` file schema — deck headers only, no Authorization. */
-function urlHeaderMcpConfig(mcpUrl: string, deckId: string, worktreePath: string) {
+function urlHeaderMcpConfig(mcpUrl: string, deckId: string, worktreePath: string, correlationId?: string | null) {
   return {
     mcpServers: {
       "agent-deck": {
         type: "http",
         url: mcpUrl,
-        headers: deckLaunchHeaders(deckId, worktreePath),
+        headers: deckLaunchHeaders(deckId, worktreePath, correlationId),
       },
     },
   };
@@ -239,6 +252,11 @@ async function materializeWorkerMcpConfig(opts: {
   deckId: string;
   worktreePath: string;
   /**
+   * NOT-305: the worker session's opaque Deck correlation UUID, carried as the
+   * `x-agent-deck-correlation-id` observability header in every runtime config below.
+   */
+  correlationId?: string | null;
+  /**
    * The session's resolved policy. The scoped config is the only place a codex session's
    * tool surface can be narrowed — codex has no `--disallowedTools` equivalent — so a
    * policy-blind config silently grants whatever the deck exposes (NOT-134).
@@ -247,7 +265,7 @@ async function materializeWorkerMcpConfig(opts: {
 }): Promise<MaterializedMcpConfig> {
   const mcpBase = getAgentDeckMcpUrl().replace(/\/mcp\/?$/, "");
   const mcpUrl = `${mcpBase}/mcp`;
-  const headers = deckLaunchHeaders(opts.deckId, opts.worktreePath);
+  const headers = deckLaunchHeaders(opts.deckId, opts.worktreePath, opts.correlationId);
 
   // NOT-278: Muse Code settings come only from `prepareMuseAttempt`
   // (runners/muse-config.ts) — never emit a Claude/Codex/Cursor config for Muse. Refuse
@@ -312,7 +330,7 @@ async function materializeWorkerMcpConfig(opts: {
   const dir = getWorkerMcpConfigDir();
   const filePath = path.join(dir, `claude-mcp-${opts.deckId.slice(0, 8)}-${randomUUID()}.json`);
   try {
-    fs.writeFileSync(filePath, JSON.stringify(urlHeaderMcpConfig(mcpUrl, opts.deckId, opts.worktreePath)), { mode: 0o600 });
+    fs.writeFileSync(filePath, JSON.stringify(urlHeaderMcpConfig(mcpUrl, opts.deckId, opts.worktreePath, opts.correlationId)), { mode: 0o600 });
   } catch (err) {
     fs.rmSync(filePath, { force: true });
     throw err;
@@ -504,6 +522,11 @@ export async function prepareWorkerDeckConnection(opts: {
   worktreePath: string;
   runtime: Runtime;
   playbookIds?: string[];
+  /**
+   * NOT-305: the worker session's opaque Deck correlation UUID, written into the
+   * materialized launch config's `x-agent-deck-correlation-id` header.
+   */
+  correlationId?: string | null;
   /** Session policy — narrows the materialized MCP config's tool surface (NOT-134). */
   policy: PermissionPolicy;
   verifyCallTool?: DeckToolCaller;
@@ -518,6 +541,7 @@ export async function prepareWorkerDeckConnection(opts: {
       deckId: opts.deckId,
       worktreePath: opts.worktreePath,
       policy: opts.policy,
+      correlationId: opts.correlationId,
     });
   } catch (err) {
     return { ok: false, kind: "infra_failure", reason: `MCP materialization failed: ${(err as Error).message}` };

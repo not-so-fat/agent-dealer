@@ -201,9 +201,26 @@ export function reasonForSessionCrash(opts: {
   timedOut: boolean;
   logPath: string | null | undefined;
   runtime?: Runtime;
+  /**
+   * NOT-307: describe an idle-watchdog kill instead of a generic timeout. The reason
+   * carries the whole minutes of silence and the last tool name so the `unknown`
+   * fallback — and the `muse_no_progress` classifier — never have to guess them.
+   */
+  idle?: {
+    minutes: number | null;
+    lastToolName: string | null;
+  } | null;
 }): string {
   const classified = classifyRunnerLogFailure(opts.logPath, opts.runtime);
   if (classified) return classified;
+  if (opts.timedOut && opts.idle) {
+    const mins =
+      typeof opts.idle.minutes === "number" && Number.isFinite(opts.idle.minutes)
+        ? ` for ${opts.idle.minutes} minute${opts.idle.minutes === 1 ? "" : "s"}`
+        : "";
+    const tool = opts.idle.lastToolName ? ` (last tool: ${opts.idle.lastToolName})` : " (no tool call seen)";
+    return `Developer session made no progress${mins}.${tool} Killed on the idle timeout.`;
+  }
   return opts.timedOut ? "Developer session timed out." : "Developer session failed or crashed.";
 }
 

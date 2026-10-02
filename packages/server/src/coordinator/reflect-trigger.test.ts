@@ -1,11 +1,9 @@
 // packages/server/src/coordinator/reflect-trigger.test.ts
 //
-// NOT-64: triggerIssueReflect is the lightweight (no agent-spawn) reflect fired on
-// final_review:complete. Network calls to Agent Deck are faked via the injectable
-// `deps` seam.
-//
-// NOT-106: Deck calls go through launch-fixed deck headers via `deps.callTool`
-// (adapters/reflect-authority.ts) — no mint.
+// NOT-305: triggerIssueReflect records completion evidence — actual-use receipts for
+// every terminal worker session plus one idempotent `signal_only` Deck report per
+// failure/correction trigger. It never proposes a playbook patch (`kind: update`) and
+// never appends generic `Notes` items.
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -13,24 +11,26 @@ import os from "node:os";
 import path from "node:path";
 import type { ReflectDeps } from "./reflect-trigger.js";
 import type { AuthorizedDeckCallResult } from "../adapters/reflect-authority.js";
+import { DECK_CORRELATION_TOOL, validateSignalOnlyArgs } from "./playbook-feedback.js";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-reflect-"));
 
-const { migrate, getDb } = await import("../db/index.js");
+const { migrate } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { createIssue } = await import("../repository/issues.js");
 const { createAgent } = await import("../repository/agents.js");
-const { createWorkerSession } = await import("../repository/worker-sessions.js");
+const { createWorkerSession, completeSession } = await import("../repository/worker-sessions.js");
 const { buildProfileSnapshot, serializeProfileSnapshot } = await import("./profile-snapshot.js");
-const { appendWorkflowEvent } = await import("../repository/workflow-events.js");
-const { createIssueArtifact } = await import("../repository/artifacts.js");
+const { createHumanAction, resolveHumanAction } = await import("../repository/human-actions.js");
 const { listArtifactsForIssue, listArtifactsForIssueByKind } = await import("../repository/artifacts-for-issue.js");
-const { listHumanActionsForIssue, createHumanAction } = await import("../repository/human-actions.js");
+const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { triggerIssueReflect, resolveReflectionInteractionAction } = await import("./reflect-trigger.js");
 
 before(() => {
   migrate();
 });
+
+const DECK = "11111111-1111-4111-a111-111111111111";
 
 function seedIssue(developerAgentId: string) {
   return createIssue({
@@ -45,18 +45,11 @@ function seedIssue(developerAgentId: string) {
   });
 }
 
-function seedFinalDeveloperSession(
-  issueId: string,
-  agent: ReturnType<typeof createAgent>,
-  overrides: { deckId: string | null; playbookIds?: string[] }
-) {
-  if (overrides.playbookIds !== undefined) {
-    getDb()
-      .prepare("UPDATE agents SET playbook_ids_json = ? WHERE id = ?")
-      .run(JSON.stringify(overrides.playbookIds), agent.id);
-  }
-  const snapshot = { ...buildProfileSnapshot(agent, "developer"), deckId: overrides.deckId };
-  return createWorkerSession({
+/** Terminal developer session on a NOT-149 profile: snapshot names the deck, no playbook IDs anywhere. */
+function seedTerminalDeveloperSession(issueId: string, agent: ReturnType<typeof createAgent>) {
+  assert.equal(agent.playbookIdsJson, null);
+  const snapshot = { ...buildProfileSnapshot(agent, "developer"), deckId: DECK };
+  const session = createWorkerSession({
     issueId,
     role: "developer",
     round: 1,
@@ -64,6 +57,52 @@ function seedFinalDeveloperSession(
     runtime: agent.runtime,
     profileSnapshotJson: serializeProfileSnapshot(snapshot),
   });
+  completeSession(session.id, { status: "done" });
+  return session;
+}
+
+interface CallRecord {
+  toolName: string;
+  args: Record<string, unknown>;
+}
+
+/** Default deps: healthy deck, correlation succeeds, signal_only succeeds. */
+function makeDeps(overrides: {
+  fetches?: Array<{ playbook_id: string }>;
+  correlationData?: unknown;
+  propose?: (args: Record<string, unknown>) => AuthorizedDeckCallResult<{ id: string }>;
+  checkHealth?: ReflectDeps["checkHealth"];
+} = {}): { deps: ReflectDeps; calls: CallRecord[] } {
+  const calls: CallRecord[] = [];
+  const deps: ReflectDeps = {
+    checkHealth: overrides.checkHealth ?? (async () => true),
+    callTool: (async (opts: { toolName: string; arguments: Record<string, unknown> }) => {
+      calls.push({ toolName: opts.toolName, args: opts.arguments });
+      if (opts.toolName === DECK_CORRELATION_TOOL) {
+        return { ok: true, data: overrides.correlationData ?? { fetches: overrides.fetches ?? [] } };
+      }
+      if (opts.toolName === "propose_playbook_patch") {
+        if (opts.arguments.kind !== "signal_only") {
+          throw new Error(`issue-centric reflection must only send signal_only, got ${opts.arguments.kind}`);
+        }
+        const schemaError = validateSignalOnlyArgs(opts.arguments);
+        if (schemaError) {
+          throw new Error(`signal payload violates Deck schema: ${schemaError}`);
+        }
+        return overrides.propose
+          ? overrides.propose(opts.arguments)
+          : { ok: true, data: { id: `sig-${calls.length}` } };
+      }
+      throw new Error(`unexpected tool call: ${opts.toolName}`);
+    }) as ReflectDeps["callTool"],
+  };
+  return { deps, calls };
+}
+
+function sentSignals(issueId: string): Array<{ status?: unknown }> {
+  return listArtifactsForIssueByKind(issueId, "deck_feedback_signal")
+    .map((a) => JSON.parse(a.contentJson!))
+    .filter((s) => s.status === "sent");
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000, intervalMs = 5): Promise<void> {
@@ -74,203 +113,105 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000, intervalMs = 
   }
 }
 
-/** Default deps: healthy deck, get_playbook/propose_playbook_patch both succeed. */
-function makeDeps(overrides: {
-  getPlaybook?: (playbookId: string) => AuthorizedDeckCallResult<{ id: string; title: string; body: string }>;
-  proposePatch?: (
-    playbookId: string,
-    rationale: string
-  ) => AuthorizedDeckCallResult<{ id: string; playbookId: string | null }>;
-  checkHealth?: ReflectDeps["checkHealth"];
-}): ReflectDeps {
-  return {
-    checkHealth: overrides.checkHealth ?? (async () => true),
-    callTool: (async (opts: { toolName: string; arguments: Record<string, unknown> }) => {
-      if (opts.toolName === "get_playbook") {
-        const playbookId = opts.arguments.playbook_id as string;
-        return overrides.getPlaybook
-          ? overrides.getPlaybook(playbookId)
-          : { ok: true, data: { id: playbookId, title: `Playbook ${playbookId}`, body: "" } };
-      }
-      if (opts.toolName === "propose_playbook_patch") {
-        const playbookId = opts.arguments.playbook_id as string;
-        const rationale = opts.arguments.rationale as string;
-        return overrides.proposePatch
-          ? overrides.proposePatch(playbookId, rationale)
-          : { ok: true, data: { id: `patch-${playbookId}`, playbookId } };
-      }
-      throw new Error(`unexpected tool call: ${opts.toolName}`);
-    }) as ReflectDeps["callTool"],
-  };
-}
-
-test("skips when the developer profile has no deck configured and no session snapshot exists", async () => {
+test("skips when the issue has no terminal sessions and no failure triggers", async () => {
   const issue = seedIssue(BUILTIN_AGENT_CLAUDE_ID);
-  const result = await triggerIssueReflect(issue.id);
-  assert.equal(result, "skipped");
-});
-
-test("uses the frozen session snapshot's deck/playbooks, not the live (possibly edited) agent profile", async () => {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "22222222-2222-4222-a222-222222222222" });
-  const issue = seedIssue(dev.id);
-  seedFinalDeveloperSession(issue.id, dev, {
-    deckId: "11111111-1111-4111-a111-111111111111",
-    playbookIds: ["pb-1", "pb-2"],
-  });
-
-  const calledDeckIds: string[] = [];
-  const proposed: string[] = [];
-  const deps = makeDeps({
-    proposePatch: (playbookId) => {
-      proposed.push(playbookId);
-      return { ok: true, data: { id: `patch-${playbookId}`, playbookId } };
-    },
-  });
-  const wrapped: ReflectDeps = {
-    ...deps,
-    callTool: (async (opts) => {
-      calledDeckIds.push(opts.deckId);
-      return deps.callTool(opts);
-    }) as ReflectDeps["callTool"],
-  };
-
-  const result = await triggerIssueReflect(issue.id, wrapped);
-  assert.equal(result, "triggered");
-  assert.ok(calledDeckIds.every((id) => id === "11111111-1111-4111-a111-111111111111"));
-  assert.deepStrictEqual(proposed.sort(), ["pb-1", "pb-2"]);
-});
-
-test("falls back to the live agent profile when the developer session has no frozen snapshot (legacy row)", async () => {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "33333333-3333-4333-a333-333333333333" });
-  getDb()
-    .prepare("UPDATE agents SET playbook_ids_json = ? WHERE id = ?")
-    .run(JSON.stringify(["pb-live"]), dev.id);
-  const issue = seedIssue(dev.id);
-  createWorkerSession({ issueId: issue.id, role: "developer", round: 1, agentId: dev.id, runtime: "claude_code" });
-
-  const proposed: string[] = [];
-  const deps = makeDeps({
-    proposePatch: (playbookId) => {
-      proposed.push(playbookId);
-      return { ok: true, data: { id: "patch", playbookId } };
-    },
-  });
-
-  const result = await triggerIssueReflect(issue.id, deps);
-  assert.equal(result, "triggered");
-  assert.deepStrictEqual(proposed, ["pb-live"]);
-});
-
-test("the legacy-row fallback also honors a profile with only the singular legacy playbookId", async () => {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "44444444-4444-4444-a444-444444444444" });
-  getDb().prepare("UPDATE agents SET playbook_id = ? WHERE id = ?").run("pb-legacy", dev.id);
-  const issue = seedIssue(dev.id);
-  createWorkerSession({ issueId: issue.id, role: "developer", round: 1, agentId: dev.id, runtime: "claude_code" });
-
-  const proposed: string[] = [];
-  const deps = makeDeps({
-    proposePatch: (playbookId) => {
-      proposed.push(playbookId);
-      return { ok: true, data: { id: "patch", playbookId } };
-    },
-  });
-
-  const result = await triggerIssueReflect(issue.id, deps);
-  assert.equal(result, "triggered");
-  assert.deepStrictEqual(proposed, ["pb-legacy"]);
-});
-
-test("skips when the deck is offline, and records why — never calls Deck tools", async () => {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "11111111-1111-4111-a111-111111111111" });
-  const issue = seedIssue(dev.id);
-  seedFinalDeveloperSession(issue.id, dev, {
-    deckId: "11111111-1111-4111-a111-111111111111",
-    playbookIds: ["pb-1"],
-  });
-  const deps: ReflectDeps = {
-    checkHealth: async () => false,
-    callTool: (async () => {
-      throw new Error("should not be called");
-    }) as ReflectDeps["callTool"],
-  };
+  const { deps, calls } = makeDeps();
   const result = await triggerIssueReflect(issue.id, deps);
   assert.equal(result, "skipped");
+  assert.deepStrictEqual(calls, []);
+});
+
+test("a clean completed run records the actual-use receipt and sends no signal", async () => {
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: DECK });
+  const issue = seedIssue(dev.id);
+  const session = seedTerminalDeveloperSession(issue.id, dev);
+  const { deps, calls } = makeDeps({ fetches: [{ playbook_id: "pb-1" }, { playbook_id: "pb-2" }] });
+
+  const result = await triggerIssueReflect(issue.id, deps);
+  assert.equal(result, "triggered");
+
+  const receipts = listArtifactsForIssueByKind(issue.id, "playbook_use_receipt").map((a) =>
+    JSON.parse(a.contentJson!)
+  );
+  assert.equal(receipts.length, 1);
+  assert.deepStrictEqual(receipts[0].playbookIds, ["pb-1", "pb-2"]);
+  assert.equal(receipts[0].workerSessionId, session.id);
+
+  assert.deepStrictEqual(
+    calls.filter((c) => c.toolName === "propose_playbook_patch"),
+    []
+  );
+  assert.deepStrictEqual(listArtifactsForIssueByKind(issue.id, "deck_feedback_signal"), []);
+  assert.deepStrictEqual(sentSignals(issue.id), []);
+});
+
+test("a human correction produces one signal_only report; a restart sends nothing more", async () => {
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: DECK });
+  const issue = seedIssue(dev.id);
+  seedTerminalDeveloperSession(issue.id, dev);
+  const action = createHumanAction({
+    issueId: issue.id,
+    actionType: "final_review",
+    reason: "Needs a repair round.",
+    question: "Repair?",
+  });
+  resolveHumanAction(action.id, "operator", { choice: "repair" });
+  const { deps, calls } = makeDeps({ fetches: [{ playbook_id: "pb-1" }] });
+
+  assert.equal(await triggerIssueReflect(issue.id, deps), "triggered");
+  const proposes = () => calls.filter((c) => c.toolName === "propose_playbook_patch");
+  assert.equal(proposes().length, 1);
+  assert.equal(proposes()[0]!.args.kind, "signal_only");
+
+  // Simulated restart: idempotent, no duplicate Deck report.
+  assert.equal(await triggerIssueReflect(issue.id, deps), "skipped");
+  assert.equal(proposes().length, 1);
+  assert.equal(sentSignals(issue.id).length, 1);
+});
+
+test("records a visible failure and preserves state when the deck is offline", async () => {
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: DECK });
+  const issue = seedIssue(dev.id);
+  seedTerminalDeveloperSession(issue.id, dev);
+  const { deps, calls } = makeDeps({ checkHealth: async () => false });
+
+  const result = await triggerIssueReflect(issue.id, deps);
+  assert.equal(result, "failed");
+  assert.deepStrictEqual(calls, []);
   const artifacts = listArtifactsForIssue(issue.id);
   assert.ok(
-    artifacts.some((a) => a.kind === "reflect_status" && JSON.parse(a.contentJson!).reason === "Agent Deck offline")
+    artifacts.some(
+      (a) =>
+        a.kind === "reflect_status" || (a.kind === "playbook_use_receipt" && JSON.parse(a.contentJson!).status === "error")
+    )
   );
 });
 
-test("posts one patch per playbook, using the implementation conclusion and review history as rationale", async () => {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099" });
+test("a retry after a failed signal send re-sends exactly once, never duplicating", async () => {
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: DECK });
   const issue = seedIssue(dev.id);
-  seedFinalDeveloperSession(issue.id, dev, {
-    deckId: "11111111-1111-4111-a111-111111111111",
-    playbookIds: ["pb-1", "pb-2"],
-  });
-  createIssueArtifact({
+  seedTerminalDeveloperSession(issue.id, dev);
+  const action = createHumanAction({
     issueId: issue.id,
-    kind: "implementation_conclusion",
-    author: "agent",
-    content: { text: "Implemented the widget using the shared component." },
+    actionType: "final_review",
+    reason: "Needs a repair round.",
+    question: "Repair?",
   });
-  appendWorkflowEvent({
-    issueId: issue.id,
-    type: "review.submitted",
-    actorType: "reviewer",
-    stage: "reviewing",
-    payload: { verdict: "changes_requested" },
-  });
-  appendWorkflowEvent({
-    issueId: issue.id,
-    type: "review.submitted",
-    actorType: "reviewer",
-    stage: "reviewing",
-    payload: { verdict: "approved" },
-  });
+  resolveHumanAction(action.id, "operator", { choice: "repair" });
 
-  const proposed: string[] = [];
-  const deps = makeDeps({
-    proposePatch: (playbookId, rationale) => {
-      proposed.push(playbookId);
-      assert.match(rationale, /2 review round\(s\)/);
-      assert.match(rationale, /changes_requested → approved/);
-      assert.match(rationale, /Implemented the widget using the shared component\./);
-      return { ok: true, data: { id: `patch-${playbookId}`, playbookId } };
-    },
+  let failPropose = true;
+  const { deps, calls } = makeDeps({
+    propose: () =>
+      failPropose
+        ? { ok: false, kind: "infra_failure", reason: "temporary deck error" }
+        : { ok: true, data: { id: "sig-1" } },
   });
-
-  const result = await triggerIssueReflect(issue.id, deps);
-  assert.equal(result, "triggered");
-  assert.deepStrictEqual(proposed.sort(), ["pb-1", "pb-2"]);
-
-  const artifacts = listArtifactsForIssue(issue.id);
-  assert.equal(artifacts.filter((a) => a.kind === "playbook_patch").length, 2);
-});
-
-test("a retry after a mid-loop failure does not re-propose a playbook that already succeeded", async () => {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099" });
-  const issue = seedIssue(dev.id);
-  seedFinalDeveloperSession(issue.id, dev, {
-    deckId: "11111111-1111-4111-a111-111111111111",
-    playbookIds: ["pb-ok", "pb-fail"],
-  });
-
-  let failPbFail = true;
-  const proposedCalls: string[] = [];
-  const deps = makeDeps({
-    proposePatch: (playbookId) => {
-      proposedCalls.push(playbookId);
-      if (playbookId === "pb-fail" && failPbFail) {
-        return { ok: false, kind: "infra_failure", reason: "temporary deck error" };
-      }
-      return { ok: true, data: { id: `patch-${playbookId}`, playbookId } };
-    },
-  });
+  const proposes = () => calls.filter((c) => c.toolName === "propose_playbook_patch");
 
   const first = await triggerIssueReflect(issue.id, deps);
-  assert.equal(first, "triggered");
-  assert.deepStrictEqual(proposedCalls, ["pb-ok", "pb-fail"]);
+  assert.equal(first, "triggered"); // the receipt still recorded
+  assert.equal(proposes().length, 1);
+  assert.equal(sentSignals(issue.id).length, 0);
 
   createHumanAction({
     issueId: issue.id,
@@ -285,11 +226,12 @@ test("a retry after a mid-loop failure does not re-propose a playbook that alrea
   const parkedAction = listHumanActionsForIssue(issue.id).find(
     (a) => a.actionType === "reflection_interaction_required" && a.status === "open"
   )!;
-  failPbFail = false;
+  failPropose = false;
   const resolved = resolveReflectionInteractionAction(parkedAction.id, "operator", "retry", deps);
   assert.equal(resolved.ok, true);
-  await waitFor(() => proposedCalls.length >= 3);
-  assert.deepStrictEqual(proposedCalls, ["pb-ok", "pb-fail", "pb-fail"]);
+  await waitFor(() => sentSignals(issue.id).length >= 1);
+  assert.equal(proposes().length, 2);
+  assert.equal(sentSignals(issue.id).length, 1);
 });
 
 test("resolveReflectionInteractionAction:dismiss closes the action without further Deck calls", async () => {
@@ -338,37 +280,56 @@ test("resolveReflectionInteractionAction rejects an invalid choice and already-r
   assert.equal(alreadyResolved.ok, false);
 });
 
-test("already-proposed playbook ids are skipped even behind a flood of other artifacts", async () => {
-  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099" });
+test("reflect_status names a malformed correlation response instead of blaming an offline Deck", async () => {
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: DECK });
   const issue = seedIssue(dev.id);
-  seedFinalDeveloperSession(issue.id, dev, {
-    deckId: "11111111-1111-4111-a111-111111111111",
-    playbookIds: ["pb-ok", "pb-next"],
-  });
-  createIssueArtifact({
-    issueId: issue.id,
-    kind: "playbook_patch",
-    author: "system",
-    content: { patchId: "existing", playbookId: "pb-ok", status: "proposed" },
-  });
-  for (let i = 0; i < 30; i++) {
-    createIssueArtifact({
-      issueId: issue.id,
-      kind: "developer_transcript",
-      author: "system",
-      content: { n: i },
-    });
-  }
+  seedTerminalDeveloperSession(issue.id, dev);
+  const { deps } = makeDeps({ correlationData: { unexpected: "shape" } });
 
-  const proposed: string[] = [];
-  const deps = makeDeps({
-    proposePatch: (playbookId) => {
-      proposed.push(playbookId);
-      return { ok: true, data: { id: `patch-${playbookId}`, playbookId } };
-    },
-  });
   const result = await triggerIssueReflect(issue.id, deps);
-  assert.equal(result, "triggered");
-  assert.deepStrictEqual(proposed, ["pb-next"]);
-  assert.equal(listArtifactsForIssueByKind(issue.id, "playbook_patch").length, 2);
+  assert.equal(result, "failed");
+  const statuses = listArtifactsForIssueByKind(issue.id, "reflect_status").map((a) =>
+    JSON.parse(a.contentJson!)
+  );
+  assert.ok(statuses.length > 0);
+  const text = statuses.map((s) => `${s.reason ?? ""} ${s.error ?? ""}`).join("\n");
+  assert.match(text, /malformed/i);
+  assert.doesNotMatch(text, /offline/i);
+});
+
+test("reflect_status still says offline when the receipt error really is a Deck outage", async () => {
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: DECK });
+  const issue = seedIssue(dev.id);
+  seedTerminalDeveloperSession(issue.id, dev);
+  const { deps } = makeDeps({ checkHealth: async () => false });
+
+  assert.equal(await triggerIssueReflect(issue.id, deps), "failed");
+  const statuses = listArtifactsForIssueByKind(issue.id, "reflect_status").map((a) =>
+    JSON.parse(a.contentJson!)
+  );
+  assert.ok(statuses.some((s) => /offline/i.test(`${s.reason ?? ""} ${s.error ?? ""}`)));
+});
+
+test("never calls propose_playbook_patch with kind:update and never writes Notes items", async () => {
+  const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: DECK });
+  const issue = seedIssue(dev.id);
+  seedTerminalDeveloperSession(issue.id, dev);
+  const action = createHumanAction({
+    issueId: issue.id,
+    actionType: "attempts_exhausted",
+    reason: "Rounds spent.",
+    question: "Close?",
+  });
+  resolveHumanAction(action.id, "operator", { choice: "close" });
+  const { deps, calls } = makeDeps({ fetches: [{ playbook_id: "pb-9" }] });
+
+  await triggerIssueReflect(issue.id, deps);
+  for (const call of calls) {
+    if (call.toolName !== "propose_playbook_patch") continue;
+    assert.notEqual(call.args.kind, "update");
+    assert.equal(call.args.kind, "signal_only");
+    const ops = call.args.ops as Array<{ section?: string }> | undefined;
+    assert.ok(!ops || !ops.some((op) => op.section === "Notes"));
+  }
+  assert.equal(listArtifactsForIssueByKind(issue.id, "playbook_patch").length, 0);
 });

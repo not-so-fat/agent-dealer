@@ -55,6 +55,14 @@ export const WorkerSession = z.object({
   processPid: z.number().int().nullable(),
   processOwner: z.string().nullable(),
   processStartedAt: z.string().nullable(),
+  /**
+   * Opaque Agent Deck correlation UUID for this session (NOT-305). Generated once at
+   * session creation, before spawn, and passed as observability metadata in every
+   * runtime's Agent Deck launch configuration. Lets Deck correlate its normalized
+   * playbook-fetch stream back to this durable Dealer session without granting any
+   * authority. Null only for rows written before NOT-305.
+   */
+  deckCorrelationId: z.string().uuid().nullable(),
   createdAt: z.string(),
   startedAt: z.string().nullable(),
   heartbeatAt: z.string().nullable(),

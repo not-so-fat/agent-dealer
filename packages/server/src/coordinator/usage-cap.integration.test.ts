@@ -41,8 +41,8 @@ beforeEach(() => {
     DELETE FROM human_actions;
     DELETE FROM workflow_events;
     DELETE FROM findings;
-    DELETE FROM worker_sessions;
     DELETE FROM artifacts;
+    DELETE FROM worker_sessions;
     DELETE FROM usage_events;
     DELETE FROM workflow_instances;
     DELETE FROM issues;

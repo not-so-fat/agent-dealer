@@ -22,7 +22,7 @@ import type { DeveloperOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
 import { buildDeveloperPrompt } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
-import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn } from "./spawn.js";
+import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn, type DeveloperSpawnResult } from "./spawn.js";
 import {
   DEFAULT_BASE_FETCH_TIMEOUT_MS,
   fastForwardLocalBranchToSha,
@@ -52,7 +52,9 @@ import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, verifyWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
 import { museCapabilitySafetyNetAfterSession } from "../adapters/muse-capability.js";
-import { getWorkerSession, patchRunningSession, recordSessionProcess, setSessionInputSha } from "../repository/worker-sessions.js";
+import { getOrAssignSessionCorrelationId, getWorkerSession, mergeSessionMetadata, patchRunningSession, recordSessionProcess, setSessionInputSha } from "../repository/worker-sessions.js";
+import { museIdleMinutes, museStallMetadata } from "./muse-spawn.js";
+import { museIdleTimeoutMs } from "./session-timeouts.js";
 import { COORDINATOR_PROCESS_OWNER, readProcessStartTime } from "./process-liveness.js";
 import { checkDeveloperWorktreeOwnerLiveness } from "./worktree-owner-liveness.js";
 import { developerSessionTimeoutMs } from "./session-timeouts.js";
@@ -135,6 +137,25 @@ async function crashOrTimeoutOutcome(opts: {
     ...(commitsAheadKnown !== undefined ? { commitsAhead: commitsAheadKnown } : {}),
     worktreePath: opts.worktreePath,
     ...(opts.logPath ? { logPath: opts.logPath } : {}),
+  };
+}
+
+/**
+ * NOT-307: idle-kill description for the timeout reason, or null for anything else
+ * (wall-clock timeout, crash, success). Minutes prefer the measured last-activity
+ * time and fall back to the configured bound; the last tool name rides along so the
+ * recorded reason — and the `muse_no_progress` classifier — names the stall point.
+ */
+function idleCrashInfoFor(
+  spawned: Pick<DeveloperSpawnResult, "idleTimedOut" | "muse">
+): { minutes: number | null; lastToolName: string | null } | null {
+  if (!spawned.idleTimedOut) return null;
+  return {
+    minutes: museIdleMinutes({
+      lastActivityAt: spawned.muse?.lastActivityAt ?? null,
+      idleTimeoutMs: museIdleTimeoutMs(),
+    }),
+    lastToolName: spawned.muse?.lastToolName ?? null,
   };
 }
 
@@ -715,6 +736,9 @@ export async function runDeveloperEffect(
 
   const session = getWorkerSession(sessionId);
   const snapshot = parseProfileSnapshot(session?.profileSnapshotJson);
+  // NOT-305: opaque per-session Deck correlation UUID, persisted before spawn and
+  // carried as observability metadata in every runtime launch config below.
+  const deckCorrelationId = session?.deckCorrelationId ?? getOrAssignSessionCorrelationId(sessionId);
   let taskSnapshot = getTaskSnapshot(issue);
   const runtime = snapshot?.runtime ?? "claude_code";
   const round = workItem.round;
@@ -930,6 +954,7 @@ export async function runDeveloperEffect(
         worktreePath,
         runtime,
         policy,
+        correlationId: deckCorrelationId,
         verifyCallTool: deps.deckCallTool,
       });
       if (!prepared.ok) {
@@ -1124,6 +1149,9 @@ export async function runDeveloperEffect(
         // NOT-278: frozen profile deck → the Muse exec attempt (deck headers + pre-spawn
         // verify). Other runtimes carry their deck via mcpConfigPath/mcpEnv and ignore this.
         deckId: snapshot?.deckId ?? null,
+        // NOT-305: opaque per-session Deck correlation UUID → the Muse settings
+        // `x-agent-deck-correlation-id` observability header.
+        deckCorrelationId,
         prompt,
         cwd: worktreePath,
         timeoutMs: developerEffectConfig.sessionTimeoutMs,
@@ -1191,6 +1219,17 @@ export async function runDeveloperEffect(
     // here on (usage, receipt, push, PR verify, checks poll) is post-spawn and must
     // not be mislabeled as a session that could not start.
     sessionStarted = true;
+    // NOT-307: stall evidence for every Muse session (timed out or not) — merged
+    // into metadata_json while the row is still running, so the classifier and the
+    // operator can read last-activity evidence whatever the outcome. Best-effort:
+    // evidence must never fail the attempt it describes.
+    if (spawned.muse) {
+      try {
+        mergeSessionMetadata(sessionId, museStallMetadata(spawned.muse));
+      } catch {
+        // ignore
+      }
+    }
     // NOT-169: exactly one agent.completed per spawned process, at child exit and before
     // any receipt mining, usage extraction, or validation. Raw outcome only — no
     // failure classification.
@@ -1436,6 +1475,7 @@ export async function runDeveloperEffect(
             timedOut: Boolean(spawned.timedOut),
             logPath: spawned.logPath,
             runtime,
+            idle: idleCrashInfoFor(spawned),
           });
           const salvageNote = `Salvaged uncommitted work as ${salvaged.message} (${salvaged.commitSha.slice(0, 7)}).`;
           const crashOutcome = await crashOrTimeoutOutcome({
@@ -1489,6 +1529,7 @@ export async function runDeveloperEffect(
           timedOut: Boolean(spawned.timedOut),
           logPath: spawned.logPath,
           runtime,
+          idle: idleCrashInfoFor(spawned),
         }),
         worktreePath,
         logPath: spawned.logPath,

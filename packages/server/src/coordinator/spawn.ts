@@ -28,6 +28,12 @@ export interface DeveloperSpawnResult {
   logPath: string;
   timedOut: boolean;
   /**
+   * NOT-307: true only when the idle watchdog (not the wall clock) killed the child.
+   * Set only by the Muse lane; other runtimes leave it absent. `timedOut` is true for
+   * either kill so salvage and infra-retry treat both identically.
+   */
+  idleTimedOut?: boolean;
+  /**
    * Set only for a `muse_code` session (NOT-181): the parsed outcome the effect needs beyond
    * exit code and transcript — confirmed model, nullable usage, failure kind, `cron_*` activity.
    */
@@ -49,6 +55,12 @@ export interface DeveloperSpawnInput {
    * and ignore this. Null/absent fails a Muse spawn before any process starts.
    */
   deckId?: string | null;
+  /**
+   * NOT-305: the worker session's opaque Deck correlation UUID → the Muse exec
+   * attempt's `x-agent-deck-correlation-id` observability header. Other runtimes carry
+   * it via mcpConfigPath/mcpEnv and ignore this.
+   */
+  deckCorrelationId?: string | null;
   /**
    * NOT-278: Agent Deck MCP endpoint (ending in `/mcp`) for the Muse exec attempt. Defaults
    * to the configured endpoint; infra callers without a deck session (the capability probe)

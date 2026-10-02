@@ -61,14 +61,16 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
     });
     if (!result.ok) return reply.status(result.code).send({ error: result.error });
 
-    // Reflect is a best-effort network call to Agent Deck (health check + a sequential
-    // fetch/propose round trip per playbook) — resolution has already committed above, so
-    // this must not hold the HTTP response hostage behind it: a slow/offline deck would
-    // otherwise risk a client timeout on an already-resolved action, whose retry then gets
-    // a spurious 409. Fire-and-forget; triggerIssueReflect never throws (it records its own
-    // outcome as artifacts), so there is nothing here to await or react to.
-    // triggerReflect is set after a successful merge-to-done (auto-merge or human complete).
-    if (result.triggerReflect && action.issueId) {
+    // NOT-305: completion evidence is a best-effort Deck read (receipts) plus at most
+    // one `signal_only` report per failure/correction trigger — resolution has already
+    // committed above, so this must not hold the HTTP response hostage behind it: a
+    // slow/offline deck would otherwise risk a client timeout on an already-resolved
+    // action, whose retry then gets a spurious 409. Fire-and-forget; triggerIssueReflect
+    // never throws (it records its own outcome as artifacts), so there is nothing here
+    // to await or react to. Fires for every instance-completing resolution (done AND
+    // closed): an attempts-exhausted close still owes its actual-use receipts and its
+    // exhaustion signal even though no merge follows.
+    if (result.instanceCompleted && action.issueId) {
       void triggerIssueReflect(action.issueId).catch(() => {});
     }
 
