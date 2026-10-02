@@ -14,9 +14,15 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { loadRouteList } from "./route-list.js";
 import { buildScreenshotPlan, resolveSeededPath } from "./plan.js";
+
+// Built-in agents seeded by migrate() into a fresh AGENT_DEALER_HOME
+// (seedBuiltinAgents in packages/server/src/db/index.ts; IDs documented as
+// stable in packages/shared/src/agents.ts). The repo's own route tests use
+// these same IDs. Hardcoded here so the driver stays stdlib-only.
+const BUILTIN_AGENT_CLAUDE_ID = "00000000-0000-4000-a000-000000000001";
+const BUILTIN_AGENT_CURSOR_ID = "00000000-0000-4000-a000-000000000002";
 
 function flagValue(name: string, fallback: string): string {
   const index = process.argv.indexOf(name);
@@ -58,15 +64,16 @@ async function main(): Promise<void> {
   await readJson(`${baseUrl}/health`);
 
   // Deterministic fixture: one draft issue (enqueue:false so the coordinator
-  // never starts a workflow for it). Random agent UUIDs are fine — issue
-  // creation stores them without resolving agents through Agent Deck.
+  // never starts a workflow for it). issues.developer_agent_id /
+  // reviewer_agent_id are FKs into agents(id), so random UUIDs fail with
+  // SQLITE_CONSTRAINT_FOREIGNKEY — use the built-in agents instead.
   const seed = (await postJson(`${baseUrl}/api/issues`, {
     title: "CI visual fixture",
     description: "Deterministic seed for the CI visual screenshot job (NOT-312).",
     acceptanceCriteria: "Screenshots render for the configured routes.",
     repo: "not-so-fat/agent-dealer",
-    developerAgentId: randomUUID(),
-    reviewerAgentId: randomUUID(),
+    developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+    reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
     enqueue: false,
     source: "manual",
   })) as { id?: unknown };
