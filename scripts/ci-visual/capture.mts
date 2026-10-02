@@ -80,8 +80,14 @@ async function main(): Promise<void> {
   if (typeof seed.id !== "string" || seed.id === "") {
     throw new Error("seed issue response is missing an id");
   }
-  const confirmed = (await readJson(`${baseUrl}/api/issues/${seed.id}`)) as { id?: unknown };
-  if (confirmed.id !== seed.id) {
+  // GET /api/issues/:id returns `{ issue, timeline, ... }` (see
+  // registerIssueRoutes) — the id lives under `issue`, not top-level.
+  const confirmed = (await readJson(`${baseUrl}/api/issues/${seed.id}`)) as {
+    issue?: { id?: unknown };
+    id?: unknown;
+  };
+  const confirmedId = typeof confirmed.issue?.id === "string" ? confirmed.issue.id : confirmed.id;
+  if (confirmedId !== seed.id) {
     throw new Error(`seed issue ${seed.id} did not read back`);
   }
 
