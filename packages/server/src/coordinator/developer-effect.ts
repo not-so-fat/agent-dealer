@@ -51,7 +51,7 @@ import {
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, verifyWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
-import { getWorkerSession, mergeSessionMetadata, patchRunningSession, recordSessionProcess, setSessionInputSha } from "../repository/worker-sessions.js";
+import { getOrAssignSessionCorrelationId, getWorkerSession, mergeSessionMetadata, patchRunningSession, recordSessionProcess, setSessionInputSha } from "../repository/worker-sessions.js";
 import { museIdleMinutes, museStallMetadata } from "./muse-spawn.js";
 import { museIdleTimeoutMs } from "./session-timeouts.js";
 import { COORDINATOR_PROCESS_OWNER, readProcessStartTime } from "./process-liveness.js";
@@ -735,6 +735,9 @@ export async function runDeveloperEffect(
 
   const session = getWorkerSession(sessionId);
   const snapshot = parseProfileSnapshot(session?.profileSnapshotJson);
+  // NOT-305: opaque per-session Deck correlation UUID, persisted before spawn and
+  // carried as observability metadata in every runtime launch config below.
+  const deckCorrelationId = session?.deckCorrelationId ?? getOrAssignSessionCorrelationId(sessionId);
   let taskSnapshot = getTaskSnapshot(issue);
   const runtime = snapshot?.runtime ?? "claude_code";
   const round = workItem.round;
@@ -950,6 +953,7 @@ export async function runDeveloperEffect(
         worktreePath,
         runtime,
         policy,
+        correlationId: deckCorrelationId,
         verifyCallTool: deps.deckCallTool,
       });
       if (!prepared.ok) {
@@ -1144,6 +1148,9 @@ export async function runDeveloperEffect(
         // NOT-278: frozen profile deck → the Muse exec attempt (deck headers + pre-spawn
         // verify). Other runtimes carry their deck via mcpConfigPath/mcpEnv and ignore this.
         deckId: snapshot?.deckId ?? null,
+        // NOT-305: opaque per-session Deck correlation UUID → the Muse settings
+        // `x-agent-deck-correlation-id` observability header.
+        deckCorrelationId,
         prompt,
         cwd: worktreePath,
         timeoutMs: developerEffectConfig.sessionTimeoutMs,

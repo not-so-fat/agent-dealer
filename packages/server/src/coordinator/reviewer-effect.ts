@@ -54,7 +54,7 @@ import {
 } from "../adapters/managed-repo.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, type GithubAdapter, type ReviewEvent } from "../adapters/github.js";
-import { getWorkerSession, patchRunningSession, recordSessionProcess } from "../repository/worker-sessions.js";
+import { getOrAssignSessionCorrelationId, getWorkerSession, patchRunningSession, recordSessionProcess } from "../repository/worker-sessions.js";
 import { COORDINATOR_PROCESS_OWNER, readProcessStartTime } from "./process-liveness.js";
 import { reviewerSessionTimeoutMs } from "./session-timeouts.js";
 import { getWorkItem } from "../repository/work-items.js";
@@ -280,6 +280,9 @@ export async function runReviewerEffect(
 
   const session = getWorkerSession(sessionId);
   const snapshot = parseProfileSnapshot(session?.profileSnapshotJson);
+  // NOT-305: opaque per-session Deck correlation UUID, persisted before spawn and
+  // carried as observability metadata in the materialized launch config below.
+  const deckCorrelationId = session?.deckCorrelationId ?? getOrAssignSessionCorrelationId(sessionId);
   const taskSnapshot = getTaskSnapshot(issue);
   const runtime = snapshot?.runtime ?? "claude_code";
   const round = workItem.round;
@@ -356,6 +359,7 @@ export async function runReviewerEffect(
         worktreePath,
         runtime,
         policy,
+        correlationId: deckCorrelationId,
         verifyCallTool: deps.deckCallTool,
       });
       if (!prepared.ok) {

@@ -155,6 +155,9 @@ CREATE TABLE IF NOT EXISTS worker_sessions (
   process_pid INTEGER,
   process_owner TEXT,
   process_started_at TEXT,
+  -- NOT-305: opaque Agent Deck correlation UUID, one per session, generated before
+  -- spawn and passed as observability metadata in every runtime's Deck launch config.
+  deck_correlation_id TEXT,
   created_at TEXT NOT NULL,
   started_at TEXT,
   heartbeat_at TEXT,

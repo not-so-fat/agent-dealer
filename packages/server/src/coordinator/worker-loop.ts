@@ -116,6 +116,16 @@ function safeCompleteSession(sessionId: string, status: "done" | "failed" | "tim
   } catch (err) {
     console.error("[coordinator] completeSession", sessionId, err);
   }
+  // NOT-305: best-effort actual-use receipt the moment the session goes terminal — a
+  // later issue-completion trigger re-attempts anything still missing, so this never
+  // throws and never changes the session outcome or the issue state.
+  try {
+    void import("./playbook-feedback.js").then(({ collectPlaybookUseReceipt }) =>
+      collectPlaybookUseReceipt(sessionId).catch(() => {})
+    );
+  } catch (err) {
+    console.error("[coordinator] playbook receipt", sessionId, err);
+  }
 }
 
 /**
@@ -312,10 +322,6 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
     safeCompleteSession(session.id, "cancelled", { reason: result.reason });
     return;
   }
-  if (result.triggerReflect) {
-    const { triggerIssueReflect } = await import("./reflect-trigger.js");
-    void triggerIssueReflect(claimed.issueId).catch(() => {});
-  }
   // NOT-136: a deck-unavailable session never spawned anything — `cancelled`, not `failed`
   // (which would read as a worker crash) and not `done` (which would claim it ran).
   // NOT-197: a base-fetch failure likewise never spawned (and created no branch).
@@ -342,7 +348,16 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
         }),
       }
     : undefined;
+  // NOT-305: the session row goes terminal BEFORE the issue-level reflect trigger
+  // below. triggerIssueReflect collects receipts for every terminal session, and
+  // completeSession writes the terminal status synchronously — firing reflect first
+  // would exclude this just-finished session from the signal's worker sessions and
+  // playbook evidence.
   safeCompleteSession(session.id, sessionStatus, errorPayload);
+  if (result.triggerReflect) {
+    const { triggerIssueReflect } = await import("./reflect-trigger.js");
+    void triggerIssueReflect(claimed.issueId).catch(() => {});
+  }
 }
 
 /**

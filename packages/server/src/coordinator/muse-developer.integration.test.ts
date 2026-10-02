@@ -231,7 +231,7 @@ function recorded(): {
 }
 
 /** The captured settings file: exactly one required agent-deck server, accepted by the guard. */
-function expectDeckSettings(rec: ReturnType<typeof recorded>, deckId: string = TEST_DECK_ID): Record<string, any> {
+function expectDeckSettings(rec: ReturnType<typeof recorded>, issueId: string, deckId: string = TEST_DECK_ID): Record<string, any> {
   const settings = JSON.parse(rec.settings) as Record<string, any>;
   assert.deepEqual(Object.keys(settings).sort(), ["mcpServers", "run", "runtime_capabilities", "schema_version"]);
   assert.deepEqual(Object.keys(settings.mcpServers), ["agent-deck"]);
@@ -239,17 +239,22 @@ function expectDeckSettings(rec: ReturnType<typeof recorded>, deckId: string = T
   assert.equal(server.type, "streamable-http");
   assert.equal(server.url, expectedMcpUrl());
   assert.equal(server.mode, "required");
+  // NOT-305: every worker session carries an opaque Deck correlation UUID, passed here
+  // as the exact x-agent-deck-correlation-id observability header.
+  const dev = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  assert.ok(dev.deckCorrelationId, "the developer session persists a Deck correlation ID");
   // cwdReal was resolved by the fixture at spawn time: the coordinator removes the
   // worktree after the turn, so resolving rec.cwd here would race cleanup.
   assert.deepEqual(server.headers, {
     "x-agent-deck-deck-id": deckId,
     "x-agent-deck-workspace": rec.cwdReal,
+    "x-agent-deck-correlation-id": dev.deckCorrelationId,
   });
   assert.equal("enabled_tools" in server, false, "developers are unfiltered: no allowlist claim");
   assert.equal("disabled_tools" in server, false, "developers are unfiltered: no denylist claim");
   assertMuseSettings(
     settings,
-    { url: expectedMcpUrl(), deckId, workspace: rec.cwdReal },
+    { url: expectedMcpUrl(), deckId, workspace: rec.cwdReal, correlationId: dev.deckCorrelationId },
     "developer"
   );
   return settings;
@@ -310,7 +315,7 @@ test("the turn runs the isolated exec lane (never serve) with the required agent
   assert.ok(!rec.xdgConfigHome.startsWith(rec.cwd), "config is not under the worktree");
   assert.equal(fs.existsSync(rec.xdgConfigHome), false, "per-attempt config removed after success");
   assert.equal(fs.existsSync(rec.xdgDataHome), false, "per-attempt data removed after success");
-  expectDeckSettings(rec);
+  expectDeckSettings(rec, issueId);
   // Exact environment: ambient secrets and sentinels never reached the child.
   assert.deepEqual(rec.envLeak, {
     META_API_KEY: false,
@@ -349,7 +354,7 @@ test("saved-login auth is symlinked, never copied, and carries no stdin key", as
   assert.equal(rec.stdinBytes, 0, "no key on stdin for saved-login auth");
   assert.equal(fs.existsSync(rec.xdgConfigHome), false, "per-attempt config (and link) removed");
   assert.equal(fs.readFileSync(operatorAuth, "utf8"), '{"token":"operator-owned"}', "operator credentials untouched");
-  expectDeckSettings(rec);
+  expectDeckSettings(rec, issueId);
 });
 
 test("usage events record muse_code, the confirmed model, duration and tokens; cost stays null", async () => {

@@ -37,15 +37,17 @@ const UNREACHABLE = "Agent Deck is unreachable — fetch failed";
 
 before(() => migrate());
 beforeEach(() => {
+  // NOT-305: session-linked playbook_use_receipt artifacts reference worker_sessions,
+  // so child rows (artifacts, usage_events) go before their parents.
   getDb().exec(`
     DELETE FROM review_publications;
+    DELETE FROM artifacts;
     DELETE FROM work_items;
     DELETE FROM human_actions;
     DELETE FROM workflow_events;
     DELETE FROM findings;
-    DELETE FROM worker_sessions;
-    DELETE FROM artifacts;
     DELETE FROM usage_events;
+    DELETE FROM worker_sessions;
     DELETE FROM workflow_instances;
     DELETE FROM issues;
     DELETE FROM runtime_availability;

@@ -664,3 +664,46 @@ test("only muse-config.ts and tests import muse-config-core", () => {
   });
   assert.deepEqual(offenders, []);
 });
+
+// NOT-305: the worker session's opaque Deck correlation UUID rides the Muse settings as
+// the exact `x-agent-deck-correlation-id` observability header; without one the header
+// is absent, and a malformed one is refused before anything is written.
+test("Muse settings carry the exact correlation header only when the session has one", () => {
+  const correlationId = "bbbbbbbb-2222-4222-b222-bbbbbbbbbbbb";
+  const fx = fixture();
+  const attempt = prepareMuseAttemptPinned(
+    input(fx, "developer", {
+      agentDeck: { url: DECK_URL, deckId: "deck-123", workspace: fx.worktree, correlationId },
+    })
+  );
+  try {
+    const onDisk = JSON.parse(fs.readFileSync(attempt.settingsPath, "utf8"));
+    assert.deepEqual(onDisk.mcpServers["agent-deck"].headers, {
+      "x-agent-deck-deck-id": "deck-123",
+      "x-agent-deck-workspace": fs.realpathSync(fx.worktree),
+      "x-agent-deck-correlation-id": correlationId,
+    });
+    assert.doesNotThrow(() => attempt.verify());
+  } finally {
+    attempt.cleanup();
+  }
+
+  const fxBare = fixture();
+  const bare = prepareMuseAttemptPinned(input(fxBare, "developer"));
+  try {
+    const onDisk = JSON.parse(fs.readFileSync(bare.settingsPath, "utf8"));
+    assert.equal("x-agent-deck-correlation-id" in onDisk.mcpServers["agent-deck"].headers, false);
+  } finally {
+    bare.cleanup();
+  }
+
+  const fxBad = fixture();
+  const bad = () =>
+    prepareMuseAttemptPinned(
+      input(fxBad, "developer", {
+        agentDeck: { url: DECK_URL, deckId: "deck-123", workspace: fxBad.worktree, correlationId: "not-a-uuid" },
+      })
+    );
+  assert.equal(code(bad), "invalid_input");
+  assert.deepEqual(fs.readdirSync(fxBad.baseDir), []);
+});

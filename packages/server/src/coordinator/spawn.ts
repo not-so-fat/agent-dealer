@@ -56,6 +56,12 @@ export interface DeveloperSpawnInput {
    */
   deckId?: string | null;
   /**
+   * NOT-305: the worker session's opaque Deck correlation UUID → the Muse exec
+   * attempt's `x-agent-deck-correlation-id` observability header. Other runtimes carry
+   * it via mcpConfigPath/mcpEnv and ignore this.
+   */
+  deckCorrelationId?: string | null;
+  /**
    * NOT-278: Agent Deck MCP endpoint (ending in `/mcp`) for the Muse exec attempt. Defaults
    * to the configured endpoint; infra callers without a deck session (the capability probe)
    * pass it explicitly so the spawn never needs the database. Other runtimes ignore this.
