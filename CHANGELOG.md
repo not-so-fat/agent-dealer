@@ -4,6 +4,21 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.8 — 2026-10-02
+
+Patch over 1.2.7: auto-merge recovers from a moved base branch, Planner tickets compile into frozen execution contracts, Muse developer sessions get a no-progress watchdog, and Muse capability checks stop blocking admission while unconfirmed.
+
+### Changes
+
+- **Sync the base and retry the merge instead of escalating (NOT-310)** — when auto-merge fails as not mergeable, Dealer syncs `origin/<base>` into the PR branch (coordinator-owned worktree, plain push, checks polled) and retries the merge once. Textual conflicts abort the sync and queue one conflict-repair developer round whose prompt names the base branch and conflicting files; a still-conflicting merge then escalates once with the file list. Bounded to one sync and one repair round per merge-failure episode; any refusal or infra failure degrades to the previous escalation. "Retry merge" is covered too.
+- **Planner tickets compile into frozen execution contracts (NOT-306)** — a shared compiler parses the canonical ticket headings into a versioned `ExecutionContractV1` (mode, non-goals, exit predicate, one-PR boundary, criteria with optional evidence). Tickets using the headings are strictly validated with actionable 400s; legacy tickets are unaffected. The contract is frozen into the task snapshot, rendered in developer and reviewer prompts (reviewer may report `exitPredicateAssessment`), and shown read-only in issue detail.
+- **Muse developer no-progress watchdog and timing logs (NOT-307)** — a session with no stdout bytes and no `session.jsonl` activity for 20 minutes (`MUSE_IDLE_TIMEOUT_MS`) is killed and classified `muse_no_progress`, salvaged like a normal timeout and retry-budgeted. Per-event timing is logged. Healthy but very quiet sessions have been measured up to ~40 minutes between recognized events, so the bound may need raising after the first real idle kills.
+- **Muse update check no longer blocks admission while unconfirmed (NOT-308)** — admission blocks and escalates a `muse_capability` human action only on confirmed capability loss; inconclusive checks retry with bounded 1/2/4-minute backoff, then escalate.
+- **Playbook-use receipts and failure signals to Deck (NOT-305)** — Dealer records which playbooks a run actually used and sends `signal_only` failure reports to Deck, correlated by a Deck correlation id across all four runtimes.
+- **Muse Dev visual QA preflight (NOT-303)** — headless Chrome aborts in the Muse sandbox, so UI tickets now get a loud preflight verdict instead of a silent missing screenshot; developers end with a `Visual QA:` line and reviewers state "visual QA not run" rather than treating a missing screenshot as a pass.
+- **Capacity probe failures carry their cause (NOT-300)** — failure kind and a sanitized message are recorded in `muse-probe.log` and the fallback stderr line.
+- **Compact top bar** — the shell header drops the Agent Deck / Agent Dealer blurb and uses tighter padding.
+
 ## 1.2.7 — 2026-09-28
 
 Patch over 1.2.6: friend-path dashboard polish (guided first issue, concise recovery actions, capacity severity colors) and a README landing refresh.
