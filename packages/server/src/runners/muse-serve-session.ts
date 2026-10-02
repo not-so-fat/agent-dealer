@@ -203,6 +203,11 @@ export function foldServeViewItems(
         name: name ?? null,
         outcome: it.status === "inProgress" ? null : failed ? "failure" : "success",
         error: asString(it.failureReason) ?? null,
+        // NOT-307: the serve turn items carry no per-tool times; exec-lane arrival
+        // stamping does not apply here, so these stay unstamped (no `ts` fallback
+        // is passed for this lane either).
+        startedAt: null,
+        durationMs: null,
       });
     }
   }

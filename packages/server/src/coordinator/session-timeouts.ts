@@ -20,6 +20,38 @@ export function reviewerSessionTimeoutMs(): number {
   return num("REVIEWER_TIMEOUT_MS", 30 * 60_000);
 }
 
+/**
+ * NOT-307: silent-child bound for the Muse developer lane only (other runtimes do
+ * not read this). Undefined means the watchdog is disabled. The watchdog ships
+ * ENABLED with a 30-minute default: 20 min risks false kills against the
+ * reported ~39.8 min silent gap in completed-session history; 45 min saves only
+ * 15 of the 60-min wall-clock cap; disabled does not address the observed
+ * 1-hour stalls. The ~39.8 min figure could not be re-verified — historical raw
+ * logs carry replayed `recorded_at`, not arrival times, so it may overstate
+ * true stdout/session.jsonl silence. The value is env-tunable, and the new
+ * per-event `ts`/`durationMs` plus `metadata_json` stall fields will provide
+ * the real gap distribution to recalibrate; a false kill is bounded by timeout
+ * salvage + retry from the branch. `0` disables explicitly. A non-numeric or
+ * negative value falls back to the default with a logged warning rather than
+ * silently disabling the guard (or killing healthy sessions on a typo like
+ * `-1`).
+ */
+export const DEFAULT_MUSE_IDLE_TIMEOUT_MS = 30 * 60_000;
+
+export function museIdleTimeoutMs(): number | undefined {
+  const raw = process.env.MUSE_IDLE_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_MUSE_IDLE_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed) && parsed === 0) return undefined;
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    console.warn(
+      `[dealer] ignoring invalid MUSE_IDLE_TIMEOUT_MS=${JSON.stringify(raw)} — using default ${DEFAULT_MUSE_IDLE_TIMEOUT_MS}`
+    );
+    return DEFAULT_MUSE_IDLE_TIMEOUT_MS;
+  }
+  return parsed;
+}
+
 export function sessionTimeoutMsFor(role: WorkerSessionRole | null | undefined): number {
   return role === "reviewer" ? reviewerSessionTimeoutMs() : developerSessionTimeoutMs();
 }

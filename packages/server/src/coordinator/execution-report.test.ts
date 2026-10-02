@@ -96,6 +96,15 @@ test("classifier keeps ambiguous timeouts unknown", () => {
   assert.equal(classifyFailureReason("").code, "unknown");
 });
 
+test("NOT-307: classifier reads an idle-watchdog kill as muse_no_progress", () => {
+  const reason =
+    "Developer session made no progress for 20 minutes. (last tool: npm_test) Killed on the idle timeout.";
+  const got = classifyFailureReason(reason);
+  assert.equal(got.code, "muse_no_progress");
+  assert.equal(got.domain, "infrastructure");
+  assert.equal(got.confidence, "high");
+});
+
 test("classifier anchors keep author/release/unrelated spawn out of buckets", () => {
   // `auth` must not match "author"; `lease` must not match "release"/"please".
   assert.equal(classifyFailureReason("the author released a fix").code, "unknown");

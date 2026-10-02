@@ -77,6 +77,7 @@ test("the contract defines every phase, taxonomy code, and quality label", () =>
     "provider_capacity_rate_limit",
     "agent_cli_crash",
     "tool_test_timeout",
+    "muse_no_progress",
     "coordinator_crash",
     "validation_failure",
     "publish_git_failure",

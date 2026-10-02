@@ -246,6 +246,23 @@ test("timed_out with infra attempts remaining retries (same bucket as session_fa
   });
 });
 
+test("NOT-307: an idle-watchdog timed_out routes exactly like a wall-clock timeout", () => {
+  // The idle kill reads as timed_out downstream: same bounded infra retry, same
+  // budget accounting — only the reason (and the failure cause) names the stall.
+  const outcome: DeveloperOutcome = {
+    kind: "timed_out",
+    reason:
+      "Developer session made no progress for 20 minutes. (last tool: npm_test) Killed on the idle timeout.",
+  };
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    next: "retry_developer",
+    reason:
+      "Developer session made no progress for 20 minutes. (last tool: npm_test) Killed on the idle timeout.",
+  });
+  assert.deepStrictEqual(routeDeveloperOutcome({ kind: "timed_out" }, INFRA_AT_LIMIT).next, "human_action");
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_AT_LIMIT).next, "human_action");
+});
+
 test("checks_failed with infra attempts remaining retries (same bucket as session_failed/no_pr)", () => {
   const outcome: DeveloperOutcome = { kind: "checks_failed" };
   assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
