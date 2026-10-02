@@ -115,6 +115,8 @@ function issueFixture(extra: Partial<Issue> = {}): Issue {
     currentRound: 1,
     maxInfraAttempts: 2,
     infraAttempts: 0,
+    maxCiAttempts: 3,
+    ciAttempts: 0,
     branch: "dealer/issue-1",
     baseSha: null,
     headSha: null,

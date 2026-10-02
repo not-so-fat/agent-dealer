@@ -70,6 +70,8 @@ function issueFixture(extra: Partial<Issue> = {}): Issue {
     currentRound: 1,
     maxInfraAttempts: 3,
     infraAttempts: 0,
+    maxCiAttempts: 3,
+    ciAttempts: 0,
     branch: null,
     baseSha: null,
     headSha: null,
