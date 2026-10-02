@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ReflectDeps } from "./reflect-trigger.js";
 import type { AuthorizedDeckCallResult } from "../adapters/reflect-authority.js";
-import { DECK_CORRELATION_TOOL } from "./playbook-feedback.js";
+import { DECK_CORRELATION_TOOL, validateSignalOnlyArgs } from "./playbook-feedback.js";
 
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-reflect-"));
 
@@ -84,6 +84,10 @@ function makeDeps(overrides: {
         if (opts.arguments.kind !== "signal_only") {
           throw new Error(`issue-centric reflection must only send signal_only, got ${opts.arguments.kind}`);
         }
+        const schemaError = validateSignalOnlyArgs(opts.arguments);
+        if (schemaError) {
+          throw new Error(`signal payload violates Deck schema: ${schemaError}`);
+        }
         return overrides.propose
           ? overrides.propose(opts.arguments)
           : { ok: true, data: { id: `sig-${calls.length}` } };
@@ -92,6 +96,12 @@ function makeDeps(overrides: {
     }) as ReflectDeps["callTool"],
   };
   return { deps, calls };
+}
+
+function sentSignals(issueId: string): Array<{ status?: unknown }> {
+  return listArtifactsForIssueByKind(issueId, "deck_feedback_signal")
+    .map((a) => JSON.parse(a.contentJson!))
+    .filter((s) => s.status === "sent");
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000, intervalMs = 5): Promise<void> {
@@ -131,6 +141,7 @@ test("a clean completed run records the actual-use receipt and sends no signal",
     []
   );
   assert.deepStrictEqual(listArtifactsForIssueByKind(issue.id, "deck_feedback_signal"), []);
+  assert.deepStrictEqual(sentSignals(issue.id), []);
 });
 
 test("a human correction produces one signal_only report; a restart sends nothing more", async () => {
@@ -154,7 +165,7 @@ test("a human correction produces one signal_only report; a restart sends nothin
   // Simulated restart: idempotent, no duplicate Deck report.
   assert.equal(await triggerIssueReflect(issue.id, deps), "skipped");
   assert.equal(proposes().length, 1);
-  assert.equal(listArtifactsForIssueByKind(issue.id, "deck_feedback_signal").length, 1);
+  assert.equal(sentSignals(issue.id).length, 1);
 });
 
 test("records a visible failure and preserves state when the deck is offline", async () => {
@@ -199,7 +210,7 @@ test("a retry after a failed signal send re-sends exactly once, never duplicatin
   const first = await triggerIssueReflect(issue.id, deps);
   assert.equal(first, "triggered"); // the receipt still recorded
   assert.equal(proposes().length, 1);
-  assert.equal(listArtifactsForIssueByKind(issue.id, "deck_feedback_signal").length, 0);
+  assert.equal(sentSignals(issue.id).length, 0);
 
   createHumanAction({
     issueId: issue.id,
@@ -217,9 +228,9 @@ test("a retry after a failed signal send re-sends exactly once, never duplicatin
   failPropose = false;
   const resolved = resolveReflectionInteractionAction(parkedAction.id, "operator", "retry", deps);
   assert.equal(resolved.ok, true);
-  await waitFor(() => listArtifactsForIssueByKind(issue.id, "deck_feedback_signal").length >= 1);
+  await waitFor(() => sentSignals(issue.id).length >= 1);
   assert.equal(proposes().length, 2);
-  assert.equal(listArtifactsForIssueByKind(issue.id, "deck_feedback_signal").length, 1);
+  assert.equal(sentSignals(issue.id).length, 1);
 });
 
 test("resolveReflectionInteractionAction:dismiss closes the action without further Deck calls", async () => {

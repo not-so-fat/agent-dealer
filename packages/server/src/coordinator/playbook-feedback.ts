@@ -334,11 +334,98 @@ function excerpt(text: string | null | undefined, max = 500): string | null {
   return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
 }
 
-interface SignalCandidate {
+export interface SignalCandidate {
   trigger: DeckSignalTrigger;
   sourceKey: string;
   humanActionId: string | null;
   failure: string;
+  /** Raw human-stated reason, kept separate so it lands in evidence.user_feedback_excerpt. */
+  userFeedback: string | null;
+}
+
+/**
+ * Deck's `propose_playbook_patch` input schema (additionalProperties:false).
+ * Dealer may only send these top-level fields; the issue-centric reflection path
+ * sends `signal_only` with `kind` + `rationale` + `evidence` and never
+ * `playbook_id`/`ops` (no attribution, no synthesized edit).
+ */
+const DECK_SIGNAL_TOP_LEVEL_KEYS = new Set([
+  "kind",
+  "rationale",
+  "evidence",
+  "signal_ids",
+  "supersedes",
+  "ops",
+  "playbook_id",
+  "new_playbook",
+]);
+
+/** Returns null when args satisfy Deck's schema; otherwise a human-readable reason. */
+export function validateSignalOnlyArgs(args: Record<string, unknown>): string | null {
+  for (const key of Object.keys(args)) {
+    if (!DECK_SIGNAL_TOP_LEVEL_KEYS.has(key)) return `unknown top-level field: ${key}`;
+  }
+  if (args.kind !== "signal_only") return `kind must be "signal_only"`;
+  if (typeof args.rationale !== "string" || !args.rationale.trim()) {
+    return "rationale must be a non-empty string";
+  }
+  const evidence = asRecord(args.evidence);
+  if (!evidence) return "evidence must be an object";
+  for (const key of Object.keys(evidence)) {
+    if (key !== "failure_summary" && key !== "user_feedback_excerpt" && key !== "corrected_output_hint") {
+      return `unknown evidence field: ${key}`;
+    }
+  }
+  if (typeof evidence.failure_summary !== "string" || !evidence.failure_summary.trim()) {
+    return "evidence.failure_summary must be a non-empty string";
+  }
+  for (const key of ["user_feedback_excerpt", "corrected_output_hint"] as const) {
+    if (key in evidence && (typeof evidence[key] !== "string" || !evidence[key].trim())) {
+      return `evidence.${key} must be a non-empty string when present`;
+    }
+  }
+  if ("playbook_id" in args || "ops" in args) return "signal_only must not carry playbook_id or ops";
+  return null;
+}
+
+/**
+ * Builds the Deck-stored `signal_only` payload. Every Dealer-owned reference the
+ * inbox needs — deterministic source key, dealer issue/session refs, observed
+ * playbook use (or an explicit `no observed playbook use` line) — lives inside
+ * Deck-stored fields (`rationale` + `evidence.failure_summary`), because Deck's
+ * schema drops anything else. The source key is embedded verbatim so a repeated
+ * send after a crash between the Deck call and the local artifact write is
+ * recognizable as the same report.
+ */
+export function buildSignalOnlyArgs(
+  candidate: SignalCandidate,
+  opts: { issueId: string; workerSessionIds: string[]; playbookIds: string[] }
+): Record<string, unknown> {
+  const baseRationale =
+    candidate.trigger === "human_retry"
+      ? "Human correction during Dealer review — reported once as supporting evidence, without attributing the failure to any playbook."
+      : candidate.trigger === "attempts_exhausted"
+        ? "Dealer review attempts were exhausted — reported once as supporting evidence, without attributing the failure to any playbook."
+        : "A blocking review finding recurred across rounds — reported once as supporting evidence, without attributing the failure to any playbook.";
+  const sessionsLine = opts.workerSessionIds.length > 0 ? opts.workerSessionIds.join(", ") : "none";
+  const playbooksLine =
+    opts.playbookIds.length > 0 ? opts.playbookIds.join(", ") : "no observed playbook use";
+  return {
+    kind: "signal_only",
+    rationale:
+      `${baseRationale} ` +
+      `Dealer source ${candidate.sourceKey} | trigger ${candidate.trigger} | ` +
+      `dealer issue ${opts.issueId} | worker sessions ${sessionsLine}.`,
+    evidence: {
+      failure_summary:
+        `${candidate.failure}\n\n` +
+        `Dealer issue: ${opts.issueId}\n` +
+        `Worker sessions: ${sessionsLine}\n` +
+        `Playbooks observed in use: ${playbooksLine}\n` +
+        `Source key: ${candidate.sourceKey}`,
+      ...(candidate.userFeedback ? { user_feedback_excerpt: candidate.userFeedback } : {}),
+    },
+  };
 }
 
 /** Deterministic source key — the cross-restart idempotency identity of one report. */
@@ -369,6 +456,7 @@ function humanRetryCandidates(issueId: string, alreadyReferencedActionIds: Set<s
       sourceKey: signalSourceKey(issueId, "human_retry", action.id),
       humanActionId: action.id,
       failure: failureParts.join(" "),
+      userFeedback: reason,
     });
   }
   return candidates;
@@ -390,6 +478,7 @@ function attemptsExhaustedCandidates(issueId: string, alreadyReferencedActionIds
         `Review attempts were exhausted (action ${action.id}, ` +
         `${action.status === "resolved" ? `human chose ${choice ?? "unknown"}` : "awaiting human decision"}). ` +
         `Stated reason: ${excerpt(action.reason) ?? "(none recorded)"}`,
+      userFeedback: excerpt(action.reason),
     });
   }
   return candidates;
@@ -409,6 +498,7 @@ function recurringBlockingCandidate(issueId: string): SignalCandidate | null {
     humanActionId: null,
     failure:
       `${recurring.length} blocking finding(s) recurred across review rounds:\n${lines.join("\n")}`,
+    userFeedback: null,
   };
 }
 
@@ -424,22 +514,64 @@ export interface ReportSignalsResult {
   error?: string;
 }
 
-function existingSignalKeys(issueId: string): { keys: Set<string>; actionIds: Set<string> } {
-  const keys = new Set<string>();
+function existingSignalKeys(issueId: string): {
+  sentKeys: Set<string>;
+  pendingKeys: Set<string>;
+  actionIds: Set<string>;
+} {
+  const sentKeys = new Set<string>();
+  const pendingKeys = new Set<string>();
   const actionIds = new Set<string>();
   for (const artifact of listArtifactsForIssueByKind(issueId, DECK_FEEDBACK_SIGNAL_KIND)) {
     try {
       const content = JSON.parse(artifact.contentJson ?? "{}") as {
         sourceKey?: unknown;
         humanActionId?: unknown;
+        status?: unknown;
       };
-      if (typeof content.sourceKey === "string") keys.add(content.sourceKey);
-      if (typeof content.humanActionId === "string") actionIds.add(content.humanActionId);
+      if (typeof content.sourceKey === "string") {
+        // Pre-intent rows (written before the pending/sent split) carry
+        // status "sent" or no status at all — both count as delivered.
+        if (content.status === "pending" || content.status === "sending") {
+          pendingKeys.add(content.sourceKey);
+        } else {
+          sentKeys.add(content.sourceKey);
+          // Only a delivered report claims its human action. A pending intent
+          // reserves the source key (no second pending row) but must not
+          // suppress the candidate — otherwise the retry the intent exists to
+          // enable would never be generated.
+          if (typeof content.humanActionId === "string") actionIds.add(content.humanActionId);
+        }
+      }
     } catch {
       // malformed content — nothing to dedupe on its account
     }
   }
-  return { keys, actionIds };
+  return { sentKeys, pendingKeys, actionIds };
+}
+
+function recordSignalIntent(
+  issueId: string,
+  candidate: SignalCandidate,
+  opts: { deckId: string; workerSessionIds: string[]; playbookIds: string[] }
+): void {
+  createIssueArtifact({
+    issueId,
+    kind: DECK_FEEDBACK_SIGNAL_KIND,
+    author: "system",
+    content: {
+      sourceKey: candidate.sourceKey,
+      trigger: candidate.trigger,
+      humanActionId: candidate.humanActionId,
+      signalId: null,
+      deckId: opts.deckId,
+      workerSessionIds: opts.workerSessionIds,
+      playbookIds: opts.playbookIds,
+      observedPlaybookUse: opts.playbookIds.length > 0 ? "observed" : "none",
+      failure: candidate.failure,
+      status: "pending",
+    },
+  });
 }
 
 function recordStatus(issueId: string, content: Record<string, unknown>): void {
@@ -462,7 +594,7 @@ export async function reportDeckFailureSignals(
   const issue = getIssue(issueId);
   if (!issue) return { sent: [], skipped: [], error: "unknown issue" };
 
-  const { keys: sentKeys, actionIds: signalledActions } = existingSignalKeys(issueId);
+  const { sentKeys, pendingKeys, actionIds: signalledActions } = existingSignalKeys(issueId);
   const recurring = recurringBlockingCandidate(issueId);
   const allCandidates = [
     ...humanRetryCandidates(issueId, signalledActions),
@@ -519,27 +651,36 @@ export async function reportDeckFailureSignals(
   const sent: SentSignal[] = [];
   let anyFailed = false;
   for (const candidate of candidates) {
-    const rationale =
-      candidate.trigger === "human_retry"
-        ? "Human correction during Dealer review — reported once as supporting evidence, without attributing the failure to any playbook."
-        : candidate.trigger === "attempts_exhausted"
-          ? "Dealer review attempts were exhausted — reported once as supporting evidence, without attributing the failure to any playbook."
-          : "A blocking review finding recurred across rounds — reported once as supporting evidence, without attributing the failure to any playbook.";
-    // signal_only: a feedback record, never a playbook edit. No playbook_id (no single
-    // attribution), no ops (no synthesized edit) — Deck owns curation and patch proposals.
+    // signal_only: a feedback record, never a playbook edit. Only Deck-schema
+    // fields are sent (kind/rationale/evidence) — no playbook_id (no single
+    // attribution), no ops (no synthesized edit), and no Dealer-only top-level
+    // keys. All Dealer refs (source key, issue/session refs, observed playbook
+    // use) live inside the Deck-stored rationale/evidence fields.
+    //
+    // Crash safety: the pending intent row is written BEFORE the Deck call, so a
+    // restart between the call and the sent row reconciles to the same source
+    // key (embedded verbatim in the Deck-stored payload) instead of minting a
+    // second report. A pending row without a sent row is retried, never duplicated
+    // locally; a repeated send after that window carries the identical key.
+    if (!pendingKeys.has(candidate.sourceKey)) {
+      recordSignalIntent(issueId, candidate, { deckId, workerSessionIds, playbookIds });
+      pendingKeys.add(candidate.sourceKey);
+    }
+    const signalArgs = buildSignalOnlyArgs(candidate, { issueId, workerSessionIds, playbookIds });
+    const schemaError = validateSignalOnlyArgs(signalArgs);
+    if (schemaError) {
+      anyFailed = true;
+      recordStatus(issueId, {
+        status: "failed",
+        sourceKey: candidate.sourceKey,
+        error: `signal payload rejected by Dealer-side Deck schema check: ${schemaError}`,
+      });
+      continue;
+    }
     const proposed = await deps.callTool<{ id?: unknown }>({
       deckId,
       toolName: "propose_playbook_patch",
-      arguments: {
-        kind: "signal_only",
-        source_key: candidate.sourceKey,
-        trigger: candidate.trigger,
-        issue_ref: { dealer_issue_id: issueId, worker_session_ids: workerSessionIds },
-        failure: candidate.failure,
-        playbook_ids: playbookIds,
-        observed_playbook_use: playbookIds.length > 0 ? "observed" : "none",
-        rationale,
-      },
+      arguments: signalArgs,
       timeoutMs: SIGNAL_TOOL_TIMEOUT_MS,
     });
     if (!proposed.ok) {

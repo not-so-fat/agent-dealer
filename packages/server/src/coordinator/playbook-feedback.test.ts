@@ -24,6 +24,7 @@ const {
 } = await import("../repository/worker-sessions.js");
 const { buildProfileSnapshot, serializeProfileSnapshot } = await import("./profile-snapshot.js");
 const { createHumanAction, resolveHumanAction } = await import("../repository/human-actions.js");
+const { createIssueArtifact } = await import("../repository/artifacts.js");
 const { reconcileFinding } = await import("../repository/findings.js");
 const { listArtifactsForIssueByKind } = await import("../repository/artifacts-for-issue.js");
 const {
@@ -31,6 +32,8 @@ const {
   collectPlaybookUseReceiptsForIssue,
   reportDeckFailureSignals,
   parseCorrelatedFetches,
+  validateSignalOnlyArgs,
+  buildSignalOnlyArgs,
   DECK_CORRELATION_TOOL,
 } = await import("./playbook-feedback.js");
 const { triggerIssueReflect } = await import("./reflect-trigger.js");
@@ -111,6 +114,12 @@ function makeDeps(
         };
       }
       if (call.toolName === "propose_playbook_patch") {
+        // Strict stand-in for Deck's schema (additionalProperties:false): reject
+        // anything the real Deck would reject, so tests prove schema compliance.
+        const schemaError = validateSignalOnlyArgs(call.arguments);
+        if (schemaError) {
+          return { ok: false, kind: "infra_failure", reason: `Deck rejected signal payload: ${schemaError}` };
+        }
         return opts.propose
           ? opts.propose(call.arguments)
           : { ok: true, data: { id: `sig-${calls.length}` } };
@@ -127,6 +136,18 @@ function receiptsFor(issueId: string) {
 
 function signalsFor(issueId: string) {
   return listArtifactsForIssueByKind(issueId, "deck_feedback_signal").map((a) => JSON.parse(a.contentJson!));
+}
+
+function sentSignalsFor(issueId: string) {
+  return signalsFor(issueId).filter((s) => s.status === "sent");
+}
+
+function pendingSignalsFor(issueId: string) {
+  return signalsFor(issueId).filter((s) => s.status === "pending" || s.status === "sending");
+}
+
+function evidenceOf(args: Record<string, unknown>): { failure_summary: string; user_feedback_excerpt?: string } {
+  return args.evidence as { failure_summary: string; user_feedback_excerpt?: string };
 }
 
 test("every new worker session persists a unique opaque correlation ID before spawn", () => {
@@ -243,27 +264,45 @@ test("human retry feedback creates one idempotent signal_only report with refs a
   const proposes = calls.filter((c) => c.toolName === "propose_playbook_patch");
   assert.equal(proposes.length, 1);
   const args = proposes[0]!.args;
-  // Only signal_only from this path — never an update proposal, never Notes ops.
+  // Only signal_only from this path — never an update proposal, never Notes ops —
+  // and only Deck-schema fields (the strict fake above already rejected the call
+  // otherwise, proving a real Deck would accept it).
+  assert.equal(validateSignalOnlyArgs(args), null);
   assert.equal(args.kind, "signal_only");
   assert.equal("playbook_id" in args, false);
   assert.equal("ops" in args, false);
-  assert.ok(typeof args.source_key === "string" && args.source_key.startsWith(`dealer:${issue.id}:human_retry:`));
-  assert.deepStrictEqual((args.issue_ref as { worker_session_ids: string[] }).worker_session_ids, [session.id]);
-  assert.equal((args.issue_ref as { dealer_issue_id: string }).dealer_issue_id, issue.id);
-  assert.deepStrictEqual(args.playbook_ids, ["pb-used-a", "pb-used-b"]);
-  assert.equal(args.observed_playbook_use, "observed");
-  assert.match(args.failure as string, /repair/);
-  assert.match(args.failure as string, /drops state on rerender/);
+  for (const banned of ["source_key", "trigger", "issue_ref", "failure", "playbook_ids", "observed_playbook_use"]) {
+    assert.equal(banned in args, false, `Dealer-only field ${banned} must not be sent to Deck`);
+  }
+  // Every Dealer reference lives in Deck-stored fields instead.
+  const expectedKey = `dealer:${issue.id}:human_retry:${action.id}`;
+  assert.match(args.rationale as string, /Human correction during Dealer review/);
+  assert.ok((args.rationale as string).includes(expectedKey), "rationale carries the source key");
+  assert.ok((args.rationale as string).includes(issue.id), "rationale carries the issue ref");
+  const evidence = evidenceOf(args);
+  assert.match(evidence.failure_summary, /repair/);
+  assert.match(evidence.failure_summary, /drops state on rerender/);
+  assert.ok(evidence.failure_summary.includes(issue.id), "evidence carries the issue ref");
+  assert.ok(evidence.failure_summary.includes(session.id), "evidence carries the session ref");
+  assert.ok(
+    evidence.failure_summary.includes("pb-used-a") && evidence.failure_summary.includes("pb-used-b"),
+    "evidence names exactly the two actually used playbooks"
+  );
+  assert.ok(evidence.failure_summary.includes(expectedKey), "evidence carries the source key");
+  assert.equal(evidence.user_feedback_excerpt, "The widget drops state on rerender.");
 
-  const signals = signalsFor(issue.id);
+  // One pending intent row (written before the Deck call) plus one sent row.
+  assert.equal(pendingSignalsFor(issue.id).length, 1);
+  const signals = sentSignalsFor(issue.id);
   assert.equal(signals.length, 1);
   assert.equal(signals[0]!.trigger, "human_retry");
+  assert.equal(signals[0]!.sourceKey, expectedKey);
 
   // Simulated restart: same trigger, no duplicate Deck report.
   const again = await triggerIssueReflect(issue.id, deps);
   assert.equal(again, "skipped");
   assert.equal(calls.filter((c) => c.toolName === "propose_playbook_patch").length, 1);
-  assert.equal(signalsFor(issue.id).length, 1);
+  assert.equal(sentSignalsFor(issue.id).length, 1);
 });
 
 test("attempts exhaustion creates one signal; a retry choice is reported once, not twice", async () => {
@@ -282,22 +321,27 @@ test("attempts exhaustion creates one signal; a retry choice is reported once, n
   assert.equal(result.sent.length, 1);
   assert.equal(result.sent[0]!.trigger, "attempts_exhausted");
   const args = calls.filter((c) => c.toolName === "propose_playbook_patch")[0]!.args;
+  assert.equal(validateSignalOnlyArgs(args), null);
   assert.equal(args.kind, "signal_only");
-  assert.deepStrictEqual(args.playbook_ids, []);
-  assert.equal(args.observed_playbook_use, "none");
-  assert.match(args.failure as string, /exhausted/);
+  const exhaustedEvidence = evidenceOf(args);
+  assert.match(exhaustedEvidence.failure_summary, /exhausted/);
+  assert.ok(
+    exhaustedEvidence.failure_summary.includes("no observed playbook use"),
+    "no receipt means the report says no observed playbook use"
+  );
+  assert.ok(exhaustedEvidence.failure_summary.includes(issue.id));
 
   // The human then retries: the same action must not produce a second signal.
   resolveHumanAction(exhausted.id, "operator", { choice: "retry" });
   const afterRetry = await reportDeckFailureSignals(issue.id, deps);
   assert.deepStrictEqual(afterRetry.sent, []);
   assert.equal(calls.filter((c) => c.toolName === "propose_playbook_patch").length, 1);
-  assert.equal(signalsFor(issue.id).length, 1);
+  assert.equal(sentSignalsFor(issue.id).length, 1);
 
   // And a restart changes nothing.
   const restart = await reportDeckFailureSignals(issue.id, deps);
   assert.deepStrictEqual(restart.sent, []);
-  assert.equal(signalsFor(issue.id).length, 1);
+  assert.equal(sentSignalsFor(issue.id).length, 1);
 });
 
 test("a recurring blocking finding creates one signal; non-blocking recurrence does not", async () => {
@@ -326,13 +370,16 @@ test("a recurring blocking finding creates one signal; non-blocking recurrence d
   assert.equal(result.sent.length, 1);
   assert.equal(result.sent[0]!.trigger, "recurring_blocking");
   const args = calls.filter((c) => c.toolName === "propose_playbook_patch")[0]!.args;
+  assert.equal(validateSignalOnlyArgs(args), null);
   assert.equal(args.kind, "signal_only");
-  assert.match(args.failure as string, /missing-null-check/);
-  assert.doesNotMatch(args.failure as string, /typo-in-comment/);
+  const recurringEvidence = evidenceOf(args);
+  assert.match(recurringEvidence.failure_summary, /missing-null-check/);
+  assert.doesNotMatch(recurringEvidence.failure_summary, /typo-in-comment/);
+  assert.ok(recurringEvidence.failure_summary.includes("no observed playbook use"));
 
   const restart = await reportDeckFailureSignals(issue.id, deps);
   assert.deepStrictEqual(restart.sent, []);
-  assert.equal(signalsFor(issue.id).length, 1);
+  assert.equal(sentSignalsFor(issue.id).length, 1);
 });
 
 test("all three triggers together send three signal_only reports, never an update", async () => {
@@ -362,7 +409,9 @@ test("all three triggers together send three signal_only reports, never an updat
   assert.equal(proposes.length, 3);
   for (const call of proposes) {
     assert.equal(call.args.kind, "signal_only");
+    assert.equal(validateSignalOnlyArgs(call.args), null);
     assert.equal("ops" in call.args, false);
+    assert.equal("playbook_id" in call.args, false);
   }
   const triggers = result.sent.map((s) => s.trigger).sort();
   assert.deepStrictEqual(triggers, ["attempts_exhausted", "human_retry", "recurring_blocking"]);
@@ -443,4 +492,141 @@ test("issue-level collection covers every terminal session and ignores running o
   assert.equal(result.collected, 2);
   const ids = receiptsFor(issue.id).map((r) => r.workerSessionId).sort();
   assert.deepStrictEqual(ids, [done.id, failed.id].sort());
+});
+
+test("buildSignalOnlyArgs emits only Deck-schema fields with refs in Deck-stored fields", () => {
+  const args = buildSignalOnlyArgs(
+    {
+      trigger: "human_retry" as "human_retry",
+      sourceKey: "dealer:issue-1:human_retry:act-1",
+      humanActionId: "act-1",
+      failure: "Human repair on final_review (action act-1). Stated reason: broken.",
+      userFeedback: "broken",
+    },
+    { issueId: "issue-1", workerSessionIds: ["ws-1"], playbookIds: ["pb-a", "pb-b"] }
+  );
+  assert.equal(validateSignalOnlyArgs(args), null);
+  assert.ok((args.rationale as string).includes("dealer:issue-1:human_retry:act-1"));
+  const evidence = evidenceOf(args);
+  assert.ok(evidence.failure_summary.includes("Dealer issue: issue-1"));
+  assert.ok(evidence.failure_summary.includes("Worker sessions: ws-1"));
+  assert.ok(evidence.failure_summary.includes("pb-a") && evidence.failure_summary.includes("pb-b"));
+  assert.equal(evidence.user_feedback_excerpt, "broken");
+
+  // No observed use is explicit, never a legacy fallback.
+  const noneArgs = buildSignalOnlyArgs(
+    {
+      trigger: "attempts_exhausted" as "attempts_exhausted",
+      sourceKey: "dealer:issue-1:attempts_exhausted:act-2",
+      humanActionId: "act-2",
+      failure: "Review attempts were exhausted.",
+      userFeedback: null,
+    },
+    { issueId: "issue-1", workerSessionIds: [], playbookIds: [] }
+  );
+  assert.equal(validateSignalOnlyArgs(noneArgs), null);
+  assert.match(evidenceOf(noneArgs).failure_summary, /no observed playbook use/);
+  assert.equal("user_feedback_excerpt" in evidenceOf(noneArgs), false);
+
+  // The validator rejects every Dealer-only smuggled field a real Deck would drop.
+  for (const extra of ["source_key", "trigger", "issue_ref", "failure", "playbook_ids", "observed_playbook_use"]) {
+    const rejected = validateSignalOnlyArgs({
+      kind: "signal_only",
+      rationale: "r",
+      evidence: { failure_summary: "f" },
+      [extra]: "x",
+    });
+    assert.match(rejected!, /unknown top-level field/, `${extra} must be rejected`);
+  }
+  assert.equal(
+    validateSignalOnlyArgs({ kind: "signal_only", rationale: "r", evidence: { nope: 1 } }),
+    "unknown evidence field: nope"
+  );
+});
+
+test("a failed Deck send leaves the pending intent; the retry reuses the same key", async () => {
+  const agent = seedAgent();
+  const issue = seedIssue(agent.id);
+  seedTerminalSession(issue.id, agent);
+  const action = createHumanAction({
+    issueId: issue.id, actionType: "final_review", reason: "Flaky on retry.", question: "Repair?",
+  });
+  resolveHumanAction(action.id, "operator", { choice: "repair" });
+  const expectedKey = `dealer:${issue.id}:human_retry:${action.id}`;
+
+  const failing = makeDeps({
+    fetches: [],
+    propose: () => ({ ok: false, kind: "infra_failure", reason: "temporary deck error" }),
+  });
+  const first = await reportDeckFailureSignals(issue.id, failing.deps);
+  assert.deepStrictEqual(first.sent, []);
+  assert.equal(failing.calls.filter((c) => c.toolName === "propose_playbook_patch").length, 1);
+  // No sent row, but the pending intent survives the failure for the retry.
+  assert.equal(sentSignalsFor(issue.id).length, 0);
+  assert.equal(pendingSignalsFor(issue.id).length, 1);
+  assert.equal(pendingSignalsFor(issue.id)[0]!.sourceKey, expectedKey);
+
+  const succeeding = makeDeps({ fetches: [] });
+  const second = await reportDeckFailureSignals(issue.id, succeeding.deps);
+  assert.equal(second.sent.length, 1);
+  assert.equal(second.sent[0]!.sourceKey, expectedKey);
+  // No second pending row: the retry reconciled to the same intent.
+  assert.equal(pendingSignalsFor(issue.id).length, 1);
+  assert.equal(sentSignalsFor(issue.id).length, 1);
+  const retryEvidence = evidenceOf(
+    succeeding.calls.filter((c) => c.toolName === "propose_playbook_patch")[0]!.args
+  );
+  assert.ok(retryEvidence.failure_summary.includes(expectedKey));
+  const failedEvidence = evidenceOf(
+    failing.calls.filter((c) => c.toolName === "propose_playbook_patch")[0]!.args
+  );
+  assert.equal(retryEvidence.failure_summary, failedEvidence.failure_summary);
+});
+
+test("a crash between the Deck send and the sent-write reconciles to the same key", async () => {
+  const agent = seedAgent();
+  const issue = seedIssue(agent.id);
+  const session = seedTerminalSession(issue.id, agent);
+  const action = createHumanAction({
+    issueId: issue.id, actionType: "final_review", reason: "Drops state.", question: "Repair?",
+  });
+  resolveHumanAction(action.id, "operator", { choice: "repair" });
+  const expectedKey = `dealer:${issue.id}:human_retry:${action.id}`;
+
+  // Simulate the crash window: a first attempt wrote its pending intent and
+  // reached Deck, but the process died before writing the sent row.
+  createIssueArtifact({
+    issueId: issue.id,
+    kind: "deck_feedback_signal",
+    author: "system",
+    content: {
+      sourceKey: expectedKey,
+      trigger: "human_retry",
+      humanActionId: action.id,
+      signalId: null,
+      deckId: DECK,
+      workerSessionIds: [session.id],
+      playbookIds: [],
+      observedPlaybookUse: "none",
+      failure: "Human repair on final_review (action placeholder).",
+      status: "pending",
+    },
+  });
+
+  const { deps, calls } = makeDeps({ fetches: [] });
+  const result = await reportDeckFailureSignals(issue.id, deps);
+  assert.equal(result.sent.length, 1);
+  assert.equal(result.sent[0]!.sourceKey, expectedKey);
+  // Exactly one send, carrying the identical Deck-visible key, and no second
+  // pending row — Deck can recognize the repeat as the same report.
+  const proposes = calls.filter((c) => c.toolName === "propose_playbook_patch");
+  assert.equal(proposes.length, 1);
+  assert.ok(evidenceOf(proposes[0]!.args).failure_summary.includes(expectedKey));
+  assert.equal(pendingSignalsFor(issue.id).length, 1);
+  assert.equal(sentSignalsFor(issue.id).length, 1);
+
+  // A further restart sends nothing more.
+  const restart = await reportDeckFailureSignals(issue.id, deps);
+  assert.deepStrictEqual(restart.sent, []);
+  assert.equal(calls.filter((c) => c.toolName === "propose_playbook_patch").length, 1);
 });
