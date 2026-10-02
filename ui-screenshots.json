@@ -1,0 +1,9 @@
+{
+  "widths": [1280, 320],
+  "routes": [
+    { "name": "issues-home", "path": "/issues" },
+    { "name": "issue-detail", "path": "/issues/{{issueId}}", "needsSeededIssue": true },
+    { "name": "agents", "path": "/agents" },
+    { "name": "execution-report", "path": "/reports/execution" }
+  ]
+}
