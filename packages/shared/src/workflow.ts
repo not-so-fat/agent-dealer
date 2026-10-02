@@ -64,6 +64,16 @@ export const WorkflowEventType = z.enum([
    * per session via idempotency keys and never drive retry/routing decisions. */
   "checkpoint.observed",
   "retry.reused",
+  /** NOT-310: merge-time base-sync attempt after a not-mergeable failure. Payload
+   * carries `outcome` (skipped | merged | repair_queued | conflict_spent |
+   * failed) plus the branch, base, and (for conflicts) the conflicting files.
+   * Audit only — never re-read. */
+  "auto_merge.conflict_sync",
+  /** NOT-310: conflict-repair developer round queued after the sync hit a textual
+   * conflict (payload: baseBranch, branch, files, round, workItemId). Append-only
+   * bound key: a later not-mergeable failure with no `human_action.resolved` after
+   * this event escalates with the file list instead of syncing again. */
+  "auto_merge.conflict_repair_queued",
   /** Migration-only — the NOT-66 cutover repoints a legacy `events` row under this type,
    * preserving the original type/payload inside `payloadJson` (see `role: "legacy"` on
    * `WorkerSessionRole` and `outcome: "migrated"` on `WorkflowInstanceOutcome` for the same

@@ -324,3 +324,45 @@ test("a deckless developer prompt still fails closed", () => {
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, deckId: null });
   assert.match(prompt, /misconfigured: Agent Deck is required but missing/);
 });
+
+// NOT-310: the conflict-repair directive renders the base, the branch, and the
+// conflicting files first — the developer merges the base before any other work.
+test("NOT-310: conflict repair directive renders base, branch, and files before the task", () => {
+  const prompt = buildDeveloperPrompt({
+    taskSnapshot,
+    round: 3,
+    conflictRepair: { baseBranch: "main", branch: "issue-9", files: ["a.ts", "b.ts"] },
+  });
+  assert.match(prompt, /## Merge conflict with main/);
+  assert.ok(prompt.includes("`issue-9`"), "branch must be named");
+  assert.ok(prompt.includes("`a.ts`") && prompt.includes("`b.ts`"), "files must be named");
+  assert.ok(prompt.includes("git fetch origin main"), "must fetch the base");
+  assert.ok(prompt.includes("git merge origin/main"), "must merge the base");
+  assert.match(prompt, /never force-push/i);
+  assert.match(prompt, /never rebase/i);
+  assert.ok(
+    prompt.indexOf("## Merge conflict") < prompt.indexOf("## Task"),
+    "conflict section must precede the task"
+  );
+});
+
+test("NOT-310: unknown conflicting files render the discover-from-merge instruction", () => {
+  const prompt = buildDeveloperPrompt({
+    taskSnapshot,
+    round: 2,
+    conflictRepair: { baseBranch: "main", branch: "issue-9", files: [] },
+  });
+  assert.match(prompt, /## Merge conflict with main/);
+  assert.match(prompt, /conflicting files are unknown/);
+});
+
+test("NOT-310: no conflict directive produces byte-for-byte the same prompt as before", () => {
+  const base = { taskSnapshot, round: 2 as const };
+  const without = buildDeveloperPrompt(base);
+  assert.doesNotMatch(without, /## Merge conflict/);
+  assert.equal(buildDeveloperPrompt({ ...base, conflictRepair: undefined }), without);
+  assert.equal(
+    buildDeveloperPrompt({ ...base, conflictRepair: { baseBranch: "", branch: "", files: [] } }),
+    without
+  );
+});

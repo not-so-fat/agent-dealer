@@ -33,6 +33,14 @@ export const MERGE_FAILURE_RESPONSE_OPTIONS: Array<{ choice: string; label: stri
 export const MERGE_FAILURE_EVIDENCE_KEY = "mergeFailure";
 
 /**
+ * NOT-310: conflicting file paths (string[]) carried on a merge-failure
+ * policy_escalation's evidence once the automatic sync + conflict-repair round are
+ * spent. Read by operators, not by routing — choice narrowing still keys off
+ * `MERGE_FAILURE_EVIDENCE_KEY` alone.
+ */
+export const MERGE_CONFLICT_FILES_EVIDENCE_KEY = "conflictingFiles";
+
+/**
  * NOT-221: divergence facts stored on a diverged `unpushed_commit` policy_escalation's
  * evidence. `remoteSha` is the lease pin a push_with_lease resolution must use — it is
  * never refreshed in place (a refreshed pin would publish over newer remote commits the

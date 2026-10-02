@@ -99,6 +99,23 @@ export interface DeveloperPromptInput {
    * this round's work-item payload (never read from the DB), so exactly the very next
    * developer round sees it. Rendered verbatim under its own heading. */
   scopeDecisionNote?: string;
+  /** NOT-310: merge-conflict repair directive — carried on this round's work-item
+   * payload (never read from the DB), so exactly the queued conflict-repair round
+   * sees it. Renders the base branch, the conflicting files, and the merge-first
+   * instruction under its own heading. */
+  conflictRepair?: ConflictRepairDirective;
+}
+
+/**
+ * NOT-310: what the conflict-repair developer round must resolve before anything
+ * else. `files` holds the conflicting paths observed when the coordinator's own
+ * base merge failed; empty when the conflict was only ever seen via `gh` (the
+ * agent then discovers the files from its own merge output).
+ */
+export interface ConflictRepairDirective {
+  baseBranch: string;
+  branch: string;
+  files: string[];
 }
 
 function guidanceSection(guidance: string[] | undefined): string[] {
@@ -108,6 +125,28 @@ function guidanceSection(guidance: string[] | undefined): string[] {
     `Apply this unless it would require changing the frozen acceptance criteria, scope, or round limits — if it would, say so in your conclusion instead of deviating.`,
     ``,
     ...guidance.flatMap((g) => [g.trim(), ``]),
+  ];
+}
+
+/** NOT-310: the merge-conflict repair directive. Empty/absent renders nothing so
+ * ordinary rounds produce byte-for-byte the prompt they always did. */
+function conflictRepairSection(directive: ConflictRepairDirective | undefined): string[] {
+  const base = directive?.baseBranch?.trim();
+  const branch = directive?.branch?.trim();
+  if (!base || !branch) return [];
+  const files = (directive?.files ?? []).map((f) => f.trim()).filter((f) => f.length > 0);
+  return [
+    `## Merge conflict with ${base} — resolve it first`,
+    `This PR's branch \`${branch}\` cannot merge into \`${base}\`: the base moved and merging it conflicts. Do this before any other work in this round:`,
+    ``,
+    `1. In your worktree: \`git fetch origin ${base}\` and \`git merge origin/${base}\`.`,
+    `2. Resolve every conflict preserving both sides' intent — the base side carries other tickets' merged work, never discard it to keep your side.`,
+    files.length > 0
+      ? `   Files seen conflicting at merge time: ${files.map((f) => `\`${f}\``).join(", ")}.`
+      : `   The conflicting files are unknown — your own merge output lists them; resolve all of them.`,
+    `3. Run the full verification suite on the resolved tree, then commit the resolution.`,
+    `4. Never rebase this published branch and never force-push — the coordinator publishes your tip with a plain push.`,
+    ``,
   ];
 }
 
@@ -193,6 +232,8 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
     }
   }
 
+  // NOT-310: the conflict repair leads — it is this round's purpose, read before the task.
+  parts.push(...conflictRepairSection(input.conflictRepair));
   // NOT-272: the scope decision leads — the developer reads it before the task itself.
   parts.push(...scopeDecisionSection(input.scopeDecisionNote));
 
