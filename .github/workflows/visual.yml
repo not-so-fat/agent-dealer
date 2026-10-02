@@ -1,0 +1,119 @@
+# NOT-312: browser screenshots for UI acceptance criteria.
+#
+# The builder sandbox cannot run a browser, so rendered evidence comes from CI:
+# this workflow boots the real server, seeds fixtures through the public API,
+# captures each route in ui-screenshots.json with Playwright (chromium) at
+# desktop and 320px widths, and uploads the PNGs as the `ui-screenshots`
+# artifact for reviewers.
+#
+# The `paths` filter is the "skipped, not failed" mechanism: a PR touching
+# neither apps/web nor packages/shared never triggers this workflow.
+# The workflow's own inputs (config, script, spec, this file) are listed too
+# so pipeline changes re-verify themselves.
+name: Visual
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "apps/web/**"
+      - "packages/shared/**"
+      - "ui-screenshots.json"
+      - "scripts/ci-visual/**"
+      - ".github/workflows/visual.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/web/**"
+      - "packages/shared/**"
+      - "ui-screenshots.json"
+      - "scripts/ci-visual/**"
+      - ".github/workflows/visual.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  visual:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspaces
+        run: npm run build
+
+      # Mirrors the `verify` boot gate, plus AGENT_DEALER_UI_DIST so the
+      # server serves the freshly built dashboard instead of needing a
+      # release bundle. PORT is explicit so the curl below cannot drift.
+      - name: Start server (boot gate)
+        env:
+          AGENT_DEALER_ENV: development
+          AGENT_DEALER_HOME: ${{ runner.temp }}/agent-dealer-home
+          AGENT_DEALER_UI_DIST: ${{ github.workspace }}/apps/web/dist
+          PORT: "3221"
+        run: |
+          node packages/server/dist/index.js > server.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3221/health >/dev/null; then
+              echo "Server ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server failed to start"
+          tail -n 100 server.log || true
+          exit 1
+
+      # Playwright lives in a scratch install on purpose: the repo takes no
+      # new dependency (and no lockfile churn) for a CI-only browser.
+      - name: Install Playwright (chromium)
+        run: |
+          mkdir -p "${RUNNER_TEMP}/ci-visual-pw"
+          cd "${RUNNER_TEMP}/ci-visual-pw"
+          npm init -y >/dev/null 2>&1
+          npm install @playwright/test@1.49.1
+          npx playwright install --with-deps chromium
+
+      - name: Seed fixtures and write screenshot plan
+        run: npx tsx scripts/ci-visual/capture.mts --base-url http://127.0.0.1:3221 --config ui-screenshots.json --out-dir ui-screenshots
+
+      - name: Capture screenshots
+        env:
+          CI_VISUAL_PLAN: ${{ github.workspace }}/ui-screenshots/plan.json
+          CI_VISUAL_OUT_DIR: ${{ github.workspace }}/ui-screenshots
+        run: |
+          cp scripts/ci-visual/visual.spec.mjs "${RUNNER_TEMP}/ci-visual-pw/visual.spec.mjs"
+          cd "${RUNNER_TEMP}/ci-visual-pw"
+          npx playwright test visual.spec.mjs --reporter=list
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: ui-screenshots/*.png
+          if-no-files-found: error
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" 2>/dev/null || true
+          fi
+          if [ -f server.log ]; then
+            tail -n 50 server.log || true
+          fi
