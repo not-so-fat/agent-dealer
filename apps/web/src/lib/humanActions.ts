@@ -15,6 +15,7 @@ const ACTION_LABELS: Record<HumanActionType, string> = {
   deck_interaction_required: "Agent Deck interaction required",
   reflection_interaction_required: "Reflection interaction required",
   outbound_delivery_interaction_required: "Outbound delivery interaction required",
+  muse_capability: "Muse capability",
 };
 
 export function actionLabel(actionType: HumanActionType): string {

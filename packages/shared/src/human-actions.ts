@@ -22,6 +22,15 @@ export const HumanActionType = z.enum([
    * kernel and never go through it). Resolved outside `resolveHumanActionOutcome` by
    * `resolveOutboundDeliveryAction`, same reasoning as `reflection_interaction_required`. */
   "outbound_delivery_interaction_required",
+  /** A Muse Code auto-update's developer shell/write check reached a verdict the
+   * admission gate cannot clear by itself (NOT-308): either the new version provably
+   * lost the capability (`missing` — admission blocked) or three checks in a row
+   * could not complete (`unverified` — admission continues on the last confirmed
+   * baseline). One action per version (request_id `muse-capability:<version>`),
+   * resolved through commands.ts's dedicated branch — never `resolveHumanActionOutcome`.
+   * The only choice is `acknowledge`: for `missing` it records a per-version override
+   * so admission proceeds on that version; for `unverified` it just dismisses. */
+  "muse_capability",
 ]);
 export type HumanActionType = z.infer<typeof HumanActionType>;
 

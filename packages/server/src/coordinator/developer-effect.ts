@@ -51,6 +51,7 @@ import {
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, verifyWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import { realGithubAdapter, pollPrChecks, type GithubAdapter, type PrView } from "../adapters/github.js";
+import { museCapabilitySafetyNetAfterSession } from "../adapters/muse-capability.js";
 import { getOrAssignSessionCorrelationId, getWorkerSession, mergeSessionMetadata, patchRunningSession, recordSessionProcess, setSessionInputSha } from "../repository/worker-sessions.js";
 import { museIdleMinutes, museStallMetadata } from "./muse-spawn.js";
 import { museIdleTimeoutMs } from "./session-timeouts.js";
@@ -1251,6 +1252,26 @@ export async function runDeveloperEffect(
         });
       } catch {
         // ignore
+      }
+    }
+
+    // NOT-308 safety net: a Muse session that left the worktree dirty without a
+    // single shell tool call is what a shell-less build looks like from the outside —
+    // when the running version is not yet the confirmed baseline, re-verify it in the
+    // background immediately (bypassing the error backoff) and escalate a `missing`
+    // verdict on this issue. Fire-and-forget: never throws, never changes this outcome.
+    // Dirtiness is read here, before salvage/commit handling below can clean the tree.
+    if (runtime === "muse_code") {
+      try {
+        const dirtyAtSessionEnd = !(await isWorktreeClean(worktreePath).catch(() => true));
+        museCapabilitySafetyNetAfterSession({
+          issueId: issue.id,
+          runtime,
+          logPath: spawned.logPath,
+          dirty: dirtyAtSessionEnd,
+        });
+      } catch {
+        // Observational only — the session outcome stands on its own.
       }
     }
 

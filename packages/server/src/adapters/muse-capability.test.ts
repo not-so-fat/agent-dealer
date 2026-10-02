@@ -33,8 +33,18 @@ const {
   setMuseCapabilityProbeForTests,
   resetMuseCapabilityStateForTests,
   ageMuseCapabilityCheckForTests,
+  ensureMuseCapabilityEscalation,
+  recordMuseCapabilityOverride,
+  museCapabilitySafetyNetAfterSession,
+  countMuseShellToolCalls,
+  museCapabilityRequestId,
   defaultMuseCapabilityProbe,
 } = await import("./muse-capability.js");
+const { migrate, getDb } = await import("../db/index.js");
+const { listHumanActionsByRequestId, resolveHumanAction } = await import(
+  "../repository/human-actions.js"
+);
+migrate();
 type ProbeResult = Awaited<ReturnType<typeof defaultMuseCapabilityProbe>>;
 
 const OLD = "1.3.0-R3401.1";
@@ -61,10 +71,59 @@ async function check(version: string) {
   return { first, settled: museCapabilityIssues(version) };
 }
 
+/** Drive `version` to three consecutive errors (attempts=3, exhausted). */
+async function exhaust(version: string) {
+  museCapabilityIssues(version);
+  await settleMuseCapabilityCheckForTests();
+  ageMuseCapabilityCheckForTests(61_000);
+  museCapabilityIssues(version);
+  await settleMuseCapabilityCheckForTests();
+  ageMuseCapabilityCheckForTests(122_000);
+  museCapabilityIssues(version);
+  await settleMuseCapabilityCheckForTests();
+}
+
+/** A `muse --version` stub reporting `version`; returns a restore function. */
+function stubMuseVersion(version: string): () => void {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-verstub-"));
+  const versionFile = path.join(dir, "version");
+  fs.writeFileSync(versionFile, `Muse Code ${version.split("-")[0]} (${version})\n`);
+  const bin = path.join(dir, "muse");
+  fs.writeFileSync(bin, `#!/bin/sh\ncat ${JSON.stringify(versionFile)}\n`);
+  fs.chmodSync(bin, 0o755);
+  const prev = process.env.MUSE_CLI;
+  process.env.MUSE_CLI = bin;
+  return () => {
+    if (prev === undefined) delete process.env.MUSE_CLI;
+    else process.env.MUSE_CLI = prev;
+  };
+}
+
+/** A real issue row — `muse_capability` escalations are FK-bound to issues. */
+function makeIssue(): string {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  getDb()
+    .prepare(
+      `INSERT INTO issues (id, source, title, repo, base_branch, status, current_owner, created_at, updated_at)
+       VALUES (?, 'manual', 'muse capability check', 'dealer-test', 'main', 'ready', 'dealer', ?, ?)`
+    )
+    .run(id, now, now);
+  return id;
+}
+
+/** A session-log file from JSON lines (plain strings pass through verbatim). */
+function writeLog(lines: unknown[]): string {
+  const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-log-")), "session.ndjson");
+  fs.writeFileSync(p, `${lines.map((l) => (typeof l === "string" ? l : JSON.stringify(l))).join("\n")}\n`);
+  return p;
+}
+
 describe("muse-capability", { concurrency: false }, () => {
   beforeEach(() => {
     resetMuseCapabilityStateForTests();
     setMuseCapabilityProbeForTests(null);
+    getDb().exec("DELETE FROM human_actions");
   });
 
   test("parseMuseVersion reads the build id from `muse --version`", () => {
@@ -73,6 +132,8 @@ describe("muse-capability", { concurrency: false }, () => {
     assert.equal(parseMuseVersion("  \n"), null);
   });
 
+  // NOT-308: with no confirmed baseline at all (fresh install) the unknown still
+  // blocks — fail closed until the first version is confirmed.
   test("a version not yet checked blocks while its one-time check runs (never assumed capable)", async () => {
     let release!: () => void;
     setMuseCapabilityProbeForTests(
@@ -88,6 +149,26 @@ describe("muse-capability", { concurrency: false }, () => {
     await settleMuseCapabilityCheckForTests();
     assert.equal(museCapabilityCheckInFlight(), false);
     assert.deepEqual(museCapabilityIssues(NEW), []);
+  });
+
+  // NOT-308: with a confirmed baseline, an unchecked version never blocks — the
+  // one-time check runs in the background while admission proceeds on the baseline.
+  test("a version not yet checked does NOT block while a confirmed baseline exists", async () => {
+    stubProbe({ [OLD]: { status: "capable" } });
+    await check(OLD);
+    let release!: () => void;
+    setMuseCapabilityProbeForTests(
+      () => new Promise((resolve) => (release = () => resolve({ status: "capable" })))
+    );
+    assert.deepEqual(museCapabilityIssues(NEW), []);
+    assert.equal(museCapabilityCheckInFlight(), true);
+    // Repeated polls while in flight stay unblocked and start no second probe.
+    assert.deepEqual(museCapabilityIssues(NEW), []);
+    assert.equal(museCapabilityCheckInFlight(), true);
+    release();
+    await settleMuseCapabilityCheckForTests();
+    assert.deepEqual(museCapabilityIssues(NEW), []);
+    assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).confirmedVersion, NEW);
   });
 
   // (a) same version as last check → no re-probe, cached result reused.
@@ -116,7 +197,7 @@ describe("muse-capability", { concurrency: false }, () => {
     const calls = stubProbe({ [OLD]: { status: "capable" }, [NEW]: { status: "capable" } });
     await check(OLD);
     const { first, settled } = await check(NEW);
-    assert.match(first[0]!.message, new RegExp(`Muse Code updated ${OLD} → ${NEW}: verifying`));
+    assert.deepEqual(first, [], "the in-flight check does not block on a baseline");
     assert.deepEqual(settled, []);
     assert.equal(calls.get(NEW), 1);
     const saved = JSON.parse(fs.readFileSync(STATE, "utf8"));
@@ -157,43 +238,70 @@ describe("muse-capability", { concurrency: false }, () => {
     assert.deepEqual((await check(FIXED)).settled, []);
   });
 
-  // (d) the check itself errors / times out → blocked with a distinct "could not verify" message.
+  // NOT-308 (d): an inconclusive check (throws / times out) with a confirmed baseline
+  // never blocks — admission proceeds on the baseline while the retry runs out.
   for (const [label, result] of [
     ["throws", new Error("spawn EACCES")],
     ["times out", { status: "error", detail: `probe session on ${NEW} timed out` }],
   ] as const) {
-    test(`a check that ${label} fails closed with a distinct "could not verify" message`, async () => {
+    test(`a check that ${label} does NOT block while a confirmed baseline exists`, async () => {
       const calls = stubProbe({ [OLD]: { status: "capable" }, [NEW]: result });
       await check(OLD);
-      const { settled } = await check(NEW);
-      assert.deepEqual(settled.map((i) => i.code), ["runtime_capability"]);
-      assert.match(
-        settled[0]!.message,
-        new RegExp(`^Could not verify Muse Code developer shell/write access after version change \\(${OLD} → ${NEW}\\)`)
-      );
-      assert.doesNotMatch(settled[0]!.message, /no longer get/);
-      // Not re-probed before the retry backoff, and the block stays up meanwhile.
-      assert.deepEqual(museCapabilityIssues(NEW), settled);
+      const { first, settled } = await check(NEW);
+      assert.deepEqual(first, [], "the in-flight check does not block on a baseline");
+      assert.deepEqual(settled, [], "an inconclusive result does not block on a baseline");
+      // Not re-probed before the retry backoff.
+      assert.deepEqual(museCapabilityIssues(NEW), []);
       assert.equal(calls.get(NEW), 1);
       assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).confirmedVersion, OLD);
     });
   }
 
-  test("a could-not-verify result is retried after the backoff, staying blocked until it passes", async () => {
-    let next: ProbeResult = { status: "error", detail: "timed out" };
-    let calls = 0;
-    setMuseCapabilityProbeForTests(async () => {
-      calls += 1;
-      return next;
+  // NOT-308: inconclusive results retry at 1 min, then 2 min — then the version is
+  // exhausted (3 attempts), escalates, and is never re-probed (not even past 4 min,
+  // and never on the old 10-minute flat timer). Admission stays unblocked throughout.
+  test("inconclusive results back off 1 min, then 2 min, then stop after 3 attempts", async () => {
+    const calls = stubProbe({
+      [OLD]: { status: "capable" },
+      [NEW]: { status: "error", detail: "timed out" },
     });
-    await check(NEW);
-    next = { status: "capable" };
-    ageMuseCapabilityCheckForTests(11 * 60_000);
-    const retrying = museCapabilityIssues(NEW);
-    assert.match(retrying[0]!.message, /Could not verify/);
+    await check(OLD);
+    assert.equal(calls.get(OLD), 1);
+
+    // Attempt 1 settles inconclusive; admission stays open.
+    museCapabilityIssues(NEW);
     await settleMuseCapabilityCheckForTests();
-    assert.equal(calls, 2);
     assert.deepEqual(museCapabilityIssues(NEW), []);
+    assert.equal(calls.get(NEW), 1);
+    assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).lastChecked.attempts, 1);
+
+    // No retry before 1 min, retry once it elapses (never the old 10 min flat wait —
+    // 61s must already re-probe).
+    ageMuseCapabilityCheckForTests(59_000);
+    museCapabilityIssues(NEW);
+    assert.equal(calls.get(NEW), 1);
+    ageMuseCapabilityCheckForTests(2_000);
+    museCapabilityIssues(NEW);
+    await settleMuseCapabilityCheckForTests();
+    assert.equal(calls.get(NEW), 2);
+    assert.deepEqual(museCapabilityIssues(NEW), []);
+    assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).lastChecked.attempts, 2);
+
+    // Attempt 2 backs off 2 min: 1 more minute is not enough, 2 are.
+    ageMuseCapabilityCheckForTests(61_000);
+    museCapabilityIssues(NEW);
+    assert.equal(calls.get(NEW), 2);
+    ageMuseCapabilityCheckForTests(61_000);
+    museCapabilityIssues(NEW);
+    await settleMuseCapabilityCheckForTests();
+    assert.equal(calls.get(NEW), 3);
+    assert.deepEqual(museCapabilityIssues(NEW), []);
+    assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).lastChecked.attempts, 3);
+
+    // Exhausted: no fourth probe ever — not after 4 min, not after 10.
+    ageMuseCapabilityCheckForTests(10 * 60_000);
+    assert.deepEqual(museCapabilityIssues(NEW), []);
+    assert.equal(calls.get(NEW), 3, "no further automatic probes after exhaustion");
   });
 
   test("consecutive updates name the exact previous version, not the last confirmed baseline", async () => {
@@ -206,23 +314,461 @@ describe("muse-capability", { concurrency: false }, () => {
     await check(OLD);
     await check(NEW);
     const { first, settled } = await check(LATER);
-    assert.match(first[0]!.message, new RegExp(`^Muse Code updated ${NEW} → ${LATER}: verifying`));
+    assert.deepEqual(first, [], "the in-flight check does not block on a baseline");
     assert.match(settled[0]!.message, new RegExp(`^Muse Code updated ${NEW} → ${LATER}: developer sessions no longer get`));
     assert.doesNotMatch(settled[0]!.message, new RegExp(OLD.replace(/\./g, "\\.")));
     assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).confirmedVersion, OLD);
   });
 
+  // NOT-308: without a baseline the inconclusive block still names the exact previous
+  // version (with one it never blocks, so there is no message to name it).
   test("consecutive could-not-verify updates also name the exact previous version", async () => {
     const LATER = "1.4.0-R4302.1";
     stubProbe({
-      [OLD]: { status: "capable" },
       [NEW]: { status: "error", detail: "timed out" },
       [LATER]: { status: "error", detail: "timed out" },
     });
-    await check(OLD);
     await check(NEW);
     const { settled } = await check(LATER);
+    assert.deepEqual(settled.map((i) => i.code), ["runtime_capability"]);
     assert.match(settled[0]!.message, new RegExp(`after version change \\(${NEW} → ${LATER}\\)`));
+  });
+
+  // NOT-308: fresh-install inconclusive results fail closed until the first version is
+  // confirmed — and an exhausted one says it will not retry, since nothing will.
+  test("with no confirmed baseline, in-flight and errored checks keep admission blocked", async () => {
+    let release!: () => void;
+    setMuseCapabilityProbeForTests(
+      () => new Promise((resolve) => (release = () => resolve({ status: "capable" })))
+    );
+    assert.deepEqual(museCapabilityIssues(NEW).map((i) => i.code), ["runtime_capability"]);
+    release();
+    await settleMuseCapabilityCheckForTests();
+    assert.deepEqual(museCapabilityIssues(NEW), []);
+
+    resetMuseCapabilityStateForTests();
+    stubProbe({ [NEW]: { status: "error", detail: "timed out" } });
+    const { settled } = await check(NEW);
+    assert.deepEqual(settled.map((i) => i.code), ["runtime_capability"]);
+    assert.match(settled[0]!.message, /Could not verify Muse Code developer shell\/write access/);
+    assert.match(settled[0]!.message, /the check retries automatically/);
+    assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).confirmedVersion, null);
+  });
+
+  // NOT-308: three consecutive errors escalate exactly one "could not verify" action
+  // (dedupe asserted by polling twice, from two issues); admission stays unblocked.
+  test("an exhausted version escalates exactly one 'could not verify' action", async () => {
+    stubProbe({
+      [OLD]: { status: "capable" },
+      [NEW]: { status: "error", detail: "timed out" },
+    });
+    await check(OLD);
+    await exhaust(NEW);
+    assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).lastChecked.attempts, 3);
+
+    const issueId = makeIssue();
+    const first = ensureMuseCapabilityEscalation(issueId);
+    assert.ok(first, "exhaustion raises an action");
+    assert.equal(first.actionType, "muse_capability");
+    assert.equal(first.issueId, issueId);
+    assert.equal(first.requestId, museCapabilityRequestId(NEW, "unverified"));
+    assert.match(
+      first.reason,
+      new RegExp(`^Could not verify Muse Code developer shell/write access for ${NEW} after 3 inconclusive checks`)
+    );
+    assert.match(first.reason, /last probe ran \d+s/);
+    assert.match(first.reason, new RegExp(`continues on the last confirmed baseline ${OLD}`));
+    assert.match(first.reason, /no further automatic checks/);
+    assert.deepEqual(JSON.parse(first.responseOptionsJson!), [
+      { choice: "acknowledge", label: "Acknowledge — keep working on baseline" },
+    ]);
+    // A second poll — even from another issue — finds the open action, never a copy.
+    assert.equal(ensureMuseCapabilityEscalation(issueId)?.id, first.id);
+    assert.equal(ensureMuseCapabilityEscalation(randomUUID())?.id, first.id);
+    assert.equal(
+      listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW, "unverified")).filter(
+        (a) => a.status === "open"
+      ).length,
+      1
+    );
+    assert.deepEqual(museCapabilityIssues(NEW), [], "admission stays on the baseline");
+  });
+
+  // NOT-308: a confirmed loss escalates exactly one action naming from → to plus the
+  // capability; the block lifts once the operator acknowledges that version.
+  test("a missing version escalates once with both versions named; acknowledge lifts the block", async () => {
+    const calls = stubProbe({
+      [OLD]: { status: "capable" },
+      [NEW]: { status: "missing", detail: "probe session completed without running its shell command" },
+    });
+    await check(OLD);
+    const { settled } = await check(NEW);
+    assert.deepEqual(settled.map((i) => i.code), ["runtime_capability"]);
+
+    const issueId = makeIssue();
+    const action = ensureMuseCapabilityEscalation(issueId);
+    assert.ok(action, "a missing verdict raises an action");
+    assert.equal(action.actionType, "muse_capability");
+    assert.match(
+      action.reason,
+      new RegExp(`^Muse Code updated ${OLD} → ${NEW}: developer sessions no longer get shell/write access`)
+    );
+    assert.match(action.reason, /Last probe ran \d+s/);
+    assert.match(action.reason, new RegExp(`admission is blocked for ${NEW}`));
+    assert.match(action.question, new RegExp(`Acknowledge to admit developers on ${NEW} anyway`));
+    assert.match(action.question, new RegExp(`pin/roll back Muse to ${OLD}`));
+    assert.deepEqual(JSON.parse(action.responseOptionsJson!), [
+      { choice: "acknowledge", label: `Acknowledge — admit on ${NEW}` },
+    ]);
+    const evidence = JSON.parse(action.evidenceJson!);
+    assert.equal(evidence.kind, "missing");
+    assert.equal(evidence.version, NEW);
+    // Deduped per version, not per poll.
+    assert.equal(ensureMuseCapabilityEscalation(issueId)?.id, action.id);
+    assert.equal(ensureMuseCapabilityEscalation(randomUUID())?.id, action.id);
+    assert.equal(calls.get(NEW), 1, "a missing verdict is conclusive: never re-probed");
+
+    // The block stands until the operator acknowledges this version.
+    assert.deepEqual(museCapabilityIssues(NEW).map((i) => i.code), ["runtime_capability"]);
+    recordMuseCapabilityOverride(NEW);
+    assert.deepEqual(museCapabilityIssues(NEW), [], "acknowledge lifts the block");
+    assert.equal(ensureMuseCapabilityEscalation(issueId), null, "no re-raise after acknowledge");
+  });
+
+  // NOT-308 repair round 3: aborting or closing the issue that holds a `missing`
+  // escalation resolves its open action with a lifecycle reason (never a choice) —
+  // that is not the operator's capability decision, so the next poll must re-raise
+  // a fresh action, never record a silent override that lifts the block.
+  test("a missing escalation closed by abort/close re-raises instead of overriding", async () => {
+    for (const reason of ["aborted_by_user", "closed_by_operator"]) {
+      resetMuseCapabilityStateForTests();
+      getDb().exec("DELETE FROM human_actions");
+      stubProbe({
+        [OLD]: { status: "capable" },
+        [NEW]: { status: "missing", detail: "probe session completed without running its shell command" },
+      });
+      await check(OLD);
+      await check(NEW);
+
+      const issueId = makeIssue();
+      const action = ensureMuseCapabilityEscalation(issueId);
+      assert.ok(action, `a missing verdict raises an action (${reason})`);
+      // What abortIssue / closeReadyIssue do to every open action on the issue.
+      resolveHumanAction(action.id, "test", { reason });
+
+      // No override recorded and the block still stands.
+      assert.ok(
+        !JSON.parse(fs.readFileSync(STATE, "utf8")).overriddenVersions.includes(NEW),
+        `no silent override after ${reason}`
+      );
+      assert.deepEqual(
+        museCapabilityIssues(NEW).map((i) => i.code),
+        ["runtime_capability"],
+        `block stands after ${reason}`
+      );
+
+      // The next poll — from another issue, as after the holding issue closes —
+      // raises a fresh action instead of admitting.
+      const fresh = ensureMuseCapabilityEscalation(makeIssue());
+      assert.ok(fresh, `re-raised after ${reason}`);
+      assert.notEqual(fresh.id, action.id, "a fresh action, not the resolved one");
+      assert.equal(fresh.status, "open");
+      assert.equal(fresh.requestId, museCapabilityRequestId(NEW, "missing"));
+      // And polling again dedupes onto the fresh open action, never a third copy.
+      assert.equal(ensureMuseCapabilityEscalation(makeIssue())?.id, fresh.id);
+      assert.equal(
+        listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW, "missing")).filter(
+          (a) => a.status === "open"
+        ).length,
+        1,
+        "exactly one open missing action"
+      );
+    }
+  });
+
+  // NOT-308 repair round 2: one version can produce both verdicts — an exhausted error
+  // escalates "unverified", then a safety-net probe past exhaustion returns `missing`.
+  // The missing verdict must raise its own action naming from → to and the lost
+  // capability; dismissing the unverified action must never override the missing block.
+  test("a missing verdict after an unverified one raises its own action; dismissing unverified never lifts missing", async () => {
+    let verdict: ProbeResult = { status: "error", detail: "timed out" };
+    const calls = new Map<string, number>();
+    setMuseCapabilityProbeForTests(async (version) => {
+      calls.set(version, (calls.get(version) ?? 0) + 1);
+      if (version === OLD) return { status: "capable" };
+      return verdict;
+    });
+    await check(OLD);
+    await exhaust(NEW);
+    assert.equal(calls.get(NEW), 3);
+    const issueId = makeIssue();
+    const unverified = ensureMuseCapabilityEscalation(issueId);
+    assert.ok(unverified, "exhaustion raises the unverified action");
+    assert.equal(unverified.requestId, museCapabilityRequestId(NEW, "unverified"));
+
+    // The operator dismisses "could not verify" — records no override (dedicated path).
+    const { resolveHumanActionAndAdvance } = await import("../coordinator/commands.js");
+    assert.equal(resolveHumanActionAndAdvance(unverified.id, "test", "acknowledge").ok, true);
+
+    // Fresh evidence: a dirty, shell-less session forces a probe past exhaustion, which
+    // now returns `missing`.
+    verdict = { status: "missing", detail: "probe session completed without running its shell command" };
+    const restore = stubMuseVersion(NEW);
+    try {
+      const log = writeLog([{ type: "tool_call", name: "read_file" }]);
+      assert.equal(
+        museCapabilitySafetyNetAfterSession({ issueId, runtime: "muse_code", logPath: log, dirty: true }),
+        "probed"
+      );
+      await settleMuseCapabilityCheckForTests();
+      const missing = listHumanActionsByRequestId(
+        "muse_capability",
+        museCapabilityRequestId(NEW, "missing")
+      );
+      assert.equal(missing.length, 1, "the missing verdict raises its own action");
+      assert.equal(missing[0]!.status, "open");
+      assert.match(
+        missing[0]!.reason,
+        new RegExp(`^Muse Code updated ${OLD} → ${NEW}: developer sessions no longer get shell/write access`)
+      );
+      assert.match(missing[0]!.reason, new RegExp(`admission is blocked for ${NEW}`));
+      // The gate blocks, and the earlier dismissal did not override this verdict.
+      assert.deepEqual(museCapabilityIssues(NEW).map((i) => i.code), ["runtime_capability"]);
+      assert.ok(!JSON.parse(fs.readFileSync(STATE, "utf8")).overriddenVersions.includes(NEW));
+      // Polling finds the missing action — never the dismissed unverified one, and the
+      // resolved unverified row does not suppress the missing escalation.
+      assert.equal(ensureMuseCapabilityEscalation(issueId)?.id, missing[0]!.id);
+    } finally {
+      restore();
+    }
+  });
+
+  // NOT-308 repair round 2: with no confirmed baseline, an exhausted version keeps
+  // retrying at the maximum backoff — stopping would block admission permanently with
+  // no path to unblock — and the escalation says blocked, never "continues on none".
+  test("with no baseline, an exhausted version keeps retrying and says blocked", async () => {
+    const calls = stubProbe({ [NEW]: { status: "error", detail: "timed out" } });
+    await exhaust(NEW);
+    assert.equal(calls.get(NEW), 3);
+    assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).lastChecked.attempts, 3);
+
+    // Still blocked, but the message promises a retry — not "no further checks".
+    const blocked = museCapabilityIssues(NEW);
+    assert.deepEqual(blocked.map((i) => i.code), ["runtime_capability"]);
+    assert.match(blocked[0]!.message, /the check retries automatically/);
+    assert.doesNotMatch(blocked[0]!.message, /no further automatic checks/);
+
+    // Past exhaustion the check still re-fires once the maximum backoff elapses.
+    ageMuseCapabilityCheckForTests(241_000);
+    museCapabilityIssues(NEW);
+    await settleMuseCapabilityCheckForTests();
+    assert.equal(calls.get(NEW), 4, "no-baseline exhaustion keeps retrying at the maximum backoff");
+    assert.deepEqual(museCapabilityIssues(NEW).map((i) => i.code), ["runtime_capability"]);
+
+    const issueId = makeIssue();
+    const action = ensureMuseCapabilityEscalation(issueId);
+    assert.ok(action, "exhaustion still escalates for a human decision");
+    assert.equal(action.requestId, museCapabilityRequestId(NEW, "unverified"));
+    assert.match(action.reason, /admission is blocked \(no confirmed baseline yet\)/);
+    assert.doesNotMatch(action.reason, /continues on the last confirmed baseline/);
+    assert.doesNotMatch(action.question, /roll back to none/);
+    // Dedupe still holds: a second poll finds the open action, never a copy.
+    assert.equal(ensureMuseCapabilityEscalation(issueId)?.id, action.id);
+  });
+
+  // NOT-308 repair round 2: a fresh-install `missing` names no "none" rollback target.
+  test("a fresh-install missing escalation never suggests rolling back to none", async () => {
+    stubProbe({ [NEW]: { status: "missing", detail: "no shell" } });
+    const { settled } = await check(NEW);
+    assert.deepEqual(settled.map((i) => i.code), ["runtime_capability"]);
+    const action = ensureMuseCapabilityEscalation(makeIssue());
+    assert.ok(action);
+    assert.doesNotMatch(action.question, /to none/);
+    assert.match(action.question, /Pin\/roll back Muse outside Dealer to a working build/);
+  });
+
+  // NOT-308: the override is version-scoped — a later regression still blocks and
+  // escalates on its own.
+  test("an acknowledged version stays overridden while a later regressed version still blocks", async () => {
+    const LATER = "1.4.0-R4302.1";
+    stubProbe({
+      [OLD]: { status: "capable" },
+      [NEW]: { status: "missing", detail: "no shell" },
+      [LATER]: { status: "missing", detail: "no shell" },
+    });
+    await check(OLD);
+    await check(NEW);
+    const issueId = makeIssue();
+    ensureMuseCapabilityEscalation(issueId);
+    recordMuseCapabilityOverride(NEW);
+    assert.deepEqual(museCapabilityIssues(NEW), []);
+
+    const { settled } = await check(LATER);
+    assert.match(
+      settled[0]!.message,
+      new RegExp(`^Muse Code updated ${NEW} → ${LATER}: developer sessions no longer get`)
+    );
+    const later = ensureMuseCapabilityEscalation(issueId);
+    assert.ok(later, "the later regression raises its own action");
+    assert.equal(later.requestId, museCapabilityRequestId(LATER, "missing"));
+    assert.match(later.reason, new RegExp(`admission is blocked for ${LATER}`));
+  });
+
+  test("countMuseShellToolCalls counts normalized and raw shell calls, null when unknown", () => {
+    assert.equal(
+      countMuseShellToolCalls(
+        writeLog([
+          { type: "system", subtype: "init" },
+          { type: "tool_call", name: "read_file" },
+          { type: "tool_call", name: "bash" },
+          { type: "assistant", message: { content: [{ type: "text", text: "hi" }] } },
+          { type: "result", result: "done" },
+        ])
+      ),
+      1
+    );
+    assert.equal(
+      countMuseShellToolCalls(
+        writeLog([
+          {
+            payload_type: "task.lifecycle.side_effect_intent",
+            payload: { event: { operation: "tool:bash" } },
+          },
+          { payload_type: "tool.result", payload: { call_id: "c" } },
+        ])
+      ),
+      1
+    );
+    assert.equal(countMuseShellToolCalls(writeLog([{ type: "tool_call", name: "write_file" }])), 0);
+    assert.equal(countMuseShellToolCalls(writeLog(["not json", ""])), null);
+    assert.equal(countMuseShellToolCalls(path.join(os.tmpdir(), `dealer-muse-nope-${randomUUID()}`)), null);
+  });
+
+  // NOT-308 safety net: a dirty, shell-less session ending on an unconfirmed version
+  // probes immediately (no backoff wait) and a `missing` verdict escalates on the issue.
+  test("safety net: dirty + zero-shell on an unconfirmed version probes immediately, missing escalates", async () => {
+    const calls = stubProbe({
+      [OLD]: { status: "capable" },
+      [NEW]: { status: "missing", detail: "probe session completed without running its shell command" },
+    });
+    await check(OLD);
+    const restore = stubMuseVersion(NEW);
+    try {
+      const issueId = makeIssue();
+      const log = writeLog([
+        { type: "tool_call", name: "read_file" },
+        { type: "assistant", message: { content: [{ type: "text", text: "edited" }] } },
+      ]);
+      const result = museCapabilitySafetyNetAfterSession({
+        issueId,
+        runtime: "muse_code",
+        logPath: log,
+        dirty: true,
+      });
+      assert.equal(result, "probed");
+      assert.equal(calls.get(NEW), 1, "probes immediately — never waits out a backoff");
+      await settleMuseCapabilityCheckForTests();
+      const actions = listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW, "missing"));
+      assert.equal(actions.length, 1, "the missing verdict escalates on the watched issue");
+      assert.equal(actions[0]!.issueId, issueId);
+      assert.equal(JSON.parse(actions[0]!.evidenceJson!).kind, "missing");
+      assert.deepEqual(museCapabilityIssues(NEW).map((i) => i.code), ["runtime_capability"]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("safety net bypasses the error backoff", async () => {
+    const calls = stubProbe({
+      [OLD]: { status: "capable" },
+      [NEW]: { status: "error", detail: "timed out" },
+    });
+    await check(OLD);
+    await check(NEW);
+    assert.equal(calls.get(NEW), 1, "attempt 1 done, backoff unelapsed");
+    const restore = stubMuseVersion(NEW);
+    try {
+      const log = writeLog([{ type: "tool_call", name: "read_file" }]);
+      assert.equal(
+        museCapabilitySafetyNetAfterSession({
+          issueId: randomUUID(),
+          runtime: "muse_code",
+          logPath: log,
+          dirty: true,
+        }),
+        "probed"
+      );
+      assert.equal(calls.get(NEW), 2, "probes now instead of waiting out the backoff");
+      await settleMuseCapabilityCheckForTests();
+      assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).lastChecked.attempts, 2);
+    } finally {
+      restore();
+    }
+  });
+
+  test("safety net skips clean trees, shell-using sessions, other runtimes, and confirmed versions", async () => {
+    const calls = stubProbe({
+      [OLD]: { status: "capable" },
+      [NEW]: { status: "capable" },
+    });
+    await check(OLD);
+    await check(NEW);
+    const restore = stubMuseVersion(NEW);
+    try {
+      const shellLog = writeLog([{ type: "tool_call", name: "bash" }]);
+      const bareLog = writeLog([{ type: "tool_call", name: "read_file" }]);
+      assert.equal(
+        museCapabilitySafetyNetAfterSession({
+          issueId: randomUUID(),
+          runtime: "muse_code",
+          logPath: bareLog,
+          dirty: false,
+        }),
+        "skipped"
+      );
+      assert.equal(
+        museCapabilitySafetyNetAfterSession({
+          issueId: randomUUID(),
+          runtime: "muse_code",
+          logPath: shellLog,
+          dirty: true,
+        }),
+        "skipped"
+      );
+      assert.equal(
+        museCapabilitySafetyNetAfterSession({
+          issueId: randomUUID(),
+          runtime: "codex_local",
+          logPath: bareLog,
+          dirty: true,
+        }),
+        "skipped"
+      );
+      assert.equal(
+        museCapabilitySafetyNetAfterSession({
+          issueId: randomUUID(),
+          runtime: "muse_code",
+          logPath: bareLog,
+          dirty: true,
+        }),
+        "skipped",
+        "the confirmed version needs no verification"
+      );
+      assert.equal(
+        museCapabilitySafetyNetAfterSession({
+          issueId: randomUUID(),
+          runtime: "muse_code",
+          logPath: "/nonexistent/session.ndjson",
+          dirty: true,
+        }),
+        "skipped"
+      );
+      assert.equal(calls.get(NEW), 1, "no safety-net probe fired");
+      assert.equal(listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW, "missing")).length, 0);
+      assert.equal(listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(NEW, "unverified")).length, 0);
+    } finally {
+      restore();
+    }
   });
 
   test("a version reported mid-probe is checked once, after the running probe, and the stale verdict is discarded", async () => {

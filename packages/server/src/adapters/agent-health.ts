@@ -178,6 +178,16 @@ function runCommand(
   return runCommandImpl(cmd, args, timeoutMs, env);
 }
 
+/**
+ * NOT-308: drop only the cached muse runtime issues — the `muse_capability` acknowledge
+ * path calls this so the lifted block is seen on the next health read instead of after
+ * the 60s TTL. Never touches capability state itself (unlike clearAgentHealthCaches,
+ * which resets it for tests).
+ */
+export function invalidateMuseHealthCache(): void {
+  runtimeIssueCache.delete("muse_code");
+}
+
 /** Exported for tests — clears the shared github + runtime health caches and soft-fail streak. */
 export function clearAgentHealthCaches(): void {
   runtimeIssueCache.clear();
@@ -289,9 +299,11 @@ async function cursorRuntimeIssues(): Promise<AgentHealthIssue[]> {
  * existence only, never read.
  *
  * NOT-277: with CLI and credentials present, the reported version is handed to the capability
- * check — a version not yet checked runs one real developer-shell probe (muse-capability.ts);
- * `runtime_capability` blocks while it runs, when it finds shell/write missing, or when it could
- * not complete.
+ * check — a version not yet checked runs one real developer-shell probe (muse-capability.ts).
+ * NOT-308: `runtime_capability` blocks only on a confirmed shell/write loss (`missing`,
+ * not operator-overridden); while the version is unchecked or inconclusive the check
+ * runs in the background and admission proceeds on the last confirmed baseline
+ * (fresh installs with no baseline still fail closed).
  */
 async function museRuntimeIssues(): Promise<AgentHealthIssue[]> {
   const bin = resolveMuseBin();

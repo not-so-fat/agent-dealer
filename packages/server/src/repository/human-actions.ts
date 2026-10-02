@@ -172,6 +172,26 @@ export function findOpenHumanActionByRequestId(
   return row ? rowToAction(row) : null;
 }
 
+/**
+ * NOT-308: version-scoped Muse capability escalations live on whichever issue first
+ * observed the verdict, but later admissions for *other* issues must find the same
+ * action instead of raising a duplicate — so the lookup is by (type, request_id)
+ * across issues, not per issue. Returns open actions first so callers can skip
+ * creation; resolved ones are included so callers can distinguish "already handled".
+ */
+export function listHumanActionsByRequestId(
+  actionType: HumanActionType,
+  requestId: string
+): HumanAction[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM human_actions WHERE action_type = ? AND request_id = ?
+       ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, requested_at ASC`
+    )
+    .all(actionType, requestId) as HumanActionRow[];
+  return rows.map(rowToAction);
+}
+
 export function listHumanActionsForIssue(issueId: string): HumanAction[] {
   const rows = getDb()
     .prepare("SELECT * FROM human_actions WHERE issue_id = ? ORDER BY requested_at ASC")

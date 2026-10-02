@@ -51,7 +51,8 @@ import { ensureIssueRepoCheckout } from "../adapters/managed-repo.js";
 import { reconcileFinding, resolveFindingsAbsentFromRound } from "../repository/findings.js";
 import { normalizeReviewerResult } from "./reviewer-result.js";
 import { getAgent } from "../repository/agents.js";
-import { githubIssuesSync } from "../adapters/agent-health.js";
+import { githubIssuesSync, invalidateMuseHealthCache } from "../adapters/agent-health.js";
+import { recordMuseCapabilityOverride, type MuseCapabilityEvidence } from "../adapters/muse-capability.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import {
   cancelWorkItem,
@@ -1235,6 +1236,11 @@ function questionFor(
       // Run-scoped action type directly with its own question text (NOT-95). Case exists
       // only so this function stays total over HumanActionType.
       throw new Error("outbound_delivery_interaction_required is not raised through applyEffect");
+    case "muse_capability":
+      // Never raised through applyEffect — muse-capability.ts creates this action
+      // directly with its own question text (NOT-308). Case exists only so this
+      // function stays total over HumanActionType.
+      throw new Error("muse_capability is not raised through applyEffect");
   }
 }
 
@@ -1279,6 +1285,11 @@ export function responseOptionsFor(
     case "outbound_delivery_interaction_required":
       // Never actually raised through applyEffect — see questionFor's identical case.
       throw new Error("outbound_delivery_interaction_required is not raised through applyEffect");
+    case "muse_capability":
+      // NOT-308: created with its own stored options (muse-capability.ts) — acknowledge
+      // admits on that Muse version (missing) or dismisses (unverified). Never raised
+      // through applyEffect; case exists only so this function stays total.
+      return [{ choice: "acknowledge", label: "Acknowledge" }];
   }
 }
 
@@ -1346,6 +1357,59 @@ export function resolveHumanActionAndAdvance(
   // defense in depth for direct/CLI callers of this sync entry point.
   const normalizedNote = normalizeResolutionNote(opts?.note);
   if (!normalizedNote.ok) return { ok: false, code: 400, error: normalizedNote.error };
+
+  // NOT-308: a Muse capability escalation resolves without touching the workflow — it
+  // has no round to spend and no merge to park, and parseHumanResolution (below)
+  // deliberately rejects it since there is no workflow outcome to map. Acknowledging a
+  // `missing` verdict records a per-version override so the admission gate stops
+  // blocking that version; acknowledging `unverified` just dismisses. Works with or
+  // without an active instance (a blocked admission never has one).
+  if (action.actionType === "muse_capability") {
+    if (choice !== "acknowledge") {
+      return { ok: false, code: 400, error: `Invalid choice "${choice}" for muse_capability` };
+    }
+    if (!action.issueId) return { ok: false, code: 500, error: "Human action has no issue" };
+    const museIssue = getIssue(action.issueId);
+    if (!museIssue) return { ok: false, code: 404, error: "Issue not found" };
+    const museInstance = getActiveWorkflowInstance(action.issueId);
+    let evidence: Partial<MuseCapabilityEvidence> | null = null;
+    try {
+      evidence = action.evidenceJson
+        ? (JSON.parse(action.evidenceJson) as Partial<MuseCapabilityEvidence>)
+        : null;
+    } catch {
+      evidence = null;
+    }
+    // File first, then the row: if the resolve below fails the action stays open and
+    // the operator retries idempotently; the reverse order could leave a resolved
+    // action whose version still blocks with no way to re-acknowledge.
+    if (evidence?.kind === "missing" && typeof evidence.version === "string" && evidence.version) {
+      recordMuseCapabilityOverride(evidence.version);
+    }
+    // The lifted block must be visible on the next health read, not after the cache TTL.
+    invalidateMuseHealthCache();
+    return getDb().transaction((): ResolveResult => {
+      resolveHumanAction(actionId, resolvedBy, { choice });
+      appendWorkflowEvent({
+        issueId: museIssue.id,
+        ...(museInstance ? { workflowInstanceId: museInstance.id } : {}),
+        type: "human_action.resolved",
+        actorType: "human",
+        actorRef: resolvedBy,
+        stage: museIssue.status,
+        round: museIssue.currentRound,
+        payload: { actionType: action.actionType, choice },
+      });
+      return {
+        ok: true,
+        issueStatus: museIssue.status,
+        nextWorkItemId: null,
+        instanceCompleted: false,
+        restarted: false,
+        triggerReflect: false,
+      };
+    })();
+  }
 
   const resolution = parseHumanResolution(action.actionType, choice, normalizedNote.note);
   if (!resolution) {

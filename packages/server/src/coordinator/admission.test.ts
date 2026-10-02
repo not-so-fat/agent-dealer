@@ -498,7 +498,10 @@ test("NOT-178: a Muse Code developer without credentials is refused at admission
 
 // NOT-277: a Muse Code auto-update is re-validated automatically. A version whose developer
 // shell/write check passes is admitted with no manual step; one that lost it is refused with the
-// versions and capability named; one whose check could not complete is refused, never assumed ok.
+// versions and capability named.
+// NOT-308: an inconclusive check never blocks on a confirmed baseline (admitted, retried in
+// the background); a confirmed loss escalates exactly one human action, and acknowledging
+// it lifts the block.
 test("NOT-277: a Muse Code update is admitted when capable, refused by name when not", async () => {
   const { clearAgentHealthCaches, runtimeIssuesUncached } = await import("../adapters/agent-health.js");
   const { setMuseCapabilityProbeForTests, settleMuseCapabilityCheckForTests } = await import(
@@ -565,14 +568,30 @@ test("NOT-277: a Muse Code update is admitted when capable, refused by name when
       new RegExp(`Muse Code updated ${NEW} → ${BROKEN}: developer sessions no longer get shell/write access`)
     );
 
-    await museReports("9.9.9-R1");
-    const unverified = await developerHealth();
-    assert.equal(unverified.ok, false);
+    // NOT-308: the confirmed loss escalates exactly one human action naming the update
+    // and the capability — and acknowledging it lifts the admission block.
+    const { listHumanActionsByRequestId } = await import("../repository/human-actions.js");
+    const { museCapabilityRequestId } = await import("../adapters/muse-capability.js");
+    const { resolveHumanActionAndAdvance } = await import("./commands.js");
+    const escalated = listHumanActionsByRequestId("muse_capability", museCapabilityRequestId(BROKEN, "missing"));
+    assert.equal(escalated.filter((a) => a.status === "open").length, 1);
     assert.match(
-      (unverified as { reason: string }).reason,
-      new RegExp(`Could not verify Muse Code developer shell/write access after version change \\(${BROKEN} → 9\\.9\\.9-R1\\)`)
+      escalated[0]!.reason,
+      new RegExp(`Muse Code updated ${NEW} → ${BROKEN}: developer sessions no longer get shell/write access`)
     );
+    const acknowledged = resolveHumanActionAndAdvance(escalated[0]!.id, "test", "acknowledge");
+    assert.equal(acknowledged.ok, true);
+    assert.deepEqual(await developerHealth(), { ok: true }, "acknowledge lifts the block");
+
+    // NOT-308: an inconclusive check (the probe throws) does NOT block on the baseline.
+    await museReports("9.9.9-R1");
+    assert.deepEqual(await developerHealth(), { ok: true });
     assert.deepEqual(probed, [OLD, NEW, BROKEN, "9.9.9-R1"]);
+    assert.equal(
+      listHumanActionsByRequestId("muse_capability", museCapabilityRequestId("9.9.9-R1", "unverified")).length,
+      0,
+      "a first inconclusive result escalates nothing"
+    );
   } finally {
     for (const [key, value] of Object.entries({
       MUSE_CLI: saved.MUSE_CLI,
@@ -587,6 +606,221 @@ test("NOT-277: a Muse Code update is admitted when capable, refused by name when
     clearAgentHealthCaches();
     setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
   }
+});
+
+// NOT-308: real-checker Muse harness — stub `muse --version`, stub gh login, stub the
+// capability probe. Restores every override so later tests keep the unit-test skip.
+async function withMuseHarness(
+  probe: (version: string) => Promise<
+    | { status: "capable" }
+    | { status: "missing"; detail: string }
+    | { status: "error"; detail: string }
+  >,
+  fn: (api: {
+    /** Report `version` and let its check settle (like the NOT-277 test's museReports). */
+    report: (version: string) => Promise<void>;
+    /** Report `version` without settling — for asserting on the in-flight state. */
+    reportUnsettled: (version: string) => Promise<import("@agent-dealer/shared").AgentHealthIssue[]>;
+    /** Just point the stub at `version` (the next health read observes it). */
+    show: (version: string) => void;
+    versionFile: string;
+  }) => Promise<void>
+): Promise<void> {
+  const { clearAgentHealthCaches, invalidateMuseHealthCache, runtimeIssuesUncached } = await import(
+    "../adapters/agent-health.js"
+  );
+  const cap = await import("../adapters/muse-capability.js");
+  cap.resetMuseCapabilityStateForTests();
+  const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-muse-stub-"));
+  const versionFile = path.join(stubDir, "version");
+  const stub = path.join(stubDir, "muse");
+  fs.writeFileSync(stub, `#!/bin/sh\ncat ${JSON.stringify(versionFile)}\n`);
+  fs.chmodSync(stub, 0o755);
+  const ghStub = path.join(stubDir, "gh");
+  fs.writeFileSync(ghStub, "#!/bin/sh\necho 'Logged in to github.com account dealer-test'\nexit 0\n");
+  fs.chmodSync(ghStub, 0o755);
+  cap.setMuseCapabilityProbeForTests(probe);
+  const saved = {
+    MUSE_CLI: process.env.MUSE_CLI,
+    META_API_KEY: process.env.META_API_KEY,
+    SKIP: process.env.AGENT_DEALER_SKIP_AGENT_HEALTH,
+    PATH: process.env.PATH,
+  };
+  process.env.MUSE_CLI = stub;
+  process.env.PATH = `${stubDir}${path.delimiter}${process.env.PATH ?? ""}`;
+  process.env.META_API_KEY = "k";
+  delete process.env.AGENT_DEALER_SKIP_AGENT_HEALTH;
+  setAdmissionHealthCheckerForTests(null);
+  clearAgentHealthCaches();
+  const writeVersion = (version: string) => {
+    fs.writeFileSync(versionFile, `Muse Code ${version.split("-")[0]} (${version})\n`);
+  };
+  try {
+    await fn({
+      versionFile,
+      show: writeVersion,
+      report: async (version: string) => {
+        writeVersion(version);
+        await runtimeIssuesUncached("muse_code");
+        await cap.settleMuseCapabilityCheckForTests();
+      },
+      reportUnsettled: async (version: string) => {
+        writeVersion(version);
+        // Targeted invalidation only: clearAgentHealthCaches would also reset the
+        // capability state under test.
+        invalidateMuseHealthCache();
+        return runtimeIssuesUncached("muse_code");
+      },
+    });
+  } finally {
+    for (const [key, value] of Object.entries({
+      MUSE_CLI: saved.MUSE_CLI,
+      META_API_KEY: saved.META_API_KEY,
+      AGENT_DEALER_SKIP_AGENT_HEALTH: saved.SKIP,
+      PATH: saved.PATH,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    cap.setMuseCapabilityProbeForTests(null);
+    clearAgentHealthCaches();
+    setAdmissionHealthCheckerForTests(async () => ({ ok: true }));
+  }
+}
+
+// NOT-308: while the new version is still being verified, developer admission is allowed
+// on the confirmed baseline — no `runtime_capability` block while the check is in flight.
+test("NOT-308: developer admission is allowed while the new version check is in flight", async () => {
+  const cap = await import("../adapters/muse-capability.js");
+  const OLD = "1.3.0-R3401.1";
+  const NEW = "1.4.0-R4161.1";
+  let release!: () => void;
+  await withMuseHarness(
+    async (version) => {
+      if (version === NEW) {
+        return new Promise((resolve) => {
+          release = () => resolve({ status: "capable" });
+        });
+      }
+      return { status: "capable" };
+    },
+    async ({ report, reportUnsettled }) => {
+      await report(OLD);
+      const issues = await reportUnsettled(NEW);
+      assert.deepEqual(
+        issues.filter((i) => i.code === "runtime_capability"),
+        [],
+        "no runtime_capability block while verifying on a baseline"
+      );
+      assert.equal(cap.museCapabilityCheckInFlight(), true);
+
+      // The admission gate agrees: healthy, with the check still running.
+      const issue = readyIssue("muse-inflight", { runtimes: { dev: "muse_code", rev: "codex_local" } });
+      const { invalidateMuseHealthCache } = await import("../adapters/agent-health.js");
+      invalidateMuseHealthCache();
+      assert.deepEqual(await checkRoleAgentHealthy(issue, "developer", { deckOnline: true }), {
+        ok: true,
+      });
+      assert.equal(cap.museCapabilityCheckInFlight(), true);
+
+      release();
+      await cap.settleMuseCapabilityCheckForTests();
+      invalidateMuseHealthCache();
+      assert.deepEqual(await checkRoleAgentHealthy(issue, "developer", { deckOnline: true }), {
+        ok: true,
+      });
+    }
+  );
+});
+
+// NOT-308: three inconclusive polls escalate exactly one "could not verify" action and stop
+// probing — admission never blocks.
+test("NOT-308: three inconclusive polls escalate once, then stop probing, never blocking", async () => {
+  const cap = await import("../adapters/muse-capability.js");
+  const { invalidateMuseHealthCache } = await import("../adapters/agent-health.js");
+  const { listHumanActionsByRequestId } = await import("../repository/human-actions.js");
+  const OLD = "1.3.0-R3401.1";
+  const NEW = "1.4.0-R4161.1";
+  const probed: string[] = [];
+  await withMuseHarness(
+    async (version) => {
+      probed.push(version);
+      if (version === NEW) return { status: "error", detail: "probe session timed out" };
+      return { status: "capable" };
+    },
+    async ({ report, show }) => {
+      await report(OLD);
+      show(NEW);
+      const issue = readyIssue("muse-unverified", {
+        runtimes: { dev: "muse_code", rev: "codex_local" },
+      });
+      const poll = async () => {
+        // Targeted invalidation only: clearAgentHealthCaches would also reset the
+        // capability attempts under test.
+        invalidateMuseHealthCache();
+        const health = await checkRoleAgentHealthy(issue, "developer", { deckOnline: true });
+        await cap.settleMuseCapabilityCheckForTests();
+        return health;
+      };
+      const { ageMuseCapabilityCheckForTests } = await import("../adapters/muse-capability.js");
+      assert.deepEqual(await poll(), { ok: true }, "attempt 1: allowed");
+      ageMuseCapabilityCheckForTests(61_000);
+      assert.deepEqual(await poll(), { ok: true }, "attempt 2: allowed");
+      ageMuseCapabilityCheckForTests(122_000);
+      assert.deepEqual(await poll(), { ok: true }, "attempt 3: allowed");
+      assert.deepEqual(probed, [OLD, NEW, NEW, NEW]);
+
+      // The third poll settles exhausted, so the next polls escalate — exactly once.
+      assert.deepEqual(await poll(), { ok: true }, "exhausted: still allowed");
+      assert.deepEqual(await poll(), { ok: true }, "second post-exhaustion poll: still allowed");
+      const actions = listHumanActionsByRequestId("muse_capability", cap.museCapabilityRequestId(NEW, "unverified"));
+      assert.equal(actions.filter((a) => a.status === "open").length, 1);
+      assert.match(actions[0]!.reason, /Could not verify Muse Code developer shell\/write access/);
+      assert.match(actions[0]!.reason, new RegExp(`for ${NEW} after 3 inconclusive checks`));
+
+      // No fourth probe ever, however long the wait.
+      ageMuseCapabilityCheckForTests(10 * 60_000);
+      invalidateMuseHealthCache();
+      assert.deepEqual(await checkRoleAgentHealthy(issue, "developer", { deckOnline: true }), {
+        ok: true,
+      });
+      assert.deepEqual(probed, [OLD, NEW, NEW, NEW], "no further probes after exhaustion");
+    }
+  );
+});
+
+// NOT-308: with no confirmed baseline ever (fresh install), the unknown still fails
+// closed — in flight and errored alike.
+test("NOT-308: with no confirmed baseline, admission stays blocked while unconfirmed", async () => {
+  const cap = await import("../adapters/muse-capability.js");
+  const NEW = "1.4.0-R4161.1";
+  let release!: () => void;
+  let calls = 0;
+  await withMuseHarness(
+    async () => {
+      calls += 1;
+      return new Promise((resolve) => {
+        release = () => resolve({ status: "error", detail: "timed out" });
+      });
+    },
+    async ({ reportUnsettled }) => {
+      const issue = readyIssue("muse-fresh", { runtimes: { dev: "muse_code", rev: "codex_local" } });
+      const health = (i: typeof issue) => checkRoleAgentHealthy(i, "developer", { deckOnline: true });
+
+      await reportUnsettled(NEW);
+      assert.equal(cap.museCapabilityCheckInFlight(), true);
+      const blocked = await health(issue);
+      assert.equal(blocked.ok, false);
+      assert.match((blocked as { reason: string }).reason, /verifying developer shell\/write access/);
+
+      release();
+      await cap.settleMuseCapabilityCheckForTests();
+      const errored = await health(issue);
+      assert.equal(errored.ok, false);
+      assert.match((errored as { reason: string }).reason, /Could not verify Muse Code/);
+      assert.equal(calls, 1);
+    }
+  );
 });
 
 // NOT-178: Muse Code is developer-only, so it is never a healthy reviewer — even with the
