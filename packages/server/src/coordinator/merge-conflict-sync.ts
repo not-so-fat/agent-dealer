@@ -8,6 +8,14 @@
 // the conflicting files; a still-conflicting merge after that round escalates
 // once with the file list.
 //
+// "Not mergeable" is broader than staleness (branch policy, dismissed
+// approvals), so a retry that still fails only earns the repair round when the
+// base actually advanced past the synced tip — otherwise the branch is already
+// up to date and Dealer escalates directly with the retry's reason instead of
+// spending a round on a false "base moved". Note the sync push itself can
+// dismiss the approval the merge depended on in repos with dismiss-stale-
+// approvals; that retry failure then takes this same direct-escalation path.
+//
 // Bound: at most one automatic sync + one conflict-repair round per
 // merge-failure episode. The episode resets on any resolved human action (a
 // retry_merge / repair click starts a fresh episode); the repair-spent marker is
@@ -52,6 +60,7 @@ import {
   fetchFreshBase,
   fetchReusedBranch,
   findWorktreeForBranch,
+  isAncestor,
   isWorktreeClean,
   pruneWorktrees,
   removeWorktree,
@@ -409,6 +418,26 @@ async function abortMergeState(syncPath: string, timeoutMs: number): Promise<voi
   await gitExecImpl(["reset", "--hard", "HEAD"], { cwd: syncPath, timeoutMs });
 }
 
+/**
+ * Whether `origin/<base>` advanced past the synced tip since the sync fetched
+ * it. Only a descendant counts — a rewritten base (force-push) is a human
+ * call, not new staleness a repair round should merge. A failed re-fetch
+ * fails closed to "not advanced": the repair round is the expensive action,
+ * so an unreadable base escalates instead of spending it.
+ */
+async function checkBaseAdvanced(
+  repoPath: string,
+  baseBranch: string,
+  syncedSha: string,
+  timeoutMs: number
+): Promise<{ advanced: boolean; freshSha: string | null; fetchFailed: boolean }> {
+  const fresh = await fetchFreshBase(repoPath, baseBranch, timeoutMs);
+  if (!fresh.ok) return { advanced: false, freshSha: null, fetchFailed: true };
+  if (fresh.sha === syncedSha) return { advanced: false, freshSha: fresh.sha, fetchFailed: false };
+  const advanced = await isAncestor(repoPath, syncedSha, fresh.sha).catch(() => false);
+  return { advanced, freshSha: fresh.sha, fetchFailed: false };
+}
+
 /** Best-effort removal of our own sync checkout. `branchPushed: true` is
  * truthful on the abort path (the branch never moved off the fetched origin
  * tip) and safe on the failed-push path (the only unpushed state possible is
@@ -560,7 +589,10 @@ export async function runMergeConflictSync(opts: {
 
   // Merge the freshly fetched base. A nonzero exit with unmerged entries is a
   // textual conflict (repair round); a nonzero exit without them — or a
-  // timeout kill — is a tool failure (escalate with the detail).
+  // timeout kill — is a tool failure (escalate with the detail). HEAD around
+  // the merge tells an "Already up to date" no-op from a real sync apart for
+  // the retry-failure decision below.
+  const headBeforeMerge = await revParseHead(syncPath).catch(() => null);
   let mergeError: SyncGitError | null = null;
   try {
     await gitExecImpl([...SYNC_GIT_IDENTITY_ARGS, "merge", "--no-edit", base.ref], {
@@ -616,6 +648,14 @@ export async function runMergeConflictSync(opts: {
     auditSync(auditInput, "repair_queued", { files: unmerged });
     return { outcome: "repair_queued", workItemId: queued.id, round: queued.round };
   }
+  const headAfterMerge = await revParseHead(syncPath).catch(() => null);
+  // Null when a rev-parse failed — unknown, never "unchanged". (A successful
+  // merge + push means the branch contains the base either way; only the
+  // already-up-to-date claim needs a verified-unchanged HEAD.)
+  const mergeChangedHead =
+    headBeforeMerge === null || headAfterMerge === null
+      ? null
+      : headBeforeMerge !== headAfterMerge;
 
   // Plain push, never force — the refspec mirrors pushBranch exactly.
   try {
@@ -665,6 +705,35 @@ export async function runMergeConflictSync(opts: {
     return { outcome: "merged" };
   }
   if (isMergeConflictFailure(retry.reason)) {
+    // The retry failed the same way. Only a base that actually advanced past
+    // the synced tip is new staleness worth a repair round — anything else (a
+    // policy block, a dismissed approval, GitHub's stale mergeability cache)
+    // is not something a merge-resolve round can fix, so escalate directly
+    // with the retry's reason instead of spending a round on a false
+    // "base moved". This also covers the "Already up to date" no-op merge:
+    // the branch already contains the base, so there is nothing to resolve.
+    const advance = await checkBaseAdvanced(repoPath, opts.baseBranch, base.sha, timeoutMs);
+    if (!advance.advanced) {
+      const short = (sha: string) => sha.slice(0, 12);
+      const note = advance.fetchFailed
+        ? `could not re-check ${opts.baseBranch} after the retry, so no repair round was queued`
+        : advance.freshSha === base.sha
+          ? mergeChangedHead === false
+            ? `branch already contains ${opts.baseBranch} ${short(base.sha)} — not a staleness conflict`
+            : `branch now contains ${opts.baseBranch} ${short(base.sha)} — not a staleness conflict`
+          : `${opts.baseBranch} was rewritten since the sync (${short(base.sha)} → ${short(advance.freshSha!)}); needs a human look`;
+      auditSync(auditInput, "failed", {
+        detail: retry.reason,
+        mergeChangedHead,
+        baseSha: base.sha,
+        freshBaseSha: advance.freshSha,
+      });
+      return {
+        outcome: "escalate",
+        reason: `Auto-merge failed: ${retry.reason} (${note})`,
+        evidence: { [MERGE_FAILURE_EVIDENCE_KEY]: true },
+      };
+    }
     // The base moved again under us — the one repair round re-syncs + resolves.
     const queued = queueConflictRepairRound({
       issueId: opts.issueId,

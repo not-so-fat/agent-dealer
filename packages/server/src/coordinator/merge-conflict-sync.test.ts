@@ -45,6 +45,13 @@ test("isMergeConflictFailure classifies gh conflict text, not infra failures", (
   );
   assert.equal(isMergeConflictFailure("merge conflict: CONFLICTING"), true);
   assert.equal(isMergeConflictFailure("CONFLICTING"), true);
+  // Deliberately broad: a policy "not mergeable" still enters the sync, which
+  // then escalates directly once the branch proves up to date (integration:
+  // "up-to-date branch that stays not mergeable").
+  assert.equal(
+    isMergeConflictFailure("Pull request #42 is not mergeable: base branch policy prohibits the merge"),
+    true
+  );
   assert.equal(isMergeConflictFailure("required status checks failed"), false);
   assert.equal(isMergeConflictFailure("gh timed out after 20000ms"), false);
   assert.equal(isMergeConflictFailure("protected branch"), false);

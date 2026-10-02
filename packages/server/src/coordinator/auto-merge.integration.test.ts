@@ -473,12 +473,20 @@ test("success txn dismisses stale needs_human policy_escalation from a racing fa
 
 /** NOT-310: origin + local clone where branch `issue-1` (commit B) is behind a moved
  * base (commit C). With `conflict`, C edits the same line of shared.txt that B
- * touched; otherwise C adds an unrelated file and merges cleanly. */
-function initNot310Repos(opts: { conflict: boolean }): {
+ * touched; otherwise C adds an unrelated file and merges cleanly. With
+ * `upToDate`, C lands before the branch is cut, so the branch already contains
+ * the base tip (a "not mergeable" failure there is a policy block, not
+ * staleness) — the conflict flag is then meaningless and must be false. */
+function initNot310Repos(opts: { conflict: boolean; upToDate?: boolean }): {
   origin: string;
   local: string;
   baseMovedSha: string;
 } {
+  assert.equal(
+    opts.upToDate === true && opts.conflict === true,
+    false,
+    "upToDate fixtures cannot also conflict"
+  );
   const origin = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not310-origin-"));
   execFileSync("git", ["init", "-b", "main"], { cwd: origin });
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: origin });
@@ -487,6 +495,17 @@ function initNot310Repos(opts: { conflict: boolean }): {
   fs.writeFileSync(path.join(origin, "shared.txt"), "line1\nline2\n");
   execFileSync("git", ["add", "."], { cwd: origin });
   execFileSync("git", ["commit", "-m", "A base"], { cwd: origin });
+
+  const commitC = () => {
+    if (opts.conflict) {
+      fs.writeFileSync(path.join(origin, "shared.txt"), "line1\nbase change\n");
+    } else {
+      fs.writeFileSync(path.join(origin, "other.txt"), "c\n");
+    }
+    execFileSync("git", ["add", "."], { cwd: origin });
+    execFileSync("git", ["commit", "-m", "C base moved"], { cwd: origin });
+  };
+  if (opts.upToDate) commitC();
 
   const local = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not310-local-"));
   fs.rmSync(local, { recursive: true, force: true });
@@ -502,13 +521,7 @@ function initNot310Repos(opts: { conflict: boolean }): {
   // issue branch must not be checked out anywhere for the sync to proceed.
   execFileSync("git", ["checkout", "-q", "main"], { cwd: local });
 
-  if (opts.conflict) {
-    fs.writeFileSync(path.join(origin, "shared.txt"), "line1\nbase change\n");
-  } else {
-    fs.writeFileSync(path.join(origin, "other.txt"), "c\n");
-  }
-  execFileSync("git", ["add", "."], { cwd: origin });
-  execFileSync("git", ["commit", "-m", "C base moved"], { cwd: origin });
+  if (!opts.upToDate) commitC();
   const baseMovedSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: origin, encoding: "utf8" }).trim();
   return { origin, local, baseMovedSha };
 }
@@ -629,6 +642,76 @@ test("NOT-310: retry_merge runs the same conflict sync (commands.ts retry path)"
   assert.equal(getIssue(issueId)!.status, "done");
   assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
   assert.equal(branchContains(origin, baseMovedSha, "issue-1"), true);
+});
+
+test("NOT-310: up-to-date branch that stays not mergeable escalates directly, no repair round", async () => {
+  const { local, baseMovedSha } = initNot310Repos({ conflict: false, upToDate: true });
+  setConflictSyncGithubForTests({ checksSnapshot: async () => "success" });
+  const policyReason = "Pull request #42 is not mergeable: base branch policy prohibits the merge";
+  let merges = 0;
+  setMergePrForTests(async () => {
+    merges += 1;
+    return { ok: false, reason: policyReason };
+  });
+
+  const issueId = newIssue({ autoMerge: true, repo: local });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
+
+  assert.equal(merges, 2, "failing merge plus one post-sync retry");
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  assert.equal(
+    listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length,
+    0,
+    "a policy block must not spend a conflict-repair round"
+  );
+  const open = listHumanActionsForIssue(issueId).filter((a) => a.status === "open");
+  assert.equal(open.length, 1);
+  assert.equal(open[0]!.actionType, "policy_escalation");
+  assert.match(open[0]!.reason, /base branch policy prohibits the merge/);
+  assert.match(open[0]!.reason, /already contains main .* — not a staleness conflict/);
+  const evidence = JSON.parse(open[0]!.evidenceJson!) as Record<string, unknown>;
+  assert.equal(evidence.mergeFailure, true);
+  assert.ok(!("conflictingFiles" in evidence), "no file list when nothing conflicted");
+  assert.equal(branchContains(local, baseMovedSha, "issue-1"), true);
+});
+
+test("NOT-310: base advancing during the checks poll still earns the repair round", async () => {
+  const { origin, local } = initNot310Repos({ conflict: false });
+  // D lands on origin/main while the sync poll runs — a genuine new conflict.
+  let advanced = false;
+  setConflictSyncGithubForTests({
+    checksSnapshot: async () => {
+      if (!advanced) {
+        advanced = true;
+        fs.writeFileSync(path.join(origin, "shared.txt"), "line1\nbase change\n");
+        execFileSync("git", ["add", "."], { cwd: origin });
+        execFileSync("git", ["commit", "-m", "D base moved again"], { cwd: origin });
+      }
+      return "success";
+    },
+  });
+  let merges = 0;
+  setMergePrForTests(async () => {
+    merges += 1;
+    return { ok: false, reason: NOT_MERGEABLE };
+  });
+
+  const issueId = newIssue({ autoMerge: true, repo: local });
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, { kind: "verdict", result: okReview("approved") });
+
+  assert.equal(merges, 2);
+  assert.equal(getIssue(issueId)!.status, "repairing");
+  assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1);
+  const payload = JSON.parse(pending[0]!.payloadJson!) as {
+    conflictRepair?: { baseBranch: string; branch: string; files: string[] };
+  };
+  assert.deepEqual(payload.conflictRepair, { baseBranch: "main", branch: "issue-1", files: [] });
 });
 
 test("NOT-310: textual conflict aborts the sync and queues a conflict-repair round, no human action yet", async () => {
