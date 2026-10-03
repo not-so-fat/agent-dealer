@@ -74,6 +74,10 @@ export const WorkflowEventType = z.enum([
    * bound key: a later not-mergeable failure with no `human_action.resolved` after
    * this event escalates with the file list instead of syncing again. */
   "auto_merge.conflict_repair_queued",
+  /** NOT-314: the operator explicitly waived an `[operator]` criterion instead of
+   * running its probe (payload: headSha the waiver covers, waivedBy, note).
+   * The gate re-blocks when the head moves past the waived SHA. */
+  "operator_verification.waived",
   /** Migration-only — the NOT-66 cutover repoints a legacy `events` row under this type,
    * preserving the original type/payload inside `payloadJson` (see `role: "legacy"` on
    * `WorkerSessionRole` and `outcome: "migrated"` on `WorkflowInstanceOutcome` for the same
