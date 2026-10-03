@@ -41,13 +41,16 @@
 // Safety: the sync checkout starts at exactly what Dealer pushed (NOT-219 reuse
 // semantics) and is removed afterwards; the push is always a plain
 // `git push -u origin HEAD:refs/heads/<branch>` — never force, never a lease
-// retry, never a rebase. An existing checkout holding the branch belongs to
+// retry, never a rebase. A pre-push hook pins that push to the tip we merged
+// onto (see {@link pinnedPushEnv}), so even a hand reset to an ancestor landing
+// after the last tip read is refused instead of fast-forwarded over. An existing checkout holding the branch belongs to
 // someone else and fails closed to today's escalation, except our own
 // merge-sync leftover from a crashed run (dead owner + clean tree), which is
 // adopted. Every refusal or infra failure degrades to today's escalation — the
 // sync only ever adds a self-resolution attempt, never removes an outcome.
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { Issue, IssueStatus } from "@agent-dealer/shared";
@@ -123,7 +126,7 @@ export function isMergeConflictFailure(reason: string): boolean {
  * inject a recorder (delegating or fake) to assert exact CLI args. */
 export type SyncGitExec = (
   args: string[],
-  opts: { cwd: string; timeoutMs: number }
+  opts: { cwd: string; timeoutMs: number; env?: Record<string, string> }
 ) => Promise<{ stdout: string; stderr: string }>;
 
 /** Failure from {@link defaultSyncGitExec} — `killed` marks a timeout kill, as
@@ -150,6 +153,7 @@ export const defaultSyncGitExec: SyncGitExec = async (args, opts) => {
       cwd: opts.cwd,
       encoding: "utf8",
       timeout: opts.timeoutMs,
+      ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
     });
     return { stdout, stderr };
   } catch (err) {
@@ -680,6 +684,45 @@ async function readRemoteTip(
   }
 }
 
+/** Marker the pinned pre-push hook prints when origin's tip is not the expected one. */
+const PINNED_PUSH_REFUSAL = "dealer-sync: origin tip is not the synced tip";
+
+/** Fails the push unless every remote ref it updates is at the expected SHA.
+ * Git hands the hook the remote values from the same connection's ref
+ * advertisement, and receive-pack only applies the update if the ref still
+ * holds that value — so the check-and-update is atomic on origin without any
+ * force flag. */
+const PINNED_PRE_PUSH_HOOK = `#!/bin/sh
+while read local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_sha" != "$DEALER_SYNC_EXPECTED_REMOTE_SHA" ]; then
+    echo "${PINNED_PUSH_REFUSAL} ($remote_ref is at $remote_sha, expected $DEALER_SYNC_EXPECTED_REMOTE_SHA)" >&2
+    exit 1
+  fi
+done
+exit 0
+`;
+
+/**
+ * NOT-356: env that installs {@link PINNED_PRE_PUSH_HOOK} for one push (via
+ * `GIT_CONFIG_*`, appended after any inherited entries) and pins it to
+ * `expectedSha`. The caller removes `dir` once the push settles.
+ */
+function pinnedPushEnv(expectedSha: string): { env: Record<string, string>; dir: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-sync-push-"));
+  fs.writeFileSync(path.join(dir, "pre-push"), PINNED_PRE_PUSH_HOOK, { mode: 0o755 });
+  const inherited = Number.parseInt(process.env.GIT_CONFIG_COUNT ?? "0", 10);
+  const index = Number.isFinite(inherited) && inherited > 0 ? inherited : 0;
+  return {
+    dir,
+    env: {
+      GIT_CONFIG_COUNT: String(index + 1),
+      [`GIT_CONFIG_KEY_${index}`]: "core.hooksPath",
+      [`GIT_CONFIG_VALUE_${index}`]: dir,
+      DEALER_SYNC_EXPECTED_REMOTE_SHA: expectedSha,
+    },
+  };
+}
+
 /** Best-effort removal of our own sync checkout. `branchPushed: true` is
  * truthful on the abort path (the branch never moved off the fetched origin
  * tip) and safe on the failed-push path (the only unpushed state possible is
@@ -966,16 +1009,39 @@ export async function runMergeConflictSync(opts: {
     return skip(refusal, "refused");
   }
 
-  // Plain push, never force — the refspec mirrors pushBranch exactly.
+  // Plain push, never force — the refspec mirrors pushBranch exactly. The
+  // pinned pre-push hook closes the window between the tip read above and the
+  // push: origin must still be at the fetched tip inside the push itself.
+  let pinned: ReturnType<typeof pinnedPushEnv>;
+  try {
+    pinned = pinnedPushEnv(reused.remoteSha);
+  } catch (err) {
+    await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
+    await cleanupSyncCheckout(repoPath, syncPath);
+    const detail = err instanceof Error ? err.message : String(err);
+    return skip(`could not prepare the pinned push: ${detail}`);
+  }
   try {
     await gitExecImpl(["push", "-u", "origin", `HEAD:refs/heads/${opts.branch}`], {
       cwd: syncPath,
       timeoutMs,
+      env: pinned.env,
     });
   } catch (err) {
-    await cleanupSyncCheckout(repoPath, syncPath);
     const detail = err instanceof Error ? err.message : String(err);
+    const stderr = err instanceof SyncGitError ? err.stderr : "";
+    if (`${detail}\n${stderr}`.includes(PINNED_PUSH_REFUSAL)) {
+      await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
+      await cleanupSyncCheckout(repoPath, syncPath);
+      return skip(
+        `origin/${opts.branch} moved off ${reused.remoteSha} as the push started; nothing was pushed`,
+        "tip_moved"
+      );
+    }
+    await cleanupSyncCheckout(repoPath, syncPath);
     return failed(`could not push the synced branch: ${detail}`);
+  } finally {
+    fs.rmSync(pinned.dir, { recursive: true, force: true });
   }
 
   // NOT-354: the push-only entries stop at the push — the deferred CI wait

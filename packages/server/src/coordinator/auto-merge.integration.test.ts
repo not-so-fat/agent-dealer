@@ -1407,6 +1407,61 @@ test("NOT-356: a hand reset to an older tip after the sync fetch is never fast-f
   assert.equal(getIssue(siblingId)!.status, "reviewing");
 });
 
+test("NOT-356: a hand reset to an older tip as the push starts is refused inside the push", async () => {
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-late", conflict: false }]);
+  const g = (...args: string[]) => execFileSync("git", args, { cwd: local, encoding: "utf8" }).trim();
+  g("checkout", "-q", "sib-late");
+  fs.writeFileSync(path.join(local, "second.txt"), "second\n");
+  g("add", ".");
+  g("commit", "-q", "-m", "second commit");
+  g("push", "-q", "origin", "sib-late");
+  const dealerTip = g("rev-parse", "HEAD");
+  g("checkout", "-q", "main");
+  const olderTip = heads["sib-late"]!;
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-late", dealerTip, 56);
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  setMergePrForTests(async () => {
+    landMergedPr();
+    return { ok: true };
+  });
+  const calls: string[][] = [];
+  // The human resets origin after every tip check passed, just before the push
+  // connects: the merge commit would be a valid fast-forward of the older tip.
+  setConflictSyncGitExecForTests(async (args, opts) => {
+    calls.push(args);
+    if (args[0] === "push") {
+      execFileSync("git", ["update-ref", "refs/heads/sib-late", olderTip], { cwd: origin });
+    }
+    return defaultSyncGitExec(args, opts);
+  });
+  const stop = observeGitCommands((args) => {
+    calls.push([...args]);
+  });
+  try {
+    const { finalizeAutoMerge } = await import("./auto-merge.js");
+    assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
+    await settleBaseAdvancedScansForTests();
+  } finally {
+    stop();
+  }
+
+  assert.equal(syncMerges(calls).length, 1);
+  assert.deepEqual(
+    calls.filter((a) => a[0] === "push"),
+    [["push", "-u", "origin", "HEAD:refs/heads/sib-late"]],
+    "one plain push attempt, refused by origin's tip pin"
+  );
+  assert.equal(originTip(origin, "sib-late"), olderTip, "the hand reset stands");
+  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["hand_edited"]);
+  assert.deepEqual(
+    syncEvents(siblingId).map((e) => [e.outcome, e.code]),
+    [["skipped", "tip_moved"]]
+  );
+  assertNoForceNoRebase(calls);
+  assert.equal(getIssue(siblingId)!.status, "reviewing");
+});
+
 test("NOT-356: a worker that starts during the sync blocks the push and leaves the branch as it was", async () => {
   const { createWorkerSession, startSession } = await import("../repository/worker-sessions.js");
   const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-late", conflict: false }]);
