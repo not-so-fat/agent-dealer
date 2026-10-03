@@ -30,7 +30,7 @@ function printUsage(): void {
   agent-dealer queue list
   agent-dealer queue move <issueId> --top|--bottom|--before <id>|--after <id>
   agent-dealer action list
-  agent-dealer action resolve <id> --choice C --by NAME
+  agent-dealer action resolve <id> --choice C --by NAME [--note TEXT]
   agent-dealer --version
 
 Human control plane for agent execution.`);

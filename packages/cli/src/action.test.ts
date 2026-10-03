@@ -56,6 +56,48 @@ test("action resolve calls POST /api/human-actions/:id/resolve with resolvedBy a
   }
 });
 
+test("action resolve forwards --note when given (required for operator_verification)", async () => {
+  const stub = stubFetch("/api/human-actions/a1/resolve", "POST", { issueStatus: "needs_human" });
+  try {
+    const code = await runActionCommand([
+      "resolve",
+      "a1",
+      "--choice",
+      "verified",
+      "--by",
+      "alice",
+      "--note",
+      "probe output here",
+    ]);
+    assert.equal(code, 0);
+    const body = stub.assertCalled();
+    assert.deepEqual(body, { choice: "verified", resolvedBy: "alice", note: "probe output here" });
+  } finally {
+    stub.restore();
+  }
+});
+
+test("action resolve omits a blank --note so noteless resolves send the historical body", async () => {
+  const stub = stubFetch("/api/human-actions/a1/resolve", "POST", { issueStatus: "closed" });
+  try {
+    const code = await runActionCommand([
+      "resolve",
+      "a1",
+      "--choice",
+      "complete",
+      "--by",
+      "alice",
+      "--note",
+      "   ",
+    ]);
+    assert.equal(code, 0);
+    const body = stub.assertCalled();
+    assert.deepEqual(body, { choice: "complete", resolvedBy: "alice" });
+  } finally {
+    stub.restore();
+  }
+});
+
 test("action resolve returns nonzero on API failure", async () => {
   const stub = stubFetch("/api/human-actions/a1/resolve", "POST", { error: "bad choice" }, 400);
   try {
