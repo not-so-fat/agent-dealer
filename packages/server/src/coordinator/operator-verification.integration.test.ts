@@ -100,14 +100,21 @@ const okReview = ReviewerResult.parse({
   risks: [],
 });
 
-const cleanHandoff = {
+const cleanHandoff: {
+  kind: "clean_handoff";
+  branch: string;
+  headSha: string;
+  baseSha: string;
+  prNumber: number;
+  prUrl: string;
+} = {
   kind: "clean_handoff",
   branch: "issue-1",
   headSha: "abc123",
   baseSha: "base1",
   prNumber: 42,
   prUrl: "https://gh/pr/42",
-} as const;
+};
 
 /** Developer handoff + approved review with autoMerge on (routes into finalize). */
 async function approve(issueId: string, handoff = cleanHandoff) {
