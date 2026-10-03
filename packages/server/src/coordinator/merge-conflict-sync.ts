@@ -58,7 +58,7 @@ import {
   MERGE_FAILURE_EVIDENCE_KEY,
 } from "./human-resolution.js";
 import { getAgent } from "../repository/agents.js";
-import { findOpenHumanAction, resolveHumanAction } from "../repository/human-actions.js";
+import { listHumanActionsForIssue, resolveHumanAction } from "../repository/human-actions.js";
 import { getActiveWorkerSessionForIssue } from "../repository/worker-sessions.js";
 import { getDb } from "../db/index.js";
 import { getIssue, incrementIssueRound, transitionIssue } from "../repository/issues.js";
@@ -237,8 +237,10 @@ export type ConflictSyncOutcome =
   | { outcome: "repair_queued"; workItemId: string; round: number }
   /** Escalate with this reason/evidence (repair spent, or sync infra failed). */
   | { outcome: "escalate"; reason: string; evidence: Record<string, unknown> }
-  /** The sync was not applicable — the caller escalates exactly as today. */
-  | { outcome: "skipped"; reason: string }
+  /** The sync was not applicable — the caller escalates exactly as today. NOT-356:
+   * `tip_moved` when origin was not the caller's `expectedHeadSha`, `refused` when
+   * its `beforePush` guard declined the push. */
+  | { outcome: "skipped"; reason: string; code?: "tip_moved" | "refused" }
   /** NOT-354 `checks_wait` only: the base merged cleanly and was pushed. */
   | { outcome: "synced"; headSha: string | null }
   /** NOT-354 `checks_wait` only: a conflict-repair round is due — the caller queues
@@ -404,8 +406,10 @@ function formatFileList(files: string[]): string {
  * NOT-356 `base_advanced`: the sibling is idle (no lease, no running session —
  * re-checked here, in the same transaction), so its parked next step is
  * superseded: pending work items (a deferred CI wait, a queued reviewer) are
- * cancelled and an open `final_review` gate is dismissed. A developer-stage issue
- * keeps its status; a reviewing / final_review one moves to repairing.
+ * cancelled and its open human gates (final_review, a needs_human escalation) are
+ * dismissed. A developer-stage issue keeps its status; a reviewing / final_review /
+ * needs_human one moves to repairing. `guard` re-checks the caller's idleness rule
+ * inside the transaction (a non-null reason queues nothing).
  */
 export function queueConflictRepairRound(input: {
   issueId: string;
@@ -415,6 +419,7 @@ export function queueConflictRepairRound(input: {
   files: string[];
   entry?: ConflictSyncEntry;
   finish?: { workItemId: string; leaseToken: string; result: unknown };
+  guard?: () => string | null;
 }): { id: string; round: number } | null {
   return getDb().transaction(() => {
     const current = getIssue(input.issueId);
@@ -425,7 +430,7 @@ export function queueConflictRepairRound(input: {
       input.entry === "pre_publish" ||
       (baseAdvanced && (current.status === "developing" || current.status === "repairing"));
     const fromStatuses: IssueStatus[] = baseAdvanced
-      ? ["developing", "repairing", "reviewing", "final_review"]
+      ? BASE_ADVANCED_STATUSES
       : developerStage
         ? ["developing", "repairing"]
         : ["final_review"];
@@ -433,19 +438,11 @@ export function queueConflictRepairRound(input: {
     const active = getActiveWorkflowInstance(input.issueId);
     if (!active || active.id !== input.instanceId) return null;
     if (baseAdvanced) {
-      const items = listWorkItemsForIssue(input.issueId);
-      if (items.some((w) => w.status === "leased")) return null;
-      if (getActiveWorkerSessionForIssue(input.issueId)) return null;
-      for (const w of items) {
-        if (w.status === "pending") cancelWorkItem(w.id);
-      }
-      const gate = findOpenHumanAction(input.issueId, "final_review");
-      if (gate) {
-        resolveHumanAction(gate.id, "system", {
-          choice: "dismissed",
-          note: `superseded: ${input.baseBranch} advanced and the PR now conflicts; conflict-repair round queued`,
-        });
-      }
+      if (!siblingIdle(input.issueId, input.guard)) return null;
+      supersedeParkedStep(
+        input.issueId,
+        `superseded: ${input.baseBranch} advanced and the PR now conflicts; conflict-repair round queued`
+      );
     }
     if (
       input.finish &&
@@ -505,6 +502,110 @@ export function queueConflictRepairRound(input: {
       },
     });
     return { id: item.id, round };
+  })();
+}
+
+/** NOT-356: the stages an idle sibling PR can be parked in when its base advances. */
+export const BASE_ADVANCED_STATUSES: IssueStatus[] = [
+  "developing",
+  "repairing",
+  "reviewing",
+  "final_review",
+  "needs_human",
+];
+
+/** No leased item, no running worker session, and the caller's guard has no objection. */
+function siblingIdle(issueId: string, guard?: () => string | null): boolean {
+  if (listWorkItemsForIssue(issueId).some((w) => w.status === "leased")) return false;
+  if (getActiveWorkerSessionForIssue(issueId)) return false;
+  return !guard?.();
+}
+
+/** Cancel the sibling's pending work and dismiss its open human gates. The dismissal
+ * writes no `human_action.resolved` event, so it never resets the episode bound. */
+function supersedeParkedStep(issueId: string, note: string): void {
+  for (const w of listWorkItemsForIssue(issueId)) {
+    if (w.status === "pending") cancelWorkItem(w.id);
+  }
+  for (const action of listHumanActionsForIssue(issueId)) {
+    if (action.status === "open") resolveHumanAction(action.id, "system", { choice: "dismissed", note });
+  }
+}
+
+function publishOnlyPayload(item: { payloadJson: string | null }): Record<string, unknown> | null {
+  if (!item.payloadJson) return null;
+  try {
+    const payload = JSON.parse(item.payloadJson) as Record<string, unknown>;
+    return payload.publishOnly === true ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * NOT-356: a clean `base_advanced` sync pushed a new head onto an idle sibling, so
+ * whatever it was parked on (a reviewer pinned to the old head, a final_review or
+ * needs_human gate, a deferred CI wait) is stale. Re-enter the normal checks wait
+ * on the pushed head: supersede the parked step and queue a no-agent publish-only
+ * developer item at the current round (no round spent) — it verifies the PR, polls
+ * CI on the new head, and hands off to review exactly like a NOT-354 re-poll. A
+ * deferred CI wait's `checksWaitStartedAt` carries over so its ceiling is never
+ * reset. A queued agent developer round (a repair round not yet started) is kept:
+ * it starts from the synced origin tip and runs its own checks wait.
+ *
+ * Null when the sibling is no longer idle or left its stage (the push already
+ * happened; that worker's own probe / CI wait sees the new head).
+ */
+export function queueChecksWaitAfterBaseSync(input: {
+  issueId: string;
+  instanceId: string;
+  baseBranch: string;
+  branch: string;
+  prNumber: number;
+  headSha: string | null;
+  guard?: () => string | null;
+}): { id: string; kept: boolean } | null {
+  return getDb().transaction(() => {
+    const current = getIssue(input.issueId);
+    if (!current || !BASE_ADVANCED_STATUSES.includes(current.status)) return null;
+    const active = getActiveWorkflowInstance(input.issueId);
+    if (!active || active.id !== input.instanceId) return null;
+    if (!siblingIdle(input.issueId, input.guard)) return null;
+    const pending = listWorkItemsForIssue(input.issueId).filter((w) => w.status === "pending");
+    const agentRound = pending.find((w) => w.kind === "developer" && !publishOnlyPayload(w));
+    if (agentRound) return { id: agentRound.id, kept: true };
+    const priorWait = pending
+      .map((w) => publishOnlyPayload(w))
+      .find((p) => p != null && typeof p.checksWaitStartedAt === "string");
+
+    const head = input.headSha ? input.headSha.slice(0, 12) : "the synced head";
+    supersedeParkedStep(
+      input.issueId,
+      `superseded: Dealer synced ${input.baseBranch} into PR #${input.prNumber}; waiting for CI on ${head}`
+    );
+    const developerStage = current.status === "developing" || current.status === "repairing";
+    transitionIssue(input.issueId, developerStage ? current.status : "repairing", {
+      currentOwner: "developer",
+      currentIntent: `Synced ${input.baseBranch} into PR #${input.prNumber}; waiting for CI on ${head} (no agent)`,
+    });
+    const taken = new Set(listWorkItemsForIssue(input.issueId).map((w) => w.idempotencyKey));
+    const keyBase = `${active.id}:developer:base-advanced-sync:${input.headSha ?? current.currentRound}`;
+    let key = keyBase;
+    for (let n = 2; taken.has(key); n++) key = `${keyBase}:${n}`;
+    const item = enqueueWorkItem({
+      issueId: input.issueId,
+      workflowInstanceId: active.id,
+      kind: "developer",
+      round: current.currentRound,
+      payload: {
+        publishOnly: true,
+        branch: input.branch,
+        profileSnapshot: queuedDeveloperProfileSnapshot(current),
+        ...(priorWait ? { checksWaitStartedAt: priorWait.checksWaitStartedAt } : {}),
+      },
+      idempotencyKey: key,
+    });
+    return { id: item.id, kept: false };
   })();
 }
 
@@ -594,6 +695,10 @@ export async function runMergeConflictSync(opts: {
   mergeReason: string;
   mergePr?: MergePr;
   entry?: ConflictSyncEntry;
+  /** NOT-356: the origin tip the caller validated; any other tip is not synced. */
+  expectedHeadSha?: string;
+  /** NOT-356: re-checked right before the push — a non-null reason refuses it. */
+  beforePush?: () => string | null;
 }): Promise<ConflictSyncOutcome> {
   const entry: ConflictSyncEntry = opts.entry ?? "merge";
   // NOT-356: `base_advanced` takes the checks-wait shape (push-only, caller queues).
@@ -613,9 +718,9 @@ export async function runMergeConflictSync(opts: {
       ? { baseAdvanced: true }
       : { checksConflict: true }
     : { [MERGE_FAILURE_EVIDENCE_KEY]: true };
-  const skip = (reason: string): ConflictSyncOutcome => {
-    auditSync(auditInput, "skipped", { reason });
-    return { outcome: "skipped", reason };
+  const skip = (reason: string, code?: "tip_moved" | "refused"): ConflictSyncOutcome => {
+    auditSync(auditInput, "skipped", { reason, ...(code ? { code } : {}) });
+    return code ? { outcome: "skipped", reason, code } : { outcome: "skipped", reason };
   };
   const failed = (detail: string): ConflictSyncOutcome => {
     auditSync(auditInput, "failed", { detail });
@@ -703,6 +808,12 @@ export async function runMergeConflictSync(opts: {
   const reused = await fetchReusedBranch(repoPath, opts.branch, timeoutMs);
   if (!reused.ok) return skip(`fetch origin/${opts.branch} failed: ${reused.reason}`);
   if (reused.remoteSha == null) return skip(`origin/${opts.branch} does not exist`);
+  if (opts.expectedHeadSha && reused.remoteSha !== opts.expectedHeadSha) {
+    return skip(
+      `origin/${opts.branch} moved to ${reused.remoteSha} (expected ${opts.expectedHeadSha})`,
+      "tip_moved"
+    );
+  }
   if (!adopted) {
     const ff = await fastForwardLocalBranchToSha({
       repo: repoPath,
@@ -812,6 +923,17 @@ export async function runMergeConflictSync(opts: {
     headBeforeMerge === null || headAfterMerge === null
       ? null
       : headBeforeMerge !== headAfterMerge;
+
+  // NOT-356: the caller's ownership/idleness rule, re-checked at the mutation
+  // boundary. The plain push below is fast-forward only, so a tip that moved
+  // since the fetch above is rejected by origin rather than overwritten.
+  const refusal = opts.beforePush?.() ?? null;
+  if (refusal) {
+    // Drop our unpushed base merge so the branch ref is back at the fetched tip.
+    await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
+    await cleanupSyncCheckout(repoPath, syncPath);
+    return skip(refusal, "refused");
+  }
 
   // Plain push, never force — the refspec mirrors pushBranch exactly.
   try {

@@ -210,6 +210,11 @@ export type AutoMergeFinalizeResult = {
  */
 const finalizeInflight = new Map<string, Promise<AutoMergeFinalizeResult>>();
 
+/** NOT-356: whether this process is merging the issue's PR right now. */
+export function isAutoMergeInFlight(issueId: string): boolean {
+  return finalizeInflight.has(issueId);
+}
+
 /** Test hook — clear single-flight state between cases. */
 export function clearFinalizeInflightForTests(): void {
   finalizeInflight.clear();

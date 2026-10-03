@@ -7,16 +7,20 @@
 //
 // Per sibling, in order — each step records one `base.advanced` event naming the
 // action and stops:
-//   - needs_human / an in-flight auto-merge park: someone else owns the next step.
-//   - a running worker session or a leased work item: `active_worker` — its own
-//     pre-publish probe (NOT-355) or CI-wait check (NOT-354) picks the base up.
-//   - origin's tip is not a SHA Dealer pushed: `hand_edited` — never touched.
+//   - a running worker session, a leased work item, or its own auto-merge in
+//     flight in this process: `active_worker` — its own pre-publish probe
+//     (NOT-355), CI-wait check (NOT-354) or merge path (NOT-310) picks the base up.
+//     Workflow ownership alone never skips a sibling: an idle PR parked on a
+//     needs_human or final_review gate is probed like any other.
+//   - origin's tip is not the SHA Dealer last pushed: `hand_edited` — never touched.
 //   - the NOT-355 local probe (`git merge-tree --write-tree`, never GitHub's lazily
 //     computed mergeable state) against the new base tip: `clean` does nothing more.
 //   - `conflict`: the NOT-310/354 push-only sync (`base_advanced` entry, plain
-//     push, never force or rebase). A clean sync is `synced` (a deferred CI wait
-//     re-polls the pushed head); a textual conflict queues one conflict-repair
-//     round naming the files (`repair_queued`).
+//     push, never force or rebase), conditional on origin still being the probed
+//     tip and the sibling still idle right before the push. A clean sync is
+//     `synced` and re-enters the normal checks wait on the pushed head (the parked
+//     step is superseded by a no-agent publish-only CI wait); a textual conflict
+//     queues one conflict-repair round naming the files (`repair_queued`).
 //
 // Bounds: one sync and one repair round per issue per episode, shared with the
 // merge and checks-wait entries. A failure for one sibling — a throw included —
@@ -37,21 +41,19 @@ import { getDb } from "../db/index.js";
 import { getIssue, listIssues } from "../repository/issues.js";
 import { getActiveWorkerSessionForIssue } from "../repository/worker-sessions.js";
 import { listWorkItemsForIssue } from "../repository/work-items.js";
+import { appendWorkflowEvent, getActiveWorkflowInstance } from "../repository/workflow-events.js";
+import { isAutoMergeInFlight } from "./auto-merge.js";
 import {
-  appendWorkflowEvent,
-  getActiveWorkflowInstance,
-  listWorkflowEventsForIssue,
-} from "../repository/workflow-events.js";
-import { AUTO_MERGE_INTENT } from "./auto-merge.js";
-import {
+  BASE_ADVANCED_STATUSES,
   checksWaitSyncSpent,
   conflictRepairSpent,
+  queueChecksWaitAfterBaseSync,
   queueConflictRepairRound,
   runMergeConflictSync,
 } from "./merge-conflict-sync.js";
 
 /** Open stages in which an issue can hold a PR Dealer opened. */
-const SIBLING_STATUSES: IssueStatus[] = ["developing", "reviewing", "repairing", "final_review", "needs_human"];
+const SIBLING_STATUSES: IssueStatus[] = BASE_ADVANCED_STATUSES;
 
 export type BaseAdvancedAction =
   | "clean"
@@ -60,7 +62,6 @@ export type BaseAdvancedAction =
   | "active_worker"
   | "hand_edited"
   | "repair_spent"
-  | "human_owned"
   | "skipped"
   | "failed";
 
@@ -168,36 +169,36 @@ async function scanSibling(
   }
   const branch = issue.branch!;
   const prNumber = issue.prNumber!;
-  if (issue.status === "needs_human") return { action: "human_owned" };
-  if (issue.status === "final_review" && issue.currentOwner === "system" && issue.currentIntent === AUTO_MERGE_INTENT) {
-    // Its own merge path (NOT-310) syncs on a conflict.
-    return { action: "human_owned", detail: { reason: "auto-merge in progress" } };
-  }
-  if (isActive(issue.id)) return { action: "active_worker" };
+  const busy = activeReason(issue.id);
+  if (busy) return { action: "active_worker", detail: { reason: busy } };
 
-  // Start from exactly what Dealer pushed; anything else is a hand edit.
+  // Start from exactly what Dealer last pushed; anything else is a hand edit.
   const reused = await fetchReusedBranch(repoPath, branch, DEFAULT_BASE_FETCH_TIMEOUT_MS);
   if (!reused.ok) return { action: "skipped", detail: { reason: `fetch origin/${branch} failed: ${reused.reason}` } };
   if (reused.remoteSha == null) return { action: "skipped", detail: { reason: `origin/${branch} does not exist` } };
-  const pushed = dealerPushedShas(issue, instance.id);
-  if (!pushed.has(reused.remoteSha)) {
-    return { action: "hand_edited", detail: { remoteSha: reused.remoteSha, dealerShas: [...pushed] } };
+  const lastPushed = lastDealerPushedSha(issue);
+  if (reused.remoteSha !== lastPushed) {
+    return { action: "hand_edited", detail: { remoteSha: reused.remoteSha, lastPushedSha: lastPushed } };
   }
+  const expectedHeadSha = reused.remoteSha;
 
   const probe: BaseConflictProbe = await probeImpl({
     worktreePath: repoPath,
     baseRef: base.ref,
-    headRef: reused.remoteSha,
+    headRef: expectedHeadSha,
   });
-  if (probe.state === "clean") return { action: "clean", detail: { probe: "clean", headSha: reused.remoteSha } };
+  if (probe.state === "clean") return { action: "clean", detail: { probe: "clean", headSha: expectedHeadSha } };
   if (probe.state !== "conflict") {
     return { action: "skipped", detail: { probe: probe.state, reason: probe.reason } };
   }
-  const probeDetail = { probe: "conflict", files: probe.files, headSha: reused.remoteSha };
+  const probeDetail = { probe: "conflict", files: probe.files, headSha: expectedHeadSha };
 
   if (conflictRepairSpent(issue.id, instance.id).spent) {
     return { action: "repair_spent", detail: probeDetail };
   }
+
+  // Every mutation re-checks idleness: a worker may have started since the check above.
+  const guard = () => activeReason(issue.id);
 
   // One push-only sync per episode: a spent sync goes straight to the repair round.
   let files = probe.files;
@@ -211,9 +212,35 @@ async function scanSibling(
       prNumber,
       mergeReason: `${issue.baseBranch} advanced and PR #${prNumber} now conflicts with it.`,
       entry: "base_advanced",
+      expectedHeadSha,
+      beforePush: guard,
     });
     if (sync.outcome === "synced") {
-      return { action: "synced", detail: { ...probeDetail, syncedHeadSha: sync.headSha } };
+      const wait = queueChecksWaitAfterBaseSync({
+        issueId: issue.id,
+        instanceId: instance.id,
+        baseBranch: issue.baseBranch,
+        branch,
+        prNumber,
+        headSha: sync.headSha,
+        guard,
+      });
+      return {
+        action: "synced",
+        detail: {
+          ...probeDetail,
+          syncedHeadSha: sync.headSha,
+          ...(wait
+            ? { workItemId: wait.id, ...(wait.kept ? { checksWait: "queued developer round" } : {}) }
+            : { reason: "issue became busy or left its stage before the checks wait queued" }),
+        },
+      };
+    }
+    if (sync.outcome === "skipped" && sync.code === "tip_moved") {
+      return { action: "hand_edited", detail: { ...probeDetail, reason: sync.reason } };
+    }
+    if (sync.outcome === "skipped" && sync.code === "refused") {
+      return { action: "active_worker", detail: { ...probeDetail, reason: sync.reason } };
     }
     if (sync.outcome === "escalate" || sync.outcome === "skipped") {
       return { action: sync.outcome === "escalate" ? "failed" : "skipped", detail: { ...probeDetail, reason: sync.reason } };
@@ -231,6 +258,7 @@ async function scanSibling(
     branch,
     files,
     entry: "base_advanced",
+    guard,
   });
   if (!queued) {
     return { action: "skipped", detail: { ...probeDetail, reason: "issue became busy or left its stage before the repair round queued" } };
@@ -238,40 +266,48 @@ async function scanSibling(
   return { action: "repair_queued", detail: { ...probeDetail, files, workItemId: queued.id, round: queued.round } };
 }
 
-/** A running worker session, or a leased work item (an effect mid-flight). */
-function isActive(issueId: string): boolean {
-  if (getActiveWorkerSessionForIssue(issueId)) return true;
-  return listWorkItemsForIssue(issueId).some((w) => w.status === "leased");
+/** Why the sibling is not idle: a running worker session, a leased work item (an
+ * effect mid-flight), or its own auto-merge running in this process. */
+function activeReason(issueId: string): string | null {
+  if (getActiveWorkerSessionForIssue(issueId)) return "a worker session is running";
+  if (listWorkItemsForIssue(issueId).some((w) => w.status === "leased")) return "a work item is leased";
+  if (isAutoMergeInFlight(issueId)) return "its auto-merge is in flight";
+  return null;
 }
 
+/** Events that record a head Dealer itself put on origin, and where they carry it. */
+const PUSH_EVENT_TYPES = ["checkpoint.observed", "pull_request.opened", "branch.pushed", "auto_merge.conflict_sync"];
+
 /**
- * Every head Dealer itself put on origin for this issue: the verified handoff head,
- * a deferred CI wait's pushed head, and this episode's push-only base syncs.
+ * The single SHA Dealer last pushed to the issue branch: the latest of a developer
+ * push checkpoint, a verified handoff, a lease push, or a push-only base sync (in
+ * event order). Falls back to the handoff head when no event names one. An older
+ * Dealer head is not accepted — a reset back to it is a hand edit too.
  */
-function dealerPushedShas(issue: Issue, instanceId: string): Set<string> {
-  const shas = new Set<string>();
-  if (issue.headSha) shas.add(issue.headSha);
-  for (const item of listWorkItemsForIssue(issue.id)) {
-    if (item.status !== "pending" || !item.errorJson) continue;
+function lastDealerPushedSha(issue: Issue): string | null {
+  const rows = getDb()
+    .prepare(
+      `SELECT type, payload_json AS payloadJson FROM workflow_events
+       WHERE issue_id = ? AND type IN (${PUSH_EVENT_TYPES.map(() => "?").join(", ")})
+       ORDER BY ts ASC, rowid ASC`
+    )
+    .all(issue.id, ...PUSH_EVENT_TYPES) as Array<{ type: string; payloadJson: string | null }>;
+  let last: string | null = null;
+  for (const row of rows) {
+    let p: Record<string, unknown>;
     try {
-      const err = JSON.parse(item.errorJson) as { kind?: unknown; headSha?: unknown };
-      if (err.kind === "checks_pending" && typeof err.headSha === "string" && err.headSha) shas.add(err.headSha);
+      p = JSON.parse(row.payloadJson ?? "{}") as Record<string, unknown>;
     } catch {
-      // unreadable deferral record names no head
+      continue; // unreadable audit payload names no head
     }
+    let sha: unknown = null;
+    if (row.type === "checkpoint.observed") sha = p.kind === "branch_pushed" ? p.observedSha : null;
+    else if (row.type === "pull_request.opened") sha = p.headSha;
+    else if (row.type === "branch.pushed") sha = p.newSha ?? p.localSha;
+    else if (p.outcome === "synced") sha = p.headSha;
+    if (typeof sha === "string" && sha) last = sha;
   }
-  for (const e of listWorkflowEventsForIssue(issue.id)) {
-    if (e.workflowInstanceId !== instanceId || e.type !== "auto_merge.conflict_sync") continue;
-    try {
-      const payload = JSON.parse(e.payloadJson ?? "{}") as { outcome?: unknown; headSha?: unknown };
-      if (payload.outcome === "synced" && typeof payload.headSha === "string" && payload.headSha) {
-        shas.add(payload.headSha);
-      }
-    } catch {
-      // audit payload only
-    }
-  }
-  return shas;
+  return last ?? issue.headSha ?? null;
 }
 
 function recordBaseAdvanced(issueId: string, payload: Record<string, unknown>): void {
