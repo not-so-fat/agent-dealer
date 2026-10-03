@@ -61,6 +61,7 @@ import {
   enqueueWorkItem,
   finishWorkItem,
   getWorkItem,
+  getWorkItemByIdempotencyKey,
   listWorkItemsForIssue,
   type WorkItem,
   type WorkItemKind,
@@ -242,7 +243,11 @@ function freezeTaskSnapshot(issue: Issue): void {
  * never changes the eventual session. The worker loop consumes this off the payload and
  * only falls back to a live resolve for a legacy item queued before snapshots were carried.
  */
-function queuedProfileSnapshot(issue: Issue, kind: WorkItemKind): string | null {
+/**
+ * NOT-333: shared with recovery's stranded-reviewer re-enqueue so a recovered round
+ * carries the same frozen profile as a normally routed one.
+ */
+export function queuedProfileSnapshot(issue: Issue, kind: WorkItemKind): string | null {
   const agentId = kind === "developer" ? issue.developerAgentId : issue.reviewerAgentId;
   const agent = agentId ? getAgent(agentId) : null;
   return agent ? serializeProfileSnapshot(buildProfileSnapshot(agent, kind)) : null;
@@ -1120,6 +1125,23 @@ function applyEffect(
     // row instead of enqueueing a new one, stranding the issue with zero pending work).
     const attemptSuffix = isInfraRetry(route) ? `:retry-of:${causativeItemId}` : "";
     if (route.next === "retry_developer_with_findings") ev.emit("repair.started");
+    let idempotencyKey = `${instance.id}:${kind}:${issueNow.currentRound}${headSuffix}${attemptSuffix}`;
+    // NOT-333: a developer round that pushes nothing (e.g. a resume round that only
+    // updates the PR description) re-derives the exact key of the already-terminal
+    // reviewer item it follows — same instance, same round, same head — so the enqueue
+    // dedupes against that done row and strands the issue in `reviewing` with no pending
+    // work. A terminal duplicate gets the same `:retry-of:<causative work item id>`
+    // shape the infra-retry path uses, so a new row is created; a still-active
+    // (pending/leased) duplicate keeps deduping.
+    if (kind === "reviewer" && attemptSuffix === "") {
+      const existing = getWorkItemByIdempotencyKey(idempotencyKey);
+      if (
+        existing &&
+        (existing.status === "done" || existing.status === "dead" || existing.status === "cancelled")
+      ) {
+        idempotencyKey += `:retry-of:${causativeItemId}`;
+      }
+    }
     const next = enqueueWorkItem({
       issueId: issue.id,
       workflowInstanceId: instance.id,
@@ -1132,7 +1154,7 @@ function applyEffect(
         ...(effect.branch ? { branch: effect.branch } : {}),
         profileSnapshot: queuedProfileSnapshot(issue, kind),
       },
-      idempotencyKey: `${instance.id}:${kind}:${issueNow.currentRound}${headSuffix}${attemptSuffix}`,
+      idempotencyKey,
     });
     return { ...base, nextWorkItemId: next.id };
   }

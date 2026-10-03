@@ -26,15 +26,17 @@
 // effect; and one item that fails to route never rolls back the others.
 import { canTransitionIssue } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
-import { getIssue, incrementIssueInfraAttempts, transitionIssue } from "../repository/issues.js";
+import { getIssue, incrementIssueInfraAttempts, listIssues, transitionIssue } from "../repository/issues.js";
 import { appendWorkflowEvent, getActiveWorkflowInstance } from "../repository/workflow-events.js";
 import type { WorkerSession } from "@agent-dealer/shared";
 import { completeSession, getWorkerSession } from "../repository/worker-sessions.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
 import {
   deferWorkItem,
+  enqueueWorkItem,
   finishWorkItem,
   listExpiredLeases,
+  listWorkItemsForIssue,
   refreshHeartbeat,
   requeueWorkItem,
   type WorkItem,
@@ -44,7 +46,7 @@ import { activeClockJumpGrace, type ClockJump } from "./clock-jump.js";
 import { inspectWorkerProcess, terminateWorkerProcess } from "./process-liveness.js";
 import { maxAliveHoldMsFor } from "./session-timeouts.js";
 import { emitHostSuspended } from "./agent-boundaries.js";
-import { routeAppliedOutcome } from "./commands.js";
+import { queuedProfileSnapshot, routeAppliedOutcome } from "./commands.js";
 import { recoverStrandedAutoMerges } from "./auto-merge.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { PRESUMED_DEAD_REASON, presumedDeadReclaimReason } from "./failure-reason.js";
@@ -88,6 +90,55 @@ export interface RecoverResult {
   unverifiedOrphans: string[];
   /** Expired leases left alone because the host was suspended across them (NOT-125). */
   heldAcrossClockJump: string[];
+  /** NOT-333: reviewer work items re-enqueued for issues stranded in `reviewing`
+   * with an open instance and no pending/leased work. */
+  strandedReviewingRecovered: string[];
+}
+
+/**
+ * NOT-333: an issue parked in `reviewing` with an open workflow instance but no
+ * pending/leased work item is stranded — nothing will ever claim it (the NOT-200
+ * shape: a resume round that pushed nothing deduped its reviewer enqueue against the
+ * already-terminal reviewer row). Re-enqueue one reviewer round at the current head.
+ *
+ * Bounded by construction: the fresh pending row makes the very next pass a no-op, so
+ * this fires at most once per stranding. Item history is required — reaching
+ * `reviewing` always enqueues a reviewer, so a bare row with no work items at all has
+ * nothing to resume and is left alone.
+ */
+export function recoverStrandedReviewing(): string[] {
+  const recovered: string[] = [];
+  for (const issue of listIssues("reviewing")) {
+    const instance = getActiveWorkflowInstance(issue.id);
+    if (!instance) continue;
+    const items = listWorkItemsForIssue(issue.id);
+    if (items.length === 0) continue;
+    if (items.some((w) => w.status === "pending" || w.status === "leased")) continue;
+    const headSha = issue.headSha ?? null;
+    const baseKey = `${instance.id}:reviewer:${issue.currentRound}${headSha ? `:${headSha}` : ""}:stranded-recovery`;
+    const taken = new Set(items.map((w) => w.idempotencyKey));
+    let key = baseKey;
+    for (let n = 2; taken.has(key); n++) key = `${baseKey}:${n}`;
+    console.warn("[coordinator] issue stranded in reviewing with no active work — re-enqueueing reviewer", {
+      issueId: issue.id,
+      workflowInstanceId: instance.id,
+      round: issue.currentRound,
+      headSha,
+    });
+    const next = enqueueWorkItem({
+      issueId: issue.id,
+      workflowInstanceId: instance.id,
+      kind: "reviewer",
+      round: issue.currentRound,
+      payload: {
+        ...(headSha ? { inputSha: headSha } : {}),
+        profileSnapshot: queuedProfileSnapshot(issue, "reviewer"),
+      },
+      idempotencyKey: key,
+    });
+    recovered.push(next.id);
+  }
+  return recovered;
 }
 
 /** Fail a worker_session still `running` for an item whose worker is gone. */
@@ -567,6 +618,10 @@ export async function recoverCoordinator(opts?: {
   }
 
   const stranded = await recoverStrandedAutoMerges();
+  // NOT-333: re-enqueue a reviewer for issues stranded in `reviewing` with no active
+  // work (runs every tick alongside the lease reclaim above — the fresh pending row
+  // makes the next pass a no-op, so this recovers exactly once per stranding).
+  const strandedReviewingRecovered = recoverStrandedReviewing();
   return {
     reclaimed,
     republished,
@@ -577,5 +632,6 @@ export async function recoverCoordinator(opts?: {
     unverifiedOrphans,
     heldAcrossClockJump,
     autoMergesFinalized: stranded.finalized,
+    strandedReviewingRecovered,
   };
 }

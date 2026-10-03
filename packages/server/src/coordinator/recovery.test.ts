@@ -11,7 +11,8 @@ process.env.COORDINATOR_FAIL_BACKOFF_MS = "0";
 
 const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
-const { createIssue, getIssue } = await import("../repository/issues.js");
+const { createIssue, getIssue, transitionIssue } = await import("../repository/issues.js");
+const { getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listWorkerSessionsForIssue, createWorkerSession, startSession } = await import(
   "../repository/worker-sessions.js"
@@ -21,6 +22,7 @@ const {
   listWorkItemsForIssue,
   claimWorkItem,
   bindWorkItemSession,
+  enqueueWorkItem,
   finishWorkItem,
   refreshHeartbeat} = await import("../repository/work-items.js");
 const { startWorkflow } = await import("./commands.js");
@@ -148,7 +150,7 @@ test("recovery ignores a lease that has not expired", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
   claimWorkItem("healthy", { leaseMs: 600_000 });
-  assert.deepEqual(await recoverCoordinator({ now: Date.now() }), { reclaimed: [], republished: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: Date.now() }), { reclaimed: [], republished: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [], strandedReviewingRecovered: [] });
 });
 
 test("recovery leaves a lease alone when a heartbeat renewed it after the snapshot", async () => {
@@ -163,7 +165,7 @@ test("recovery leaves a lease alone when a heartbeat renewed it after the snapsh
   refreshHeartbeat(devItem.id, claimed.leaseToken!, { leaseMs: 600_000 });
 
   const res = await recoverCoordinator({ now: Date.now() + 1_000 });
-  assert.deepEqual(res, { reclaimed: [], republished: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
+  assert.deepEqual(res, { reclaimed: [], republished: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [], strandedReviewingRecovered: [] });
   assert.equal(getWorkItem(devItem.id)!.status, "leased");
 });
 
@@ -195,7 +197,7 @@ test("an expired lease past the infra-attempt limit is dead-lettered AND routed 
   assert.match(last.reason ?? "", /presumed dead/);
 
   // A second recovery pass is a no-op — the item is already dead, nothing to reclaim.
-  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], republished: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], republished: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [], strandedReviewingRecovered: [] });
   assert.equal(
     listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
     1,
@@ -212,7 +214,7 @@ test("recovery loses its CAS to a worker that completed concurrently", async () 
   // Worker finishes just before recovery's transaction runs.
   finishWorkItem(devItem.id, claimed.leaseToken!, { status: "done", result: { kind: "no_pr" } });
 
-  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], republished: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], republished: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [], strandedReviewingRecovered: [] });
   assert.equal(getWorkItem(devItem.id)!.status, "done");
 });
 
@@ -254,7 +256,8 @@ test("an expired lease on a usage-capped runtime is deferred, not dead-lettered 
       heldAliveExpired: [],
       unverifiedOrphans: [],
       heldAcrossClockJump: [],
-      autoMergesFinalized: []});
+      autoMergesFinalized: [],
+      strandedReviewingRecovered: []});
     assert.equal(getWorkItem(devItem.id)!.status, "pending");
     assert.equal(getWorkItem(devItem.id)!.attemptCount, 0, "claim's attempt bump is reverted, like a live cap deferral");
     assert.equal(getWorkItem(devItem.id)!.availableAt, until);
@@ -270,5 +273,71 @@ test("an expired lease on a usage-capped runtime is deferred, not dead-lettered 
 });
 
 test("recoverCoordinator is a no-op on a clean queue", async () => {
-  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], republished: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [] });
+  assert.deepEqual(await recoverCoordinator({ now: FUTURE() }), { reclaimed: [], republished: [], deadLettered: [], deferredForCap: [], heldAlive: [], heldAliveExpired: [], unverifiedOrphans: [], heldAcrossClockJump: [], autoMergesFinalized: [], strandedReviewingRecovered: [] });
+});
+
+/** Settles an issue's developer round so the test can park the issue in `reviewing`. */
+function settleDeveloper(issueId: string): void {
+  const dev = claimWorkItem(`seed-${issueId}`, { leaseMs: 600_000 })!;
+  assert.equal(dev.issueId, issueId);
+  assert.equal(finishWorkItem(dev.id, dev.leaseToken!, { status: "done", result: { kind: "no_pr" } })!.status, "done");
+}
+
+test("NOT-333: recovery re-enqueues exactly once for an issue stranded in reviewing, and is a no-op otherwise", async () => {
+  // The NOT-200 stranding: reviewing, open instance, head pinned, but every work
+  // item terminal — the resume round's reviewer enqueue deduped against the done row.
+  const strandedId = newIssue();
+  startWorkflow(strandedId);
+  settleDeveloper(strandedId);
+  transitionIssue(strandedId, "reviewing", { headSha: "abc123" });
+  const instance = getActiveWorkflowInstance(strandedId)!;
+  const oldReviewer = enqueueWorkItem({
+    issueId: strandedId,
+    workflowInstanceId: instance.id,
+    kind: "reviewer",
+    round: 1,
+    payload: { inputSha: "abc123" },
+    idempotencyKey: `${instance.id}:reviewer:1:abc123`,
+  });
+  const leasedOld = claimWorkItem(`seed-rev-${strandedId}`, { leaseMs: 600_000 })!;
+  assert.equal(leasedOld.id, oldReviewer.id);
+  assert.equal(finishWorkItem(oldReviewer.id, leasedOld.leaseToken!, { status: "done", result: { kind: "verdict" } })!.status, "done");
+
+  // A healthy issue: reviewing WITH a pending reviewer must be left alone.
+  const healthyId = newIssue();
+  startWorkflow(healthyId);
+  settleDeveloper(healthyId);
+  transitionIssue(healthyId, "reviewing", { headSha: "def456" });
+  const healthyInstance = getActiveWorkflowInstance(healthyId)!;
+  const healthyReviewer = enqueueWorkItem({
+    issueId: healthyId,
+    workflowInstanceId: healthyInstance.id,
+    kind: "reviewer",
+    round: 1,
+    payload: { inputSha: "def456" },
+    idempotencyKey: `${healthyInstance.id}:reviewer:1:def456`,
+  });
+
+  // First tick recovers the stranded issue exactly once.
+  const first = await recoverCoordinator({ now: Date.now() });
+  assert.equal(first.strandedReviewingRecovered.length, 1);
+  const recovered = getWorkItem(first.strandedReviewingRecovered[0])!;
+  assert.equal(recovered.issueId, strandedId);
+  assert.equal(recovered.kind, "reviewer");
+  assert.equal(recovered.status, "pending");
+  assert.notEqual(recovered.id, oldReviewer.id);
+  assert.equal(JSON.parse(recovered.payloadJson!).inputSha, "abc123");
+
+  // ...and touches nothing else.
+  assert.equal(listWorkItemsForIssue(healthyId).length, 2);
+  assert.equal(getWorkItem(healthyReviewer.id)!.status, "pending");
+
+  // Second tick is a no-op — the fresh pending row bounds the guard, no loop.
+  const second = await recoverCoordinator({ now: Date.now() });
+  assert.deepEqual(second.strandedReviewingRecovered, []);
+  assert.equal(listWorkItemsForIssue(strandedId).filter((i) => i.kind === "reviewer").length, 2);
+  assert.equal(
+    listWorkItemsForIssue(strandedId).filter((i) => i.kind === "reviewer" && i.status === "pending").length,
+    1
+  );
 });
