@@ -94,7 +94,37 @@ test("NOT-355: a git without merge-tree --write-tree is skipped (fail open)", as
   assert.deepEqual(calls, [["merge-tree", "--write-tree", "--name-only", "--no-messages", "main", "HEAD"]]);
 });
 
-test("NOT-355: any other merge-tree failure is skipped with its detail, never reported as conflict", async () => {
-  const probe = await probeBaseConflict({ worktreePath: repo, baseRef: "no-such-ref" });
-  assert.equal(probe.state, "skipped");
+test("NOT-355: any other merge-tree failure is an error, never skipped (fail open) or conflict", async () => {
+  const badRef = await probeBaseConflict({ worktreePath: repo, baseRef: "no-such-ref" });
+  assert.equal(badRef.state, "error");
+  assert.match((badRef as { reason: string }).reason, /no-such-ref/);
+
+  // A usage-looking stderr without exit 129, or a 129 without the usage dump, is not "unsupported".
+  for (const failure of [
+    { code: 128, stderr: "usage: git merge-tree [--write-tree] [<options>] <branch1> <branch2>" },
+    { code: 129, stderr: "fatal: something else entirely" },
+    { code: 1, stderr: "" }, // conflict exit with no conflicted paths
+    { code: "ENOENT", stderr: "" }, // git missing / spawn failure
+  ]) {
+    const probe = await probeBaseConflict({
+      worktreePath: repo,
+      baseRef: "main",
+      exec: async () => {
+        throw Object.assign(new Error("git merge-tree failed"), { stdout: "", ...failure });
+      },
+    });
+    assert.equal(probe.state, "error", `exit ${failure.code} must not fail open`);
+  }
+});
+
+test("NOT-355: headRef probes a branch from the repo itself (no worktree checkout)", async () => {
+  const baseRef = divergedPair(
+    "by-ref",
+    ["shared.txt", "line one\nby-ref feature\nline three\n"],
+    ["shared.txt", "line one\nby-ref base\nline three\n"]
+  );
+  git(repo, "checkout", "-q", "main");
+  const probe = await probeBaseConflict({ worktreePath: repo, baseRef, headRef: "by-ref" });
+  assert.deepEqual(probe, { state: "conflict", files: ["shared.txt"] });
+  assert.deepEqual(await probeBaseConflict({ worktreePath: repo, baseRef: "main", headRef: "by-ref" }), { state: "clean" });
 });

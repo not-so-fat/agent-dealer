@@ -30,7 +30,11 @@ const LABELS: Record<string, (e: WorkflowEvent) => string> = {
       ? "Base conflict found before publish"
       : result === "skipped"
         ? "Base conflict probe skipped"
-        : "Base conflict probe clean";
+        : result === "deferred"
+          ? "Base conflict probe waiting on base fetch"
+          : result === "failed"
+            ? "Base conflict probe failed; not published"
+            : "Base conflict probe clean";
   },
   "branch.pushed": () => "Branch pushed",
   "checks.started": () => "Checks started",

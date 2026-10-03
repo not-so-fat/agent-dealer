@@ -40,7 +40,7 @@ const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js"
 const { runDeveloperEffect } = await import("./developer-effect.js");
 const { realDeveloperSpawn } = await import("./spawn.js");
 const { realGithubAdapter } = await import("../adapters/github.js");
-const { branchExists, roleWorktreePath, withRepoLock } = await import("../adapters/git-worktree.js");
+const { branchExists, roleWorktreePath, withRepoLock, observeGitCommands } = await import("../adapters/git-worktree.js");
 type SpawnFn = typeof realDeveloperSpawn;
 type GithubFn = typeof realGithubAdapter;
 
@@ -2980,18 +2980,12 @@ function commitIn(cwd: string, file: string, content: string, message: string): 
   git(cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", message);
 }
 
-/** Records the probe's git shell-outs while delegating to real git. */
-function recordingProbeExec(): { exec: NonNullable<Parameters<typeof runDeveloperEffect>[1]>["probeGitExec"] & {}; calls: string[][] } {
+/** Records every git command the coordinator runs (fetch, probe, push, worktree
+ * handling — the whole pre-publish sequence) for the rest of test `t`. */
+function recordGitCommands(t: { after: (fn: () => void) => void }): string[][] {
   const calls: string[][] = [];
-  return {
-    calls,
-    exec: async (args, opts) => {
-      calls.push(args);
-      const { promisify } = await import("node:util");
-      const { execFile } = await import("node:child_process");
-      return promisify(execFile)("git", args, { cwd: opts.cwd, encoding: "utf8" });
-    },
-  };
+  t.after(observeGitCommands((args) => calls.push([...args])));
+  return calls;
 }
 
 /** Wraps a GithubFn so every adapter call is recorded in order. */
@@ -3016,14 +3010,28 @@ function probeEvents(issueId: string): Array<Record<string, unknown>> {
     .map((e) => JSON.parse(e.payloadJson ?? "{}") as Record<string, unknown>);
 }
 
+const isPush = (args: string[]) => args[0] === "push";
+const isProbe = (args: string[]) => args[0] === "merge-tree";
+const isBaseFetch = (args: string[]) => args[0] === "fetch" && args[args.length - 1] === "main";
+
+/** No rebase anywhere, no force/lease/`+refspec` push, and nothing merges into a ref:
+ * the only merge is merge-tree's in-object-store probe. */
 function assertNoForceOrRebase(calls: string[][]): void {
+  assert.ok(calls.some(isProbe), "the recorder saw the probe");
   for (const args of calls) {
-    assert.equal(args[0], "merge-tree", `the probe only ever runs merge-tree, got: git ${args.join(" ")}`);
-    assert.ok(!args.some((a) => /^--force|^-f$|rebase/.test(a)), `no force/rebase: git ${args.join(" ")}`);
+    const cmd = `git ${args.join(" ")}`;
+    assert.ok(!args.includes("rebase"), `no rebase: ${cmd}`);
+    assert.notEqual(args[0], "merge", `no merge into the branch: ${cmd}`);
+    if (isPush(args)) {
+      assert.ok(!args.some((a) => /^--force|^-f$|^\+/.test(a)), `no force push: ${cmd}`);
+    }
   }
 }
 
-test("NOT-355: a branch whose base advanced with a conflicting change is not published; one repair round names the base and files, and its resolution publishes normally", async () => {
+/** Index of the first command matching `pred`, or -1. */
+const firstIndex = (calls: string[][], pred: (args: string[]) => boolean) => calls.findIndex(pred);
+
+test("NOT-355: a branch whose base advanced with a conflicting change is not published; one repair round names the base and files, and its resolution publishes normally", async (t) => {
   const issueId = await makeIssue();
   const branch = issueBranchName(issueId);
   const file = `probe-${issueId.slice(0, 8)}.txt`;
@@ -3045,16 +3053,17 @@ test("NOT-355: a branch whose base advanced with a conflicting change is not pub
     }
     return { exitCode: 0, transcript: "Implementation conclusion: done.", logPath: "/dev/null", timedOut: false };
   };
-  const probe = recordingProbeExec();
+  const gitCalls = recordGitCommands(t);
   const { github, calls } = recordingGithub(fakeGithub());
-  registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github, probeGitExec: probe.exec })
-  );
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github }));
   startWorkflow(issueId);
   await pump(1);
 
   // Round 1: conflict found locally — nothing pushed, no PR created.
   assert.equal(calls.includes("createDraftPr"), false, "createDraftPr must not run before the repair round");
+  assert.equal(gitCalls.filter(isPush).length, 0, "no push command was issued for the conflicting branch");
+  assert.ok(firstIndex(gitCalls, isBaseFetch) < firstIndex(gitCalls, isProbe), "the probe runs after a fresh base fetch");
+  const round1Calls = gitCalls.length;
   assert.equal(git(repo, "ls-remote", "origin", `refs/heads/${branch}`), "", "the conflicting branch was never pushed");
   assert.deepEqual(
     probeEvents(issueId).map((p) => [p.result, p.files]),
@@ -3083,12 +3092,15 @@ test("NOT-355: a branch whose base advanced with a conflicting change is not pub
   assert.ok(published.includes("merge main: resolve conflict"));
   assert.equal(calls.filter((c) => c === "createDraftPr").length, 1);
   assert.deepEqual(probeEvents(issueId).map((p) => p.result), ["conflict", "clean"]);
-  assert.equal(probe.calls.length, 2);
-  assertNoForceOrRebase(probe.calls);
+  assert.equal(gitCalls.filter(isProbe).length, 2);
+  const round2 = gitCalls.slice(round1Calls);
+  assert.ok(firstIndex(round2, isProbe) < firstIndex(round2, isPush), "the resolved branch is probed before its push");
+  assert.equal(round2.filter(isPush).length, 1);
+  assertNoForceOrRebase(gitCalls);
   assert.equal(listWorkflowEventsForIssue(issueId).filter((e) => e.type === "auto_merge.conflict_repair_queued").length, 1);
 });
 
-test("NOT-355: a repair round that still conflicts escalates once with the file list and queues no further round", async () => {
+test("NOT-355: a repair round that still conflicts escalates once with the file list and queues no further round", async (t) => {
   const issueId = await makeIssue();
   const branch = issueBranchName(issueId);
   const file = `probe-${issueId.slice(0, 8)}.txt`;
@@ -3104,11 +3116,9 @@ test("NOT-355: a repair round that still conflicts escalates once with the file 
     }
     return { exitCode: 0, transcript: "Implementation conclusion: done.", logPath: "/dev/null", timedOut: false };
   };
-  const probe = recordingProbeExec();
+  const gitCalls = recordGitCommands(t);
   const { github, calls } = recordingGithub(fakeGithub());
-  registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github, probeGitExec: probe.exec })
-  );
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github }));
   startWorkflow(issueId);
   await pump(1);
   assert.equal(getIssue(issueId)!.status, "developing");
@@ -3131,14 +3141,15 @@ test("NOT-355: a repair round that still conflicts escalates once with the file 
   assert.equal(calls.includes("createDraftPr"), false, "never published");
   assert.equal(git(repo, "ls-remote", "origin", `refs/heads/${branch}`), "", "never pushed");
   assert.deepEqual(probeEvents(issueId).map((p) => p.result), ["conflict", "conflict"]);
-  assertNoForceOrRebase(probe.calls);
+  assert.equal(gitCalls.filter(isPush).length, 0, "no push command in either round");
+  assertNoForceOrRebase(gitCalls);
 
   await pump(1);
   assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 1, "no repeat escalation");
   assert.equal(n, 2, "no third round");
 });
 
-test("NOT-355: a base that advanced without conflict probes clean and publishes exactly as before — no merge commit", async () => {
+test("NOT-355: a base that advanced without conflict probes clean and publishes exactly as before — no merge commit", async (t) => {
   const issueId = await makeIssue();
   const branch = issueBranchName(issueId);
   const tag = issueId.slice(0, 8);
@@ -3151,18 +3162,19 @@ test("NOT-355: a base that advanced without conflict probes clean and publishes 
     advanceRemoteMain(`base-${tag}.txt`, "unrelated base change\n");
     return { exitCode: 0, transcript: "Implementation conclusion: done.", logPath: "/dev/null", timedOut: false };
   };
-  const probe = recordingProbeExec();
+  const gitCalls = recordGitCommands(t);
   const { github, calls } = recordingGithub(fakeGithub());
-  registerEffectHandler("developer", (ctx) =>
-    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github, probeGitExec: probe.exec })
-  );
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github }));
   startWorkflow(issueId);
   await pump(1);
 
   assert.equal(getIssue(issueId)!.status, "reviewing");
   assert.deepEqual(probeEvents(issueId).map((p) => p.result), ["clean"]);
-  assert.equal(probe.calls.length, 1);
-  assertNoForceOrRebase(probe.calls);
+  assert.equal(gitCalls.filter(isProbe).length, 1);
+  assertNoForceOrRebase(gitCalls);
+  // Git: one plain push of HEAD after the probe — the same command as before the probe existed.
+  assert.deepEqual(gitCalls.filter(isPush), [["push", "-u", "origin", `HEAD:refs/heads/${branch}`]]);
+  assert.ok(firstIndex(gitCalls, isProbe) < firstIndex(gitCalls, isPush));
   // Push: exactly the developer's commit, on top of the base it was cut from.
   const pushed = git(repo, "ls-remote", "origin", `refs/heads/${branch}`).split(/\s+/)[0];
   assert.equal(pushed, localHead, "the pushed head is the developer's commit — no merge, no rebase");
@@ -3174,7 +3186,7 @@ test("NOT-355: a base that advanced without conflict probes clean and publishes 
   assert.ok(events.indexOf("base.probe") < events.indexOf("branch.pushed"), "the probe runs before the push");
 });
 
-test("NOT-355: a git without merge-tree --write-tree skips the probe, records skipped, and publishes", async () => {
+test("NOT-355: a git without merge-tree --write-tree skips the probe, records skipped, and publishes", async (t) => {
   const issueId = await makeIssue();
   const probeCalls: string[][] = [];
   const oldGit: NonNullable<Parameters<typeof runDeveloperEffect>[1]>["probeGitExec"] = async (args) => {
@@ -3185,6 +3197,7 @@ test("NOT-355: a git without merge-tree --write-tree skips the probe, records sk
       stderr: "error: unknown option `write-tree'\nusage: git merge-tree <base-tree> <branch1> <branch2>",
     });
   };
+  const gitCalls = recordGitCommands(t);
   const { github, calls } = recordingGithub(fakeGithub());
   registerEffectHandler("developer", (ctx) =>
     runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github, probeGitExec: oldGit })
@@ -3199,4 +3212,92 @@ test("NOT-355: a git without merge-tree --write-tree skips the probe, records sk
   assert.equal(probes[0]!.result, "skipped");
   assert.match(String(probes[0]!.reason), /not supported/);
   assert.equal(calls.filter((c) => c === "createDraftPr").length, 1);
+  assert.equal(gitCalls.filter(isPush).length, 1);
+  for (const args of gitCalls) {
+    assert.ok(!args.includes("rebase") && args[0] !== "merge", `no rebase/merge: git ${args.join(" ")}`);
+    if (isPush(args)) assert.ok(!args.some((a) => /^--force|^-f$|^\+/.test(a)), `no force push: git ${args.join(" ")}`);
+  }
+});
+
+test("NOT-355: any other probe failure blocks publication and escalates with the commits kept — never fails open", async (t) => {
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  const brokenGit: NonNullable<Parameters<typeof runDeveloperEffect>[1]>["probeGitExec"] = async () => {
+    throw Object.assign(new Error("git merge-tree failed"), {
+      code: 128,
+      stdout: "",
+      stderr: "fatal: unable to read tree 0123abcd",
+    });
+  };
+  const gitCalls = recordGitCommands(t);
+  const { github, calls } = recordingGithub(fakeGithub());
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github, probeGitExec: brokenGit })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  assert.equal(calls.includes("createDraftPr"), false, "never published");
+  assert.equal(gitCalls.filter(isPush).length, 0, "never pushed");
+  assert.equal(git(repo, "ls-remote", "origin", `refs/heads/${branch}`), "");
+  const probes = probeEvents(issueId);
+  assert.deepEqual(probes.map((p) => p.result), ["failed"]);
+  assert.match(String(probes[0]!.reason), /unable to read tree/);
+  const open = listHumanActionsForIssue(issueId).filter((a) => a.status === "open");
+  assert.equal(open.length, 1);
+  assert.match(open[0]!.reason, /probe against main failed/);
+  assert.match(open[0]!.reason, /was not published/);
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0, "no repair round");
+  const session = listWorkerSessionsForIssue(issueId).find((x) => x.role === "developer")!;
+  const kept = roleWorktreePath(repo, session.id, "developer");
+  assert.ok(fs.existsSync(kept), "the worktree holding the unpublished commit is preserved");
+  assert.equal(git(kept, "log", "-1", "--format=%s"), "implement");
+});
+
+test("NOT-355: a failed base fetch defers publication (no push, no PR); the publish-only rerun probes and publishes without re-running the agent", async (t) => {
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  let spawns = 0;
+  const spawn: SpawnFn = async (input) => {
+    spawns++;
+    const result = await commitingSpawn(input);
+    git(repo, "remote", "set-url", "origin", path.join(remote, "does-not-exist.git")); // network drops
+    return result;
+  };
+  const gitCalls = recordGitCommands(t);
+  t.after(() => git(repo, "remote", "set-url", "origin", remote));
+  const { github, calls } = recordingGithub(fakeGithub());
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.equal(calls.includes("createDraftPr"), false, "nothing is published from a stale base");
+  assert.equal(gitCalls.filter(isPush).length, 0);
+  assert.equal(gitCalls.filter(isProbe).length, 0, "no probe against an unconfirmed base");
+  assert.deepEqual(probeEvents(issueId).map((p) => p.result), ["deferred"]);
+  const issue = getIssue(issueId)!;
+  assert.notEqual(issue.status, "needs_human");
+  assert.match(issue.currentIntent ?? "", /Waiting for network/);
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1, "the item waits on the network");
+  assert.ok(Date.parse(pending[0]!.availableAt) > Date.now(), "behind the base-fetch backoff");
+  const payload = JSON.parse(pending[0]!.payloadJson ?? "{}") as Record<string, unknown>;
+  assert.equal(payload.publishOnly, true);
+  assert.equal(payload.branch, branch);
+  assert.ok(await branchExists(repo, branch), "the session's commit is kept on the local branch");
+  const deferred = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "worker.deferred");
+  assert.equal(JSON.parse(deferred[deferred.length - 1]!.payloadJson ?? "{}").outcome, "base_fetch_failed");
+
+  // Network back: the publish-only rerun fetches, probes, then publishes.
+  git(repo, "remote", "set-url", "origin", remote);
+  getDb().prepare(`UPDATE work_items SET available_at = ? WHERE id = ?`).run(new Date(0).toISOString(), pending[0]!.id);
+  await pump(1);
+
+  assert.equal(spawns, 1, "the agent is not re-run");
+  assert.equal(getIssue(issueId)!.status, "reviewing");
+  assert.deepEqual(probeEvents(issueId).map((p) => p.result), ["deferred", "clean"]);
+  assert.ok(firstIndex(gitCalls, isProbe) < firstIndex(gitCalls, isPush), "probed before the push");
+  assert.equal(calls.filter((c) => c === "createDraftPr").length, 1);
+  assertNoForceOrRebase(gitCalls);
 });

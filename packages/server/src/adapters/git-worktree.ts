@@ -21,7 +21,30 @@ import { withRepoLock } from "../runners/process-registry.js";
  * worker cwd and `bind_workspace` to that path can succeed. */
 export const WORKTREES_DIR_NAME = ".agent-dealer-worktrees";
 
-const run = promisify(execFile);
+const execFileAsync = promisify(execFile);
+
+/** Sees every `git` command this adapter runs, before it runs (test seam — NOT-355
+ * asserts on the whole pre-publish sequence: no force push, no rebase). */
+export type GitCommandObserver = (args: readonly string[], cwd: string) => void;
+
+const gitCommandObservers = new Set<GitCommandObserver>();
+
+/** Registers `observer` for every adapter `git` invocation; returns the unsubscribe. */
+export function observeGitCommands(observer: GitCommandObserver): () => void {
+  gitCommandObservers.add(observer);
+  return () => {
+    gitCommandObservers.delete(observer);
+  };
+}
+
+function run(
+  file: "git",
+  args: string[],
+  opts: { cwd: string; timeout?: number }
+): Promise<{ stdout: string; stderr: string }> {
+  for (const observer of gitCommandObservers) observer(args, opts.cwd);
+  return execFileAsync(file, args, { ...opts, encoding: "utf8" });
+}
 
 async function git(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   try {
@@ -748,37 +771,41 @@ export async function commitsAhead(opts: { worktreePath: string; baseRef: string
 }
 
 /**
- * NOT-355: what merging `baseRef` into the worktree's HEAD would do, without touching
- * the working tree or any ref. `skipped` means the probe could not answer (a git
- * without `merge-tree --write-tree`, or any other tool failure) — callers fail open.
+ * NOT-355: what merging `baseRef` into `headRef` would do, without touching the
+ * working tree or any ref. `skipped` is only ever an installed git without
+ * `merge-tree --write-tree` (callers fail open on that alone); `error` is any other
+ * failure — the probe established nothing, so callers must not publish on it.
  */
 export type BaseConflictProbe =
   | { state: "clean" }
   | { state: "conflict"; files: string[] }
-  | { state: "skipped"; reason: string };
+  | { state: "skipped"; reason: string }
+  | { state: "error"; reason: string };
 
 /** The probe's `git` shell-out, as a seam: rejects with `{ code, stdout, stderr }`
- * on a nonzero exit, like `promisify(execFile)`. Tests inject a recorder/fake. */
+ * on a nonzero exit, like `promisify(execFile)`. Tests inject a fake old git. */
 export type ProbeGitExec = (args: string[], opts: { cwd: string }) => Promise<{ stdout: string; stderr: string }>;
 
-const defaultProbeGitExec: ProbeGitExec = (args, opts) => run("git", args, { cwd: opts.cwd, encoding: "utf8" });
+const defaultProbeGitExec: ProbeGitExec = (args, opts) => run("git", args, { cwd: opts.cwd });
 
-/** git < 2.38 rejects `--write-tree` (exit 129 with a usage dump). */
+/** git < 2.38 rejects `--write-tree` with exit 129 and the old usage dump. */
 const MERGE_TREE_UNSUPPORTED = /unknown option|usage: git merge-tree/i;
 
 /**
- * NOT-355: `git merge-tree --write-tree --name-only --no-messages <baseRef> HEAD` —
- * a pure in-object-store merge. Exit 0 is clean; exit 1 is a conflict whose stdout
+ * NOT-355: `git merge-tree --write-tree --name-only --no-messages <baseRef> <headRef>`
+ * — a pure in-object-store merge. Exit 0 is clean; exit 1 is a conflict whose stdout
  * is the (partial) tree OID followed by one conflicted path per line. Never a merge
  * commit, never a rebase, never a working-tree change.
  */
 export async function probeBaseConflict(opts: {
+  /** Worktree (with `headRef` HEAD) or the repo itself (with `headRef` a branch). */
   worktreePath: string;
   baseRef: string;
+  headRef?: string;
   exec?: ProbeGitExec;
 }): Promise<BaseConflictProbe> {
   const exec = opts.exec ?? defaultProbeGitExec;
-  const args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", opts.baseRef, "HEAD"];
+  const args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", opts.baseRef, opts.headRef ?? "HEAD"];
   try {
     await exec(args, { cwd: opts.worktreePath });
     return { state: "clean" };
@@ -797,11 +824,15 @@ export async function probeBaseConflict(opts: {
         ),
       ];
       if (files.length > 0) return { state: "conflict", files };
+      return {
+        state: "error",
+        reason: `git merge-tree exited 1 without naming a conflicted path${stderr.trim() ? `: ${stderr.trim()}` : ""}`,
+      };
     }
-    if (e.code === 129 || MERGE_TREE_UNSUPPORTED.test(stderr)) {
+    if (e.code === 129 && MERGE_TREE_UNSUPPORTED.test(stderr)) {
       return { state: "skipped", reason: "git merge-tree --write-tree is not supported by the installed git" };
     }
-    return { state: "skipped", reason: `git merge-tree failed: ${stderr.trim() || e.message || String(err)}` };
+    return { state: "error", reason: `git merge-tree failed: ${stderr.trim() || e.message || String(err)}` };
   }
 }
 

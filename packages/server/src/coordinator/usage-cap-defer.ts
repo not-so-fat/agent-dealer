@@ -43,6 +43,8 @@ export interface BaseFetchFailedOutcome {
   kind: "base_fetch_failed";
   reason: string;
   evidence?: unknown;
+  /** NOT-355: set by the pre-publish probe — the branch already carries the work. */
+  publishBranch?: string;
 }
 
 /** NOT-156: active-role health failed before spawn — wait and retry, do not burn infra. */
@@ -332,6 +334,9 @@ export function deferLeasedWorkItemForBaseFetch(
       error: { kind: "base_fetch_failed", until, reason: failure.reason, evidence: failure.evidence },
       payloadJson: JSON.stringify({
         ...payload,
+        // NOT-355: the session already committed; the next run publishes (and re-probes)
+        // that branch instead of spawning a fresh agent to redo the work.
+        ...(failure.publishBranch ? { publishOnly: true, branch: failure.publishBranch } : {}),
         baseFetchUnavailableSince: firstDeferredAt,
         baseFetchDeferrals: priorDeferrals + 1,
       }),

@@ -106,8 +106,10 @@ export type DeveloperOutcome =
   /** NOT-197: the pre-branch `git fetch origin <base>` failed or timed out — nothing
    * spawned, nothing attempted, no branch created. Deferred like an unreachable deck
    * (no infra attempt, exponential backoff), never routed as a worker failure and never
-   * retried against the stale local base. `until` is computed by the deferral. */
-  | { kind: "base_fetch_failed"; reason: string }
+   * retried against the stale local base. `until` is computed by the deferral.
+   * NOT-355: `publishBranch` — the fetch was the pre-publish probe's, after the session
+   * committed; the deferral re-queues that branch publish-only (no agent rerun). */
+  | { kind: "base_fetch_failed"; reason: string; publishBranch?: string }
   /** Optional progress fields — see `timed_out` (NOT-147). */
   | {
       kind: "session_failed";
