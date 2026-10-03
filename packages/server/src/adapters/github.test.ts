@@ -152,6 +152,24 @@ test("viewPr: a retry can find the already-created PR by explicit branch even wi
   assert.equal(view?.number, 42);
 });
 
+test("NOT-354: prMergeableState reads `mergeable` by PR number; unknown values and failures are UNKNOWN", async () => {
+  const conflicting = queuedExec([{ stdout: JSON.stringify({ mergeable: "CONFLICTING" }) }]);
+  assert.equal(await createGithubAdapter(conflicting.exec).prMergeableState!({ cwd: "/repo", number: 42 }), "CONFLICTING");
+  assert.deepEqual(conflicting.calls[0], ["pr", "view", "42", "--json", "mergeable"]);
+
+  const mergeable = queuedExec([{ stdout: JSON.stringify({ mergeable: "MERGEABLE" }) }]);
+  assert.equal(await createGithubAdapter(mergeable.exec).prMergeableState!({ cwd: "/repo", number: 42 }), "MERGEABLE");
+
+  const unknown = queuedExec([{ stdout: JSON.stringify({ mergeable: "UNKNOWN" }) }]);
+  assert.equal(await createGithubAdapter(unknown.exec).prMergeableState!({ cwd: "/repo", number: 42 }), "UNKNOWN");
+
+  const odd = queuedExec([{ stdout: JSON.stringify({ mergeable: "something-new" }) }]);
+  assert.equal(await createGithubAdapter(odd.exec).prMergeableState!({ cwd: "/repo", number: 42 }), "UNKNOWN");
+
+  const failing = queuedExec([{ error: "HTTP 502" }]);
+  assert.equal(await createGithubAdapter(failing.exec).prMergeableState!({ cwd: "/repo", number: 42 }), "UNKNOWN");
+});
+
 test("checksSnapshot looks up the PR's check rollup by explicit selector (number preferred), never a bare `gh pr view`", async () => {
   const success = { stdout: JSON.stringify({ statusCheckRollup: [{ conclusion: "success" }] }) };
 

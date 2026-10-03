@@ -76,7 +76,12 @@ export interface ChecksPendingOutcome {
 }
 
 /** Reason values carried on the `checks.completed` milestone when CI was not proven. */
-export type ChecksCompletedWaitReason = "pending_ceiling" | "none_with_workflow" | "none_no_workflow";
+export type ChecksCompletedWaitReason =
+  | "pending_ceiling"
+  | "none_with_workflow"
+  | "none_no_workflow"
+  /** NOT-354: no checks because the PR conflicts with its base — never a queued wait. */
+  | "conflicting";
 
 const roleFor: Record<WorkItemKind, "developer" | "reviewer"> = {
   developer: "developer",

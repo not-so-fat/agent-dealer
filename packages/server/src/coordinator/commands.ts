@@ -93,6 +93,7 @@ import {
   type PushDivergenceEvidence,
 } from "./human-resolution.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
+import { queueConflictRepairRound } from "./merge-conflict-sync.js";
 import {
   OPERATOR_VERIFICATION_ARTIFACT_KIND,
   OPERATOR_VERIFICATION_RESPONSE_OPTIONS,
@@ -481,6 +482,12 @@ export async function applyCompletion(
   if (outcome.kind === "checks_pending") {
     return applyChecksPendingCompletion(workItemId, leaseToken, outcome);
   }
+  // NOT-354: the PR conflicts with its base, so CI will never start. The effect
+  // already ran the base sync; this re-polls the synced head, queues the one
+  // conflict-repair round, or escalates once — never a "Waiting for CI" deferral.
+  if (outcome.kind === "checks_conflicting") {
+    return applyChecksConflictCompletion(workItemId, leaseToken, outcome);
+  }
 
   const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
@@ -619,6 +626,165 @@ function applyChecksPendingCompletion(
     (item, issue, instance) => deferLeasedWorkItemForChecksPending(item, leaseToken, pending, issue, instance),
     (issue, instance, item) => routeChecksWaitEscalation(issue, instance, item, pending)
   );
+}
+
+type ChecksConflictingOutcome = Extract<DeveloperOutcome, { kind: "checks_conflicting" }>;
+
+/**
+ * NOT-354: act on the base sync a conflicting PR's CI wait ran. A clean sync is a
+ * normal CI wait on the pushed head, anchored at the original wait start (the
+ * deferral keeps any persisted `checksWaitStartedAt`), so the ceiling is never
+ * reset. A textual conflict queues the one NOT-310 conflict-repair round while
+ * finishing this item; anything else escalates once.
+ */
+function applyChecksConflictCompletion(
+  workItemId: string,
+  leaseToken: string,
+  outcome: ChecksConflictingOutcome
+): ApplyResult {
+  const { sync } = outcome;
+  if (sync.result === "synced") {
+    const headSha = sync.headSha ?? outcome.headSha;
+    return applyChecksPendingCompletion(workItemId, leaseToken, {
+      kind: "checks_pending",
+      reason: `Synced ${outcome.baseBranch} into PR #${outcome.prNumber}; waiting for CI on ${headSha.slice(0, 12)} - no attempt spent`,
+      branch: outcome.branch,
+      prNumber: outcome.prNumber,
+      headSha,
+      waitStartedAt: outcome.waitStartedAt,
+    });
+  }
+  return getDb().transaction((): ApplyResult => {
+    const before = getWorkItem(workItemId);
+    if (!before) return { applied: false, reason: "not_found" };
+    if (before.status === "done" || before.status === "dead" || before.status === "cancelled") {
+      return { applied: false, reason: "already_terminal" };
+    }
+    const issue = getIssue(before.issueId);
+    if (!issue) return { applied: false, reason: "not_found" };
+    const instance = getActiveWorkflowInstance(before.issueId);
+    if (!instance || instance.id !== before.workflowInstanceId) {
+      return { applied: false, reason: "no_active_instance" };
+    }
+
+    if (sync.result === "repair") {
+      const queued = queueConflictRepairRound({
+        issueId: issue.id,
+        instanceId: instance.id,
+        baseBranch: outcome.baseBranch,
+        branch: outcome.branch,
+        files: sync.files,
+        entry: "checks_wait",
+        finish: { workItemId, leaseToken, result: outcome },
+      });
+      if (queued) {
+        const session = before.workerSessionId ? getWorkerSession(before.workerSessionId) : null;
+        appendWorkflowEvent({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          workerSessionId: before.workerSessionId,
+          type: "worker.completed",
+          actorType: "developer",
+          stage: getIssue(issue.id)!.status,
+          round: issue.currentRound,
+          payload: {
+            ...workerSessionPayload({
+              runtime: session?.runtime,
+              model: session?.model,
+              sessionId: before.workerSessionId ?? "",
+              worktreePath: session?.worktreePath,
+            }),
+            outcome: outcome.kind,
+            ...(isPublishOnlyItem(before) ? { publishOnly: true } : {}),
+          },
+        });
+        return {
+          applied: true,
+          issueStatus: getIssue(issue.id)!.status,
+          nextWorkItemId: queued.id,
+          humanActionId: null,
+          instanceCompleted: false,
+        };
+      }
+      // Lease lost, or the issue left its developer stage — a lost lease applies
+      // nothing; otherwise fall through to the single escalation.
+      if (!getWorkItem(workItemId) || getWorkItem(workItemId)!.leaseToken !== leaseToken) {
+        return { applied: false, reason: "lease_lost" };
+      }
+    }
+
+    const item = finishWorkItem(workItemId, leaseToken, { status: "done", result: outcome });
+    if (!item) return { applied: false, reason: "lease_lost" };
+    const reason =
+      sync.result === "escalate"
+        ? sync.reason
+        : `PR #${outcome.prNumber} conflicts with ${outcome.baseBranch}; the conflict-repair round could not be queued.`;
+    const evidence = sync.result === "escalate" ? sync.evidence : { checksConflict: true };
+    return routeChecksConflictEscalation(issue, instance, item, outcome, reason, evidence);
+  })();
+}
+
+/** NOT-354: the one escalation for a conflicting PR — same shape as the CI-wait
+ * ceiling escalation, naming the PR, base, and (when known) the conflicting files. */
+function routeChecksConflictEscalation(
+  issue: Issue,
+  instance: WorkflowInstance,
+  item: WorkItem,
+  outcome: ChecksConflictingOutcome,
+  reason: string,
+  evidence: Record<string, unknown>
+): ApplyResult {
+  const ev = eventEmitter(issue, instance, item.workerSessionId, "needs_human", issue.currentRound);
+  const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
+  for (const type of capEscalationEvents()) {
+    ev.emit(type, {
+      actorType: "developer",
+      payload: {
+        ...workerSessionPayload({
+          runtime: session?.runtime ?? null,
+          model: session?.model ?? null,
+          sessionId: item.workerSessionId ?? "",
+          worktreePath: session?.worktreePath,
+        }),
+        outcome: outcome.kind,
+        reason,
+        branch: outcome.branch,
+        baseBranch: outcome.baseBranch,
+        prNumber: outcome.prNumber,
+        headSha: outcome.headSha,
+      },
+    });
+  }
+  applyProjectionTransition(
+    issue,
+    { issueStatus: "needs_human", currentOwner: "human", currentIntent: reason, events: capEscalationEvents() },
+    {}
+  );
+  const action = createHumanAction({
+    issueId: issue.id,
+    workflowInstanceId: instance.id,
+    actionType: "policy_escalation",
+    reason,
+    question: questionFor("policy_escalation", reason),
+    evidence: {
+      ...evidence,
+      checksConflict: {
+        branch: outcome.branch,
+        baseBranch: outcome.baseBranch,
+        prNumber: outcome.prNumber,
+        headSha: outcome.headSha,
+      },
+    },
+    responseOptions: responseOptionsFor("policy_escalation"),
+  });
+  ev.emit("human_action.requested", { payload: { actionType: "policy_escalation", actionId: action.id } });
+  return {
+    applied: true,
+    issueStatus: "needs_human",
+    nextWorkItemId: null,
+    humanActionId: action.id,
+    instanceCompleted: false,
+  };
 }
 
 /**

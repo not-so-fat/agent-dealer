@@ -19,6 +19,7 @@ import path from "node:path";
 import { parsePhaseBudget, parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
 import type { EffectContext } from "./effect-registry.js";
 import type { DeveloperOutcome } from "./routing.js";
+import { runMergeConflictSync } from "./merge-conflict-sync.js";
 import { getTaskSnapshot } from "./commands.js";
 import { extractOperatorCriteria } from "./operator-criteria.js";
 import { buildDeveloperPrompt } from "./prompts.js";
@@ -56,7 +57,14 @@ import {
 } from "../adapters/managed-repo.js";
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, verifyWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
-import { realGithubAdapter, pollPrChecksDetailed, type GithubAdapter, type PollChecksDetail, type PrView } from "../adapters/github.js";
+import {
+  realGithubAdapter,
+  pollPrChecksDetailed,
+  type GithubAdapter,
+  type PollChecksDetail,
+  type PrMergeableState,
+  type PrView,
+} from "../adapters/github.js";
 import { checksWaitCeilingExceeded, checksWaitCeilingMs } from "./checks-wait-config.js";
 import type { ChecksCompletedWaitReason, ChecksPendingOutcome } from "./usage-cap-defer.js";
 import { museCapabilitySafetyNetAfterSession } from "../adapters/muse-capability.js";
@@ -207,6 +215,9 @@ export interface DeveloperEffectDeps {
   /** Test-only seam: fake `get_bound_deck` so a deckId-bearing profile can exercise the
    * real deck-connection path without a reachable Agent Deck. */
   deckCallTool?: DeckToolCaller;
+  /** NOT-354: test seam for the base sync a conflicting PR's CI wait runs; production
+   * uses the NOT-310 `runMergeConflictSync`. */
+  conflictSync?: typeof runMergeConflictSync;
 }
 
 const defaultDeps: DeveloperEffectDeps = { spawn: realDeveloperSpawn, github: realGithubAdapter };
@@ -419,6 +430,11 @@ function checksWaitStartedAtFromPayload(payloadJson: string | null): string | nu
  * A missing/unknown workflow answer (no adapter method, unreadable base ref) waits
  * fail-closed: sending an unverified PR to review is the outcome this exists to
  * prevent, and the wait ceiling still bounds it.
+ *
+ * NOT-354: "no checks" on a CONFLICTING PR is not a queued wait — GitHub creates no
+ * merge ref, so the workflow never starts. That case returns `conflicting` (and the
+ * `conflicting` milestone reason) so the caller runs the base sync instead of
+ * deferring. UNKNOWN mergeability is "not computed yet" and keeps today's wait.
  */
 async function resolveChecksWait(opts: {
   github: GithubAdapter;
@@ -431,7 +447,11 @@ async function resolveChecksWait(opts: {
   signal?: AbortSignal;
   payloadJson: string | null;
   pollStartedAt: string;
-}): Promise<{ pending: ChecksPendingOutcome | null; milestoneReason?: ChecksCompletedWaitReason }> {
+}): Promise<{
+  pending: ChecksPendingOutcome | null;
+  milestoneReason?: ChecksCompletedWaitReason;
+  conflicting?: { waitStartedAt: string };
+}> {
   const waitStartedAt = checksWaitStartedAtFromPayload(opts.payloadJson) ?? opts.pollStartedAt;
   const base = {
     kind: "checks_pending" as const,
@@ -451,6 +471,15 @@ async function resolveChecksWait(opts: {
     if (hasWorkflow === false) {
       return { pending: null, milestoneReason: "none_no_workflow" };
     }
+    let mergeable: PrMergeableState = "UNKNOWN";
+    try {
+      mergeable = (await opts.github.prMergeableState?.({ cwd: opts.cwd, number: opts.prNumber })) ?? "UNKNOWN";
+    } catch {
+      mergeable = "UNKNOWN";
+    }
+    if (mergeable === "CONFLICTING") {
+      return { pending: null, milestoneReason: "conflicting", conflicting: { waitStartedAt } };
+    }
     return {
       pending: { ...base, reason: "Waiting for CI (queued) - no attempt spent" },
       milestoneReason: "none_with_workflow",
@@ -464,6 +493,67 @@ async function resolveChecksWait(opts: {
     };
   }
   return { pending: null };
+}
+
+/**
+ * NOT-354: a conflicting PR's CI wait runs the NOT-310 base sync (`checks_wait`
+ * entry: plain push, never force/rebase, one sync + one repair round per episode)
+ * from the effect, which still holds the lease. applyCompletion acts on the
+ * result. A refusal (`skipped`) becomes the single escalation, never a wait.
+ */
+async function checksConflictOutcome(
+  ctx: EffectContext,
+  deps: DeveloperEffectDeps,
+  opts: { branch: string; baseBranch: string; prNumber: number; headSha: string; waitStartedAt: string }
+): Promise<DeveloperOutcome> {
+  const sync = deps.conflictSync ?? runMergeConflictSync;
+  const conflictReason =
+    `PR #${opts.prNumber} conflicts with ${opts.baseBranch} (mergeable: CONFLICTING), ` +
+    `so its CI cannot start.`;
+  const base = {
+    kind: "checks_conflicting" as const,
+    branch: opts.branch,
+    baseBranch: opts.baseBranch,
+    prNumber: opts.prNumber,
+    headSha: opts.headSha,
+    waitStartedAt: opts.waitStartedAt,
+  };
+  let result: Awaited<ReturnType<typeof runMergeConflictSync>>;
+  try {
+    result = await sync({
+      issueId: ctx.issue.id,
+      instanceId: ctx.instance.id,
+      repo: ctx.issue.repo,
+      branch: opts.branch,
+      baseBranch: opts.baseBranch,
+      prNumber: opts.prNumber,
+      mergeReason: conflictReason,
+      entry: "checks_wait",
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    result = { outcome: "skipped", reason: `base sync errored: ${detail}` };
+  }
+  switch (result.outcome) {
+    case "synced":
+      return { ...base, sync: { result: "synced", headSha: result.headSha } };
+    case "repair_needed":
+      return { ...base, sync: { result: "repair", files: result.files } };
+    case "escalate":
+      return { ...base, sync: { result: "escalate", reason: result.reason, evidence: result.evidence } };
+    default:
+      // skipped (or a merge-only outcome that cannot occur on this entry).
+      return {
+        ...base,
+        sync: {
+          result: "escalate",
+          reason: `${conflictReason} Dealer could not sync ${opts.baseBranch}: ${
+            result.outcome === "skipped" ? result.reason : result.outcome
+          }`,
+          evidence: { checksConflict: true },
+        },
+      };
+  }
 }
 
 /**
@@ -791,6 +881,16 @@ async function runPublishOnlyHandoff(
       author: "system",
       content: { snapshot: checks, prNumber: prView.number, headSha: prView.headRefOid },
     });
+    // NOT-354: a conflicting PR never gets checks — sync the base instead of waiting.
+    if (wait.conflicting) {
+      return checksConflictOutcome(ctx, deps, {
+        branch: branchName,
+        baseBranch: prView.baseRefName,
+        prNumber: prView.number,
+        headSha: prView.headRefOid,
+        waitStartedAt: wait.conflicting.waitStartedAt,
+      });
+    }
     // NOT-311: still-waiting CI defers with backoff (no attempt spent) instead of
     // timing out the session. An aborted wait keeps today's `timed_out`.
     if (wait.pending) return wait.pending;
@@ -1967,6 +2067,18 @@ export async function runDeveloperEffect(
       author: "system",
       content: { snapshot: checks, prNumber: prView.number, headSha: prView.headRefOid },
     });
+    // NOT-354: a conflicting PR never gets checks — sync the base instead of waiting.
+    // The worktree goes first: the sync refuses a branch still checked out elsewhere.
+    if (wait.conflicting) {
+      await bestEffortRemove(repoPath, worktreePath);
+      return checksConflictOutcome(ctx, deps, {
+        branch: branchName,
+        baseBranch: prView.baseRefName,
+        prNumber: prView.number,
+        headSha: prView.headRefOid,
+        waitStartedAt: wait.conflicting.waitStartedAt,
+      });
+    }
     // NOT-311: still-waiting CI defers with backoff (no attempt spent) instead of
     // timing out the session. An aborted wait keeps today's `timed_out`.
     if (wait.pending) {

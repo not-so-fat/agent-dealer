@@ -16,6 +16,16 @@
 // dismiss the approval the merge depended on in repos with dismiss-stale-
 // approvals; that retry failure then takes this same direct-escalation path.
 //
+// NOT-354 adds a second entry point, `checks_wait`: a developer PR that conflicts
+// with its base while Dealer waits for CI never gets checks (GitHub creates no
+// merge ref), so the developer effect runs this same sync instead of deferring
+// "Waiting for CI (queued)" forever. That entry stops at the push (no checks
+// poll, no merge retry — the deferred CI wait re-polls the pushed head) and does
+// not queue the repair round itself: the effect still holds its work item's
+// lease, so applyCompletion queues it through {@link queueConflictRepairRound}
+// while finishing that item. One sync per episode there too — a later conflict
+// after a checks-wait sync earns the repair round, never a second sync.
+//
 // Bound: at most one automatic sync + one conflict-repair round per
 // merge-failure episode. The episode resets on any resolved human action (a
 // retry_merge / repair click starts a fresh episode); the repair-spent marker is
@@ -34,7 +44,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { Issue } from "@agent-dealer/shared";
+import type { Issue, IssueStatus } from "@agent-dealer/shared";
 import type { MergePr } from "./auto-merge.js";
 import type { ConflictRepairDirective } from "./prompts.js";
 import {
@@ -46,6 +56,7 @@ import { getDb } from "../db/index.js";
 import { getIssue, incrementIssueRound, transitionIssue } from "../repository/issues.js";
 import {
   enqueueWorkItem,
+  finishWorkItem,
   listWorkItemsForIssue,
 } from "../repository/work-items.js";
 import {
@@ -218,7 +229,15 @@ export type ConflictSyncOutcome =
   /** Escalate with this reason/evidence (repair spent, or sync infra failed). */
   | { outcome: "escalate"; reason: string; evidence: Record<string, unknown> }
   /** The sync was not applicable — the caller escalates exactly as today. */
-  | { outcome: "skipped"; reason: string };
+  | { outcome: "skipped"; reason: string }
+  /** NOT-354 `checks_wait` only: the base merged cleanly and was pushed. */
+  | { outcome: "synced"; headSha: string | null }
+  /** NOT-354 `checks_wait` only: a conflict-repair round is due — the caller queues
+   * it via {@link queueConflictRepairRound} while finishing its leased item. */
+  | { outcome: "repair_needed"; files: string[] };
+
+/** NOT-354: which path asked for the sync — see the module doc. */
+export type ConflictSyncEntry = "merge" | "checks_wait";
 
 function parseRepairFiles(payloadJson: string | null): string[] {
   if (!payloadJson) return [];
@@ -263,6 +282,32 @@ export function conflictRepairSpent(
 }
 
 /**
+ * NOT-354: whether a checks-wait sync already pushed the base this episode (same
+ * episode rule as {@link conflictRepairSpent}). Merge-entry syncs never count —
+ * that path retries the merge in the same call, so it cannot sync twice.
+ */
+export function checksWaitSyncSpent(issueId: string, instanceId: string): boolean {
+  const events = listWorkflowEventsForIssue(issueId).filter(
+    (e) => e.workflowInstanceId === instanceId
+  );
+  let lastSync = -1;
+  let lastResolved = -1;
+  events.forEach((e, index) => {
+    if (e.type === "auto_merge.conflict_sync") {
+      try {
+        const payload = JSON.parse(e.payloadJson ?? "{}") as { outcome?: unknown; entry?: unknown };
+        if (payload.entry === "checks_wait" && payload.outcome === "synced") lastSync = index;
+      } catch {
+        // unreadable audit payload cannot mark a sync
+      }
+    } else if (e.type === "human_action.resolved") {
+      lastResolved = index;
+    }
+  });
+  return lastSync > lastResolved;
+}
+
+/**
  * Mirrors commands.ts's `queuedProfileSnapshot` (kept local: auto-merge →
  * commands would close an import cycle — commands already imports auto-merge).
  */
@@ -282,23 +327,31 @@ function conflictRepairWorkItemKey(issueId: string, instanceId: string, round: n
 }
 
 function auditSync(
-  input: { issueId: string; instanceId: string; branch: string; baseBranch: string },
+  input: {
+    issueId: string;
+    instanceId: string;
+    branch: string;
+    baseBranch: string;
+    entry: ConflictSyncEntry;
+  },
   outcome: string,
   detail?: Record<string, unknown>
 ): void {
   try {
+    const issue = getIssue(input.issueId);
     appendWorkflowEvent({
       issueId: input.issueId,
       workflowInstanceId: input.instanceId,
       workerSessionId: null,
       type: "auto_merge.conflict_sync",
       actorType: "system",
-      stage: "final_review",
-      round: getIssue(input.issueId)?.currentRound ?? null,
+      stage: input.entry === "merge" ? "final_review" : (issue?.status ?? "developing"),
+      round: issue?.currentRound ?? null,
       payload: {
         outcome,
         branch: input.branch,
         baseBranch: input.baseBranch,
+        ...(input.entry === "merge" ? {} : { entry: input.entry }),
         ...(detail ?? {}),
       },
     });
@@ -319,22 +372,42 @@ function formatFileList(files: string[]): string {
  * with the conflict directive on the work-item payload for exactly this round.
  * Null when the issue left the merge park first (a racer won) — the caller
  * then falls back to today's escalation, which no-ops off-park itself.
+ *
+ * NOT-354 `checks_wait`: the issue is still in its developer stage (developing
+ * or repairing, which it keeps), and `finish` names the leased developer item
+ * the CI wait ran in — it is CAS-finished in the same transaction, so a lost
+ * lease queues nothing (null).
  */
-function queueConflictRepairRound(input: {
+export function queueConflictRepairRound(input: {
   issueId: string;
   instanceId: string;
   baseBranch: string;
   branch: string;
   files: string[];
+  entry?: ConflictSyncEntry;
+  finish?: { workItemId: string; leaseToken: string; result: unknown };
 }): { id: string; round: number } | null {
   return getDb().transaction(() => {
     const current = getIssue(input.issueId);
-    if (!current || current.status !== "final_review") return null;
+    if (!current) return null;
+    const fromStatuses: IssueStatus[] =
+      input.entry === "checks_wait" ? ["developing", "repairing"] : ["final_review"];
+    if (!fromStatuses.includes(current.status)) return null;
     const active = getActiveWorkflowInstance(input.issueId);
     if (!active || active.id !== input.instanceId) return null;
+    if (
+      input.finish &&
+      !finishWorkItem(input.finish.workItemId, input.finish.leaseToken, {
+        status: "done",
+        result: input.finish.result,
+      })
+    ) {
+      return null;
+    }
+    const toStatus: IssueStatus = input.entry === "checks_wait" ? current.status : "repairing";
     const round = current.currentRound + 1;
     incrementIssueRound(input.issueId);
-    transitionIssue(input.issueId, "repairing", {
+    transitionIssue(input.issueId, toStatus, {
       currentOwner: "developer",
       currentIntent: `Resolving merge conflict with ${input.baseBranch} (round ${round})`,
     });
@@ -344,7 +417,7 @@ function queueConflictRepairRound(input: {
       workerSessionId: null,
       type: "repair.started",
       actorType: "system",
-      stage: "repairing",
+      stage: toStatus,
       round,
     });
     const directive: ConflictRepairDirective = {
@@ -369,7 +442,7 @@ function queueConflictRepairRound(input: {
       workerSessionId: null,
       type: "auto_merge.conflict_repair_queued",
       actorType: "system",
-      stage: "repairing",
+      stage: toStatus,
       round,
       payload: {
         baseBranch: input.baseBranch,
@@ -454,6 +527,10 @@ async function cleanupSyncCheckout(repoPath: string, syncPath: string): Promise<
  * Runs the NOT-310 self-resolution for one not-mergeable failure. See the
  * module doc for the bound, the safety invariant, and the fail-closed shape:
  * every refusal returns `skipped` so the caller escalates exactly as today.
+ *
+ * `entry` defaults to the merge path; `checks_wait` (NOT-354) needs no
+ * `mergePr`, and its `mergeReason` is the whole escalation lead-in (there is no
+ * "Auto-merge failed" to report before review).
  */
 export async function runMergeConflictSync(opts: {
   issueId: string;
@@ -463,14 +540,24 @@ export async function runMergeConflictSync(opts: {
   baseBranch: string;
   prNumber: number;
   mergeReason: string;
-  mergePr: MergePr;
+  mergePr?: MergePr;
+  entry?: ConflictSyncEntry;
 }): Promise<ConflictSyncOutcome> {
+  const entry: ConflictSyncEntry = opts.entry ?? "merge";
+  const checksWait = entry === "checks_wait";
   const auditInput = {
     issueId: opts.issueId,
     instanceId: opts.instanceId,
     branch: opts.branch,
     baseBranch: opts.baseBranch,
+    entry,
   };
+  const lead = checksWait ? opts.mergeReason : `Auto-merge failed: ${opts.mergeReason}`;
+  // A merge failure's escalation offers retry_merge; a pre-review conflict has
+  // nothing to retry, so it keeps the default policy_escalation choices.
+  const escalationEvidence: Record<string, unknown> = checksWait
+    ? { checksConflict: true }
+    : { [MERGE_FAILURE_EVIDENCE_KEY]: true };
   const skip = (reason: string): ConflictSyncOutcome => {
     auditSync(auditInput, "skipped", { reason });
     return { outcome: "skipped", reason };
@@ -479,8 +566,8 @@ export async function runMergeConflictSync(opts: {
     auditSync(auditInput, "failed", { detail });
     return {
       outcome: "escalate",
-      reason: `Auto-merge failed: ${opts.mergeReason} (base sync ${opts.baseBranch}: ${detail})`,
-      evidence: { [MERGE_FAILURE_EVIDENCE_KEY]: true },
+      reason: `${lead} (base sync ${opts.baseBranch}: ${detail})`,
+      evidence: escalationEvidence,
     };
   };
 
@@ -496,15 +583,24 @@ export async function runMergeConflictSync(opts: {
     return {
       outcome: "escalate",
       reason:
-        `Auto-merge failed: ${opts.mergeReason} ` +
+        `${lead} ` +
         `Dealer already synced ${opts.baseBranch} and ran one conflict-repair round; ` +
         `the PR still conflicts. ${filesText}`,
       evidence: {
-        [MERGE_FAILURE_EVIDENCE_KEY]: true,
+        ...escalationEvidence,
         [MERGE_CONFLICT_FILES_EVIDENCE_KEY]: spent.files,
       },
     };
   }
+
+  // NOT-354: a checks-wait sync already pushed this episode and the PR conflicts
+  // again (the base moved under it) — the one repair round re-syncs and resolves,
+  // never a second automatic sync.
+  if (checksWait && checksWaitSyncSpent(opts.issueId, opts.instanceId)) {
+    auditSync(auditInput, "repair_needed", { files: [], baseMovedAgain: true });
+    return { outcome: "repair_needed", files: [] };
+  }
+  if (!checksWait && !opts.mergePr) return skip("merge entry requires mergePr");
 
   if (!opts.branch.trim()) return skip("issue has no branch to sync");
   let repoPath: string;
@@ -637,6 +733,11 @@ export async function runMergeConflictSync(opts: {
     if (unmerged.length === 0) {
       return failed(`merge failed: ${mergeError.message}`);
     }
+    if (checksWait) {
+      const files = unmerged.slice(0, CONFLICTING_FILES_MAX);
+      auditSync(auditInput, "repair_needed", { files: unmerged });
+      return { outcome: "repair_needed", files };
+    }
     const queued = queueConflictRepairRound({
       issueId: opts.issueId,
       instanceId: opts.instanceId,
@@ -669,6 +770,14 @@ export async function runMergeConflictSync(opts: {
     return failed(`could not push the synced branch: ${detail}`);
   }
 
+  // NOT-354: the checks-wait entry stops at the push — the deferred CI wait
+  // re-polls the pushed head through the normal publish-only path.
+  if (checksWait) {
+    await cleanupSyncCheckout(repoPath, syncPath);
+    auditSync(auditInput, "synced", { baseSha: base.sha, headSha: headAfterMerge, mergeChangedHead });
+    return { outcome: "synced", headSha: headAfterMerge };
+  }
+
   // Wait for checks on the new head exactly as the developer effect does, then
   // retry the merge once. A failed/timed-out poll escalates directly — retrying
   // the merge against red or unknown checks cannot succeed.
@@ -699,7 +808,7 @@ export async function runMergeConflictSync(opts: {
   }
   await cleanupSyncCheckout(repoPath, syncPath);
 
-  const retry = await opts.mergePr({ cwd: repoPath, number: opts.prNumber });
+  const retry = await opts.mergePr!({ cwd: repoPath, number: opts.prNumber });
   if (retry.ok) {
     auditSync(auditInput, "merged", { baseSha: base.sha });
     return { outcome: "merged" };
