@@ -10,7 +10,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MUSE_CODE_CONTRIBUTOR_MODEL } from "@agent-dealer/shared";
-import { parseMuseRun, isMuseTerminalStdoutLine } from "../runners/muse-code-jsonl.js";
+import {
+  parseMuseRun,
+  isMuseTerminalStdoutLine,
+  createMusePrimaryTerminalMatcher,
+} from "../runners/muse-code-jsonl.js";
 import {
   museIdleTimeoutMs,
   museTerminalGraceMs,
@@ -320,8 +324,10 @@ async function runLingeringMuse(opts: {
   sessionId: string;
 }): Promise<{
   timedOut: boolean;
-  lingeredAfterTerminal?: boolean;
+  lingeredAfterTerminal: boolean | undefined;
+  museLingeredAfterTerminal: boolean | undefined;
   failureMessage: string | null;
+  failureKind: string | null;
   elapsedMs: number;
   logPath: string;
 }> {
@@ -358,8 +364,12 @@ async function runLingeringMuse(opts: {
     });
     return {
       timedOut: result.timedOut,
-      lingeredAfterTerminal: result.lingeredAfterTerminal ?? result.muse?.lingeredAfterTerminal,
+      // Assert top-level and muse summary separately — a regression that drops
+      // either field must fail (do not coalesce with ??).
+      lingeredAfterTerminal: result.lingeredAfterTerminal,
+      museLingeredAfterTerminal: result.muse?.lingeredAfterTerminal,
       failureMessage: result.muse?.failure?.message ?? null,
+      failureKind: result.muse?.failure?.kind ?? null,
       elapsedMs: Date.now() - startedAt,
       logPath: result.logPath,
     };
@@ -386,6 +396,7 @@ test(
     assert.ok(out.elapsedMs < 5_000, `settled on the grace, took ${out.elapsedMs}ms`);
     assert.equal(out.timedOut, false);
     assert.equal(out.lingeredAfterTerminal, true);
+    assert.equal(out.museLingeredAfterTerminal, true);
     assert.match(out.failureMessage ?? "", /transport error/);
   }
 );
@@ -399,6 +410,7 @@ test("a completed Muse run that lingers is still a completion, not a timeout", {
   });
   assert.equal(out.timedOut, false);
   assert.equal(out.lingeredAfterTerminal, true);
+  assert.equal(out.museLingeredAfterTerminal, true);
   assert.equal(out.failureMessage, null);
 });
 
@@ -410,5 +422,33 @@ test("MUSE_TERMINAL_GRACE_MS=0 leaves a lingering Muse child to the wall clock",
     sessionId: "00000000-0000-4000-8000-000000000343",
   });
   assert.equal(out.lingeredAfterTerminal, false);
+  assert.equal(out.museLingeredAfterTerminal, false);
   assert.equal(out.timedOut, true, "without the grace, the wall clock still kills");
+});
+
+// NOT-342 repair: a cron run's terminal must not arm the 30s grace and SIGTERM the
+// still-working primary. The child has no primary terminal — only the wall clock kills.
+test(
+  "a cron terminal before the primary does not arm terminal grace",
+  { timeout: 15_000 },
+  async () => {
+    const out = await runLingeringMuse({
+      scenario: "cron-terminal-then-primary-linger",
+      graceMs: "200",
+      timeoutMs: 800,
+      sessionId: "00000000-0000-4000-8000-000000000345",
+    });
+    assert.equal(out.lingeredAfterTerminal, false, "cron terminal must not linger-kill");
+    assert.equal(out.museLingeredAfterTerminal, false);
+    assert.equal(out.timedOut, true, "wall clock still owns the kill when primary never terminals");
+    assert.notEqual(out.failureKind, "malformed_stream");
+  }
+);
+
+test("createMusePrimaryTerminalMatcher is what Muse wires for terminalGrace", () => {
+  // Sanity: the factory exists and matches the shape spawnCli expects.
+  const m = createMusePrimaryTerminalMatcher();
+  assert.equal(typeof m.isTerminalLine, "function");
+  assert.equal(typeof m.sawPrimaryTerminal, "function");
+  assert.equal(m.sawPrimaryTerminal(), false);
 });

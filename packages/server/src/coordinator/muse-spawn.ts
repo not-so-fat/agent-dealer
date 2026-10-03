@@ -28,7 +28,7 @@ import {
 } from "../runners/muse-config.js";
 import {
   parseMuseRun,
-  isMuseTerminalStdoutLine,
+  createMusePrimaryTerminalMatcher,
   type MuseFailure,
   type MuseUsage,
 } from "../runners/muse-code-jsonl.js";
@@ -318,7 +318,9 @@ export async function runMuseDeveloperSession(
   // (`MUSE_IDLE_TIMEOUT_MS=0`); only the Muse lane opts in.
   const idleTimeoutMs = museIdleTimeoutMs();
   // NOT-342: post-terminal linger bound. Undefined disables (`MUSE_TERMINAL_GRACE_MS=0`).
+  // Stateful: only the primary run's terminal arms the grace (cron terminals must not).
   const terminalGraceMs = museTerminalGraceMs();
+  const primaryTerminal = createMusePrimaryTerminalMatcher();
   try {
     // The exact launch about to happen — a tampered settings file or a differing
     // cwd/argv/env/stdin fails here, before any process exists.
@@ -340,7 +342,7 @@ export async function runMuseDeveloperSession(
       },
       terminalGrace:
         terminalGraceMs !== undefined
-          ? { isTerminalLine: isMuseTerminalStdoutLine, graceMs: terminalGraceMs }
+          ? { isTerminalLine: primaryTerminal.isTerminalLine, graceMs: terminalGraceMs }
           : undefined,
     });
     sessionLog = readSessionLog(attempt.env.XDG_DATA_HOME, input.sessionId);
@@ -349,7 +351,11 @@ export async function runMuseDeveloperSession(
   }
 
   const rawLog = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : spawned.transcript;
-  const parseExit = spawned.timedOut ? null : spawned.lingeredAfterTerminal ? 0 : spawned.exitCode;
+  // Only remap a linger kill to exit 0 when the primary run's terminal was actually
+  // seen — a spurious linger (e.g. armed on a secondary run) must keep the real
+  // signal exit so parseMuseRun does not invent a clean "exited 0 without terminal".
+  const lingerAsCleanExit = spawned.lingeredAfterTerminal && primaryTerminal.sawPrimaryTerminal();
+  const parseExit = spawned.timedOut ? null : lingerAsCleanExit ? 0 : spawned.exitCode;
   const { stdout, stderr } = splitSpawnLog(rawLog);
   const run = parseMuseRun({
     stdout,
@@ -398,7 +404,7 @@ export async function runMuseDeveloperSession(
   // blocks this result).
   refreshMuseCapacityAfterSession();
 
-  const reportedExit = spawned.lingeredAfterTerminal ? 0 : spawned.exitCode;
+  const reportedExit = lingerAsCleanExit ? 0 : spawned.exitCode;
   return {
     // A failed session must not read as success just because Muse exited 0 (wrong model, no terminal event).
     // A linger kill after a terminal event is not a timeout: classify via parseMuseRun (failed

@@ -222,6 +222,26 @@ switch (scenario) {
     setInterval(() => {}, 1000);
     break;
   }
+  case "cron-terminal-then-primary-linger": {
+    // NOT-342 repair: a cron run can terminal before the primary. The primary's
+    // terminal must arm the grace — not the cron's. Emit primary link, cron link,
+    // cron completed, then keep the process alive with no primary terminal.
+    const cronRun = "run-cron";
+    const envFor = (runId, payloadType, payload) =>
+      JSON.stringify({
+        schema_version: 1,
+        stream: { kind: "session", id: sessionId },
+        payload_type: payloadType,
+        payload: { run_stream: { kind: "run", id: runId }, ...payload },
+      });
+    process.stdout.write(`${envFor(RUN, "session.run.linked", {})}\n`);
+    process.stdout.write(`${envFor(cronRun, "session.run.linked", {})}\n`);
+    process.stdout.write(
+      `${envFor(cronRun, "run.terminal.completed", { terminal: "completed", text: "cron done", reason: null })}\n`
+    );
+    setInterval(() => {}, 1000);
+    break;
+  }
   default:
     process.stderr.write(`fake-muse: unknown scenario ${scenario}\n`);
     process.exit(2);

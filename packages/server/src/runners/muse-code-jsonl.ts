@@ -130,8 +130,10 @@ function cap(s: string): string {
 
 /**
  * NOT-342: true when a stdout line is a Muse `run.terminal.completed` or
- * `run.terminal.failed` envelope. Used by `spawnCli`'s opt-in terminal grace.
- * Garbage lines are not terminal (never throw).
+ * `run.terminal.failed` envelope (any run). Prefer
+ * {@link createMusePrimaryTerminalMatcher} for `spawnCli` terminal grace — a
+ * cron run's terminal must not arm the kill. Garbage lines are not terminal
+ * (never throw).
  */
 export function isMuseTerminalStdoutLine(line: string): boolean {
   const trimmed = line.trim();
@@ -278,6 +280,48 @@ function usageFrom(calls: ModelCompleted[]): MuseUsage {
 function runIdOf(payload: Record<string, unknown>): string | undefined {
   const rs = asRecord(payload.run_stream);
   return rs?.kind === "run" ? str(rs.id) : undefined;
+}
+
+/**
+ * NOT-342: stateful predicate for Muse `terminalGrace`. Tracks the first-seen
+ * run id with the same rule as {@link parseMuseRun}, and returns true only when
+ * that primary run's terminal envelope arrives. A cron (or other secondary) run
+ * completing first must not start the grace — otherwise Dealer SIGTERMs the
+ * still-working primary and the session is mis-recorded as `malformed_stream`.
+ */
+export function createMusePrimaryTerminalMatcher(): {
+  isTerminalLine: (line: string) => boolean;
+  /** True once the primary run's terminal envelope has been observed. */
+  sawPrimaryTerminal: () => boolean;
+} {
+  let primaryRunId: string | null = null;
+  let sawPrimary = false;
+  return {
+    sawPrimaryTerminal: () => sawPrimary,
+    isTerminalLine(line: string): boolean {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("{")) return false;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        return false;
+      }
+      const env = toEnvelope(parsed);
+      if (!env) return false;
+      const runId = runIdOf(env.payload);
+      // Same first-run-id rule as parseMuseRun: the first envelope that names a
+      // run wins; envelopes with no run id leave primary unset (any later terminal
+      // with no correlating id is accepted, matching parseMuseRun).
+      if (primaryRunId === null) primaryRunId = runId ?? null;
+      if (env.payloadType !== "run.terminal.completed" && env.payloadType !== "run.terminal.failed") {
+        return false;
+      }
+      if (primaryRunId !== null && runId !== primaryRunId) return false;
+      sawPrimary = true;
+      return true;
+    },
+  };
 }
 
 function hasRateLimitFacet(payload: Record<string, unknown>): boolean {

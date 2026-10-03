@@ -190,6 +190,7 @@ export async function spawnCli(
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
       let progressTimer: ReturnType<typeof setInterval> | undefined;
       let terminalGraceTimer: ReturnType<typeof setTimeout> | undefined;
+      let lingerSettleTimer: ReturnType<typeof setTimeout> | undefined;
       let terminalGraceArmed = false;
       const terminalGraceMs = opts.terminalGrace?.graceMs;
       const terminalGraceEnabled =
@@ -206,6 +207,8 @@ export async function spawnCli(
       const clearTerminalGrace = () => {
         if (terminalGraceTimer) clearTimeout(terminalGraceTimer);
         terminalGraceTimer = undefined;
+        if (lingerSettleTimer) clearTimeout(lingerSettleTimer);
+        lingerSettleTimer = undefined;
       };
       const rescheduleIdle = () => {
         if (!idleEnabled || settled || aborted || lingeredAfterTerminal) return;
@@ -256,6 +259,15 @@ export async function spawnCli(
         lingeredAfterTerminal = true;
         clearIdle();
         requestKill();
+        // If a grandchild holds the stdout pipe open after SIGKILL, Node never
+        // emits 'close' — settle as lingered so the spawn slot and lease cannot
+        // leak until the wall clock. Close still wins when it arrives first.
+        if (lingerSettleTimer) clearTimeout(lingerSettleTimer);
+        lingerSettleTimer = setTimeout(() => {
+          if (settled || aborted) return;
+          finish(1);
+        }, abortKillGraceMs() + 500);
+        lingerSettleTimer.unref?.();
       }
       const maybeArmTerminalGrace = (line: string) => {
         if (!terminalGraceEnabled || settled || aborted || terminalGraceArmed) return;
@@ -416,7 +428,13 @@ export async function spawnCli(
       };
 
       const timer = setTimeout(() => {
-        if (settled || lingeredAfterTerminal) return;
+        if (settled) return;
+        // A terminal-grace kill already requested: settle as lingered (not timedOut)
+        // if 'close' still has not arrived — same backstop role as lingerSettleTimer.
+        if (lingeredAfterTerminal) {
+          finish(1);
+          return;
+        }
         timedOut = true;
         killRunProcess(runId);
         setTimeout(() => finish(124), 500);
