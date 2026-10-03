@@ -121,3 +121,43 @@ test("a timed-out install throws with the same dependency-install prefix", async
     return true;
   });
 });
+
+test("a failing install removes a leftover node_modules so an infra retry reinstalls", async () => {
+  // npm ci that dies mid-reify (or is SIGTERM-killed by the execFile timeout)
+  // can leave a partial node_modules behind; the retry reuses the leftover
+  // worktree, so the husk must be gone or the retry would skip the install.
+  const dir = makeWorktree({ "package.json": PKG, "package-lock.json": LOCK });
+  const failing: WorktreeDepsRunner = async (_cmd, _args, opts) => {
+    fs.mkdirSync(path.join(opts.cwd, "node_modules", "half-written-pkg"), { recursive: true });
+    fs.writeFileSync(path.join(opts.cwd, "node_modules", "half-written-pkg", "index.js"), "partial\n");
+    const err = new Error("npm ci exited") as Error & { stderr: string };
+    err.stderr = "npm error code E500\nnpm error registry exploded on line 42\n";
+    throw err;
+  };
+  await assert.rejects(() => ensureWorktreeDeps(dir, { runner: failing }), (err: Error) => {
+    assert.match(err.message, /^dependency install failed: /);
+    assert.match(err.message, /registry exploded on line 42/);
+    return true;
+  });
+  assert.equal(fs.existsSync(path.join(dir, "node_modules")), false, "partial node_modules must be removed");
+});
+
+test("a killed (timed-out) install names the timeout in the reason", async () => {
+  const dir = makeWorktree({ "package.json": PKG, "package-lock.json": LOCK });
+  const killed: WorktreeDepsRunner = async () => {
+    // Shape of a real execFile timeout: killed by SIGTERM with little stderr.
+    const err = new Error("Command failed: npm ci --prefer-offline --no-audit --no-fund") as Error & {
+      killed: boolean;
+      signal: string;
+    };
+    err.killed = true;
+    err.signal = "SIGTERM";
+    throw err;
+  };
+  await assert.rejects(() => ensureWorktreeDeps(dir, { runner: killed, timeoutMs: 4321 }), (err: Error) => {
+    assert.match(err.message, /^dependency install failed: /);
+    assert.match(err.message, /timed out after 4321ms/);
+    return true;
+  });
+  assert.equal(fs.existsSync(path.join(dir, "node_modules")), false);
+});

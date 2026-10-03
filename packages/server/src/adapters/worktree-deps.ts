@@ -104,7 +104,20 @@ export async function ensureWorktreeDeps(
   try {
     await runner("npm", NPM_CI_ARGS, { cwd: worktreePath, timeoutMs });
   } catch (err) {
-    throw new Error(`dependency install failed: ${stderrTail(err)}`);
+    // A failed `npm ci` (or a timeout kill mid-reify) can leave a
+    // partial/empty node_modules behind. The setup failure retries on the
+    // infra path, which reuses the leftover worktree — and a leftover
+    // node_modules would make the retry skip the install and hand the builder
+    // broken deps. Remove it so the retry reinstalls from scratch; the removal
+    // itself is best-effort and must never mask the install error.
+    try {
+      fs.rmSync(path.join(worktreePath, "node_modules"), { recursive: true, force: true });
+    } catch {
+      // keep the original install error below
+    }
+    const killed = (err as { killed?: unknown })?.killed === true;
+    const prefix = killed ? `timed out after ${timeoutMs}ms: ` : "";
+    throw new Error(`dependency install failed: ${prefix}${stderrTail(err)}`);
   }
   return { ran: true, durationMs: Date.now() - startedAt };
 }

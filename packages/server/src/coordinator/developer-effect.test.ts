@@ -2669,6 +2669,8 @@ test("NOT-315: a failing dependency install is a worktree-setup failure with the
   // before the runner is ever invoked), so this test cuts its own repo + remote whose
   // main tip declares npm dependencies — the fresh worktree then really triggers the install.
   const npmRepo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-npm-repo-"));
+  const npmRemote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-npm-remote-"));
+  try {
   git(npmRepo, "init", "-q", "-b", "main");
   git(npmRepo, "config", "user.email", "test@example.com");
   git(npmRepo, "config", "user.name", "Test");
@@ -2677,7 +2679,6 @@ test("NOT-315: a failing dependency install is a worktree-setup failure with the
   fs.writeFileSync(path.join(npmRepo, "package-lock.json"), JSON.stringify({ name: "wt", lockfileVersion: 3, packages: {} }));
   git(npmRepo, "add", ".");
   git(npmRepo, "commit", "-q", "-m", "init");
-  const npmRemote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-npm-remote-"));
   execFileSync("git", ["init", "-q", "--bare", "-b", "main", npmRemote]);
   git(npmRepo, "remote", "add", "origin", npmRemote);
   git(npmRepo, "push", "-q", "origin", "main");
@@ -2724,8 +2725,10 @@ test("NOT-315: a failing dependency install is a worktree-setup failure with the
   assert.match(reason, /worktree setup failed/);
   assert.match(reason, /dependency install failed: /);
   assert.match(reason, /registry unreachable/);
-  fs.rmSync(npmRepo, { recursive: true, force: true });
-  fs.rmSync(npmRemote, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(npmRepo, { recursive: true, force: true });
+    fs.rmSync(npmRemote, { recursive: true, force: true });
+  }
 });
 
 test("NOT-315: a skipped dependency install still emits worktree.deps_ready with ran/skipped and durationMs", async () => {

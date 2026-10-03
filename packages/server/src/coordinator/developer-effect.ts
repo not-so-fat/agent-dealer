@@ -25,8 +25,8 @@ import { buildDeveloperPrompt } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn, type DeveloperSpawnResult } from "./spawn.js";
 import {
-  DEFAULT_WORKTREE_DEPS_TIMEOUT_MS,
   ensureWorktreeDeps,
+  worktreeDepsTimeoutMs,
   type WorktreeDepsRunner,
 } from "../adapters/worktree-deps.js";
 import {
@@ -187,7 +187,7 @@ export const developerEffectConfig = {
   },
   /** NOT-315: bound for `npm ci` in the fresh worktree (coordinator side, with network). */
   get worktreeDepsTimeoutMs(): number {
-    return num("WORKTREE_DEPS_TIMEOUT_MS", DEFAULT_WORKTREE_DEPS_TIMEOUT_MS);
+    return worktreeDepsTimeoutMs();
   },
   /** NOT-110: bounded window to let a lagging `gh pr view` catch up to a just-pushed HEAD. */
   get headReconcileTimeoutMs(): number {
