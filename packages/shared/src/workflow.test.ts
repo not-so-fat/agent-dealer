@@ -22,6 +22,7 @@ test("WorkflowEventType accepts every PRD §9.2 event type", () => {
     "worker.completed",
     "worker.failed",
     "worktree.ready",
+    "worktree.deps_ready",
     "deck.connected",
     "brief.resolved",
     "branch.pushed",

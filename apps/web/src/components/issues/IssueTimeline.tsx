@@ -21,6 +21,7 @@ const LABELS: Record<string, (e: WorkflowEvent) => string> = {
       ? `Waiting for Agent Deck${e.round ? ` (round ${e.round})` : ""}`
       : `${roleNoun(e.actorType)} deferred${e.round ? ` (round ${e.round})` : ""}`,
   "worktree.ready": () => "Worktree ready",
+  "worktree.deps_ready": () => "Dependencies ready",
   "deck.connected": () => "Deck connected",
   "brief.resolved": () => "Brief resolved",
   "branch.pushed": () => "Branch pushed",
