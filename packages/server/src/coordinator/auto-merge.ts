@@ -40,6 +40,7 @@ import {
 } from "../repository/human-actions.js";
 import { MERGE_FAILURE_EVIDENCE_KEY, MERGE_FAILURE_RESPONSE_OPTIONS } from "./human-resolution.js";
 import { isMergeConflictFailure, runMergeConflictSync } from "./merge-conflict-sync.js";
+import { startBaseAdvancedScan } from "./base-advanced-scan.js";
 import {
   OPERATOR_VERIFICATION_RESPONSE_OPTIONS,
   formatOperatorCriteria,
@@ -209,6 +210,11 @@ export type AutoMergeFinalizeResult = {
  */
 const finalizeInflight = new Map<string, Promise<AutoMergeFinalizeResult>>();
 
+/** NOT-356: whether this process is merging the issue's PR right now. */
+export function isAutoMergeInFlight(issueId: string): boolean {
+  return finalizeInflight.has(issueId);
+}
+
 /** Test hook — clear single-flight state between cases. */
 export function clearFinalizeInflightForTests(): void {
   finalizeInflight.clear();
@@ -297,7 +303,7 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
     return escalateMergeFailure(issue, instance.id, `Auto-merge failed: ${merge.reason}`);
   }
 
-  return getDb().transaction((): AutoMergeFinalizeResult => {
+  const merged = getDb().transaction((): AutoMergeFinalizeResult => {
     const current = getIssue(issueId)!;
     const active = getActiveWorkflowInstance(issueId);
     if (!active) {
@@ -356,6 +362,11 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
       triggerReflect: true,
     };
   })();
+  // NOT-356: the base just moved under every other open Dealer PR on this repo +
+  // base — probe them and resolve the idle conflicting ones. Background and
+  // self-contained: nothing it does can change this merge's result.
+  if (merged.triggerReflect) startBaseAdvancedScan(getIssue(issueId) ?? issue);
+  return merged;
 }
 
 /**

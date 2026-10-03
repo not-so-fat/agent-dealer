@@ -46,6 +46,7 @@ test("WorkflowEventType accepts every PRD §9.2 event type", () => {
     "retry.reused",
     "auto_merge.conflict_sync",
     "auto_merge.conflict_repair_queued",
+    "base.advanced",
   ];
   for (const t of types) {
     assert.equal(WorkflowEventType.parse(t), t);
