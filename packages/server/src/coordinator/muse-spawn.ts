@@ -28,11 +28,12 @@ import {
 } from "../runners/muse-config.js";
 import {
   parseMuseRun,
+  isMuseTerminalStdoutLine,
   type MuseFailure,
   type MuseUsage,
 } from "../runners/muse-code-jsonl.js";
 import { spawnCli } from "../runners/spawn-cli.js";
-import { museIdleTimeoutMs } from "./session-timeouts.js";
+import { museIdleTimeoutMs, museTerminalGraceMs } from "./session-timeouts.js";
 import type { DeveloperSpawnInput, DeveloperSpawnResult } from "./spawn.js";
 
 /**
@@ -65,10 +66,13 @@ export interface MuseSessionSummary {
    * `firstOutputMs` is spawn → first stdout bytes (null when the child never wrote);
    * `lastActivityAt` the last observed progress (stdout bytes or session-log growth);
    * `idleTimedOut` is true only when the idle watchdog (not the wall clock) killed it.
+   * `lingeredAfterTerminal` is true when the child was killed after its terminal
+   * event because it did not exit within the grace (NOT-342).
    */
   firstOutputMs: number | null;
   lastActivityAt: string | null;
   idleTimedOut: boolean;
+  lingeredAfterTerminal: boolean;
   /** Tool intents seen on stdout, in stream order. */
   toolCallCount: number;
   /** Name of the last tool intent in stream order; null when none was seen. */
@@ -76,9 +80,10 @@ export interface MuseSessionSummary {
 }
 
 /**
- * NOT-307: the five stall-evidence fields persisted to
+ * NOT-307/NOT-342: stall-evidence fields persisted to
  * `worker_sessions.metadata_json` for every Muse session. Exactly these keys —
- * the failure classifier reads `idleTimedOut`/`lastToolName` back out of them.
+ * the failure classifier reads `idleTimedOut`/`lastToolName` back out of them;
+ * `lingeredAfterTerminal` records a post-terminal grace kill (not a timeout).
  */
 export type MuseStallMetadata = {
   lastActivityAt: string | null;
@@ -86,11 +91,12 @@ export type MuseStallMetadata = {
   lastToolName: string | null;
   firstOutputMs: number | null;
   idleTimedOut: boolean;
+  lingeredAfterTerminal: boolean;
 };
 
 export function museStallMetadata(summary: Pick<
   MuseSessionSummary,
-  "lastActivityAt" | "toolCallCount" | "lastToolName" | "firstOutputMs" | "idleTimedOut"
+  "lastActivityAt" | "toolCallCount" | "lastToolName" | "firstOutputMs" | "idleTimedOut" | "lingeredAfterTerminal"
 >): MuseStallMetadata {
   return {
     lastActivityAt: summary.lastActivityAt,
@@ -98,6 +104,7 @@ export function museStallMetadata(summary: Pick<
     lastToolName: summary.lastToolName,
     firstOutputMs: summary.firstOutputMs,
     idleTimedOut: summary.idleTimedOut,
+    lingeredAfterTerminal: summary.lingeredAfterTerminal,
   };
 }
 
@@ -298,6 +305,7 @@ export async function runMuseDeveloperSession(
     transcript: string;
     timedOut: boolean;
     idleTimedOut: boolean;
+    lingeredAfterTerminal: boolean;
     firstOutputMs: number | null;
     lastActivityAt: string | null;
   };
@@ -309,6 +317,8 @@ export async function runMuseDeveloperSession(
   // NOT-307: silence bound for this session. Undefined disables the watchdog
   // (`MUSE_IDLE_TIMEOUT_MS=0`); only the Muse lane opts in.
   const idleTimeoutMs = museIdleTimeoutMs();
+  // NOT-342: post-terminal linger bound. Undefined disables (`MUSE_TERMINAL_GRACE_MS=0`).
+  const terminalGraceMs = museTerminalGraceMs();
   try {
     // The exact launch about to happen — a tampered settings file or a differing
     // cwd/argv/env/stdin fails here, before any process exists.
@@ -328,6 +338,10 @@ export async function runMuseDeveloperSession(
       onStdoutLine: (_line, atMs) => {
         lineTs.push(atMs);
       },
+      terminalGrace:
+        terminalGraceMs !== undefined
+          ? { isTerminalLine: isMuseTerminalStdoutLine, graceMs: terminalGraceMs }
+          : undefined,
     });
     sessionLog = readSessionLog(attempt.env.XDG_DATA_HOME, input.sessionId);
   } finally {
@@ -335,11 +349,12 @@ export async function runMuseDeveloperSession(
   }
 
   const rawLog = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : spawned.transcript;
+  const parseExit = spawned.timedOut ? null : spawned.lingeredAfterTerminal ? 0 : spawned.exitCode;
   const { stdout, stderr } = splitSpawnLog(rawLog);
   const run = parseMuseRun({
     stdout,
     stderr,
-    exitCode: spawned.timedOut ? null : spawned.exitCode,
+    exitCode: parseExit,
     sessionLog,
     expectedModel: model,
     lineTs,
@@ -360,6 +375,7 @@ export async function runMuseDeveloperSession(
     firstOutputMs: spawned.firstOutputMs,
     lastActivityAt: spawned.lastActivityAt,
     idleTimedOut: spawned.idleTimedOut,
+    lingeredAfterTerminal: spawned.lingeredAfterTerminal,
     toolCallCount: run.tools.length,
     lastToolName: run.tools.length > 0 ? (run.tools[run.tools.length - 1].name ?? null) : null,
   };
@@ -382,15 +398,19 @@ export async function runMuseDeveloperSession(
   // blocks this result).
   refreshMuseCapacityAfterSession();
 
+  const reportedExit = spawned.lingeredAfterTerminal ? 0 : spawned.exitCode;
   return {
     // A failed session must not read as success just because Muse exited 0 (wrong model, no terminal event).
-    exitCode: run.failure && spawned.exitCode === 0 ? 1 : spawned.exitCode,
+    // A linger kill after a terminal event is not a timeout: classify via parseMuseRun (failed
+    // keeps its reason; completed is a normal completion) and report exit 0 unless the run failed.
+    exitCode: run.failure && reportedExit === 0 ? 1 : reportedExit,
     transcript: run.finalText ?? "",
     logPath,
     timedOut: spawned.timedOut,
     // NOT-307: an idle kill reads as a timeout downstream (same salvage, same
     // infra-retry budget) with the idle flag distinguishing the cause.
     idleTimedOut: spawned.idleTimedOut,
+    lingeredAfterTerminal: spawned.lingeredAfterTerminal,
     muse: summary,
   };
 }

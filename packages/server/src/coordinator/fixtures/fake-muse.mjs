@@ -210,6 +210,18 @@ switch (scenario) {
     setInterval(() => {}, 1000);
     break;
   }
+  case "transport-linger": {
+    // NOT-342: the run already failed (provider transport) but the process stays alive.
+    failed("transport error [net-timeout]: timed out waiting for response data (meta stream)");
+    setInterval(() => {}, 1000);
+    break;
+  }
+  case "completed-linger": {
+    writeSessionLog({ usage: USAGE });
+    completed("Implementation conclusion: added the widget.");
+    setInterval(() => {}, 1000);
+    break;
+  }
   default:
     process.stderr.write(`fake-muse: unknown scenario ${scenario}\n`);
     process.exit(2);

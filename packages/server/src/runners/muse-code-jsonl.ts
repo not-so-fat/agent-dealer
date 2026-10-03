@@ -128,6 +128,22 @@ function cap(s: string): string {
   return s.length > ERROR_TEXT_MAX ? `${s.slice(0, ERROR_TEXT_MAX)}…` : s;
 }
 
+/**
+ * NOT-342: true when a stdout line is a Muse `run.terminal.completed` or
+ * `run.terminal.failed` envelope. Used by `spawnCli`'s opt-in terminal grace.
+ * Garbage lines are not terminal (never throw).
+ */
+export function isMuseTerminalStdoutLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) return false;
+  try {
+    const env = JSON.parse(trimmed) as { payload_type?: unknown };
+    return env.payload_type === "run.terminal.completed" || env.payload_type === "run.terminal.failed";
+  } catch {
+    return false;
+  }
+}
+
 function firstLine(s: string): string {
   return s.trim().split("\n")[0] ?? "";
 }
