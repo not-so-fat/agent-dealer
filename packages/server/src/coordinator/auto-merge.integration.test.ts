@@ -1174,3 +1174,193 @@ test("NOT-356: a second Dealer merge in the same episode never syncs or repairs 
   assertNoForceNoRebase(calls);
   assert.equal(originTip(origin, "sib-twice"), heads["sib-twice"]);
 });
+
+/** Run one Dealer merge of `mergedId` (landing its change on origin/main) and wait
+ * for the sibling scan it starts, recording every git command. */
+async function mergeAndScan(mergedId: string, landMergedPr: () => string): Promise<string[][]> {
+  setMergePrForTests(async () => {
+    landMergedPr();
+    return { ok: true };
+  });
+  const { calls, stop } = recordAllGit();
+  try {
+    const { finalizeAutoMerge } = await import("./auto-merge.js");
+    assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
+    await settleBaseAdvancedScansForTests();
+  } finally {
+    stop();
+  }
+  return calls;
+}
+
+test("NOT-356: a clean sync re-enters the checks wait on the pushed head, superseding the stale reviewer", async () => {
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-sync", conflict: false }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-sync", heads["sib-sync"]!, 50);
+  const reviewerItem = listWorkItemsForIssue(siblingId).find((i) => i.status === "pending")!;
+  const roundBefore = getIssue(siblingId)!.currentRound;
+  // The probe reports a conflict GitHub could not see yet; the sync then merges cleanly.
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  const calls = await mergeAndScan(mergedId, landMergedPr);
+
+  const events = baseAdvancedEvents(siblingId);
+  assert.deepEqual(events.map((e) => e.action), ["synced"]);
+  const synced = originTip(origin, "sib-sync");
+  assert.notEqual(synced, heads["sib-sync"]);
+  assert.equal(events[0]!.syncedHeadSha, synced);
+  const pushes = calls.filter((a) => a[0] === "push");
+  assert.deepEqual(pushes, [["push", "-u", "origin", "HEAD:refs/heads/sib-sync"]]);
+  assertNoForceNoRebase(calls);
+
+  const sibling = getIssue(siblingId)!;
+  assert.equal(sibling.status, "repairing");
+  assert.equal(sibling.currentOwner, "developer");
+  assert.equal(sibling.currentRound, roundBefore, "re-entering the checks wait spends no round");
+  assert.match(sibling.currentIntent ?? "", /waiting for CI on/);
+  const items = listWorkItemsForIssue(siblingId);
+  assert.equal(items.find((i) => i.id === reviewerItem.id)!.status, "cancelled", "no review of the stale head");
+  const pending = items.filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]!.kind, "developer");
+  assert.equal(pending[0]!.id, events[0]!.workItemId);
+  const payload = JSON.parse(pending[0]!.payloadJson!);
+  assert.equal(payload.publishOnly, true, "a no-agent CI wait on the pushed head");
+  assert.equal(payload.branch, "sib-sync");
+  assert.equal(payload.conflictRepair, undefined);
+});
+
+test("NOT-356: an origin reset to an older Dealer head is a hand edit, not Dealer's last push", async () => {
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-old", conflict: true }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-old", heads["sib-old"]!, 51);
+  // Dealer later pushed a newer head (a base sync) onto the branch ...
+  const g = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  g(local, "checkout", "-q", "sib-old");
+  fs.writeFileSync(path.join(local, "later.txt"), "dealer sync\n");
+  g(local, "add", ".");
+  g(local, "commit", "-q", "-m", "dealer sync");
+  g(local, "push", "-q", "origin", "sib-old");
+  const newer = g(local, "rev-parse", "HEAD");
+  g(local, "checkout", "-q", "main");
+  const { appendWorkflowEvent } = await import("../repository/workflow-events.js");
+  appendWorkflowEvent({
+    issueId: siblingId,
+    workflowInstanceId: getActiveWorkflowInstance(siblingId)!.id,
+    workerSessionId: null,
+    type: "auto_merge.conflict_sync",
+    actorType: "system",
+    stage: "reviewing",
+    payload: { outcome: "synced", entry: "base_advanced", branch: "sib-old", baseBranch: "main", headSha: newer },
+  });
+  // ... and a human reset origin back to the older Dealer handoff head.
+  g(origin, "update-ref", "refs/heads/sib-old", heads["sib-old"]!);
+
+  const calls = await mergeAndScan(mergedId, landMergedPr);
+
+  const events = baseAdvancedEvents(siblingId);
+  assert.deepEqual(events.map((e) => e.action), ["hand_edited"]);
+  assert.equal(events[0]!.remoteSha, heads["sib-old"]);
+  assert.equal(events[0]!.lastPushedSha, newer);
+  assert.equal(calls.filter((a) => a[0] === "push").length, 0);
+  assert.equal(calls.filter((a) => a[0] === "merge-tree").length, 0);
+  assert.equal(originTip(origin, "sib-old"), heads["sib-old"]);
+  assert.equal(getIssue(siblingId)!.status, "reviewing");
+});
+
+test("NOT-356: a hand push after the ownership check is never synced or pushed over", async () => {
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-race", conflict: true }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-race", heads["sib-race"]!, 52);
+  const g = (...args: string[]) => execFileSync("git", args, { cwd: local, encoding: "utf8" }).trim();
+  let handTip = "";
+  // The human push lands between the validated fetch and the sync's own fetch.
+  setBaseAdvancedProbeForTests(async (opts) => {
+    const result = await probeBaseConflict(opts);
+    g("checkout", "-q", "-B", "hand", heads["sib-race"]!);
+    fs.writeFileSync(path.join(local, "hand.txt"), "by hand\n");
+    g("add", ".");
+    g("commit", "-q", "-m", "hand edit");
+    g("push", "-q", "origin", "HEAD:refs/heads/sib-race");
+    handTip = g("rev-parse", "HEAD");
+    g("checkout", "-q", "main");
+    return result;
+  });
+  const calls = await mergeAndScan(mergedId, landMergedPr);
+
+  const events = baseAdvancedEvents(siblingId);
+  assert.deepEqual(events.map((e) => e.action), ["hand_edited"]);
+  assert.deepEqual(
+    syncEvents(siblingId).map((e) => [e.outcome, e.code]),
+    [["skipped", "tip_moved"]]
+  );
+  assert.equal(syncMerges(calls).length, 0, "the moved tip is never merged");
+  assert.equal(calls.filter((a) => a[0] === "push").length, 0);
+  assert.equal(originTip(origin, "sib-race"), handTip);
+  assert.equal(getIssue(siblingId)!.status, "reviewing");
+});
+
+test("NOT-356: a worker that starts during the sync blocks the push and leaves the branch as it was", async () => {
+  const { createWorkerSession, startSession } = await import("../repository/worker-sessions.js");
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-late", conflict: false }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-late", heads["sib-late"]!, 53);
+  setBaseAdvancedProbeForTests(async () => {
+    const session = createWorkerSession({ issueId: siblingId, role: "reviewer", round: 1, agentId: null, runtime: null });
+    assert.ok(startSession(session.id));
+    return { state: "conflict", files: ["shared.txt"] } as never;
+  });
+  const calls = await mergeAndScan(mergedId, landMergedPr);
+
+  const events = baseAdvancedEvents(siblingId);
+  assert.deepEqual(events.map((e) => e.action), ["active_worker"]);
+  assert.deepEqual(
+    syncEvents(siblingId).map((e) => [e.outcome, e.code]),
+    [["skipped", "refused"]]
+  );
+  assert.equal(calls.filter((a) => a[0] === "push").length, 0, "nothing pushed under a live worker");
+  assert.equal(originTip(origin, "sib-late"), heads["sib-late"]);
+  assert.equal(
+    execFileSync("git", ["rev-parse", "refs/heads/sib-late"], { cwd: local, encoding: "utf8" }).trim(),
+    heads["sib-late"],
+    "the unpushed base merge is dropped from the local branch"
+  );
+  assert.equal(getIssue(siblingId)!.status, "reviewing");
+  assert.equal(listWorkItemsForIssue(siblingId).filter((i) => i.status === "pending").length, 1);
+});
+
+test("NOT-356: idle siblings parked on a needs_human gate or a stranded auto-merge are probed and repaired", async () => {
+  const { transitionIssue } = await import("../repository/issues.js");
+  const { createHumanAction } = await import("../repository/human-actions.js");
+  const { cancelWorkItem } = await import("../repository/work-items.js");
+  const { AUTO_MERGE_INTENT } = await import("./auto-merge.js");
+  const { local, heads, landMergedPr } = initSiblingRepos([
+    { branch: "sib-human", conflict: true },
+    { branch: "sib-park", conflict: true },
+  ]);
+  const mergedId = await parkedMergeIn(local);
+  const humanId = await idleSiblingIn(local, "sib-human", heads["sib-human"]!, 54);
+  const parkId = await idleSiblingIn(local, "sib-park", heads["sib-park"]!, 55);
+  for (const id of [humanId, parkId]) {
+    for (const w of listWorkItemsForIssue(id)) if (w.status === "pending") cancelWorkItem(w.id);
+  }
+  transitionIssue(humanId, "needs_human", { currentOwner: "human", currentIntent: "waiting on a human" });
+  createHumanAction({
+    issueId: humanId,
+    workflowInstanceId: getActiveWorkflowInstance(humanId)!.id,
+    actionType: "policy_escalation",
+    reason: "waiting on a human",
+    question: "?",
+  });
+  transitionIssue(parkId, "final_review", { currentOwner: "system", currentIntent: AUTO_MERGE_INTENT });
+
+  await mergeAndScan(mergedId, landMergedPr);
+
+  for (const id of [humanId, parkId]) {
+    assert.deepEqual(baseAdvancedEvents(id).map((e) => e.action), ["repair_queued"]);
+    assert.equal(getIssue(id)!.status, "repairing");
+    assert.equal(listHumanActionsForIssue(id).filter((a) => a.status === "open").length, 0);
+    const pending = listWorkItemsForIssue(id).filter((i) => i.status === "pending");
+    assert.equal(pending.length, 1);
+    assert.ok(JSON.parse(pending[0]!.payloadJson!).conflictRepair);
+  }
+});
