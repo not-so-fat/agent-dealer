@@ -664,6 +664,22 @@ async function checkBaseAdvanced(
   return { advanced, freshSha: fresh.sha, fetchFailed: false };
 }
 
+/** Origin's current tip of `branch` (`sha: null` when the branch is gone),
+ * read straight from the remote so no local ref can mask a move. */
+async function readRemoteTip(
+  cwd: string,
+  branch: string,
+  timeoutMs: number
+): Promise<{ ok: true; sha: string | null } | { ok: false; reason: string }> {
+  try {
+    const { stdout } = await gitExecImpl(["ls-remote", "origin", `refs/heads/${branch}`], { cwd, timeoutMs });
+    const sha = stdout.trim().split(/\s+/)[0];
+    return { ok: true, sha: sha ? sha : null };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** Best-effort removal of our own sync checkout. `branchPushed: true` is
  * truthful on the abort path (the branch never moved off the fetched origin
  * tip) and safe on the failed-push path (the only unpushed state possible is
@@ -925,14 +941,28 @@ export async function runMergeConflictSync(opts: {
       : headBeforeMerge !== headAfterMerge;
 
   // NOT-356: the caller's ownership/idleness rule, re-checked at the mutation
-  // boundary. The plain push below is fast-forward only, so a tip that moved
-  // since the fetch above is rejected by origin rather than overwritten.
+  // boundary.
   const refusal = opts.beforePush?.() ?? null;
   if (refusal) {
     // Drop our unpushed base merge so the branch ref is back at the fetched tip.
     await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
     await cleanupSyncCheckout(repoPath, syncPath);
     return skip(refusal, "refused");
+  }
+  // NOT-356: re-pin origin's tip right before the push. The plain push rejects
+  // divergent or forward movement on its own, but a hand reset to an ancestor
+  // of the fetched tip would let our merge fast-forward over it and silently
+  // undo the edit — any tip other than the one we merged onto is not ours.
+  const tipNow = await readRemoteTip(syncPath, opts.branch, timeoutMs);
+  if (!tipNow.ok || tipNow.sha !== reused.remoteSha) {
+    await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
+    await cleanupSyncCheckout(repoPath, syncPath);
+    return !tipNow.ok
+      ? skip(`could not re-read origin/${opts.branch} before the push: ${tipNow.reason}`)
+      : skip(
+          `origin/${opts.branch} moved to ${tipNow.sha ?? "(deleted)"} during the sync (fetched ${reused.remoteSha})`,
+          "tip_moved"
+        );
   }
 
   // Plain push, never force — the refspec mirrors pushBranch exactly.

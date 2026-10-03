@@ -1354,6 +1354,59 @@ test("NOT-356: a hand push after the ownership check is never synced or pushed o
   assert.equal(getIssue(siblingId)!.status, "reviewing");
 });
 
+test("NOT-356: a hand reset to an older tip after the sync fetch is never fast-forwarded over", async () => {
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-reset", conflict: false }]);
+  const g = (...args: string[]) => execFileSync("git", args, { cwd: local, encoding: "utf8" }).trim();
+  // A second Dealer commit, so the human has an ancestor to reset back to.
+  g("checkout", "-q", "sib-reset");
+  fs.writeFileSync(path.join(local, "second.txt"), "second\n");
+  g("add", ".");
+  g("commit", "-q", "-m", "second commit");
+  g("push", "-q", "origin", "sib-reset");
+  const dealerTip = g("rev-parse", "HEAD");
+  g("checkout", "-q", "main");
+  const olderTip = heads["sib-reset"]!;
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-reset", dealerTip, 55);
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  setMergePrForTests(async () => {
+    landMergedPr();
+    return { ok: true };
+  });
+  const calls: string[][] = [];
+  // The human resets origin back to the ancestor after the sync fetched and
+  // merged: Dealer's merge commit would now be a valid fast-forward.
+  setConflictSyncGitExecForTests(async (args, opts) => {
+    calls.push(args);
+    const out = await defaultSyncGitExec(args, opts);
+    if (args.includes("merge") && args.includes("--no-edit")) {
+      execFileSync("git", ["update-ref", "refs/heads/sib-reset", olderTip], { cwd: origin });
+    }
+    return out;
+  });
+  const stop = observeGitCommands((args) => {
+    calls.push([...args]);
+  });
+  try {
+    const { finalizeAutoMerge } = await import("./auto-merge.js");
+    assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
+    await settleBaseAdvancedScansForTests();
+  } finally {
+    stop();
+  }
+
+  assert.equal(syncMerges(calls).length, 1, "the sync merged onto the validated tip");
+  assert.equal(calls.filter((a) => a[0] === "push").length, 0, "no branch-changing push");
+  assert.equal(originTip(origin, "sib-reset"), olderTip, "the hand reset stands");
+  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["hand_edited"]);
+  assert.deepEqual(
+    syncEvents(siblingId).map((e) => [e.outcome, e.code]),
+    [["skipped", "tip_moved"]]
+  );
+  assertNoForceNoRebase(calls);
+  assert.equal(getIssue(siblingId)!.status, "reviewing");
+});
+
 test("NOT-356: a worker that starts during the sync blocks the push and leaves the branch as it was", async () => {
   const { createWorkerSession, startSession } = await import("../repository/worker-sessions.js");
   const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-late", conflict: false }]);
