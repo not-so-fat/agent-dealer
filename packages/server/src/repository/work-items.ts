@@ -166,6 +166,14 @@ export function getWorkItem(id: string): WorkItem | null {
   return row ? rowToWorkItem(row) : null;
 }
 
+/** Finds the row a retried enqueue would dedupe against (null when the key is unused). */
+export function getWorkItemByIdempotencyKey(idempotencyKey: string): WorkItem | null {
+  const row = getDb()
+    .prepare("SELECT * FROM work_items WHERE idempotency_key = ?")
+    .get(idempotencyKey) as WorkItemRow | undefined;
+  return row ? rowToWorkItem(row) : null;
+}
+
 export function listWorkItemsForIssue(issueId: string): WorkItem[] {
   const rows = getDb()
     .prepare("SELECT * FROM work_items WHERE issue_id = ? ORDER BY created_at ASC")

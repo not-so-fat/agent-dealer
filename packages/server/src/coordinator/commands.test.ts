@@ -769,6 +769,63 @@ test("fail → retry → exhaust → resume → fail again does not collide with
   assert.notEqual(pending[0].id, firstRetryItem.id, "must be a NEW work item, not the pre-escalation retry's now-terminal row");
 });
 
+test("NOT-333: a resume round that pushes nothing still enqueues a fresh reviewer instead of deduping against the terminal one", async () => {
+  // The NOT-200 shape: reviewer round 1 at head H escalates with a product scope
+  // question, the human resumes, and the developer round changes nothing — so its
+  // handoff re-derives the exact idempotency key of the already-done reviewer item.
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  const firstReviewer = listWorkItemsForIssue(issueId).find((i) => i.kind === "reviewer")!;
+  await complete(issueId, {
+    kind: "verdict",
+    result: { ...okReview("escalated"), productScopeQuestion: "Should deleted users retain sessions?" },
+  });
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "product_scope_decision")!;
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+  assert.equal(getIssue(issueId)!.status, "developing");
+
+  // The resume round pushes nothing: the handoff carries the very same head SHA.
+  const { result } = await complete(issueId, cleanHandoff);
+  assert.equal(result.applied, true);
+  assert.equal(getIssue(issueId)!.status, "reviewing");
+  assert.equal(getWorkItem(firstReviewer.id)!.status, "done");
+
+  const reviewers = listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer");
+  const pending = reviewers.filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1, "a fresh reviewer round must be queued, not dropped via a key collision");
+  assert.notEqual(pending[0].id, firstReviewer.id, "must be a NEW work item, not the escalated round's now-terminal row");
+  assert.match(pending[0].idempotencyKey!, /:retry-of:/, "the terminal duplicate is disambiguated like an infra retry");
+  assert.equal(JSON.parse(pending[0].payloadJson!).inputSha, cleanHandoff.headSha);
+});
+
+test("NOT-333: a duplicate developer completion while the reviewer is still pending or leased enqueues no second reviewer", async () => {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const item = claim(issueId);
+
+  const first = await applyCompletion(item.id, item.leaseToken!, cleanHandoff);
+  assert.equal(first.applied, true);
+  // A retried callback redelivers the same completion while the reviewer is pending.
+  const second = await applyCompletion(item.id, item.leaseToken!, cleanHandoff);
+  assert.equal(second.applied, false);
+
+  // Same while the reviewer is leased — still exactly one active reviewer row.
+  const reviewer = claim(issueId);
+  assert.equal(reviewer.kind, "reviewer");
+  const third = await applyCompletion(item.id, item.leaseToken!, cleanHandoff);
+  assert.equal(third.applied, false);
+
+  const active = listWorkItemsForIssue(issueId).filter(
+    (i) => i.kind === "reviewer" && (i.status === "pending" || i.status === "leased")
+  );
+  assert.equal(active.length, 1);
+  assert.equal(active[0].id, reviewer.id);
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 1);
+});
+
 test("resolving product_scope_decision:resume after a reviewer's escalated+question resumes as the developer", async () => {
   const issueId = newIssue();
   startWorkflow(issueId);
