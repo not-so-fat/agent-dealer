@@ -435,3 +435,14 @@ test("NOT-314: no operator criteria produces byte-for-byte the same reviewer pro
   assert.equal(buildReviewerPrompt({ ...reviewerBase, operatorCriteria: undefined }), without);
   assert.equal(buildReviewerPrompt({ ...reviewerBase, operatorCriteria: [] }), without);
 });
+
+// NOT-315: dependencies arrive installed (coordinator-side `npm ci`); the sandbox has
+// no network, so the worker must never try to install them itself.
+test("NOT-315: developer prompt tells the worker dependencies are installed and not to run npm install", () => {
+  for (const round of [1, 2]) {
+    const prompt = buildDeveloperPrompt({ taskSnapshot, round });
+    assert.match(prompt, /Dependencies are installed; do not run npm install \(no network\)\./);
+  }
+  const retry = buildDeveloperPrompt({ taskSnapshot, round: 1, retryReason: "Developer session failed or crashed." });
+  assert.match(retry, /Dependencies are installed; do not run npm install \(no network\)\./);
+});

@@ -26,6 +26,8 @@ export const WorkflowEventType = z.enum([
   "worker.deferred",
   /** Mid-session milestones (NOT-109) — low volume, not per-tool-call. */
   "worktree.ready",
+  /** NOT-315: pre-spawn dependency provisioning settled (ran or skipped). */
+  "worktree.deps_ready",
   "deck.connected",
   "brief.resolved",
   "branch.pushed",

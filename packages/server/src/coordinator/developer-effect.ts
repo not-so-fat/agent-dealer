@@ -25,6 +25,11 @@ import { buildDeveloperPrompt } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn, type DeveloperSpawnResult } from "./spawn.js";
 import {
+  ensureWorktreeDeps,
+  worktreeDepsTimeoutMs,
+  type WorktreeDepsRunner,
+} from "../adapters/worktree-deps.js";
+import {
   DEFAULT_BASE_FETCH_TIMEOUT_MS,
   fastForwardLocalBranchToSha,
   resolveDeveloperWorktree,
@@ -180,6 +185,10 @@ export const developerEffectConfig = {
   get baseFetchTimeoutMs(): number {
     return num("BASE_FETCH_TIMEOUT_MS", DEFAULT_BASE_FETCH_TIMEOUT_MS);
   },
+  /** NOT-315: bound for `npm ci` in the fresh worktree (coordinator side, with network). */
+  get worktreeDepsTimeoutMs(): number {
+    return worktreeDepsTimeoutMs();
+  },
   /** NOT-110: bounded window to let a lagging `gh pr view` catch up to a just-pushed HEAD. */
   get headReconcileTimeoutMs(): number {
     return num("HEAD_RECONCILE_TIMEOUT_MS", 30_000);
@@ -192,6 +201,9 @@ export const developerEffectConfig = {
 export interface DeveloperEffectDeps {
   spawn: DeveloperSpawn;
   github: GithubAdapter;
+  /** NOT-315: test seam for the pre-spawn `npm ci` — tests inject a fake so no
+   * registry is touched; production uses the default execFile runner. */
+  depsRunner?: WorktreeDepsRunner;
   /** Test-only seam: fake `get_bound_deck` so a deckId-bearing profile can exercise the
    * real deck-connection path without a reachable Agent Deck. */
   deckCallTool?: DeckToolCaller;
@@ -999,6 +1011,18 @@ export async function runDeveloperEffect(
       recordIssueBaseSha(issue.id, resolved.baseSha);
       issue.baseSha = resolved.baseSha;
     }
+    // NOT-315: provision dependencies here, outside the sandbox, with network — the
+    // builder sandbox has none, so an in-session install can never work. A throw
+    // lands in the worktree-setup adapter_failure below: visible and
+    // infra-retryable, never a silent hour-long stall. The session is not spawned.
+    const depsResult = await ensureWorktreeDeps(worktreePath, {
+      runner: deps.depsRunner,
+      timeoutMs: developerEffectConfig.worktreeDepsTimeoutMs,
+    });
+    milestone("worktree.deps_ready", `Developer · dependencies ready (round ${round})`, {
+      ...(depsResult.ran ? { ran: true as const } : { ran: false as const, reason: depsResult.reason }),
+      durationMs: depsResult.durationMs,
+    });
   } catch (err) {
     return { kind: "adapter_failure", reason: `worktree setup failed: ${String(err)}` };
   }

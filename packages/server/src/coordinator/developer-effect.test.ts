@@ -2663,3 +2663,96 @@ test("NOT-313: three CI repair attempts then a CI-specific escalation — infra_
   assert.match(action!.reason, /CI checks still failing after 3 repair attempts \(limit 3\)/);
   assert.doesNotMatch(action!.reason, /infra-attempt limit reached/);
 });
+
+test("NOT-315: a failing dependency install is a worktree-setup failure with the stderr tail — the session is not spawned", async () => {
+  // Hermetic repo: the shared fixture carries no package.json (so the step would skip
+  // before the runner is ever invoked), so this test cuts its own repo + remote whose
+  // main tip declares npm dependencies — the fresh worktree then really triggers the install.
+  const npmRepo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-npm-repo-"));
+  const npmRemote = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-npm-remote-"));
+  try {
+  git(npmRepo, "init", "-q", "-b", "main");
+  git(npmRepo, "config", "user.email", "test@example.com");
+  git(npmRepo, "config", "user.name", "Test");
+  fs.writeFileSync(path.join(npmRepo, "README.md"), "hello\n");
+  fs.writeFileSync(path.join(npmRepo, "package.json"), JSON.stringify({ name: "wt", version: "1.0.0" }));
+  fs.writeFileSync(path.join(npmRepo, "package-lock.json"), JSON.stringify({ name: "wt", lockfileVersion: 3, packages: {} }));
+  git(npmRepo, "add", ".");
+  git(npmRepo, "commit", "-q", "-m", "init");
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", npmRemote]);
+  git(npmRepo, "remote", "add", "origin", npmRemote);
+  git(npmRepo, "push", "-q", "origin", "main");
+  const devAgent = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099" });
+  const revAgent = createAgent({ name: `rev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099" });
+  const issueId = createIssue({
+    title: "Add widget",
+    description: "Build the widget.",
+    acceptanceCriteria: "Widget renders.",
+    repo: npmRepo,
+    baseBranch: "main",
+    developerAgentId: devAgent.id,
+    reviewerAgentId: revAgent.id,
+    maxReviewRounds: 3,
+    maxInfraAttempts: 3,
+    source: "manual"}).id;
+  let spawnCalls = 0;
+  const neverSpawn: SpawnFn = async () => {
+    spawnCalls++;
+    return { exitCode: 0, transcript: "", logPath: "/dev/null", timedOut: false };
+  };
+  let depsCalls = 0;
+  const failingDeps = async () => {
+    depsCalls++;
+    const err = new Error("npm ci exited") as Error & { stderr: string };
+    err.stderr = "npm error code EAI_AGAIN\nnpm error registry unreachable (sandbox has no network)\n";
+    throw err;
+  };
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: neverSpawn, github: fakeGithub(), depsRunner: failingDeps })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.equal(depsCalls, 1, "the worktree declares npm deps, so the install must run exactly once");
+  assert.equal(spawnCalls, 0, "the session must not spawn when dependency provisioning fails");
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing", "adapter_failure retries on the infra budget");
+  const dev = listWorkerSessionsForIssue(issueId).find((s) => s.role === "developer")!;
+  // adapter_failure never spawned, so the session row goes terminal (done) with the
+  // setup failure recorded as its reason — like every other adapter_failure.
+  assert.ok(dev.status === "done" || dev.status === "failed", `terminal session, got ${dev.status}`);
+  const reason = (JSON.parse(dev.errorJson ?? "{}") as { reason?: string }).reason ?? dev.errorJson ?? "";
+  assert.match(reason, /worktree setup failed/);
+  assert.match(reason, /dependency install failed: /);
+  assert.match(reason, /registry unreachable/);
+  } finally {
+    fs.rmSync(npmRepo, { recursive: true, force: true });
+    fs.rmSync(npmRemote, { recursive: true, force: true });
+  }
+});
+
+test("NOT-315: a skipped dependency install still emits worktree.deps_ready with ran/skipped and durationMs", async () => {
+  // The fixture repo carries no package.json, so the step skips (no package.json) and
+  // the fake runner is never called — the milestone must still record the skip.
+  const issueId = await makeIssue();
+  let depsCalls = 0;
+  const countingDeps = async () => {
+    depsCalls++;
+    return { stdout: "", stderr: "" };
+  };
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub(), depsRunner: countingDeps })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.equal(getIssue(issueId)!.status, "reviewing", "a skipped install must not block handoff");
+  assert.equal(depsCalls, 0, "no package.json means the runner is never invoked");
+  const { listWorkflowEventsForIssue: listEvents } = await import("../repository/workflow-events.js");
+  const depsEvent = listEvents(issueId).find((e) => e.type === "worktree.deps_ready");
+  assert.ok(depsEvent, "expected a worktree.deps_ready milestone");
+  const payload = JSON.parse(depsEvent!.payloadJson!) as { ran?: unknown; reason?: unknown; durationMs?: unknown };
+  assert.equal(payload.ran, false);
+  assert.match(String(payload.reason ?? ""), /no package\.json/);
+  assert.ok(typeof payload.durationMs === "number" && payload.durationMs >= 0);
+});

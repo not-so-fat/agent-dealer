@@ -327,6 +327,9 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
 
   parts.push(
     `## Required`,
+    // NOT-315: the coordinator provisions dependencies before the session spawns —
+    // the sandbox has no network, so an in-session install can never work.
+    `Dependencies are installed; do not run npm install (no network).`,
     // NOT-115: encourage incremental commits so a mid-session death leaves less
     // uncommitted work for dirty_worktree escalation — soft mitigation only.
     // NOT-146: timed-spawn handoff bar is commits + targeted tests for the change.
