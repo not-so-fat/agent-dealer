@@ -1436,6 +1436,53 @@ test("NOT-356: a worker that starts during the sync blocks the push and leaves t
   assert.equal(listWorkItemsForIssue(siblingId).filter((i) => i.status === "pending").length, 1);
 });
 
+test("NOT-356: a sibling aborted after the sync merge but before the push is never pushed", async () => {
+  const { abortIssue } = await import("./commands.js");
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-abort", conflict: false }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-abort", heads["sib-abort"]!, 56);
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  setMergePrForTests(async () => {
+    landMergedPr();
+    return { ok: true };
+  });
+  const calls: string[][] = [];
+  // The operator aborts the sibling while the sync's base merge runs: work and
+  // sessions are cancelled and the workflow completes, so no worker is active.
+  setConflictSyncGitExecForTests(async (args, opts) => {
+    calls.push(args);
+    const out = await defaultSyncGitExec(args, opts);
+    if (args.includes("merge") && args.includes("--no-edit")) {
+      const aborted = abortIssue(siblingId, "operator", { killProcess: () => true });
+      assert.ok(aborted.ok);
+    }
+    return out;
+  });
+  const stop = observeGitCommands((args) => {
+    calls.push([...args]);
+  });
+  try {
+    const { finalizeAutoMerge } = await import("./auto-merge.js");
+    assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
+    await settleBaseAdvancedScansForTests();
+  } finally {
+    stop();
+  }
+
+  assert.equal(syncMerges(calls).length, 1, "the abort landed after the sync merge");
+  assert.equal(calls.filter((a) => a[0] === "push").length, 0, "nothing pushed to the closed issue");
+  assert.equal(originTip(origin, "sib-abort"), heads["sib-abort"]);
+  assert.equal(getIssue(siblingId)!.status, "closed");
+  const events = baseAdvancedEvents(siblingId);
+  assert.deepEqual(events.map((e) => e.action), ["skipped"]);
+  assert.match(String(events[0]!.reason), /left its open stage|workflow instance/);
+  assert.deepEqual(
+    syncEvents(siblingId).map((e) => [e.outcome, e.code]),
+    [["skipped", "refused"]]
+  );
+  assertNoForceNoRebase(calls);
+});
+
 test("NOT-356: idle siblings parked on a needs_human gate or a stranded auto-merge are probed and repaired", async () => {
   const { transitionIssue } = await import("../repository/issues.js");
   const { createHumanAction } = await import("../repository/human-actions.js");

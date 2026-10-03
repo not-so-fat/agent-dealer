@@ -17,7 +17,8 @@
 //     computed mergeable state) against the new base tip: `clean` does nothing more.
 //   - `conflict`: the NOT-310/354 push-only sync (`base_advanced` entry, plain
 //     push, never force or rebase), conditional on origin still being the probed
-//     tip and the sibling still idle right before the push. A clean sync is
+//     tip and the sibling still idle and still open on the same workflow instance,
+//     branch, PR, repo and base right before the push. A clean sync is
 //     `synced` and re-enters the normal checks wait on the pushed head (the parked
 //     step is superseded by a no-agent publish-only CI wait); a textual conflict
 //     queues one conflict-repair round naming the files (`repair_queued`).
@@ -197,8 +198,17 @@ async function scanSibling(
     return { action: "repair_spent", detail: probeDetail };
   }
 
-  // Every mutation re-checks idleness: a worker may have started since the check above.
-  const guard = () => activeReason(issue.id);
+  // Every mutation re-checks the sibling: it may have been closed, re-targeted or
+  // picked up by a worker since the checks above.
+  let drifted = false;
+  const guard = () => {
+    const drift = siblingDrift(issue, instance.id);
+    if (drift) {
+      drifted = true;
+      return drift;
+    }
+    return activeReason(issue.id);
+  };
 
   // One push-only sync per episode: a spent sync goes straight to the repair round.
   let files = probe.files;
@@ -240,7 +250,7 @@ async function scanSibling(
       return { action: "hand_edited", detail: { ...probeDetail, reason: sync.reason } };
     }
     if (sync.outcome === "skipped" && sync.code === "refused") {
-      return { action: "active_worker", detail: { ...probeDetail, reason: sync.reason } };
+      return { action: drifted ? "skipped" : "active_worker", detail: { ...probeDetail, reason: sync.reason } };
     }
     if (sync.outcome === "escalate" || sync.outcome === "skipped") {
       return { action: sync.outcome === "escalate" ? "failed" : "skipped", detail: { ...probeDetail, reason: sync.reason } };
@@ -264,6 +274,25 @@ async function scanSibling(
     return { action: "skipped", detail: { ...probeDetail, reason: "issue became busy or left its stage before the repair round queued" } };
   }
   return { action: "repair_queued", detail: { ...probeDetail, files, workItemId: queued.id, round: queued.round } };
+}
+
+/** Why the sibling is no longer the open PR the scan validated: closed or moved to
+ * another stage outside the open set, a different (or no) active workflow instance,
+ * or a changed branch, PR, repo or base. */
+function siblingDrift(expected: Issue, instanceId: string): string | null {
+  const now = getIssue(expected.id);
+  if (!now) return "issue no longer exists";
+  if (!SIBLING_STATUSES.includes(now.status)) return `issue left its open stage (now ${now.status})`;
+  if (getActiveWorkflowInstance(expected.id)?.id !== instanceId) return "its workflow instance is no longer active";
+  if (
+    now.branch !== expected.branch ||
+    now.prNumber !== expected.prNumber ||
+    now.repo !== expected.repo ||
+    now.baseBranch !== expected.baseBranch
+  ) {
+    return "its branch, PR, repo or base changed";
+  }
+  return null;
 }
 
 /** Why the sibling is not idle: a running worker session, a leased work item (an
