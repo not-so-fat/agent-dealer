@@ -940,15 +940,6 @@ export async function runMergeConflictSync(opts: {
       ? null
       : headBeforeMerge !== headAfterMerge;
 
-  // NOT-356: the caller's ownership/idleness rule, re-checked at the mutation
-  // boundary.
-  const refusal = opts.beforePush?.() ?? null;
-  if (refusal) {
-    // Drop our unpushed base merge so the branch ref is back at the fetched tip.
-    await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
-    await cleanupSyncCheckout(repoPath, syncPath);
-    return skip(refusal, "refused");
-  }
   // NOT-356: re-pin origin's tip right before the push. The plain push rejects
   // divergent or forward movement on its own, but a hand reset to an ancestor
   // of the fetched tip would let our merge fast-forward over it and silently
@@ -963,6 +954,16 @@ export async function runMergeConflictSync(opts: {
           `origin/${opts.branch} moved to ${tipNow.sha ?? "(deleted)"} during the sync (fetched ${reused.remoteSha})`,
           "tip_moved"
         );
+  }
+  // NOT-356: the caller's ownership/idleness rule, re-checked at the mutation
+  // boundary — after the last await, so nothing can close the issue or start a
+  // worker between this check and the push starting.
+  const refusal = opts.beforePush?.() ?? null;
+  if (refusal) {
+    // Drop our unpushed base merge so the branch ref is back at the fetched tip.
+    await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
+    await cleanupSyncCheckout(repoPath, syncPath);
+    return skip(refusal, "refused");
   }
 
   // Plain push, never force — the refspec mirrors pushBranch exactly.

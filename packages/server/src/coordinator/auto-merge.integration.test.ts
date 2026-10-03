@@ -1483,6 +1483,96 @@ test("NOT-356: a sibling aborted after the sync merge but before the push is nev
   assertNoForceNoRebase(calls);
 });
 
+test("NOT-356: a sibling aborted while the pre-push tip re-read runs is never pushed", async () => {
+  const { abortIssue } = await import("./commands.js");
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-late-abort", conflict: false }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-late-abort", heads["sib-late-abort"]!, 57);
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  setMergePrForTests(async () => {
+    landMergedPr();
+    return { ok: true };
+  });
+  const calls: string[][] = [];
+  // The abort lands during the last await before the push: the ls-remote that
+  // re-pins origin's tip after the base merge, which itself still succeeds.
+  let merged = false;
+  setConflictSyncGitExecForTests(async (args, opts) => {
+    calls.push(args);
+    const out = await defaultSyncGitExec(args, opts);
+    if (args.includes("merge") && args.includes("--no-edit")) merged = true;
+    if (merged && args[0] === "ls-remote") {
+      const aborted = abortIssue(siblingId, "operator", { killProcess: () => true });
+      assert.ok(aborted.ok);
+    }
+    return out;
+  });
+  const stop = observeGitCommands((args) => {
+    calls.push([...args]);
+  });
+  try {
+    const { finalizeAutoMerge } = await import("./auto-merge.js");
+    assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
+    await settleBaseAdvancedScansForTests();
+  } finally {
+    stop();
+  }
+
+  assert.equal(syncMerges(calls).length, 1);
+  assert.ok(calls.some((a) => a[0] === "ls-remote"), "the abort landed in the pre-push tip re-read");
+  assert.equal(calls.filter((a) => a[0] === "push").length, 0, "nothing pushed to the closed issue");
+  assert.equal(originTip(origin, "sib-late-abort"), heads["sib-late-abort"]);
+  assert.equal(getIssue(siblingId)!.status, "closed");
+  assert.deepEqual(
+    syncEvents(siblingId).map((e) => [e.outcome, e.code]),
+    [["skipped", "refused"]]
+  );
+  assertNoForceNoRebase(calls);
+});
+
+test("NOT-356: a worker that starts during the pre-push tip re-read blocks the push", async () => {
+  const { createWorkerSession, startSession } = await import("../repository/worker-sessions.js");
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-late-worker", conflict: false }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-late-worker", heads["sib-late-worker"]!, 58);
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  setMergePrForTests(async () => {
+    landMergedPr();
+    return { ok: true };
+  });
+  const calls: string[][] = [];
+  let merged = false;
+  setConflictSyncGitExecForTests(async (args, opts) => {
+    calls.push(args);
+    const out = await defaultSyncGitExec(args, opts);
+    if (args.includes("merge") && args.includes("--no-edit")) merged = true;
+    if (merged && args[0] === "ls-remote") {
+      const session = createWorkerSession({ issueId: siblingId, role: "reviewer", round: 1, agentId: null, runtime: null });
+      assert.ok(startSession(session.id));
+    }
+    return out;
+  });
+  const stop = observeGitCommands((args) => {
+    calls.push([...args]);
+  });
+  try {
+    const { finalizeAutoMerge } = await import("./auto-merge.js");
+    assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
+    await settleBaseAdvancedScansForTests();
+  } finally {
+    stop();
+  }
+
+  assert.equal(syncMerges(calls).length, 1);
+  assert.equal(calls.filter((a) => a[0] === "push").length, 0, "nothing pushed under a live worker");
+  assert.equal(originTip(origin, "sib-late-worker"), heads["sib-late-worker"]);
+  assert.deepEqual(
+    syncEvents(siblingId).map((e) => [e.outcome, e.code]),
+    [["skipped", "refused"]]
+  );
+  assertNoForceNoRebase(calls);
+});
+
 test("NOT-356: idle siblings parked on a needs_human gate or a stranded auto-merge are probed and repaired", async () => {
   const { transitionIssue } = await import("../repository/issues.js");
   const { createHumanAction } = await import("../repository/human-actions.js");
