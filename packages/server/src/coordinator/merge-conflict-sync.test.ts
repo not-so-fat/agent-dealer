@@ -147,3 +147,219 @@ test("conflictRepairSpent ignores other issues/instances and malformed file list
   assert.equal(spent.spent, true);
   assert.deepEqual(spent.files, []);
 });
+
+// ---------------------------------------------------------------------------
+// NOT-354: the checks-wait entry — a developer PR that conflicts while Dealer
+// waits for CI. Real git (origin + managed clone); the sync's git shell-out is
+// recorded so the safety rules are asserted on the exact commands issued.
+
+const { execFileSync } = await import("node:child_process");
+const {
+  checksWaitSyncSpent,
+  defaultSyncGitExec,
+  queueConflictRepairRound,
+  runMergeConflictSync,
+  setConflictSyncGitExecForTests,
+} = await import("./merge-conflict-sync.js");
+const { claimWorkItem, getWorkItem, listWorkItemsForIssue } = await import("../repository/work-items.js");
+const { getIssue } = await import("../repository/issues.js");
+
+/** origin + clone where `issue-1` is pushed, then origin/main moves. `conflict`
+ * makes the base edit the same line of shared.txt the branch edited. */
+function initChecksWaitRepos(conflict: boolean): { origin: string; local: string; baseMovedSha: string } {
+  const g = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const origin = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not354-origin-"));
+  g(origin, "init", "-q", "-b", "main");
+  g(origin, "config", "user.email", "test@example.com");
+  g(origin, "config", "user.name", "Test");
+  fs.writeFileSync(path.join(origin, "shared.txt"), "line1\nline2\n");
+  g(origin, "add", ".");
+  g(origin, "commit", "-q", "-m", "A base");
+
+  const local = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not354-local-"));
+  fs.rmSync(local, { recursive: true, force: true });
+  execFileSync("git", ["clone", "-q", origin, local]);
+  g(local, "config", "user.email", "test@example.com");
+  g(local, "config", "user.name", "Test");
+  g(local, "checkout", "-q", "-b", "issue-1");
+  fs.writeFileSync(path.join(local, "shared.txt"), "line1\nfeature change\n");
+  g(local, "add", ".");
+  g(local, "commit", "-q", "-m", "B feature");
+  g(local, "push", "-q", "-u", "origin", "issue-1");
+  g(local, "checkout", "-q", "main");
+
+  if (conflict) fs.writeFileSync(path.join(origin, "shared.txt"), "line1\nbase change\n");
+  else fs.writeFileSync(path.join(origin, "other.txt"), "c\n");
+  g(origin, "add", ".");
+  g(origin, "commit", "-q", "-m", "C base moved (sibling PR merged)");
+  return { origin, local, baseMovedSha: g(origin, "rev-parse", "HEAD") };
+}
+
+function developingIssueIn(repo: string): { issueId: string; instanceId: string } {
+  const issueId = createIssue({
+    title: "Conflicting PR",
+    description: "d",
+    acceptanceCriteria: "It works",
+    repo,
+    developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+    reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    baseBranch: "main",
+    maxReviewRounds: 3,
+    maxInfraAttempts: 3,
+    source: "manual",
+  }).id;
+  startWorkflow(issueId);
+  return { issueId, instanceId: getActiveWorkflowInstance(issueId)!.id };
+}
+
+function recordGit(): string[][] {
+  const calls: string[][] = [];
+  setConflictSyncGitExecForTests(async (args, opts) => {
+    calls.push(args);
+    return defaultSyncGitExec(args, opts);
+  });
+  return calls;
+}
+
+function assertSafeGit(calls: string[][]): void {
+  for (const args of calls) {
+    assert.ok(!args.includes("rebase"), `never rebase: git ${args.join(" ")}`);
+    if (args[0] === "push") {
+      assert.ok(
+        args.every((a) => !/^(-f|--force)/.test(a) && !a.startsWith("+")),
+        `push must never force: git ${args.join(" ")}`
+      );
+    }
+  }
+}
+
+function contains(repo: string, sha: string, ref: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", sha, ref], { cwd: repo });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const CHECKS_WAIT_REASON = "PR #7 conflicts with main (mergeable: CONFLICTING), so its CI cannot start.";
+
+test("NOT-354: checks_wait clean sync merges the base and plain-pushes, then never syncs twice in the episode", async () => {
+  const { origin, local, baseMovedSha } = initChecksWaitRepos(false);
+  const { issueId, instanceId } = developingIssueIn(local);
+  const calls = recordGit();
+  try {
+    const sync = {
+      issueId,
+      instanceId,
+      repo: local,
+      branch: "issue-1",
+      baseBranch: "main",
+      prNumber: 7,
+      mergeReason: CHECKS_WAIT_REASON,
+      entry: "checks_wait" as const,
+    };
+    const first = await runMergeConflictSync(sync);
+    assert.equal(first.outcome, "synced");
+    const originTip = execFileSync("git", ["rev-parse", "issue-1"], { cwd: origin, encoding: "utf8" }).trim();
+    assert.equal(first.outcome === "synced" ? first.headSha : null, originTip, "reports the pushed head");
+    assert.equal(contains(origin, baseMovedSha, "issue-1"), true, "origin's branch now contains the moved base");
+    assert.equal(calls.filter((a) => a.includes("merge") && a.includes("origin/main")).length, 1);
+    assert.deepEqual(
+      calls.filter((a) => a[0] === "push"),
+      [["push", "-u", "origin", "HEAD:refs/heads/issue-1"]]
+    );
+    assertSafeGit(calls);
+    assert.equal(checksWaitSyncSpent(issueId, instanceId), true);
+    const root = path.join(local, ".agent-dealer-worktrees");
+    const leftovers = fs.existsSync(root) ? fs.readdirSync(root).filter((e) => e.startsWith("merge-sync-")) : [];
+    assert.deepEqual(leftovers, []);
+
+    // The base moved again and the PR conflicts again: the episode's one sync is
+    // spent, so the repair round is due — and no git command runs.
+    const before = calls.length;
+    const second = await runMergeConflictSync(sync);
+    assert.deepEqual(second, { outcome: "repair_needed", files: [] });
+    assert.equal(calls.length, before, "no second sync");
+    assert.equal(getIssue(issueId)!.status, "developing", "the sync itself never moves the issue");
+  } finally {
+    setConflictSyncGitExecForTests(null);
+  }
+});
+
+test("NOT-354: checks_wait textual conflict aborts without pushing, one repair round queues on the leased item, then escalates once with the files", async () => {
+  const { local, baseMovedSha } = initChecksWaitRepos(true);
+  const { issueId, instanceId } = developingIssueIn(local);
+  const calls = recordGit();
+  try {
+    const sync = {
+      issueId,
+      instanceId,
+      repo: local,
+      branch: "issue-1",
+      baseBranch: "main",
+      prNumber: 7,
+      mergeReason: CHECKS_WAIT_REASON,
+      entry: "checks_wait" as const,
+    };
+    const first = await runMergeConflictSync(sync);
+    assert.deepEqual(first, { outcome: "repair_needed", files: ["shared.txt"] });
+    assert.equal(calls.filter((a) => a[0] === "push").length, 0, "a conflicted merge is never pushed");
+    assert.equal(contains(local, baseMovedSha, "issue-1"), false, "the merge was aborted");
+    assertSafeGit(calls);
+
+    // The developer item the CI wait ran in is still leased; the repair round
+    // queues while CAS-finishing it.
+    const leased = claimWorkItem("not354-test", { leaseMs: 60_000 })!;
+    assert.equal(leased.issueId, issueId);
+    assert.equal(
+      queueConflictRepairRound({
+        issueId,
+        instanceId,
+        baseBranch: "main",
+        branch: "issue-1",
+        files: ["shared.txt"],
+        entry: "checks_wait",
+        finish: { workItemId: leased.id, leaseToken: "stale-token", result: {} },
+      }),
+      null,
+      "a lost lease queues nothing"
+    );
+    const queued = queueConflictRepairRound({
+      issueId,
+      instanceId,
+      baseBranch: "main",
+      branch: "issue-1",
+      files: ["shared.txt"],
+      entry: "checks_wait",
+      finish: { workItemId: leased.id, leaseToken: leased.leaseToken!, result: {} },
+    });
+    assert.ok(queued);
+    assert.equal(getWorkItem(leased.id)!.status, "done");
+    const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]!.id, queued!.id);
+    assert.deepEqual(JSON.parse(pending[0]!.payloadJson!).conflictRepair, {
+      baseBranch: "main",
+      branch: "issue-1",
+      files: ["shared.txt"],
+    });
+    assert.equal(getIssue(issueId)!.status, "developing", "developing has no repairing edge — the stage is kept");
+    assert.equal(getIssue(issueId)!.currentRound, 2);
+
+    // The repair round's CI wait still sees a conflicting PR: escalate with the
+    // file list, no second sync.
+    const before = calls.length;
+    const again = await runMergeConflictSync(sync);
+    assert.equal(again.outcome, "escalate");
+    if (again.outcome === "escalate") {
+      assert.match(again.reason, /^PR #7 conflicts with main/);
+      assert.match(again.reason, /shared\.txt/);
+      assert.deepEqual(again.evidence.conflictingFiles, ["shared.txt"]);
+      assert.equal(again.evidence.mergeFailure, undefined);
+    }
+    assert.equal(calls.length, before, "no git command once the episode is spent");
+  } finally {
+    setConflictSyncGitExecForTests(null);
+  }
+});

@@ -144,6 +144,8 @@ function fakeGithub(opts: {
   createFails?: boolean | (() => boolean);
   /** NOT-311: base-branch `pull_request` workflow answer; null (default) = unknown. */
   pullRequestWorkflow?: boolean | null;
+  /** NOT-354: PR mergeable state; absent = no adapter method (reads as UNKNOWN). */
+  mergeable?: "CONFLICTING" | "MERGEABLE" | "UNKNOWN" | (() => "CONFLICTING" | "MERGEABLE" | "UNKNOWN");
 } = {}): GithubFn {
   const prs = new Map<string, { number: number; url: string; base: string }>();
   let nextNumber = 100;
@@ -183,6 +185,13 @@ function fakeGithub(opts: {
     async publishReview() {
       throw new Error("publishReview is unused by the developer effect");
     }};
+  if (opts.mergeable !== undefined) {
+    const mergeable = opts.mergeable;
+    adapter.prMergeableState = async ({ number }) => {
+      if (number == null) throw new Error("fakeGithub.prMergeableState requires an explicit PR number");
+      return typeof mergeable === "function" ? mergeable() : mergeable;
+    };
+  }
   return adapter;
 }
 
@@ -774,6 +783,197 @@ test("NOT-311: none with an unknown workflow answer waits fail-closed", async ()
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 0);
   const completed = listWorkflowEventsForIssue(issueId).find((e) => e.type === "checks.completed");
   assert.equal(JSON.parse(completed!.payloadJson ?? "{}").reason, "none_with_workflow");
+});
+
+type ConflictSyncFn = NonNullable<Parameters<typeof runDeveloperEffect>[1]>["conflictSync"] & {};
+type ConflictSyncCall = Parameters<ConflictSyncFn>[0];
+
+/** NOT-354: records every base-sync invocation and answers from `respond`. */
+function recordingConflictSync(respond: (call: ConflictSyncCall, n: number) => ReturnType<ConflictSyncFn>): {
+  sync: ConflictSyncFn;
+  calls: ConflictSyncCall[];
+} {
+  const calls: ConflictSyncCall[] = [];
+  return {
+    calls,
+    sync: async (call) => {
+      calls.push(call);
+      return respond(call, calls.length);
+    },
+  };
+}
+
+async function withShortDeferralBackoff(fn: () => Promise<void>): Promise<void> {
+  const prevBase = process.env.DECK_OUTAGE_BACKOFF_BASE_MS;
+  const prevMax = process.env.DECK_OUTAGE_BACKOFF_MAX_MS;
+  process.env.DECK_OUTAGE_BACKOFF_BASE_MS = "10";
+  process.env.DECK_OUTAGE_BACKOFF_MAX_MS = "10";
+  try {
+    await fn();
+  } finally {
+    if (prevBase === undefined) delete process.env.DECK_OUTAGE_BACKOFF_BASE_MS;
+    else process.env.DECK_OUTAGE_BACKOFF_BASE_MS = prevBase;
+    if (prevMax === undefined) delete process.env.DECK_OUTAGE_BACKOFF_MAX_MS;
+    else process.env.DECK_OUTAGE_BACKOFF_MAX_MS = prevMax;
+  }
+}
+
+for (const state of ["UNKNOWN", "MERGEABLE"] as const) {
+  test(`NOT-354: none + pull_request workflow + ${state} PR keeps the queued CI wait, no base sync`, async () => {
+    const issueId = await makeIssue();
+    const recorder = recordingConflictSync(async () => {
+      throw new Error("a non-conflicting PR must never run the base sync");
+    });
+    registerEffectHandler("developer", (ctx) =>
+      runDeveloperEffect(ctx, {
+        deckCallTool: okDeckCallTool,
+        spawn: commitingSpawn,
+        github: fakeGithub({ checks: "none", pullRequestWorkflow: true, mergeable: state }),
+        conflictSync: recorder.sync,
+      })
+    );
+    startWorkflow(issueId);
+    await pump(1);
+
+    assert.equal(recorder.calls.length, 0);
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.status, "developing");
+    assert.match(issue.currentIntent ?? "", /Waiting for CI \(queued\) - no attempt spent/);
+    const deferred = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "worker.deferred");
+    assert.equal(deferred.length, 1);
+    assert.equal(JSON.parse(deferred[0]!.payloadJson ?? "{}").outcome, "checks_pending");
+    const completed = listWorkflowEventsForIssue(issueId).find((e) => e.type === "checks.completed");
+    assert.equal(JSON.parse(completed!.payloadJson ?? "{}").reason, "none_with_workflow");
+  });
+}
+
+test("NOT-354: none + pull_request workflow + CONFLICTING runs the base sync instead of a queued wait; a clean sync re-polls and hands off", async () => {
+  await withShortDeferralBackoff(async () => {
+    let mergeable: "CONFLICTING" | "MERGEABLE" = "CONFLICTING";
+    let ci: "none" | "success" = "none";
+    let spawns = 0;
+    const countingSpawn: SpawnFn = async (input) => {
+      spawns++;
+      return commitingSpawn(input);
+    };
+    const issueId = await makeIssue();
+    const branch = issueBranchName(issueId);
+    const recorder = recordingConflictSync(async () => ({ outcome: "synced", headSha: git(remote, "rev-parse", branch) }));
+    registerEffectHandler("developer", (ctx) =>
+      runDeveloperEffect(ctx, {
+        deckCallTool: okDeckCallTool,
+        spawn: countingSpawn,
+        github: fakeGithub({ checks: () => ci, pullRequestWorkflow: true, mergeable: () => mergeable }),
+        conflictSync: recorder.sync,
+      })
+    );
+    startWorkflow(issueId);
+    await pump(1);
+
+    // The coordinator invoked the NOT-310 sync through its checks-wait entry.
+    assert.equal(recorder.calls.length, 1);
+    const call = recorder.calls[0]!;
+    assert.equal(call.entry, "checks_wait");
+    assert.equal(call.branch, branch);
+    assert.equal(call.baseBranch, "main");
+    assert.equal(call.repo, repo);
+    assert.equal(call.mergePr, undefined, "the checks-wait entry never merges");
+    assert.match(call.mergeReason, /conflicts with main/);
+
+    const events = listWorkflowEventsForIssue(issueId);
+    const completed = events.find((e) => e.type === "checks.completed");
+    assert.equal(JSON.parse(completed!.payloadJson ?? "{}").reason, "conflicting");
+    const deferred = events.filter((e) => e.type === "worker.deferred");
+    assert.equal(deferred.length, 1, "the synced head waits on a normal CI re-poll");
+    const deferredReason = JSON.parse(deferred[0]!.payloadJson ?? "{}").reason as string;
+    assert.doesNotMatch(deferredReason, /Waiting for CI \(queued\)/);
+    assert.match(deferredReason, /Synced main into PR #\d+/);
+    const item = listWorkItemsForIssue(issueId)[0]!;
+    const payload = JSON.parse(item.payloadJson ?? "{}");
+    assert.equal(payload.publishOnly, true, "the re-poll takes the no-agent publish path");
+    assert.ok(payload.checksWaitStartedAt, "the wait keeps its original ceiling anchor");
+
+    // GitHub recomputes mergeability on the pushed head and CI runs.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    mergeable = "MERGEABLE";
+    ci = "success";
+    await pump(1);
+
+    const issue = getIssue(issueId)!;
+    assert.equal(issue.status, "reviewing", "the synced head continues to review with no human action");
+    assert.equal(spawns, 1, "the re-poll spawns no agent");
+    assert.equal(recorder.calls.length, 1, "no second sync");
+    assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
+    assert.equal(issue.infraAttempts, 0);
+  });
+});
+
+test("NOT-354: CONFLICTING with an unresolvable conflict queues exactly one conflict-repair round; still conflicting after it escalates once with the files", async () => {
+  const issueId = await makeIssue();
+  const prompts: string[] = [];
+  let n = 0;
+  const appendingSpawn: SpawnFn = async (input) => {
+    prompts.push(input.prompt);
+    n++;
+    fs.appendFileSync(path.join(input.cwd, "feature.txt"), `round ${n}\n`);
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", `round ${n}`);
+    return { exitCode: 0, transcript: "Implementation conclusion: done.", logPath: "/dev/null", timedOut: false };
+  };
+  const { runMergeConflictSync } = await import("./merge-conflict-sync.js");
+  // First episode call: the sync hit a textual conflict. Second call: the real
+  // sync, whose episode bound must escalate before touching git.
+  const recorder = recordingConflictSync(async (call, i) =>
+    i === 1 ? { outcome: "repair_needed", files: ["shared.txt"] } : runMergeConflictSync(call)
+  );
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, {
+      deckCallTool: okDeckCallTool,
+      spawn: appendingSpawn,
+      github: fakeGithub({ checks: "none", pullRequestWorkflow: true, mergeable: "CONFLICTING" }),
+      conflictSync: recorder.sync,
+    })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  let issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing");
+  assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1, "exactly one conflict-repair round");
+  assert.equal(pending[0]!.kind, "developer");
+  assert.equal(pending[0]!.round, 2);
+  const payload = JSON.parse(pending[0]!.payloadJson ?? "{}");
+  assert.deepEqual(payload.conflictRepair, { baseBranch: "main", branch: issueBranchName(issueId), files: ["shared.txt"] });
+  assert.equal(payload.publishOnly, undefined, "the repair round is an agent session, not a re-poll");
+  assert.equal(
+    listWorkflowEventsForIssue(issueId).filter((e) => e.type === "worker.deferred").length,
+    0,
+    "a conflicting PR never defers as a CI wait"
+  );
+
+  await pump(1);
+  assert.equal(prompts.length, 2);
+  assert.ok(prompts[1]!.includes("main"), "repair prompt names the base");
+  assert.ok(prompts[1]!.includes("shared.txt"), "repair prompt names the conflicting files");
+
+  issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(recorder.calls.length, 2);
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0);
+  const open = listHumanActionsForIssue(issueId).filter((a) => a.status === "open");
+  assert.equal(open.length, 1, "escalates exactly once");
+  assert.equal(open[0]!.actionType, "policy_escalation");
+  assert.match(open[0]!.reason, /shared\.txt/);
+  assert.match(open[0]!.reason, /conflicts with main/);
+  assert.doesNotMatch(open[0]!.reason, /Auto-merge failed/);
+  const evidence = JSON.parse(open[0]!.evidenceJson!) as Record<string, unknown>;
+  assert.deepEqual(evidence.conflictingFiles, ["shared.txt"]);
+  assert.equal(evidence.mergeFailure, undefined, "a pre-review conflict offers no retry_merge");
+
+  await pump(1);
+  assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 1, "no repeat escalation");
 });
 
 test("NOT-311: past CHECKS_WAIT_CEILING_MS the wait escalates naming the PR and head SHA", async () => {
