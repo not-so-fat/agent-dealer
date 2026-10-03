@@ -208,6 +208,60 @@ function renderDetail(action: HumanAction): string {
   );
 }
 
+function operatorAction(extra: Partial<HumanAction> = {}): HumanAction {
+  return actionFixture({
+    actionType: "operator_verification",
+    reason:
+      "Reviewer approved abc12345, but 1 acceptance criterion requires a human operator " +
+      "to verify (tagged [operator] in the frozen task snapshot) and no result is recorded " +
+      "for this head. The PR stays unmerged until the result is recorded:\n" +
+      "- [ ] Operator can sign in with SSO and see the org dashboard [operator]\n" +
+      "  - `npm run probe:sso -- --env staging`",
+    question: "Paste the probe output to record verification, waive with a reason, or send the work back for another repair round?",
+    evidenceJson: JSON.stringify({
+      operatorVerification: {
+        criteria: [
+          {
+            text: "Operator can sign in with SSO and see the org dashboard [operator]",
+            commands: ["npm run probe:sso -- --env staging"],
+          },
+        ],
+        headSha: "abc12345",
+      },
+    }),
+    responseOptionsJson: JSON.stringify([
+      { choice: "verified", label: "Verified" },
+      { choice: "waive", label: "Waive" },
+      { choice: "repair", label: "Repair" },
+    ]),
+    ...extra,
+  });
+}
+
+test("detail renders operator_verification with a required note field and all server choices", () => {
+  const html = renderDetail(operatorAction());
+  assert.match(html, /Result note \(required\)/, "note textarea names the requirement");
+  assert.match(html, /Verified/);
+  assert.match(html, /Waive/);
+  assert.match(html, /Repair/);
+  // Static markup cannot carry the disabled prop state, but the gate is the
+  // empty note: buttons carry the enter-the-note-first hint.
+  assert.match(html, /Enter the result note first/);
+});
+
+test("home links issue-scoped operator_verification out instead of resolving inline", () => {
+  const action = operatorAction();
+  const html = renderHome(action);
+  assert.ok(html.includes(`/issues/${action.issueId}`), "issue-scoped action links to its issue");
+  assert.ok(!html.includes("Result note (required)"), "the note lives on the issue page, not the list");
+});
+
+test("home renders a required note field for run-scoped operator_verification", () => {
+  const html = renderHome(operatorAction({ issueId: null, runId: "44444444-4444-4444-8444-444444444444" }));
+  assert.match(html, /Result note \(required\)/);
+  assert.match(html, /Verified/);
+});
+
 for (const [name, make] of [
   ["worktree conflict", worktreeConflictAction],
   ["diverged push", divergedAction],

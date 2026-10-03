@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { HumanAction } from "@agent-dealer/shared";
 import AlertIcon from "../ui/AlertIcon";
 import HumanActionCard from "./HumanActionCard";
@@ -5,7 +6,7 @@ import HumanActionCard from "./HumanActionCard";
 type Props = {
   actions: HumanAction[];
   busyActionId: string | null;
-  onResolve: (actionId: string, choice: string) => void;
+  onResolve: (actionId: string, choice: string, note?: string) => void;
 };
 
 /**
@@ -22,6 +23,10 @@ type Props = {
  * Renders nothing when no action is open: the home screen needs no action-center chrome then.
  */
 export default function NeedsAttentionPanel({ actions, busyActionId, onResolve }: Props) {
+  // NOT-314: run-scoped operator_verification resolves (issue-scoped ones link
+  // out to their issue) still require the result note — the server 400s every
+  // choice without one, so the buttons stay disabled until it is non-blank.
+  const [notes, setNotes] = useState<Record<string, string>>({});
   if (actions.length === 0) return null;
 
   return (
@@ -42,13 +47,28 @@ export default function NeedsAttentionPanel({ actions, busyActionId, onResolve }
             );
           }
 
+          // NOT-314: operator_verification needs its note threaded through —
+          // a noteless onChoose would always fail server-side.
+          const needsNote = action.actionType === "operator_verification";
+          const note = notes[action.id] ?? "";
           return (
             <div key={action.id} className="px-4 py-3">
               <HumanActionCard
                 action={action}
-                disabled={busyActionId === action.id}
-                onChoose={(choice) => onResolve(action.id, choice)}
-              />
+                disabled={busyActionId === action.id || (needsNote && !note.trim())}
+                onChoose={(choice) => onResolve(action.id, choice, needsNote ? note : undefined)}
+              >
+                {needsNote && (
+                  <textarea
+                    className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm text-white/85 placeholder:text-white/30"
+                    rows={2}
+                    placeholder="Result note (required) — paste the probe output, waiver reason, or repair note"
+                    value={note}
+                    disabled={busyActionId === action.id}
+                    onChange={(e) => setNotes((prev) => ({ ...prev, [action.id]: e.target.value }))}
+                  />
+                )}
+              </HumanActionCard>
             </div>
           );
         })}

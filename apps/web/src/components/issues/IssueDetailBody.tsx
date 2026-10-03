@@ -22,6 +22,7 @@ import ExecutionContractSummary from "./ExecutionContractSummary";
 import IssueTimeline from "./IssueTimeline";
 import ExecutionAnalysisSection from "./ExecutionAnalysisSection";
 import HumanActionCard from "./HumanActionCard";
+import { parseResponseOptions } from "../../lib/humanActions";
 import { summarizeHumanAction } from "@agent-dealer/shared";
 
 type Props = {
@@ -195,6 +196,9 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   const [closeNotice, setCloseNotice] = useState<string | null>(null);
   /** NOT-272: optional per-action decision note for a product_scope_decision resolve. */
   const [scopeNotes, setScopeNotes] = useState<Record<string, string>>({});
+  /** NOT-314: required per-action result note for an operator_verification resolve —
+   * the server 400s every choice without a non-empty note. */
+  const [operatorNotes, setOperatorNotes] = useState<Record<string, string>>({});
 
   const fail = (e: unknown) => onError(String(e));
 
@@ -584,6 +588,42 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
               // detail agrees with the Issues home on the compact question, choice
               // labels, and Details content.
               const scopeDecision = a.actionType === "product_scope_decision";
+              // NOT-314: operator_verification keeps its own gated buttons — every
+              // choice requires the result note, so the generic noteless
+              // onChoose below would just bounce off the server with a 400.
+              if (a.actionType === "operator_verification") {
+                const options = parseResponseOptions(a);
+                const note = operatorNotes[a.id] ?? "";
+                const noteReady = note.trim().length > 0;
+                return (
+                  <HumanActionCard key={a.id} action={a} hideChoicesHint>
+                    <div className="space-y-1">
+                      <textarea
+                        className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm text-white/85 placeholder:text-white/30"
+                        rows={2}
+                        placeholder="Result note (required) — paste the probe output, waiver reason, or repair note"
+                        value={note}
+                        disabled={busy}
+                        onChange={(e) => setOperatorNotes((prev) => ({ ...prev, [a.id]: e.target.value }))}
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        {options.map((o) => (
+                          <button
+                            key={o.choice}
+                            type="button"
+                            className="btn-gold px-3 py-1 text-xs disabled:opacity-50"
+                            disabled={busy || !noteReady}
+                            title={noteReady ? undefined : "Enter the result note first — the server requires it"}
+                            onClick={() => resolveActionChoice(a.id, o.choice, note)}
+                          >
+                            {o.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </HumanActionCard>
+                );
+              }
               return scopeDecision ? (
                 <HumanActionCard key={a.id} action={a} hideChoicesHint>
                   {readiness.ok && (
