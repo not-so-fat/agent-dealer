@@ -4,6 +4,15 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.10 — 2026-10-03
+
+Patch over 1.2.9: a developer PR that conflicts with its base while CI is pending no longer waits forever, and a Muse session that already finished no longer holds the worker until the 1-hour wall.
+
+### Changes
+
+- **Conflicting PR during the CI wait syncs the base instead of waiting (NOT-354)** — a PR with no checks that GitHub reports as `CONFLICTING` (no merge ref, so `pull_request` CI never starts) was read as "CI queued" and deferred indefinitely. The checks wait now reads the PR's mergeable state and routes into the NOT-310 base sync (plain push, never force or rebase; one sync and one conflict-repair round per episode), re-polling the synced head or escalating once with the conflicting files.
+- **Finished Muse sessions are reaped after a short grace (NOT-342)** — a Muse session that already emitted a terminal event is killed after a 30s grace (`MUSE_TERMINAL_GRACE_MS=0` disables it) instead of at the 1-hour wall, and a provider transport failure is recorded by its real cause, not as a timeout.
+
 ## 1.2.9 — 2026-10-03
 
 Patch over 1.2.8: CI becomes a first-class verifier (pending checks wait, screenshot artifacts, separate retry budget), operator-verified ACs gate auto-merge, and developer worktrees come with dependencies installed.
