@@ -10,6 +10,7 @@
 // (`READ_ONLY_BUILTIN_TOOLS` in args.ts) has no Bash at all, so it cannot shell out —
 // every artifact it needs to judge must already be in the prompt.
 import type { ExecutionContractV1, Finding } from "@agent-dealer/shared";
+import { MUSE_SANDBOX_CAPABILITIES } from "../runners/muse-code-args.js";
 import {
   checkMuseVisualQa,
   museVisualQaPromptSection,
@@ -203,6 +204,82 @@ function operatorReviewerSection(criteria: OperatorCriterion[] | undefined): str
   ];
 }
 
+/**
+ * NOT-316: the Muse developer sandbox limits, rendered from
+ * `MUSE_SANDBOX_CAPABILITIES` (which is tied by test to the real
+ * `--sandbox-network` launch flag) instead of hand-written prose, so the
+ * prompt cannot drift from what the sandbox actually does. Muse developers
+ * only — returns [] otherwise, so non-Muse prompts are byte-for-byte
+ * unchanged.
+ */
+function museEnvironmentLimitsSection(): string[] {
+  const caps = MUSE_SANDBOX_CAPABILITIES;
+  return [
+    `## Environment limits (sandbox network: ${caps.sandboxNetwork})`,
+    `This session runs inside the Muse sandbox with network \`${caps.network}\` — these limits come from the launch flags and cannot be worked around:`,
+    ``,
+    `- Network: ${caps.network} (no DNS — the npm registry and GitHub API are unreachable).`,
+    `- Loopback listeners: ${caps.loopbackListen ? "yes" : "no"} — \`listen()\` fails with EPERM, so do not start servers.`,
+    `- Browser: ${caps.browser ? "yes" : "no"}.`,
+    `- Credentials/Keychain: ${caps.credentialsKeychain ? "yes" : "no"}.`,
+    `After one failed attempt at something the environment cannot do (install, listen, browser, credentials), stop and hand off; do not work around the sandbox.`,
+    ``,
+  ];
+}
+
+function acceptanceCriteriaHasTag(acceptanceCriteria: string, tag: "[agent]" | "[ci]" | "[operator]"): boolean {
+  return acceptanceCriteria.includes(tag);
+}
+
+/**
+ * NOT-316: what `[agent]` / `[ci]` tags on acceptance criteria mean for a Muse
+ * developer. Rendered only when the AC text carries the tag (per-tag lines)
+ * and only for Muse developers — otherwise returns [] so untagged and
+ * non-Muse prompts are byte-for-byte what they always were. `[operator]`
+ * criteria are owned by the operator-gate section (`operatorDeveloperSection`)
+ * and deliberately not duplicated here.
+ */
+function tagSemanticsDeveloperSection(acceptanceCriteria: string): string[] {
+  const lines: string[] = [];
+  if (acceptanceCriteriaHasTag(acceptanceCriteria, "[agent]")) {
+    lines.push(
+      `- \`[agent]\`: verify yourself — prove the criterion with your own in-session runs (targeted tests); your verification is the evidence.`
+    );
+  }
+  if (acceptanceCriteriaHasTag(acceptanceCriteria, "[ci]")) {
+    lines.push(
+      `- \`[ci]\`: implement or extend the named CI job/test and push — CI is the evidence, do not reproduce it locally.`
+    );
+  }
+  if (!lines.length) return [];
+  return [`## Acceptance-criterion tags ([agent] / [ci])`, ...lines, ``];
+}
+
+/**
+ * NOT-316: how the reviewer judges tagged criteria. Rendered only when the AC
+ * text carries the tag (per-tag lines) — untagged reviewer prompts are
+ * byte-for-byte what they always were. `[ci]` is judged by the PR check
+ * status in the evidence, never by local runs; an `[operator]` criterion is
+ * gated by Dealer and missing operator evidence is never a defect (the
+ * probe/doc existence check lives in `operatorReviewerSection` and is not
+ * duplicated here).
+ */
+function tagSemanticsReviewerSection(acceptanceCriteria: string): string[] {
+  const lines: string[] = [];
+  if (acceptanceCriteriaHasTag(acceptanceCriteria, "[ci]")) {
+    lines.push(
+      `- Judge \`[ci]\` criteria by the PR check status in the evidence (the CI checks section), not by local runs.`
+    );
+  }
+  if (acceptanceCriteriaHasTag(acceptanceCriteria, "[operator]")) {
+    lines.push(
+      `- Do not mark an \`[operator]\` criterion as a defect — it is gated by Dealer.`
+    );
+  }
+  if (!lines.length) return [];
+  return [`## Criterion tags ([ci] / [operator]) — how to judge`, ...lines, ``];
+}
+
 /** NOT-272: a resolved product_scope_decision's human note, verbatim. Empty/absent
  * renders nothing so noteless resolves produce byte-for-byte the prompt they always did. */
 function scopeDecisionSection(note: string | undefined): string[] {
@@ -303,6 +380,12 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
     // NOT-314: operator criteria render separately right after the criteria —
     // the worker must not attempt them, only ship the probe + doc.
     ...operatorDeveloperSection(input.operatorCriteria),
+    // NOT-316: tag semantics render only for Muse developers whose AC text
+    // carries the tags — otherwise nothing, so untagged and non-Muse prompts
+    // stay byte-for-byte.
+    ...(input.museDeveloper
+      ? tagSemanticsDeveloperSection(input.taskSnapshot.acceptanceCriteria)
+      : []),
     ...executionContractSection(input.taskSnapshot.executionContract),
   );
 
@@ -318,6 +401,9 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
   parts.push(...guidanceSection(input.guidance));
   parts.push(...agentDeckSection(input.worktreePath, input.deckId));
   if (input.museDeveloper) parts.push(...museCronProhibitionSection());
+  // NOT-316: sandbox limits rendered from MUSE_SANDBOX_CAPABILITIES — Muse
+  // developers only, so non-Muse prompts are untouched.
+  if (input.museDeveloper) parts.push(...museEnvironmentLimitsSection());
   // NOT-303: the screenshot-path preflight verdict is embedded before the session
   // starts, so the worker reads it instead of discovering the Chrome.app abort
   // mid-session. Non-Muse developers are untouched.
@@ -465,6 +551,9 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
     // NOT-314: missing operator evidence is NOT a defect — but the probe and
     // doc must exist. Only rendered when the snapshot carries operator criteria.
     ...operatorReviewerSection(input.operatorCriteria),
+    // NOT-316: tagged-criterion judging lines — only when the AC text carries
+    // the tags, so untagged reviewer prompts stay byte-for-byte.
+    ...tagSemanticsReviewerSection(input.taskSnapshot.acceptanceCriteria),
     ...executionContractSection(input.taskSnapshot.executionContract),
     `## Diff (base ${input.baseSha.slice(0, 8)} → head ${input.headSha.slice(0, 8)})`,
     "```diff",

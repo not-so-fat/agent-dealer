@@ -446,3 +446,91 @@ test("NOT-315: developer prompt tells the worker dependencies are installed and 
   const retry = buildDeveloperPrompt({ taskSnapshot, round: 1, retryReason: "Developer session failed or crashed." });
   assert.match(retry, /Dependencies are installed; do not run npm install \(no network\)\./);
 });
+
+// NOT-316: a Muse developer learns the sandbox limits from its prompt — the
+// section is rendered from MUSE_SANDBOX_CAPABILITIES, not hand-written prose.
+// Other runtimes are unchanged.
+test("NOT-316: museDeveloper prompt contains the Environment limits section; other runtimes do not", async () => {
+  const { MUSE_SANDBOX_CAPABILITIES } = await import("../runners/muse-code-args.js");
+  const muse = buildDeveloperPrompt({ taskSnapshot, round: 1, museDeveloper: true });
+  assert.match(muse, /## Environment limits/);
+  assert.ok(
+    muse.includes(`sandbox network: ${MUSE_SANDBOX_CAPABILITIES.sandboxNetwork}`),
+    "section header names the sandbox-network value from the constant"
+  );
+  assert.ok(muse.includes(`Network: ${MUSE_SANDBOX_CAPABILITIES.network}`), "network limit comes from the constant");
+  assert.match(muse, /listen.*EPERM/i);
+  assert.match(muse, /Browser: no/);
+  assert.match(muse, /Credentials\/Keychain: no/);
+  assert.match(muse, /After one failed attempt.*stop and hand off; do not work around the sandbox\./);
+  const other = buildDeveloperPrompt({ taskSnapshot, round: 1 });
+  assert.doesNotMatch(other, /## Environment limits/);
+  assert.doesNotMatch(other, /do not work around the sandbox/);
+});
+
+// NOT-316: tag semantics appear only when the AC text carries the tags, per
+// tag, and only for Muse developers — an untagged ticket's prompt carries no
+// tag section at all.
+test("NOT-316: developer tag semantics render per tag only for a Muse developer with tagged ACs", () => {
+  const taggedBoth = {
+    ...taskSnapshot,
+    acceptanceCriteria: "- [ ] [agent] Widget renders in the preview.\n- [ ] [ci] Extend the `verify` workflow for widgets.",
+  };
+  const museBoth = buildDeveloperPrompt({ taskSnapshot: taggedBoth, round: 1, museDeveloper: true });
+  assert.match(museBoth, /## Acceptance-criterion tags/);
+  assert.match(museBoth, /`\[agent\]`: verify yourself/);
+  assert.match(museBoth, /`\[ci\]`: implement or extend the named CI job\/test and push/);
+  assert.match(museBoth, /CI is the evidence, do not reproduce it locally/);
+
+  const agentOnly = buildDeveloperPrompt({
+    taskSnapshot: { ...taskSnapshot, acceptanceCriteria: "- [ ] [agent] Widget renders." },
+    round: 1,
+    museDeveloper: true,
+  });
+  assert.match(agentOnly, /`\[agent\]`: verify yourself/);
+  assert.doesNotMatch(agentOnly, /`\[ci\]`: implement or extend/);
+
+  const ciOnly = buildDeveloperPrompt({
+    taskSnapshot: { ...taskSnapshot, acceptanceCriteria: "- [ ] [ci] Extend the `verify` workflow." },
+    round: 1,
+    museDeveloper: true,
+  });
+  assert.match(ciOnly, /`\[ci\]`: implement or extend the named CI job\/test and push/);
+  assert.doesNotMatch(ciOnly, /`\[agent\]`: verify yourself/);
+
+  // Untagged Muse prompt: no tag section — snapshot-style byte check that the
+  // tag feature adds nothing beyond the section itself.
+  const untaggedMuse = buildDeveloperPrompt({ taskSnapshot, round: 1, museDeveloper: true });
+  assert.doesNotMatch(untaggedMuse, /## Acceptance-criterion tags/);
+  assert.doesNotMatch(untaggedMuse, /`\[agent\]`: verify yourself/);
+  assert.doesNotMatch(untaggedMuse, /`\[ci\]`: implement or extend/);
+  assert.equal(buildDeveloperPrompt({ taskSnapshot, round: 1, museDeveloper: true }), untaggedMuse);
+
+  // Non-Muse prompts never carry tag semantics, even with tagged ACs.
+  const otherTagged = buildDeveloperPrompt({ taskSnapshot: taggedBoth, round: 1 });
+  assert.doesNotMatch(otherTagged, /## Acceptance-criterion tags/);
+  assert.doesNotMatch(otherTagged, /## Environment limits/);
+});
+
+// NOT-316: the reviewer judges [ci] by the PR check status and never flags a
+// missing [operator] result as a defect.
+test("NOT-316: reviewer prompt judges [ci] by check status and never defects [operator]", () => {
+  const tagged = buildReviewerPrompt({
+    ...reviewerBase,
+    taskSnapshot: {
+      ...taskSnapshot,
+      acceptanceCriteria: "- [ ] [ci] The `verify` workflow covers widgets.\n- [ ] [operator] Operator completes a paid checkout.",
+    },
+  });
+  assert.match(tagged, /## Criterion tags/);
+  assert.match(tagged, /Judge `\[ci\]` criteria by the PR check status in the evidence/);
+  assert.match(tagged, /not by local runs/);
+  assert.match(tagged, /Do not mark an `\[operator\]` criterion as a defect/);
+  assert.match(tagged, /gated by Dealer/);
+});
+
+test("NOT-316: untagged reviewer prompt carries no tag-judging section", () => {
+  const without = buildReviewerPrompt(reviewerBase);
+  assert.doesNotMatch(without, /## Criterion tags/);
+  assert.equal(buildReviewerPrompt(reviewerBase), without);
+});

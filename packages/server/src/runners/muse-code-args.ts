@@ -5,6 +5,32 @@
 
 export const MUSE_COMMAND = "muse";
 
+/**
+ * NOT-316: what the Muse developer sandbox cannot do, derived from the real
+ * launch flags in `buildMuseDeveloperInvocation` below. The developer prompt's
+ * "Environment limits" section is rendered from this constant (not hand-written
+ * prose), and `muse-code-args.test.ts` asserts the pairing — changing
+ * `--sandbox-network` without updating this constant fails a test.
+ *
+ * Live probe results behind these values: under `restricted` there is no DNS
+ * (npm registry and GitHub API unreachable) and loopback `listen()` fails with
+ * EPERM; under `proxy-only` network works through a local proxy but `listen()`
+ * still fails; under `enabled` both work. No headless browser or
+ * credentials/Keychain are provisioned into the developer session.
+ */
+export const MUSE_SANDBOX_CAPABILITIES = {
+  /** Must equal the `--sandbox-network` value passed in the developer argv. */
+  sandboxNetwork: "restricted",
+  /** Effective network access under that sandbox mode. */
+  network: "none",
+  /** Whether loopback `listen()` works. */
+  loopbackListen: false,
+  /** Whether a browser is available for visual QA / screenshots. */
+  browser: false,
+  /** Whether credentials / Keychain are provisioned. */
+  credentialsKeychain: false,
+} as const;
+
 /** The launcher re-execs a newer binary hourly unless this is set, so the pinned version can drift. */
 export const MUSE_NO_AUTO_UPDATE_ENV = { MUSE_NO_AUTO_UPDATE: "1" } as const;
 
