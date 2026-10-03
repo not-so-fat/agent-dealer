@@ -889,10 +889,32 @@ async function parkedMergeIn(repo: string): Promise<string> {
   return issueId;
 }
 
-/** An idle sibling: handed off at the pushed head, its reviewer round still queued. */
-async function idleSiblingIn(repo: string, branch: string, headSha: string, prNumber: number): Promise<string> {
+/** The developer effect's durable proof that Dealer pushed `sha` to the branch. */
+async function recordDealerPush(issueId: string, branch: string, sha: string): Promise<void> {
+  const { appendWorkflowEvent } = await import("../repository/workflow-events.js");
+  appendWorkflowEvent({
+    issueId,
+    workflowInstanceId: getActiveWorkflowInstance(issueId)!.id,
+    workerSessionId: null,
+    type: "checkpoint.observed",
+    actorType: "developer",
+    stage: getIssue(issueId)!.status,
+    payload: { kind: "branch_pushed", observedSha: sha, branch },
+  });
+}
+
+/** An idle sibling: Dealer pushed `pushedSha` (default: the handed-off head), then
+ * handed off at `headSha`; its reviewer round still queued. */
+async function idleSiblingIn(
+  repo: string,
+  branch: string,
+  headSha: string,
+  prNumber: number,
+  pushedSha: string = headSha
+): Promise<string> {
   const issueId = newIssue({ autoMerge: false, repo });
   startWorkflow(issueId);
+  await recordDealerPush(issueId, branch, pushedSha);
   // Hold back earlier siblings' queued reviewer rounds so the claim gets this issue's item.
   const held = getDb()
     .prepare("SELECT id, available_at FROM work_items WHERE issue_id != ? AND status = 'pending'")
@@ -1264,6 +1286,39 @@ test("NOT-356: an origin reset to an older Dealer head is a hand edit, not Deale
   assert.equal(calls.filter((a) => a[0] === "push").length, 0);
   assert.equal(calls.filter((a) => a[0] === "merge-tree").length, 0);
   assert.equal(originTip(origin, "sib-old"), heads["sib-old"]);
+  assert.equal(getIssue(siblingId)!.status, "reviewing");
+});
+
+test("NOT-356: an external push accepted by a publish-only clean handoff is still a hand edit", async () => {
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-ext", conflict: true }]);
+  const mergedId = await parkedMergeIn(local);
+  // Dealer pushed its head; then someone pushed outside the coordinator, and the
+  // publish-only retry accepted origin and handed off at that observed head.
+  const g = (...args: string[]) => execFileSync("git", args, { cwd: local, encoding: "utf8" }).trim();
+  g("checkout", "-q", "sib-ext");
+  fs.writeFileSync(path.join(local, "hand.txt"), "by hand\n");
+  g("add", ".");
+  g("commit", "-q", "-m", "hand edit");
+  g("push", "-q", "origin", "sib-ext");
+  const handTip = g("rev-parse", "HEAD");
+  g("checkout", "-q", "main");
+  const siblingId = await idleSiblingIn(local, "sib-ext", handTip, 54, heads["sib-ext"]!);
+  assert.equal(getIssue(siblingId)!.headSha, handTip, "the handoff recorded the observed head");
+  assert.equal(
+    JSON.parse(listWorkflowEventsForIssue(siblingId).find((e) => e.type === "pull_request.opened")!.payloadJson!).headSha,
+    handTip
+  );
+
+  const calls = await mergeAndScan(mergedId, landMergedPr);
+
+  const events = baseAdvancedEvents(siblingId);
+  assert.deepEqual(events.map((e) => e.action), ["hand_edited"]);
+  assert.equal(events[0]!.remoteSha, handTip);
+  assert.equal(events[0]!.lastPushedSha, heads["sib-ext"]);
+  assert.equal(calls.filter((a) => a[0] === "push").length, 0, "nothing pushed");
+  assert.equal(calls.filter((a) => a[0] === "merge-tree").length, 0, "not even probed");
+  assert.deepEqual(syncEvents(siblingId), []);
+  assert.equal(originTip(origin, "sib-ext"), handTip);
   assert.equal(getIssue(siblingId)!.status, "reviewing");
 });
 

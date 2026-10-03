@@ -275,14 +275,19 @@ function activeReason(issueId: string): string | null {
   return null;
 }
 
-/** Events that record a head Dealer itself put on origin, and where they carry it. */
-const PUSH_EVENT_TYPES = ["checkpoint.observed", "pull_request.opened", "branch.pushed", "auto_merge.conflict_sync"];
+/**
+ * Events that prove Dealer itself put a head on origin. `pull_request.opened` and
+ * the issue's `headSha` are deliberately absent: a publish-only handoff accepts an
+ * origin someone pushed outside the coordinator and records that observed head
+ * there, so neither says who pushed it.
+ */
+const PUSH_EVENT_TYPES = ["checkpoint.observed", "branch.pushed", "auto_merge.conflict_sync"];
 
 /**
  * The single SHA Dealer last pushed to the issue branch: the latest of a developer
- * push checkpoint, a verified handoff, a lease push, or a push-only base sync (in
- * event order). Falls back to the handoff head when no event names one. An older
- * Dealer head is not accepted — a reset back to it is a hand edit too.
+ * push checkpoint, a lease push, or a push-only base sync that moved the head (in
+ * event order). Null when no event proves a push — the tip is then never Dealer's.
+ * An older Dealer head is not accepted — a reset back to it is a hand edit too.
  */
 function lastDealerPushedSha(issue: Issue): string | null {
   const rows = getDb()
@@ -302,12 +307,13 @@ function lastDealerPushedSha(issue: Issue): string | null {
     }
     let sha: unknown = null;
     if (row.type === "checkpoint.observed") sha = p.kind === "branch_pushed" ? p.observedSha : null;
-    else if (row.type === "pull_request.opened") sha = p.headSha;
     else if (row.type === "branch.pushed") sha = p.newSha ?? p.localSha;
-    else if (p.outcome === "synced") sha = p.headSha;
+    // A sync whose merge left the head unchanged pushed nothing new: its head is
+    // whatever origin already held, not proof of a Dealer push.
+    else if (p.outcome === "synced" && p.mergeChangedHead !== false) sha = p.headSha;
     if (typeof sha === "string" && sha) last = sha;
   }
-  return last ?? issue.headSha ?? null;
+  return last;
 }
 
 function recordBaseAdvanced(issueId: string, payload: Record<string, unknown>): void {
