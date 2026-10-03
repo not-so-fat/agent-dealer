@@ -360,6 +360,9 @@ const CORRECTION_CHOICES: Record<string, readonly string[]> = {
   policy_escalation: ["resume", "repair", "retry_merge"],
   product_scope_decision: ["resume"],
   deck_interaction_required: ["resume"],
+  // NOT-314: an operator_verification repair sends the work back like any
+  // other repair round; verified/waive accept the work (no correction signal).
+  operator_verification: ["repair"],
 };
 
 function resolutionChoice(resolutionJson: string | null): string | null {

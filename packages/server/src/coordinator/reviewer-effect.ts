@@ -28,6 +28,7 @@ import { parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
 import type { EffectContext } from "./effect-registry.js";
 import type { ReviewerOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
+import { extractOperatorCriteria } from "./operator-criteria.js";
 import { buildReviewerPrompt, formatDiffForPrompt, TOTAL_DIFF_LIMIT } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realReviewerSpawn, reviewerSessionLogPath, type ReviewerSpawn } from "./spawn.js";
@@ -400,6 +401,10 @@ export async function runReviewerEffect(
       (f) => f.status === "open" || f.status === "recurring"
     );
     const guidance = guidanceForNextSession(issue.id, sessionId);
+    // NOT-314: the frozen snapshot's operator criteria — the reviewer must not
+    // treat missing operator evidence as a defect (Dealer gates the merge), but
+    // the probe and doc must exist. Rendered only when non-empty.
+    const operatorCriteria = extractOperatorCriteria(taskSnapshot.acceptanceCriteria);
     const prompt = buildReviewerPrompt({
       taskSnapshot,
       round: workItem.round,
@@ -412,6 +417,7 @@ export async function runReviewerEffect(
       worktreePath,
       deckId: snapshot?.deckId ?? null,
       guidance: guidance.length ? guidance : undefined,
+      operatorCriteria: operatorCriteria.length > 0 ? operatorCriteria : undefined,
     });
 
     // NOT-83 review finding — see developer-effect.ts's identical check for the full

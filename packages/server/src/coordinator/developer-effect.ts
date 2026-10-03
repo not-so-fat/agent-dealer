@@ -20,6 +20,7 @@ import { parsePhaseBudget, parseProfileSnapshot, roleCeiling } from "@agent-deal
 import type { EffectContext } from "./effect-registry.js";
 import type { DeveloperOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
+import { extractOperatorCriteria } from "./operator-criteria.js";
 import { buildDeveloperPrompt } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn, type DeveloperSpawnResult } from "./spawn.js";
@@ -821,6 +822,7 @@ export async function runDeveloperEffect(
     branch?: string;
     scopeDecisionNote?: string | null;
     conflictRepair?: { baseBranch?: unknown; branch?: unknown; files?: unknown } | null;
+    operatorRepairNote?: string | null;
   } = {};
   try {
     if (workItem.payloadJson) payload = JSON.parse(workItem.payloadJson);
@@ -1114,6 +1116,15 @@ export async function runDeveloperEffect(
       typeof payload.scopeDecisionNote === "string" && payload.scopeDecisionNote.trim()
         ? payload.scopeDecisionNote.trim()
         : undefined;
+    // NOT-314: same one-shot ride for an operator_verification repair note.
+    const operatorRepairNote =
+      typeof payload.operatorRepairNote === "string" && payload.operatorRepairNote.trim()
+        ? payload.operatorRepairNote.trim()
+        : undefined;
+    // NOT-314: the frozen snapshot's operator criteria, parsed here so the
+    // worker never re-derives them — the section renders only when non-empty.
+    const operatorCriteria = extractOperatorCriteria(taskSnapshot.acceptanceCriteria);
+    const hasOperatorCriteria = operatorCriteria.length > 0 ? operatorCriteria : undefined;
     // NOT-310: the conflict directive rides only the work item queued by the merge
     // path — exactly this round reads it; nothing is re-read from the DB. Shaped
     // defensively: a malformed directive renders nothing rather than breaking the
@@ -1166,6 +1177,8 @@ export async function runDeveloperEffect(
       guidance: guidance.length ? guidance : undefined,
       scopeDecisionNote,
       conflictRepair,
+      operatorCriteria: hasOperatorCriteria,
+      operatorRepairNote,
     });
 
     // NOT-83 review finding: the session is marked `running` (worker-loop.ts) before this

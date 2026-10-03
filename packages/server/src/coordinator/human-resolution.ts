@@ -16,7 +16,13 @@ export type HumanResolution =
       choice: "resume" | "retry_merge" | "repair" | "close" | "push_with_lease";
     }
   | { actionType: "product_scope_decision"; choice: "resume"; note?: string }
-  | { actionType: "deck_interaction_required"; choice: "resume" | "close" };
+  | { actionType: "deck_interaction_required"; choice: "resume" | "close" }
+  // NOT-314: an `[operator]` gate resolution. `verified` / `waive` park for
+  // undraft+merge (same finalize as final_review:merge — the gate re-checks the
+  // recorded result before merging); `repair` queues another developer round
+  // with the note threaded to its prompt. The note is always required — an
+  // empty result/waiver/repair note is a caller error, never stored.
+  | { actionType: "operator_verification"; choice: "verified" | "waive" | "repair"; note: string };
 
 /**
  * NOT-194: the stored response options for a merge-failure policy_escalation. Shared by
@@ -146,6 +152,7 @@ const VALID_CHOICES: Record<HumanActionType, readonly string[]> = {
   // below and the only legal resolver is commands.ts's dedicated muse_capability branch
   // (acknowledge records a per-version override; there is no workflow outcome to map).
   muse_capability: ["acknowledge"],
+  operator_verification: ["verified", "waive", "repair"],
 };
 
 /**
@@ -178,6 +185,14 @@ export function parseHumanResolution(actionType: string, choice: string, note?: 
   // arriving with any other action type is dropped here, never stored or threaded.
   if (actionType === "product_scope_decision" && note) {
     return { actionType, choice, note } as HumanResolution;
+  }
+  // NOT-314: operator_verification always carries a required non-empty note (the
+  // recorded result, the waiver reason, or the repair instruction). A missing or
+  // blank note is a caller error — resolveHumanActionAndAdvance 400s, never stores.
+  if (actionType === "operator_verification") {
+    if (!VALID_CHOICES.operator_verification.includes(choice)) return null;
+    if (!note || !note.trim()) return null;
+    return { actionType, choice, note: note.trim() } as HumanResolution;
   }
   return { actionType, choice } as HumanResolution;
 }
@@ -223,6 +238,13 @@ export function resolveHumanActionOutcome(resolution: HumanResolution): HumanRes
       throw new Error(`Unrecognized policy_escalation choice: ${resolution.choice}`);
     case "product_scope_decision":
       return { issueStatus: "developing", startNewRound: true, roundKind: "none" };
+    case "operator_verification":
+      // NOT-314: `repair` is a genuine repair cycle (same shape as
+      // final_review:repair). `verified` / `waive` never reach here — the sync
+      // core parks them for undraft+merge before consulting this outcome map
+      // (same as policy_escalation:retry_merge).
+      if (resolution.choice === "repair") return { issueStatus: "repairing", startNewRound: true, roundKind: "review" };
+      throw new Error(`Unrecognized operator_verification choice: ${resolution.choice}`);
     case "deck_interaction_required":
       // Same semantics as policy_escalation:resume — an authority/control-plane hiccup is
       // not a review-round spend; a fresh attempt mints its own new authority when it runs.
