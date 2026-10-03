@@ -747,6 +747,64 @@ export async function commitsAhead(opts: { worktreePath: string; baseRef: string
   return Number(stdout.trim());
 }
 
+/**
+ * NOT-355: what merging `baseRef` into the worktree's HEAD would do, without touching
+ * the working tree or any ref. `skipped` means the probe could not answer (a git
+ * without `merge-tree --write-tree`, or any other tool failure) — callers fail open.
+ */
+export type BaseConflictProbe =
+  | { state: "clean" }
+  | { state: "conflict"; files: string[] }
+  | { state: "skipped"; reason: string };
+
+/** The probe's `git` shell-out, as a seam: rejects with `{ code, stdout, stderr }`
+ * on a nonzero exit, like `promisify(execFile)`. Tests inject a recorder/fake. */
+export type ProbeGitExec = (args: string[], opts: { cwd: string }) => Promise<{ stdout: string; stderr: string }>;
+
+const defaultProbeGitExec: ProbeGitExec = (args, opts) => run("git", args, { cwd: opts.cwd, encoding: "utf8" });
+
+/** git < 2.38 rejects `--write-tree` (exit 129 with a usage dump). */
+const MERGE_TREE_UNSUPPORTED = /unknown option|usage: git merge-tree/i;
+
+/**
+ * NOT-355: `git merge-tree --write-tree --name-only --no-messages <baseRef> HEAD` —
+ * a pure in-object-store merge. Exit 0 is clean; exit 1 is a conflict whose stdout
+ * is the (partial) tree OID followed by one conflicted path per line. Never a merge
+ * commit, never a rebase, never a working-tree change.
+ */
+export async function probeBaseConflict(opts: {
+  worktreePath: string;
+  baseRef: string;
+  exec?: ProbeGitExec;
+}): Promise<BaseConflictProbe> {
+  const exec = opts.exec ?? defaultProbeGitExec;
+  const args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", opts.baseRef, "HEAD"];
+  try {
+    await exec(args, { cwd: opts.worktreePath });
+    return { state: "clean" };
+  } catch (err) {
+    const e = err as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: string };
+    const stdout = typeof e.stdout === "string" ? e.stdout : "";
+    const stderr = typeof e.stderr === "string" ? e.stderr : "";
+    if (e.code === 1) {
+      const files = [
+        ...new Set(
+          stdout
+            .split("\n")
+            .slice(1)
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0)
+        ),
+      ];
+      if (files.length > 0) return { state: "conflict", files };
+    }
+    if (e.code === 129 || MERGE_TREE_UNSUPPORTED.test(stderr)) {
+      return { state: "skipped", reason: "git merge-tree --write-tree is not supported by the installed git" };
+    }
+    return { state: "skipped", reason: `git merge-tree failed: ${stderr.trim() || e.message || String(err)}` };
+  }
+}
+
 /** `commitsAhead` between two arbitrary refs — no worktree, no HEAD (see `pushBranchRef`). */
 export async function countCommitsBetween(opts: {
   repo: string;
