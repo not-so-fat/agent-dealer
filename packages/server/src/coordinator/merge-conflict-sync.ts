@@ -43,12 +43,13 @@
 // `git push -u origin HEAD:refs/heads/<branch>` — never force, never a lease
 // retry, never a rebase. A pre-push hook pins that push to the tip we merged
 // onto (see {@link pinnedPushEnv}), so even a hand reset to an ancestor landing
-// after the last tip read is refused instead of fast-forwarded over. An existing checkout holding the branch belongs to
+// after the last tip read is refused instead of fast-forwarded over; the
+// repository's own pre-push hook is chained and still vetoes the push. An existing checkout holding the branch belongs to
 // someone else and fails closed to today's escalation, except our own
 // merge-sync leftover from a crashed run (dead owner + clean tree), which is
 // adopted. Every refusal or infra failure degrades to today's escalation — the
 // sync only ever adds a self-resolution attempt, never removes an outcome.
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -687,27 +688,45 @@ async function readRemoteTip(
 /** Marker the pinned pre-push hook prints when origin's tip is not the expected one. */
 const PINNED_PUSH_REFUSAL = "dealer-sync: origin tip is not the synced tip";
 
-/** Fails the push unless every remote ref it updates is at the expected SHA.
+/** Fails the push unless every remote ref it updates is at the expected SHA,
+ * then hands the same stdin and arguments to the repository's own pre-push
+ * hook (if any), so a repository hook still vetoes the push.
  * Git hands the hook the remote values from the same connection's ref
  * advertisement, and receive-pack only applies the update if the ref still
  * holds that value — so the check-and-update is atomic on origin without any
  * force flag. */
 const PINNED_PRE_PUSH_HOOK = `#!/bin/sh
-while read local_ref local_sha remote_ref remote_sha; do
-  if [ "$remote_sha" != "$DEALER_SYNC_EXPECTED_REMOTE_SHA" ]; then
-    echo "${PINNED_PUSH_REFUSAL} ($remote_ref is at $remote_sha, expected $DEALER_SYNC_EXPECTED_REMOTE_SHA)" >&2
-    exit 1
-  fi
-done
+input=$(cat)
+if [ -n "$input" ]; then
+  printf '%s\\n' "$input" | while read local_ref local_sha remote_ref remote_sha; do
+    [ -z "$local_ref" ] && continue
+    if [ "$remote_sha" != "$DEALER_SYNC_EXPECTED_REMOTE_SHA" ]; then
+      echo "${PINNED_PUSH_REFUSAL} ($remote_ref is at $remote_sha, expected $DEALER_SYNC_EXPECTED_REMOTE_SHA)" >&2
+      exit 1
+    fi
+  done || exit 1
+fi
+if [ -n "$DEALER_SYNC_REPO_PRE_PUSH" ] && [ -f "$DEALER_SYNC_REPO_PRE_PUSH" ] && [ -x "$DEALER_SYNC_REPO_PRE_PUSH" ]; then
+  if [ -n "$input" ]; then printf '%s\\n' "$input"; fi | "$DEALER_SYNC_REPO_PRE_PUSH" "$@"
+  exit $?
+fi
 exit 0
 `;
 
 /**
  * NOT-356: env that installs {@link PINNED_PRE_PUSH_HOOK} for one push (via
  * `GIT_CONFIG_*`, appended after any inherited entries) and pins it to
- * `expectedSha`. The caller removes `dir` once the push settles.
+ * `expectedSha`. The repository's own pre-push hook — resolved from `cwd`
+ * before the override, honoring any `core.hooksPath` — is chained so it still
+ * runs. Synchronous so no await sits between the caller's last check and the
+ * push. Throws (fail closed) if the hook path cannot be resolved. The caller
+ * removes `dir` once the push settles.
  */
-function pinnedPushEnv(expectedSha: string): { env: Record<string, string>; dir: string } {
+function pinnedPushEnv(cwd: string, expectedSha: string): { env: Record<string, string>; dir: string } {
+  const repoHook = path.resolve(
+    cwd,
+    execFileSync("git", ["rev-parse", "--git-path", "hooks/pre-push"], { cwd, encoding: "utf8" }).trim()
+  );
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-sync-push-"));
   fs.writeFileSync(path.join(dir, "pre-push"), PINNED_PRE_PUSH_HOOK, { mode: 0o755 });
   const inherited = Number.parseInt(process.env.GIT_CONFIG_COUNT ?? "0", 10);
@@ -719,6 +738,7 @@ function pinnedPushEnv(expectedSha: string): { env: Record<string, string>; dir:
       [`GIT_CONFIG_KEY_${index}`]: "core.hooksPath",
       [`GIT_CONFIG_VALUE_${index}`]: dir,
       DEALER_SYNC_EXPECTED_REMOTE_SHA: expectedSha,
+      DEALER_SYNC_REPO_PRE_PUSH: repoHook,
     },
   };
 }
@@ -1014,7 +1034,7 @@ export async function runMergeConflictSync(opts: {
   // push: origin must still be at the fetched tip inside the push itself.
   let pinned: ReturnType<typeof pinnedPushEnv>;
   try {
-    pinned = pinnedPushEnv(reused.remoteSha);
+    pinned = pinnedPushEnv(syncPath, reused.remoteSha);
   } catch (err) {
     await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
     await cleanupSyncCheckout(repoPath, syncPath);

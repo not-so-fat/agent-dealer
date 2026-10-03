@@ -1462,6 +1462,109 @@ test("NOT-356: a hand reset to an older tip as the push starts is refused inside
   assert.equal(getIssue(siblingId)!.status, "reviewing");
 });
 
+/** Installs `body` as the repository's pre-push hook, via `core.hooksPath`
+ * when given (the pinned push must resolve it before overriding hooksPath). */
+function installRepoPrePushHook(local: string, body: string, hooksPath?: string): void {
+  let dir: string;
+  if (hooksPath) {
+    execFileSync("git", ["config", "core.hooksPath", hooksPath], { cwd: local });
+    dir = hooksPath;
+  } else {
+    dir = path.resolve(
+      local,
+      execFileSync("git", ["rev-parse", "--git-path", "hooks"], { cwd: local, encoding: "utf8" }).trim()
+    );
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "pre-push"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+}
+
+test("NOT-356: the pinned sync push still runs the repository's pre-push hook", async () => {
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-hook", conflict: false }]);
+  const hookLog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-hook-log-")), "log");
+  installRepoPrePushHook(
+    local,
+    `echo "args $1" >> "${hookLog}"\ncat >> "${hookLog}"\nexit 0`,
+    fs.mkdtempSync(path.join(os.tmpdir(), "dealer-repo-hooks-"))
+  );
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-hook", heads["sib-hook"]!, 57);
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  const calls = await mergeAndScan(mergedId, landMergedPr);
+
+  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["synced"]);
+  const synced = originTip(origin, "sib-hook");
+  assert.notEqual(synced, heads["sib-hook"]);
+  const log = fs.readFileSync(hookLog, "utf8");
+  assert.match(log, /^args origin$/m, "the repository hook got git's arguments");
+  assert.match(
+    log,
+    new RegExp(`^HEAD ${synced} refs/heads/sib-hook ${heads["sib-hook"]}$`, "m"),
+    "the repository hook got git's ref lines on stdin"
+  );
+  assertNoForceNoRebase(calls);
+});
+
+test("NOT-356: a repository pre-push hook that rejects still stops the pinned sync push", async () => {
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-veto", conflict: false }]);
+  installRepoPrePushHook(local, `echo "repo policy: no pushes" >&2\nexit 1`);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-veto", heads["sib-veto"]!, 58);
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  const calls = await mergeAndScan(mergedId, landMergedPr);
+
+  assert.equal(syncMerges(calls).length, 1);
+  assert.deepEqual(
+    calls.filter((a) => a[0] === "push"),
+    [["push", "-u", "origin", "HEAD:refs/heads/sib-veto"]],
+    "one plain push attempt, vetoed by the repository hook"
+  );
+  assert.equal(originTip(origin, "sib-veto"), heads["sib-veto"], "nothing was published");
+  const events = baseAdvancedEvents(siblingId);
+  assert.deepEqual(events.map((e) => e.action), ["failed"]);
+  assert.match(String(events[0]!.reason), /repo policy: no pushes/);
+  assertNoForceNoRebase(calls);
+});
+
+test("NOT-356: with a repository pre-push hook installed, a hand reset as the push starts is still refused by the tip pin", async () => {
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-both", conflict: false }]);
+  const g = (...args: string[]) => execFileSync("git", args, { cwd: local, encoding: "utf8" }).trim();
+  g("checkout", "-q", "sib-both");
+  fs.writeFileSync(path.join(local, "second.txt"), "second\n");
+  g("add", ".");
+  g("commit", "-q", "-m", "second commit");
+  g("push", "-q", "origin", "sib-both");
+  const dealerTip = g("rev-parse", "HEAD");
+  g("checkout", "-q", "main");
+  const olderTip = heads["sib-both"]!;
+  const hookLog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-hook-log-")), "log");
+  installRepoPrePushHook(local, `cat >> "${hookLog}"\nexit 0`);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-both", dealerTip, 59);
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  setMergePrForTests(async () => {
+    landMergedPr();
+    return { ok: true };
+  });
+  const calls: string[][] = [];
+  setConflictSyncGitExecForTests(async (args, opts) => {
+    calls.push(args);
+    if (args[0] === "push") {
+      execFileSync("git", ["update-ref", "refs/heads/sib-both", olderTip], { cwd: origin });
+    }
+    return defaultSyncGitExec(args, opts);
+  });
+  const { finalizeAutoMerge } = await import("./auto-merge.js");
+  assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
+  await settleBaseAdvancedScansForTests();
+
+  assert.equal(originTip(origin, "sib-both"), olderTip, "the hand reset stands");
+  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["hand_edited"]);
+  assert.deepEqual(syncEvents(siblingId).map((e) => [e.outcome, e.code]), [["skipped", "tip_moved"]]);
+  assert.equal(fs.existsSync(hookLog), false, "the pin refused before the repository hook ran");
+  assertNoForceNoRebase(calls);
+});
+
 test("NOT-356: a worker that starts during the sync blocks the push and leaves the branch as it was", async () => {
   const { createWorkerSession, startSession } = await import("../repository/worker-sessions.js");
   const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-late", conflict: false }]);
