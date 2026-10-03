@@ -31,6 +31,14 @@ export const HumanActionType = z.enum([
    * The only choice is `acknowledge`: for `missing` it records a per-version override
    * so admission proceeds on that version; for `unverified` it just dismisses. */
   "muse_capability",
+  /** An `[operator]` acceptance criterion from the frozen task snapshot (NOT-314):
+   * only a human with real credentials, a real login, or a paid session can prove
+   * it. Raised by the auto-merge gate (coordinator/auto-merge.ts) after reviewer
+   * approve, before the merge — the PR stays unmerged until the human records the
+   * result. Choices: `verified` (note = the result, stored as an artifact),
+   * `waive` (explicit waiver, note required, recorded as a workflow event), or
+   * `repair` (another developer round with the note threaded to its prompt). */
+  "operator_verification",
 ]);
 export type HumanActionType = z.infer<typeof HumanActionType>;
 

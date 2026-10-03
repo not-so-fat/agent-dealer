@@ -859,7 +859,7 @@ export default function IssuesListPage({
       <NeedsAttentionPanel
         actions={humanActions}
         busyActionId={busyActionId}
-        onResolve={(actionId, choice) => void resolveAction(actionId, choice)}
+        onResolve={(actionId, choice, note) => void resolveAction(actionId, choice, note)}
       />
 
       <div className="mb-4 rounded border border-white/10 bg-panel-elevated/60">

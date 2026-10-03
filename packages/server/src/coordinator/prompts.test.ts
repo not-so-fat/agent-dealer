@@ -366,3 +366,72 @@ test("NOT-310: no conflict directive produces byte-for-byte the same prompt as b
     without
   );
 });
+
+// NOT-314: the developer prompt lists operator criteria separately — the worker
+// ships the probe + doc and never attempts the criterion itself.
+test("NOT-314: developer prompt lists operator criteria with the do-not-attempt instruction", () => {
+  const prompt = buildDeveloperPrompt({
+    taskSnapshot,
+    round: 1,
+    operatorCriteria: [
+      {
+        text: "Operator can sign in with SSO and see the org dashboard [operator]",
+        commands: ["`npm run probe:sso -- --env staging`"],
+      },
+    ],
+  });
+  assert.match(prompt, /## Operator verification required/);
+  assert.match(prompt, /Do not attempt these; ship the ready-to-run probe and a doc, put the exact command in the PR body/);
+  assert.match(prompt, /sign in with SSO/);
+  assert.match(prompt, /npm run probe:sso -- --env staging/);
+});
+
+test("NOT-314: no operator criteria produces byte-for-byte the same developer prompt as before", () => {
+  const base = { taskSnapshot, round: 2 as const };
+  const without = buildDeveloperPrompt(base);
+  assert.doesNotMatch(without, /## Operator verification/);
+  assert.equal(buildDeveloperPrompt({ ...base, operatorCriteria: undefined }), without);
+  assert.equal(buildDeveloperPrompt({ ...base, operatorCriteria: [] }), without);
+});
+
+test("NOT-314: operator repair note renders verbatim under its own heading before the task", () => {
+  const note = "The probe 404s — its path moved; fix the script and the doc.";
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 2, operatorRepairNote: note });
+  assert.match(prompt, /## Operator verification feedback/);
+  assert.ok(prompt.includes(note), "note text must appear verbatim");
+  assert.ok(
+    prompt.indexOf("## Operator verification feedback") < prompt.indexOf("## Task"),
+    "repair feedback must precede the task"
+  );
+  const without = buildDeveloperPrompt({ taskSnapshot, round: 2 });
+  assert.doesNotMatch(without, /## Operator verification feedback/);
+  assert.equal(buildDeveloperPrompt({ taskSnapshot, round: 2, operatorRepairNote: "  " }), without);
+});
+
+// NOT-314: the reviewer must not flag missing operator evidence — Dealer gates
+// the merge — but the probe and doc must exist.
+test("NOT-314: reviewer prompt states missing operator evidence is not a defect, probe and doc must exist", () => {
+  const prompt = buildReviewerPrompt({
+    ...reviewerBase,
+    operatorCriteria: [
+      {
+        text: "Operator can complete a paid checkout [operator]",
+        commands: ["`npm run probe:checkout -- --env staging`"],
+      },
+    ],
+  });
+  assert.match(prompt, /## Operator-gated criteria/);
+  assert.match(prompt, /Missing operator evidence is NOT a defect/);
+  assert.match(prompt, /never raise a blocking finding/);
+  assert.match(prompt, /probe and doc/);
+  assert.match(prompt, /A missing probe or doc IS a blocking finding/);
+  assert.match(prompt, /paid checkout/);
+  assert.match(prompt, /npm run probe:checkout/);
+});
+
+test("NOT-314: no operator criteria produces byte-for-byte the same reviewer prompt as before", () => {
+  const without = buildReviewerPrompt(reviewerBase);
+  assert.doesNotMatch(without, /Operator-gated criteria/);
+  assert.equal(buildReviewerPrompt({ ...reviewerBase, operatorCriteria: undefined }), without);
+  assert.equal(buildReviewerPrompt({ ...reviewerBase, operatorCriteria: [] }), without);
+});

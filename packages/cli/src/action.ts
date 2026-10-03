@@ -32,13 +32,16 @@ export async function runActionCommand(args: string[]): Promise<number> {
       const id = rest[0];
       const choice = flag(rest, "--choice");
       const resolvedBy = flag(rest, "--by");
+      // NOT-314: operator_verification requires a non-empty note (the result,
+      // waiver reason, or repair note) — the server 400s without one.
+      const note = flag(rest, "--note");
       if (!id || !choice || !resolvedBy) {
         console.error("resolve requires an action id, --choice, and --by");
         return 1;
       }
       const result = await apiFetch(`/api/human-actions/${id}/resolve`, {
         method: "POST",
-        body: { choice, resolvedBy },
+        body: note?.trim() ? { choice, resolvedBy, note: note.trim() } : { choice, resolvedBy },
       });
       console.log(JSON.stringify(result, null, 2));
       return 0;

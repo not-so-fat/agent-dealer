@@ -92,6 +92,10 @@ import {
   type PushDivergenceEvidence,
 } from "./human-resolution.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
+import {
+  OPERATOR_VERIFICATION_ARTIFACT_KIND,
+  OPERATOR_VERIFICATION_RESPONSE_OPTIONS,
+} from "./operator-criteria.js";
 import { externalMergeStateForIssue, type ExternalMergeState } from "./external-merge.js";
 import {
   detectNonConvergence,
@@ -1345,6 +1349,12 @@ function questionFor(
       // directly with its own question text (NOT-308). Case exists only so this
       // function stays total over HumanActionType.
       throw new Error("muse_capability is not raised through applyEffect");
+    case "operator_verification":
+      // Never raised through applyEffect — auto-merge.ts's operator gate creates
+      // this action directly with a question listing each criterion and its
+      // command (NOT-314). Case exists only so this function stays total over
+      // HumanActionType.
+      throw new Error("operator_verification is not raised through applyEffect");
   }
 }
 
@@ -1394,6 +1404,11 @@ export function responseOptionsFor(
       // admits on that Muse version (missing) or dismisses (unverified). Never raised
       // through applyEffect; case exists only so this function stays total.
       return [{ choice: "acknowledge", label: "Acknowledge" }];
+    case "operator_verification":
+      // Raised by auto-merge.ts's operator gate with these exact options (the
+      // shared constant keeps the two from drifting); listed here so the table
+      // stays total over HumanActionType.
+      return [...OPERATOR_VERIFICATION_RESPONSE_OPTIONS];
   }
 }
 
@@ -1461,6 +1476,17 @@ export function resolveHumanActionAndAdvance(
   // defense in depth for direct/CLI callers of this sync entry point.
   const normalizedNote = normalizeResolutionNote(opts?.note);
   if (!normalizedNote.ok) return { ok: false, code: 400, error: normalizedNote.error };
+  // NOT-314: every operator_verification choice requires a non-empty note — the
+  // recorded result (verified), the waiver reason (waive), or what to fix
+  // (repair). parseHumanResolution below also rejects a missing note; this
+  // names the requirement instead of misreporting a valid choice as invalid.
+  if (action.actionType === "operator_verification" && !normalizedNote.note) {
+    return {
+      ok: false,
+      code: 400,
+      error: 'A non-empty note is required to resolve operator_verification (verified: the result, e.g. pasted output; waive: why it is waived; repair: what the next round must fix)',
+    };
+  }
 
   // NOT-308: a Muse capability escalation resolves without touching the workflow — it
   // has no round to spend and no merge to park, and parseHumanResolution (below)
@@ -1520,14 +1546,20 @@ export function resolveHumanActionAndAdvance(
     return { ok: false, code: 400, error: `Invalid choice "${choice}" for ${action.actionType}` };
   }
   // NOT-272: the typed resolution carries the note only for product_scope_decision
-  // (parseHumanResolution drops it for every other action type).
+  // (parseHumanResolution drops it for every other action type — except
+  // operator_verification, whose note is required and always carried).
   const scopeDecisionNote =
     resolution.actionType === "product_scope_decision" && "note" in resolution
       ? resolution.note
       : undefined;
-  const storedResolution: Record<string, unknown> = scopeDecisionNote
-    ? { choice, note: scopeDecisionNote }
-    : { choice };
+  // NOT-314: the repair instruction rides the next developer round's payload;
+  // the verified/waived note is stored on the artifact / waiver event below.
+  const operatorNote =
+    resolution.actionType === "operator_verification" && "note" in resolution
+      ? resolution.note
+      : undefined;
+  const storedResolution: Record<string, unknown> =
+    scopeDecisionNote ?? operatorNote ? { choice, note: scopeDecisionNote ?? operatorNote } : { choice };
   // NOT-194: narrow policy_escalation choices per action. A merge-failure action offers
   // retry_merge/repair/close only (resume would re-run development on approved work);
   // every other policy_escalation keeps resume/close only. Pre-NOT-194 open merge-failure
@@ -1572,14 +1604,56 @@ export function resolveHumanActionAndAdvance(
   // Park like auto-merge, then the async wrapper runs finalizeAutoMerge outside this txn.
   // NOT-194: a merge-failure retry_merge parks the same way — the old action is resolved
   // first, so a second failure escalates exactly one fresh action with the new reason.
-  if (
-    instance &&
-    ((resolution.actionType === "final_review" &&
+  // NOT-314: an operator_verification verified/waive parks the same way — the recorded
+  // result satisfies the gate, so finalizeAutoMerge merges on the very next pass.
+  // (repair takes the generic repair-round path below, never this park.)
+  const parksForMerge =
+    (resolution.actionType === "final_review" &&
       (resolution.choice === "merge" || resolution.choice === "complete")) ||
-      (resolution.actionType === "policy_escalation" && resolution.choice === "retry_merge"))
-  ) {
+    (resolution.actionType === "policy_escalation" && resolution.choice === "retry_merge") ||
+    (resolution.actionType === "operator_verification" &&
+      (resolution.choice === "verified" || resolution.choice === "waive"));
+  if (instance && parksForMerge) {
     return getDb().transaction((): ResolveResult => {
-      resolveHumanAction(actionId, resolvedBy, { choice });
+      resolveHumanAction(actionId, resolvedBy, storedResolution);
+      // NOT-314: durably record what the merge is authorized by, in the same txn as
+      // the park — `verified` stores the result as an issue artifact (kind
+      // operator_verification, author human) pinned to this head; `waive`
+      // appends an operator_verification.waived workflow event. A later finalize
+      // re-checks the record against the then-current head, so new commits
+      // re-block the gate.
+      if (resolution.actionType === "operator_verification" && operatorNote) {
+        if (resolution.choice === "verified") {
+          createIssueArtifact({
+            issueId: issue.id,
+            kind: OPERATOR_VERIFICATION_ARTIFACT_KIND,
+            author: "human",
+            content: {
+              headSha: issue.headSha,
+              note: operatorNote,
+              verifiedBy: resolvedBy,
+              verifiedAt: new Date().toISOString(),
+            },
+          });
+        } else {
+          appendWorkflowEvent({
+            issueId: issue.id,
+            workflowInstanceId: instance.id,
+            type: "operator_verification.waived",
+            actorType: "human",
+            actorRef: resolvedBy,
+            stage: issue.status,
+            round: issue.currentRound,
+            payload: {
+              actionType: "operator_verification",
+              choice: "waive",
+              headSha: issue.headSha,
+              waivedBy: resolvedBy,
+              note: operatorNote,
+            },
+          });
+        }
+      }
       appendWorkflowEvent({
         issueId: issue.id,
         workflowInstanceId: instance.id,
@@ -1588,7 +1662,12 @@ export function resolveHumanActionAndAdvance(
         actorRef: resolvedBy,
         stage: resolution.actionType === "final_review" ? "final_review" : issue.status,
         round: issue.currentRound,
-        payload: { actionType: action.actionType, choice: resolution.choice, pendingMerge: true },
+        payload: {
+          actionType: action.actionType,
+          choice: resolution.choice,
+          pendingMerge: true,
+          ...(operatorNote ? { note: operatorNote } : {}),
+        },
       });
       transitionIssue(issue.id, "final_review", {
         currentOwner: "system",
@@ -1851,6 +1930,10 @@ export function resolveHumanActionAndAdvance(
             // NOT-272: a product_scope_decision note rides only this next round's
             // payload — later rounds never see it.
             ...(scopeDecisionNote ? { scopeDecisionNote } : {}),
+            // NOT-314: same one-shot ride for an operator_verification repair
+            // note — only the repair choice reaches this path (verified/waive
+            // park for merge above), and only this round reads it.
+            ...(operatorNote ? { operatorRepairNote: operatorNote } : {}),
           },
           idempotencyKey: resumeKey,
         });

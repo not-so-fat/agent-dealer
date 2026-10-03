@@ -16,6 +16,7 @@ const ACTION_LABELS: Record<HumanActionType, string> = {
   reflection_interaction_required: "Reflection interaction required",
   outbound_delivery_interaction_required: "Outbound delivery interaction required",
   muse_capability: "Muse capability",
+  operator_verification: "Operator verification",
 };
 
 export function actionLabel(actionType: HumanActionType): string {
@@ -50,6 +51,10 @@ export function actionContextLines(action: HumanAction): string[] {
     review?: { verdict?: string; findings?: unknown[] };
     serviceId?: string;
     toolName?: string;
+    operatorVerification?: {
+      criteria?: Array<{ text?: string; commands?: string[] }>;
+      headSha?: string;
+    };
     pushDivergence?: {
       branch?: string;
       localSha?: string;
@@ -73,6 +78,16 @@ export function actionContextLines(action: HumanAction): string[] {
   }
   if (evidence?.serviceId || evidence?.toolName) {
     lines.push(`Delivery: ${[evidence.serviceId, evidence.toolName].filter(Boolean).join(" · ")}`);
+  }
+  // NOT-314: operator gates show what is being waited on — the criterion count
+  // and the gated head — so the operator never leaves the list to judge it.
+  const gated = evidence?.operatorVerification;
+  if (gated && (Array.isArray(gated.criteria) || typeof gated.headSha === "string")) {
+    const count = Array.isArray(gated.criteria) ? gated.criteria.length : 0;
+    const head = typeof gated.headSha === "string" && gated.headSha ? ` at ${gated.headSha.slice(0, 8)}` : "";
+    lines.push(
+      `Operator verification: ${count} ${count === 1 ? "criterion" : "criteria"}${head} — run each command, then record the result`
+    );
   }
   // NOT-221: diverged-push escalations show the exact SHAs the Push-with-lease button
   // would publish (local) and pin against (remote), plus the freshest observed tip

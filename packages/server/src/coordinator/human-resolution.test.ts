@@ -98,3 +98,41 @@ test("deck_interaction_required close ends the issue", () => {
   assert.equal(result.issueStatus, "closed");
   assert.equal(result.workflowOutcome, "closed");
 });
+
+// NOT-314: operator_verification parses only with a non-empty note.
+test("parseHumanResolution accepts operator_verification choices only with a note", () => {
+  assert.deepStrictEqual(parseHumanResolution("operator_verification", "verified", "SSO login OK"), {
+    actionType: "operator_verification",
+    choice: "verified",
+    note: "SSO login OK",
+  });
+  assert.deepStrictEqual(parseHumanResolution("operator_verification", "waive", "  waiver reason  "), {
+    actionType: "operator_verification",
+    choice: "waive",
+    note: "waiver reason",
+  });
+  assert.deepStrictEqual(parseHumanResolution("operator_verification", "repair", "fix the probe"), {
+    actionType: "operator_verification",
+    choice: "repair",
+    note: "fix the probe",
+  });
+  assert.equal(parseHumanResolution("operator_verification", "verified"), null);
+  assert.equal(parseHumanResolution("operator_verification", "verified", ""), null);
+  assert.equal(parseHumanResolution("operator_verification", "verified", "   "), null);
+  assert.equal(parseHumanResolution("operator_verification", "merge", "a note"), null);
+});
+
+test("operator_verification repair queues another repair round; verified/waive never map here", () => {
+  const result = resolveHumanActionOutcome({
+    actionType: "operator_verification",
+    choice: "repair",
+    note: "fix the probe",
+  });
+  assert.equal(result.issueStatus, "repairing");
+  assert.equal(result.startNewRound, true);
+  assert.equal(result.roundKind, "review");
+  assert.throws(
+    () => resolveHumanActionOutcome({ actionType: "operator_verification", choice: "verified", note: "ok" }),
+    /Unrecognized operator_verification choice/
+  );
+});

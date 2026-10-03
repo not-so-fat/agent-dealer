@@ -19,6 +19,10 @@ import {
   formatVerificationReceiptSection,
   type VerificationReceipt,
 } from "./verification-receipt.js";
+import {
+  formatOperatorCriteria,
+  type OperatorCriterion,
+} from "./operator-criteria.js";
 
 export interface TaskSnapshot {
   title: string;
@@ -104,6 +108,14 @@ export interface DeveloperPromptInput {
    * sees it. Renders the base branch, the conflicting files, and the merge-first
    * instruction under its own heading. */
   conflictRepair?: ConflictRepairDirective;
+  /** NOT-314: the frozen snapshot's `[operator]` criteria, parsed by the
+   * coordinator (never re-derived by the worker). Renders the do-not-attempt
+   * section; empty/absent renders nothing. */
+  operatorCriteria?: OperatorCriterion[];
+  /** NOT-314: the human's note from resolving an `operator_verification` with
+   * `repair` — carried on this round's work-item payload (never read from the
+   * DB), so exactly the very next developer round sees it. */
+  operatorRepairNote?: string;
 }
 
 /**
@@ -146,6 +158,47 @@ function conflictRepairSection(directive: ConflictRepairDirective | undefined): 
       : `   The conflicting files are unknown — your own merge output lists them; resolve all of them.`,
     `3. Run the full verification suite on the resolved tree, then commit the resolution.`,
     `4. Never rebase this published branch and never force-push — the coordinator publishes your tip with a plain push.`,
+    ``,
+  ];
+}
+
+/** NOT-314: the frozen snapshot's `[operator]` criteria for the developer.
+ * Empty/absent renders nothing so operator-free tasks produce byte-for-byte
+ * the prompt they always did. */
+function operatorDeveloperSection(criteria: OperatorCriterion[] | undefined): string[] {
+  if (!criteria?.length) return [];
+  return [
+    `## Operator verification required ([operator] criteria)`,
+    `These acceptance criteria can only be proven by a human operator with real credentials, a real login, or a paid session — Dealer blocks the merge until the operator records the result, so do not work around the gate. Do not attempt these; ship the ready-to-run probe and a doc, put the exact command in the PR body:`,
+    ``,
+    ...formatOperatorCriteria(criteria),
+    ``,
+  ];
+}
+
+/** NOT-314: an operator_verification `repair` note, verbatim. Empty/absent
+ * renders nothing so ordinary rounds produce byte-for-byte the prompt they always did. */
+function operatorRepairSection(note: string | undefined): string[] {
+  if (!note?.trim()) return [];
+  return [
+    `## Operator verification feedback`,
+    `A human reviewed the operator-gated criteria and sent the work back instead of verifying. Address this before anything else, and do not ask the operator to re-verify the same head without fixing it:`,
+    ``,
+    note.trim(),
+    ``,
+  ];
+}
+
+/** NOT-314: the frozen snapshot's `[operator]` criteria for the reviewer.
+ * Missing operator evidence is NOT a defect (Dealer gates the merge itself) —
+ * but the probe and the doc must exist. Empty/absent renders nothing. */
+function operatorReviewerSection(criteria: OperatorCriterion[] | undefined): string[] {
+  if (!criteria?.length) return [];
+  return [
+    `## Operator-gated criteria ([operator]) — not yours to verify`,
+    `Missing operator evidence is NOT a defect: Dealer blocks the merge until a human operator records the result, so never raise a blocking finding and never escalate for an unverified [operator] criterion. What you MUST check instead is that the probe and doc exist: the diff must ship the ready-to-run probe for each criterion below, the doc must name the exact command, and the PR body must carry it. A missing probe or doc IS a blocking finding.`,
+    ``,
+    ...formatOperatorCriteria(criteria),
     ``,
   ];
 }
@@ -236,6 +289,8 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
   parts.push(...conflictRepairSection(input.conflictRepair));
   // NOT-272: the scope decision leads — the developer reads it before the task itself.
   parts.push(...scopeDecisionSection(input.scopeDecisionNote));
+  // NOT-314: operator repair feedback leads for the same reason.
+  parts.push(...operatorRepairSection(input.operatorRepairNote));
 
   parts.push(
     `## Task`,
@@ -245,6 +300,9 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
     `## Acceptance criteria`,
     input.taskSnapshot.acceptanceCriteria,
     ``,
+    // NOT-314: operator criteria render separately right after the criteria —
+    // the worker must not attempt them, only ship the probe + doc.
+    ...operatorDeveloperSection(input.operatorCriteria),
     ...executionContractSection(input.taskSnapshot.executionContract),
   );
 
@@ -298,6 +356,9 @@ export interface ReviewerPromptInput {
   deckId?: string | null;
   /** See DeveloperPromptInput.guidance. */
   guidance?: string[];
+  /** NOT-314: the frozen snapshot's `[operator]` criteria, parsed by the
+   * coordinator. Renders the not-a-defect section; empty/absent renders nothing. */
+  operatorCriteria?: OperatorCriterion[];
 }
 
 const REVIEWER_RESULT_SHAPE =
@@ -398,6 +459,9 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
     `## Acceptance criteria`,
     input.taskSnapshot.acceptanceCriteria,
     ``,
+    // NOT-314: missing operator evidence is NOT a defect — but the probe and
+    // doc must exist. Only rendered when the snapshot carries operator criteria.
+    ...operatorReviewerSection(input.operatorCriteria),
     ...executionContractSection(input.taskSnapshot.executionContract),
     `## Diff (base ${input.baseSha.slice(0, 8)} → head ${input.headSha.slice(0, 8)})`,
     "```diff",
