@@ -24,6 +24,18 @@ const LABELS: Record<string, (e: WorkflowEvent) => string> = {
   "worktree.deps_ready": () => "Dependencies ready",
   "deck.connected": () => "Deck connected",
   "brief.resolved": () => "Brief resolved",
+  "base.probe": (e) => {
+    const result = parseJson<{ result?: string }>(e.payloadJson)?.result;
+    return result === "conflict"
+      ? "Base conflict found before publish"
+      : result === "skipped"
+        ? "Base conflict probe skipped"
+        : result === "deferred"
+          ? "Base conflict probe waiting on base fetch"
+          : result === "failed"
+            ? "Base conflict probe failed; not published"
+            : "Base conflict probe clean";
+  },
   "branch.pushed": () => "Branch pushed",
   "checks.started": () => "Checks started",
   "pull_request.opened": () => "Developer opened the PR",

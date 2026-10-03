@@ -324,8 +324,9 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
   }
   // NOT-136: a deck-unavailable session never spawned anything — `cancelled`, not `failed`
   // (which would read as a worker crash) and not `done` (which would claim it ran).
-  // NOT-197: a base-fetch failure likewise never spawned (and created no branch).
-  if (outcome.kind === "deck_unavailable" || outcome.kind === "base_fetch_failed") {
+  // NOT-197: a base-fetch failure likewise never spawned (and created no branch) —
+  // unless it was NOT-355's pre-publish fetch, after a session that did run.
+  if (outcome.kind === "deck_unavailable" || (outcome.kind === "base_fetch_failed" && !outcome.publishBranch)) {
     safeCompleteSession(session.id, "cancelled", { reason: outcome.reason });
     return;
   }

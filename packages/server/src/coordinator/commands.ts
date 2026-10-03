@@ -81,6 +81,7 @@ import {
 import type { ReviewerResult } from "./reviewer-result.js";
 import { projectDeveloperRoute, projectReviewerRoute, type IssueProjection } from "./projection.js";
 import {
+  MERGE_CONFLICT_FILES_EVIDENCE_KEY,
   MERGE_FAILURE_EVIDENCE_KEY,
   MERGE_FAILURE_RESPONSE_OPTIONS,
   PUSH_DIVERGENCE_EVIDENCE_KEY,
@@ -93,7 +94,7 @@ import {
   type PushDivergenceEvidence,
 } from "./human-resolution.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
-import { queueConflictRepairRound } from "./merge-conflict-sync.js";
+import { conflictRepairSpent, queueConflictRepairRound } from "./merge-conflict-sync.js";
 import {
   OPERATOR_VERIFICATION_ARTIFACT_KIND,
   OPERATOR_VERIFICATION_RESPONSE_OPTIONS,
@@ -488,6 +489,11 @@ export async function applyCompletion(
   if (outcome.kind === "checks_conflicting") {
     return applyChecksConflictCompletion(workItemId, leaseToken, outcome);
   }
+  // NOT-355: the pre-publish probe found a base conflict before anything was pushed.
+  // Queue the one conflict-repair round (needs the lease), or escalate once.
+  if (outcome.kind === "base_conflict") {
+    return applyBaseConflictCompletion(workItemId, leaseToken, outcome);
+  }
 
   const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
@@ -720,19 +726,113 @@ function applyChecksConflictCompletion(
         ? sync.reason
         : `PR #${outcome.prNumber} conflicts with ${outcome.baseBranch}; the conflict-repair round could not be queued.`;
     const evidence = sync.result === "escalate" ? sync.evidence : { checksConflict: true };
-    return routeChecksConflictEscalation(issue, instance, item, outcome, reason, evidence);
+    return routeChecksConflictEscalation(issue, instance, item, outcome, reason, evidence, "checksConflict");
+  })();
+}
+
+type BaseConflictOutcome = Extract<DeveloperOutcome, { kind: "base_conflict" }>;
+
+/**
+ * NOT-355: the pre-publish probe found the unpushed branch conflicts with its base.
+ * Queue one conflict-repair round naming the files while finishing this item — the
+ * developer merges the base and the next round's normal push proceeds. When this
+ * episode already spent its conflict-repair round (the probe still conflicts after
+ * it), escalate once with the file list instead; never a second round.
+ */
+function applyBaseConflictCompletion(
+  workItemId: string,
+  leaseToken: string,
+  outcome: BaseConflictOutcome
+): ApplyResult {
+  return getDb().transaction((): ApplyResult => {
+    const before = getWorkItem(workItemId);
+    if (!before) return { applied: false, reason: "not_found" };
+    if (before.status === "done" || before.status === "dead" || before.status === "cancelled") {
+      return { applied: false, reason: "already_terminal" };
+    }
+    const issue = getIssue(before.issueId);
+    if (!issue) return { applied: false, reason: "not_found" };
+    const instance = getActiveWorkflowInstance(before.issueId);
+    if (!instance || instance.id !== before.workflowInstanceId) {
+      return { applied: false, reason: "no_active_instance" };
+    }
+
+    const facts = { kind: outcome.kind, branch: outcome.branch, baseBranch: outcome.baseBranch, prNumber: null, headSha: outcome.headSha };
+    const filesText = outcome.files.length > 0 ? ` Conflicting files: ${outcome.files.join(", ")}.` : "";
+    const spent = conflictRepairSpent(issue.id, instance.id).spent;
+    if (!spent) {
+      const queued = queueConflictRepairRound({
+        issueId: issue.id,
+        instanceId: instance.id,
+        baseBranch: outcome.baseBranch,
+        branch: outcome.branch,
+        files: outcome.files,
+        entry: "pre_publish",
+        finish: { workItemId, leaseToken, result: outcome },
+      });
+      if (queued) {
+        const session = before.workerSessionId ? getWorkerSession(before.workerSessionId) : null;
+        appendWorkflowEvent({
+          issueId: issue.id,
+          workflowInstanceId: instance.id,
+          workerSessionId: before.workerSessionId,
+          type: "worker.completed",
+          actorType: "developer",
+          stage: getIssue(issue.id)!.status,
+          round: issue.currentRound,
+          payload: {
+            ...workerSessionPayload({
+              runtime: session?.runtime,
+              model: session?.model,
+              sessionId: before.workerSessionId ?? "",
+              worktreePath: session?.worktreePath,
+            }),
+            outcome: outcome.kind,
+          },
+        });
+        return {
+          applied: true,
+          issueStatus: getIssue(issue.id)!.status,
+          nextWorkItemId: queued.id,
+          humanActionId: null,
+          instanceCompleted: false,
+        };
+      }
+      if (!getWorkItem(workItemId) || getWorkItem(workItemId)!.leaseToken !== leaseToken) {
+        return { applied: false, reason: "lease_lost" };
+      }
+    }
+
+    const item = finishWorkItem(workItemId, leaseToken, { status: "done", result: outcome });
+    if (!item) return { applied: false, reason: "lease_lost" };
+    const reason = spent
+      ? `Branch ${outcome.branch} conflicts with ${outcome.baseBranch} and was not published. ` +
+        `Dealer already ran one conflict-repair round; the branch still conflicts.${filesText}`
+      : `Branch ${outcome.branch} conflicts with ${outcome.baseBranch} and was not published; ` +
+        `the conflict-repair round could not be queued.${filesText}`;
+    return routeChecksConflictEscalation(
+      issue,
+      instance,
+      item,
+      facts,
+      reason,
+      { [MERGE_CONFLICT_FILES_EVIDENCE_KEY]: outcome.files },
+      "baseProbeConflict"
+    );
   })();
 }
 
 /** NOT-354: the one escalation for a conflicting PR — same shape as the CI-wait
- * ceiling escalation, naming the PR, base, and (when known) the conflicting files. */
+ * ceiling escalation, naming the PR, base, and (when known) the conflicting files.
+ * NOT-355 reuses it for an unpublished branch (`prNumber` null) under its own key. */
 function routeChecksConflictEscalation(
   issue: Issue,
   instance: WorkflowInstance,
   item: WorkItem,
-  outcome: ChecksConflictingOutcome,
+  outcome: { kind: string; branch: string; baseBranch: string; prNumber: number | null; headSha: string },
   reason: string,
-  evidence: Record<string, unknown>
+  evidence: Record<string, unknown>,
+  factsKey: "checksConflict" | "baseProbeConflict"
 ): ApplyResult {
   const ev = eventEmitter(issue, instance, item.workerSessionId, "needs_human", issue.currentRound);
   const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
@@ -768,7 +868,7 @@ function routeChecksConflictEscalation(
     question: questionFor("policy_escalation", reason),
     evidence: {
       ...evidence,
-      checksConflict: {
+      [factsKey]: {
         branch: outcome.branch,
         baseBranch: outcome.baseBranch,
         prNumber: outcome.prNumber,

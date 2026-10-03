@@ -274,12 +274,16 @@ test("NOT-129: a recovered push that fails transiently retries publish-only, the
 
     const afterFailure = getIssue(issueId)!;
     assert.notEqual(afterFailure.status, "reviewing", "the publish failed");
-    assert.match(afterFailure.currentIntent ?? "", /Retrying GitHub publish \(no agent\)/);
+    // NOT-355: the pre-publish base probe fetches the base before the first push, so an
+    // unreachable remote now surfaces as the network deferral rather than a failed push.
+    assert.match(afterFailure.currentIntent ?? "", /Retrying GitHub publish \(no agent\)|Waiting for network/);
     const pending = listWorkItemsForIssue(issueId).filter((i) => i.kind === "developer" && i.status === "pending");
     assert.equal(pending.length, 1, "the failed publish leaves exactly one pending developer item");
     const payload = JSON.parse(pending[0]!.payloadJson!) as { publishOnly?: boolean; branch?: string };
     assert.equal(payload.publishOnly, true, "a transient push failure must not cost a full agent rerun");
     assert.equal(payload.branch, branch, "…and the retry must still be pointed at the recovered branch");
+    // The network deferral gates the retry behind a backoff; lift it so the next tick runs it.
+    getDb().prepare(`UPDATE work_items SET available_at = ? WHERE id = ?`).run(new Date(0).toISOString(), pending[0]!.id);
   } finally {
     git(repo, "remote", "set-url", "origin", originUrl);
   }

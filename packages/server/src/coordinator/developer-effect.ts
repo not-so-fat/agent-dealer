@@ -19,7 +19,7 @@ import path from "node:path";
 import { parsePhaseBudget, parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
 import type { EffectContext } from "./effect-registry.js";
 import type { DeveloperOutcome } from "./routing.js";
-import { runMergeConflictSync } from "./merge-conflict-sync.js";
+import { CONFLICTING_FILES_MAX, runMergeConflictSync } from "./merge-conflict-sync.js";
 import { getTaskSnapshot } from "./commands.js";
 import { extractOperatorCriteria } from "./operator-criteria.js";
 import { buildDeveloperPrompt } from "./prompts.js";
@@ -48,6 +48,10 @@ import {
   dirtyWorktreeRecoveryCommands,
   withRepoLock,
   leftoverFingerprint,
+  fetchFreshBase,
+  probeBaseConflict,
+  refExists,
+  type ProbeGitExec,
 } from "../adapters/git-worktree.js";
 import { recordIssueBaseSha } from "../repository/issues.js";
 import {
@@ -218,6 +222,9 @@ export interface DeveloperEffectDeps {
   /** NOT-354: test seam for the base sync a conflicting PR's CI wait runs; production
    * uses the NOT-310 `runMergeConflictSync`. */
   conflictSync?: typeof runMergeConflictSync;
+  /** NOT-355: test seam for the pre-publish `git merge-tree` probe; production
+   * execFiles real git. */
+  probeGitExec?: ProbeGitExec;
 }
 
 const defaultDeps: DeveloperEffectDeps = { spawn: realDeveloperSpawn, github: realGithubAdapter };
@@ -556,6 +563,101 @@ async function checksConflictOutcome(
   }
 }
 
+/** What stops a first push: a real conflict, a base we could not fetch, or a probe
+ * that established nothing. */
+type PrePublishBlock = Extract<DeveloperOutcome, { kind: "base_conflict" | "base_fetch_failed" | "unpushed_commit" }>;
+
+/**
+ * NOT-355: before a developer branch's first push, fetch the base fresh and ask
+ * `git merge-tree --write-tree` whether merging it into the branch would conflict.
+ * Local git, so it never waits on GitHub's lazily computed mergeability. Returns null
+ * to publish exactly as before — on `clean`, or on a git without `--write-tree` (the
+ * only fail-open case) — and otherwise the outcome that blocks the push:
+ * - conflict → `base_conflict` (applyCompletion queues the one repair round);
+ * - base fetch failed → `base_fetch_failed` (NOT-197's network deferral), re-queued
+ *   publish-only so the next run re-probes instead of re-running the agent;
+ * - any other probe failure → `unpushed_commit`, a human decision with the commits kept.
+ * `worktreePath` null probes the local branch ref from the repo (the publish-only
+ * path). Every probe records one `base.probe` event. Never merges, rebases, or
+ * force-pushes.
+ */
+async function prePublishBaseProbe(opts: {
+  repoPath: string;
+  worktreePath: string | null;
+  branchName: string;
+  baseBranch: string;
+  exec?: ProbeGitExec;
+  emit: (intent: string, payload: Record<string, unknown>) => void;
+}): Promise<PrePublishBlock | null> {
+  const { repoPath, worktreePath, branchName, baseBranch } = opts;
+  const headSha = await (worktreePath ? revParseHead(worktreePath) : revParseRef(repoPath, `refs/heads/${branchName}`)).catch(
+    () => null
+  );
+  const common = { baseBranch, branch: branchName, headSha };
+  const notPublished = (reason: string): PrePublishBlock => ({
+    kind: "unpushed_commit",
+    reason: `${reason}; branch ${branchName} was not published.`,
+    branch: branchName,
+    ...(worktreePath ? { worktreePath } : {}),
+  });
+  // A session's commits must survive on the local issue branch before its checkout
+  // goes (strictly a fast-forward — the worker may have committed on a side branch).
+  const keepCommits = async (): Promise<boolean> => {
+    if (!worktreePath) return true;
+    if (!headSha) return false;
+    const kept = await fastForwardLocalBranchToSha({ repo: repoPath, branch: branchName, sha: headSha }).catch(() => false);
+    if (kept) await bestEffortRemove(repoPath, worktreePath);
+    return kept;
+  };
+
+  const fresh = await fetchFreshBase(repoPath, baseBranch, developerEffectConfig.baseFetchTimeoutMs);
+  if (!fresh.ok) {
+    opts.emit(`Developer · base probe deferred: could not fetch ${baseBranch}`, {
+      result: "deferred",
+      reason: fresh.reason,
+      ...common,
+    });
+    if (!(await keepCommits())) {
+      return notPublished(`Could not fetch ${baseBranch} to probe for conflicts (${fresh.reason})`);
+    }
+    return { kind: "base_fetch_failed", reason: fresh.reason, publishBranch: branchName };
+  }
+  if (!headSha) {
+    opts.emit(`Developer · base probe failed`, { result: "failed", reason: "branch head does not resolve", ...common });
+    return notPublished(`Base conflict probe against ${baseBranch} failed (branch head does not resolve)`);
+  }
+  const probe = await probeBaseConflict({
+    worktreePath: worktreePath ?? repoPath,
+    baseRef: fresh.sha,
+    headRef: worktreePath ? "HEAD" : `refs/heads/${branchName}`,
+    exec: opts.exec,
+  });
+  if (probe.state === "skipped") {
+    console.warn(`[dealer] base probe skipped for ${branchName}: ${probe.reason}`);
+    opts.emit(`Developer · base probe skipped`, { result: "skipped", reason: probe.reason, baseSha: fresh.sha, ...common });
+    return null;
+  }
+  if (probe.state === "error") {
+    opts.emit(`Developer · base probe failed`, { result: "failed", reason: probe.reason, baseSha: fresh.sha, ...common });
+    return notPublished(`Base conflict probe against ${baseBranch} failed (${probe.reason})`);
+  }
+  if (probe.state === "clean") {
+    opts.emit(`Developer · base probe clean`, { result: "clean", baseSha: fresh.sha, ...common });
+    return null;
+  }
+  const files = probe.files.slice(0, CONFLICTING_FILES_MAX);
+  opts.emit(`Developer · branch conflicts with ${baseBranch}; not publishing`, {
+    result: "conflict",
+    files: probe.files,
+    baseSha: fresh.sha,
+    ...common,
+  });
+  // The repair round continues from the local issue branch; keepCommits leaves the
+  // checkout in place when it cannot fast-forward, for crash-recovery inspection.
+  await keepCommits();
+  return { kind: "base_conflict", branch: branchName, baseBranch, headSha, files };
+}
+
 /**
  * Infra retry that skips the agent: publish whatever the branch already carries. Uses the
  * issue repo as `gh` cwd and `origin/<branch>` as the verified head (any worktree was
@@ -660,6 +762,19 @@ async function runPublishOnlyHandoff(
         fetch: true,
       });
       if (progress.state === "unpushed") {
+        // NOT-355: commits origin has never seen (a reclaim, or a probe deferred on a
+        // base fetch) get the same pre-publish probe as a live attempt's first push.
+        if (!(await refExists(cwd, `refs/remotes/origin/${branchName}`))) {
+          const blocked = await prePublishBaseProbe({
+            repoPath: cwd,
+            worktreePath: null,
+            branchName,
+            baseBranch,
+            exec: deps.probeGitExec,
+            emit: (intent, payload) => milestone("base.probe", intent, payload),
+          });
+          if (blocked) return { kind: "early", outcome: blocked };
+        }
         setLiveIntent(
           issue.id,
           `Developer · pushing ${progress.unpushed} recovered commit${progress.unpushed === 1 ? "" : "s"} (round ${round})`
@@ -1857,6 +1972,21 @@ export async function runDeveloperEffect(
     if (ahead === 0) {
       await bestEffortRemove(repoPath, worktreePath);
       return { kind: "no_pr" };
+    }
+
+    // NOT-355: a branch never pushed before (no PR can exist yet) is probed against
+    // the fresh base first — a conflicting branch gets a repair round, not a
+    // conflicting draft PR CI never runs on. Published branches are NOT-354/310's.
+    if (!(await refExists(worktreePath, `refs/remotes/origin/${branchName}`))) {
+      const blocked = await prePublishBaseProbe({
+        repoPath,
+        worktreePath,
+        branchName,
+        baseBranch,
+        exec: deps.probeGitExec,
+        emit: (intent, payload) => milestone("base.probe", intent, payload),
+      });
+      if (blocked) return blocked;
     }
 
     setLiveIntent(issue.id, `Developer · pushing branch (round ${round})`);

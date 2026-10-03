@@ -236,8 +236,10 @@ export type ConflictSyncOutcome =
    * it via {@link queueConflictRepairRound} while finishing its leased item. */
   | { outcome: "repair_needed"; files: string[] };
 
-/** NOT-354: which path asked for the sync — see the module doc. */
-export type ConflictSyncEntry = "merge" | "checks_wait";
+/** NOT-354: which path asked for the sync — see the module doc. NOT-355's
+ * `pre_publish` only ever queues the repair round (the probe never syncs); like
+ * `checks_wait` it runs in the developer stage with the lease held. */
+export type ConflictSyncEntry = "merge" | "checks_wait" | "pre_publish";
 
 function parseRepairFiles(payloadJson: string | null): string[] {
   if (!payloadJson) return [];
@@ -376,7 +378,7 @@ function formatFileList(files: string[]): string {
  * NOT-354 `checks_wait`: the issue is still in its developer stage (developing
  * or repairing, which it keeps), and `finish` names the leased developer item
  * the CI wait ran in — it is CAS-finished in the same transaction, so a lost
- * lease queues nothing (null).
+ * lease queues nothing (null). NOT-355 `pre_publish` queues the same way.
  */
 export function queueConflictRepairRound(input: {
   issueId: string;
@@ -390,8 +392,8 @@ export function queueConflictRepairRound(input: {
   return getDb().transaction(() => {
     const current = getIssue(input.issueId);
     if (!current) return null;
-    const fromStatuses: IssueStatus[] =
-      input.entry === "checks_wait" ? ["developing", "repairing"] : ["final_review"];
+    const developerStage = input.entry === "checks_wait" || input.entry === "pre_publish";
+    const fromStatuses: IssueStatus[] = developerStage ? ["developing", "repairing"] : ["final_review"];
     if (!fromStatuses.includes(current.status)) return null;
     const active = getActiveWorkflowInstance(input.issueId);
     if (!active || active.id !== input.instanceId) return null;
@@ -404,7 +406,7 @@ export function queueConflictRepairRound(input: {
     ) {
       return null;
     }
-    const toStatus: IssueStatus = input.entry === "checks_wait" ? current.status : "repairing";
+    const toStatus: IssueStatus = developerStage ? current.status : "repairing";
     const round = current.currentRound + 1;
     incrementIssueRound(input.issueId);
     transitionIssue(input.issueId, toStatus, {

@@ -69,6 +69,17 @@ export type DeveloperOutcome =
       waitStartedAt: string;
       sync: ChecksConflictSync;
     }
+  /** NOT-355: the pre-publish probe found the unpushed branch conflicts with the
+   * freshly fetched base, so nothing was pushed and no PR exists. applyCompletion
+   * queues the one conflict-repair round naming `files`, or escalates once when the
+   * episode's round is already spent. */
+  | {
+      kind: "base_conflict";
+      branch: string;
+      baseBranch: string;
+      headSha: string;
+      files: string[];
+    }
   /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll.
    * NOT-147: `commitsAhead` (when known) feeds the empty-tip no-progress gate; optional
    * worktree/log pointers make the human escalation actionable. */
@@ -95,8 +106,10 @@ export type DeveloperOutcome =
   /** NOT-197: the pre-branch `git fetch origin <base>` failed or timed out — nothing
    * spawned, nothing attempted, no branch created. Deferred like an unreachable deck
    * (no infra attempt, exponential backoff), never routed as a worker failure and never
-   * retried against the stale local base. `until` is computed by the deferral. */
-  | { kind: "base_fetch_failed"; reason: string }
+   * retried against the stale local base. `until` is computed by the deferral.
+   * NOT-355: `publishBranch` — the fetch was the pre-publish probe's, after the session
+   * committed; the deferral re-queues that branch publish-only (no agent rerun). */
+  | { kind: "base_fetch_failed"; reason: string; publishBranch?: string }
   /** Optional progress fields — see `timed_out` (NOT-147). */
   | {
       kind: "session_failed";
@@ -381,6 +394,13 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
           outcome.sync.result === "escalate"
             ? outcome.sync.reason
             : `PR #${outcome.prNumber} conflicts with ${outcome.baseBranch}; CI cannot start.`,
+      };
+    case "base_conflict":
+      // NOT-355: applyCompletion handles this before routing (same reason as above).
+      return {
+        next: "human_action",
+        actionType: "policy_escalation",
+        reason: `Branch ${outcome.branch} conflicts with ${outcome.baseBranch}; it was not published.`,
       };
   }
 }
