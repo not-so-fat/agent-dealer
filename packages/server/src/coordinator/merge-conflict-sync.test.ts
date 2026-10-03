@@ -363,3 +363,103 @@ test("NOT-354: checks_wait textual conflict aborts without pushing, one repair r
     setConflictSyncGitExecForTests(null);
   }
 });
+
+// ---------------------------------------------------------------------------
+// NOT-356: the `base_advanced` entry — no merge failure triggered it; Dealer just
+// merged a sibling PR and the probe says this idle PR now conflicts.
+
+const BASE_ADVANCED_REASON = "main advanced and PR #7 now conflicts with it.";
+
+test("NOT-356: base_advanced clean sync plain-pushes without a merge failure, and spends the episode's one sync", async () => {
+  const { origin, local, baseMovedSha } = initChecksWaitRepos(false);
+  const { issueId, instanceId } = developingIssueIn(local);
+  const calls = recordGit();
+  try {
+    const sync = {
+      issueId,
+      instanceId,
+      repo: local,
+      branch: "issue-1",
+      baseBranch: "main",
+      prNumber: 7,
+      mergeReason: BASE_ADVANCED_REASON,
+      entry: "base_advanced" as const,
+    };
+    // No mergePr: the merge entry would skip without one; this entry never merges.
+    const first = await runMergeConflictSync(sync);
+    assert.equal(first.outcome, "synced");
+    assert.equal(contains(origin, baseMovedSha, "issue-1"), true);
+    assert.deepEqual(
+      calls.filter((a) => a[0] === "push"),
+      [["push", "-u", "origin", "HEAD:refs/heads/issue-1"]]
+    );
+    assertSafeGit(calls);
+    const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
+    const audit = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "auto_merge.conflict_sync");
+    assert.equal(audit.length, 1);
+    assert.equal(JSON.parse(audit[0]!.payloadJson!).entry, "base_advanced");
+    assert.equal(checksWaitSyncSpent(issueId, instanceId), true, "a base_advanced sync spends the push-only sync");
+
+    // Neither push-only entry syncs again this episode.
+    const before = calls.length;
+    assert.deepEqual(await runMergeConflictSync(sync), { outcome: "repair_needed", files: [] });
+    assert.deepEqual(await runMergeConflictSync({ ...sync, entry: "checks_wait" }), { outcome: "repair_needed", files: [] });
+    assert.equal(calls.length, before, "no second sync");
+  } finally {
+    setConflictSyncGitExecForTests(null);
+  }
+});
+
+test("NOT-356: base_advanced conflict returns the files; the repair round supersedes the idle item and refuses a leased one", async () => {
+  const { local } = initChecksWaitRepos(true);
+  const { issueId, instanceId } = developingIssueIn(local);
+  const calls = recordGit();
+  try {
+    const first = await runMergeConflictSync({
+      issueId,
+      instanceId,
+      repo: local,
+      branch: "issue-1",
+      baseBranch: "main",
+      prNumber: 7,
+      mergeReason: BASE_ADVANCED_REASON,
+      entry: "base_advanced",
+    });
+    assert.deepEqual(first, { outcome: "repair_needed", files: ["shared.txt"] });
+    assert.equal(calls.filter((a) => a[0] === "push").length, 0);
+    assertSafeGit(calls);
+
+    const queue = () =>
+      queueConflictRepairRound({
+        issueId,
+        instanceId,
+        baseBranch: "main",
+        branch: "issue-1",
+        files: ["shared.txt"],
+        entry: "base_advanced",
+      });
+    // A leased item means the issue is not idle — nothing queues.
+    const leased = claimWorkItem("not356-test", { leaseMs: 60_000 })!;
+    assert.equal(leased.issueId, issueId);
+    assert.equal(queue(), null);
+    const { requeueWorkItem } = await import("../repository/work-items.js");
+    assert.ok(requeueWorkItem(leased.id, leased.leaseToken!, { kind: "test" }, { backoffMs: 0 }));
+    const idle = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+    assert.equal(idle.length, 1);
+
+    const queued = queue();
+    assert.ok(queued);
+    assert.equal(getWorkItem(idle[0]!.id)!.status, "cancelled", "the parked item is superseded");
+    const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+    assert.deepEqual(pending.map((i) => i.id), [queued!.id]);
+    assert.deepEqual(JSON.parse(pending[0]!.payloadJson!).conflictRepair, {
+      baseBranch: "main",
+      branch: "issue-1",
+      files: ["shared.txt"],
+    });
+    assert.equal(getIssue(issueId)!.status, "developing");
+    assert.equal(conflictRepairSpent(issueId, instanceId).spent, true);
+  } finally {
+    setConflictSyncGitExecForTests(null);
+  }
+});

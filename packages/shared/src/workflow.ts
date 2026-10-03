@@ -80,6 +80,11 @@ export const WorkflowEventType = z.enum([
    * push. Payload `result` is clean | conflict | skipped, plus the base, head, and
    * (for conflicts) the conflicting files or (for skips) the reason. */
   "base.probe",
+  /** NOT-356: Dealer merged a sibling PR on this issue's repo + base. Payload carries
+   * the merged issue/PR, the new base tip, and `action` (clean | synced |
+   * repair_queued | active_worker | hand_edited | repair_spent | human_owned |
+   * skipped | failed) plus the probe's conflicting files or the reason. */
+  "base.advanced",
   /** NOT-314: the operator explicitly waived an `[operator]` criterion instead of
    * running its probe (payload: headSha the waiver covers, waivedBy, note).
    * The gate re-blocks when the head moves past the waived SHA. */
