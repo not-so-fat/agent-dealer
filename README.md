@@ -2,9 +2,9 @@
 
 A governed way of working that travels with every new agent worker — playbooks, tools, and credentials in a deck; queue the issues and only show up for real decisions.
 
-[![Agent Deck + Agent Dealer](https://img.youtube.com/vi/zkQcCT0tZeo/maxresdefault.jpg)](https://www.youtube.com/watch?v=zkQcCT0tZeo)
+[![Agent Deck + Agent Dealer](https://img.youtube.com/vi/DVC70PgMY80/maxresdefault.jpg)](https://www.youtube.com/watch?v=DVC70PgMY80)
 
-[Watch the 2-min overview](https://www.youtube.com/watch?v=zkQcCT0tZeo) — portable decks, then a governed issue queue.
+[Watch the 2-min overview](https://www.youtube.com/watch?v=DVC70PgMY80) — portable decks, then a governed issue queue.
 
 agent-dealer is an issue queue and execution control plane for coding agents: bind an **Agent profile**, run an **issue** through one **workflow template** on the **Task coordinator**, and monitor or approve via the **GUI / API** (or CLI). Today the shipping coding path is Dev-review — a developer agent implements in its own git worktree and opens a pull request, a reviewer agent reviews the diff, and the loop repeats until the work merges or something genuinely needs a human. Every session, finding, cost, and decision lands on one durable issue record in SQLite. Pair it with [Agent Deck](https://github.com/not-so-fat/agent_deck) and every session starts with the right tools, keys, and playbooks.
 
