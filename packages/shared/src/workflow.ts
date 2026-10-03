@@ -76,6 +76,10 @@ export const WorkflowEventType = z.enum([
    * bound key: a later not-mergeable failure with no `human_action.resolved` after
    * this event escalates with the file list instead of syncing again. */
   "auto_merge.conflict_repair_queued",
+  /** NOT-355: pre-publish base-conflict probe before a developer branch's first
+   * push. Payload `result` is clean | conflict | skipped, plus the base, head, and
+   * (for conflicts) the conflicting files or (for skips) the reason. */
+  "base.probe",
   /** NOT-314: the operator explicitly waived an `[operator]` criterion instead of
    * running its probe (payload: headSha the waiver covers, waivedBy, note).
    * The gate re-blocks when the head moves past the waived SHA. */

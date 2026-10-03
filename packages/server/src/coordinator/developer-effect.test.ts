@@ -2956,3 +2956,247 @@ test("NOT-315: a skipped dependency install still emits worktree.deps_ready with
   assert.match(String(payload.reason ?? ""), /no package\.json/);
   assert.ok(typeof payload.durationMs === "number" && payload.durationMs >= 0);
 });
+
+// ---------------------------------------------------------------------------
+// NOT-355: pre-publish base-conflict probe.
+
+/** Advances origin/main from a throwaway clone — the "another PR merged" fake. */
+function advanceRemoteMain(file: string, content: string): void {
+  const clone = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-deveff-advance-"));
+  try {
+    execFileSync("git", ["clone", "-q", remote, clone]);
+    fs.writeFileSync(path.join(clone, file), content);
+    git(clone, "add", file);
+    git(clone, "-c", "user.email=other@test", "-c", "user.name=Other", "commit", "-q", "-m", `base: ${file}`);
+    git(clone, "push", "-q", "origin", "HEAD:main");
+  } finally {
+    fs.rmSync(clone, { recursive: true, force: true });
+  }
+}
+
+function commitIn(cwd: string, file: string, content: string, message: string): void {
+  fs.writeFileSync(path.join(cwd, file), content);
+  git(cwd, "add", file);
+  git(cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", message);
+}
+
+/** Records the probe's git shell-outs while delegating to real git. */
+function recordingProbeExec(): { exec: NonNullable<Parameters<typeof runDeveloperEffect>[1]>["probeGitExec"] & {}; calls: string[][] } {
+  const calls: string[][] = [];
+  return {
+    calls,
+    exec: async (args, opts) => {
+      calls.push(args);
+      const { promisify } = await import("node:util");
+      const { execFile } = await import("node:child_process");
+      return promisify(execFile)("git", args, { cwd: opts.cwd, encoding: "utf8" });
+    },
+  };
+}
+
+/** Wraps a GithubFn so every adapter call is recorded in order. */
+function recordingGithub(inner: GithubFn): { github: GithubFn; calls: string[] } {
+  const calls: string[] = [];
+  const github = new Proxy(inner, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        calls.push(String(prop));
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
+  return { github, calls };
+}
+
+function probeEvents(issueId: string): Array<Record<string, unknown>> {
+  return listWorkflowEventsForIssue(issueId)
+    .filter((e) => e.type === "base.probe")
+    .map((e) => JSON.parse(e.payloadJson ?? "{}") as Record<string, unknown>);
+}
+
+function assertNoForceOrRebase(calls: string[][]): void {
+  for (const args of calls) {
+    assert.equal(args[0], "merge-tree", `the probe only ever runs merge-tree, got: git ${args.join(" ")}`);
+    assert.ok(!args.some((a) => /^--force|^-f$|rebase/.test(a)), `no force/rebase: git ${args.join(" ")}`);
+  }
+}
+
+test("NOT-355: a branch whose base advanced with a conflicting change is not published; one repair round names the base and files, and its resolution publishes normally", async () => {
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  const file = `probe-${issueId.slice(0, 8)}.txt`;
+  const prompts: string[] = [];
+  const spawn: SpawnFn = async (input) => {
+    prompts.push(input.prompt);
+    if (prompts.length === 1) {
+      commitIn(input.cwd, file, "feature side\n", "implement");
+      advanceRemoteMain(file, "base side\n"); // main moved while the ticket was in development
+    } else {
+      // The repair round: merge the base and resolve, exactly as the prompt directs.
+      git(input.cwd, "fetch", "-q", "origin", "main");
+      try {
+        git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "merge", "--no-edit", "origin/main");
+      } catch {
+        // conflicted — resolved below
+      }
+      commitIn(input.cwd, file, "feature side\nbase side\n", "merge main: resolve conflict");
+    }
+    return { exitCode: 0, transcript: "Implementation conclusion: done.", logPath: "/dev/null", timedOut: false };
+  };
+  const probe = recordingProbeExec();
+  const { github, calls } = recordingGithub(fakeGithub());
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github, probeGitExec: probe.exec })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  // Round 1: conflict found locally — nothing pushed, no PR created.
+  assert.equal(calls.includes("createDraftPr"), false, "createDraftPr must not run before the repair round");
+  assert.equal(git(repo, "ls-remote", "origin", `refs/heads/${branch}`), "", "the conflicting branch was never pushed");
+  assert.deepEqual(
+    probeEvents(issueId).map((p) => [p.result, p.files]),
+    [["conflict", [file]]]
+  );
+  let issue = getIssue(issueId)!;
+  assert.equal(issue.status, "developing");
+  assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 0);
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1, "exactly one conflict-repair round");
+  assert.equal(pending[0]!.kind, "developer");
+  assert.equal(pending[0]!.round, 2);
+  assert.deepEqual(JSON.parse(pending[0]!.payloadJson ?? "{}").conflictRepair, { baseBranch: "main", branch, files: [file] });
+  assert.equal(listWorkflowEventsForIssue(issueId).filter((e) => e.type === "auto_merge.conflict_repair_queued").length, 1);
+
+  // Round 2: the repair prompt names the base and the file; the resolved branch publishes.
+  await pump(1);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1]!, /Merge conflict with main/);
+  assert.ok(prompts[1]!.includes(file), "repair prompt names the conflicting file");
+
+  issue = getIssue(issueId)!;
+  assert.equal(issue.status, "reviewing", "the resolved branch publishes through the normal push");
+  const published = git(remote, "log", "--format=%s", branch).split("\n");
+  assert.ok(published.includes("implement"), "the repair round continued the unpushed round-1 commit");
+  assert.ok(published.includes("merge main: resolve conflict"));
+  assert.equal(calls.filter((c) => c === "createDraftPr").length, 1);
+  assert.deepEqual(probeEvents(issueId).map((p) => p.result), ["conflict", "clean"]);
+  assert.equal(probe.calls.length, 2);
+  assertNoForceOrRebase(probe.calls);
+  assert.equal(listWorkflowEventsForIssue(issueId).filter((e) => e.type === "auto_merge.conflict_repair_queued").length, 1);
+});
+
+test("NOT-355: a repair round that still conflicts escalates once with the file list and queues no further round", async () => {
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  const file = `probe-${issueId.slice(0, 8)}.txt`;
+  let n = 0;
+  const spawn: SpawnFn = async (input) => {
+    n++;
+    if (n === 1) {
+      commitIn(input.cwd, file, "feature side\n", "implement");
+      advanceRemoteMain(file, "base side\n");
+    } else {
+      // Ignores the directive: commits something else, the conflict stays.
+      commitIn(input.cwd, `unrelated-${issueId.slice(0, 8)}.txt`, `round ${n}\n`, `round ${n}`);
+    }
+    return { exitCode: 0, transcript: "Implementation conclusion: done.", logPath: "/dev/null", timedOut: false };
+  };
+  const probe = recordingProbeExec();
+  const { github, calls } = recordingGithub(fakeGithub());
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github, probeGitExec: probe.exec })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+  assert.equal(getIssue(issueId)!.status, "developing");
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(n, 2, "exactly one repair round ran");
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.status === "pending").length, 0, "no further round");
+  assert.equal(listWorkflowEventsForIssue(issueId).filter((e) => e.type === "auto_merge.conflict_repair_queued").length, 1);
+  const open = listHumanActionsForIssue(issueId).filter((a) => a.status === "open");
+  assert.equal(open.length, 1, "escalates exactly once");
+  assert.equal(open[0]!.actionType, "policy_escalation");
+  assert.ok(open[0]!.reason.includes(file), "the escalation names the conflicting file");
+  assert.match(open[0]!.reason, /conflicts with main/);
+  const evidence = JSON.parse(open[0]!.evidenceJson!) as Record<string, unknown>;
+  assert.deepEqual(evidence.conflictingFiles, [file]);
+  assert.equal((evidence.baseProbeConflict as { branch?: string }).branch, branch);
+
+  assert.equal(calls.includes("createDraftPr"), false, "never published");
+  assert.equal(git(repo, "ls-remote", "origin", `refs/heads/${branch}`), "", "never pushed");
+  assert.deepEqual(probeEvents(issueId).map((p) => p.result), ["conflict", "conflict"]);
+  assertNoForceOrRebase(probe.calls);
+
+  await pump(1);
+  assert.equal(listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length, 1, "no repeat escalation");
+  assert.equal(n, 2, "no third round");
+});
+
+test("NOT-355: a base that advanced without conflict probes clean and publishes exactly as before — no merge commit", async () => {
+  const issueId = await makeIssue();
+  const branch = issueBranchName(issueId);
+  const tag = issueId.slice(0, 8);
+  let localHead = "";
+  let cutFrom = "";
+  const spawn: SpawnFn = async (input) => {
+    cutFrom = git(input.cwd, "rev-parse", "HEAD");
+    commitIn(input.cwd, `feature-${tag}.txt`, "implemented\n", "implement");
+    localHead = git(input.cwd, "rev-parse", "HEAD");
+    advanceRemoteMain(`base-${tag}.txt`, "unrelated base change\n");
+    return { exitCode: 0, transcript: "Implementation conclusion: done.", logPath: "/dev/null", timedOut: false };
+  };
+  const probe = recordingProbeExec();
+  const { github, calls } = recordingGithub(fakeGithub());
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github, probeGitExec: probe.exec })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.equal(getIssue(issueId)!.status, "reviewing");
+  assert.deepEqual(probeEvents(issueId).map((p) => p.result), ["clean"]);
+  assert.equal(probe.calls.length, 1);
+  assertNoForceOrRebase(probe.calls);
+  // Push: exactly the developer's commit, on top of the base it was cut from.
+  const pushed = git(repo, "ls-remote", "origin", `refs/heads/${branch}`).split(/\s+/)[0];
+  assert.equal(pushed, localHead, "the pushed head is the developer's commit — no merge, no rebase");
+  assert.equal(git(repo, "rev-parse", `${localHead}^`), cutFrom);
+  // Adapter sequence: same as a branch whose base never moved.
+  assert.deepEqual(calls.slice(0, 4), ["viewPr", "createDraftPr", "viewPr", "checksSnapshot"]);
+  assert.equal(calls.filter((c) => c === "createDraftPr").length, 1);
+  const events = listWorkflowEventsForIssue(issueId).map((e) => e.type);
+  assert.ok(events.indexOf("base.probe") < events.indexOf("branch.pushed"), "the probe runs before the push");
+});
+
+test("NOT-355: a git without merge-tree --write-tree skips the probe, records skipped, and publishes", async () => {
+  const issueId = await makeIssue();
+  const probeCalls: string[][] = [];
+  const oldGit: NonNullable<Parameters<typeof runDeveloperEffect>[1]>["probeGitExec"] = async (args) => {
+    probeCalls.push(args);
+    throw Object.assign(new Error("git merge-tree failed"), {
+      code: 129,
+      stdout: "",
+      stderr: "error: unknown option `write-tree'\nusage: git merge-tree <base-tree> <branch1> <branch2>",
+    });
+  };
+  const { github, calls } = recordingGithub(fakeGithub());
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github, probeGitExec: oldGit })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.equal(getIssue(issueId)!.status, "reviewing", "publishing proceeds");
+  assert.equal(probeCalls.length, 1);
+  const probes = probeEvents(issueId);
+  assert.equal(probes.length, 1);
+  assert.equal(probes[0]!.result, "skipped");
+  assert.match(String(probes[0]!.reason), /not supported/);
+  assert.equal(calls.filter((c) => c === "createDraftPr").length, 1);
+});
