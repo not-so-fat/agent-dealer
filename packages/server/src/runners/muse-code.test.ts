@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildMuseDeveloperInvocation } from "./muse-code-args.js";
-import { parseMuseRun, type MuseFailureKind } from "./muse-code-jsonl.js";
+import { parseMuseRun, createMusePrimaryTerminalMatcher, type MuseFailureKind } from "./muse-code-jsonl.js";
 import { extractResultText, extractSessionId, extractUsage } from "./stream-json.js";
 
 // NOT-179: developer argv + JSONL parser, table-driven over the sanitized NOT-177 fixtures.
@@ -189,6 +189,19 @@ test("terminals are selected by the primary run id, not by arrival order", () =>
   assert.equal(r.usage.inputTokens, 7);
   assert.equal(r.usage.modelDurationMs, 3);
   assert.equal(r.failure, null);
+});
+
+// NOT-342: terminalGrace must follow the same primary-run rule — a cron terminal
+// arriving first must not arm the kill while the primary is still working.
+test("createMusePrimaryTerminalMatcher ignores a cron terminal before the primary's", () => {
+  const matcher = createMusePrimaryTerminalMatcher();
+  const lines = interleavedStdout.split("\n");
+  assert.equal(matcher.isTerminalLine(lines[0]), false, "primary linked");
+  assert.equal(matcher.isTerminalLine(lines[1]), false, "cron linked");
+  assert.equal(matcher.isTerminalLine(lines[2]), false, "cron terminal must not arm grace");
+  assert.equal(matcher.sawPrimaryTerminal(), false);
+  assert.equal(matcher.isTerminalLine(lines[3]), true, "primary terminal arms grace");
+  assert.equal(matcher.sawPrimaryTerminal(), true);
 });
 
 test("a cron run's model_completed cannot confirm the primary run's model", () => {

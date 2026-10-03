@@ -411,4 +411,45 @@ test("spawnCli without idleTimeoutMs times out on the wall clock with idleTimedO
   });
   assert.equal(result.timedOut, true);
   assert.equal(result.idleTimedOut, false);
+  assert.equal(result.lingeredAfterTerminal, false);
+});
+
+const terminalFailedLine = JSON.stringify({
+  payload_type: "run.terminal.failed",
+  payload: { terminal: "failed", reason: "transport error [net-timeout]: timed out waiting for response data (meta stream)" },
+});
+const isTerminalLine = (line: string) => line.includes("run.terminal.failed") || line.includes("run.terminal.completed");
+
+// NOT-342: a child that has already printed its terminal envelope but does not exit
+// is SIGTERM'd after the grace — well before the wall clock — and is not a timeout.
+test("spawnCli kills a lingering child after terminalGrace without timing out", { timeout: 10_000 }, async () => {
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+  const { cmd, args } = nodeChild(`console.log(${JSON.stringify(terminalFailedLine)}); setInterval(() => {}, 1000);`);
+  const startedAt = Date.now();
+  const result = await spawnCli("test-run-terminal-linger", cmd, args, process.cwd(), {
+    logPath,
+    timeoutMs: 30_000,
+    terminalGrace: { isTerminalLine, graceMs: 200 },
+  });
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed < 5_000, `settled on the grace, not the wall clock, took ${elapsed}ms`);
+  assert.equal(result.lingeredAfterTerminal, true);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.idleTimedOut, false);
+  assert.match(result.transcript, /transport error/);
+});
+
+// NOT-342: exiting on its own inside the grace is the child's own close — no linger kill.
+test("spawnCli does not linger-kill a child that exits inside the terminal grace", async () => {
+  const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-spawn-cli-")), "out.ndjson");
+  const { cmd, args } = nodeChild(`console.log(${JSON.stringify(terminalFailedLine)}); process.exit(0);`);
+  const result = await spawnCli("test-run-terminal-exits", cmd, args, process.cwd(), {
+    logPath,
+    timeoutMs: 10_000,
+    terminalGrace: { isTerminalLine, graceMs: 2_000 },
+  });
+  assert.equal(result.lingeredAfterTerminal, false);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.idleTimedOut, false);
+  assert.equal(result.exitCode, 0);
 });

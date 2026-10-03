@@ -34,6 +34,11 @@ export interface DeveloperSpawnResult {
    */
   idleTimedOut?: boolean;
   /**
+   * NOT-342: true when the Muse child was killed after emitting a terminal event
+   * because it did not exit within the grace. Never set with `timedOut`.
+   */
+  lingeredAfterTerminal?: boolean;
+  /**
    * Set only for a `muse_code` session (NOT-181): the parsed outcome the effect needs beyond
    * exit code and transcript — confirmed model, nullable usage, failure kind, `cron_*` activity.
    */

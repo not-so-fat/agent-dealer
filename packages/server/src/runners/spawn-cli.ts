@@ -33,6 +33,12 @@ export interface SpawnCliResult {
   transcript: string;
   timedOut: boolean;
   idleTimedOut: boolean;
+  /**
+   * NOT-342: true only when `terminalGrace` matched a stdout line and the child was
+   * killed after that grace because it had not closed. Never implies `timedOut` or
+   * `idleTimedOut` — those stay false so the terminal event's own cause is used.
+   */
+  lingeredAfterTerminal: boolean;
   firstOutputMs: number | null;
   lastActivityAt: string | null;
   /** Silence observed at an idle kill (now minus last activity); null otherwise. */
@@ -145,6 +151,19 @@ export async function spawnCli(
      * trailing partial line is flushed on child close.
      */
     onStdoutLine?: (line: string, atMs: number) => void;
+    /**
+     * NOT-342: opt-in kill after a terminal stdout line. When `isTerminalLine`
+     * matches a complete stdout line and the child has not closed within `graceMs`,
+     * the child is SIGTERM'd (then SIGKILL after the abort-kill grace) and the
+     * spawn settles with `lingeredAfterTerminal: true`. Does not set `timedOut` or
+     * `idleTimedOut`. Undefined, non-positive `graceMs`, or a throwing/false
+     * predicate leaves existing callers unchanged. Muse is the only production
+     * lane that opts in.
+     */
+    terminalGrace?: {
+      isTerminalLine: (line: string) => boolean;
+      graceMs: number;
+    };
   }
 ): Promise<SpawnCliResult> {
   await acquireSpawnSlot();
@@ -154,6 +173,7 @@ export async function spawnCli(
       const stderrChunks: string[] = [];
       let timedOut = false;
       let settled = false;
+      let lingeredAfterTerminal = false;
       let killEscalation: ReturnType<typeof setTimeout> | undefined;
 
       // NOT-307: idle watchdog state. lastActivityMs starts at spawn so a child that
@@ -169,14 +189,29 @@ export async function spawnCli(
         typeof idleMs === "number" && Number.isFinite(idleMs) && idleMs > 0;
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
       let progressTimer: ReturnType<typeof setInterval> | undefined;
+      let terminalGraceTimer: ReturnType<typeof setTimeout> | undefined;
+      let lingerSettleTimer: ReturnType<typeof setTimeout> | undefined;
+      let terminalGraceArmed = false;
+      const terminalGraceMs = opts.terminalGrace?.graceMs;
+      const terminalGraceEnabled =
+        typeof terminalGraceMs === "number" &&
+        Number.isFinite(terminalGraceMs) &&
+        terminalGraceMs > 0 &&
+        typeof opts.terminalGrace?.isTerminalLine === "function";
       const clearIdle = () => {
         if (idleTimer) clearTimeout(idleTimer);
         if (progressTimer) clearInterval(progressTimer);
         idleTimer = undefined;
         progressTimer = undefined;
       };
+      const clearTerminalGrace = () => {
+        if (terminalGraceTimer) clearTimeout(terminalGraceTimer);
+        terminalGraceTimer = undefined;
+        if (lingerSettleTimer) clearTimeout(lingerSettleTimer);
+        lingerSettleTimer = undefined;
+      };
       const rescheduleIdle = () => {
-        if (!idleEnabled || settled || aborted) return;
+        if (!idleEnabled || settled || aborted || lingeredAfterTerminal) return;
         if (idleTimer) clearTimeout(idleTimer);
         idleTimer = setTimeout(fireIdle, idleMs as number);
         idleTimer.unref?.();
@@ -195,12 +230,59 @@ export async function spawnCli(
       // later) so salvage and infra-retry accounting treat an idle kill as a timeout.
       // Never fires after an abort: a lost lease is not idleness.
       function fireIdle() {
-        if (settled || aborted) return;
+        if (settled || aborted || lingeredAfterTerminal) return;
         idleTimedOut = true;
         timedOut = true;
         killRunProcess(runId);
         setTimeout(() => finish(124), 500);
       }
+      // Same polite SIGTERM → SIGKILL backstop the abort path uses: the CLI should
+      // reap its own children on SIGTERM. Does not settle the promise — `close` does.
+      const requestKill = () => {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // Already exited between the decision and this kill — nothing to signal.
+        }
+        if (killEscalation) clearTimeout(killEscalation);
+        killEscalation = setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // Same race as above; the 'close' handler still settles the promise.
+          }
+        }, abortKillGraceMs());
+        killEscalation.unref?.();
+      };
+      function fireTerminalGrace() {
+        if (settled || aborted) return;
+        lingeredAfterTerminal = true;
+        clearIdle();
+        requestKill();
+        // If a grandchild holds the stdout pipe open after SIGKILL, Node never
+        // emits 'close' — settle as lingered so the spawn slot and lease cannot
+        // leak until the wall clock. Close still wins when it arrives first.
+        if (lingerSettleTimer) clearTimeout(lingerSettleTimer);
+        lingerSettleTimer = setTimeout(() => {
+          if (settled || aborted) return;
+          finish(1);
+        }, abortKillGraceMs() + 500);
+        lingerSettleTimer.unref?.();
+      }
+      const maybeArmTerminalGrace = (line: string) => {
+        if (!terminalGraceEnabled || settled || aborted || terminalGraceArmed) return;
+        let match = false;
+        try {
+          match = opts.terminalGrace!.isTerminalLine(line) === true;
+        } catch (err) {
+          console.error(`[spawn-cli] terminalGrace.isTerminalLine for ${runId}`, err);
+          return;
+        }
+        if (!match) return;
+        terminalGraceArmed = true;
+        terminalGraceTimer = setTimeout(fireTerminalGrace, terminalGraceMs as number);
+        terminalGraceTimer.unref?.();
+      };
 
       const logStream = fs.createWriteStream(opts.logPath, { flags: "w" });
       // A WriteStream's 'error' event has no default handler — left unguarded, any
@@ -251,19 +333,8 @@ export async function spawnCli(
         if (settled) return;
         aborted = true;
         clearIdle();
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // Already exited between the abort firing and this kill — nothing to signal.
-        }
-        killEscalation = setTimeout(() => {
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            // Same race as above; the 'close' handler still settles the promise.
-          }
-        }, abortKillGraceMs());
-        killEscalation.unref?.();
+        clearTerminalGrace();
+        requestKill();
       };
       // Not cleared on settle alone — `cleanupAbort` also drops the listener, so a
       // long-lived signal (one AbortController per work item, reused across the
@@ -300,6 +371,7 @@ export async function spawnCli(
         }
         clearTimeout(timer);
         clearIdle();
+        clearTerminalGrace();
         cleanupAbort();
         unregisterChild(runId);
         // Write any stderr BEFORE ending the stream — writing after end() throws
@@ -325,6 +397,7 @@ export async function spawnCli(
             transcript: stdoutChunks.join(""),
             timedOut,
             idleTimedOut,
+            lingeredAfterTerminal,
             firstOutputMs,
             lastActivityAt: new Date(lastActivityMs).toISOString(),
             idleForMs: idleTimedOut ? Math.max(0, Date.now() - lastActivityMs) : null,
@@ -355,6 +428,13 @@ export async function spawnCli(
       };
 
       const timer = setTimeout(() => {
+        if (settled) return;
+        // A terminal-grace kill already requested: settle as lingered (not timedOut)
+        // if 'close' still has not arrived — same backstop role as lingerSettleTimer.
+        if (lingeredAfterTerminal) {
+          finish(1);
+          return;
+        }
         timedOut = true;
         killRunProcess(runId);
         setTimeout(() => finish(124), 500);
@@ -370,7 +450,7 @@ export async function spawnCli(
           // that the kill lands near the bound, sparse enough to never matter for I/O.
           const pollMs = Math.min(Math.max(Math.floor((idleMs as number) / 10), 50), 30_000);
           progressTimer = setInterval(() => {
-            if (settled || aborted) return;
+            if (settled || aborted || lingeredAfterTerminal) return;
             let at: number | null = null;
             try {
               at = opts.progressSource?.() ?? null;
@@ -392,12 +472,14 @@ export async function spawnCli(
         // NOT-307: any stdout bytes are progress. (stderr deliberately does not count:
         // the contract defines progress as stdout bytes or the external source.)
         noteActivity();
-        if (opts.onStdoutLine) {
+        if (opts.onStdoutLine || terminalGraceEnabled) {
           lineTail += chunk;
           let idx: number;
           while ((idx = lineTail.indexOf("\n")) >= 0) {
-            emitLine(lineTail.slice(0, idx));
+            const line = lineTail.slice(0, idx);
             lineTail = lineTail.slice(idx + 1);
+            emitLine(line);
+            maybeArmTerminalGrace(line);
           }
         }
       });
@@ -409,6 +491,7 @@ export async function spawnCli(
         settled = true;
         clearTimeout(timer);
         clearIdle();
+        clearTerminalGrace();
         cleanupAbort();
         unregisterChild(runId);
         logStream.end();

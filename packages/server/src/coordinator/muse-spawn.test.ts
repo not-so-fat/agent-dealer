@@ -2,16 +2,29 @@
 // arrival-stamped normalized events, and the five-field stall metadata object.
 // The full `runMuseDeveloperSession` needs a Muse binary + credentials, so these
 // test the pure pieces it wires together (plus the parser contract it relies on).
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseMuseRun } from "../runners/muse-code-jsonl.js";
-import { museIdleTimeoutMs, DEFAULT_MUSE_IDLE_TIMEOUT_MS } from "./session-timeouts.js";
+import { fileURLToPath } from "node:url";
+import { MUSE_CODE_CONTRIBUTOR_MODEL } from "@agent-dealer/shared";
+import {
+  parseMuseRun,
+  isMuseTerminalStdoutLine,
+  createMusePrimaryTerminalMatcher,
+} from "../runners/muse-code-jsonl.js";
+import {
+  museIdleTimeoutMs,
+  museTerminalGraceMs,
+  DEFAULT_MUSE_IDLE_TIMEOUT_MS,
+  DEFAULT_MUSE_TERMINAL_GRACE_MS,
+} from "./session-timeouts.js";
 import {
   museIdleMinutes,
   museStallMetadata,
+  runMuseDeveloperSession,
   sessionLogActivityMs,
   writeMuseNormalizedLog,
 } from "./muse-spawn.js";
@@ -21,14 +34,18 @@ const MODEL = "muse-spark-1.3-contributor";
 // ── MUSE_IDLE_TIMEOUT_MS parsing ─────────────────────────────────────────────
 
 function withIdleEnv(raw: string | undefined, fn: () => void): void {
-  const prev = process.env.MUSE_IDLE_TIMEOUT_MS;
+  withEnv("MUSE_IDLE_TIMEOUT_MS", raw, fn);
+}
+
+function withEnv(name: string, raw: string | undefined, fn: () => void): void {
+  const prev = process.env[name];
   try {
-    if (raw === undefined) delete process.env.MUSE_IDLE_TIMEOUT_MS;
-    else process.env.MUSE_IDLE_TIMEOUT_MS = raw;
+    if (raw === undefined) delete process.env[name];
+    else process.env[name] = raw;
     fn();
   } finally {
-    if (prev === undefined) delete process.env.MUSE_IDLE_TIMEOUT_MS;
-    else process.env.MUSE_IDLE_TIMEOUT_MS = prev;
+    if (prev === undefined) delete process.env[name];
+    else process.env[name] = prev;
   }
 }
 
@@ -118,7 +135,7 @@ test("museIdleMinutes measures silence from last activity, else the bound", () =
 
 // ── stall metadata object ────────────────────────────────────────────────────
 
-test("museStallMetadata carries exactly the five worker_sessions fields", () => {
+test("museStallMetadata carries stall-evidence fields including lingeredAfterTerminal", () => {
   assert.deepEqual(
     museStallMetadata({
       lastActivityAt: "2026-10-01T19:00:00.000Z",
@@ -126,6 +143,7 @@ test("museStallMetadata carries exactly the five worker_sessions fields", () => 
       lastToolName: "npm_test",
       firstOutputMs: 1234,
       idleTimedOut: true,
+      lingeredAfterTerminal: false,
     }),
     {
       lastActivityAt: "2026-10-01T19:00:00.000Z",
@@ -133,6 +151,7 @@ test("museStallMetadata carries exactly the five worker_sessions fields", () => 
       lastToolName: "npm_test",
       firstOutputMs: 1234,
       idleTimedOut: true,
+      lingeredAfterTerminal: false,
     }
   );
 });
@@ -217,6 +236,7 @@ test("the written ndjson carries ts on every event and durationMs on completed t
     firstOutputMs: 900,
     lastActivityAt: new Date(t0 + 63_000).toISOString(),
     idleTimedOut: false,
+    lingeredAfterTerminal: false,
     toolCallCount: r.tools.length,
     lastToolName: "npm_test",
   };
@@ -240,5 +260,195 @@ test("the written ndjson carries ts on every event and durationMs on completed t
   assert.equal(muse.toolCallCount, 2);
   assert.equal(muse.lastToolName, "npm_test");
   assert.equal(muse.idleTimedOut, false);
+  assert.equal(muse.lingeredAfterTerminal, false);
   assert.equal(muse.lastActivityAt, new Date(t0 + 63_000).toISOString());
+});
+
+// ── MUSE_TERMINAL_GRACE_MS parsing ───────────────────────────────────────────
+
+test("museTerminalGraceMs defaults to 30 seconds when unset or blank", () => {
+  withEnv("MUSE_TERMINAL_GRACE_MS", undefined, () =>
+    assert.equal(museTerminalGraceMs(), DEFAULT_MUSE_TERMINAL_GRACE_MS)
+  );
+  withEnv("MUSE_TERMINAL_GRACE_MS", "", () => assert.equal(museTerminalGraceMs(), DEFAULT_MUSE_TERMINAL_GRACE_MS));
+  withEnv("MUSE_TERMINAL_GRACE_MS", "   ", () =>
+    assert.equal(museTerminalGraceMs(), DEFAULT_MUSE_TERMINAL_GRACE_MS)
+  );
+  assert.equal(DEFAULT_MUSE_TERMINAL_GRACE_MS, 30_000);
+});
+
+test("MUSE_TERMINAL_GRACE_MS=0 disables the post-terminal kill", () => {
+  withEnv("MUSE_TERMINAL_GRACE_MS", "0", () => assert.equal(museTerminalGraceMs(), undefined));
+});
+
+test("isMuseTerminalStdoutLine matches completed and failed envelopes only", () => {
+  assert.equal(
+    isMuseTerminalStdoutLine(
+      JSON.stringify({ payload_type: "run.terminal.failed", payload: { terminal: "failed", reason: "x" } })
+    ),
+    true
+  );
+  assert.equal(
+    isMuseTerminalStdoutLine(JSON.stringify({ payload_type: "run.terminal.completed", payload: {} })),
+    true
+  );
+  assert.equal(isMuseTerminalStdoutLine(JSON.stringify({ payload_type: "tool.result", payload: {} })), false);
+  assert.equal(isMuseTerminalStdoutLine("not json"), false);
+});
+
+// ── NOT-342: linger after terminal, through the Muse spawn ───────────────────
+
+const FAKE_MUSE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "fake-muse.mjs");
+const LINGER_HOME = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-linger-"));
+after(() => {
+  fs.rmSync(LINGER_HOME, { recursive: true, force: true });
+});
+
+function lingerScratchWorktree(): string {
+  const wt = fs.mkdtempSync(path.join(LINGER_HOME, "wt-"));
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: wt });
+  execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: wt });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: wt });
+  fs.writeFileSync(path.join(wt, "a.txt"), "a\n");
+  execFileSync("git", ["add", "."], { cwd: wt });
+  execFileSync("git", ["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "-m", "init"], {
+    cwd: wt,
+  });
+  return wt;
+}
+
+async function runLingeringMuse(opts: {
+  scenario: string;
+  graceMs: string;
+  timeoutMs: number;
+  sessionId: string;
+}): Promise<{
+  timedOut: boolean;
+  lingeredAfterTerminal: boolean | undefined;
+  museLingeredAfterTerminal: boolean | undefined;
+  failureMessage: string | null;
+  failureKind: string | null;
+  elapsedMs: number;
+  logPath: string;
+}> {
+  const keys = [
+    "MUSE_CLI",
+    "FAKE_MUSE_SCENARIO",
+    "META_API_KEY",
+    "AGENT_DEALER_HOME",
+    "MUSE_TERMINAL_GRACE_MS",
+    "MUSE_IDLE_TIMEOUT_MS",
+  ] as const;
+  const prev = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  const wt = lingerScratchWorktree();
+  const dealerHome = fs.mkdtempSync(path.join(LINGER_HOME, "home-"));
+  const startedAt = Date.now();
+  try {
+    process.env.MUSE_CLI = FAKE_MUSE;
+    process.env.FAKE_MUSE_SCENARIO = opts.scenario;
+    process.env.META_API_KEY = "mk-test-linger-key";
+    process.env.AGENT_DEALER_HOME = dealerHome;
+    process.env.MUSE_TERMINAL_GRACE_MS = opts.graceMs;
+    process.env.MUSE_IDLE_TIMEOUT_MS = "0";
+    const result = await runMuseDeveloperSession({
+      sessionId: opts.sessionId,
+      runtime: "muse_code",
+      policy: { worktreeWrite: true } as never,
+      model: MUSE_CODE_CONTRIBUTOR_MODEL,
+      deckId: "00000000-0000-4000-a000-000000000099",
+      agentDeckUrl: "http://127.0.0.1:1110/mcp",
+      prompt: "Implement it",
+      cwd: wt,
+      timeoutMs: opts.timeoutMs,
+      logPath: path.join(dealerHome, `muse-${opts.sessionId}.ndjson`),
+    });
+    return {
+      timedOut: result.timedOut,
+      // Assert top-level and muse summary separately — a regression that drops
+      // either field must fail (do not coalesce with ??).
+      lingeredAfterTerminal: result.lingeredAfterTerminal,
+      museLingeredAfterTerminal: result.muse?.lingeredAfterTerminal,
+      failureMessage: result.muse?.failure?.message ?? null,
+      failureKind: result.muse?.failure?.kind ?? null,
+      elapsedMs: Date.now() - startedAt,
+      logPath: result.logPath,
+    };
+  } finally {
+    for (const k of keys) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+    fs.rmSync(wt, { recursive: true, force: true });
+    fs.rmSync(dealerHome, { recursive: true, force: true });
+  }
+}
+
+test(
+  "a Muse transport-error that lingers is recorded as a failure, not a timeout",
+  { timeout: 15_000 },
+  async () => {
+    const out = await runLingeringMuse({
+      scenario: "transport-linger",
+      graceMs: "200",
+      timeoutMs: 20_000,
+      sessionId: "00000000-0000-4000-8000-000000000342",
+    });
+    assert.ok(out.elapsedMs < 5_000, `settled on the grace, took ${out.elapsedMs}ms`);
+    assert.equal(out.timedOut, false);
+    assert.equal(out.lingeredAfterTerminal, true);
+    assert.equal(out.museLingeredAfterTerminal, true);
+    assert.match(out.failureMessage ?? "", /transport error/);
+  }
+);
+
+test("a completed Muse run that lingers is still a completion, not a timeout", { timeout: 15_000 }, async () => {
+  const out = await runLingeringMuse({
+    scenario: "completed-linger",
+    graceMs: "200",
+    timeoutMs: 20_000,
+    sessionId: "00000000-0000-4000-8000-000000000344",
+  });
+  assert.equal(out.timedOut, false);
+  assert.equal(out.lingeredAfterTerminal, true);
+  assert.equal(out.museLingeredAfterTerminal, true);
+  assert.equal(out.failureMessage, null);
+});
+
+test("MUSE_TERMINAL_GRACE_MS=0 leaves a lingering Muse child to the wall clock", { timeout: 15_000 }, async () => {
+  const out = await runLingeringMuse({
+    scenario: "transport-linger",
+    graceMs: "0",
+    timeoutMs: 500,
+    sessionId: "00000000-0000-4000-8000-000000000343",
+  });
+  assert.equal(out.lingeredAfterTerminal, false);
+  assert.equal(out.museLingeredAfterTerminal, false);
+  assert.equal(out.timedOut, true, "without the grace, the wall clock still kills");
+});
+
+// NOT-342 repair: a cron run's terminal must not arm the 30s grace and SIGTERM the
+// still-working primary. The child has no primary terminal — only the wall clock kills.
+test(
+  "a cron terminal before the primary does not arm terminal grace",
+  { timeout: 15_000 },
+  async () => {
+    const out = await runLingeringMuse({
+      scenario: "cron-terminal-then-primary-linger",
+      graceMs: "200",
+      timeoutMs: 800,
+      sessionId: "00000000-0000-4000-8000-000000000345",
+    });
+    assert.equal(out.lingeredAfterTerminal, false, "cron terminal must not linger-kill");
+    assert.equal(out.museLingeredAfterTerminal, false);
+    assert.equal(out.timedOut, true, "wall clock still owns the kill when primary never terminals");
+    assert.notEqual(out.failureKind, "malformed_stream");
+  }
+);
+
+test("createMusePrimaryTerminalMatcher is what Muse wires for terminalGrace", () => {
+  // Sanity: the factory exists and matches the shape spawnCli expects.
+  const m = createMusePrimaryTerminalMatcher();
+  assert.equal(typeof m.isTerminalLine, "function");
+  assert.equal(typeof m.sawPrimaryTerminal, "function");
+  assert.equal(m.sawPrimaryTerminal(), false);
 });

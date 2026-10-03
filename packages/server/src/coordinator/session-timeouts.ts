@@ -52,6 +52,30 @@ export function museIdleTimeoutMs(): number | undefined {
   return parsed;
 }
 
+/**
+ * NOT-342: how long Muse may linger after a `run.terminal` envelope before Dealer
+ * SIGTERMs it. Ships ENABLED at 30 seconds: long enough for a clean self-exit,
+ * short enough that a provider `transport error` is not held until the 1-hour
+ * wall (and then recorded as `timed_out`). `0` disables. A non-numeric or
+ * negative value falls back to the default with a logged warning, matching
+ * `museIdleTimeoutMs`.
+ */
+export const DEFAULT_MUSE_TERMINAL_GRACE_MS = 30_000;
+
+export function museTerminalGraceMs(): number | undefined {
+  const raw = process.env.MUSE_TERMINAL_GRACE_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_MUSE_TERMINAL_GRACE_MS;
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed) && parsed === 0) return undefined;
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    console.warn(
+      `[dealer] ignoring invalid MUSE_TERMINAL_GRACE_MS=${JSON.stringify(raw)} — using default ${DEFAULT_MUSE_TERMINAL_GRACE_MS}`
+    );
+    return DEFAULT_MUSE_TERMINAL_GRACE_MS;
+  }
+  return parsed;
+}
+
 export function sessionTimeoutMsFor(role: WorkerSessionRole | null | undefined): number {
   return role === "reviewer" ? reviewerSessionTimeoutMs() : developerSessionTimeoutMs();
 }
