@@ -65,6 +65,17 @@ export interface RawCheck {
 
 export type ChecksSnapshot = "success" | "failure" | "pending" | "none";
 
+/**
+ * NOT-354: GitHub's `mergeable` for a PR. `UNKNOWN` means GitHub has not computed it
+ * yet (or the read failed) — callers retry, never read it as a conflict.
+ */
+export type PrMergeableState = "CONFLICTING" | "MERGEABLE" | "UNKNOWN";
+
+/** Normalizes `gh pr view --json mergeable` output; anything unrecognized is UNKNOWN. */
+export function parsePrMergeableState(raw: unknown): PrMergeableState {
+  return raw === "CONFLICTING" || raw === "MERGEABLE" ? raw : "UNKNOWN";
+}
+
 const FAILURE_STATES = new Set([
   "failure",
   "error",
@@ -471,6 +482,14 @@ export interface GithubAdapter {
    */
   hasPullRequestWorkflow?(opts: { cwd: string; baseRef: string }): Promise<boolean | null>;
   /**
+   * NOT-354: the PR's mergeable state. GitHub creates no merge ref for a CONFLICTING
+   * PR, so its `pull_request` workflow never starts — "no checks" then means "will
+   * never have checks", not "not registered yet". A failed read returns UNKNOWN.
+   * Optional so existing fakes keep compiling — a missing implementation reads as
+   * UNKNOWN (today's wait), never as a conflict.
+   */
+  prMergeableState?(opts: { cwd: string; number: number }): Promise<PrMergeableState>;
+  /**
    * Publishes the reviewer's validated verdict against `number` explicitly — required for
    * a detached-HEAD reviewer worktree, same reason as `viewPr`'s `number`. `event`
    * "APPROVE"/"REQUEST_CHANGES" falls back to a plain comment review carrying the same
@@ -556,6 +575,15 @@ export function createGithubAdapter(exec: GhExec = defaultExec): GithubAdapter {
         return await baseRefHasPullRequestWorkflow(cwd, baseRef);
       } catch {
         return null;
+      }
+    },
+
+    async prMergeableState({ cwd, number }) {
+      try {
+        const raw = await ghPrView(exec, cwd, "mergeable", String(number));
+        return parsePrMergeableState(raw?.mergeable);
+      } catch {
+        return "UNKNOWN";
       }
     },
 

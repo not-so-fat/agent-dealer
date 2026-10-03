@@ -55,6 +55,20 @@ export type DeveloperOutcome =
       headSha: string;
       waitStartedAt: string;
     }
+  /** NOT-354: the PR conflicts with its base, so CI never starts (GitHub creates no
+   * merge ref). The effect already ran the NOT-310 base sync (`checks_wait` entry);
+   * `sync` is what applyCompletion does next: re-poll the pushed head as a CI wait
+   * (anchored at the original `waitStartedAt`, so the ceiling is never reset), queue
+   * the one conflict-repair round, or escalate once. */
+  | {
+      kind: "checks_conflicting";
+      branch: string;
+      baseBranch: string;
+      prNumber: number;
+      headSha: string;
+      waitStartedAt: string;
+      sync: ChecksConflictSync;
+    }
   /** Covers both the developer session's own wall-clock timeout and an exhausted CI-checks poll.
    * NOT-147: `commitsAhead` (when known) feeds the empty-tip no-progress gate; optional
    * worktree/log pointers make the human escalation actionable. */
@@ -101,6 +115,11 @@ export type DeveloperOutcome =
       evidence?: unknown;
       resume?: { retryReason: string };
     };
+
+export type ChecksConflictSync =
+  | { result: "synced"; headSha: string | null }
+  | { result: "repair"; files: string[] }
+  | { result: "escalate"; reason: string; evidence: Record<string, unknown> };
 
 export type ReviewerOutcome =
   | { kind: "verdict"; result: ReviewerResult }
@@ -352,6 +371,17 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
       // session ended cleanly with a pushed branch and an open PR. Wait on backoff
       // and re-poll; the deferral path (not this route) enforces the wait ceiling.
       return { next: "defer_work", reason: outcome.reason };
+    case "checks_conflicting":
+      // NOT-354: applyCompletion handles this before routing (it needs the lease to
+      // queue the repair round). Reaching here is a bug — fail safe to a human.
+      return {
+        next: "human_action",
+        actionType: "policy_escalation",
+        reason:
+          outcome.sync.result === "escalate"
+            ? outcome.sync.reason
+            : `PR #${outcome.prNumber} conflicts with ${outcome.baseBranch}; CI cannot start.`,
+      };
   }
 }
 
