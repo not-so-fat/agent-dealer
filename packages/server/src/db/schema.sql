@@ -114,6 +114,8 @@ CREATE TABLE IF NOT EXISTS issues (
   current_round INTEGER NOT NULL DEFAULT 1,
   max_infra_attempts INTEGER NOT NULL DEFAULT 3,
   infra_attempts INTEGER NOT NULL DEFAULT 0,
+  max_ci_attempts INTEGER NOT NULL DEFAULT 3,
+  ci_attempts INTEGER NOT NULL DEFAULT 0,
   branch TEXT,
   base_sha TEXT,
   head_sha TEXT,

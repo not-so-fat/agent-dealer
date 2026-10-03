@@ -11,6 +11,10 @@ import {
 
 const REVIEW_ROUNDS_LEFT: RouteLimits = { currentRound: 1, maxReviewRounds: 3, infraAttempts: 0, maxInfraAttempts: 3 };
 const REVIEW_AT_LIMIT: RouteLimits = { currentRound: 3, maxReviewRounds: 3, infraAttempts: 0, maxInfraAttempts: 3 };
+// NOT-313: CI-repair budget fixtures — infra counters stay at 0/3 throughout so
+// every CI test below also proves the infra budget is untouched, and vice versa.
+const CI_BUDGET_LEFT: RouteLimits = { currentRound: 1, maxReviewRounds: 3, infraAttempts: 0, maxInfraAttempts: 3, ciAttempts: 1, maxCiAttempts: 3 };
+const CI_AT_LIMIT: RouteLimits = { currentRound: 1, maxReviewRounds: 3, infraAttempts: 0, maxInfraAttempts: 3, ciAttempts: 3, maxCiAttempts: 3 };
 const INFRA_ATTEMPTS_LEFT: RouteLimits = { currentRound: 1, maxReviewRounds: 3, infraAttempts: 1, maxInfraAttempts: 3 };
 const INFRA_AT_LIMIT: RouteLimits = { currentRound: 1, maxReviewRounds: 3, infraAttempts: 3, maxInfraAttempts: 3 };
 const PINNED_HEAD = "pinned-head-sha";
@@ -282,11 +286,18 @@ test("NOT-307: an idle-watchdog timed_out routes exactly like a wall-clock timeo
   assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_AT_LIMIT).next, "human_action");
 });
 
-test("checks_failed with infra attempts remaining retries (same bucket as session_failed/no_pr)", () => {
+test("NOT-313: checks_failed retries on the CI budget with the attempt number, not the infra bucket", () => {
   const outcome: DeveloperOutcome = { kind: "checks_failed" };
-  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, REVIEW_ROUNDS_LEFT), {
     next: "retry_developer",
-    reason: "Developer's PR checks failed.",
+    reason: "CI repair attempt 1 of 3: Developer's PR checks failed.",
+    budget: "ci",
+  });
+  // One CI attempt already spent → the next retry is attempt 2, infra untouched.
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, CI_BUDGET_LEFT), {
+    next: "retry_developer",
+    reason: "CI repair attempt 2 of 3: Developer's PR checks failed.",
+    budget: "ci",
   });
 });
 
@@ -294,36 +305,54 @@ test("NOT-252: checks_failed with enrichment details retries with the enriched r
   const details =
     "Developer's PR checks failed at abc123: build.\nFailed checks (PR #7 @ abc123):\n- build (CI · failure)";
   const outcome: DeveloperOutcome = { kind: "checks_failed", details };
-  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, CI_BUDGET_LEFT), {
     next: "retry_developer",
-    reason: details,
+    reason: `CI repair attempt 2 of 3: ${details}`,
+    budget: "ci",
   });
 });
 
 test("NOT-252: checks_failed with blank details falls back to exactly the generic reason", () => {
   for (const outcome of [{ kind: "checks_failed", details: "   " } as DeveloperOutcome, { kind: "checks_failed" } as DeveloperOutcome]) {
-    assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    assert.deepStrictEqual(routeDeveloperOutcome(outcome, CI_BUDGET_LEFT), {
       next: "retry_developer",
-      reason: "Developer's PR checks failed.",
+      reason: "CI repair attempt 2 of 3: Developer's PR checks failed.",
+      budget: "ci",
     });
   }
 });
 
-test("checks_failed at the infra-attempt limit escalates", () => {
+test("NOT-313: checks_failed at the CI limit escalates with a CI-specific reason, infra budget untouched", () => {
   const outcome: DeveloperOutcome = { kind: "checks_failed" };
-  const result = routeDeveloperOutcome(outcome, INFRA_AT_LIMIT);
+  const result = routeDeveloperOutcome(outcome, CI_AT_LIMIT);
   assert.equal(result.next, "human_action");
   assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+  const reason = (result as { reason: string }).reason;
+  assert.match(reason, /CI checks still failing after 3 repair attempts \(limit 3\)/);
+  assert.doesNotMatch(reason, /infra-attempt limit reached/);
 });
 
-test("NOT-252: checks_failed escalation at the limit carries the enriched reason", () => {
+test("NOT-252: checks_failed escalation at the limit carries the failing check names", () => {
   const details = "Developer's PR checks failed at abc123: build.";
   const outcome: DeveloperOutcome = { kind: "checks_failed", details };
-  const result = routeDeveloperOutcome(outcome, INFRA_AT_LIMIT);
+  const result = routeDeveloperOutcome(outcome, CI_AT_LIMIT);
   assert.equal(result.next, "human_action");
   assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+  assert.match((result as { reason: string }).reason, /CI checks still failing after 3 repair attempts \(limit 3\)/);
   assert.match((result as { reason: string }).reason, /at abc123: build/);
-  assert.match((result as { reason: string }).reason, /infra-attempt limit reached/);
+  assert.doesNotMatch((result as { reason: string }).reason, /infra-attempt limit reached/);
+});
+
+test("NOT-313: the budgets are independent — CI failures ignore the infra limit and infra failures ignore the CI limit", () => {
+  // An exhausted infra budget does not stop CI repair while CI budget remains.
+  const ciRetry = routeDeveloperOutcome({ kind: "checks_failed" }, INFRA_AT_LIMIT);
+  assert.equal(ciRetry.next, "retry_developer");
+  // An exhausted CI budget does not stop infra retries while infra budget remains.
+  for (const outcome of [{ kind: "session_failed" }, { kind: "timed_out" }, { kind: "no_pr" }] as DeveloperOutcome[]) {
+    const infraRetry = routeDeveloperOutcome(outcome, { ...CI_AT_LIMIT, infraAttempts: 1 });
+    assert.equal(infraRetry.next, "retry_developer", outcome.kind);
+    assert.ok(!("budget" in infraRetry) || (infraRetry as { budget?: string }).budget === undefined);
+  }
 });
 
 test("an infra-class developer failure never spends the review-round budget, even at the review-round limit", () => {
@@ -547,10 +576,11 @@ test("NOT-147: tip with commits ahead still auto-retries under existing infra bu
 });
 
 test("NOT-147: no_pr / checks_failed are unaffected by the empty-tip gate (timeout/crash only)", () => {
-  // Even with infraAttempts already spent and zero progress implied, non-crash infra
-  // failures keep the pre-NOT-147 budget-only policy.
+  // Even with attempts already spent and zero progress implied, non-crash failures
+  // keep the pre-NOT-147 budget-only policy — no_pr on the infra budget,
+  // checks_failed on its own CI budget (NOT-313).
   assert.equal(routeDeveloperOutcome({ kind: "no_pr" }, INFRA_ATTEMPTS_LEFT).next, "retry_developer");
-  assert.equal(routeDeveloperOutcome({ kind: "checks_failed" }, INFRA_ATTEMPTS_LEFT).next, "retry_developer");
+  assert.equal(routeDeveloperOutcome({ kind: "checks_failed" }, CI_BUDGET_LEFT).next, "retry_developer");
 });
 
 test("NOT-147: noProgressInfraAttempts is tunable (N=1 escalates on first empty-tip crash)", () => {

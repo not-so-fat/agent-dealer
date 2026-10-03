@@ -170,6 +170,29 @@ test("infra-class retries — including a stale re-review — spend the infra bu
   assert.equal(stale.advance, "infra");
 });
 
+test("NOT-313: a checks_failed retry spends the CI budget, never the infra one", () => {
+  const ciRetry = projectDeveloperRoute(
+    routeDeveloperOutcome({ kind: "checks_failed" }, REVIEW_ROUNDS_LEFT),
+    "developing",
+    1
+  );
+  assert.equal(ciRetry.advance, "ci");
+  assert.deepStrictEqual(ciRetry.effect, {
+    kind: "enqueue",
+    workItem: "developer",
+    retryReason: "CI repair attempt 1 of 3: Developer's PR checks failed.",
+  });
+  assert.match(ciRetry.projection.currentIntent, /CI repair attempt/);
+
+  // An infra-class retry keeps the exact pre-NOT-313 shape — no budget marker.
+  const infraRetry = projectDeveloperRoute(
+    routeDeveloperOutcome({ kind: "session_failed" }, REVIEW_ROUNDS_LEFT),
+    "developing",
+    1
+  );
+  assert.equal(infraRetry.advance, "infra");
+});
+
 test("NOT-147: empty-tip no-progress escalation projects to needs_human without spending infra budget", () => {
   const INFRA_ATTEMPTS_LEFT: RouteLimits = {
     currentRound: 1,

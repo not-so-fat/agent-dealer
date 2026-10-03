@@ -23,7 +23,9 @@ import {
   getIssue,
   incrementIssueRound,
   incrementIssueInfraAttempts,
+  incrementIssueCiAttempts,
   resetIssueInfraAttempts,
+  resetIssueCiAttempts,
   grantReviewRetry,
   transitionIssue,
   type TransitionIssuePatch,
@@ -829,6 +831,8 @@ function applyDeveloper(
     maxReviewRounds: issue.maxReviewRounds,
     infraAttempts: issue.infraAttempts,
     maxInfraAttempts: issue.maxInfraAttempts,
+    ciAttempts: issue.ciAttempts,
+    maxCiAttempts: issue.maxCiAttempts,
   });
   const { projection, effect, advance } = projectDeveloperRoute(route, issue.status, issue.currentRound);
 
@@ -910,6 +914,8 @@ function applyDeveloper(
   applyProjectionTransition(issue, projection, patch);
   if (advance === "review") incrementIssueRound(issue.id);
   else if (advance === "infra") incrementIssueInfraAttempts(issue.id);
+  // NOT-313: a CI-repair retry spends ci_attempts, never infra_attempts.
+  else if (advance === "ci") incrementIssueCiAttempts(issue.id);
   const issueNow = getIssue(issue.id)!;
 
   return applyEffect(issue, instance, effect, route, issueNow, ev, item.id);
@@ -1063,9 +1069,10 @@ type AnyRoute =
   | ReturnType<typeof routeDeveloperOutcome>
   | ReturnType<typeof routeReviewerOutcome>;
 
-/** Every route that spends an infra attempt (projection.ts's advance === "infra") repeats
- * the same round/head, so its enqueue needs a suffix the plain round/head key doesn't
- * provide to avoid colliding with the previous (terminal) attempt's key.
+/** Every route that spends an infra or CI attempt (projection.ts's advance === "infra"
+ * or "ci") repeats the same round/head, so its enqueue needs a suffix the plain
+ * round/head key doesn't provide to avoid colliding with the previous (terminal)
+ * attempt's key.
  * retry_reviewer_at_new_head belongs here too — a head that cycles A→B→A would otherwise
  * re-derive attempt A's ORIGINAL key (same round, same head) and collide with that
  * now-terminal work item, leaving the issue "reviewing" with no pending item. */
@@ -1799,7 +1806,10 @@ export function resolveHumanActionAndAdvance(
         incrementIssueRound(issue.id);
         break;
       case "infra":
+        // NOT-313: a resume past an infra OR CI-checks escalation grants a fresh
+        // budget of both kinds — the CI budget is not a review-round spend either.
         resetIssueInfraAttempts(issue.id);
+        resetIssueCiAttempts(issue.id);
         if (advancesRound) incrementIssueRound(issue.id);
         break;
       case "none":

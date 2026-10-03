@@ -111,8 +111,9 @@ export interface HumanResolutionResult {
    * "review" bumps current_round only (final_review:repair — a genuine repair cycle);
    * "review_grant" bumps current_round AND max_review_rounds (attempts_exhausted:retry —
    * a retry must grant one more round or the very next changes_requested re-exhausts);
-   * "infra" resets infra_attempts to 0, no round change (policy_escalation:resume — an
-   * infra hiccup, not a review-round spend);
+   * "infra" resets infra_attempts (and, NOT-313, ci_attempts) to 0, no round change
+   * (policy_escalation:resume — an infra hiccup or an exhausted CI-repair loop,
+   * neither a review-round spend);
    * "none" touches neither (product_scope_decision — just unblocks a paused workflow).
    */
   roundKind?: "review" | "review_grant" | "infra" | "none";

@@ -17,6 +17,13 @@ export type IssueStatus = z.infer<typeof IssueStatus>;
 export const IssueOwner = z.enum(["human", "developer", "reviewer", "system"]);
 export type IssueOwner = z.infer<typeof IssueOwner>;
 
+/**
+ * NOT-313: default CI-repair budget — a failing CI check is the expected feedback
+ * loop, not an infrastructure failure, so it spends `ci_attempts` (bounded by this),
+ * never `infra_attempts`. Mirrors the infra default (3) deliberately.
+ */
+export const DEFAULT_MAX_CI_ATTEMPTS = 3;
+
 /** "agent" covers an issue a coding agent created via the API/CLI (PRD §5). */
 export const IssueSource = z.enum(["manual", "linear", "agent"]);
 export type IssueSource = z.infer<typeof IssueSource>;
@@ -54,6 +61,14 @@ export const Issue = z.object({
   /** 0 is a valid policy: no automatic infra retry, escalate to a human immediately. */
   maxInfraAttempts: z.number().int().min(0),
   infraAttempts: z.number().int().min(0),
+  /**
+   * NOT-313: separate CI-repair budget. `checks_failed` spends `ciAttempts`
+   * (bounded by `maxCiAttempts`), every other retryable failure spends
+   * `infraAttempts`. 0 means no automatic CI repair — escalate immediately.
+   * Deliberately absent from CreateIssueInput/UpdateIssueInput (no per-ticket config).
+   */
+  maxCiAttempts: z.number().int().min(0),
+  ciAttempts: z.number().int().min(0),
   branch: z.string().nullable(),
   baseSha: z.string().nullable(),
   headSha: z.string().nullable(),

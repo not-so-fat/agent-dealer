@@ -634,6 +634,8 @@ test("checks_failed: CI failure after a clean push/PR retries without a human ac
 
   const issue = getIssue(issueId)!;
   assert.equal(issue.status, "developing");
+  assert.equal(issue.ciAttempts, 1, "a checks_failed retry spends the CI budget");
+  assert.equal(issue.infraAttempts, 0, "a checks_failed retry never touches the infra budget");
   assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 0);
   const kinds = listArtifactsForIssue(issueId).map((a) => a.kind);
   const evidence = listArtifactsForIssue(issueId).find((a) => a.kind === "checks_evidence");
@@ -2538,7 +2540,9 @@ test("NOT-252: checks_failed enriches checks_evidence and the retry prompt with 
   startWorkflow(issueId);
   await pump(1);
 
-  assert.equal(getIssue(issueId)!.status, "developing", "enriched checks_failed still retries on the infra budget");
+  assert.equal(getIssue(issueId)!.status, "developing", "enriched checks_failed still retries on the CI budget");
+  assert.equal(getIssue(issueId)!.ciAttempts, 1, "the enriched retry spends ci_attempts");
+  assert.equal(getIssue(issueId)!.infraAttempts, 0, "the enriched retry leaves infra_attempts alone");
   const evidence = listArtifactsForIssue(issueId).find((a) => a.kind === "checks_evidence");
   assert.ok(evidence, "enriched checks_failed persists checks_evidence");
   const content = JSON.parse(evidence!.contentJson!) as {
@@ -2609,4 +2613,53 @@ test("NOT-252: publish-only retry on checks_failed enriches evidence and the nex
   assert.equal(spawnCalls, 2);
   assert.match(prompts[1]!, /publish-checks/);
   assert.match(prompts[1]!, /is not in this registry/);
+});
+
+test("NOT-313: three CI repair attempts then a CI-specific escalation — infra_attempts stays 0", async () => {
+  // Exit-predicate loop: the CI budget (default 3) buys three repair attempts;
+  // the fourth consecutive checks_failed escalates with a CI-specific reason.
+  const issueId = await makeIssue();
+  const prompts: string[] = [];
+  let call = 0;
+  const evolvingSpawn: SpawnFn = async (input) => {
+    call++;
+    prompts.push(input.prompt);
+    fs.writeFileSync(path.join(input.cwd, "feature.txt"), `implemented attempt ${call}\n`);
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", `implement ${call}`);
+    return { exitCode: 0, transcript: "Implementation conclusion: added the widget.", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: evolvingSpawn, github: fakeGithub({ checks: "failure" }) })
+  );
+  startWorkflow(issueId);
+
+  await pump(1); // failure #1 → CI repair attempt 1
+  assert.equal(getIssue(issueId)!.status, "developing");
+  assert.equal(getIssue(issueId)!.ciAttempts, 1);
+  assert.equal(getIssue(issueId)!.infraAttempts, 0);
+
+  await pump(1); // failure #2 → CI repair attempt 2
+  assert.equal(getIssue(issueId)!.status, "developing");
+  assert.equal(getIssue(issueId)!.ciAttempts, 2);
+  assert.equal(getIssue(issueId)!.infraAttempts, 0);
+  assert.match(prompts[1]!, /CI repair attempt 1 of 3/);
+
+  await pump(1); // failure #3 → CI repair attempt 3
+  assert.equal(getIssue(issueId)!.status, "developing");
+  assert.equal(getIssue(issueId)!.ciAttempts, 3);
+  assert.equal(getIssue(issueId)!.infraAttempts, 0);
+  assert.match(prompts[2]!, /CI repair attempt 2 of 3/);
+
+  await pump(1); // failure #4 → budget spent → escalate
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.ciAttempts, 3, "the escalation itself spends no further CI attempt");
+  assert.equal(issue.infraAttempts, 0, "four CI failures never touched the infra budget");
+  assert.match(prompts[3]!, /CI repair attempt 3 of 3/);
+  const action = listHumanActionsForIssue(issueId).find((a) => a.status === "open");
+  assert.ok(action, "the exhausted CI budget raises a human action");
+  assert.equal(action!.actionType, "policy_escalation");
+  assert.match(action!.reason, /CI checks still failing after 3 repair attempts \(limit 3\)/);
+  assert.doesNotMatch(action!.reason, /infra-attempt limit reached/);
 });

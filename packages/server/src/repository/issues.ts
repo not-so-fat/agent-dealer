@@ -2,6 +2,7 @@ import {
   canTransitionIssue,
   compileExecutionContract,
   CreateIssueInput,
+  DEFAULT_MAX_CI_ATTEMPTS,
   looksLikeLocalRepoPath,
   parseGitHubRepoInput,
   resolveIssueContractFields,
@@ -37,6 +38,11 @@ interface IssueRow {
   current_round: number;
   max_infra_attempts: number;
   infra_attempts: number;
+  // NOT-313: nullable here (not in the DB type) so a row read from a database
+  // that predates the CI-budget migration still maps — rowToIssue backfills the
+  // defaults below. migrate() adds the columns, so this is only a race window.
+  max_ci_attempts: number | null;
+  ci_attempts: number | null;
   branch: string | null;
   base_sha: string | null;
   head_sha: string | null;
@@ -73,6 +79,8 @@ function rowToIssue(row: IssueRow): Issue {
     currentRound: row.current_round,
     maxInfraAttempts: row.max_infra_attempts,
     infraAttempts: row.infra_attempts,
+    maxCiAttempts: row.max_ci_attempts ?? DEFAULT_MAX_CI_ATTEMPTS,
+    ciAttempts: row.ci_attempts ?? 0,
     branch: row.branch,
     baseSha: row.base_sha,
     headSha: row.head_sha,
@@ -131,6 +139,10 @@ export function createIssue(raw: CreateIssueRaw): Issue {
     current_round: 1,
     max_infra_attempts: input.maxInfraAttempts,
     infra_attempts: 0,
+    // NOT-313: no per-ticket config (stays out of CreateIssueInput) — every new
+    // issue opens with the full default CI-repair budget, unspent.
+    max_ci_attempts: DEFAULT_MAX_CI_ATTEMPTS,
+    ci_attempts: 0,
     branch: null,
     base_sha: null,
     head_sha: null,
@@ -145,13 +157,13 @@ export function createIssue(raw: CreateIssueRaw): Issue {
       id, source, external_id, external_label, external_url, title, description,
       acceptance_criteria, repo, base_branch, status, current_owner, current_intent,
       developer_agent_id, reviewer_agent_id, max_review_rounds, current_round,
-      max_infra_attempts, infra_attempts,
+      max_infra_attempts, infra_attempts, max_ci_attempts, ci_attempts,
       branch, base_sha, head_sha, pr_number, pr_url, auto_merge, created_at, updated_at
     ) VALUES (
       @id, @source, @external_id, @external_label, @external_url, @title, @description,
       @acceptance_criteria, @repo, @base_branch, @status, @current_owner, @current_intent,
       @developer_agent_id, @reviewer_agent_id, @max_review_rounds, @current_round,
-      @max_infra_attempts, @infra_attempts,
+      @max_infra_attempts, @infra_attempts, @max_ci_attempts, @ci_attempts,
       @branch, @base_sha, @head_sha, @pr_number, @pr_url, @auto_merge, @created_at, @updated_at
     )
   `).run(row);
@@ -488,6 +500,20 @@ export function incrementIssueInfraAttempts(id: string): Issue {
   return updated;
 }
 
+/** NOT-313: spends one CI-repair attempt — a `checks_failed` being retried
+ * automatically. Never touches `infra_attempts`; see incrementIssueInfraAttempts. */
+export function incrementIssueCiAttempts(id: string): Issue {
+  const current = getIssue(id);
+  if (!current) throw new Error(`Issue not found: ${id}`);
+  const now = new Date().toISOString();
+  getDb()
+    .prepare("UPDATE issues SET ci_attempts = ci_attempts + 1, updated_at = ? WHERE id = ?")
+    .run(now, id);
+  const updated = getIssue(id);
+  if (!updated) throw new Error(`Issue vanished: ${id}`);
+  return updated;
+}
+
 /** A human resuming past a `policy_escalation` gets a fresh infra-attempt budget. */
 export function resetIssueInfraAttempts(id: string): Issue {
   const current = getIssue(id);
@@ -495,6 +521,20 @@ export function resetIssueInfraAttempts(id: string): Issue {
   const now = new Date().toISOString();
   getDb()
     .prepare("UPDATE issues SET infra_attempts = 0, updated_at = ? WHERE id = ?")
+    .run(now, id);
+  const updated = getIssue(id);
+  if (!updated) throw new Error(`Issue vanished: ${id}`);
+  return updated;
+}
+
+/** NOT-313: a human resuming past a CI-checks `policy_escalation` gets a fresh
+ * CI-repair budget alongside the infra one (commands.ts resets both together). */
+export function resetIssueCiAttempts(id: string): Issue {
+  const current = getIssue(id);
+  if (!current) throw new Error(`Issue not found: ${id}`);
+  const now = new Date().toISOString();
+  getDb()
+    .prepare("UPDATE issues SET ci_attempts = 0, updated_at = ? WHERE id = ?")
     .run(now, id);
   const updated = getIssue(id);
   if (!updated) throw new Error(`Issue vanished: ${id}`);

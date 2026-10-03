@@ -45,6 +45,8 @@ test("Issue schema parses a well-formed issue", () => {
     currentRound: 1,
     maxInfraAttempts: 3,
     infraAttempts: 0,
+    maxCiAttempts: 3,
+    ciAttempts: 0,
     branch: null,
     baseSha: null,
     headSha: null,

@@ -161,6 +161,8 @@ function issueFixture(): Issue {
     currentRound: 1,
     maxInfraAttempts: 2,
     infraAttempts: 2,
+    maxCiAttempts: 3,
+    ciAttempts: 0,
     branch: "dealer/issue-1",
     baseSha: null,
     headSha: null,
