@@ -4,6 +4,20 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.9 — 2026-10-03
+
+Patch over 1.2.8: CI becomes a first-class verifier (pending checks wait, screenshot artifacts, separate retry budget), operator-verified ACs gate auto-merge, and developer worktrees come with dependencies installed.
+
+### Changes
+
+- **CI as verifier (NOT-311)** — pending checks wait instead of timing out the session; "no checks yet" is no longer treated as a pass.
+- **CI verification failures get their own retry budget (NOT-313)** — separate from infra attempts.
+- **Browser screenshot CI job (NOT-312)** — PR artifacts let UI ACs be verified without the builder running a browser.
+- **Operator-verified ACs (NOT-314)** — `[operator]`-tagged criteria block auto-merge until a human records the result.
+- **Provision dependencies in developer worktrees (NOT-315)** — no in-session `npm install`.
+- **Builder prompt states sandbox limits (NOT-316)** — plus `[agent]`/`[ci]` tag semantics, derived from launch flags.
+- **Re-enqueue reviewer when a resume round leaves the head unchanged (NOT-333)**.
+
 ## 1.2.8 — 2026-10-02
 
 Patch over 1.2.7: auto-merge recovers from a moved base branch, Planner tickets compile into frozen execution contracts, Muse developer sessions get a no-progress watchdog, and Muse capability checks stop blocking admission while unconfirmed.
