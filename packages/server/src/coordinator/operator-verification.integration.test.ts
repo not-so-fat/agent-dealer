@@ -11,7 +11,7 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-no
 
 const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
-const { createIssue, getIssue, updateIssue } = await import("../repository/issues.js");
+const { createIssue, getIssue, updateIssue, transitionIssue } = await import("../repository/issues.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listArtifactsForIssueByKind } = await import("../repository/artifacts-for-issue.js");
 const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
@@ -30,6 +30,7 @@ const {
   setMergePrForTests,
   clearFinalizeInflightForTests,
   finalizeAutoMerge,
+  gateOperatorVerification,
   OPERATOR_VERIFICATION_INTENT,
 } = await import("./auto-merge.js");
 const { stubManagedCloneForTests } = await import("../adapters/managed-repo.js");
@@ -193,6 +194,69 @@ test("a second finalize for the same head reuses the open action — still no me
     ).length,
     1
   );
+});
+
+test("operator criteria with no recorded head SHA escalate instead of merging", async () => {
+  let merges = 0;
+  setMergePrForTests(async () => {
+    merges += 1;
+    return { ok: true };
+  });
+
+  // Parked for auto-merge with operator criteria but no handoff ever recorded
+  // a head SHA — the gate cannot pin a verification, so it must hold the merge.
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  transitionIssue(issueId, "reviewing", { currentOwner: "system", currentIntent: "test" });
+  transitionIssue(issueId, "final_review", { currentOwner: "system", currentIntent: "review-test" });
+  assert.equal(getIssue(issueId)!.headSha, null);
+
+  const blocked = gateOperatorVerification(issueId);
+  assert.ok(blocked, "the gate must hold the merge when no head can be pinned");
+  assert.equal(blocked.issueStatus, "needs_human");
+  assert.ok(blocked.humanActionId);
+  assert.equal(merges, 0);
+
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  const open = listHumanActionsForIssue(issueId).filter((a) => a.status === "open");
+  assert.equal(open.length, 1);
+  assert.equal(open[0]!.actionType, "policy_escalation");
+  assert.match(open[0]!.reason, /no head SHA/);
+
+  // A repeat finalize reuses the open escalation — still no merge, no duplicate.
+  const again = gateOperatorVerification(issueId);
+  assert.ok(again);
+  assert.equal(again.humanActionId, blocked.humanActionId);
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+    1
+  );
+  assert.equal(merges, 0);
+});
+
+test("operator criteria at an unexpected status park the finalize without merging", async () => {
+  let merges = 0;
+  setMergePrForTests(async () => {
+    merges += 1;
+    return { ok: true };
+  });
+
+  // A racer's finalize while the issue is still reviewing (never parked): the
+  // gate invents no action there, but must not let the merge through either.
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  transitionIssue(issueId, "reviewing", { currentOwner: "system", currentIntent: "test" });
+
+  const parked = gateOperatorVerification(issueId);
+  assert.ok(parked, "the gate must not let the merge through off-park");
+  assert.equal(parked.issueStatus, "reviewing");
+  assert.equal(parked.humanActionId, null);
+  assert.equal(getIssue(issueId)!.status, "reviewing");
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+    0
+  );
+  assert.equal(merges, 0);
 });
 
 test("no [operator] AC: the existing auto-merge path is unchanged", async () => {

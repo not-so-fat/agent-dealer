@@ -35,6 +35,7 @@ import {
 import {
   createHumanAction,
   findOpenHumanAction,
+  findOpenHumanActionByRequestId,
   resolveHumanAction,
 } from "../repository/human-actions.js";
 import { MERGE_FAILURE_EVIDENCE_KEY, MERGE_FAILURE_RESPONSE_OPTIONS } from "./human-resolution.js";
@@ -65,6 +66,13 @@ export const AUTO_MERGE_INTENT = "Auto-merging approved PR";
  * until the human records a result or waives the criterion.
  */
 export const OPERATOR_VERIFICATION_INTENT = "Operator verification required before merge";
+
+/**
+ * NOT-314 fail-closed: the stable request id for the no-head escalation, so
+ * repeat finalizes dedupe onto the one open `policy_escalation` instead of
+ * stacking a new one per tick.
+ */
+export const OPERATOR_VERIFICATION_NO_HEAD_REQUEST_ID = "operator-verification-blocked:no-head";
 
 const ALREADY_MERGED = /already (been )?merged|pull request is not mergeable:.*merged/i;
 
@@ -361,6 +369,10 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
  * Returns null when the merge may proceed (no operator criteria, a recorded
  * result for this head, or no workflow to gate). Idempotent: a second finalize
  * for the same head reuses the open action instead of raising another.
+ *
+ * Fail-closed: when operator criteria exist, every non-proceed path returns a
+ * result (never null), so a missing head SHA or an unexpected status blocks the
+ * `gh` merge instead of letting it through.
  */
 export function gateOperatorVerification(issueId: string): AutoMergeFinalizeResult | null {
   return getDb().transaction((): AutoMergeFinalizeResult | null => {
@@ -371,11 +383,89 @@ export function gateOperatorVerification(issueId: string): AutoMergeFinalizeResu
     const criteria = getOperatorCriteriaForIssue(current);
     if (criteria.length === 0) return null;
     const head = current.headSha;
-    if (!head || hasOperatorVerificationForHead(issueId, head)) return null;
+    if (head && hasOperatorVerificationForHead(issueId, head)) return null;
     if (current.status === "done") return null;
     // Only the auto-merge park (or an already-gated issue) is gated — any other
-    // status is a racer or a non-parked issue; do not invent an action there.
-    if (current.status !== "final_review" && current.status !== "needs_human") return null;
+    // status is a racer or a non-parked issue; do not invent an action there,
+    // but do not let the merge through either — park the finalize as a no-op.
+    if (current.status !== "final_review" && current.status !== "needs_human") {
+      return {
+        applied: true,
+        issueStatus: current.status,
+        nextWorkItemId: null,
+        humanActionId: null,
+        instanceCompleted: false,
+        triggerReflect: false,
+      };
+    }
+    // No head SHA to pin the verification to (no handoff recorded one): the
+    // gate cannot name a head, so escalate instead of merging — retry_merge
+    // re-enters this same finalize once a head exists and gates normally.
+    // Repeat finalizes reuse the one open escalation (no duplicate action or
+    // event), and the transition is skipped when already parked
+    // (needs_human has no self-loop).
+    if (!head) {
+      const retry = findOpenHumanActionByRequestId(
+        issueId,
+        "policy_escalation",
+        OPERATOR_VERIFICATION_NO_HEAD_REQUEST_ID
+      );
+      if (retry) {
+        if (current.status !== "needs_human") {
+          transitionIssue(issueId, "needs_human", {
+            currentOwner: "human",
+            currentIntent: OPERATOR_VERIFICATION_INTENT,
+          });
+        }
+        return {
+          applied: true,
+          issueStatus: "needs_human",
+          nextWorkItemId: null,
+          humanActionId: retry.id,
+          instanceCompleted: false,
+          triggerReflect: false,
+        };
+      }
+      const reason =
+        `Reviewer approved, but ${criteria.length} acceptance ` +
+        `${criteria.length === 1 ? "criterion requires" : "criteria require"} a human operator ` +
+        `to verify (tagged [operator] in the frozen task snapshot) and no head SHA is ` +
+        `recorded to pin the verification to. The PR stays unmerged.`;
+      if (current.status !== "needs_human") {
+        transitionIssue(issueId, "needs_human", {
+          currentOwner: "human",
+          currentIntent: reason,
+        });
+      }
+      const action = createHumanAction({
+        issueId,
+        workflowInstanceId: active.id,
+        actionType: "policy_escalation",
+        reason,
+        question: `${reason} Retry the merge once a head is recorded, queue another repair round, or close the issue?`,
+        evidence: { [MERGE_FAILURE_EVIDENCE_KEY]: true, operatorVerificationBlocked: true },
+        responseOptions: [...MERGE_FAILURE_RESPONSE_OPTIONS],
+        requestId: OPERATOR_VERIFICATION_NO_HEAD_REQUEST_ID,
+      });
+      appendWorkflowEvent({
+        issueId,
+        workflowInstanceId: active.id,
+        workerSessionId: null,
+        type: "human_action.requested",
+        actorType: "system",
+        stage: "needs_human",
+        round: current.currentRound,
+        payload: { actionType: "policy_escalation", actionId: action.id, operatorVerificationBlocked: true },
+      });
+      return {
+        applied: true,
+        issueStatus: "needs_human",
+        nextWorkItemId: null,
+        humanActionId: action.id,
+        instanceCompleted: false,
+        triggerReflect: false,
+      };
+    }
 
     const existing = findOpenHumanAction(issueId, "operator_verification");
     if (existing && operatorActionHeadSha(existing) === head) {
