@@ -18,6 +18,7 @@ const {
   createRoleWorktree,
   safeRemoveWorktree,
   fetchFreshBase,
+  readRemoteTip,
   inspectLeftoverWorktree,
   isWorktreeClean,
   withRepoLock,
@@ -1684,4 +1685,17 @@ test("NOT-197: fetchFreshBase uses the local base as-is when the repo has no ori
   } finally {
     fs.rmSync(bare, { recursive: true, force: true });
   }
+});
+
+test("NOT-356: readRemoteTip honours timeoutMs and returns null for a stalled remote", async () => {
+  const repo = fs.mkdtempSync(path.join(home, "stalled-remote-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("init", "-q");
+  // An `ext::` remote whose helper never answers stands in for a hung network read.
+  git("config", "protocol.ext.allow", "always");
+  git("remote", "add", "origin", "ext::sh -c 'sleep 30'");
+  const started = Date.now();
+  const tip = await readRemoteTip({ cwd: repo, branch: "any", timeoutMs: 300 });
+  assert.equal(tip, null);
+  assert.ok(Date.now() - started < 10_000, "the stalled ls-remote was not cut off by the timeout");
 });

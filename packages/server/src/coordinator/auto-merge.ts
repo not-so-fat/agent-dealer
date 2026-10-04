@@ -40,6 +40,7 @@ import {
 } from "../repository/human-actions.js";
 import { MERGE_FAILURE_EVIDENCE_KEY, MERGE_FAILURE_RESPONSE_OPTIONS } from "./human-resolution.js";
 import { isMergeConflictFailure, runMergeConflictSync } from "./merge-conflict-sync.js";
+import { startBaseAdvancedScan } from "./base-advanced-scan.js";
 import {
   OPERATOR_VERIFICATION_RESPONSE_OPTIONS,
   formatOperatorCriteria,
@@ -53,7 +54,9 @@ const run = promisify(execFile);
 /** Bound each `gh` shell-out so a hang cannot freeze the coordinator process. */
 export const GH_MERGE_TIMEOUT_MS = 20_000;
 
-export type MergePrResult = { ok: true } | { ok: false; reason: string };
+/** `alreadyMerged`: GitHub reported the PR merged before this call — not a merge
+ * Dealer just made (crash recovery, or a human merged it by hand). */
+export type MergePrResult = { ok: true; alreadyMerged?: boolean } | { ok: false; reason: string };
 
 export type MergePr = (opts: { cwd: string; number: number }) => Promise<MergePrResult>;
 
@@ -179,7 +182,7 @@ export const realMergePr: MergePr = async ({ cwd, number }) => {
   } catch (err) {
     const reason = ghErrorReason(err, "gh pr merge failed", cwd);
     // Crash between a successful merge and the done-transition: retry must not escalate.
-    if (ALREADY_MERGED.test(reason)) return { ok: true };
+    if (ALREADY_MERGED.test(reason)) return { ok: true, alreadyMerged: true };
     return { ok: false, reason };
   }
 };
@@ -208,6 +211,11 @@ export type AutoMergeFinalizeResult = {
  * for the same issue share one Promise (set synchronously before any await).
  */
 const finalizeInflight = new Map<string, Promise<AutoMergeFinalizeResult>>();
+
+/** NOT-356: whether this process is merging the issue's PR right now. */
+export function isAutoMergeInFlight(issueId: string): boolean {
+  return finalizeInflight.has(issueId);
+}
 
 /** Test hook — clear single-flight state between cases. */
 export function clearFinalizeInflightForTests(): void {
@@ -277,7 +285,7 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
       mergePr: mergePrImpl,
     });
     if (sync.outcome === "merged") {
-      merge = { ok: true };
+      merge = sync.alreadyMerged ? { ok: true, alreadyMerged: true } : { ok: true };
     } else if (sync.outcome === "repair_queued") {
       return {
         applied: true,
@@ -297,7 +305,7 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
     return escalateMergeFailure(issue, instance.id, `Auto-merge failed: ${merge.reason}`);
   }
 
-  return getDb().transaction((): AutoMergeFinalizeResult => {
+  const merged = getDb().transaction((): AutoMergeFinalizeResult => {
     const current = getIssue(issueId)!;
     const active = getActiveWorkflowInstance(issueId);
     if (!active) {
@@ -356,6 +364,13 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
       triggerReflect: true,
     };
   })();
+  // NOT-356: the base just moved under every other open Dealer PR on this repo +
+  // base — probe them and resolve the idle conflicting ones. Background and
+  // self-contained: nothing it does can change this merge's result. Only for a
+  // merge this call made: a PR GitHub already reports merged (a human merged it,
+  // or a crash recovery re-runs the finalize) is not Dealer's merge.
+  if (merged.triggerReflect && !merge.alreadyMerged) startBaseAdvancedScan(getIssue(issueId) ?? issue);
+  return merged;
 }
 
 /**
