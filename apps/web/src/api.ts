@@ -241,6 +241,11 @@ export interface IssueDetail {
   queued?: boolean;
   /** NOT-118: queue position (1-based) and current wait reason while it is queued. */
   queueEntry?: { position: number; waitReason: string | null } | null;
+  /**
+   * NOT-358: usage-cap / deck-outage wait behind an availability window, if any —
+   * the detail offers "Park for human" next to the wait notice.
+   */
+  capWait?: { kind: "usage_capped" | "deck_unavailable"; until: string; reason: string } | null;
 }
 
 export interface IssueEvidence {
@@ -420,6 +425,17 @@ export async function abortIssue(id: string, resolvedBy = "web"): Promise<AbortI
  * closes it atomically (status → `closed`, queue entry removed, one
  * human-authored `issue.closed` event) and refuses anything in-flight.
  */
+/**
+ * NOT-358: park an issue waiting on a usage-cap or deck-outage window for a human.
+ * Answers the updated issue plus the new `policy_escalation` action id — resolving
+ * that action with `resume` continues with whichever agents are then set.
+ */
+export async function parkIssueForHuman(id: string): Promise<Issue & { humanActionId: string }> {
+  const res = await fetch(`${API}/api/issues/${id}/park`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 export interface CloseIssueResult {
   issueStatus: IssueStatus;
   alreadyClosed: boolean;

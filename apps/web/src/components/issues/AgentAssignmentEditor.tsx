@@ -9,6 +9,12 @@ type Props = {
   busy: boolean;
   onSave: (developerAgentId: string, reviewerAgentId: string) => void;
   onCancel: () => void;
+  /**
+   * NOT-358: `queued` keeps the pre-start copy (queue position is kept); `parked`
+   * describes the parked swap instead (worktree, branch and review rounds are kept
+   * and a resume continues with the new agents).
+   */
+  variant?: "queued" | "parked";
 };
 
 /** True when the agent carries a durable usage-cap observation. */
@@ -53,6 +59,7 @@ export default function AgentAssignmentEditor({
   busy,
   onSave,
   onCancel,
+  variant = "queued",
 }: Props) {
   const [developerId, setDeveloperId] = useState(initialDeveloperId ?? "");
   const [reviewerId, setReviewerId] = useState(initialReviewerId ?? "");
@@ -62,12 +69,26 @@ export default function AgentAssignmentEditor({
   const developerNote = healthNote(developer);
   const reviewerNote = healthNote(reviewer);
   const unchanged = developerId === (initialDeveloperId ?? "") && reviewerId === (initialReviewerId ?? "");
+  const saveTitle =
+    variant === "parked"
+      ? "Save via the issue PATCH contract — keeps the worktree and branch, records the change on the timeline; resume continues with the new agents"
+      : "Save via the issue PATCH contract — keeps queue position and rechecks the wait reason";
 
   return (
     <div className="p-3 rounded border border-white/10 bg-panel-elevated/60 space-y-2">
       <p className="text-xs text-white/50">
-        Reassign agents — queue position is kept, the wait reason is rechecked, and the
-        change is recorded on the timeline.
+        {variant === "parked" ? (
+          <>
+            Swap the developer and/or reviewer to another profile — the worktree,
+            branch and review rounds are kept, the change is recorded on the timeline,
+            and a resume continues with the new agents.
+          </>
+        ) : (
+          <>
+            Reassign agents — queue position is kept, the wait reason is rechecked, and the
+            change is recorded on the timeline.
+          </>
+        )}
       </p>
       <label className="block space-y-1">
         <span className="text-xs text-white/45 uppercase tracking-wide">Developer</span>
@@ -112,12 +133,12 @@ export default function AgentAssignmentEditor({
         </select>
         {reviewerNote && <span className="text-xs text-amber-200/80 block">{reviewerNote}</span>}
       </label>
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <button
           type="button"
           className="btn-gold px-4 py-1.5 text-sm disabled:opacity-50"
           disabled={busy || !developerId || !reviewerId || unchanged}
-          title="Save via the issue PATCH contract — keeps queue position and rechecks the wait reason"
+          title={saveTitle}
           onClick={() => onSave(developerId, reviewerId)}
         >
           Save agents

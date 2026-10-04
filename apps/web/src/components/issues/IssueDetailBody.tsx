@@ -10,6 +10,7 @@ import {
   fetchIssueArtifactTrace,
   fetchIssueEvidence,
   guideIssue,
+  parkIssueForHuman,
   patchIssue,
   resolveHumanAction,
   startIssue,
@@ -17,6 +18,7 @@ import {
   type IssueEvidence,
 } from "../../api";
 import IssueStatusBadge from "./IssueStatusBadge";
+import AgentAssignmentEditor from "./AgentAssignmentEditor";
 import IssueConfigurationSection from "./IssueConfiguration";
 import ExecutionContractSummary from "./ExecutionContractSummary";
 import IssueTimeline from "./IssueTimeline";
@@ -190,6 +192,8 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   const [startNotice, setStartNotice] = useState<string | null>(null);
   /** NOT-240 pre-execution configuration editor (ready, no active workflow). */
   const [configEditing, setConfigEditing] = useState(false);
+  /** NOT-358 parked agent-swap editor (needs_human with an open park action). */
+  const [agentSwapEditing, setAgentSwapEditing] = useState(false);
   /** NOT-239 pre-execution close: two-step inside the low-prominence area below. */
   const [closeConfirming, setCloseConfirming] = useState(false);
   /** NOT-239 unambiguous result banner after a successful close. */
@@ -202,7 +206,7 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
 
   const fail = (e: unknown) => onError(String(e));
 
-  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, liveProgress, latestSessionFailure, branchTipStatus, queued, queueEntry } = detail;
+  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, liveProgress, latestSessionFailure, branchTipStatus, queued, queueEntry, capWait } = detail;
   const developerAgent = agents.find((a) => a.id === issue.developerAgentId);
   const developerBlocked = developerAgent && !developerAgent.healthy;
   const developerBlockReason = developerAgent?.issues[0]?.message ?? "Developer agent is unhealthy";
@@ -210,6 +214,11 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
     ? new Date(latestWorkflowInstance.completedAt ?? Date.now()).getTime() - new Date(latestWorkflowInstance.startedAt).getTime()
     : 0;
   const openActions = humanActions.filter((a) => a.status === "open");
+  // NOT-358: a parked issue (open attempts_exhausted or policy_escalation) offers the
+  // agent swap inline — same worktree and branch, resume continues with the new agents.
+  const isParkedForSwap =
+    issue.status === "needs_human" &&
+    openActions.some((a) => a.actionType === "attempts_exhausted" || a.actionType === "policy_escalation");
   const canEdit = readiness.ok === false || openActions.some((a) => a.actionType === "product_scope_decision");
   const hasActiveWorkflow = latestWorkflowInstance != null && latestWorkflowInstance.completedAt === null;
   // NOT-239: pre-execution Close is for `ready` with no active workflow only — it
@@ -325,6 +334,40 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
       setConfigEditing(false);
       fail(e);
       refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveAgentSwap = async (developerAgentId: string, reviewerAgentId: string) => {
+    setBusy(true);
+    onError(null);
+    try {
+      // One PATCH for the swapped roles: the server re-freezes the profile snapshot
+      // on the next resume and records the before/after on the timeline.
+      await patchIssue(issueId, { developerAgentId, reviewerAgentId });
+      setAgentSwapEditing(false);
+      refresh();
+    } catch (e) {
+      // A 409 means a resume or session won the race: close the editor and refresh
+      // to the live state instead of leaving a stale success.
+      setAgentSwapEditing(false);
+      fail(e);
+      refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doParkForHuman = async () => {
+    setBusy(true);
+    onError(null);
+    try {
+      await parkIssueForHuman(issueId);
+      onHumanActionsChanged();
+      refresh();
+    } catch (e) {
+      fail(e);
     } finally {
       setBusy(false);
     }
@@ -452,6 +495,33 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
           onCancel={() => setConfigEditing(false)}
         />
 
+        {/* NOT-358: parked agent swap — developer and reviewer as selectable
+            controls with a Save action. The worktree, branch and review rounds
+            are kept; a resume continues with the new agents. */}
+        {isParkedForSwap && !agentSwapEditing && (
+          <button
+            type="button"
+            className="font-ui-display mb-4 text-xs text-cyber-teal hover:underline disabled:opacity-50"
+            disabled={busy}
+            onClick={() => setAgentSwapEditing(true)}
+          >
+            Swap developer / reviewer agents
+          </button>
+        )}
+        {isParkedForSwap && agentSwapEditing && (
+          <div className="mb-4">
+            <AgentAssignmentEditor
+              variant="parked"
+              agents={agents}
+              initialDeveloperId={issue.developerAgentId}
+              initialReviewerId={issue.reviewerAgentId}
+              busy={busy}
+              onSave={(dev, rev) => void saveAgentSwap(dev, rev)}
+              onCancel={() => setAgentSwapEditing(false)}
+            />
+          </div>
+        )}
+
         {/* NOT-306: frozen execution contract, read-only — the ticket
             description stays the only authoring surface, so this renders no
             inputs. Absent for legacy/contract-free issues. */}
@@ -480,6 +550,32 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
             <p className="text-sm text-white/80 mt-0.5">
               {queueEntry.waitReason ?? "Next up — starts as soon as the coordinator ticks"}
             </p>
+          </div>
+        )}
+
+        {/* NOT-358: usage-cap / deck-outage wait behind an availability window, with
+            a Park for human action next to the notice. Parking cancels the wait
+            without touching the worktree and hands the issue to a human. */}
+        {capWait && (
+          <div className="mb-4 p-3 rounded border border-amber-400/30 bg-amber-500/10 flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-xs text-amber-300 font-medium uppercase tracking-wide">
+                {capWait.kind === "usage_capped" ? "Waiting on usage cap" : "Waiting on Agent Deck"}
+              </p>
+              <p className="text-sm text-white/80 mt-0.5 break-words">{capWait.reason}</p>
+              <p className="text-xs text-white/45 mt-0.5">
+                Wait until {new Date(capWait.until).toLocaleString()}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn-gold px-3 py-1.5 text-xs shrink-0 disabled:opacity-50"
+              disabled={busy}
+              title="Park this issue for a human — cancels the wait without touching the worktree; a resume continues with whichever agents are then set"
+              onClick={doParkForHuman}
+            >
+              Park for human
+            </button>
           </div>
         )}
 
