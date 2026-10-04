@@ -1842,6 +1842,48 @@ test("NOT-356: a sibling aborted while the sync push is in flight is never pushe
   assertNoForceNoRebase(calls);
 });
 
+test("NOT-356: a stranded auto-merge on the held sibling is deferred while its sync push is in flight", async () => {
+  const { transitionIssue } = await import("../repository/issues.js");
+  const { cancelWorkItem } = await import("../repository/work-items.js");
+  const { AUTO_MERGE_INTENT, finalizeAutoMerge, listStrandedAutoMerges, recoverStrandedAutoMerges } =
+    await import("./auto-merge.js");
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-strand", conflict: false }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-strand", heads["sib-strand"]!, 62);
+  for (const w of listWorkItemsForIssue(siblingId)) if (w.status === "pending") cancelWorkItem(w.id);
+  transitionIssue(siblingId, "final_review", { currentOwner: "system", currentIntent: AUTO_MERGE_INTENT });
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  const merges: number[] = [];
+  setMergePrForTests(async ({ number }) => {
+    merges.push(number);
+    if (merges.length === 1) landMergedPr();
+    return { ok: true };
+  });
+  let duringPush: { stranded: string[]; recovered: string[]; direct: string } | null = null;
+  // The push executor pauses before the real push; a recovery tick (and a direct
+  // finalize) runs for the sibling, which is still parked on its auto-merge.
+  setConflictSyncGitExecForTests(async (args, opts) => {
+    if (args[0] === "push") {
+      const stranded = listStrandedAutoMerges().map((i) => i.id);
+      const recovered = (await recoverStrandedAutoMerges()).finalized;
+      const direct = (await finalizeAutoMerge(siblingId)).issueStatus;
+      duringPush = { stranded, recovered, direct };
+    }
+    return defaultSyncGitExec(args, opts);
+  });
+  assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
+  await settleBaseAdvancedScansForTests();
+
+  assert.deepEqual(duringPush, { stranded: [], recovered: [], direct: "final_review" });
+  assert.equal(merges.length, 1, "only the triggering PR was merged; the held sibling's old head never was");
+  assert.notEqual(originTip(origin, "sib-strand"), heads["sib-strand"], "the held push landed");
+  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["synced"]);
+  assert.equal(getIssue(siblingId)!.status, "repairing", "the park is superseded by the checks wait");
+  const pending = listWorkItemsForIssue(siblingId).filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1);
+  assert.equal(JSON.parse(pending[0]!.payloadJson!).publishOnly, true);
+});
+
 test("NOT-356: a PR GitHub already reports merged (a hand merge found by recovery) starts no sibling scan", async () => {
   const { local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-ext", conflict: true }]);
   const mergedId = await parkedMergeIn(local);

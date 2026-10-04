@@ -23,8 +23,11 @@
 //     step is superseded by a no-agent publish-only CI wait). In one transaction
 //     with that last check the sibling's one pending work item (or a sentinel) is
 //     leased to the sync until the push is over, so no worker can start on the
-//     branch mid-push, and an abort revokes the push through its pre-push fence; a
-//     push that does not land gives the hold up and changes nothing.
+//     branch mid-push and no auto-merge can merge the old head, and an abort
+//     before the pre-push hook's last check revokes the push; a
+//     push that does not land gives the hold up and changes nothing. An abort
+//     once git is past that hook is the ticket's declared best-effort boundary
+//     (no fence exists inside an in-flight `git push`).
 //     A textual conflict queues one conflict-repair round naming the files
 //     (`repair_queued`).
 //

@@ -613,6 +613,12 @@ export function reserveBaseSyncPush(input: {
   })();
 }
 
+/** NOT-356: whether a {@link reserveBaseSyncPush} hold is on the issue — a sync may
+ * be pushing onto its branch, so nothing else (auto-merge included) may act on it. */
+export function isBaseSyncHeld(issueId: string): boolean {
+  return listWorkItemsForIssue(issueId).some((w) => w.status === "leased" && w.leaseOwner === BASE_SYNC_HOLDER);
+}
+
 /** Nothing was pushed: hand the parked item back untouched, or drop the sentinel. */
 export function cancelBaseSyncReservation(reservation: BaseSyncReservation): void {
   if (reservation.parked) releaseReservedWorkItem(reservation.id, reservation.token);
@@ -853,9 +859,12 @@ const pushFences = new Map<string, string>();
 
 /**
  * NOT-356: revoke an in-flight reserved sync push for the issue (the abort path).
- * The pinned hook then refuses the push if git has not sent it yet; a push that
- * already landed is left to the reservation's own fencing (the aborted item is
- * cancelled, so nothing follows it).
+ * Best-effort, by design: the pinned hook refuses the push only if its fence check
+ * has not run yet. Once git is past the hook (sending the pack, remote receive
+ * hooks) nothing can stop the ref update — the ticket's declared boundary: no
+ * locks, leases or post-push rollback for state changes during the in-flight
+ * push. Whatever lands is left to the reservation's own fencing (the aborted item
+ * is cancelled, so nothing follows it).
  */
 export function revokeBaseSyncPush(issueId: string): void {
   const fence = pushFences.get(issueId);
