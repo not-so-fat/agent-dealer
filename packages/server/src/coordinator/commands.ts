@@ -94,7 +94,7 @@ import {
   type PushDivergenceEvidence,
 } from "./human-resolution.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
-import { conflictRepairSpent, queueConflictRepairRound, revokeBaseSyncPush } from "./merge-conflict-sync.js";
+import { conflictRepairSpent, queueConflictRepairRound } from "./merge-conflict-sync.js";
 import {
   OPERATOR_VERIFICATION_ARTIFACT_KIND,
   OPERATOR_VERIFICATION_RESPONSE_OPTIONS,
@@ -2637,8 +2637,6 @@ export function abortIssue(
   // Outside the transaction, per the ticket contract: terminating a child process is not
   // a DB write, and must happen only once the abort itself is durably committed.
   for (const sessionId of tx.runningSessionIds) deps.killProcess(sessionId);
-  // NOT-356: likewise refuse a base-advanced sync push still in flight on the branch.
-  if (!tx.alreadyClosed) revokeBaseSyncPush(issueId);
 
   return { ok: true, issueStatus: tx.issueStatus, alreadyClosed: tx.alreadyClosed };
 }

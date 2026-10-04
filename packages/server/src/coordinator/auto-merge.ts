@@ -39,7 +39,7 @@ import {
   resolveHumanAction,
 } from "../repository/human-actions.js";
 import { MERGE_FAILURE_EVIDENCE_KEY, MERGE_FAILURE_RESPONSE_OPTIONS } from "./human-resolution.js";
-import { isBaseSyncHeld, isMergeConflictFailure, runMergeConflictSync } from "./merge-conflict-sync.js";
+import { isMergeConflictFailure, runMergeConflictSync } from "./merge-conflict-sync.js";
 import { startBaseAdvancedScan } from "./base-advanced-scan.js";
 import {
   OPERATOR_VERIFICATION_RESPONSE_OPTIONS,
@@ -231,13 +231,6 @@ export function clearFinalizeInflightForTests(): void {
 export function finalizeAutoMerge(issueId: string): Promise<AutoMergeFinalizeResult> {
   const existing = finalizeInflight.get(issueId);
   if (existing) return existing;
-  // NOT-356: a base-advanced sync holds the issue and may be pushing onto its
-  // branch — merging the old head now would let that push land on a merged PR.
-  // Defer: the park stays as it is, and the next recovery tick retries once the
-  // hold is gone (a landed sync supersedes the park with a fresh checks wait).
-  // Checked synchronously with registering the single-flight, and the sync's
-  // reservation refuses an in-flight finalize, so the two can never overlap.
-  if (isBaseSyncHeld(issueId)) return Promise.resolve(deferredFinalize(issueId));
 
   const promise = finalizeAutoMergeOnce(issueId).finally(() => {
     if (finalizeInflight.get(issueId) === promise) {
@@ -246,20 +239,6 @@ export function finalizeAutoMerge(issueId: string): Promise<AutoMergeFinalizeRes
   });
   finalizeInflight.set(issueId, promise);
   return promise;
-}
-
-/** A finalize that did nothing: the issue stays parked for the next attempt. */
-function deferredFinalize(issueId: string): AutoMergeFinalizeResult {
-  const issue = getIssue(issueId);
-  if (!issue) throw new Error(`finalizeAutoMerge: issue vanished ${issueId}`);
-  return {
-    applied: true,
-    issueStatus: issue.status,
-    nextWorkItemId: null,
-    humanActionId: null,
-    instanceCompleted: false,
-    triggerReflect: false,
-  };
 }
 
 async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalizeResult> {
@@ -665,16 +644,14 @@ function escalateMergeFailure(
 }
 
 /** Issues parked for undraft+merge (autoMerge approve *or* human final_review:complete)
- * that are not already being finalized in this process nor held by a base-advanced
- * sync (NOT-356). Keyed by AUTO_MERGE_INTENT —
+ * that are not already being finalized in this process. Keyed by AUTO_MERGE_INTENT —
  * not `autoMerge` — so autoMerge-off human accepts still recover after a crash. */
 export function listStrandedAutoMerges(): Issue[] {
   return listIssues("final_review").filter(
     (i) =>
       i.currentOwner === "system" &&
       i.currentIntent === AUTO_MERGE_INTENT &&
-      !finalizeInflight.has(i.id) &&
-      !isBaseSyncHeld(i.id)
+      !finalizeInflight.has(i.id)
   );
 }
 

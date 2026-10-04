@@ -20,16 +20,8 @@
 //     tip and the sibling still idle and still open on the same workflow instance,
 //     branch, PR, repo and base right before the push. A clean sync is
 //     `synced` and re-enters the normal checks wait on the pushed head (the parked
-//     step is superseded by a no-agent publish-only CI wait). In one transaction
-//     with that last check the sibling's one pending work item (or a sentinel) is
-//     leased to the sync until the push is over, so no worker can start on the
-//     branch mid-push and no auto-merge can merge the old head, and an abort
-//     before the pre-push hook's last check revokes the push; a
-//     push that does not land gives the hold up and changes nothing. An abort
-//     once git is past that hook is the ticket's declared best-effort boundary
-//     (no fence exists inside an in-flight `git push`).
-//     A textual conflict queues one conflict-repair round naming the files
-//     (`repair_queued`).
+//     step is superseded by a no-agent publish-only CI wait); a textual conflict
+//     queues one conflict-repair round naming the files (`repair_queued`).
 //
 // Bounds: one sync and one repair round per issue per episode, shared with the
 // merge and checks-wait entries. A failure for one sibling — a throw included —
@@ -43,6 +35,7 @@ import {
   fetchFreshBase,
   fetchReusedBranch,
   probeBaseConflict,
+  readRemoteTip,
   type BaseConflictProbe,
 } from "../adapters/git-worktree.js";
 import { classifyIssueRepo } from "../adapters/managed-repo.js";
@@ -56,10 +49,8 @@ import {
   BASE_ADVANCED_STATUSES,
   checksWaitSyncSpent,
   conflictRepairSpent,
-  cancelBaseSyncReservation,
-  commitBaseSyncReservation,
+  queueChecksWaitAfterBaseSync,
   queueConflictRepairRound,
-  reserveBaseSyncPush,
   runMergeConflictSync,
 } from "./merge-conflict-sync.js";
 
@@ -223,9 +214,6 @@ async function scanSibling(
   // One push-only sync per episode: a spent sync goes straight to the repair round.
   let files = probe.files;
   if (!checksWaitSyncSpent(issue.id, instance.id)) {
-    // The sibling is held from the idleness check until the push is over, so no
-    // worker can start mid-push; only a landed push re-enters the checks wait.
-    let wait: { id: string; kept: boolean } | null = null;
     const sync = await runMergeConflictSync({
       issueId: issue.id,
       instanceId: instance.id,
@@ -236,34 +224,26 @@ async function scanSibling(
       mergeReason: `${issue.baseBranch} advanced and PR #${prNumber} now conflicts with it.`,
       entry: "base_advanced",
       expectedHeadSha,
-      reservePush: (headSha) => {
-        const reserved = reserveBaseSyncPush({ issueId: issue.id, instanceId: instance.id, branch, headSha, guard });
-        if (typeof reserved === "string") return reserved;
-        return {
-          release: (pushed) => {
-            if (!pushed) return cancelBaseSyncReservation(reserved);
-            wait = commitBaseSyncReservation(reserved, {
-              issueId: issue.id,
-              instanceId: instance.id,
-              baseBranch: issue.baseBranch,
-              branch,
-              prNumber,
-              headSha,
-            });
-          },
-        };
-      },
+      beforePush: guard,
     });
     if (sync.outcome === "synced") {
-      const checksWait = wait as { id: string; kept: boolean } | null;
+      const wait = queueChecksWaitAfterBaseSync({
+        issueId: issue.id,
+        instanceId: instance.id,
+        baseBranch: issue.baseBranch,
+        branch,
+        prNumber,
+        headSha: sync.headSha,
+        guard,
+      });
       return {
         action: "synced",
         detail: {
           ...probeDetail,
           syncedHeadSha: sync.headSha,
-          ...(checksWait
-            ? { workItemId: checksWait.id, ...(checksWait.kept ? { checksWait: "queued developer round" } : {}) }
-            : { reason: "the hold was revoked or the issue left its stage before the checks wait queued" }),
+          ...(wait
+            ? { workItemId: wait.id, ...(wait.kept ? { checksWait: "queued developer round" } : {}) }
+            : { reason: "issue became busy or left its stage before the checks wait queued" }),
         },
       };
     }
@@ -271,9 +251,7 @@ async function scanSibling(
       return { action: "hand_edited", detail: { ...probeDetail, reason: sync.reason } };
     }
     if (sync.outcome === "skipped" && sync.code === "refused") {
-      // Drifted at the guard, or during the push (an abort revoking it).
-      const left = drifted || siblingDrift(issue, instance.id) != null;
-      return { action: left ? "skipped" : "active_worker", detail: { ...probeDetail, reason: sync.reason } };
+      return { action: drifted ? "skipped" : "active_worker", detail: { ...probeDetail, reason: sync.reason } };
     }
     if (sync.outcome === "escalate" || sync.outcome === "skipped") {
       return { action: sync.outcome === "escalate" ? "failed" : "skipped", detail: { ...probeDetail, reason: sync.reason } };
@@ -282,6 +260,14 @@ async function scanSibling(
       return { action: "skipped", detail: { ...probeDetail, reason: `unexpected sync outcome ${sync.outcome}` } };
     }
     if (sync.files.length > 0) files = sync.files;
+  }
+
+  // The textual-conflict path returns before the sync's own pre-push tip read, so
+  // re-read origin right before the repair mutation: a hand edit is never touched.
+  const tipNow = await readRemoteTip({ cwd: repoPath, branch });
+  const lastPushedNow = lastDealerPushedSha(issue);
+  if (tipNow !== lastPushedNow) {
+    return { action: "hand_edited", detail: { ...probeDetail, remoteSha: tipNow, lastPushedSha: lastPushedNow } };
   }
 
   const queued = queueConflictRepairRound({

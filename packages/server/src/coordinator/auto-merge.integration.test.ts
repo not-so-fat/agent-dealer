@@ -1354,6 +1354,57 @@ test("NOT-356: a hand push after the ownership check is never synced or pushed o
   assert.equal(getIssue(siblingId)!.status, "reviewing");
 });
 
+test("NOT-356: a hand push during a conflicted sync merge never queues the repair round", async () => {
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-textual", conflict: true }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-textual", heads["sib-textual"]!, 59);
+  const reviewerItem = listWorkItemsForIssue(siblingId).find((i) => i.status === "pending")!;
+  const g = (...args: string[]) => execFileSync("git", args, { cwd: local, encoding: "utf8" }).trim();
+  let handTip = "";
+  setMergePrForTests(async () => {
+    landMergedPr();
+    return { ok: true };
+  });
+  const calls: string[][] = [];
+  // The human push lands while the sync's merge reports the textual conflict.
+  setConflictSyncGitExecForTests(async (args, opts) => {
+    calls.push(args);
+    try {
+      return await defaultSyncGitExec(args, opts);
+    } finally {
+      if (args.includes("merge") && args.includes("--no-edit")) {
+        g("checkout", "-q", "-B", "hand", heads["sib-textual"]!);
+        fs.writeFileSync(path.join(local, "hand.txt"), "by hand\n");
+        g("add", ".");
+        g("commit", "-q", "-m", "hand edit");
+        g("push", "-q", "origin", "HEAD:refs/heads/sib-textual");
+        handTip = g("rev-parse", "HEAD");
+        g("checkout", "-q", "main");
+      }
+    }
+  });
+  const { finalizeAutoMerge } = await import("./auto-merge.js");
+  assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
+  await settleBaseAdvancedScansForTests();
+
+  assert.deepEqual(
+    syncEvents(siblingId).map((e) => [e.entry, e.outcome]),
+    [["base_advanced", "repair_needed"]]
+  );
+  const events = baseAdvancedEvents(siblingId);
+  assert.deepEqual(events.map((e) => e.action), ["hand_edited"]);
+  assert.equal(events[0]!.remoteSha, handTip);
+  assert.equal(calls.filter((a) => a[0] === "push").length, 0);
+  assert.equal(originTip(origin, "sib-textual"), handTip);
+  assert.equal(
+    listWorkflowEventsForIssue(siblingId).filter((e) => e.type === "auto_merge.conflict_repair_queued").length,
+    0,
+    "no repair round was queued"
+  );
+  assert.equal(listWorkItemsForIssue(siblingId).find((i) => i.id === reviewerItem.id)!.status, "pending");
+  assert.equal(getIssue(siblingId)!.status, "reviewing");
+});
+
 test("NOT-356: a hand reset to an older tip after the sync fetch is never fast-forwarded over", async () => {
   const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-reset", conflict: false }]);
   const g = (...args: string[]) => execFileSync("git", args, { cwd: local, encoding: "utf8" }).trim();
@@ -1407,63 +1458,8 @@ test("NOT-356: a hand reset to an older tip after the sync fetch is never fast-f
   assert.equal(getIssue(siblingId)!.status, "reviewing");
 });
 
-test("NOT-356: a hand reset to an older tip as the push starts is refused inside the push", async () => {
-  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-late", conflict: false }]);
-  const g = (...args: string[]) => execFileSync("git", args, { cwd: local, encoding: "utf8" }).trim();
-  g("checkout", "-q", "sib-late");
-  fs.writeFileSync(path.join(local, "second.txt"), "second\n");
-  g("add", ".");
-  g("commit", "-q", "-m", "second commit");
-  g("push", "-q", "origin", "sib-late");
-  const dealerTip = g("rev-parse", "HEAD");
-  g("checkout", "-q", "main");
-  const olderTip = heads["sib-late"]!;
-  const mergedId = await parkedMergeIn(local);
-  const siblingId = await idleSiblingIn(local, "sib-late", dealerTip, 56);
-  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
-  setMergePrForTests(async () => {
-    landMergedPr();
-    return { ok: true };
-  });
-  const calls: string[][] = [];
-  // The human resets origin after every tip check passed, just before the push
-  // connects: the merge commit would be a valid fast-forward of the older tip.
-  setConflictSyncGitExecForTests(async (args, opts) => {
-    calls.push(args);
-    if (args[0] === "push") {
-      execFileSync("git", ["update-ref", "refs/heads/sib-late", olderTip], { cwd: origin });
-    }
-    return defaultSyncGitExec(args, opts);
-  });
-  const stop = observeGitCommands((args) => {
-    calls.push([...args]);
-  });
-  try {
-    const { finalizeAutoMerge } = await import("./auto-merge.js");
-    assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
-    await settleBaseAdvancedScansForTests();
-  } finally {
-    stop();
-  }
-
-  assert.equal(syncMerges(calls).length, 1);
-  assert.deepEqual(
-    calls.filter((a) => a[0] === "push"),
-    [["push", "-u", "origin", "HEAD:refs/heads/sib-late"]],
-    "one plain push attempt, refused by origin's tip pin"
-  );
-  assert.equal(originTip(origin, "sib-late"), olderTip, "the hand reset stands");
-  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["hand_edited"]);
-  assert.deepEqual(
-    syncEvents(siblingId).map((e) => [e.outcome, e.code]),
-    [["skipped", "tip_moved"]]
-  );
-  assertNoForceNoRebase(calls);
-  assert.equal(getIssue(siblingId)!.status, "reviewing");
-});
-
 /** Installs `body` as the repository's pre-push hook, via `core.hooksPath`
- * when given (the pinned push must resolve it before overriding hooksPath). */
+ * when given. */
 function installRepoPrePushHook(local: string, body: string, hooksPath?: string): void {
   let dir: string;
   if (hooksPath) {
@@ -1479,7 +1475,7 @@ function installRepoPrePushHook(local: string, body: string, hooksPath?: string)
   fs.writeFileSync(path.join(dir, "pre-push"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
 }
 
-test("NOT-356: the pinned sync push still runs the repository's pre-push hook", async () => {
+test("NOT-356: the sync push still runs the repository's pre-push hook", async () => {
   const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-hook", conflict: false }]);
   const hookLog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-hook-log-")), "log");
   installRepoPrePushHook(
@@ -1505,7 +1501,7 @@ test("NOT-356: the pinned sync push still runs the repository's pre-push hook", 
   assertNoForceNoRebase(calls);
 });
 
-test("NOT-356: a repository pre-push hook that rejects still stops the pinned sync push", async () => {
+test("NOT-356: a repository pre-push hook that rejects still stops the sync push", async () => {
   const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-veto", conflict: false }]);
   installRepoPrePushHook(local, `echo "repo policy: no pushes" >&2\nexit 1`);
   const mergedId = await parkedMergeIn(local);
@@ -1523,45 +1519,6 @@ test("NOT-356: a repository pre-push hook that rejects still stops the pinned sy
   const events = baseAdvancedEvents(siblingId);
   assert.deepEqual(events.map((e) => e.action), ["failed"]);
   assert.match(String(events[0]!.reason), /repo policy: no pushes/);
-  assertNoForceNoRebase(calls);
-});
-
-test("NOT-356: with a repository pre-push hook installed, a hand reset as the push starts is still refused by the tip pin", async () => {
-  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-both", conflict: false }]);
-  const g = (...args: string[]) => execFileSync("git", args, { cwd: local, encoding: "utf8" }).trim();
-  g("checkout", "-q", "sib-both");
-  fs.writeFileSync(path.join(local, "second.txt"), "second\n");
-  g("add", ".");
-  g("commit", "-q", "-m", "second commit");
-  g("push", "-q", "origin", "sib-both");
-  const dealerTip = g("rev-parse", "HEAD");
-  g("checkout", "-q", "main");
-  const olderTip = heads["sib-both"]!;
-  const hookLog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-hook-log-")), "log");
-  installRepoPrePushHook(local, `cat >> "${hookLog}"\nexit 0`);
-  const mergedId = await parkedMergeIn(local);
-  const siblingId = await idleSiblingIn(local, "sib-both", dealerTip, 59);
-  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
-  setMergePrForTests(async () => {
-    landMergedPr();
-    return { ok: true };
-  });
-  const calls: string[][] = [];
-  setConflictSyncGitExecForTests(async (args, opts) => {
-    calls.push(args);
-    if (args[0] === "push") {
-      execFileSync("git", ["update-ref", "refs/heads/sib-both", olderTip], { cwd: origin });
-    }
-    return defaultSyncGitExec(args, opts);
-  });
-  const { finalizeAutoMerge } = await import("./auto-merge.js");
-  assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
-  await settleBaseAdvancedScansForTests();
-
-  assert.equal(originTip(origin, "sib-both"), olderTip, "the hand reset stands");
-  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["hand_edited"]);
-  assert.deepEqual(syncEvents(siblingId).map((e) => [e.outcome, e.code]), [["skipped", "tip_moved"]]);
-  assert.equal(fs.existsSync(hookLog), false, "the pin refused before the repository hook ran");
   assertNoForceNoRebase(calls);
 });
 
@@ -1729,159 +1686,6 @@ test("NOT-356: a worker that starts during the pre-push tip re-read blocks the p
     [["skipped", "refused"]]
   );
   assertNoForceNoRebase(calls);
-});
-
-test("NOT-356: no worker can be dispatched on the sibling while the sync push is in flight", async () => {
-  const { claimWorkItem, enqueueWorkItem } = await import("../repository/work-items.js");
-  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-held", conflict: false }]);
-  const mergedId = await parkedMergeIn(local);
-  const siblingId = await idleSiblingIn(local, "sib-held", heads["sib-held"]!, 59);
-  const reviewerItem = listWorkItemsForIssue(siblingId).find((i) => i.status === "pending")!;
-  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
-  setMergePrForTests(async () => {
-    landMergedPr();
-    return { ok: true };
-  });
-  const calls: string[][] = [];
-  let duringPush: { claimed: unknown; heldBy: string | null; enqueueRejected: boolean } | null = null;
-  // The push executor pauses before the real push: the dispatcher tries to lease the
-  // sibling's work, and a racing command tries to queue another item for it.
-  setConflictSyncGitExecForTests(async (args, opts) => {
-    calls.push(args);
-    if (args[0] === "push") {
-      const claimed = claimWorkItem("dispatcher-under-test", { leaseMs: 60_000 });
-      const held = listWorkItemsForIssue(siblingId).find((i) => i.id === reviewerItem.id)!;
-      let enqueueRejected = false;
-      try {
-        enqueueWorkItem({
-          issueId: siblingId,
-          workflowInstanceId: getActiveWorkflowInstance(siblingId)!.id,
-          kind: "developer",
-          round: getIssue(siblingId)!.currentRound,
-          payload: {},
-          idempotencyKey: "racing-command",
-        });
-      } catch {
-        enqueueRejected = true;
-      }
-      duringPush = { claimed, heldBy: held.status === "leased" ? held.leaseOwner : null, enqueueRejected };
-    }
-    return defaultSyncGitExec(args, opts);
-  });
-  const stop = observeGitCommands((args) => {
-    calls.push([...args]);
-  });
-  try {
-    const { finalizeAutoMerge } = await import("./auto-merge.js");
-    assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
-    await settleBaseAdvancedScansForTests();
-  } finally {
-    stop();
-  }
-
-  assert.deepEqual(duringPush, { claimed: null, heldBy: "base-advanced-sync", enqueueRejected: true });
-  assert.notEqual(originTip(origin, "sib-held"), heads["sib-held"], "the held push landed");
-  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["synced"]);
-  const items = listWorkItemsForIssue(siblingId);
-  assert.equal(items.find((i) => i.id === reviewerItem.id)!.status, "cancelled");
-  const pending = items.filter((i) => i.status === "pending");
-  assert.equal(pending.length, 1, "the checks wait on the pushed head, released to the dispatcher");
-  assert.equal(JSON.parse(pending[0]!.payloadJson!).publishOnly, true);
-  assertNoForceNoRebase(calls);
-});
-
-test("NOT-356: a sibling aborted while the sync push is in flight is never pushed", async () => {
-  const { abortIssue } = await import("./commands.js");
-  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-push-abort", conflict: false }]);
-  const mergedId = await parkedMergeIn(local);
-  const siblingId = await idleSiblingIn(local, "sib-push-abort", heads["sib-push-abort"]!, 60);
-  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
-  setMergePrForTests(async () => {
-    landMergedPr();
-    return { ok: true };
-  });
-  const calls: string[][] = [];
-  // The push executor pauses before the real push, the operator aborts the sibling,
-  // then the real push runs.
-  setConflictSyncGitExecForTests(async (args, opts) => {
-    calls.push(args);
-    if (args[0] === "push") {
-      const aborted = abortIssue(siblingId, "operator", { killProcess: () => true });
-      assert.ok(aborted.ok);
-    }
-    return defaultSyncGitExec(args, opts);
-  });
-  const stop = observeGitCommands((args) => {
-    calls.push([...args]);
-  });
-  try {
-    const { finalizeAutoMerge } = await import("./auto-merge.js");
-    assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
-    await settleBaseAdvancedScansForTests();
-  } finally {
-    stop();
-  }
-
-  assert.deepEqual(
-    calls.filter((a) => a[0] === "push"),
-    [["push", "-u", "origin", "HEAD:refs/heads/sib-push-abort"]],
-    "one plain push attempt, revoked inside the push"
-  );
-  assert.equal(originTip(origin, "sib-push-abort"), heads["sib-push-abort"], "origin never moved");
-  assert.equal(getIssue(siblingId)!.status, "closed");
-  assert.deepEqual(
-    syncEvents(siblingId).map((e) => [e.outcome, e.code]),
-    [["skipped", "refused"]]
-  );
-  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["skipped"]);
-  assert.equal(
-    listWorkItemsForIssue(siblingId).filter((i) => i.status === "pending" || i.status === "leased").length,
-    0,
-    "nothing queued for the aborted issue"
-  );
-  assertNoForceNoRebase(calls);
-});
-
-test("NOT-356: a stranded auto-merge on the held sibling is deferred while its sync push is in flight", async () => {
-  const { transitionIssue } = await import("../repository/issues.js");
-  const { cancelWorkItem } = await import("../repository/work-items.js");
-  const { AUTO_MERGE_INTENT, finalizeAutoMerge, listStrandedAutoMerges, recoverStrandedAutoMerges } =
-    await import("./auto-merge.js");
-  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-strand", conflict: false }]);
-  const mergedId = await parkedMergeIn(local);
-  const siblingId = await idleSiblingIn(local, "sib-strand", heads["sib-strand"]!, 62);
-  for (const w of listWorkItemsForIssue(siblingId)) if (w.status === "pending") cancelWorkItem(w.id);
-  transitionIssue(siblingId, "final_review", { currentOwner: "system", currentIntent: AUTO_MERGE_INTENT });
-  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
-  const merges: number[] = [];
-  setMergePrForTests(async ({ number }) => {
-    merges.push(number);
-    if (merges.length === 1) landMergedPr();
-    return { ok: true };
-  });
-  let duringPush: { stranded: string[]; recovered: string[]; direct: string } | null = null;
-  // The push executor pauses before the real push; a recovery tick (and a direct
-  // finalize) runs for the sibling, which is still parked on its auto-merge.
-  setConflictSyncGitExecForTests(async (args, opts) => {
-    if (args[0] === "push") {
-      const stranded = listStrandedAutoMerges().map((i) => i.id);
-      const recovered = (await recoverStrandedAutoMerges()).finalized;
-      const direct = (await finalizeAutoMerge(siblingId)).issueStatus;
-      duringPush = { stranded, recovered, direct };
-    }
-    return defaultSyncGitExec(args, opts);
-  });
-  assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
-  await settleBaseAdvancedScansForTests();
-
-  assert.deepEqual(duringPush, { stranded: [], recovered: [], direct: "final_review" });
-  assert.equal(merges.length, 1, "only the triggering PR was merged; the held sibling's old head never was");
-  assert.notEqual(originTip(origin, "sib-strand"), heads["sib-strand"], "the held push landed");
-  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["synced"]);
-  assert.equal(getIssue(siblingId)!.status, "repairing", "the park is superseded by the checks wait");
-  const pending = listWorkItemsForIssue(siblingId).filter((i) => i.status === "pending");
-  assert.equal(pending.length, 1);
-  assert.equal(JSON.parse(pending[0]!.payloadJson!).publishOnly, true);
 });
 
 test("NOT-356: a PR GitHub already reports merged (a hand merge found by recovery) starts no sibling scan", async () => {

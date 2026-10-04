@@ -41,17 +41,13 @@
 // Safety: the sync checkout starts at exactly what Dealer pushed (NOT-219 reuse
 // semantics) and is removed afterwards; the push is always a plain
 // `git push -u origin HEAD:refs/heads/<branch>` — never force, never a lease
-// retry, never a rebase. A pre-push hook pins that push to the tip we merged
-// onto (see {@link pinnedPushEnv}), so even a hand reset to an ancestor landing
-// after the last tip read is refused instead of fast-forwarded over; the
-// repository's own pre-push hook is chained and still vetoes the push. An existing checkout holding the branch belongs to
+// retry, never a rebase. An existing checkout holding the branch belongs to
 // someone else and fails closed to today's escalation, except our own
 // merge-sync leftover from a crashed run (dead owner + clean tree), which is
 // adopted. Every refusal or infra failure degrades to today's escalation — the
 // sync only ever adds a self-resolution attempt, never removes an outcome.
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { Issue, IssueStatus } from "@agent-dealer/shared";
@@ -71,9 +67,6 @@ import {
   enqueueWorkItem,
   finishWorkItem,
   listWorkItemsForIssue,
-  dropReservedWorkItem,
-  releaseReservedWorkItem,
-  reserveWorkItem,
 } from "../repository/work-items.js";
 import {
   appendWorkflowEvent,
@@ -130,7 +123,7 @@ export function isMergeConflictFailure(reason: string): boolean {
  * inject a recorder (delegating or fake) to assert exact CLI args. */
 export type SyncGitExec = (
   args: string[],
-  opts: { cwd: string; timeoutMs: number; env?: Record<string, string> }
+  opts: { cwd: string; timeoutMs: number }
 ) => Promise<{ stdout: string; stderr: string }>;
 
 /** Failure from {@link defaultSyncGitExec} — `killed` marks a timeout kill, as
@@ -157,7 +150,6 @@ export const defaultSyncGitExec: SyncGitExec = async (args, opts) => {
       cwd: opts.cwd,
       encoding: "utf8",
       timeout: opts.timeoutMs,
-      ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
     });
     return { stdout, stderr };
   } catch (err) {
@@ -248,7 +240,7 @@ export type ConflictSyncOutcome =
   | { outcome: "escalate"; reason: string; evidence: Record<string, unknown> }
   /** The sync was not applicable — the caller escalates exactly as today. NOT-356:
    * `tip_moved` when origin was not the caller's `expectedHeadSha`, `refused` when
-   * its `reservePush` guard declined the push. */
+   * its `beforePush` guard declined the push. */
   | { outcome: "skipped"; reason: string; code?: "tip_moved" | "refused" }
   /** NOT-354 `checks_wait` only: the base merged cleanly and was pushed. */
   | { outcome: "synced"; headSha: string | null }
@@ -551,121 +543,41 @@ function publishOnlyPayload(item: { payloadJson: string | null }): Record<string
   }
 }
 
-/** Lease holder of a base-advanced push hold (never a dispatcher's owner). */
-const BASE_SYNC_HOLDER = "base-advanced-sync";
-
-/** A {@link reserveBaseSyncPush} hold: the leased item, its token, and whether it is
- * the sibling's own parked item (else a sentinel queued for the hold). */
-export type BaseSyncReservation = { id: string; token: string; parked: boolean };
-
 /**
- * NOT-356: hold an idle sibling for a `base_advanced` sync push. Runs right before
- * the push, in one transaction with the caller's idleness/ownership guard, and
- * leases the instance's one pending item to the sync — the parked item itself, or
- * a sentinel when the sibling is parked on a gate with no item. While it is held no
- * dispatcher can claim it and no other item can be queued for the instance
- * (`idx_work_items_one_active`), so no worker can start on the branch while the
- * push is in flight. Nothing else changes until the push lands
- * ({@link commitBaseSyncReservation}); if it does not,
- * {@link cancelBaseSyncReservation} returns the sibling to exactly how it was.
+ * NOT-356: a clean `base_advanced` sync pushed a new head onto an idle sibling, so
+ * whatever it was parked on (a reviewer pinned to the old head, a final_review or
+ * needs_human gate, a deferred CI wait) is stale. Re-enter the normal checks wait
+ * on the pushed head: supersede the parked step and queue a no-agent publish-only
+ * developer item at the current round (no round spent) — it verifies the PR, polls
+ * CI on the new head, and hands off to review exactly like a NOT-354 re-poll. A
+ * deferred CI wait's `checksWaitStartedAt` carries over so its ceiling is never
+ * reset. A queued agent developer round (a repair round not yet started) is kept:
+ * it starts from the synced origin tip and runs its own checks wait.
  *
- * A string is the refusal reason when the sibling is no longer idle or left its stage.
+ * Null when the sibling is no longer idle or left its stage (the push already
+ * happened; that worker's own probe / CI wait sees the new head).
  */
-export function reserveBaseSyncPush(input: {
+export function queueChecksWaitAfterBaseSync(input: {
   issueId: string;
   instanceId: string;
+  baseBranch: string;
   branch: string;
+  prNumber: number;
   headSha: string | null;
   guard?: () => string | null;
-}): BaseSyncReservation | string {
-  return getDb().transaction((): BaseSyncReservation | string => {
-    const refusal = input.guard?.() ?? null;
-    if (refusal) return refusal;
-    const current = getIssue(input.issueId);
-    if (!current || !BASE_ADVANCED_STATUSES.includes(current.status)) return "issue left its open stage";
-    const active = getActiveWorkflowInstance(input.issueId);
-    if (!active || active.id !== input.instanceId) return "its workflow instance is no longer active";
-    if (!siblingIdle(input.issueId)) return "issue is no longer idle";
-    const lease = { leaseMs: 2 * mergeSyncConfig.syncGitTimeoutMs + 60_000 };
-    const parked = listWorkItemsForIssue(input.issueId).find(
-      (w) => w.status === "pending" && w.workflowInstanceId === active.id
-    );
-    const item =
-      parked ??
-      enqueueWorkItem({
-        issueId: input.issueId,
-        workflowInstanceId: active.id,
-        kind: "developer",
-        round: current.currentRound,
-        // A valid CI wait in its own right, should crash recovery requeue the hold.
-        payload: {
-          publishOnly: true,
-          branch: input.branch,
-          profileSnapshot: queuedDeveloperProfileSnapshot(current),
-          baseSyncHold: true,
-        },
-        idempotencyKey: uniqueKey(input.issueId, `${active.id}:developer:base-advanced-hold:${input.headSha ?? current.currentRound}`),
-      });
-    const token = reserveWorkItem(item.id, BASE_SYNC_HOLDER, lease);
-    // Unreachable: the item is pending in this same transaction.
-    if (!token) throw new Error(`could not hold work item ${item.id}`);
-    return { id: item.id, token, parked: parked != null };
-  })();
-}
-
-/** NOT-356: whether a {@link reserveBaseSyncPush} hold is on the issue — a sync may
- * be pushing onto its branch, so nothing else (auto-merge included) may act on it. */
-export function isBaseSyncHeld(issueId: string): boolean {
-  return listWorkItemsForIssue(issueId).some((w) => w.status === "leased" && w.leaseOwner === BASE_SYNC_HOLDER);
-}
-
-/** Nothing was pushed: hand the parked item back untouched, or drop the sentinel. */
-export function cancelBaseSyncReservation(reservation: BaseSyncReservation): void {
-  if (reservation.parked) releaseReservedWorkItem(reservation.id, reservation.token);
-  else dropReservedWorkItem(reservation.id, reservation.token);
-}
-
-/**
- * NOT-356: the clean `base_advanced` sync pushed a new head onto the held sibling,
- * so whatever it was parked on (a reviewer pinned to the old head, a final_review
- * or needs_human gate, a deferred CI wait) is stale. Re-enter the normal checks
- * wait on the pushed head: supersede the parked step and queue a no-agent
- * publish-only developer item at the current round (no round spent) — it verifies
- * the PR, polls CI on the new head, and hands off to review exactly like a NOT-354
- * re-poll. A deferred CI wait's `checksWaitStartedAt` carries over so its ceiling
- * is never reset. A held agent developer round (a repair round not yet started) is
- * handed back instead: it starts from the synced origin tip and runs its own
- * checks wait.
- *
- * Null when the hold was revoked meanwhile (an abort cancelled the item) or the
- * issue left its stage — the hold is then given up and nothing else changes.
- */
-export function commitBaseSyncReservation(
-  reservation: BaseSyncReservation,
-  input: { issueId: string; instanceId: string; baseBranch: string; branch: string; prNumber: number; headSha: string | null }
-): { id: string; kept: boolean } | null {
+}): { id: string; kept: boolean } | null {
   return getDb().transaction(() => {
-    const held = listWorkItemsForIssue(input.issueId).find(
-      (w) => w.id === reservation.id && w.status === "leased" && w.leaseToken === reservation.token
-    );
-    if (!held) return null;
     const current = getIssue(input.issueId);
+    if (!current || !BASE_ADVANCED_STATUSES.includes(current.status)) return null;
     const active = getActiveWorkflowInstance(input.issueId);
-    if (
-      !current ||
-      !BASE_ADVANCED_STATUSES.includes(current.status) ||
-      active?.id !== input.instanceId ||
-      getActiveWorkerSessionForIssue(input.issueId)
-    ) {
-      cancelBaseSyncReservation(reservation);
-      return null;
-    }
-    if (reservation.parked && held.kind === "developer" && !publishOnlyPayload(held)) {
-      releaseReservedWorkItem(reservation.id, reservation.token);
-      return { id: held.id, kept: true };
-    }
-    const priorWait = reservation.parked ? publishOnlyPayload(held) : null;
-    dropReservedWorkItem(reservation.id, reservation.token);
+    if (!active || active.id !== input.instanceId) return null;
+    if (!siblingIdle(input.issueId, input.guard)) return null;
+    const pending = listWorkItemsForIssue(input.issueId).filter((w) => w.status === "pending");
+    const agentRound = pending.find((w) => w.kind === "developer" && !publishOnlyPayload(w));
+    if (agentRound) return { id: agentRound.id, kept: true };
+    const priorWait = pending
+      .map((w) => publishOnlyPayload(w))
+      .find((p) => p != null && typeof p.checksWaitStartedAt === "string");
 
     const head = input.headSha ? input.headSha.slice(0, 12) : "the synced head";
     supersedeParkedStep(
@@ -677,6 +589,10 @@ export function commitBaseSyncReservation(
       currentOwner: "developer",
       currentIntent: `Synced ${input.baseBranch} into PR #${input.prNumber}; waiting for CI on ${head} (no agent)`,
     });
+    const taken = new Set(listWorkItemsForIssue(input.issueId).map((w) => w.idempotencyKey));
+    const keyBase = `${active.id}:developer:base-advanced-sync:${input.headSha ?? current.currentRound}`;
+    let key = keyBase;
+    for (let n = 2; taken.has(key); n++) key = `${keyBase}:${n}`;
     const item = enqueueWorkItem({
       issueId: input.issueId,
       workflowInstanceId: active.id,
@@ -686,25 +602,12 @@ export function commitBaseSyncReservation(
         publishOnly: true,
         branch: input.branch,
         profileSnapshot: queuedDeveloperProfileSnapshot(current),
-        ...(typeof priorWait?.checksWaitStartedAt === "string"
-          ? { checksWaitStartedAt: priorWait.checksWaitStartedAt }
-          : {}),
+        ...(priorWait ? { checksWaitStartedAt: priorWait.checksWaitStartedAt } : {}),
       },
-      idempotencyKey: uniqueKey(
-        input.issueId,
-        `${active.id}:developer:base-advanced-sync:${input.headSha ?? current.currentRound}`
-      ),
+      idempotencyKey: key,
     });
     return { id: item.id, kept: false };
   })();
-}
-
-/** `keyBase`, suffixed until no work item of the issue uses it. */
-function uniqueKey(issueId: string, keyBase: string): string {
-  const taken = new Set(listWorkItemsForIssue(issueId).map((w) => w.idempotencyKey));
-  let key = keyBase;
-  for (let n = 2; taken.has(key); n++) key = `${keyBase}:${n}`;
-  return key;
 }
 
 function tryRealpath(p: string): string {
@@ -778,99 +681,6 @@ async function readRemoteTip(
   }
 }
 
-/** Marker the pinned pre-push hook prints when origin's tip is not the expected one. */
-const PINNED_PUSH_REFUSAL = "dealer-sync: origin tip is not the synced tip";
-
-/** Marker the pinned pre-push hook prints when the push's fence was revoked. */
-const PINNED_PUSH_FENCED = "dealer-sync: the push was revoked (issue aborted)";
-
-/** Fails the push unless every remote ref it updates is at the expected SHA,
- * then hands the same stdin and arguments to the repository's own pre-push
- * hook (if any), so a repository hook still vetoes the push. Last, as the
- * final step before git sends the update, an armed fence file
- * (`DEALER_SYNC_FENCE`) must still exist — {@link revokeBaseSyncPush} deletes it.
- * Git hands the hook the remote values from the same connection's ref
- * advertisement, and receive-pack only applies the update if the ref still
- * holds that value — so the check-and-update is atomic on origin without any
- * force flag. */
-const PINNED_PRE_PUSH_HOOK = `#!/bin/sh
-input=$(cat)
-if [ -n "$input" ]; then
-  printf '%s\\n' "$input" | while read local_ref local_sha remote_ref remote_sha; do
-    [ -z "$local_ref" ] && continue
-    if [ "$remote_sha" != "$DEALER_SYNC_EXPECTED_REMOTE_SHA" ]; then
-      echo "${PINNED_PUSH_REFUSAL} ($remote_ref is at $remote_sha, expected $DEALER_SYNC_EXPECTED_REMOTE_SHA)" >&2
-      exit 1
-    fi
-  done || exit 1
-fi
-if [ -n "$DEALER_SYNC_REPO_PRE_PUSH" ] && [ -f "$DEALER_SYNC_REPO_PRE_PUSH" ] && [ -x "$DEALER_SYNC_REPO_PRE_PUSH" ]; then
-  if [ -n "$input" ]; then printf '%s\\n' "$input"; fi | "$DEALER_SYNC_REPO_PRE_PUSH" "$@"
-  status=$?
-  [ "$status" -ne 0 ] && exit "$status"
-fi
-if [ -n "$DEALER_SYNC_FENCE" ] && [ ! -f "$DEALER_SYNC_FENCE" ]; then
-  echo "${PINNED_PUSH_FENCED}" >&2
-  exit 1
-fi
-exit 0
-`;
-
-/**
- * NOT-356: env that installs {@link PINNED_PRE_PUSH_HOOK} for one push (via
- * `GIT_CONFIG_*`, appended after any inherited entries) and pins it to
- * `expectedSha`. The repository's own pre-push hook — resolved from `cwd`
- * before the override, honoring any `core.hooksPath` — is chained so it still
- * runs. Synchronous so no await sits between the caller's last check and the
- * push. Throws (fail closed) if the hook path cannot be resolved. The caller
- * removes `dir` once the push settles.
- */
-function pinnedPushEnv(
-  cwd: string,
-  expectedSha: string,
-  fenced = false
-): { env: Record<string, string>; dir: string; fence: string | null } {
-  const repoHook = path.resolve(
-    cwd,
-    execFileSync("git", ["rev-parse", "--git-path", "hooks/pre-push"], { cwd, encoding: "utf8" }).trim()
-  );
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-sync-push-"));
-  fs.writeFileSync(path.join(dir, "pre-push"), PINNED_PRE_PUSH_HOOK, { mode: 0o755 });
-  const fence = fenced ? path.join(dir, "fence") : null;
-  if (fence) fs.writeFileSync(fence, "");
-  const inherited = Number.parseInt(process.env.GIT_CONFIG_COUNT ?? "0", 10);
-  const index = Number.isFinite(inherited) && inherited > 0 ? inherited : 0;
-  return {
-    dir,
-    fence,
-    env: {
-      ...(fence ? { DEALER_SYNC_FENCE: fence } : {}),
-      GIT_CONFIG_COUNT: String(index + 1),
-      [`GIT_CONFIG_KEY_${index}`]: "core.hooksPath",
-      [`GIT_CONFIG_VALUE_${index}`]: dir,
-      DEALER_SYNC_EXPECTED_REMOTE_SHA: expectedSha,
-      DEALER_SYNC_REPO_PRE_PUSH: repoHook,
-    },
-  };
-}
-
-/** Fence files of the reserved pushes in flight, by issue. */
-const pushFences = new Map<string, string>();
-
-/**
- * NOT-356: revoke an in-flight reserved sync push for the issue (the abort path).
- * Best-effort, by design: the pinned hook refuses the push only if its fence check
- * has not run yet. Once git is past the hook (sending the pack, remote receive
- * hooks) nothing can stop the ref update — the ticket's declared boundary: no
- * locks, leases or post-push rollback for state changes during the in-flight
- * push. Whatever lands is left to the reservation's own fencing (the aborted item
- * is cancelled, so nothing follows it).
- */
-export function revokeBaseSyncPush(issueId: string): void {
-  const fence = pushFences.get(issueId);
-  if (fence) fs.rmSync(fence, { force: true });
-}
-
 /** Best-effort removal of our own sync checkout. `branchPushed: true` is
  * truthful on the abort path (the branch never moved off the fetched origin
  * tip) and safe on the failed-push path (the only unpushed state possible is
@@ -904,14 +714,8 @@ export async function runMergeConflictSync(opts: {
   entry?: ConflictSyncEntry;
   /** NOT-356: the origin tip the caller validated; any other tip is not synced. */
   expectedHeadSha?: string;
-  /**
-   * NOT-356: called after the last await before the push, with the head about to
-   * be pushed. A string refuses the push. Otherwise the returned reservation
-   * holds the issue for the whole push (see {@link reserveBaseSyncPush}) and the
-   * push is fenced against an abort ({@link revokeBaseSyncPush}); its `release`
-   * runs once the push finished, told whether it landed.
-   */
-  reservePush?: (headSha: string | null) => string | { release: (pushed: boolean) => void };
+  /** NOT-356: re-checked right before the push — a non-null reason refuses it. */
+  beforePush?: () => string | null;
 }): Promise<ConflictSyncOutcome> {
   const entry: ConflictSyncEntry = opts.entry ?? "merge";
   // NOT-356: `base_advanced` takes the checks-wait shape (push-only, caller queues).
@@ -1152,63 +956,27 @@ export async function runMergeConflictSync(opts: {
           "tip_moved"
         );
   }
-  // NOT-356: the caller's ownership/idleness rule, checked and reserved at the
-  // mutation boundary — after the last await, so nothing can close the issue or
-  // start a worker between this check and the push starting, and the
-  // reservation keeps it that way until the push is over.
-  const reserved = opts.reservePush?.(headAfterMerge) ?? null;
-  if (typeof reserved === "string") {
-    const refusal = reserved;
+  // NOT-356: the caller's ownership/idleness rule, re-checked at the mutation
+  // boundary — after the last await, so nothing can close the issue or start a
+  // worker between this check and the push starting.
+  const refusal = opts.beforePush?.() ?? null;
+  if (refusal) {
     // Drop our unpushed base merge so the branch ref is back at the fetched tip.
     await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
     await cleanupSyncCheckout(repoPath, syncPath);
     return skip(refusal, "refused");
   }
 
-  // Plain push, never force — the refspec mirrors pushBranch exactly. The
-  // pinned pre-push hook closes the window between the tip read above and the
-  // push: origin must still be at the fetched tip inside the push itself.
-  let pinned: ReturnType<typeof pinnedPushEnv>;
-  try {
-    pinned = pinnedPushEnv(syncPath, reused.remoteSha, reserved != null);
-  } catch (err) {
-    reserved?.release(false);
-    await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
-    await cleanupSyncCheckout(repoPath, syncPath);
-    const detail = err instanceof Error ? err.message : String(err);
-    return skip(`could not prepare the pinned push: ${detail}`);
-  }
-  if (pinned.fence) pushFences.set(opts.issueId, pinned.fence);
-  let pushed = false;
+  // Plain push, never force — the refspec mirrors pushBranch exactly.
   try {
     await gitExecImpl(["push", "-u", "origin", `HEAD:refs/heads/${opts.branch}`], {
       cwd: syncPath,
       timeoutMs,
-      env: pinned.env,
     });
-    pushed = true;
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    const stderr = err instanceof SyncGitError ? err.stderr : "";
-    if (`${detail}\n${stderr}`.includes(PINNED_PUSH_FENCED)) {
-      await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
-      await cleanupSyncCheckout(repoPath, syncPath);
-      return skip(`the push was revoked as it started; nothing was pushed`, "refused");
-    }
-    if (`${detail}\n${stderr}`.includes(PINNED_PUSH_REFUSAL)) {
-      await gitExecImpl(["reset", "--hard", reused.remoteSha], { cwd: syncPath, timeoutMs }).catch(() => {});
-      await cleanupSyncCheckout(repoPath, syncPath);
-      return skip(
-        `origin/${opts.branch} moved off ${reused.remoteSha} as the push started; nothing was pushed`,
-        "tip_moved"
-      );
-    }
     await cleanupSyncCheckout(repoPath, syncPath);
+    const detail = err instanceof Error ? err.message : String(err);
     return failed(`could not push the synced branch: ${detail}`);
-  } finally {
-    if (pinned.fence && pushFences.get(opts.issueId) === pinned.fence) pushFences.delete(opts.issueId);
-    fs.rmSync(pinned.dir, { recursive: true, force: true });
-    reserved?.release(pushed);
   }
 
   // NOT-354: the push-only entries stop at the push — the deferred CI wait
