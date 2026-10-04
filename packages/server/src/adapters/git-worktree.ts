@@ -46,9 +46,9 @@ function run(
   return execFileAsync(file, args, { ...opts, encoding: "utf8" });
 }
 
-async function git(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+async function git(cwd: string, args: string[], timeout?: number): Promise<{ stdout: string; stderr: string }> {
   try {
-    return await run("git", args, { cwd });
+    return await run("git", args, timeout === undefined ? { cwd } : { cwd, timeout });
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; message: string };
     throw new Error(`git ${args.join(" ")} failed: ${e.stderr?.trim() || e.message}`);
@@ -752,11 +752,12 @@ export async function pushLeaseToSha(opts: {
 /**
  * NOT-221: read origin's live tip for a branch without touching local refs — shown on
  * the still-open action after a lease push fails, so the operator sees what moved.
- * Null when the branch cannot be resolved remotely (deleted, renamed, or unreachable).
+ * Null when the branch cannot be resolved remotely (deleted, renamed, unreachable, or
+ * — when `timeoutMs` is given — the read stalled past that bound).
  */
-export async function readRemoteTip(opts: { cwd: string; branch: string }): Promise<string | null> {
+export async function readRemoteTip(opts: { cwd: string; branch: string; timeoutMs?: number }): Promise<string | null> {
   try {
-    const { stdout } = await git(opts.cwd, ["ls-remote", "origin", `refs/heads/${opts.branch}`]);
+    const { stdout } = await git(opts.cwd, ["ls-remote", "origin", `refs/heads/${opts.branch}`], opts.timeoutMs);
     const sha = stdout.trim().split(/\s+/)[0];
     return sha && /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
   } catch {

@@ -264,7 +264,9 @@ async function scanSibling(
 
   // The textual-conflict path returns before the sync's own pre-push tip read, so
   // re-read origin right before the repair mutation: a hand edit is never touched.
-  const tipNow = await readRemoteTip({ cwd: repoPath, branch });
+  // Bounded like the sync's own git calls: a stalled remote must not hold up the
+  // remaining siblings, and a timed-out read (null) fails closed as hand_edited.
+  const tipNow = await readRemoteTip({ cwd: repoPath, branch, timeoutMs: DEFAULT_BASE_FETCH_TIMEOUT_MS });
   const lastPushedNow = lastDealerPushedSha(issue);
   if (tipNow !== lastPushedNow) {
     return { action: "hand_edited", detail: { ...probeDetail, remoteSha: tipNow, lastPushedSha: lastPushedNow } };
