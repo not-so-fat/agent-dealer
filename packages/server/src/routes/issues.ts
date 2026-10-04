@@ -24,7 +24,8 @@ import {
 } from "../repository/workflow-events.js";
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
-import { abortIssueAsync, canEditParkedIssue, checkIssueReadiness, closeReadyIssue } from "../coordinator/commands.js";
+import { abortIssueAsync, applyParkedEdit, canEditParkedIssue, capWaitForIssue, checkIssueReadiness, closeReadyIssue, parkCapWait, PARKED_EDITABLE_FIELDS } from "../coordinator/commands.js";
+import { getAgent } from "../repository/agents.js";
 import {
   executeIssueNow,
   isStartable,
@@ -41,8 +42,7 @@ import { branchTipStatusForIssue } from "../coordinator/branch-tip-status.js";
 
 const TRACE_DEFAULT_MAX_CHARS = 50_000;
 const TRACE_HARD_MAX_CHARS = 200_000;
-/** NOT-185: the only fields PATCH accepts at an open attempts_exhausted park. */
-const PARKED_EDITABLE_FIELDS: ReadonlySet<string> = new Set(["title", "description", "acceptanceCriteria"]);
+
 
 /** Non-numeric, non-finite, zero, or negative all fall back to the default rather than
  * disabling the cap — `Number("not-a-number")` is NaN, and `Math.min(NaN, N)` is NaN,
@@ -182,6 +182,9 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       queued: getQueuedEntryForIssue(id) != null,
       // NOT-118: position + current wait reason so a queued `ready` issue never reads as idle.
       queueEntry: queueStatusForIssue(id),
+      // NOT-358: usage-cap / deck-outage wait behind an availability window, if any —
+      // the dashboard offers "Park for human" next to the wait notice.
+      capWait: capWaitForIssue(id),
     };
   });
 
@@ -307,23 +310,42 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       if (fresh.status !== "ready" && fresh.status !== "needs_human") {
         return `Cannot edit an issue that is ${fresh.status}`;
       }
+      // NOT-358: an agent swap must never race a live worker — a running session
+      // owns the frozen profile snapshot the next spawn would read.
+      if (getActiveWorkerSessionForIssue(id)) {
+        return "Cannot edit an issue with an actively running session";
+      }
       // NOT-185: the one active-workflow exception — parked at an open attempts_exhausted
-      // action with nothing pending/leased. Retry re-freezes the snapshot from these fields.
+      // or policy_escalation action with nothing pending/leased. A resume re-freezes the
+      // snapshot (task fields) and the next round's profile snapshot (agent fields).
       if (getActiveWorkflowInstance(id)) {
         if (!canEditParkedIssue(fresh)) {
           return "Cannot edit an issue with an active workflow";
         }
-        // Only the fields the snapshot is frozen from may change at the park: the review budget,
-        // repo/base branch, agents and autoMerge stay as the running workflow saw them.
+        // Only the re-frozen inputs may change at the park: repo/base branch, the review
+        // budget and autoMerge stay as the running workflow saw them.
         const blocked = Object.keys(parsed.data).filter((k) => !PARKED_EDITABLE_FIELDS.has(k));
         if (blocked.length > 0) {
-          return `Only title, description and acceptanceCriteria can be edited while parked at attempts_exhausted (got: ${blocked.join(", ")})`;
+          return `Only title, description, acceptanceCriteria, developerAgentId and reviewerAgentId can be edited while parked (got: ${blocked.join(", ")})`;
         }
       }
       return null;
     };
     const fastPath = guardConflict(issue);
     if (fastPath) return reply.status(409).send({ error: fastPath });
+
+    // An active workflow instance here is a parked edit — the fast-path guard already
+    // established it is editable. The kernel command re-checks that guard inside its own
+    // transaction, so an edit that races a resume fails closed instead of landing on a
+    // live snapshot. Queue order is untouched — position is preserved by construction.
+    if (getActiveWorkflowInstance(id)) {
+      const result = applyParkedEdit(id, parsed.data);
+      if (!result.ok) return reply.status(result.code).send({ error: result.error });
+      // NOT-217: re-derive the visible wait reason now that admission may see a
+      // different (e.g. healthy) agent.
+      await refreshQueueWaitReasonForIssue(id);
+      return result.issue;
+    }
 
     // Guard re-check + row write + `issue.reassigned` audit in one transaction, so an
     // edit that races admission fails closed instead of landing on a live snapshot.
@@ -336,6 +358,14 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
         if (!fresh) throw Object.assign(new Error("Not found"), { code: 404 });
         const conflict = guardConflict(fresh);
         if (conflict) throw Object.assign(new Error(conflict), { code: 409 });
+        // NOT-358: an agent assignment must reference an existing profile — a dangling
+        // id would only surface later as a failed admission or a broken resume.
+        for (const role of ["developerAgentId", "reviewerAgentId"] as const) {
+          const agentId = parsed.data[role];
+          if (agentId !== undefined && !getAgent(agentId)) {
+            throw Object.assign(new Error(`Unknown agent profile: ${agentId}`), { code: 400 });
+          }
+        }
         const next = updateIssue(id, parsed.data);
         // NOT-217/NOT-240: durable configuration audit — only when an execution input
         // actually changed, comparing against the freshly read row so a concurrent edit
@@ -373,6 +403,7 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       }
       const code = (err as { code?: number }).code;
       const message = err instanceof Error ? err.message : String(err);
+      if (code === 400) return reply.status(400).send({ error: message });
       if (code === 404) return reply.status(404).send({ error: message });
       if (code === 409) return reply.status(409).send({ error: message });
       throw err;
@@ -421,6 +452,22 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       position: queued?.position ?? null,
       waitReason: queued?.waitReason ?? null,
     } satisfies ExecuteIssueResponse & { error: string });
+  });
+
+  /**
+   * NOT-358: park an issue that is waiting on a usage-cap or deck-outage window for a
+   * human. Cancels the wait without touching the worktree, moves the issue to
+   * `needs_human` with one open `policy_escalation` naming the cap and its `until`,
+   * and answers the updated issue plus the new action id. A `resume` of that action
+   * continues with whichever agents are then set.
+   */
+  app.post("/api/issues/:id/park", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { parkedBy?: string };
+    const parkedBy = typeof body.parkedBy === "string" && body.parkedBy.trim() ? body.parkedBy.trim() : "human";
+    const result = parkCapWait(id, parkedBy);
+    if (!result.ok) return reply.status(result.code).send({ error: result.error });
+    return { ...getIssue(id)!, humanActionId: result.humanActionId };
   });
 
   app.post("/api/issues/:id/abort", async (req, reply) => {

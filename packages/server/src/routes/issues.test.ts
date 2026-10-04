@@ -16,14 +16,15 @@ function tmpTraceFile(content: string): string {
 process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-issue-routes-"));
 
 const { migrate, getDb } = await import("../db/index.js");
-const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
+const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CODEX_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
 const { registerIssueRoutes } = await import("./issues.js");
 const { transitionIssue, listIssuesByExternalId, getIssue } = await import("../repository/issues.js");
 const { createHumanAction } = await import("../repository/human-actions.js");
 const { createIssueArtifact } = await import("../repository/artifacts.js");
-const { claimWorkItem } = await import("../repository/work-items.js");
+const { claimWorkItem, cancelWorkItem } = await import("../repository/work-items.js");
+const { randomUUID } = await import("node:crypto");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
-const { applyCompletion, resolveHumanActionAndAdvance, getTaskSnapshot } = await import("../coordinator/commands.js");
+const { applyCompletion, resolveHumanActionAndAdvance, getTaskSnapshot, startWorkflow } = await import("../coordinator/commands.js");
 const { ReviewerResult } = await import("../coordinator/reviewer-result.js");
 const { getQueuedEntryForIssue, listQueuedEntries } = await import("../repository/queue-entries.js");
 const { admitNext, setAdmissionHealthCheckerForTests, queueStatusForIssue } = await import(
@@ -31,7 +32,7 @@ const { admitNext, setAdmissionHealthCheckerForTests, queueStatusForIssue } = aw
 );
 const { listWorkflowInstancesForIssue } = await import("../repository/workflow-events.js");
 const { listWorkItemsForIssue } = await import("../repository/work-items.js");
-const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
+const { createWorkerSession, listWorkerSessionsForIssue, startSession } = await import("../repository/worker-sessions.js");
 const { createAgent } = await import("../repository/agents.js");
 const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
 
@@ -325,14 +326,14 @@ test("NOT-185: PATCH /api/issues/:id succeeds while parked at attempts_exhausted
       findings: [],
       risks: []})});
 
-  // Non-task fields stay frozen at the park — notably the review budget (a non-goal).
+  // Non-task, non-agent fields stay frozen at the park — notably the review budget
+  // (a non-goal). Agent profiles are swappable at the park (NOT-358, covered below),
+  // so they are no longer in this blocked list.
   for (const payload of [
     { maxReviewRounds: 5 },
     { maxInfraAttempts: 3 },
     { repo: "acme/other" },
     { baseBranch: "develop" },
-    { developerAgentId: BUILTIN_AGENT_CURSOR_ID },
-    { reviewerAgentId: BUILTIN_AGENT_CLAUDE_ID },
     { autoMerge: true },
     { title: "Mixed", maxReviewRounds: 5 },
   ]) {
@@ -1426,5 +1427,372 @@ test("NOT-239: closed issues leave the default paginated list but stay findable 
   // Legacy unpaginated list (CLI contract) is untouched.
   const legacy = (await app.inject({ method: "GET", url: "/api/issues" })).json() as Array<{ id: string }>;
   assert.ok(legacy.some((i) => i.id === closedId));
+  await app.close();
+});
+
+// NOT-358: parked agent-swap and cap-wait park shared helpers.
+async function n358ParkAtAttemptsExhausted(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  extra: Record<string, unknown> = {}
+) {
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Swap me",
+        description: "old",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        maxReviewRounds: 1,
+        acceptanceCriteria: "Old criteria",
+        ...extra,
+      },
+    })
+  ).json() as { id: string };
+  // Force-started: an HTTP start would queue behind other in-flight issues in the
+  // same test — the PATCH surface under test is identical either way.
+  assert.equal(startWorkflow(created.id).ok, true);
+  const complete = async (outcome: Parameters<typeof applyCompletion>[2]) => {
+    const item = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+    await applyCompletion(item.id, item.leaseToken!, outcome);
+  };
+  await complete({ kind: "clean_handoff", branch: "swap-b", headSha: "abc", baseSha: "base", prNumber: 1, prUrl: "https://gh/pr/1" });
+  await complete({
+    kind: "verdict",
+    result: ReviewerResult.parse({
+      verdict: "changes_requested",
+      baseSha: "b",
+      headSha: "h",
+      acceptanceCriteriaAssessment: "ok",
+      evidenceAssessment: "ok",
+      findings: [],
+      risks: [],
+    }),
+  });
+  return created.id;
+}
+
+/** The frozen profile snapshot the resumed round carries — what the next session spawns from. */
+function n358PendingSnapshot(issueId: string, kind: "developer" | "reviewer") {
+  const item = listWorkItemsForIssue(issueId).find((i) => i.status === "pending" && i.kind === kind)!;
+  assert.ok(item, `expected a pending ${kind} work item`);
+  const payload = JSON.parse(item.payloadJson!) as { profileSnapshot?: string };
+  const snapshot = JSON.parse(payload.profileSnapshot!) as { agentId: string; runtime: string; role: string };
+  return snapshot;
+}
+
+test("NOT-358: PATCH swaps the developer alone at an attempts_exhausted park, and resume freezes the new profile", async () => {
+  const app = await buildApp();
+  const issueId = await n358ParkAtAttemptsExhausted(app);
+  const patch = (payload: object) => app.inject({ method: "PATCH", url: `/api/issues/${issueId}`, payload });
+
+  const res = await patch({ developerAgentId: BUILTIN_AGENT_CODEX_ID });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { developerAgentId: string; reviewerAgentId: string; branch: string | null; currentRound: number; maxReviewRounds: number };
+  assert.equal(body.developerAgentId, BUILTIN_AGENT_CODEX_ID);
+  assert.equal(body.reviewerAgentId, BUILTIN_AGENT_CURSOR_ID, "the other role is untouched");
+  assert.equal(body.branch, "swap-b", "the swap keeps the existing branch");
+  assert.deepEqual([body.currentRound, body.maxReviewRounds], [1, 1], "rounds are unchanged");
+
+  const events = listWorkflowEventsForIssue(issueId).filter((e) => e.type === "issue.reassigned");
+  assert.equal(events.length, 1);
+  assert.deepEqual(JSON.parse(events[0]!.payloadJson!), {
+    fromRepo: "github.com/acme/app",
+    toRepo: "github.com/acme/app",
+    fromDeveloperAgentId: BUILTIN_AGENT_CLAUDE_ID,
+    toDeveloperAgentId: BUILTIN_AGENT_CODEX_ID,
+    fromReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    toReviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+  });
+
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "attempts_exhausted")!;
+  assert.equal(resolveHumanActionAndAdvance(action.id, "op", "retry").ok, true);
+  // The resumed developer round carries the NEW profile — the worker loop builds the
+  // spawned session (agent + runtime) from exactly this snapshot.
+  const snapshot = n358PendingSnapshot(issueId, "developer");
+  assert.equal(snapshot.agentId, BUILTIN_AGENT_CODEX_ID);
+  assert.equal(snapshot.runtime, "codex_local");
+  assert.equal(snapshot.role, "developer");
+  await app.close();
+});
+
+test("NOT-358: PATCH swaps the reviewer alone and both roles together at a policy_escalation park", async () => {
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Capped",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${created.id}/start` })).statusCode, 200);
+  const item = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  const until = new Date(Date.now() + 300_000).toISOString();
+  await applyCompletion(item.id, item.leaseToken!, {
+    kind: "usage_capped",
+    until,
+    reason: "claude_code usage capped — five_hour limit rejected",
+  });
+
+  // The detail names the wait — the dashboard parks from this notice.
+  const waiting = (await app.inject({ method: "GET", url: `/api/issues/${created.id}` })).json() as {
+    capWait: { kind: string; until: string; reason: string } | null;
+  };
+  assert.deepEqual(waiting.capWait, {
+    kind: "usage_capped",
+    until,
+    reason: "claude_code usage capped — five_hour limit rejected",
+  });
+
+  const parked = await app.inject({ method: "POST", url: `/api/issues/${created.id}/park`, payload: {} });
+  assert.equal(parked.statusCode, 200);
+  const parkedBody = parked.json() as { id: string; status: string; humanActionId: string };
+  assert.equal(parkedBody.status, "needs_human");
+  assert.ok(parkedBody.humanActionId);
+
+  const patch = (payload: object) => app.inject({ method: "PATCH", url: `/api/issues/${created.id}`, payload });
+  const revRes = await patch({ reviewerAgentId: BUILTIN_AGENT_CLAUDE_ID });
+  assert.equal(revRes.statusCode, 200);
+  assert.equal((revRes.json() as { reviewerAgentId: string }).reviewerAgentId, BUILTIN_AGENT_CLAUDE_ID);
+
+  const bothRes = await patch({ developerAgentId: BUILTIN_AGENT_CODEX_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID });
+  assert.equal(bothRes.statusCode, 200);
+  const bothBody = bothRes.json() as { developerAgentId: string; reviewerAgentId: string };
+  assert.equal(bothBody.developerAgentId, BUILTIN_AGENT_CODEX_ID);
+  assert.equal(bothBody.reviewerAgentId, BUILTIN_AGENT_CURSOR_ID);
+  assert.equal(
+    listWorkflowEventsForIssue(created.id).filter((e) => e.type === "issue.reassigned").length,
+    2,
+    "one reassigned event per PATCH"
+  );
+
+  const action = listHumanActionsForIssue(created.id).find((a) => a.status === "open")!;
+  assert.equal(action.actionType, "policy_escalation");
+  assert.equal(resolveHumanActionAndAdvance(action.id, "op", "resume").ok, true);
+  const snapshot = n358PendingSnapshot(created.id, "developer");
+  assert.equal(snapshot.agentId, BUILTIN_AGENT_CODEX_ID);
+  assert.equal(snapshot.runtime, "codex_local");
+  await app.close();
+});
+
+test("NOT-358: PATCH agent IDs are rejected while running, queued behind work, completed, or with an active session (409), and unknown IDs are 400", async () => {
+  const app = await buildApp();
+  const mk = async (title: string) =>
+    (
+      (await app.inject({
+        method: "POST",
+        url: "/api/issues",
+        payload: {
+          title,
+          repo: "acme/app",
+          baseBranch: "main",
+          developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+          reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+          acceptanceCriteria: "It works",
+        },
+      })).json() as { id: string }
+    ).id;
+  const patch = (id: string, payload: object) => app.inject({ method: "PATCH", url: `/api/issues/${id}`, payload });
+  // `claimWorkItem` takes the oldest claimable item across issues — cancel each flow's
+  // leftovers so later flows claim their own items.
+  const cancelPending = (id: string) => {
+    for (const i of listWorkItemsForIssue(id)) {
+      if (i.status === "pending" || i.status === "leased") cancelWorkItem(i.id);
+    }
+  };
+
+  // Running: a pending developer item owns the snapshot.
+  const runningId = await mk("Running swap");
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${runningId}/start` })).statusCode, 200);
+  assert.equal((await patch(runningId, { developerAgentId: BUILTIN_AGENT_CODEX_ID })).statusCode, 409);
+  assert.equal(getIssue(runningId)!.developerAgentId, BUILTIN_AGENT_CLAUDE_ID);
+  assert.equal(listWorkflowEventsForIssue(runningId).filter((e) => e.type === "issue.reassigned").length, 0);
+  cancelPending(runningId);
+
+  // Queued behind work: parked at policy_escalation but a work item is still pending.
+  // Force-started directly: an HTTP start would queue behind the running issue above.
+  const queuedId = await mk("Queued swap");
+  assert.equal(startWorkflow(queuedId).ok, true);
+  transitionIssue(queuedId, "needs_human");
+  createHumanAction({
+    issueId: queuedId,
+    actionType: "policy_escalation",
+    reason: "test park",
+    question: "Resume?",
+  });
+  assert.equal((await patch(queuedId, { reviewerAgentId: BUILTIN_AGENT_CLAUDE_ID })).statusCode, 409);
+  assert.equal(getIssue(queuedId)!.reviewerAgentId, BUILTIN_AGENT_CURSOR_ID);
+  cancelPending(queuedId);
+
+  // Completed: history is immutable.
+  const doneId = await mk("Done swap");
+  transitionIssue(doneId, "developing");
+  transitionIssue(doneId, "reviewing");
+  transitionIssue(doneId, "final_review");
+  transitionIssue(doneId, "done");
+  assert.equal((await patch(doneId, { developerAgentId: BUILTIN_AGENT_CODEX_ID })).statusCode, 409);
+
+  // Active session: parked with nothing pending/leased, but a worker still runs.
+  const sessionId = await mk("Session swap");
+  assert.equal(startWorkflow(sessionId).ok, true);
+  const pending = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  assert.equal(pending.issueId, sessionId);
+  cancelWorkItem(pending.id);
+  transitionIssue(sessionId, "needs_human");
+  createHumanAction({
+    issueId: sessionId,
+    actionType: "policy_escalation",
+    reason: "test park",
+    question: "Resume?",
+  });
+  const worker = createWorkerSession({
+    issueId: sessionId,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "claude_code",
+  });
+  startSession(worker.id);
+  const sessionRes = await patch(sessionId, { developerAgentId: BUILTIN_AGENT_CODEX_ID });
+  assert.equal(sessionRes.statusCode, 409);
+  assert.match((sessionRes.json() as { error: string }).error, /running session/);
+  assert.equal(getIssue(sessionId)!.developerAgentId, BUILTIN_AGENT_CLAUDE_ID);
+
+  // Unknown agent profiles are 400 and change nothing — at both park flavors.
+  const parkedId = await n358ParkAtAttemptsExhausted(app);
+  const unknownId = randomUUID();
+  assert.equal((await patch(parkedId, { developerAgentId: unknownId })).statusCode, 400);
+  assert.equal((await patch(parkedId, { reviewerAgentId: unknownId })).statusCode, 400);
+  assert.equal(getIssue(parkedId)!.developerAgentId, BUILTIN_AGENT_CLAUDE_ID);
+  assert.equal(getIssue(parkedId)!.reviewerAgentId, BUILTIN_AGENT_CURSOR_ID);
+
+  // Locked fields stay locked at a policy_escalation park too.
+  assert.equal((await patch(queuedId, { maxReviewRounds: 5 })).statusCode, 409);
+  await app.close();
+});
+
+test("NOT-358: POST /api/issues/:id/park parks cap and outage waits, and rejects anything else", async () => {
+  const app = await buildApp();
+  assert.equal((await app.inject({ method: "POST", url: "/api/issues/does-not-exist/park", payload: {} })).statusCode, 404);
+
+  // No active workflow: nothing to park.
+  const ready = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Never started",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${ready.id}/park`, payload: {} })).statusCode, 409);
+
+  // A plain pending item is not a cap wait.
+  const plain = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Plain pending",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${plain.id}/start` })).statusCode, 200);
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${plain.id}/park`, payload: {} })).statusCode, 409);
+  // Cancel the plain pending item — `claimWorkItem` takes the oldest claimable item
+  // across issues, so later flows must not see it.
+  for (const i of listWorkItemsForIssue(plain.id)) {
+    if (i.status === "pending" || i.status === "leased") cancelWorkItem(i.id);
+  }
+
+  // A deck-outage wait parks the same way a usage-cap wait does.
+  const outage = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Outage wait",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+  // Force-started: the plain issue above still holds the admission slot.
+  assert.equal(startWorkflow(outage.id).ok, true);
+  const outageItem = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  assert.equal(outageItem.issueId, outage.id);
+  await applyCompletion(outageItem.id, outageItem.leaseToken!, {
+    kind: "deck_unavailable",
+    reason: "Agent Deck unreachable — connection refused",
+  });
+  const outagePark = await app.inject({ method: "POST", url: `/api/issues/${outage.id}/park`, payload: {} });
+  assert.equal(outagePark.statusCode, 200);
+  const outageBody = outagePark.json() as { status: string; humanActionId: string };
+  assert.equal(outageBody.status, "needs_human");
+  const outageAction = listHumanActionsForIssue(outage.id).find((a) => a.id === outageBody.humanActionId)!;
+  assert.equal(outageAction.actionType, "policy_escalation");
+  assert.match(outageAction.reason, /Agent Deck outage/);
+
+  // A running session blocks the park even when a cap wait is pending.
+  const live = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        title: "Live session",
+        repo: "acme/app",
+        baseBranch: "main",
+        developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+        reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+        acceptanceCriteria: "It works",
+      },
+    })
+  ).json() as { id: string };
+  assert.equal(startWorkflow(live.id).ok, true);
+  const liveItem = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  assert.equal(liveItem.issueId, live.id);
+  await applyCompletion(liveItem.id, liveItem.leaseToken!, {
+    kind: "usage_capped",
+    until: new Date(Date.now() + 300_000).toISOString(),
+    reason: "claude_code usage capped — test",
+  });
+  const liveSession = createWorkerSession({
+    issueId: live.id,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "claude_code",
+  });
+  startSession(liveSession.id);
+  const livePark = await app.inject({ method: "POST", url: `/api/issues/${live.id}/park`, payload: {} });
+  assert.equal(livePark.statusCode, 409);
+  assert.equal(getIssue(live.id)!.status, "developing");
+  assert.ok(
+    listWorkItemsForIssue(live.id).some((i) => i.status === "pending"),
+    "the rejected park cancels nothing"
+  );
   await app.close();
 });
