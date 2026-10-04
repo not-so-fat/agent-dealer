@@ -9,6 +9,9 @@ process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-cm
 
 const { migrate, getDb } = await import("../db/index.js");
 const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
+const { createAgent } = await import("../repository/agents.js");
+const { parseProfileSnapshot } = await import("@agent-dealer/shared");
+const { randomUUID } = await import("node:crypto");
 const { createIssue, getIssue, updateIssue } = await import("../repository/issues.js");
 const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
   "../repository/workflow-events.js"
@@ -21,16 +24,19 @@ const { listFindingsForIssue, reconcileFinding } = await import("../repository/f
 const { cancelWorkItem, claimWorkItem, listWorkItemsForIssue, getWorkItem, enqueueWorkItem } = await import(
   "../repository/work-items.js"
 );
-const { createWorkerSession, startSession, listWorkerSessionsForIssue } = await import(
+const { createWorkerSession, completeSession, startSession, listWorkerSessionsForIssue } = await import(
   "../repository/worker-sessions.js"
 );
 const {
   startWorkflow,
   applyCompletion,
+  applyParkedEdit,
+  capWaitForIssue,
   resolveHumanActionAndAdvance,
   resolveHumanActionAndAdvanceAsync,
   getTaskSnapshot,
   canEditParkedIssue,
+  parkCapWait,
   TASK_SNAPSHOT_ARTIFACT_KIND,
   checkIssueReadiness,
   abortIssue} = await import("./commands.js");
@@ -403,9 +409,20 @@ async function parkAtAttemptsExhausted(): Promise<{ issueId: string; actionId: s
 const snapshotArtifacts = (issueId: string) =>
   listArtifactsForIssue(issueId).filter((a) => a.kind === TASK_SNAPSHOT_ARTIFACT_KIND);
 
-test("NOT-185: canEditParkedIssue is true only at an open attempts_exhausted with nothing pending or leased", async () => {
+test("NOT-185/NOT-358: canEditParkedIssue is true only at an open attempts_exhausted or policy_escalation with nothing pending or leased", async () => {
   const { issueId } = await parkAtAttemptsExhausted();
   assert.equal(canEditParkedIssue(getIssue(issueId)!), true);
+
+  // NOT-358: a policy_escalation park (e.g. after a developer budget failure) is
+  // editable the same way, so the owner can swap agents and resume in place.
+  const cappedId = newIssue({ maxInfraAttempts: 0 });
+  startWorkflow(cappedId);
+  await complete(cappedId, { kind: "session_failed" });
+  assert.equal(
+    listHumanActionsForIssue(cappedId).find((a) => a.status === "open")!.actionType,
+    "policy_escalation"
+  );
+  assert.equal(canEditParkedIssue(getIssue(cappedId)!), true);
 
   const instance = getActiveWorkflowInstance(issueId)!;
   const item = enqueueWorkItem({
@@ -1134,4 +1151,299 @@ test("NOT-184: resolving the escalation with resume continues without re-trigger
   await reviewRound(issueId, [blocking("a.mjs", "r6")]);
   assert.equal(getIssue(issueId)!.status, "needs_human");
   assert.match(openNonConvergence(issueId)!.reason, /rounds 4, 5, 6/);
+});
+
+/** Swap-target profiles with runtimes distinct from the builtins the issue starts on. */
+function n358Agents(): { dev: { id: string }; rev: { id: string } } {
+  const deckId = "00000000-0000-4000-a000-000000000358";
+  const dev = createAgent({ name: `n358-dev-${Math.random()}`, runtime: "codex_local", deckId });
+  const rev = createAgent({ name: `n358-rev-${Math.random()}`, runtime: "cursor_local", deckId });
+  return { dev, rev };
+}
+
+function reassignedEvents(issueId: string) {
+  return listWorkflowEventsForIssue(issueId).filter((e) => e.type === "issue.reassigned");
+}
+
+/** The frozen profile snapshot a resumed round carries — what the next session spawns from. */
+function pendingSnapshot(issueId: string, kind: "developer" | "reviewer") {
+  const item = listWorkItemsForIssue(issueId).find((i) => i.status === "pending" && i.kind === kind)!;
+  assert.ok(item, `expected a pending ${kind} work item`);
+  const payload = JSON.parse(item.payloadJson!) as { profileSnapshot?: string };
+  const snapshot = parseProfileSnapshot(payload.profileSnapshot)!;
+  assert.ok(snapshot, "the resumed round carries a frozen profile snapshot");
+  return snapshot;
+}
+
+test("NOT-358: applyParkedEdit swaps each role alone and both, keeping worktree, branch and rounds, one reassigned event per swap", async () => {
+  const { dev, rev } = n358Agents();
+  const { issueId, actionId } = await parkAtAttemptsExhausted();
+  const before = getIssue(issueId)!;
+  assert.equal(before.branch, "issue-1");
+
+  const devSwap = applyParkedEdit(issueId, { developerAgentId: dev.id });
+  assert.equal(devSwap.ok, true);
+  if (devSwap.ok !== true) return;
+  assert.equal(devSwap.issue.developerAgentId, dev.id);
+  assert.equal(devSwap.issue.reviewerAgentId, before.reviewerAgentId);
+  assert.equal(devSwap.issue.branch, before.branch);
+  assert.deepEqual(
+    [devSwap.issue.currentRound, devSwap.issue.maxReviewRounds],
+    [before.currentRound, before.maxReviewRounds]
+  );
+  assert.equal(reassignedEvents(issueId).length, 1);
+  assert.deepEqual(JSON.parse(reassignedEvents(issueId)[0]!.payloadJson!), {
+    fromRepo: before.repo,
+    toRepo: before.repo,
+    fromDeveloperAgentId: before.developerAgentId,
+    toDeveloperAgentId: dev.id,
+    fromReviewerAgentId: before.reviewerAgentId,
+    toReviewerAgentId: before.reviewerAgentId,
+  });
+
+  const revSwap = applyParkedEdit(issueId, { reviewerAgentId: rev.id });
+  assert.equal(revSwap.ok, true);
+  if (revSwap.ok !== true) return;
+  assert.equal(revSwap.issue.reviewerAgentId, rev.id);
+  assert.equal(revSwap.issue.branch, before.branch);
+  assert.deepEqual(
+    [revSwap.issue.currentRound, revSwap.issue.maxReviewRounds],
+    [before.currentRound, before.maxReviewRounds]
+  );
+  assert.equal(reassignedEvents(issueId).length, 2);
+
+  // Both roles in one call: a single event carrying both changes.
+  const both = await parkAtAttemptsExhausted();
+  const bothSwap = applyParkedEdit(both.issueId, { developerAgentId: dev.id, reviewerAgentId: rev.id });
+  assert.equal(bothSwap.ok, true);
+  if (bothSwap.ok !== true) return;
+  assert.equal(bothSwap.issue.developerAgentId, dev.id);
+  assert.equal(bothSwap.issue.reviewerAgentId, rev.id);
+  assert.equal(reassignedEvents(both.issueId).length, 1);
+
+  // Resume freezes the NEW developer profile into the next round's payload — the
+  // worker loop builds the spawned session's runtime from exactly this snapshot.
+  const resolved = resolveHumanActionAndAdvance(actionId, "yusuke", "retry");
+  assert.equal(resolved.ok, true);
+  const snapshot = pendingSnapshot(issueId, "developer");
+  assert.equal(snapshot.agentId, dev.id);
+  assert.equal(snapshot.runtime, "codex_local");
+  assert.equal(snapshot.role, "developer");
+});
+
+test("NOT-358: applyParkedEdit rejects unknown agents (400), locked fields, pending items and running sessions (409)", async () => {
+  const { dev } = n358Agents();
+  const { issueId } = await parkAtAttemptsExhausted();
+  const before = getIssue(issueId)!;
+  const reassignedBefore = reassignedEvents(issueId).length;
+
+  const unknown = applyParkedEdit(issueId, { developerAgentId: randomUUID() });
+  assert.equal(unknown.ok, false);
+  if (unknown.ok !== false) return;
+  assert.equal(unknown.code, 400);
+  assert.match(unknown.error, /Unknown agent profile/);
+  const unknownRev = applyParkedEdit(issueId, { reviewerAgentId: randomUUID() });
+  assert.equal(unknownRev.ok, false);
+  if (unknownRev.ok !== false) return;
+  assert.equal(unknownRev.code, 400);
+  assert.equal(getIssue(issueId)!.developerAgentId, before.developerAgentId);
+  assert.equal(getIssue(issueId)!.reviewerAgentId, before.reviewerAgentId);
+  assert.equal(reassignedEvents(issueId).length, reassignedBefore);
+
+  for (const patch of [{ repo: "acme/other" }, { maxReviewRounds: 5 }, { autoMerge: true }]) {
+    const blocked = applyParkedEdit(issueId, patch);
+    assert.equal(blocked.ok, false, JSON.stringify(patch));
+    if (blocked.ok !== false) return;
+    assert.equal(blocked.code, 409);
+  }
+  assert.equal(getIssue(issueId)!.maxReviewRounds, before.maxReviewRounds);
+
+  // A pending work item blocks the swap; cancelling it re-opens the surface.
+  const instance = getActiveWorkflowInstance(issueId)!;
+  const item = enqueueWorkItem({
+    issueId,
+    workflowInstanceId: instance.id,
+    kind: "developer",
+    round: 1,
+    payload: {},
+    idempotencyKey: `${instance.id}:test:n358-pending`,
+  });
+  const queued = applyParkedEdit(issueId, { developerAgentId: dev.id });
+  assert.equal(queued.ok, false);
+  if (queued.ok !== false) return;
+  assert.equal(queued.code, 409);
+  cancelWorkItem(item.id);
+  const afterCancel = applyParkedEdit(issueId, { developerAgentId: dev.id });
+  assert.equal(afterCancel.ok, true);
+
+  // An actively running session blocks the swap even with nothing pending/leased.
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "claude_code",
+  });
+  startSession(session.id);
+  const running = applyParkedEdit(issueId, { reviewerAgentId: BUILTIN_AGENT_CLAUDE_ID });
+  assert.equal(running.ok, false);
+  if (running.ok !== false) return;
+  assert.equal(running.code, 409);
+  assert.match(running.error, /running session/);
+  completeSession(session.id, { status: "done" });
+  const afterSession = applyParkedEdit(issueId, { title: "Renamed at park" });
+  assert.equal(afterSession.ok, true);
+});
+
+test("NOT-358: parkCapWait parks a usage-cap wait for a human; swap + resume continue in the same worktree", async () => {
+  const { dev } = n358Agents();
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  const until = new Date(Date.now() + 300_000).toISOString();
+  const capReason = "claude_code usage capped — five_hour limit rejected";
+  await complete(issueId, { kind: "usage_capped", until, reason: capReason });
+
+  const wait = capWaitForIssue(issueId);
+  assert.deepEqual(wait, { kind: "usage_capped", until, reason: capReason });
+
+  // The attempt's session and branch predate the park — both must survive it.
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "claude_code",
+  });
+  startSession(session.id);
+  completeSession(session.id, { status: "done", worktreePath: "/tmp/n358-worktree" });
+  const { transitionIssue } = await import("../repository/issues.js");
+  transitionIssue(issueId, "developing", { branch: "dealer/n358-park" });
+
+  const parked = parkCapWait(issueId, "op");
+  assert.equal(parked.ok, true);
+  if (parked.ok !== true) return;
+  assert.equal(parked.issueStatus, "needs_human");
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.currentOwner, "human");
+  assert.match(issue.currentIntent ?? "", /five_hour/);
+  assert.match(issue.currentIntent ?? "", new RegExp(until.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(issue.branch, "dealer/n358-park");
+  assert.deepEqual([issue.currentRound, issue.maxReviewRounds], [1, 3]);
+
+  const open = listHumanActionsForIssue(issueId).filter((a) => a.status === "open");
+  assert.equal(open.length, 1);
+  assert.equal(open[0]!.actionType, "policy_escalation");
+  assert.match(open[0]!.reason, /five_hour/);
+  assert.match(open[0]!.reason, /wait until/);
+  assert.equal(capWaitForIssue(issueId), null, "the wait is cancelled, not deferred again");
+  assert.deepEqual(
+    listWorkItemsForIssue(issueId).map((i) => i.status),
+    ["cancelled"],
+    "the deferred wait is cancelled"
+  );
+  const keptSession = listWorkerSessionsForIssue(issueId).find((s) => s.id === session.id)!;
+  assert.equal(keptSession.worktreePath, "/tmp/n358-worktree");
+
+  // Swap while parked, then resume — the next developer round carries the new profile.
+  const swapped = applyParkedEdit(issueId, { developerAgentId: dev.id });
+  assert.equal(swapped.ok, true);
+  const resolved = resolveHumanActionAndAdvance(open[0]!.id, "op", "resume");
+  assert.equal(resolved.ok, true);
+  if (resolved.ok !== true) return;
+  assert.equal(resolved.issueStatus, "developing");
+  assert.equal(getIssue(issueId)!.branch, "dealer/n358-park");
+  const snapshot = pendingSnapshot(issueId, "developer");
+  assert.equal(snapshot.agentId, dev.id);
+  assert.equal(snapshot.runtime, "codex_local");
+});
+
+test("NOT-358: parkCapWait parks a deck-outage wait, and a reviewer wait resumes as reviewer", async () => {
+  const deckId = newIssue();
+  startWorkflow(deckId);
+  await complete(deckId, { kind: "deck_unavailable", reason: "Agent Deck unreachable — connection refused" });
+  assert.equal(capWaitForIssue(deckId)?.kind, "deck_unavailable");
+
+  const parked = parkCapWait(deckId, "op");
+  assert.equal(parked.ok, true);
+  const open = listHumanActionsForIssue(deckId).filter((a) => a.status === "open");
+  assert.equal(open.length, 1);
+  assert.match(open[0]!.reason, /Agent Deck outage/);
+  assert.match(open[0]!.reason, /connection refused/);
+  const resumed = resolveHumanActionAndAdvance(open[0]!.id, "op", "resume");
+  assert.equal(resumed.ok, true);
+  if (resumed.ok !== true) return;
+  assert.equal(resumed.issueStatus, "developing");
+  // The resume above enqueued a fresh developer item — cancel it so the reviewer flow
+  // below claims its own item (`claim` takes the oldest pending item across issues).
+  for (const item of listWorkItemsForIssue(deckId)) {
+    if (item.status === "pending") cancelWorkItem(item.id);
+  }
+
+  // A reviewer-role wait tags the continuation so resume re-queues a reviewer at the
+  // pinned head instead of an unrelated developer round.
+  const revId = newIssue();
+  startWorkflow(revId);
+  await complete(revId, cleanHandoff);
+  await complete(revId, { kind: "deck_unavailable", reason: "Agent Deck unreachable — reset by peer" });
+  assert.equal(capWaitForIssue(revId)?.kind, "deck_unavailable");
+  const revParked = parkCapWait(revId, "op");
+  assert.equal(revParked.ok, true);
+  const revOpen = listHumanActionsForIssue(revId).filter((a) => a.status === "open");
+  assert.equal(revOpen.length, 1);
+  const revResumed = resolveHumanActionAndAdvance(revOpen[0]!.id, "op", "resume");
+  assert.equal(revResumed.ok, true);
+  if (revResumed.ok !== true) return;
+  assert.equal(revResumed.issueStatus, "reviewing");
+  const pending = listWorkItemsForIssue(revId).filter((i) => i.status === "pending");
+  assert.deepEqual(pending.map((i) => i.kind), ["reviewer"]);
+  const payload = JSON.parse(pending[0]!.payloadJson!) as { inputSha?: string };
+  assert.equal(payload.inputSha, "abc123");
+});
+
+test("NOT-358: parkCapWait rejects without a wait, with leased work, or with a running session", async () => {
+  const readyId = newIssue();
+  const noInstance = parkCapWait(readyId, "op");
+  assert.equal(noInstance.ok, false);
+  if (noInstance.ok !== false) return;
+  assert.equal(noInstance.code, 409);
+
+  const plainId = newIssue();
+  startWorkflow(plainId);
+  const noWait = parkCapWait(plainId, "op");
+  assert.equal(noWait.ok, false);
+  if (noWait.ok !== false) return;
+  assert.equal(noWait.code, 409);
+  assert.match(noWait.error, /usage-cap or deck-outage/);
+
+  const leased = claim(plainId);
+  const leasedPark = parkCapWait(plainId, "op");
+  assert.equal(leasedPark.ok, false);
+  if (leasedPark.ok !== false) return;
+  assert.equal(leasedPark.code, 409);
+  // The failed park changes nothing: the lease is intact and the issue still develops.
+  assert.equal(getIssue(plainId)!.status, "developing");
+  assert.equal(getWorkItem(leased.id)!.status, "leased");
+
+  const until = new Date(Date.now() + 300_000).toISOString();
+  await applyCompletion(leased.id, leased.leaseToken!, {
+    kind: "usage_capped",
+    until,
+    reason: "claude_code usage capped — test",
+  });
+  const running = createWorkerSession({
+    issueId: plainId,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "claude_code",
+  });
+  startSession(running.id);
+  const runningPark = parkCapWait(plainId, "op");
+  assert.equal(runningPark.ok, false);
+  if (runningPark.ok !== false) return;
+  assert.equal(runningPark.code, 409);
+  assert.match(runningPark.error, /running session/);
+  assert.equal(getIssue(plainId)!.status, "developing");
+  assert.ok(capWaitForIssue(plainId), "the wait survives the rejected park");
 });

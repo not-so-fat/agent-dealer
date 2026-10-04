@@ -17,7 +17,8 @@ import type {
   WorkflowInstance,
   WorkflowEventType,
 } from "@agent-dealer/shared";
-import { canTransitionIssue, tryCompileContract } from "@agent-dealer/shared";
+import { canTransitionIssue, ExecutionContractError, tryCompileContract } from "@agent-dealer/shared";
+import type { UpdateIssueInput } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 import {
   getIssue,
@@ -28,6 +29,7 @@ import {
   resetIssueCiAttempts,
   grantReviewRetry,
   transitionIssue,
+  updateIssue,
   type TransitionIssuePatch,
 } from "../repository/issues.js";
 import {
@@ -66,7 +68,7 @@ import {
   type WorkItem,
   type WorkItemKind,
 } from "../repository/work-items.js";
-import { completeSession, getWorkerSession, listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
+import { completeSession, getActiveWorkerSessionForIssue, getWorkerSession, listWorkerSessionsForIssue } from "../repository/worker-sessions.js";
 import { killRunProcess } from "../runners/spawn-cli.js";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import { workerSessionPayload } from "./session-progress.js";
@@ -194,12 +196,140 @@ export function getTaskSnapshot(issue: Issue): TaskSnapshotContent {
  * retried. True only while the workflow is active, the issue is `needs_human` with that
  * action open, and no work item is pending or leased — so no session can be reading the
  * snapshot an edit would supersede.
+ *
+ * NOT-358: the same parked-edit surface covers an open `policy_escalation` (e.g. after a
+ * developer budget failure) so the owner can swap the developer and/or reviewer agent
+ * profile and resume in the same worktree instead of recreating the issue.
  */
 export function canEditParkedIssue(issue: Issue): boolean {
   if (issue.status !== "needs_human") return false;
   if (!getActiveWorkflowInstance(issue.id)) return false;
-  if (!findOpenHumanAction(issue.id, "attempts_exhausted")) return false;
+  if (
+    !findOpenHumanAction(issue.id, "attempts_exhausted") &&
+    !findOpenHumanAction(issue.id, "policy_escalation")
+  ) {
+    return false;
+  }
   return !listWorkItemsForIssue(issue.id).some((w) => w.status === "pending" || w.status === "leased");
+}
+
+/**
+ * NOT-358: the usage-cap / deck-outage wait a parked-for-human command can interrupt —
+ * a `pending` work item deferred behind an availability window (`deferWorkItem` records
+ * the window as its error). Null when the issue has no such wait.
+ */
+export interface IssueCapWait {
+  kind: "usage_capped" | "deck_unavailable";
+  until: string;
+  reason: string;
+}
+
+function parkableWaitFor(item: WorkItem): IssueCapWait | null {
+  if (item.status !== "pending" || !item.errorJson) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(item.errorJson);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const { kind, until, reason } = parsed as Record<string, unknown>;
+  if (kind !== "usage_capped" && kind !== "deck_unavailable") return null;
+  if (typeof until !== "string" || !until || typeof reason !== "string" || !reason) return null;
+  return { kind, until, reason };
+}
+
+/** First usage-cap / deck-outage wait on the issue, if any. */
+export function capWaitForIssue(issueId: string): IssueCapWait | null {
+  for (const item of listWorkItemsForIssue(issueId)) {
+    const wait = parkableWaitFor(item);
+    if (wait) return wait;
+  }
+  return null;
+}
+
+/**
+ * NOT-185: the only fields a parked edit may touch. Re-scoping (title/description/
+ * criteria) re-freezes the task snapshot on retry; agent profiles re-freeze on the
+ * resumed round's profile snapshot (NOT-358). Repo, base branch, review budget and
+ * autoMerge stay as the running workflow saw them.
+ */
+export const PARKED_EDITABLE_FIELDS: ReadonlySet<string> = new Set([
+  "title",
+  "description",
+  "acceptanceCriteria",
+  "developerAgentId",
+  "reviewerAgentId",
+]);
+
+export type ParkedEditResult = { ok: true; issue: Issue } | { ok: false; code: number; error: string };
+
+/**
+ * NOT-358: applies a parked-issue edit (re-scope and/or agent swap) as one short
+ * transaction: guard re-check + agent-profile existence + row write + `issue.reassigned`
+ * audit. The guard re-reads the row so an edit that races a resume fails closed with
+ * 409 instead of landing on a live snapshot. A swap keeps the worktree, branch,
+ * `currentRound` and `maxReviewRounds` — `updateIssue` never touches those — and the
+ * next resume freezes the new profile into its work item payload.
+ */
+export function applyParkedEdit(issueId: string, patch: UpdateIssueInput): ParkedEditResult {
+  try {
+    return getDb().transaction((): ParkedEditResult => {
+      const fresh = getIssue(issueId);
+      if (!fresh) return { ok: false, code: 404, error: "Issue not found" };
+      if (getActiveWorkerSessionForIssue(issueId)) {
+        return { ok: false, code: 409, error: "Cannot edit an issue with an actively running session" };
+      }
+      if (!getActiveWorkflowInstance(issueId) || !canEditParkedIssue(fresh)) {
+        return { ok: false, code: 409, error: "Cannot edit an issue with an active workflow" };
+      }
+      const blocked = Object.keys(patch).filter((k) => !PARKED_EDITABLE_FIELDS.has(k));
+      if (blocked.length > 0) {
+        return {
+          ok: false,
+          code: 409,
+          error: `Only title, description, acceptanceCriteria, developerAgentId and reviewerAgentId can be edited while parked (got: ${blocked.join(", ")})`,
+        };
+      }
+      for (const role of ["developerAgentId", "reviewerAgentId"] as const) {
+        const agentId = patch[role];
+        if (agentId !== undefined && !getAgent(agentId)) {
+          return { ok: false, code: 400, error: `Unknown agent profile: ${agentId}` };
+        }
+      }
+      const next = updateIssue(issueId, patch);
+      // NOT-217/NOT-240: durable configuration audit — only when an execution input
+      // actually changed, comparing against the freshly read row so a concurrent edit
+      // is attributed exactly.
+      if (
+        fresh.repo !== next.repo ||
+        fresh.developerAgentId !== next.developerAgentId ||
+        fresh.reviewerAgentId !== next.reviewerAgentId
+      ) {
+        appendWorkflowEvent({
+          issueId,
+          type: "issue.reassigned",
+          actorType: "human",
+          stage: next.status,
+          payload: {
+            fromRepo: fresh.repo,
+            toRepo: next.repo,
+            fromDeveloperAgentId: fresh.developerAgentId,
+            toDeveloperAgentId: next.developerAgentId,
+            fromReviewerAgentId: fresh.reviewerAgentId,
+            toReviewerAgentId: next.reviewerAgentId,
+          },
+        });
+      }
+      return { ok: true, issue: next };
+    })();
+  } catch (err) {
+    // NOT-306: a contract edit that turns ambiguous/malformed is a 400.
+    if (err instanceof ExecutionContractError) {
+      return { ok: false, code: 400, error: err.message };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -2186,7 +2316,12 @@ export function resolveHumanActionAndAdvance(
     const issueNow = getIssue(issue.id)!;
     // NOT-185: freeze before queuing so the next developer prompt and the reviewer both
     // read the re-scoped task. An unedited issue writes nothing.
-    if (action.actionType === "attempts_exhausted" && resolution.choice === "retry") {
+    // NOT-358: a policy_escalation park is editable the same way (title/description/
+    // criteria as well as agent profiles), so its resume re-freezes too.
+    if (
+      (action.actionType === "attempts_exhausted" && resolution.choice === "retry") ||
+      (action.actionType === "policy_escalation" && resolution.choice === "resume")
+    ) {
       const changedFields = refreshTaskSnapshotIfEdited(issueNow);
       if (changedFields.length > 0) {
         ev.emit("task_snapshot.refreshed", { actorType: "human", payload: { actionId: action.id, changedFields } });
@@ -2739,6 +2874,105 @@ export function closeReadyIssue(issueId: string, closedBy: string): CloseReadyIs
     throw err;
   }
   return { ok: true, ...out };
+}
+
+/**
+ * NOT-358: park an issue that is waiting on a usage-cap or deck-outage window for a
+ * human. Cancels the deferred wait, leaves the worktree and branch untouched, and moves
+ * the issue to `needs_human` with one open `policy_escalation` whose reason names the
+ * cap and its `until`. Resolving that action with `resume` continues with whichever
+ * agents are then set — a swap made while parked flows into the resumed round's frozen
+ * profile snapshot (`queuedProfileSnapshot` reads the live issue row at enqueue time).
+ *
+ * Rejected with 409 when a session is actively running (or a work item is leased),
+ * when there is no active workflow, or when no work item is waiting on such a window.
+ * A reviewer-role wait tags the continuation so `resume` re-queues a reviewer at the
+ * pinned head instead of defaulting to an unrelated developer round.
+ */
+export type ParkCapWaitResult =
+  | { ok: true; issueStatus: Issue["status"]; humanActionId: string }
+  | { ok: false; code: number; error: string };
+
+export function parkCapWait(issueId: string, parkedBy: string): ParkCapWaitResult {
+  const issue = getIssue(issueId);
+  if (!issue) return { ok: false, code: 404, error: "Issue not found" };
+  if (issue.status === "done" || issue.status === "closed") {
+    return { ok: false, code: 409, error: `Cannot park an issue that is ${issue.status}` };
+  }
+  if (getActiveWorkerSessionForIssue(issueId)) {
+    return { ok: false, code: 409, error: "Cannot park an issue with an actively running session" };
+  }
+  if (!getActiveWorkflowInstance(issueId)) {
+    return { ok: false, code: 409, error: "Cannot park an issue with no active workflow" };
+  }
+  const items = listWorkItemsForIssue(issueId);
+  if (items.some((w) => w.status === "leased")) {
+    return { ok: false, code: 409, error: "Cannot park an issue with leased work — wait for the attempt to finish" };
+  }
+  if (!capWaitForIssue(issueId)) {
+    return { ok: false, code: 409, error: "Issue is not waiting on a usage-cap or deck-outage window" };
+  }
+
+  return getDb().transaction((): ParkCapWaitResult => {
+    const fresh = getIssue(issueId);
+    if (!fresh) return { ok: false, code: 404, error: "Issue not found" };
+    if (getActiveWorkerSessionForIssue(issueId)) {
+      return { ok: false, code: 409, error: "Cannot park an issue with an actively running session" };
+    }
+    const instance = getActiveWorkflowInstance(issueId);
+    if (!instance) return { ok: false, code: 409, error: "Cannot park an issue with no active workflow" };
+    const liveItems = listWorkItemsForIssue(issueId);
+    if (liveItems.some((w) => w.status === "leased")) {
+      return { ok: false, code: 409, error: "Cannot park an issue with leased work — wait for the attempt to finish" };
+    }
+    const waitItem = liveItems.find((w) => w.status === "pending" && parkableWaitFor(w) != null);
+    if (!waitItem) {
+      return { ok: false, code: 409, error: "Issue is not waiting on a usage-cap or deck-outage window" };
+    }
+    const wait = parkableWaitFor(waitItem)!;
+    const kindLabel = wait.kind === "usage_capped" ? "usage cap" : "Agent Deck outage";
+    const reason =
+      `Parked by ${parkedBy} while waiting on ${kindLabel}: ${wait.reason} (wait until ${wait.until})`;
+    // A reviewer-role wait resumes as a reviewer at the pinned head (the same
+    // continuation reviewer-origin infra escalations tag); anything else takes the
+    // generic developer resume.
+    const resumeAsReviewer = waitItem.kind === "reviewer" && fresh.headSha != null;
+
+    for (const item of liveItems) {
+      if (item.status === "pending") cancelWorkItem(item.id);
+    }
+
+    const ev = eventEmitter(fresh, instance, waitItem.workerSessionId, "needs_human", fresh.currentRound);
+    if (fresh.status === "needs_human") {
+      getDb()
+        .prepare("UPDATE issues SET current_owner = 'human', current_intent = ?, updated_at = ? WHERE id = ?")
+        .run(reason, new Date().toISOString(), issueId);
+    } else {
+      transitionIssue(issueId, "needs_human", { currentOwner: "human", currentIntent: reason });
+    }
+    const action = createHumanAction({
+      issueId,
+      workflowInstanceId: instance.id,
+      actionType: "policy_escalation",
+      reason,
+      question: questionFor("policy_escalation", reason, resumeAsReviewer),
+      evidence: {
+        parkedCapWait: {
+          kind: wait.kind,
+          until: wait.until,
+          reason: wait.reason,
+          parkedBy,
+          parkedAt: new Date().toISOString(),
+        },
+      },
+      continuationPreview: resumeAsReviewer
+        ? { resumeRole: "reviewer", resumeHeadSha: fresh.headSha }
+        : undefined,
+      responseOptions: responseOptionsFor("policy_escalation", resumeAsReviewer),
+    });
+    ev.emit("human_action.requested", { payload: { actionType: "policy_escalation", actionId: action.id } });
+    return { ok: true, issueStatus: getIssue(issueId)!.status, humanActionId: action.id };
+  })();
 }
 
 export async function abortIssueAsync(
