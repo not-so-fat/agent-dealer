@@ -36,6 +36,8 @@ export type ParsedIssueArgs =
   | { subcommand: "show"; id: string; includeEvidence: boolean }
   | { subcommand: "start"; id: string }
   | { subcommand: "execute"; id: string }
+  | { subcommand: "update"; id: string; developerAgentId?: string; reviewerAgentId?: string }
+  | { subcommand: "park"; id: string }
   | { subcommand: "guide"; id: string; message: string };
 
 function flag(args: string[], name: string): string | undefined {
@@ -80,6 +82,21 @@ export function parseIssueArgs(args: string[]): ParsedIssueArgs {
       const id = rest[0];
       if (!id) throw new Error("execute requires an issue id");
       return { subcommand: "execute", id };
+    }
+    case "update": {
+      const id = rest[0];
+      if (!id) throw new Error("update requires an issue id");
+      const developerAgentId = flag(rest, "--developer-agent");
+      const reviewerAgentId = flag(rest, "--reviewer-agent");
+      if (!developerAgentId && !reviewerAgentId) {
+        throw new Error("update requires --developer-agent and/or --reviewer-agent");
+      }
+      return { subcommand: "update", id, developerAgentId, reviewerAgentId };
+    }
+    case "park": {
+      const id = rest[0];
+      if (!id) throw new Error("park requires an issue id");
+      return { subcommand: "park", id };
     }
     case "guide": {
       const id = rest[0];
@@ -153,6 +170,22 @@ export async function runIssueCommand(args: string[]): Promise<number> {
         const result = (await apiFetch(`/api/issues/${parsed.id}/execute`, { method: "POST" })) as ExecuteIssueResponse;
         console.log(JSON.stringify(result, null, 2));
         console.error("Admitted — the workflow started immediately (queue order bypassed).");
+        return 0;
+      }
+      case "update": {
+        // NOT-358: swap the developer and/or reviewer profile on a parked issue.
+        // Either flag alone is valid; the server enforces the parked-edit surface.
+        const body: Record<string, string> = {};
+        if (parsed.developerAgentId) body.developerAgentId = parsed.developerAgentId;
+        if (parsed.reviewerAgentId) body.reviewerAgentId = parsed.reviewerAgentId;
+        const result = await apiFetch(`/api/issues/${parsed.id}`, { method: "PATCH", body });
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      case "park": {
+        // NOT-358: park an issue waiting on a usage-cap or deck-outage window for a human.
+        const result = await apiFetch(`/api/issues/${parsed.id}/park`, { method: "POST" });
+        console.log(JSON.stringify(result, null, 2));
         return 0;
       }
       case "guide": {

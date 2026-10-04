@@ -284,6 +284,102 @@ test("issue execute prints the admitted response shape and exits 0", async () =>
   }
 });
 
+test("parseIssueArgs: update accepts either agent flag alone, park requires an id", () => {
+  assert.deepEqual(parseIssueArgs(["update", "issue-123", "--developer-agent", "a1"]), {
+    subcommand: "update",
+    id: "issue-123",
+    developerAgentId: "a1",
+    reviewerAgentId: undefined,
+  });
+  assert.deepEqual(parseIssueArgs(["update", "issue-123", "--reviewer-agent", "a2"]), {
+    subcommand: "update",
+    id: "issue-123",
+    developerAgentId: undefined,
+    reviewerAgentId: "a2",
+  });
+  assert.deepEqual(
+    parseIssueArgs(["update", "issue-123", "--developer-agent", "a1", "--reviewer-agent", "a2"]),
+    { subcommand: "update", id: "issue-123", developerAgentId: "a1", reviewerAgentId: "a2" }
+  );
+  assert.throws(() => parseIssueArgs(["update", "issue-123"]), /--developer-agent/);
+  assert.throws(() => parseIssueArgs(["update"]), /issue id/);
+  assert.deepEqual(parseIssueArgs(["park", "issue-123"]), { subcommand: "park", id: "issue-123" });
+  assert.throws(() => parseIssueArgs(["park"]), /issue id/);
+});
+
+test("NOT-358: issue update PATCHes the agents and prints the updated issue as JSON", async () => {
+  const updated = { id: "issue-123", status: "needs_human", developerAgentId: "a-new" };
+  for (const args of [
+    ["update", "issue-123", "--developer-agent", "a-new"],
+    ["update", "issue-123", "--reviewer-agent", "r-new"],
+    ["update", "issue-123", "--developer-agent", "a-new", "--reviewer-agent", "r-new"],
+  ]) {
+    const stub = stubFetch("/api/issues/issue-123", "PATCH", updated);
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (message?: unknown) => logs.push(String(message));
+    try {
+      const code = await runIssueCommand(args);
+      assert.equal(code, 0);
+      const sent = stub.assertCalled() as Record<string, string>;
+      const expectedKeys = args
+        .filter((a) => a.startsWith("--"))
+        .map((a) => (a === "--developer-agent" ? "developerAgentId" : "reviewerAgentId"))
+        .sort();
+      assert.deepEqual(Object.keys(sent).sort(), expectedKeys);
+      const printed = JSON.parse(logs.join("\n")) as { id: string; status: string };
+      assert.equal(printed.id, "issue-123");
+      assert.equal(printed.status, "needs_human");
+    } finally {
+      console.log = originalLog;
+      stub.restore();
+    }
+  }
+});
+
+test("NOT-358: issue update returns nonzero on API failure", async () => {
+  const stub = stubFetch("/api/issues/issue-123", "PATCH", { error: "Cannot edit an issue with an active workflow" }, 409);
+  try {
+    const code = await runIssueCommand(["update", "issue-123", "--developer-agent", "a-new"]);
+    assert.equal(code, 1);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("NOT-358: issue park POSTs to the park route and prints the updated issue as JSON", async () => {
+  const stub = stubFetch("/api/issues/issue-123/park", "POST", {
+    id: "issue-123",
+    status: "needs_human",
+    humanActionId: "action-1",
+  });
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (message?: unknown) => logs.push(String(message));
+  try {
+    const code = await runIssueCommand(["park", "issue-123"]);
+    assert.equal(code, 0);
+    stub.assertCalled();
+    const printed = JSON.parse(logs.join("\n")) as { id: string; status: string; humanActionId: string };
+    assert.equal(printed.id, "issue-123");
+    assert.equal(printed.status, "needs_human");
+    assert.equal(printed.humanActionId, "action-1");
+  } finally {
+    console.log = originalLog;
+    stub.restore();
+  }
+});
+
+test("NOT-358: issue park returns nonzero on API failure", async () => {
+  const stub = stubFetch("/api/issues/issue-123/park", "POST", { error: "Issue is not waiting on a usage-cap or deck-outage window" }, 409);
+  try {
+    const code = await runIssueCommand(["park", "issue-123"]);
+    assert.equal(code, 1);
+  } finally {
+    stub.restore();
+  }
+});
+
 test("issue execute returns nonzero on refusal without claiming a queue action", async () => {
   const stub = stubFetch(
     "/api/issues/issue-123/execute",
