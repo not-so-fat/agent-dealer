@@ -40,16 +40,15 @@ Dashboard + API: **http://localhost:2222** (single port when UI is bundled).
 
 ## Release order
 
-1. Agree version with human (`X.Y.Z`).
-2. `npm version X.Y.Z --workspaces --include-workspace-root --no-git-tag-version`
-3. Sync `packages/cli/package.json` dependency `"@agent-dealer/server": "X.Y.Z"`.
-4. `CHANGELOG.md` section for `X.Y.Z`.
-5. `npm run build:release` — builds all workspaces + copies web dist → `packages/server/static-ui`.
-6. `npm run install:smoke` — pack + fresh install test (must pass before publish).
-7. Gates: `npm run flow:verify` when API changes need it.
-8. Commit: `Ship X.Y.Z: <why>.`
-9. Tag + push + `gh release create`.
-10. `npm run publish:packages` — stages then publishes from `.temporal/npm-stage/agent-dealer` (must `cd` there; root monorepo is `private`). With 2FA: `npm run publish:packages -- --otp=CODE`
+One command per phase; the scripts own every mechanical step (`scripts/release.mjs`).
+
+1. From a clean, up-to-date `main`: `npm run release:prepare -- <patch|minor|major|X.Y.Z> --summary "<one line why>"`
+   bumps every manifest, internal pin and the lockfile, stubs the CHANGELOG from `git log vPREV..HEAD`, runs `build:release` + `install:smoke`, commits `Ship X.Y.Z: <why>` and opens the PR.
+2. Edit the CHANGELOG stub in the PR if the bullets need rewording (the bump level and summary are the only judgment calls).
+3. From the `release/X.Y.Z` branch: `npm run release:finish` waits for CI, squash-merges, tags `vX.Y.Z` and runs `gh release create`.
+4. **Human:** `npm run publish:packages -- --otp=CODE` (stages and publishes from `.temporal/npm-stage/agent-dealer`).
+
+CI runs `npm run release:check`, which fails on any version, internal-pin or lockfile drift.
 
 ## Dev monorepo
 
