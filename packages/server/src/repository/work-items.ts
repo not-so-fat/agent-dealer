@@ -214,7 +214,12 @@ export function claimWorkItem(leaseOwner: string, opts: ClaimOpts): WorkItem | n
       ) AND status = 'pending'
       RETURNING *
     `)
-    .get({ lease_owner: leaseOwner, lease_token: uuid(), expires: expiresIso, now: nowIso }) as
+    .get({
+      lease_owner: leaseOwner,
+      lease_token: uuid(),
+      expires: expiresIso,
+      now: nowIso,
+    }) as
     | WorkItemRow
     | undefined;
   return row ? rowToWorkItem(row) : null;
@@ -441,6 +446,85 @@ export function cancelWorkItem(id: string): WorkItem | null {
     `)
     .get({ id, now }) as WorkItemRow | undefined;
   return row ? rowToWorkItem(row) : null;
+}
+
+/**
+ * NOT-356: lease a pending item to a coordinator-side holder without starting an attempt
+ * (no `attempt_count` bump). While it is held no dispatcher can claim it, and — one
+ * pending/leased item per workflow instance (`idx_work_items_one_active`) — no other
+ * item can be queued for that instance, so no worker can start on the issue while the
+ * holder mutates its branch. Returns the minted token, or null when the item is no
+ * longer pending.
+ */
+export function reserveWorkItem(id: string, holder: string, opts: ClaimOpts): string | null {
+  const now = Date.now();
+  const token = uuid();
+  const info = getDb()
+    .prepare(`
+      UPDATE work_items SET
+        status = 'leased',
+        lease_owner = @holder,
+        lease_token = @token,
+        lease_expires_at = @expires,
+        heartbeat_at = @now,
+        updated_at = @now
+      WHERE id = @id AND status = 'pending'
+    `)
+    .run({
+      id,
+      holder,
+      token,
+      now: new Date(now).toISOString(),
+      expires: new Date(now + opts.leaseMs).toISOString(),
+    });
+  return info.changes > 0 ? token : null;
+}
+
+/** NOT-356: hand a {@link reserveWorkItem} reservation to the dispatcher as `pending`,
+ * fenced on its token, merging `payloadPatch` into its payload. False when the
+ * reservation was cancelled (an abort) or reclaimed meanwhile. */
+export function releaseReservedWorkItem(
+  id: string,
+  leaseToken: string,
+  payloadPatch?: Record<string, unknown>
+): boolean {
+  const db = getDb();
+  return db.transaction(() => {
+    const row = db
+      .prepare("SELECT payload_json FROM work_items WHERE id = ? AND status = 'leased' AND lease_token = ?")
+      .get(id, leaseToken) as { payload_json: string | null } | undefined;
+    if (!row) return false;
+    const payloadJson = payloadPatch
+      ? JSON.stringify({ ...(row.payload_json ? JSON.parse(row.payload_json) : {}), ...payloadPatch })
+      : row.payload_json;
+    db.prepare(`
+      UPDATE work_items SET
+        status = 'pending',
+        payload_json = @payload,
+        lease_owner = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        updated_at = @now
+      WHERE id = @id AND status = 'leased' AND lease_token = @token
+    `).run({ id, token: leaseToken, payload: payloadJson, now: new Date().toISOString() });
+    return true;
+  })();
+}
+
+/** NOT-356: drop a {@link reserveWorkItem} reservation (`cancelled`), fenced on its token. */
+export function dropReservedWorkItem(id: string, leaseToken: string): boolean {
+  const info = getDb()
+    .prepare(`
+      UPDATE work_items SET
+        status = 'cancelled',
+        lease_owner = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        updated_at = @now
+      WHERE id = @id AND status = 'leased' AND lease_token = @token
+    `)
+    .run({ id, token: leaseToken, now: new Date().toISOString() });
+  return info.changes > 0;
 }
 
 /**

@@ -54,7 +54,9 @@ const run = promisify(execFile);
 /** Bound each `gh` shell-out so a hang cannot freeze the coordinator process. */
 export const GH_MERGE_TIMEOUT_MS = 20_000;
 
-export type MergePrResult = { ok: true } | { ok: false; reason: string };
+/** `alreadyMerged`: GitHub reported the PR merged before this call — not a merge
+ * Dealer just made (crash recovery, or a human merged it by hand). */
+export type MergePrResult = { ok: true; alreadyMerged?: boolean } | { ok: false; reason: string };
 
 export type MergePr = (opts: { cwd: string; number: number }) => Promise<MergePrResult>;
 
@@ -180,7 +182,7 @@ export const realMergePr: MergePr = async ({ cwd, number }) => {
   } catch (err) {
     const reason = ghErrorReason(err, "gh pr merge failed", cwd);
     // Crash between a successful merge and the done-transition: retry must not escalate.
-    if (ALREADY_MERGED.test(reason)) return { ok: true };
+    if (ALREADY_MERGED.test(reason)) return { ok: true, alreadyMerged: true };
     return { ok: false, reason };
   }
 };
@@ -283,7 +285,7 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
       mergePr: mergePrImpl,
     });
     if (sync.outcome === "merged") {
-      merge = { ok: true };
+      merge = sync.alreadyMerged ? { ok: true, alreadyMerged: true } : { ok: true };
     } else if (sync.outcome === "repair_queued") {
       return {
         applied: true,
@@ -364,8 +366,10 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
   })();
   // NOT-356: the base just moved under every other open Dealer PR on this repo +
   // base — probe them and resolve the idle conflicting ones. Background and
-  // self-contained: nothing it does can change this merge's result.
-  if (merged.triggerReflect) startBaseAdvancedScan(getIssue(issueId) ?? issue);
+  // self-contained: nothing it does can change this merge's result. Only for a
+  // merge this call made: a PR GitHub already reports merged (a human merged it,
+  // or a crash recovery re-runs the finalize) is not Dealer's merge.
+  if (merged.triggerReflect && !merge.alreadyMerged) startBaseAdvancedScan(getIssue(issueId) ?? issue);
   return merged;
 }
 

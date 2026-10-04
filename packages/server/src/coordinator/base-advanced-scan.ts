@@ -20,8 +20,13 @@
 //     tip and the sibling still idle and still open on the same workflow instance,
 //     branch, PR, repo and base right before the push. A clean sync is
 //     `synced` and re-enters the normal checks wait on the pushed head (the parked
-//     step is superseded by a no-agent publish-only CI wait); a textual conflict
-//     queues one conflict-repair round naming the files (`repair_queued`).
+//     step is superseded by a no-agent publish-only CI wait). In one transaction
+//     with that last check the sibling's one pending work item (or a sentinel) is
+//     leased to the sync until the push is over, so no worker can start on the
+//     branch mid-push, and an abort revokes the push through its pre-push fence; a
+//     push that does not land gives the hold up and changes nothing.
+//     A textual conflict queues one conflict-repair round naming the files
+//     (`repair_queued`).
 //
 // Bounds: one sync and one repair round per issue per episode, shared with the
 // merge and checks-wait entries. A failure for one sibling — a throw included —
@@ -48,8 +53,10 @@ import {
   BASE_ADVANCED_STATUSES,
   checksWaitSyncSpent,
   conflictRepairSpent,
-  queueChecksWaitAfterBaseSync,
+  cancelBaseSyncReservation,
+  commitBaseSyncReservation,
   queueConflictRepairRound,
+  reserveBaseSyncPush,
   runMergeConflictSync,
 } from "./merge-conflict-sync.js";
 
@@ -213,6 +220,9 @@ async function scanSibling(
   // One push-only sync per episode: a spent sync goes straight to the repair round.
   let files = probe.files;
   if (!checksWaitSyncSpent(issue.id, instance.id)) {
+    // The sibling is held from the idleness check until the push is over, so no
+    // worker can start mid-push; only a landed push re-enters the checks wait.
+    let wait: { id: string; kept: boolean } | null = null;
     const sync = await runMergeConflictSync({
       issueId: issue.id,
       instanceId: instance.id,
@@ -223,26 +233,34 @@ async function scanSibling(
       mergeReason: `${issue.baseBranch} advanced and PR #${prNumber} now conflicts with it.`,
       entry: "base_advanced",
       expectedHeadSha,
-      beforePush: guard,
+      reservePush: (headSha) => {
+        const reserved = reserveBaseSyncPush({ issueId: issue.id, instanceId: instance.id, branch, headSha, guard });
+        if (typeof reserved === "string") return reserved;
+        return {
+          release: (pushed) => {
+            if (!pushed) return cancelBaseSyncReservation(reserved);
+            wait = commitBaseSyncReservation(reserved, {
+              issueId: issue.id,
+              instanceId: instance.id,
+              baseBranch: issue.baseBranch,
+              branch,
+              prNumber,
+              headSha,
+            });
+          },
+        };
+      },
     });
     if (sync.outcome === "synced") {
-      const wait = queueChecksWaitAfterBaseSync({
-        issueId: issue.id,
-        instanceId: instance.id,
-        baseBranch: issue.baseBranch,
-        branch,
-        prNumber,
-        headSha: sync.headSha,
-        guard,
-      });
+      const checksWait = wait as { id: string; kept: boolean } | null;
       return {
         action: "synced",
         detail: {
           ...probeDetail,
           syncedHeadSha: sync.headSha,
-          ...(wait
-            ? { workItemId: wait.id, ...(wait.kept ? { checksWait: "queued developer round" } : {}) }
-            : { reason: "issue became busy or left its stage before the checks wait queued" }),
+          ...(checksWait
+            ? { workItemId: checksWait.id, ...(checksWait.kept ? { checksWait: "queued developer round" } : {}) }
+            : { reason: "the hold was revoked or the issue left its stage before the checks wait queued" }),
         },
       };
     }
