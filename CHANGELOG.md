@@ -4,6 +4,15 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.12 — 2026-10-04
+
+Swap developer/reviewer agent on a parked issue, park usage-cap waits for a human, release pipeline script.
+
+### Changes
+
+- NOT-358: Swap developer/reviewer agent on a parked issue, and park a usage-cap wait for a human (#200)
+- Release pipeline: scripts/release.mjs (prepare/finish/check), CI version-consistency gate, PUBLISHING.md reduced to the commands. (#199)
+
 ## 1.2.11 — 2026-10-04
 
 Patch over 1.2.10: base conflicts are caught before the first push, and a merge no longer leaves sibling PRs conflicting.
