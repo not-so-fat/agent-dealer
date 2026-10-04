@@ -4,6 +4,15 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.11 — 2026-10-04
+
+Patch over 1.2.10: base conflicts are caught before the first push, and a merge no longer leaves sibling PRs conflicting.
+
+### Changes
+
+- **Probe for base conflicts before the first push (NOT-355)** — a conflict with the base is detected up front and the developer gets a repair round before the PR exists.
+- **Post-merge sibling scan (NOT-356)** — after Dealer merges a PR, the other idle open PRs on the same repo and base are probed with `git merge-tree`; a conflicting one gets the push-only base sync (never force or rebase) and at most one conflict-repair round per episode, then re-enters the checks wait.
+
 ## 1.2.10 — 2026-10-03
 
 Patch over 1.2.9: a developer PR that conflicts with its base while CI is pending no longer waits forever, and a Muse session that already finished no longer holds the worker until the 1-hour wall.
