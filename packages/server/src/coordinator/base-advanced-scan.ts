@@ -268,7 +268,9 @@ async function scanSibling(
       return { action: "hand_edited", detail: { ...probeDetail, reason: sync.reason } };
     }
     if (sync.outcome === "skipped" && sync.code === "refused") {
-      return { action: drifted ? "skipped" : "active_worker", detail: { ...probeDetail, reason: sync.reason } };
+      // Drifted at the guard, or during the push (an abort revoking it).
+      const left = drifted || siblingDrift(issue, instance.id) != null;
+      return { action: left ? "skipped" : "active_worker", detail: { ...probeDetail, reason: sync.reason } };
     }
     if (sync.outcome === "escalate" || sync.outcome === "skipped") {
       return { action: sync.outcome === "escalate" ? "failed" : "skipped", detail: { ...probeDetail, reason: sync.reason } };

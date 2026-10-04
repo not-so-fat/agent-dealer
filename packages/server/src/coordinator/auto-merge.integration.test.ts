@@ -1731,6 +1731,140 @@ test("NOT-356: a worker that starts during the pre-push tip re-read blocks the p
   assertNoForceNoRebase(calls);
 });
 
+test("NOT-356: no worker can be dispatched on the sibling while the sync push is in flight", async () => {
+  const { claimWorkItem, enqueueWorkItem } = await import("../repository/work-items.js");
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-held", conflict: false }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-held", heads["sib-held"]!, 59);
+  const reviewerItem = listWorkItemsForIssue(siblingId).find((i) => i.status === "pending")!;
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  setMergePrForTests(async () => {
+    landMergedPr();
+    return { ok: true };
+  });
+  const calls: string[][] = [];
+  let duringPush: { claimed: unknown; heldBy: string | null; enqueueRejected: boolean } | null = null;
+  // The push executor pauses before the real push: the dispatcher tries to lease the
+  // sibling's work, and a racing command tries to queue another item for it.
+  setConflictSyncGitExecForTests(async (args, opts) => {
+    calls.push(args);
+    if (args[0] === "push") {
+      const claimed = claimWorkItem("dispatcher-under-test", { leaseMs: 60_000 });
+      const held = listWorkItemsForIssue(siblingId).find((i) => i.id === reviewerItem.id)!;
+      let enqueueRejected = false;
+      try {
+        enqueueWorkItem({
+          issueId: siblingId,
+          workflowInstanceId: getActiveWorkflowInstance(siblingId)!.id,
+          kind: "developer",
+          round: getIssue(siblingId)!.currentRound,
+          payload: {},
+          idempotencyKey: "racing-command",
+        });
+      } catch {
+        enqueueRejected = true;
+      }
+      duringPush = { claimed, heldBy: held.status === "leased" ? held.leaseOwner : null, enqueueRejected };
+    }
+    return defaultSyncGitExec(args, opts);
+  });
+  const stop = observeGitCommands((args) => {
+    calls.push([...args]);
+  });
+  try {
+    const { finalizeAutoMerge } = await import("./auto-merge.js");
+    assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
+    await settleBaseAdvancedScansForTests();
+  } finally {
+    stop();
+  }
+
+  assert.deepEqual(duringPush, { claimed: null, heldBy: "base-advanced-sync", enqueueRejected: true });
+  assert.notEqual(originTip(origin, "sib-held"), heads["sib-held"], "the held push landed");
+  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["synced"]);
+  const items = listWorkItemsForIssue(siblingId);
+  assert.equal(items.find((i) => i.id === reviewerItem.id)!.status, "cancelled");
+  const pending = items.filter((i) => i.status === "pending");
+  assert.equal(pending.length, 1, "the checks wait on the pushed head, released to the dispatcher");
+  assert.equal(JSON.parse(pending[0]!.payloadJson!).publishOnly, true);
+  assertNoForceNoRebase(calls);
+});
+
+test("NOT-356: a sibling aborted while the sync push is in flight is never pushed", async () => {
+  const { abortIssue } = await import("./commands.js");
+  const { origin, local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-push-abort", conflict: false }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-push-abort", heads["sib-push-abort"]!, 60);
+  setBaseAdvancedProbeForTests(async () => ({ state: "conflict", files: ["shared.txt"] }) as never);
+  setMergePrForTests(async () => {
+    landMergedPr();
+    return { ok: true };
+  });
+  const calls: string[][] = [];
+  // The push executor pauses before the real push, the operator aborts the sibling,
+  // then the real push runs.
+  setConflictSyncGitExecForTests(async (args, opts) => {
+    calls.push(args);
+    if (args[0] === "push") {
+      const aborted = abortIssue(siblingId, "operator", { killProcess: () => true });
+      assert.ok(aborted.ok);
+    }
+    return defaultSyncGitExec(args, opts);
+  });
+  const stop = observeGitCommands((args) => {
+    calls.push([...args]);
+  });
+  try {
+    const { finalizeAutoMerge } = await import("./auto-merge.js");
+    assert.equal((await finalizeAutoMerge(mergedId)).issueStatus, "done");
+    await settleBaseAdvancedScansForTests();
+  } finally {
+    stop();
+  }
+
+  assert.deepEqual(
+    calls.filter((a) => a[0] === "push"),
+    [["push", "-u", "origin", "HEAD:refs/heads/sib-push-abort"]],
+    "one plain push attempt, revoked inside the push"
+  );
+  assert.equal(originTip(origin, "sib-push-abort"), heads["sib-push-abort"], "origin never moved");
+  assert.equal(getIssue(siblingId)!.status, "closed");
+  assert.deepEqual(
+    syncEvents(siblingId).map((e) => [e.outcome, e.code]),
+    [["skipped", "refused"]]
+  );
+  assert.deepEqual(baseAdvancedEvents(siblingId).map((e) => e.action), ["skipped"]);
+  assert.equal(
+    listWorkItemsForIssue(siblingId).filter((i) => i.status === "pending" || i.status === "leased").length,
+    0,
+    "nothing queued for the aborted issue"
+  );
+  assertNoForceNoRebase(calls);
+});
+
+test("NOT-356: a PR GitHub already reports merged (a hand merge found by recovery) starts no sibling scan", async () => {
+  const { local, heads, landMergedPr } = initSiblingRepos([{ branch: "sib-ext", conflict: true }]);
+  const mergedId = await parkedMergeIn(local);
+  const siblingId = await idleSiblingIn(local, "sib-ext", heads["sib-ext"]!, 61);
+  const before = listWorkflowEventsForIssue(siblingId).length;
+  // A human merged the parked PR by hand; the recovery finalize finds it merged.
+  landMergedPr();
+  setMergePrForTests(async () => ({ ok: true, alreadyMerged: true }));
+  const { calls, stop } = recordAllGit();
+  try {
+    const { recoverStrandedAutoMerges } = await import("./auto-merge.js");
+    await recoverStrandedAutoMerges();
+    await settleBaseAdvancedScansForTests();
+  } finally {
+    stop();
+  }
+
+  assert.equal(getIssue(mergedId)!.status, "done", "recovery still completes the issue");
+  assert.deepEqual(listWorkflowEventsForIssue(siblingId).slice(before), [], "the sibling is untouched");
+  assert.deepEqual(calls, [], "no probe, sync or push");
+  assert.equal(getIssue(siblingId)!.status, "reviewing");
+});
+
 test("NOT-356: idle siblings parked on a needs_human gate or a stranded auto-merge are probed and repaired", async () => {
   const { transitionIssue } = await import("../repository/issues.js");
   const { createHumanAction } = await import("../repository/human-actions.js");

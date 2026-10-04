@@ -76,3 +76,25 @@ test("NOT-151: resolveAutoMergeCwd accepts a real legacy local checkout", () => 
   assert.equal(ok.ok, true);
   if (ok.ok) assert.equal(ok.cwd, dir);
 });
+
+test("NOT-356: realMergePr marks a PR GitHub already merged, and only that, as alreadyMerged", async () => {
+  const { realMergePr } = await import("./auto-merge.js");
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not356-gh-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-not356-cwd-"));
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ""}`;
+  const fakeGh = (mergeBody: string) =>
+    fs.writeFileSync(
+      path.join(bin, "gh"),
+      `#!/bin/sh\nif [ "$2" = "merge" ]; then\n${mergeBody}\nfi\nexit 0\n`,
+      { mode: 0o755 }
+    );
+  try {
+    fakeGh(`echo "GraphQL: Pull request #7 was already merged" >&2; exit 1`);
+    assert.deepEqual(await realMergePr({ cwd, number: 7 }), { ok: true, alreadyMerged: true });
+    fakeGh("exit 0");
+    assert.deepEqual(await realMergePr({ cwd, number: 7 }), { ok: true });
+  } finally {
+    process.env.PATH = savedPath;
+  }
+});
