@@ -8,13 +8,23 @@ type Props = {
   initialReviewerId: string | null;
   busy: boolean;
   onSave: (developerAgentId: string, reviewerAgentId: string) => void;
-  onCancel: () => void;
+  /**
+   * NOT-359: optional — the parked swap box is always expanded, so its Cancel
+   * resets the selectors to the current agents instead of closing anything.
+   * The queued editor still passes a closer.
+   */
+  onCancel?: () => void;
   /**
    * NOT-358: `queued` keeps the pre-start copy (queue position is kept); `parked`
    * describes the parked swap instead (worktree, branch and review rounds are kept
    * and a resume continues with the new agents).
    */
   variant?: "queued" | "parked";
+  /**
+   * NOT-359: confirmation line rendered inside the box after a successful save
+   * (e.g. "Agents updated. Resume to continue with the new agents.").
+   */
+  notice?: string | null;
 };
 
 /** True when the agent carries a durable usage-cap observation. */
@@ -60,6 +70,7 @@ export default function AgentAssignmentEditor({
   onSave,
   onCancel,
   variant = "queued",
+  notice = null,
 }: Props) {
   const [developerId, setDeveloperId] = useState(initialDeveloperId ?? "");
   const [reviewerId, setReviewerId] = useState(initialReviewerId ?? "");
@@ -147,11 +158,27 @@ export default function AgentAssignmentEditor({
           type="button"
           className="px-4 py-1.5 text-sm text-white/60 hover:text-white disabled:opacity-50"
           disabled={busy}
-          onClick={onCancel}
+          title={
+            variant === "parked"
+              ? "Reset the selectors to the issue's current agents"
+              : undefined
+          }
+          onClick={() => {
+            // NOT-359: the parked box never collapses — Cancel resets the
+            // selectors to the current agents. The queued editor still closes.
+            if (variant === "parked") {
+              setDeveloperId(initialDeveloperId ?? "");
+              setReviewerId(initialReviewerId ?? "");
+              onCancel?.();
+              return;
+            }
+            onCancel?.();
+          }}
         >
           Cancel
         </button>
       </div>
+      {notice && <p className="text-xs text-emerald-200/90">{notice}</p>}
     </div>
   );
 }
