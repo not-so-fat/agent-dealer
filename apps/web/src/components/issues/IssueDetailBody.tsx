@@ -154,6 +154,29 @@ export function CloseIssueConfirmation({
   );
 }
 
+/**
+ * NOT-359: confirmation line kept inside the parked swap box after a save —
+ * the box stays expanded, the refreshed detail carries the new agents, and this
+ * tells the owner a resume continues with them.
+ */
+export const AGENT_SWAP_SAVED_NOTICE = "Agents updated. Resume to continue with the new agents.";
+
+/**
+ * NOT-359: a parked-swap save PATCHes only the roles that actually changed —
+ * one PATCH per save, never a full reassignment when a single role moved.
+ */
+export function buildAgentSwapPatch(
+  currentDeveloperId: string | null,
+  currentReviewerId: string | null,
+  nextDeveloperId: string,
+  nextReviewerId: string
+): { developerAgentId?: string; reviewerAgentId?: string } {
+  const patch: { developerAgentId?: string; reviewerAgentId?: string } = {};
+  if (nextDeveloperId !== (currentDeveloperId ?? "")) patch.developerAgentId = nextDeveloperId;
+  if (nextReviewerId !== (currentReviewerId ?? "")) patch.reviewerAgentId = nextReviewerId;
+  return patch;
+}
+
 /** The next allowed action, per the ticket's workflow rail: an open human action's own
  * compact summary question when one exists (NOT-288 — never a folded git command
  * block), otherwise a derived "waiting on X" from currentOwner. */
@@ -192,8 +215,9 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   const [startNotice, setStartNotice] = useState<string | null>(null);
   /** NOT-240 pre-execution configuration editor (ready, no active workflow). */
   const [configEditing, setConfigEditing] = useState(false);
-  /** NOT-358 parked agent-swap editor (needs_human with an open park action). */
-  const [agentSwapEditing, setAgentSwapEditing] = useState(false);
+  /** NOT-359 parked swap confirmation — the box itself is always expanded, so
+   * there is no editing toggle; this only holds the post-save notice. */
+  const [swapNotice, setSwapNotice] = useState<string | null>(null);
   /** NOT-239 pre-execution close: two-step inside the low-prominence area below. */
   const [closeConfirming, setCloseConfirming] = useState(false);
   /** NOT-239 unambiguous result banner after a successful close. */
@@ -343,15 +367,19 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
     setBusy(true);
     onError(null);
     try {
-      // One PATCH for the swapped roles: the server re-freezes the profile snapshot
-      // on the next resume and records the before/after on the timeline.
-      await patchIssue(issueId, { developerAgentId, reviewerAgentId });
-      setAgentSwapEditing(false);
+      // NOT-359: one PATCH with only the changed roles — the server re-freezes
+      // the profile snapshot on the next resume and records the before/after on
+      // the timeline. The box stays expanded: the refreshed detail carries the
+      // new agents and the notice confirms a resume continues with them.
+      await patchIssue(
+        issueId,
+        buildAgentSwapPatch(issue.developerAgentId, issue.reviewerAgentId, developerAgentId, reviewerAgentId)
+      );
+      setSwapNotice(AGENT_SWAP_SAVED_NOTICE);
       refresh();
     } catch (e) {
-      // A 409 means a resume or session won the race: close the editor and refresh
-      // to the live state instead of leaving a stale success.
-      setAgentSwapEditing(false);
+      // A 409 means a resume or session won the race: refresh to the live state
+      // instead of leaving a stale success — the box stays open on the live agents.
       fail(e);
       refresh();
     } finally {
@@ -494,33 +522,6 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
           onSave={(repo, dev, rev) => void saveConfig(repo, dev, rev)}
           onCancel={() => setConfigEditing(false)}
         />
-
-        {/* NOT-358: parked agent swap — developer and reviewer as selectable
-            controls with a Save action. The worktree, branch and review rounds
-            are kept; a resume continues with the new agents. */}
-        {isParkedForSwap && !agentSwapEditing && (
-          <button
-            type="button"
-            className="font-ui-display mb-4 text-xs text-cyber-teal hover:underline disabled:opacity-50"
-            disabled={busy}
-            onClick={() => setAgentSwapEditing(true)}
-          >
-            Swap developer / reviewer agents
-          </button>
-        )}
-        {isParkedForSwap && agentSwapEditing && (
-          <div className="mb-4">
-            <AgentAssignmentEditor
-              variant="parked"
-              agents={agents}
-              initialDeveloperId={issue.developerAgentId}
-              initialReviewerId={issue.reviewerAgentId}
-              busy={busy}
-              onSave={(dev, rev) => void saveAgentSwap(dev, rev)}
-              onCancel={() => setAgentSwapEditing(false)}
-            />
-          </div>
-        )}
 
         {/* NOT-306: frozen execution contract, read-only — the ticket
             description stays the only authoring surface, so this renders no
@@ -752,6 +753,26 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
                 />
               );
             })}
+          </div>
+        )}
+
+        {/* NOT-359: parked agent swap — always expanded directly under the open
+            human action card, next to the Resume/Close choices, preselected to
+            the current agents. The worktree, branch and review rounds are kept;
+            a resume continues with the new agents. Rendered for parked issues
+            only — every other state renders nothing here. */}
+        {isParkedForSwap && (
+          <div className="mb-4">
+            <AgentAssignmentEditor
+              key={`${issue.developerAgentId ?? ""}:${issue.reviewerAgentId ?? ""}`}
+              variant="parked"
+              agents={agents}
+              initialDeveloperId={issue.developerAgentId}
+              initialReviewerId={issue.reviewerAgentId}
+              busy={busy}
+              notice={swapNotice}
+              onSave={(dev, rev) => void saveAgentSwap(dev, rev)}
+            />
           </div>
         )}
 

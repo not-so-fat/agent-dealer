@@ -1,7 +1,13 @@
-// NOT-358: a parked issue offers the developer/reviewer swap, and a usage-cap
-// wait offers "Park for human" next to its notice. Static-markup regression tests
-// alongside IssueDetailRegression.test.tsx — interaction (save/park calls) is the
-// server PATCH/park contract, already covered by the route tests.
+// NOT-359: a parked issue shows the developer/reviewer swap box expanded by
+// default, directly under the open human action card — no collapsed link. Static
+// markup tests alongside IssueDetailBody (renderToStaticMarkup, no browser):
+// presence/absence/preselection/disabled state are asserted on the markup, and
+// the partial-PATCH contract (only changed roles) is asserted on the exported
+// buildAgentSwapPatch helper the save path sends. Interaction (changing a
+// selector, clicking Save/Cancel) needs a DOM harness the repo does not ship,
+// so the enabled-after-change and reset branches are covered by construction:
+// Save's `disabled` reads the same unchanged comparison the builder inverts,
+// and parked Cancel assigns the initial ids back into the same state.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
@@ -12,8 +18,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { AgentWithHealth, HumanAction, Issue } from "@agent-dealer/shared";
 import type { IssueDetail as WebIssueDetail } from "../../api.js";
-import IssueDetailBody from "./IssueDetailBody.js";
+import IssueDetailBody, {
+  AGENT_SWAP_SAVED_NOTICE,
+  buildAgentSwapPatch,
+} from "./IssueDetailBody.js";
 import AgentAssignmentEditor from "./AgentAssignmentEditor.js";
+
+const DEV = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+const REV = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+const DEV2 = "cccccccc-cccc-4ccc-cccc-cccccccccccc";
 
 function issueFixture(extra: Partial<Issue> = {}): Issue {
   return {
@@ -30,8 +43,8 @@ function issueFixture(extra: Partial<Issue> = {}): Issue {
     status: "needs_human",
     currentOwner: "human",
     currentIntent: "Developer deferred — capped",
-    developerAgentId: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
-    reviewerAgentId: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+    developerAgentId: DEV,
+    reviewerAgentId: REV,
     maxReviewRounds: 3,
     currentRound: 1,
     maxInfraAttempts: 3,
@@ -77,7 +90,7 @@ function actionFixture(extra: Partial<HumanAction> = {}): HumanAction {
 
 function agentFixture(extra: Partial<AgentWithHealth> = {}): AgentWithHealth {
   return {
-    id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+    id: DEV,
     name: "Dev One",
     runtime: "claude_code",
     workspaceRoot: null,
@@ -123,8 +136,13 @@ function agentsFixture(): AgentWithHealth[] {
   return [
     agentFixture(),
     agentFixture({
-      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      id: REV,
       name: "Rev Two",
+      runtime: "cursor_local",
+    }),
+    agentFixture({
+      id: DEV2,
+      name: "Dev Three",
       runtime: "cursor_local",
     }),
   ];
@@ -145,35 +163,201 @@ function renderBody(detail: WebIssueDetail, agents: AgentWithHealth[] = []): str
   );
 }
 
-test("a parked issue offers the agent swap, other statuses do not", () => {
-  const parked = renderBody(detailFixture(), agentsFixture());
-  assert.match(parked, /Swap developer \/ reviewer agents/);
+/** The two swap selectors: the only <select> elements the detail renders. */
+function swapSelects(html: string): RegExpMatchArray[] {
+  return [...html.matchAll(/<select[^>]*>/g)];
+}
 
-  const running = renderBody(
-    detailFixture({ issue: issueFixture({ status: "developing" }), humanActions: [] }),
-    agentsFixture()
-  );
-  assert.doesNotMatch(running, /Swap developer \/ reviewer agents/);
-
-  const ready = renderBody(
-    detailFixture({ issue: issueFixture({ status: "ready" }), humanActions: [] }),
-    agentsFixture()
-  );
-  assert.doesNotMatch(ready, /Swap developer \/ reviewer agents/);
+test("a parked issue renders both selectors expanded without any click, preselected to the current agents", () => {
+  for (const actionType of ["attempts_exhausted", "policy_escalation"] as const) {
+    const html = renderBody(
+      detailFixture({ humanActions: [actionFixture({ actionType })] }),
+      agentsFixture()
+    );
+    // Expanded box, not the old collapsed link.
+    assert.match(html, /Swap the developer and\/or reviewer/, `expanded copy for ${actionType}`);
+    assert.doesNotMatch(html, /Swap developer \/ reviewer agents/, `no collapsed link for ${actionType}`);
+    // Both selectors present and enabled.
+    const selects = swapSelects(html);
+    assert.equal(selects.length, 2, `two selectors for ${actionType}`);
+    for (const s of selects) assert.doesNotMatch(s[0], /disabled/, `selector enabled for ${actionType}`);
+    // Preselected to the issue's current agents.
+    assert.match(html, new RegExp(`<option value="${DEV}"[^>]*selected`), `developer preselected for ${actionType}`);
+    assert.match(html, new RegExp(`<option value="${REV}"[^>]*selected`), `reviewer preselected for ${actionType}`);
+    // Save disabled while nothing changed.
+    assert.match(html, /<button[^>]*disabled=""[^>]*>Save agents</, `save disabled initially for ${actionType}`);
+    // The box sits under the human action card, next to the Resume/Close choices.
+    assert.ok(
+      html.indexOf("Human action needed") !== -1 &&
+        html.indexOf("Human action needed") < html.indexOf("Swap the developer"),
+      `swap box under the human action card for ${actionType}`
+    );
+    // No premature confirmation.
+    assert.doesNotMatch(html, /Agents updated/, `no confirmation before a save for ${actionType}`);
+  }
 });
 
-test("a policy_escalation park offers the swap, other open actions do not", () => {
-  const escalation = renderBody(
-    detailFixture({ humanActions: [actionFixture({ actionType: "policy_escalation" })] }),
-    agentsFixture()
-  );
-  assert.match(escalation, /Swap developer \/ reviewer agents/);
+test("no swap box for running, reviewing, repairing, final_review, queued, ready, cap-waiting, done, closed, or other-action needs_human states", () => {
+  const activeInstance = {
+    id: "33333333-3333-4333-8333-333333333333",
+    issueId: "11111111-1111-4111-8111-111111111111",
+    workflowVersion: "v1",
+    startedAt: "2026-09-20T09:30:00.000Z",
+    completedAt: null,
+    outcome: null,
+  };
+  const cases: Array<{ name: string; detail: WebIssueDetail }> = [
+    {
+      name: "developing",
+      detail: detailFixture({ issue: issueFixture({ status: "developing" }), humanActions: [] }),
+    },
+    {
+      name: "reviewing",
+      detail: detailFixture({ issue: issueFixture({ status: "reviewing" }), humanActions: [] }),
+    },
+    {
+      name: "repairing",
+      detail: detailFixture({ issue: issueFixture({ status: "repairing" }), humanActions: [] }),
+    },
+    {
+      name: "final_review",
+      detail: detailFixture({ issue: issueFixture({ status: "final_review" }), humanActions: [] }),
+    },
+    {
+      name: "ready",
+      detail: detailFixture({ issue: issueFixture({ status: "ready" }), humanActions: [] }),
+    },
+    {
+      name: "queued ready",
+      detail: detailFixture({
+        issue: issueFixture({ status: "ready" }),
+        humanActions: [],
+        queued: true,
+        queueEntry: { position: 2, waitReason: "waiting for slot" },
+      }),
+    },
+    {
+      name: "cap-waiting",
+      detail: detailFixture({
+        issue: issueFixture({ status: "developing", currentOwner: "developer" }),
+        humanActions: [],
+        capWait: {
+          kind: "usage_capped",
+          until: "2026-10-04T12:00:00.000Z",
+          reason: "claude_code usage capped — five_hour limit rejected",
+        },
+      }),
+    },
+    {
+      name: "done",
+      detail: detailFixture({ issue: issueFixture({ status: "done" }), humanActions: [] }),
+    },
+    {
+      name: "closed",
+      detail: detailFixture({ issue: issueFixture({ status: "closed" }), humanActions: [] }),
+    },
+    {
+      name: "aborted run (closed with a completed instance)",
+      detail: detailFixture({
+        issue: issueFixture({ status: "closed" }),
+        humanActions: [],
+        latestWorkflowInstance: { ...activeInstance, completedAt: "2026-09-20T10:00:00.000Z", outcome: "closed" },
+      }),
+    },
+    {
+      name: "needs_human with only a resolved park action",
+      detail: detailFixture({
+        humanActions: [actionFixture({ status: "resolved" })],
+      }),
+    },
+  ];
+  const otherActionTypes = [
+    "final_review",
+    "product_scope_decision",
+    "operator_verification",
+    "deck_interaction_required",
+    "reflection_interaction_required",
+    "muse_capability",
+  ] as const;
+  for (const actionType of otherActionTypes) {
+    cases.push({
+      name: `needs_human with only ${actionType}`,
+      detail: detailFixture({ humanActions: [actionFixture({ actionType })] }),
+    });
+  }
+  for (const { name, detail } of cases) {
+    const html = renderBody(detail, agentsFixture());
+    assert.doesNotMatch(html, /Swap the developer and\/or reviewer/, `no swap copy for ${name}`);
+    assert.doesNotMatch(html, /Save agents/, `no swap save for ${name}`);
+    assert.doesNotMatch(html, /resume continues with the new agents/, `no swap note for ${name}`);
+    assert.equal(swapSelects(html).length, 0, `no swap selectors for ${name}`);
+  }
+});
 
-  const review = renderBody(
-    detailFixture({ humanActions: [actionFixture({ actionType: "final_review" })] }),
+test("buildAgentSwapPatch sends only the changed roles", () => {
+  assert.deepEqual(
+    buildAgentSwapPatch(DEV, REV, DEV2, REV),
+    { developerAgentId: DEV2 },
+    "developer-only change patches only the developer"
+  );
+  assert.deepEqual(
+    buildAgentSwapPatch(DEV, REV, DEV, DEV2),
+    { reviewerAgentId: DEV2 },
+    "reviewer-only change patches only the reviewer"
+  );
+  assert.deepEqual(
+    buildAgentSwapPatch(DEV, REV, DEV2, DEV),
+    { developerAgentId: DEV2, reviewerAgentId: DEV },
+    "both changed patches both roles"
+  );
+  assert.deepEqual(buildAgentSwapPatch(DEV, REV, DEV, REV), {}, "nothing changed patches nothing");
+  assert.deepEqual(
+    buildAgentSwapPatch(null, null, DEV, REV),
+    { developerAgentId: DEV, reviewerAgentId: REV },
+    "unassigned currents patch both roles"
+  );
+});
+
+test("the saved notice stays inside the visible box with the new agents selected", () => {
+  // The confirmation line itself renders inside the editor, under the buttons.
+  const saved = renderToStaticMarkup(
+    <AgentAssignmentEditor
+      variant="parked"
+      agents={agentsFixture()}
+      initialDeveloperId={DEV2}
+      initialReviewerId={REV}
+      busy={false}
+      notice={AGENT_SWAP_SAVED_NOTICE}
+      onSave={() => {}}
+    />
+  );
+  assert.match(saved, /Agents updated\. Resume to continue with the new agents\./);
+  // The box stays visible: selectors and Save remain alongside the notice.
+  assert.equal(swapSelects(saved).length, 2, "selectors remain after save");
+  assert.match(saved, /Save agents/);
+  assert.match(saved, new RegExp(`<option value="${DEV2}"[^>]*selected`), "new developer stays selected");
+
+  // A fresh parked render (pre-save) shows no confirmation.
+  const fresh = renderToStaticMarkup(
+    <AgentAssignmentEditor
+      variant="parked"
+      agents={agentsFixture()}
+      initialDeveloperId={DEV}
+      initialReviewerId={REV}
+      busy={false}
+      onSave={() => {}}
+    />
+  );
+  assert.doesNotMatch(fresh, /Agents updated/);
+  assert.match(fresh, /<button[^>]*disabled=""[^>]*>Save agents</, "save disabled while nothing changed");
+
+  // The refreshed detail after a save keeps the box open on the new agents.
+  const refreshed = renderBody(
+    detailFixture({ issue: issueFixture({ developerAgentId: DEV2 }) }),
     agentsFixture()
   );
-  assert.doesNotMatch(review, /Swap developer \/ reviewer agents/);
+  assert.match(refreshed, /Swap the developer and\/or reviewer/);
+  assert.match(refreshed, new RegExp(`<option value="${DEV2}"[^>]*selected`));
 });
 
 test("a usage-cap wait shows the wait notice with a Park for human action", () => {
@@ -222,8 +406,8 @@ test("the parked editor shows both agent selects with a Save action and the park
     <AgentAssignmentEditor
       variant="parked"
       agents={agentsFixture()}
-      initialDeveloperId="aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
-      initialReviewerId="bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
+      initialDeveloperId={DEV}
+      initialReviewerId={REV}
       busy={false}
       onSave={() => {}}
       onCancel={() => {}}
@@ -232,6 +416,7 @@ test("the parked editor shows both agent selects with a Save action and the park
   assert.match(html, /Developer/);
   assert.match(html, /Reviewer/);
   assert.match(html, /Save agents/);
+  assert.match(html, /Cancel/);
   assert.match(html, /worktree/);
   assert.match(html, /resume continues with the new agents/);
   assert.doesNotMatch(html, /queue position is kept/);
@@ -241,8 +426,8 @@ test("the queued editor keeps its queue copy", () => {
   const html = renderToStaticMarkup(
     <AgentAssignmentEditor
       agents={agentsFixture()}
-      initialDeveloperId="aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
-      initialReviewerId="bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
+      initialDeveloperId={DEV}
+      initialReviewerId={REV}
       busy={false}
       onSave={() => {}}
       onCancel={() => {}}
