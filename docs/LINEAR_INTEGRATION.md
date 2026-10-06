@@ -36,7 +36,7 @@ flowchart TB
 | **Intake** | Human or agent imports issues one at a time — no server auto-cron enqueue |
 | **Linear read** | Server GraphQL (`linear-inbox.ts`) — not Agent Deck MCP for the queue |
 | **API key** | `LINEAR_API_KEY` env-only — never stored in SQLite |
-| **Settings** | Filters in SQLite, seeded with defaults; `LINEAR_STATE_FILTER` / `LINEAR_TEAM_ID` env override saved values when set. No UI edits them since NOT-71 removed the Inbox settings panel |
+| **Settings** | Filters in SQLite, seeded with defaults; `LINEAR_STATE_FILTER` / `LINEAR_TEAM_ID` env override saved values when set. Edit Team / Assignee / Status from **New issue → From Linear** (gear beside the open-inbox picker) — NOT-361; no global Configuration page |
 | **Automation** | REST API first; orchestrator agents create issues directly |
 | **Write-back** | Non-blocking comment + status, but only on the run-scoped delivery `done` path — see [Status write-back](#status-write-back) |
 
@@ -62,11 +62,19 @@ flowchart TB
 | `linear.syncEnabled` | true | Master toggle for write-back |
 | `linear.routingRules` | `[]` | **Unused since NOT-71** — `autoAgent` label routing is deleted |
 
-These are read from SQLite (and overridden by env where noted). NOT-71 removed the settings UI and its `PATCH` route, so changing a saved value now means editing `intake_settings` directly or setting the env override.
+These are read from SQLite (and overridden by env where noted). **NOT-361** restores a narrow picker config API and an inline editor on **New issue → From Linear**:
+
+| Endpoint | Role |
+|----------|------|
+| `GET` / `PATCH /api/intake/linear/config` | Effective + persisted Team / Assignee / Status; env override flags |
+| `GET /api/intake/linear/metadata` | Team names/IDs, workflow status names, authenticated Linear viewer |
+| `GET /api/intake/linear` | At most **50** most-recently-updated candidates + `hasMore` (no cursor walk) |
+
+Exact identifier/URL lookup (`GET /api/intake/linear/lookup`) ignores saved picker filters. Env overrides remain authoritative: the UI disables only the overridden controls and explains why.
 
 ## Workflow
 
-1. **Find** — Open-state issues matching the saved filters (default: Backlog, Todo, In Progress, In Review; **not** limited to assignee) appear as candidates under **New issue → From Linear**. The same form also accepts a free-form `NOT-xx` or a Linear URL via lookup. Optional "assigned to me" lives in the persisted settings.
+1. **Find** — Open-state issues matching the saved filters (default: Backlog, Todo, In Progress, In Review; **not** limited to assignee) appear as candidates under **New issue → From Linear** (most recently updated first, capped at 50). Use the gear beside the open-inbox picker to change Team / Assignee / Status. The same form also accepts a free-form `NOT-xx` or a Linear URL via lookup (works even when the issue is outside the picker filters).
 2. **Import** — Title, description and any Acceptance criteria section are pulled from the Linear issue; you pick repo, base branch, developer and reviewer, and it is queued by default.
 3. **Run** — The issue coordinator takes it from the queue: developer session → reviewer session → PR, with human actions raised on the Issues home when something needs a decision.
 
@@ -203,7 +211,8 @@ Response headers of interest (on every GraphQL POST):
 | Path | Operation name(s) | Expected rate |
 |------|-------------------|---------------|
 | Admission blockers (NOT-104) | `fetchLinearBlockers`, `fetchLinearBlockersPage` | ≤ ~1 req / 60s when a free slot exists and Linear-sourced issues are queued (TTL cache). **Zero** when capacity is full or the queue has no Linear issues |
-| From Linear (candidate list) | `listLinearCandidates` (+ pages of 50); `getLinearViewer` only when `linear.assigneeMe` is true | Burst on each open — **uncached** |
+| From Linear (candidate list) | `listLinearCandidates` (single page of ≤50, `orderBy: updatedAt`); `getLinearViewer` only when `linear.assigneeMe` is true | Burst on each open — **uncached** |
+| From Linear (filter editor) | `fetchLinearIntakeMetadata` (teams + states + viewer); config via SQLite | On editor open / save |
 | Kick lookup | `getLinearIssue` | One per lookup |
 | Delivery sync | `getLinearIssue`, `getWorkflowStates`, `commentCreate`, `issueUpdateState` | Few per approved delivery |
 

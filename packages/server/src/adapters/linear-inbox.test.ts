@@ -193,11 +193,8 @@ test("listLinearCandidates requests AND filters, updatedAt order, and a single p
 test("fetchLinearIntakeMetadata returns teams, statuses, and viewer", async () => {
   process.env.LINEAR_API_KEY = "test-key";
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () => ({
-    ok: true,
-    status: 200,
-    headers: new Headers(),
-    text: async () =>
+  globalThis.fetch = (async () =>
+    new Response(
       JSON.stringify({
         data: {
           viewer: { id: "v1", name: "Ada", email: "ada@example.com" },
@@ -207,13 +204,19 @@ test("fetchLinearIntakeMetadata returns teams, statuses, and viewer", async () =
                 id: "t1",
                 name: "Core",
                 key: "COR",
-                states: { nodes: [{ name: "Todo", type: "unstarted" }, { name: "Done", type: "completed" }] },
+                states: {
+                  nodes: [
+                    { name: "Todo", type: "unstarted" },
+                    { name: "Done", type: "completed" },
+                  ],
+                },
               },
             ],
           },
         },
       }),
-  })) as typeof fetch;
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    )) as typeof fetch;
   try {
     const meta = await fetchLinearIntakeMetadata();
     assert.equal(meta.viewer?.name, "Ada");

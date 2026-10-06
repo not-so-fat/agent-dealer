@@ -16,6 +16,10 @@ import type {
   IssueExecutionAnalysis,
   IssueStatus,
   LinearCandidate,
+  LinearCandidatesPage,
+  LinearIntakeConfigPatch,
+  LinearIntakeConfigView,
+  LinearIntakeMetadata,
   QueueMoveTarget,
   ReportFilterState,
   RuntimeCapacityResponse,
@@ -47,11 +51,14 @@ async function readApiError(res: Response): Promise<string> {
   return text;
 }
 
-export async function fetchLinearInbox(): Promise<LinearCandidate[]> {
+export async function fetchLinearInbox(): Promise<LinearCandidatesPage> {
   const res = await fetch(`${API}/api/intake/linear`);
   if (!res.ok) throw new Error(await res.text());
-  const json = (await res.json()) as { candidates: LinearCandidate[] };
-  return json.candidates ?? [];
+  const json = (await res.json()) as LinearCandidatesPage;
+  return {
+    candidates: json.candidates ?? [],
+    hasMore: Boolean(json.hasMore),
+  };
 }
 
 export async function lookupLinearIssue(q: string): Promise<LinearCandidate> {
@@ -60,6 +67,31 @@ export async function lookupLinearIssue(q: string): Promise<LinearCandidate> {
   if (!res.ok) throw new Error(body.error ?? `Lookup failed (${res.status})`);
   if (!body.candidate) throw new Error("Linear issue not found");
   return body.candidate;
+}
+
+/** NOT-361: Linear picker filters (Team / Assignee / Status) for the inline editor. */
+export async function fetchLinearIntakeConfig(): Promise<LinearIntakeConfigView> {
+  const res = await fetch(`${API}/api/intake/linear/config`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json() as Promise<LinearIntakeConfigView>;
+}
+
+export async function patchLinearIntakeConfig(
+  patch: LinearIntakeConfigPatch
+): Promise<LinearIntakeConfigView> {
+  const res = await fetch(`${API}/api/intake/linear/config`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json() as Promise<LinearIntakeConfigView>;
+}
+
+export async function fetchLinearIntakeMetadata(): Promise<LinearIntakeMetadata> {
+  const res = await fetch(`${API}/api/intake/linear/metadata`);
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json() as Promise<LinearIntakeMetadata>;
 }
 
 /** NOT-260: Linear label → repository mappings (inline editor in New issue). */

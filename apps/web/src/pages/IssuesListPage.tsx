@@ -3,6 +3,8 @@ import { Link, useSearchParams } from "react-router-dom";
 import type { AgentWithHealth, HumanAction, LinearCandidate } from "@agent-dealer/shared";
 import {
   canSubmitNewIssue,
+  insertLookedUpLinearCandidate,
+  mergeLinearCandidatePage,
   nextRepoForLinearCandidate,
   repoLabelWarning,
 } from "../lib/linearRepoIntake";
@@ -46,6 +48,7 @@ import FirstIssueStrip from "../components/issues/FirstIssueStrip";
 import { dismissFirstIssue, isFirstIssueDismissed, shouldShowFirstIssueStrip } from "../lib/firstIssue";
 import RepositoryPicker from "../components/issues/RepositoryPicker";
 import RepositoryMappingsEditor from "../components/issues/RepositoryMappingsEditor";
+import LinearIntakeFiltersEditor from "../components/issues/LinearIntakeFiltersEditor";
 import AgentAssignmentEditor from "../components/issues/AgentAssignmentEditor";
 import NeedsAttentionPanel from "../components/issues/NeedsAttentionPanel";
 import AlertIcon from "../components/ui/AlertIcon";
@@ -94,9 +97,15 @@ export default function IssuesListPage({
   // NOT-260: inline label → repository mapping editor toggled by the gear
   // beside the Repository control. Toggling never touches the form fields.
   const [mappingsOpen, setMappingsOpen] = useState(false);
+  // NOT-361: inline Linear picker filters beside the open-inbox select.
+  // Opening/saving/closing never clears New issue form state.
+  const [linearFiltersOpen, setLinearFiltersOpen] = useState(false);
   const [sourceMode, setSourceMode] = useState<"manual" | "linear">("manual");
   const [candidates, setCandidates] = useState<LinearCandidate[]>([]);
+  const [candidatesHasMore, setCandidatesHasMore] = useState(false);
   const [selectedLinearId, setSelectedLinearId] = useState("");
+  const selectedLinearIdRef = useRef(selectedLinearId);
+  selectedLinearIdRef.current = selectedLinearId;
   const [linearRef, setLinearRef] = useState("");
   const [linearLookupBusy, setLinearLookupBusy] = useState(false);
   const [recentRepos, setRecentRepos] = useState<string[]>([]);
@@ -319,16 +328,27 @@ export default function IssuesListPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
+  /** NOT-361: refresh the open-inbox list without clearing the selected issue. */
+  const refreshLinearCandidates = () => {
+    fetchLinearInbox()
+      .then((page) => {
+        setCandidatesHasMore(page.hasMore);
+        setCandidates((prev) =>
+          mergeLinearCandidatePage(prev, page.candidates, selectedLinearIdRef.current)
+        );
+      })
+      .catch((e) => setError(`Linear inbox: ${String(e)}`));
+  };
+
   useEffect(() => {
     if (!showCreate) return;
     fetchRecentRepos()
       .then(setRecentRepos)
       .catch(() => setRecentRepos([]));
     if (sourceMode === "linear") {
-      fetchLinearInbox()
-        .then(setCandidates)
-        .catch((e) => setError(`Linear inbox: ${String(e)}`));
+      refreshLinearCandidates();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showCreate, sourceMode]);
 
   useEffect(() => {
@@ -359,8 +379,8 @@ export default function IssuesListPage({
 
   const applyLinearCandidate = (c: LinearCandidate) => {
     // A repeat Lookup must replace the cached candidate so fresher labels and
-    // repoResolution are never silently dropped.
-    setCandidates((prev) => [c, ...prev.filter((x) => x.id !== c.id)]);
+    // repoResolution are never silently dropped. Saved picker filters stay put.
+    setCandidates((prev) => insertLookedUpLinearCandidate(prev, c).candidates);
     setSelectedLinearId(c.id);
     setLinearRef(c.identifier);
   };
@@ -492,23 +512,63 @@ export default function IssuesListPage({
                   {linearLookupBusy ? "…" : "Lookup"}
                 </button>
               </div>
-              <select
-                className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
-                value={selectedLinearId}
-                onChange={(e) => {
-                  const id = e.target.value;
-                  setSelectedLinearId(id);
-                  const c = candidates.find((x) => x.id === id);
-                  if (c) setLinearRef(c.identifier);
-                }}
-              >
-                <option value="">Or pick from open inbox…</option>
-                {candidates.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.identifier}: {c.title}
-                  </option>
-                ))}
-              </select>
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-white/50">Or pick from open inbox…</span>
+                  <button
+                    type="button"
+                    aria-label="Configure Linear intake filters"
+                    title="Configure Linear intake filters"
+                    aria-expanded={linearFiltersOpen}
+                    onClick={() => setLinearFiltersOpen((v) => !v)}
+                    className="text-white/40 hover:text-white shrink-0 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyber-teal/45"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                      <path
+                        d="M8 5.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6Z"
+                        stroke="currentColor"
+                        strokeWidth="1.3"
+                      />
+                      <path
+                        d="M8 1.5v1.7M8 12.8v1.7M1.5 8h1.7M12.8 8h1.7M3.4 3.4l1.2 1.2M11.4 11.4l1.2 1.2M12.6 3.4l-1.2 1.2M4.6 11.4l-1.2 1.2"
+                        stroke="currentColor"
+                        strokeWidth="1.3"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </button>
+                </div>
+                <select
+                  className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
+                  aria-label="Or pick from open inbox"
+                  value={selectedLinearId}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    setSelectedLinearId(id);
+                    const c = candidates.find((x) => x.id === id);
+                    if (c) setLinearRef(c.identifier);
+                  }}
+                >
+                  <option value="">Select an issue…</option>
+                  {candidates.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.identifier}: {c.title}
+                    </option>
+                  ))}
+                </select>
+                {linearFiltersOpen && (
+                  <LinearIntakeFiltersEditor
+                    onClose={() => setLinearFiltersOpen(false)}
+                    onSaved={refreshLinearCandidates}
+                  />
+                )}
+                {candidatesHasMore && (
+                  <p className="text-xs text-white/40" data-testid="linear-candidates-has-more">
+                    Showing the 50 most recently updated matches. Use exact ID/URL lookup above
+                    for another issue.
+                  </p>
+                )}
+              </div>
             </div>
           )}
 

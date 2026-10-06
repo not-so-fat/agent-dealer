@@ -8,6 +8,8 @@ import { resolveLinearRepoWithMappings } from "@agent-dealer/shared";
 import {
   canonicalRepoIdentity,
   canSubmitNewIssue,
+  insertLookedUpLinearCandidate,
+  mergeLinearCandidatePage,
   nextRepoForLinearCandidate,
   repoHintFor,
   repoLabelWarning,
@@ -213,4 +215,38 @@ test("submit needs title, a valid repository, developer, and reviewer", () => {
   assert.equal(canSubmitNewIssue({ ...base, title: " " }), false);
   assert.equal(canSubmitNewIssue({ ...base, developerAgentId: "" }), false);
   assert.equal(canSubmitNewIssue({ ...base, reviewerAgentId: "" }), false);
+});
+
+// NOT-361: filter save refreshes candidates without dropping the selection;
+// exact lookup inserts an out-of-filter issue without changing saved filters.
+test("mergeLinearCandidatePage keeps the selected issue when it falls outside the new page", () => {
+  const selected = candidate({ id: "sel", identifier: "NOT-OUT" });
+  const next = [candidate({ id: "n1", identifier: "NOT-1" })];
+  const merged = mergeLinearCandidatePage([selected], next, "sel");
+  assert.equal(merged[0]?.id, "sel");
+  assert.equal(merged.length, 2);
+  assert.deepEqual(
+    mergeLinearCandidatePage([selected], next, ""),
+    next
+  );
+  assert.deepEqual(
+    mergeLinearCandidatePage([selected], [selected, ...next], "sel"),
+    [selected, ...next]
+  );
+});
+
+test("insertLookedUpLinearCandidate selects an out-of-filter issue without dropping others", () => {
+  const inFilter = candidate({ id: "in", identifier: "NOT-IN" });
+  const lookedUp = candidate({ id: "out", identifier: "NOT-OUT", title: "outside" });
+  const result = insertLookedUpLinearCandidate([inFilter], lookedUp);
+  assert.equal(result.selectedId, "out");
+  assert.equal(result.candidates[0]?.identifier, "NOT-OUT");
+  assert.equal(result.candidates[1]?.identifier, "NOT-IN");
+  // Repeat lookup replaces the cached row.
+  const again = insertLookedUpLinearCandidate(result.candidates, {
+    ...lookedUp,
+    title: "fresher",
+  });
+  assert.equal(again.candidates.filter((c) => c.id === "out").length, 1);
+  assert.equal(again.candidates[0]?.title, "fresher");
 });
