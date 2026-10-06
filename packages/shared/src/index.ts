@@ -343,6 +343,67 @@ export const LinearIntakeConfig = z.object({
 });
 export type LinearIntakeConfig = z.infer<typeof LinearIntakeConfig>;
 
+/**
+ * NOT-361: picker-facing Linear intake filters (Team / Assignee / Status).
+ * Narrower than `LinearIntakeConfig` — no sync toggle, no deleted routing fields.
+ */
+export const LinearIntakePickerConfig = z.object({
+  stateFilter: z.array(z.string().min(1)).min(1),
+  teamId: z.string().nullable(),
+  assigneeMe: z.boolean(),
+});
+export type LinearIntakePickerConfig = z.infer<typeof LinearIntakePickerConfig>;
+
+/** GET /api/intake/linear/config — effective picker filters plus persistence / env hints. */
+export const LinearIntakeConfigView = LinearIntakePickerConfig.extend({
+  persisted: LinearIntakePickerConfig,
+  envOverrides: z.object({
+    stateFilter: z.boolean(),
+    teamId: z.boolean(),
+  }),
+});
+export type LinearIntakeConfigView = z.infer<typeof LinearIntakeConfigView>;
+
+/** PATCH /api/intake/linear/config — partial update of picker fields only. */
+export const LinearIntakeConfigPatch = LinearIntakePickerConfig.partial();
+export type LinearIntakeConfigPatch = z.infer<typeof LinearIntakeConfigPatch>;
+
+export const LinearTeamOption = z.object({
+  id: z.string(),
+  name: z.string(),
+  key: z.string().optional(),
+});
+export type LinearTeamOption = z.infer<typeof LinearTeamOption>;
+
+export const LinearWorkflowStateOption = z.object({
+  name: z.string(),
+  type: z.string().optional(),
+  /** Present when the state is tied to a specific team (for team-scoped UI filtering). */
+  teamId: z.string().optional(),
+});
+export type LinearWorkflowStateOption = z.infer<typeof LinearWorkflowStateOption>;
+
+/** GET /api/intake/linear/metadata — display names for the inline filter editor. */
+export const LinearIntakeMetadata = z.object({
+  teams: z.array(LinearTeamOption),
+  workflowStates: z.array(LinearWorkflowStateOption),
+  viewer: z
+    .object({
+      id: z.string(),
+      name: z.string(),
+      email: z.string().optional(),
+    })
+    .nullable(),
+});
+export type LinearIntakeMetadata = z.infer<typeof LinearIntakeMetadata>;
+
+/** GET /api/intake/linear — bounded candidate page (≤50, most recently updated). */
+export const LinearCandidatesPage = z.object({
+  candidates: z.array(LinearCandidate),
+  hasMore: z.boolean(),
+});
+export type LinearCandidatesPage = z.infer<typeof LinearCandidatesPage>;
+
 export const AgentDeckConfig = z.object({
   host: z.string(),
   port: z.number().int().min(1).max(65535),

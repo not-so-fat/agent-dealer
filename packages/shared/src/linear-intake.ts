@@ -2,6 +2,42 @@ import { z } from "zod";
 import { parseGitHubRepoInput } from "./github-repo.js";
 
 /**
+ * NOT-361: normalize a Linear picker patch before persistence.
+ * Trims status names, drops empties, coerces blank teamId to null.
+ * Throws a readable Error when the resulting status list would be empty.
+ */
+export function normalizeLinearIntakePickerPatch(input: {
+  stateFilter?: string[] | undefined;
+  teamId?: string | null | undefined;
+  assigneeMe?: boolean | undefined;
+}): {
+  stateFilter?: string[];
+  teamId?: string | null;
+  assigneeMe?: boolean;
+} {
+  const out: {
+    stateFilter?: string[];
+    teamId?: string | null;
+    assigneeMe?: boolean;
+  } = {};
+  if (input.stateFilter !== undefined) {
+    const stateFilter = input.stateFilter.map((s) => s.trim()).filter(Boolean);
+    if (stateFilter.length === 0) {
+      throw new Error("Select at least one workflow status");
+    }
+    out.stateFilter = stateFilter;
+  }
+  if (input.teamId !== undefined) {
+    const trimmed = typeof input.teamId === "string" ? input.teamId.trim() : "";
+    out.teamId = trimmed.length > 0 ? trimmed : null;
+  }
+  if (input.assigneeMe !== undefined) {
+    out.assigneeMe = Boolean(input.assigneeMe);
+  }
+  return out;
+}
+
+/**
  * NOT-242: explicit Linear repository labels.
  *
  * A Linear issue declares its GitHub repository with a reusable label that

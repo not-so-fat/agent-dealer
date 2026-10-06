@@ -1,16 +1,22 @@
 import type {
   LinearCandidate,
+  LinearCandidatesPage,
   LinearIntakeConfig,
+  LinearIntakeMetadata,
   LinearRepositoryMapping,
+  LinearTeamOption,
+  LinearWorkflowStateOption,
 } from "@agent-dealer/shared";
 import { resolveLinearRepoWithMappings } from "@agent-dealer/shared";
 import { DEFAULT_LINEAR_STATE_FILTER, getLinearIntakeConfig } from "../repository/intake-settings.js";
 import { listRepositoryMappings } from "../repository/repository-mappings.js";
-import { linearGraphqlRequest } from "./linear-graphql.js";
+import { LinearApiKeyMissingError, linearGraphqlRequest } from "./linear-graphql.js";
 
 export { DEFAULT_LINEAR_STATE_FILTER };
 
-const PAGE_SIZE = 50;
+/** NOT-361: first-page bound for the From Linear picker — never walk further cursors. */
+export const LINEAR_CANDIDATE_PAGE_SIZE = 50;
+const PAGE_SIZE = LINEAR_CANDIDATE_PAGE_SIZE;
 
 interface LinearIssueNode {
   id: string;
@@ -129,46 +135,101 @@ export function parseLinearIssueRef(raw: string): string | null {
   return null;
 }
 
-export async function listLinearCandidates(): Promise<LinearCandidate[]> {
-  if (!hasApiKey()) return [];
+/**
+ * NOT-361: at most one GraphQL page of candidates, most recently updated first.
+ * Does not walk `pageInfo` cursors — `hasMore` tells the UI when matches remain.
+ */
+export async function listLinearCandidates(): Promise<LinearCandidatesPage> {
+  if (!hasApiKey()) return { candidates: [], hasMore: false };
 
   const settings = getLinearIntakeConfig();
   let viewerId: string | undefined;
   if (settings.assigneeMe) {
     const viewer = await getLinearViewer();
     viewerId = viewer?.id;
-    if (!viewerId) return [];
+    if (!viewerId) return { candidates: [], hasMore: false };
   }
 
   const filter = buildIssueFilter(settings, viewerId);
-  const nodes: LinearIssueNode[] = [];
-  let after: string | undefined;
-
-  for (;;) {
-    const data = (await linearQuery(
-      "listLinearCandidates",
-      `query PollIssues($filter: IssueFilter, $after: String) {
-        issues(filter: $filter, first: ${PAGE_SIZE}, after: $after) {
-          nodes { ${ISSUE_FIELDS} }
-          pageInfo { hasNextPage endCursor }
-        }
-      }`,
-      { filter, after: after ?? null }
-    )) as {
-      issues: {
-        nodes: LinearIssueNode[];
-        pageInfo: { hasNextPage: boolean; endCursor: string | null };
-      };
+  const data = (await linearQuery(
+    "listLinearCandidates",
+    `query PollIssues($filter: IssueFilter) {
+      issues(filter: $filter, first: ${PAGE_SIZE}, orderBy: updatedAt) {
+        nodes { ${ISSUE_FIELDS} }
+        pageInfo { hasNextPage }
+      }
+    }`,
+    { filter }
+  )) as {
+    issues: {
+      nodes: LinearIssueNode[];
+      pageInfo: { hasNextPage: boolean };
     };
-
-    nodes.push(...data.issues.nodes);
-    if (!data.issues.pageInfo.hasNextPage || !data.issues.pageInfo.endCursor) break;
-    after = data.issues.pageInfo.endCursor;
-  }
+  };
 
   // NOT-260: mappings load once per list operation, not once per candidate.
   const mappings = listRepositoryMappings();
-  return nodes.map((n) => nodeToCandidate(n, mappings));
+  return {
+    candidates: data.issues.nodes.map((n) => nodeToCandidate(n, mappings)),
+    hasMore: Boolean(data.issues.pageInfo.hasNextPage),
+  };
+}
+
+/**
+ * NOT-361: teams, workflow statuses, and the authenticated Linear viewer for
+ * the inline filter editor — never ask the operator for raw UUIDs or CSV text.
+ */
+export async function fetchLinearIntakeMetadata(): Promise<LinearIntakeMetadata> {
+  if (!hasApiKey()) throw new LinearApiKeyMissingError();
+
+  const data = (await linearQuery(
+    "fetchLinearIntakeMetadata",
+    `query IntakeMetadata {
+      viewer { id name email }
+      teams {
+        nodes {
+          id
+          name
+          key
+          states { nodes { name type } }
+        }
+      }
+    }`
+  )) as {
+    viewer: LinearViewer | null;
+    teams: {
+      nodes: Array<{
+        id: string;
+        name: string;
+        key?: string;
+        states?: { nodes: Array<{ name: string; type?: string }> };
+      }>;
+    };
+  };
+
+  const teams: LinearTeamOption[] = [];
+  const workflowStates: LinearWorkflowStateOption[] = [];
+
+  for (const team of data.teams?.nodes ?? []) {
+    teams.push({ id: team.id, name: team.name, key: team.key });
+    for (const state of team.states?.nodes ?? []) {
+      const name = state.name?.trim();
+      if (!name) continue;
+      workflowStates.push({ name, type: state.type, teamId: team.id });
+    }
+  }
+
+  // Stable team order by name; statuses keep Linear's per-team order, then
+  // unique-by-name order is left to the UI when "All teams" is selected.
+  teams.sort((a, b) => a.name.localeCompare(b.name));
+
+  return {
+    teams,
+    workflowStates,
+    viewer: data.viewer
+      ? { id: data.viewer.id, name: data.viewer.name, email: data.viewer.email }
+      : null,
+  };
 }
 
 export async function getLinearIssue(issueId: string): Promise<LinearCandidate | null> {

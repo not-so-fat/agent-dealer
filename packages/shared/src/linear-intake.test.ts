@@ -1,10 +1,17 @@
 // NOT-242: explicit `repo:` label resolution over Linear candidate labels.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LinearCandidate } from "./index.js";
+import {
+  LinearCandidate,
+  LinearCandidatesPage,
+  LinearIntakeConfigPatch,
+  LinearIntakeConfigView,
+  LinearIntakeMetadata,
+} from "./index.js";
 import {
   LinearRepoResolution,
   extractRepoLabels,
+  normalizeLinearIntakePickerPatch,
   normalizeMappingLabel,
   normalizeRepositoryMappings,
   resolveLinearRepoLabels,
@@ -191,4 +198,56 @@ test("LinearRepoResolution schema round-trips every state", () => {
     const parsed = LinearRepoResolution.parse({ status });
     assert.equal(parsed.status, status);
   }
+});
+
+// NOT-361: picker config / patch / metadata contracts (no routing fields).
+test("normalizeLinearIntakePickerPatch trims statuses and blank teamId", () => {
+  assert.deepEqual(
+    normalizeLinearIntakePickerPatch({
+      stateFilter: [" Todo ", "", "In Progress"],
+      teamId: "  ",
+      assigneeMe: true,
+    }),
+    { stateFilter: ["Todo", "In Progress"], teamId: null, assigneeMe: true }
+  );
+  assert.throws(
+    () => normalizeLinearIntakePickerPatch({ stateFilter: ["  ", ""] }),
+    /at least one workflow status/i
+  );
+});
+
+test("LinearIntakeConfigView and Patch reject deleted routing fields and empty status lists", () => {
+  const view = LinearIntakeConfigView.parse({
+    stateFilter: ["Todo"],
+    teamId: null,
+    assigneeMe: false,
+    persisted: { stateFilter: ["Todo"], teamId: null, assigneeMe: false },
+    envOverrides: { stateFilter: false, teamId: false },
+  });
+  assert.equal(view.stateFilter[0], "Todo");
+  assert.equal("defaultAgentId" in view, false);
+  assert.equal("routingRules" in view, false);
+  assert.equal("syncEnabled" in view, false);
+
+  assert.throws(
+    () => LinearIntakeConfigPatch.parse({ stateFilter: [] }),
+    /Array must contain at least 1/
+  );
+  const patch = LinearIntakeConfigPatch.parse({ assigneeMe: true, teamId: "t-1" });
+  assert.deepEqual(patch, { assigneeMe: true, teamId: "t-1" });
+});
+
+test("LinearCandidatesPage and LinearIntakeMetadata parse the picker contracts", () => {
+  const page = LinearCandidatesPage.parse({
+    candidates: [],
+    hasMore: true,
+  });
+  assert.equal(page.hasMore, true);
+  const meta = LinearIntakeMetadata.parse({
+    teams: [{ id: "t1", name: "Core", key: "COR" }],
+    workflowStates: [{ name: "Todo", type: "unstarted", teamId: "t1" }],
+    viewer: { id: "v1", name: "Ada", email: "ada@example.com" },
+  });
+  assert.equal(meta.teams[0]?.name, "Core");
+  assert.equal(meta.viewer?.name, "Ada");
 });

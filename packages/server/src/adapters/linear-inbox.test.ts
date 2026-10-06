@@ -1,7 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildIssueFilter, nodeToCandidate, parseLinearIssueRef } from "./linear-inbox.js";
-
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  buildIssueFilter,
+  LINEAR_CANDIDATE_PAGE_SIZE,
+  listLinearCandidates,
+  fetchLinearIntakeMetadata,
+  nodeToCandidate,
+  parseLinearIssueRef,
+} from "./linear-inbox.js";
 test("parseLinearIssueRef accepts identifier, URL, and UUID", () => {
   assert.equal(parseLinearIssueRef("NOT-103"), "NOT-103");
   assert.equal(parseLinearIssueRef("  not-90  "), "NOT-90");
@@ -99,4 +108,124 @@ test("buildIssueFilter includes assignee when assigneeMe is true", () => {
     state: { name: { in: ["Todo"] } },
     assignee: { id: { eq: "viewer-1" } },
   });
+});
+
+// NOT-361: bounded candidate fetch — AND filters, updatedAt order, first page only.
+test("listLinearCandidates requests AND filters, updatedAt order, and a single page", async () => {
+  process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-linear-inbox-"));
+  process.env.LINEAR_API_KEY = "test-key";
+  delete process.env.LINEAR_STATE_FILTER;
+  delete process.env.LINEAR_TEAM_ID;
+
+  const { migrate } = await import("../db/index.js");
+  migrate();
+  const { patchLinearIntakeConfig } = await import("../repository/intake-settings.js");
+  patchLinearIntakeConfig({
+    stateFilter: ["Todo", "In Progress"],
+    teamId: "team-9",
+    assigneeMe: true,
+  });
+
+  const requests: Array<{ query: string; variables?: Record<string, unknown> }> = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
+    const body = JSON.parse(String((init as { body?: string })?.body ?? "{}")) as {
+      query?: string;
+      variables?: Record<string, unknown>;
+    };
+    requests.push({ query: body.query ?? "", variables: body.variables });
+    if ((body.query ?? "").includes("viewer {")) {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        text: async () => JSON.stringify({ data: { viewer: { id: "viewer-1", name: "Ada" } } }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: async () =>
+        JSON.stringify({
+          data: {
+            issues: {
+              nodes: [
+                {
+                  id: "i1",
+                  identifier: "NOT-1",
+                  title: "one",
+                  url: "https://linear.app/x/issue/NOT-1/one",
+                  state: { name: "Todo" },
+                  team: { id: "team-9" },
+                  labels: { nodes: [] },
+                },
+              ],
+              pageInfo: { hasNextPage: true },
+            },
+          },
+        }),
+    };
+  }) as typeof fetch;
+
+  try {
+    const page = await listLinearCandidates();
+    assert.equal(page.candidates.length, 1);
+    assert.equal(page.hasMore, true);
+    // viewer (assigneeMe) + one issues page — never a second cursor page.
+    assert.equal(requests.length, 2);
+    const issuesReq = requests.find((r) => r.query.includes("issues("));
+    assert.ok(issuesReq, "issues query sent");
+    assert.match(issuesReq!.query, /orderBy:\s*updatedAt/);
+    assert.match(issuesReq!.query, new RegExp(`first:\\s*${LINEAR_CANDIDATE_PAGE_SIZE}`));
+    assert.ok(!issuesReq!.query.includes("$after"), "no cursor variable");
+    assert.deepEqual(issuesReq!.variables?.filter, {
+      state: { name: { in: ["Todo", "In Progress"] } },
+      team: { id: { eq: "team-9" } },
+      assignee: { id: { eq: "viewer-1" } },
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.LINEAR_API_KEY;
+  }
+});
+
+test("fetchLinearIntakeMetadata returns teams, statuses, and viewer", async () => {
+  process.env.LINEAR_API_KEY = "test-key";
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    text: async () =>
+      JSON.stringify({
+        data: {
+          viewer: { id: "v1", name: "Ada", email: "ada@example.com" },
+          teams: {
+            nodes: [
+              {
+                id: "t1",
+                name: "Core",
+                key: "COR",
+                states: { nodes: [{ name: "Todo", type: "unstarted" }, { name: "Done", type: "completed" }] },
+              },
+            ],
+          },
+        },
+      }),
+  })) as typeof fetch;
+  try {
+    const meta = await fetchLinearIntakeMetadata();
+    assert.equal(meta.viewer?.name, "Ada");
+    assert.equal(meta.teams[0]?.name, "Core");
+    assert.ok(meta.workflowStates.some((s) => s.name === "Todo" && s.teamId === "t1"));
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.LINEAR_API_KEY;
+  }
+});
+
+test("fetchLinearIntakeMetadata fails clearly without LINEAR_API_KEY", async () => {
+  delete process.env.LINEAR_API_KEY;
+  await assert.rejects(() => fetchLinearIntakeMetadata(), /LINEAR_API_KEY/);
 });
