@@ -175,48 +175,67 @@ export async function listLinearCandidates(): Promise<LinearCandidatesPage> {
   };
 }
 
+/** Page size when walking Linear teams for the filter editor metadata. */
+const METADATA_TEAM_PAGE_SIZE = 50;
+
+type LinearTeamNode = {
+  id: string;
+  name: string;
+  key?: string;
+  states?: { nodes: Array<{ name: string; type?: string }> };
+};
+
 /**
  * NOT-361: teams, workflow statuses, and the authenticated Linear viewer for
  * the inline filter editor — never ask the operator for raw UUIDs or CSV text.
+ * Teams are walked page-by-page so large workspaces are not truncated at
+ * Linear's default first page.
  */
 export async function fetchLinearIntakeMetadata(): Promise<LinearIntakeMetadata> {
   if (!hasApiKey()) throw new LinearApiKeyMissingError();
 
-  const data = (await linearQuery(
-    "fetchLinearIntakeMetadata",
-    `query IntakeMetadata {
-      viewer { id name email }
-      teams {
-        nodes {
-          id
-          name
-          key
-          states { nodes { name type } }
-        }
-      }
-    }`
-  )) as {
-    viewer: LinearViewer | null;
-    teams: {
-      nodes: Array<{
-        id: string;
-        name: string;
-        key?: string;
-        states?: { nodes: Array<{ name: string; type?: string }> };
-      }>;
-    };
-  };
+  const viewerData = (await linearQuery(
+    "fetchLinearIntakeMetadataViewer",
+    `query IntakeMetadataViewer { viewer { id name email } }`
+  )) as { viewer: LinearViewer | null };
 
   const teams: LinearTeamOption[] = [];
   const workflowStates: LinearWorkflowStateOption[] = [];
+  let after: string | null = null;
 
-  for (const team of data.teams?.nodes ?? []) {
-    teams.push({ id: team.id, name: team.name, key: team.key });
-    for (const state of team.states?.nodes ?? []) {
-      const name = state.name?.trim();
-      if (!name) continue;
-      workflowStates.push({ name, type: state.type, teamId: team.id });
+  for (;;) {
+    const page = (await linearQuery(
+      "fetchLinearIntakeMetadataTeams",
+      `query IntakeMetadataTeams($first: Int!, $after: String) {
+        teams(first: $first, after: $after) {
+          nodes {
+            id
+            name
+            key
+            states { nodes { name type } }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }`,
+      { first: METADATA_TEAM_PAGE_SIZE, after }
+    )) as {
+      teams: {
+        nodes: LinearTeamNode[];
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      };
+    };
+
+    for (const team of page.teams?.nodes ?? []) {
+      teams.push({ id: team.id, name: team.name, key: team.key });
+      for (const state of team.states?.nodes ?? []) {
+        const name = state.name?.trim();
+        if (!name) continue;
+        workflowStates.push({ name, type: state.type, teamId: team.id });
+      }
     }
+
+    if (!page.teams?.pageInfo?.hasNextPage || !page.teams.pageInfo.endCursor) break;
+    after = page.teams.pageInfo.endCursor;
   }
 
   // Stable team order by name; statuses keep Linear's per-team order, then
@@ -226,8 +245,12 @@ export async function fetchLinearIntakeMetadata(): Promise<LinearIntakeMetadata>
   return {
     teams,
     workflowStates,
-    viewer: data.viewer
-      ? { id: data.viewer.id, name: data.viewer.name, email: data.viewer.email }
+    viewer: viewerData.viewer
+      ? {
+          id: viewerData.viewer.id,
+          name: viewerData.viewer.name,
+          email: viewerData.viewer.email,
+        }
       : null,
   };
 }

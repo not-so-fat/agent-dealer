@@ -34,6 +34,25 @@ export function uniqueStatusNames(
   return out;
 }
 
+/** Drop selections that are not among the visible options for the current team. */
+export function pruneStatusesToOptions(
+  selected: readonly string[],
+  options: readonly string[]
+): string[] {
+  if (options.length === 0) return [...selected];
+  return selected.filter((s) =>
+    options.some((o) => o.toLowerCase() === s.toLowerCase())
+  );
+}
+
+/** Save stays disabled until a real config view exists (failed load must not PATCH defaults). */
+export function canSaveLinearIntakeFilters(
+  view: LinearIntakeConfigView | null,
+  saving: boolean
+): boolean {
+  return view !== null && !saving;
+}
+
 export default function LinearIntakeFiltersEditor({
   initialConfig,
   initialMetadata,
@@ -43,8 +62,12 @@ export default function LinearIntakeFiltersEditor({
   onSaved,
   onClose,
 }: {
-  initialConfig?: LinearIntakeConfigView;
-  initialMetadata?: LinearIntakeMetadata;
+  /**
+   * `undefined` → fetch; a view → seed; `null` → load already failed (Save disabled).
+   * Used by tests to pin the failed-config path without running effects.
+   */
+  initialConfig?: LinearIntakeConfigView | null;
+  initialMetadata?: LinearIntakeMetadata | null;
   loadConfig?: () => Promise<LinearIntakeConfigView>;
   loadMetadata?: () => Promise<LinearIntakeMetadata>;
   saveConfig?: typeof patchLinearIntakeConfig;
@@ -52,45 +75,83 @@ export default function LinearIntakeFiltersEditor({
   onSaved?: () => void;
   onClose?: () => void;
 }) {
-  const [view, setView] = useState<LinearIntakeConfigView | null>(initialConfig ?? null);
-  const [metadata, setMetadata] = useState<LinearIntakeMetadata | null>(initialMetadata ?? null);
+  const [view, setView] = useState<LinearIntakeConfigView | null>(
+    initialConfig === undefined ? null : initialConfig
+  );
+  const [metadata, setMetadata] = useState<LinearIntakeMetadata | null>(
+    initialMetadata === undefined ? null : initialMetadata
+  );
   const [teamId, setTeamId] = useState(initialConfig?.persisted.teamId ?? "");
   const [assigneeMe, setAssigneeMe] = useState(initialConfig?.persisted.assigneeMe ?? false);
   const [selectedStatuses, setSelectedStatuses] = useState<string[]>(
     initialConfig?.persisted.stateFilter ?? [...DEFAULT_OPEN_STATES]
   );
-  const [loaded, setLoaded] = useState(
-    initialConfig !== undefined && initialMetadata !== undefined
+  // Config and metadata load independently so a metadata failure cannot leave
+  // Save armed with defaults that would overwrite persisted filters.
+  const [configReady, setConfigReady] = useState(initialConfig !== undefined);
+  const [metadataReady, setMetadataReady] = useState(initialMetadata !== undefined);
+  const [configError, setConfigError] = useState<string | null>(
+    initialConfig === null ? "Could not load saved Linear intake filters" : null
   );
-  const [error, setError] = useState<string | null>(null);
+  const [metadataError, setMetadataError] = useState<string | null>(
+    initialMetadata === null ? "Could not load Linear teams and statuses" : null
+  );
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (initialConfig !== undefined && initialMetadata !== undefined) return;
+    if (initialConfig !== undefined) return;
     let live = true;
-    Promise.all([
-      initialConfig ? Promise.resolve(initialConfig) : loadConfig(),
-      initialMetadata ? Promise.resolve(initialMetadata) : loadMetadata(),
-    ])
-      .then(([cfg, meta]) => {
+    loadConfig()
+      .then((cfg) => {
         if (!live) return;
         setView(cfg);
-        setMetadata(meta);
         setTeamId(cfg.persisted.teamId ?? "");
         setAssigneeMe(cfg.persisted.assigneeMe);
         setSelectedStatuses(cfg.persisted.stateFilter);
-        setLoaded(true);
+        setConfigError(null);
+        setConfigReady(true);
       })
       .catch((e) => {
         if (!live) return;
-        setError(String(e));
-        setLoaded(true);
+        setView(null);
+        setConfigError(String(e));
+        setConfigReady(true);
       });
     return () => {
       live = false;
     };
-  }, [initialConfig, initialMetadata, loadConfig, loadMetadata]);
+  }, [initialConfig, loadConfig]);
+
+  useEffect(() => {
+    if (initialMetadata !== undefined) return;
+    let live = true;
+    loadMetadata()
+      .then((meta) => {
+        if (!live) return;
+        setMetadata(meta);
+        setMetadataError(null);
+        setMetadataReady(true);
+      })
+      .catch((e) => {
+        if (!live) return;
+        setMetadata(null);
+        setMetadataError(String(e));
+        setMetadataReady(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, [initialMetadata, loadMetadata]);
+
+  // Once workflow statuses are known, drop selections that aren't shown for the
+  // current team so a team switch (or late metadata) cannot save invisible names.
+  useEffect(() => {
+    if (!metadata) return;
+    const options = uniqueStatusNames(metadata.workflowStates, teamId || null);
+    setSelectedStatuses((prev) => pruneStatusesToOptions(prev, options));
+  }, [metadata, teamId]);
 
   const statusOptions = useMemo(
     () => uniqueStatusNames(metadata?.workflowStates ?? [], teamId || null),
@@ -104,6 +165,8 @@ export default function LinearIntakeFiltersEditor({
   const teamDisabled = Boolean(view?.envOverrides.teamId);
   const statusDisabled = Boolean(view?.envOverrides.stateFilter);
   const hasEnvOverride = teamDisabled || statusDisabled;
+  const loaded = configReady && metadataReady;
+  const canSave = canSaveLinearIntakeFilters(view, saving);
 
   const toggleStatus = (name: string) => {
     setSelectedStatuses((prev) => {
@@ -114,16 +177,27 @@ export default function LinearIntakeFiltersEditor({
   };
 
   const save = async () => {
-    setError(null);
+    setSaveError(null);
     setNotice(null);
+    if (!view) {
+      setSaveError("Saved filters are unavailable — reload before saving");
+      return;
+    }
     if (selectedStatuses.length === 0) {
-      setError("Select at least one workflow status");
+      setSaveError("Select at least one workflow status");
       return;
     }
     setSaving(true);
     try {
+      const options = uniqueStatusNames(metadata?.workflowStates ?? [], teamId.trim() || null);
+      const stateFilter = pruneStatusesToOptions(selectedStatuses, options);
+      if (stateFilter.length === 0) {
+        setSaveError("Select at least one workflow status");
+        setSaving(false);
+        return;
+      }
       const updated = await saveConfig({
-        stateFilter: selectedStatuses,
+        stateFilter,
         teamId: teamId.trim() || null,
         assigneeMe,
       });
@@ -138,11 +212,13 @@ export default function LinearIntakeFiltersEditor({
       );
       onSaved?.();
     } catch (e) {
-      setError(String(e));
+      setSaveError(String(e));
     } finally {
       setSaving(false);
     }
   };
+
+  const error = configError || metadataError || saveError;
 
   return (
     <div
@@ -198,7 +274,7 @@ export default function LinearIntakeFiltersEditor({
               className="w-full bg-black/30 border border-white/10 rounded px-2 py-1.5 text-sm disabled:opacity-50"
               aria-label="Team"
               value={teamId}
-              disabled={teamDisabled || !loaded}
+              disabled={teamDisabled || !view}
               onChange={(e) => setTeamId(e.target.value)}
             >
               <option value="">All teams</option>
@@ -211,7 +287,7 @@ export default function LinearIntakeFiltersEditor({
             </select>
           </label>
 
-          <fieldset className="space-y-1" disabled={!loaded}>
+          <fieldset className="space-y-1" disabled={!view}>
             <legend className="text-xs text-white/50">Assignee</legend>
             <label className="flex items-center gap-2 text-sm text-white/80 cursor-pointer">
               <input
@@ -238,7 +314,7 @@ export default function LinearIntakeFiltersEditor({
             </label>
           </fieldset>
 
-          <fieldset className="space-y-1" disabled={statusDisabled || !loaded}>
+          <fieldset className="space-y-1" disabled={statusDisabled || !view}>
             <legend className="text-xs text-white/50">Status</legend>
             {displayStatuses.length === 0 ? (
               <p className="text-xs text-white/40">No workflow statuses available.</p>
@@ -256,9 +332,10 @@ export default function LinearIntakeFiltersEditor({
                       <input
                         type="checkbox"
                         checked={checked}
-                        disabled={statusDisabled}
+                        disabled={statusDisabled || !view}
                         onChange={() => toggleStatus(name)}
                         className="accent-[#C4B643]"
+                        aria-label={`Status ${name}`}
                       />
                       {name}
                     </label>
@@ -283,7 +360,8 @@ export default function LinearIntakeFiltersEditor({
             <button
               type="button"
               className="text-xs px-2 py-1 rounded border border-teal/40 text-teal disabled:opacity-50"
-              disabled={saving || !loaded}
+              disabled={!canSave}
+              data-testid="linear-filters-save"
               onClick={() => void save()}
             >
               {saving ? "Saving…" : "Save"}

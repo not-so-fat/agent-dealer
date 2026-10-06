@@ -86,8 +86,12 @@ test("hasMore true shows the 50-result bound and points at ID/URL lookup", () =>
 });
 
 test("saving, closing, or reopening filters preserves New issue form state", () => {
-  // Seeded form fields the page owns — none of these setters appear in the editor.
-  for (const field of [
+  // Seeded New issue fields the page owns — open/save/close/reopen must not
+  // clear them. Effects do not run under renderToStaticMarkup, so this pins the
+  // ownership boundary: the editor never writes these setters, and the page only
+  // toggles linearFiltersOpen / refreshes candidates via merge (unit-tested in
+  // linearRepoIntake.test.ts with a seeded selection).
+  const seededFormSetters = [
     "setTitle",
     "setDescription",
     "setAcceptanceCriteria",
@@ -98,21 +102,21 @@ test("saving, closing, or reopening filters preserves New issue form state", () 
     "setAutoMerge",
     "setSelectedLinearId",
     "setLinearRef",
-  ]) {
+  ] as const;
+  for (const field of seededFormSetters) {
     assert.ok(!editorSource.includes(field), `editor must not call ${field}`);
   }
 
-  // Gear toggle flips only editor visibility.
+  // Gear open/close/reopen flip only editor visibility — not form fields.
   assert.ok(
     pageSource.includes("onClick={() => setLinearFiltersOpen((v) => !v)}"),
     "toggle touches only linearFiltersOpen"
   );
-  // Close only hides the editor.
   assert.ok(
     pageSource.includes("onClose={() => setLinearFiltersOpen(false)}"),
     "close only hides editor"
   );
-  // Successful save refreshes candidates only.
+  // Successful save refreshes candidates only (selection kept by merge helper).
   assert.ok(
     pageSource.includes("onSaved={refreshLinearCandidates}"),
     "save refreshes candidates"
@@ -121,6 +125,16 @@ test("saving, closing, or reopening filters preserves New issue form state", () 
     pageSource.includes("mergeLinearCandidatePage"),
     "refresh preserves selected candidate"
   );
+  const refreshBlock = pageSource.match(
+    /const refreshLinearCandidates = \(\) => \{[\s\S]{0,400}?\}/
+  );
+  assert.ok(refreshBlock, "refresh helper present");
+  for (const field of seededFormSetters) {
+    assert.ok(
+      !refreshBlock![0].includes(field),
+      `refreshLinearCandidates must not call ${field}`
+    );
+  }
 });
 
 test("exact lookup inserts an out-of-filter issue without altering saved filters", () => {

@@ -9,7 +9,11 @@ import React from "react";
 (globalThis as { React?: unknown }).React ??= React;
 import { renderToStaticMarkup } from "react-dom/server";
 import type { LinearIntakeConfigView, LinearIntakeMetadata } from "@agent-dealer/shared";
-import LinearIntakeFiltersEditor, { uniqueStatusNames } from "./LinearIntakeFiltersEditor.js";
+import LinearIntakeFiltersEditor, {
+  canSaveLinearIntakeFilters,
+  pruneStatusesToOptions,
+  uniqueStatusNames,
+} from "./LinearIntakeFiltersEditor.js";
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(dir, "LinearIntakeFiltersEditor.tsx"), "utf8");
@@ -52,6 +56,24 @@ test("uniqueStatusNames dedupes across teams and scopes to one team", () => {
   ]);
 });
 
+test("pruneStatusesToOptions drops names not shown for the current team", () => {
+  assert.deepEqual(
+    pruneStatusesToOptions(["Todo", "Done", "In Progress"], ["Todo", "In Progress"]),
+    ["Todo", "In Progress"]
+  );
+  assert.deepEqual(
+    pruneStatusesToOptions(["Todo"], []),
+    ["Todo"],
+    "empty options preserve selection (metadata gap)"
+  );
+});
+
+test("canSaveLinearIntakeFilters requires a loaded config view", () => {
+  assert.equal(canSaveLinearIntakeFilters(null, false), false);
+  assert.equal(canSaveLinearIntakeFilters(CONFIG, true), false);
+  assert.equal(canSaveLinearIntakeFilters(CONFIG, false), true);
+});
+
 test("editor renders Team, Assignee, and Status controls with display names", () => {
   const html = renderToStaticMarkup(
     <LinearIntakeFiltersEditor initialConfig={CONFIG} initialMetadata={METADATA} />
@@ -67,7 +89,7 @@ test("editor renders Team, Assignee, and Status controls with display names", ()
   assert.ok(html.includes("Todo"), "status display name");
   assert.ok(html.includes("In Progress"), "status display name");
   assert.ok(!html.includes("comma-separated"), "no CSV status entry");
-  assert.ok(html.includes(">Save<") || html.includes("Save"), "save action");
+  assert.ok(html.includes('data-testid="linear-filters-save"'), "save action");
 });
 
 test("env overrides disable only the affected controls and explain why", () => {
@@ -83,9 +105,13 @@ test("env overrides disable only the affected controls and explain why", () => {
   assert.ok(html.includes('data-testid="linear-filter-env-notice"'), "override notice");
   assert.ok(html.includes("LINEAR_TEAM_ID"), "names team env");
   assert.ok(html.includes("LINEAR_STATE_FILTER"), "names status env");
-  // Team select and status fieldset carry disabled when overridden.
   assert.ok(/aria-label="Team"[^>]*disabled/.test(html), "team control disabled");
-  assert.ok(source.includes("statusDisabled"), "status controls gated");
+  // Status checkboxes themselves carry disabled (not only a source-name grep).
+  assert.ok(
+    /aria-label="Status Todo"[^>]*disabled/.test(html) ||
+      /disabled[^>]*aria-label="Status Todo"/.test(html),
+    "status checkbox disabled when env overrides status"
+  );
 });
 
 test("reopening restores persisted Team, Assignee, and Status values", () => {
@@ -93,15 +119,63 @@ test("reopening restores persisted Team, Assignee, and Status values", () => {
     <LinearIntakeFiltersEditor initialConfig={CONFIG} initialMetadata={METADATA} />
   );
   assert.ok(html.includes('value="team-1"'), "persisted team selected");
-  // Assignee-me radio is checked when persisted.assigneeMe is true.
+  // Assigned-to-me is the second radio; with assigneeMe true it must be checked.
+  const assigneeRadios = [
+    ...html.matchAll(
+      /name="linear-assignee"[^>]*?(?:checked)?[^>]*?(?:checked)?/g
+    ),
+  ];
+  assert.ok(assigneeRadios.length >= 2, "both assignee radios rendered");
   assert.ok(
-    /name="linear-assignee"[^>]*checked/.test(html) || html.includes("checked"),
-    "assignee selection restored"
+    /name="linear-assignee"[^>]*checked[^>]*>[\s\S]*?Assigned to me/.test(html) ||
+      /checked[\s\S]{0,80}Assigned to me/.test(html),
+    "Assigned to me radio is checked from persisted assigneeMe"
   );
-  assert.ok(html.includes("Todo"), "persisted statuses present");
-  assert.ok(source.includes("cfg.persisted.stateFilter"), "loads persisted statuses");
-  assert.ok(source.includes("cfg.persisted.teamId"), "loads persisted team");
-  assert.ok(source.includes("cfg.persisted.assigneeMe"), "loads persisted assignee");
+  assert.ok(
+    /aria-label="Status Todo"[^>]*checked/.test(html) ||
+      /checked[^>]*aria-label="Status Todo"/.test(html),
+    "Todo status checkbox checked from persisted stateFilter"
+  );
+  assert.ok(
+    /aria-label="Status In Progress"[^>]*checked/.test(html) ||
+      /checked[^>]*aria-label="Status In Progress"/.test(html),
+    "In Progress status checkbox checked from persisted stateFilter"
+  );
+});
+
+test("config load failure disables Save and does not leave defaults saveable", () => {
+  // initialConfig=null pins the failed-load path (effects do not run under SSR).
+  const html = renderToStaticMarkup(
+    <LinearIntakeFiltersEditor initialConfig={null} initialMetadata={METADATA} />
+  );
+  assert.ok(html.includes('data-testid="linear-filters-error"'), "shows load error");
+  assert.ok(
+    /data-testid="linear-filters-save"[^>]*disabled/.test(html) ||
+      /disabled[^>]*data-testid="linear-filters-save"/.test(html),
+    "Save disabled without a config view"
+  );
+  assert.equal(canSaveLinearIntakeFilters(null, false), false);
+  // Config and metadata must load independently — a metadata rejection must not
+  // arm Save with DEFAULT_OPEN_STATES over the operator's persisted filters.
+  assert.ok(!source.includes("Promise.all"), "loads are not coupled via Promise.all");
+  assert.ok(source.includes("loadConfig()"), "loads config on its own");
+  assert.ok(source.includes("loadMetadata()"), "loads metadata on its own");
+  assert.ok(
+    source.includes("canSaveLinearIntakeFilters(view"),
+    "Save gated on config view"
+  );
+});
+
+test("metadata load failure still allows Save when config view is present", () => {
+  const html = renderToStaticMarkup(
+    <LinearIntakeFiltersEditor initialConfig={CONFIG} initialMetadata={null} />
+  );
+  assert.ok(html.includes('data-testid="linear-filters-error"'), "shows metadata error");
+  assert.ok(html.includes('data-testid="linear-filters-save"'), "Save button present");
+  assert.ok(
+    !/data-testid="linear-filters-save"[^>]*\bdisabled\b/.test(html),
+    "Save stays enabled when config loaded even if metadata failed"
+  );
 });
 
 test("the editor never writes parent New issue form fields", () => {

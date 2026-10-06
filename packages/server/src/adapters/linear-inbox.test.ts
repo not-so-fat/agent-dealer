@@ -193,11 +193,21 @@ test("listLinearCandidates requests AND filters, updatedAt order, and a single p
 test("fetchLinearIntakeMetadata returns teams, statuses, and viewer", async () => {
   process.env.LINEAR_API_KEY = "test-key";
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () =>
-    new Response(
+  const bodies: unknown[] = [];
+  globalThis.fetch = (async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body ?? "{}")));
+    const op = (bodies[bodies.length - 1] as { query?: string }).query ?? "";
+    if (op.includes("IntakeMetadataViewer")) {
+      return new Response(
+        JSON.stringify({
+          data: { viewer: { id: "v1", name: "Ada", email: "ada@example.com" } },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    return new Response(
       JSON.stringify({
         data: {
-          viewer: { id: "v1", name: "Ada", email: "ada@example.com" },
           teams: {
             nodes: [
               {
@@ -212,16 +222,88 @@ test("fetchLinearIntakeMetadata returns teams, statuses, and viewer", async () =
                 },
               },
             ],
+            pageInfo: { hasNextPage: false, endCursor: null },
           },
         },
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
-    )) as typeof fetch;
+    );
+  }) as typeof fetch;
   try {
     const meta = await fetchLinearIntakeMetadata();
     assert.equal(meta.viewer?.name, "Ada");
     assert.equal(meta.teams[0]?.name, "Core");
     assert.ok(meta.workflowStates.some((s) => s.name === "Todo" && s.teamId === "t1"));
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.LINEAR_API_KEY;
+  }
+});
+
+test("fetchLinearIntakeMetadata walks team pages beyond Linear's default first page", async () => {
+  process.env.LINEAR_API_KEY = "test-key";
+  const realFetch = globalThis.fetch;
+  let teamPageCalls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      query?: string;
+      variables?: { after?: string | null; first?: number };
+    };
+    if ((body.query ?? "").includes("IntakeMetadataViewer")) {
+      return new Response(JSON.stringify({ data: { viewer: { id: "v1", name: "Ada" } } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    teamPageCalls += 1;
+    assert.equal(body.variables?.first, 50, "requests a bounded team page");
+    if (teamPageCalls === 1) {
+      assert.equal(body.variables?.after ?? null, null, "first page has no cursor");
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: {
+              nodes: [
+                {
+                  id: "t1",
+                  name: "Alpha",
+                  states: { nodes: [{ name: "Todo", type: "unstarted" }] },
+                },
+              ],
+              pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+            },
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    assert.equal(body.variables?.after, "cursor-1", "follows endCursor");
+    return new Response(
+      JSON.stringify({
+        data: {
+          teams: {
+            nodes: [
+              {
+                id: "t2",
+                name: "Zeta",
+                states: { nodes: [{ name: "In Progress", type: "started" }] },
+              },
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  }) as typeof fetch;
+  try {
+    const meta = await fetchLinearIntakeMetadata();
+    assert.equal(teamPageCalls, 2, "walks a second team page");
+    assert.deepEqual(
+      meta.teams.map((t) => t.name),
+      ["Alpha", "Zeta"]
+    );
+    assert.ok(meta.workflowStates.some((s) => s.name === "In Progress" && s.teamId === "t2"));
   } finally {
     globalThis.fetch = realFetch;
     delete process.env.LINEAR_API_KEY;
