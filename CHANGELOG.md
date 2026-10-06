@@ -4,6 +4,15 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.13 — 2026-10-06
+
+Inline Linear intake filters for large workspaces; parked swap box expanded by default
+
+### Changes
+
+- NOT-361: Add inline Linear intake filters for large workspaces (#204)
+- NOT-359: show parked developer/reviewer swap box expanded by default (#202)
+
 ## 1.2.12 — 2026-10-04
 
 Swap developer/reviewer agent on a parked issue, park usage-cap waits for a human, release pipeline script.
