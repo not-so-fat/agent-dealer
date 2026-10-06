@@ -95,3 +95,36 @@ export function canSubmitNewIssue(gate: NewIssueGate): boolean {
     gate.reviewerAgentId.length > 0
   );
 }
+
+/**
+ * NOT-361: when the open-inbox list reloads after a filter save, keep the
+ * currently selected Linear candidate even if it falls outside the new filter.
+ * Exact ID/URL lookup uses the same insert-at-front pattern.
+ */
+export function mergeLinearCandidatePage(
+  previous: readonly LinearCandidate[],
+  next: readonly LinearCandidate[],
+  selectedId: string
+): LinearCandidate[] {
+  const selected = selectedId
+    ? previous.find((c) => c.id === selectedId)
+    : undefined;
+  if (selected && !next.some((c) => c.id === selected.id)) {
+    return [selected, ...next];
+  }
+  return [...next];
+}
+
+/**
+ * NOT-361: insert (or replace) a looked-up Linear candidate at the front of
+ * the picker list and return the id to select — filters stay unchanged.
+ */
+export function insertLookedUpLinearCandidate(
+  previous: readonly LinearCandidate[],
+  lookedUp: LinearCandidate
+): { candidates: LinearCandidate[]; selectedId: string } {
+  return {
+    candidates: [lookedUp, ...previous.filter((x) => x.id !== lookedUp.id)],
+    selectedId: lookedUp.id,
+  };
+}

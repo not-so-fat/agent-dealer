@@ -103,7 +103,7 @@ Two separate CLI processes (plan + execute). Context carryover via `approved_pla
 
 ## intake_settings table
 
-Key/value JSON for Inbox config (not secrets). Keys: `linear.stateFilter`, `linear.teamId`, `linear.assigneeMe`, `linear.defaultAgentId`, `linear.syncEnabled`, `linear.routingRules`. `LINEAR_API_KEY` stays env-only.
+Key/value JSON for Inbox config (not secrets). Keys: `linear.stateFilter`, `linear.teamId`, `linear.assigneeMe`, `linear.defaultAgentId`, `linear.syncEnabled`, `linear.routingRules`. `LINEAR_API_KEY` stays env-only. NOT-361 exposes Team / Assignee / Status (`stateFilter`, `teamId`, `assigneeMe`) via `GET`/`PATCH /api/intake/linear/config` and the New issue inline editor; `defaultAgentId` / `routingRules` remain unused since NOT-71.
 
 ## Agents table
 

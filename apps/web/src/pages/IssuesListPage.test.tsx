@@ -81,6 +81,17 @@ test("toggling or saving the editor never clears the in-progress form", () => {
   assert.ok(!editorSource.includes("setTitle"), "editor cannot write the parent title");
 });
 
+// NOT-361: Linear intake filters gear beside the open-inbox picker (see
+// IssuesListPageLinearFilters.test.tsx for the fuller regression suite).
+test("gear beside open-inbox picker opens the inline Linear filters editor", () => {
+  assert.ok(
+    pageSource.includes('aria-label="Configure Linear intake filters"'),
+    "Linear filters gear labeled"
+  );
+  assert.ok(pageSource.includes("LinearIntakeFiltersEditor"), "inline Linear filters editor");
+  assert.ok(!pageSource.includes("ConfigurationPage"), "still no Configuration page");
+});
+
 test("no Configuration page, route, or top-level navigation item is introduced", () => {
   assert.ok(!pageSource.includes("ConfigurationPage"), "no configuration page import");
   assert.ok(!/path="\/configuration"/.test(appSource), "no /configuration route");

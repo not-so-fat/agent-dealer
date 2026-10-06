@@ -30,6 +30,7 @@ import {
   refreshCursorIndividualCapacityIfStale,
 } from "../capacity/cursor-individual.js";
 import { registerVersionRoute } from "./version.js";
+import { registerIntakeLinearConfigRoutes } from "./intake-linear-config.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
   if (!deckId) return null;
@@ -58,14 +59,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
   );
 
+  // NOT-361: picker config + Linear metadata for the inline New issue filter editor.
+  await registerIntakeLinearConfigRoutes(app);
+
   // Linear lookup for the Issues home "New issue" flow — the only intake surface left
   // after NOT-71 removed the Inbox page and its promote-to-run pipeline.
+  // NOT-361: bounded page (≤50, most recently updated) with hasMore escape hatch.
   app.get("/api/intake/linear", async (_req, reply) => {
     try {
-      const candidates = await listLinearCandidates();
-      return { candidates };
+      return await listLinearCandidates();
     } catch (e) {
-      return reply.status(502).send({ error: String(e), candidates: [] });
+      return reply.status(502).send({ error: String(e), candidates: [], hasMore: false });
     }
   });
 

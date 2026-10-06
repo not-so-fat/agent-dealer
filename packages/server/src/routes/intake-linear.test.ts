@@ -38,23 +38,46 @@ before(() => {
   process.env.LINEAR_API_KEY = "test-key";
   globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
     const body = JSON.parse(String((init as { body?: string })?.body ?? "{}")) as {
+      query?: string;
       variables?: { id?: string };
     };
-    const payload =
-      typeof body.variables?.id === "string"
-        ? {
-            data: {
-              issue:
-                LIST_NODES.find((n) => n.identifier === body.variables?.id) ??
-                LIST_NODES.find((n) => n.identifier === "NOT-242") ??
-                null,
-            },
-          }
-        : {
-            data: {
-              issues: { nodes: LIST_NODES, pageInfo: { hasNextPage: false, endCursor: null } },
-            },
-          };
+    const query = body.query ?? "";
+    let payload: unknown;
+    if (typeof body.variables?.id === "string") {
+      payload = {
+        data: {
+          issue:
+            LIST_NODES.find((n) => n.identifier === body.variables?.id) ??
+            LIST_NODES.find((n) => n.identifier === "NOT-242") ??
+            null,
+        },
+      };
+    } else if (query.includes("IntakeMetadata") || /query\s*\{\s*viewer\s*\{/.test(query)) {
+      payload = {
+        data: {
+          viewer: { id: "viewer-1", name: "Ada" },
+          teams: {
+            nodes: [
+              {
+                id: "team-1",
+                name: "Core",
+                key: "COR",
+                states: { nodes: [{ name: "Todo", type: "unstarted" }] },
+              },
+            ],
+          },
+        },
+      };
+    } else {
+      payload = {
+        data: {
+          issues: {
+            nodes: LIST_NODES,
+            pageInfo: { hasNextPage: listHasMoreForTest, endCursor: null },
+          },
+        },
+      };
+    }
     return {
       ok: true,
       status: 200,
@@ -63,6 +86,9 @@ before(() => {
     };
   }) as typeof fetch;
 });
+
+/** Flipped by hasMore route tests; default false for the existing candidate-list cases. */
+let listHasMoreForTest = false;
 
 after(() => {
   globalThis.fetch = realFetch;
@@ -76,11 +102,16 @@ async function buildApp() {
 }
 
 test("GET /api/intake/linear returns candidates with resolved repo hints", async () => {
+  listHasMoreForTest = false;
   const app = await buildApp();
   const res = await app.inject({ method: "GET", url: "/api/intake/linear" });
   assert.equal(res.statusCode, 200);
-  const json = res.json() as { candidates: Array<{ identifier: string; repoResolution?: { status: string; repository?: string; labels?: string[] } }> };
+  const json = res.json() as {
+    candidates: Array<{ identifier: string; repoResolution?: { status: string; repository?: string; labels?: string[] } }>;
+    hasMore: boolean;
+  };
   assert.equal(json.candidates.length, 4);
+  assert.equal(json.hasMore, false);
 
   const one = json.candidates.find((c) => c.identifier === "NOT-242");
   assert.equal(one?.repoResolution?.status, "resolved");
@@ -175,4 +206,84 @@ test("a mapped Linear label resolves in direct lookup", async () => {
   } finally {
     replaceRepositoryMappings({ mappings: [] });
   }
+});
+
+// NOT-361: config / metadata / hasMore on the intake routes.
+test("GET/PATCH /api/intake/linear/config round-trips picker filters", async () => {
+  delete process.env.LINEAR_STATE_FILTER;
+  delete process.env.LINEAR_TEAM_ID;
+  const app = await buildApp();
+  const patched = await app.inject({
+    method: "PATCH",
+    url: "/api/intake/linear/config",
+    payload: { stateFilter: ["Todo"], teamId: "team-1", assigneeMe: true },
+  });
+  assert.equal(patched.statusCode, 200);
+  const body = patched.json() as {
+    stateFilter: string[];
+    teamId: string | null;
+    assigneeMe: boolean;
+    persisted: { stateFilter: string[]; teamId: string | null; assigneeMe: boolean };
+  };
+  assert.deepEqual(body.persisted, { stateFilter: ["Todo"], teamId: "team-1", assigneeMe: true });
+
+  const got = await app.inject({ method: "GET", url: "/api/intake/linear/config" });
+  assert.equal(got.statusCode, 200);
+  assert.deepEqual(got.json().persisted, body.persisted);
+});
+
+test("env overrides are visible on the config view", async () => {
+  process.env.LINEAR_STATE_FILTER = "In Review";
+  process.env.LINEAR_TEAM_ID = "env-team";
+  try {
+    const app = await buildApp();
+    const res = await app.inject({ method: "GET", url: "/api/intake/linear/config" });
+    assert.equal(res.statusCode, 200);
+    const body = res.json() as {
+      stateFilter: string[];
+      teamId: string | null;
+      envOverrides: { stateFilter: boolean; teamId: boolean };
+      persisted: { stateFilter: string[]; teamId: string | null };
+    };
+    assert.deepEqual(body.stateFilter, ["In Review"]);
+    assert.equal(body.teamId, "env-team");
+    assert.equal(body.envOverrides.stateFilter, true);
+    assert.equal(body.envOverrides.teamId, true);
+  } finally {
+    delete process.env.LINEAR_STATE_FILTER;
+    delete process.env.LINEAR_TEAM_ID;
+  }
+});
+
+test("GET /api/intake/linear/metadata returns teams, statuses, and viewer", async () => {
+  const app = await buildApp();
+  const res = await app.inject({ method: "GET", url: "/api/intake/linear/metadata" });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as {
+    teams: Array<{ id: string; name: string }>;
+    workflowStates: Array<{ name: string }>;
+    viewer: { name: string } | null;
+  };
+  assert.equal(body.teams[0]?.name, "Core");
+  assert.ok(body.workflowStates.some((s) => s.name === "Todo"));
+  assert.equal(body.viewer?.name, "Ada");
+});
+
+test("GET /api/intake/linear reports hasMore true and false", async () => {
+  // Ensure assigneeMe does not short-circuit the list when viewer lookup fails.
+  const app = await buildApp();
+  await app.inject({
+    method: "PATCH",
+    url: "/api/intake/linear/config",
+    payload: { assigneeMe: false },
+  });
+  listHasMoreForTest = true;
+  const more = await app.inject({ method: "GET", url: "/api/intake/linear" });
+  assert.equal(more.statusCode, 200);
+  assert.equal(more.json().hasMore, true);
+
+  listHasMoreForTest = false;
+  const done = await app.inject({ method: "GET", url: "/api/intake/linear" });
+  assert.equal(done.statusCode, 200);
+  assert.equal(done.json().hasMore, false);
 });

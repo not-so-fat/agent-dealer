@@ -1,4 +1,11 @@
-import type { AgentDeckConfig, LinearIntakeConfig } from "@agent-dealer/shared";
+import type {
+  AgentDeckConfig,
+  LinearIntakeConfig,
+  LinearIntakeConfigPatch,
+  LinearIntakeConfigView,
+  LinearIntakePickerConfig,
+} from "@agent-dealer/shared";
+import { normalizeLinearIntakePickerPatch } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 
 /** Open workflow states — exclude terminal Done / Canceled. Shared with linear-inbox seed. */
@@ -16,6 +23,14 @@ function getJson<T>(key: string, fallback: T): T {
   }
 }
 
+function setJson(key: string, value: unknown): void {
+  getDb()
+    .prepare(
+      "INSERT INTO intake_settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json"
+    )
+    .run(key, JSON.stringify(value));
+}
+
 function parseStateFilterEnv(raw: string | undefined): string[] | null {
   if (!raw?.trim()) return null;
   const parts = raw
@@ -23,6 +38,21 @@ function parseStateFilterEnv(raw: string | undefined): string[] | null {
     .map((s) => s.trim())
     .filter(Boolean);
   return parts.length > 0 ? parts : null;
+}
+
+function linearEnvOverrides(): { stateFilter: boolean; teamId: boolean } {
+  return {
+    stateFilter: parseStateFilterEnv(process.env.LINEAR_STATE_FILTER) !== null,
+    teamId: process.env.LINEAR_TEAM_ID !== undefined && process.env.LINEAR_TEAM_ID !== "",
+  };
+}
+
+function toPickerConfig(config: LinearIntakeConfig): LinearIntakePickerConfig {
+  return {
+    stateFilter: config.stateFilter,
+    teamId: config.teamId,
+    assigneeMe: config.assigneeMe,
+  };
 }
 
 /** Persisted-only view of the Linear intake config (env overrides applied separately). */
@@ -52,6 +82,39 @@ function applyEnvOverrides(config: LinearIntakeConfig): LinearIntakeConfig {
 /** Effective config for inbox poll + sync (env overrides when set). */
 export function getLinearIntakeConfig(): LinearIntakeConfig {
   return applyEnvOverrides(getPersistedLinearIntakeConfig());
+}
+
+/** NOT-361: effective picker filters + persisted values + which env vars win. */
+export function getLinearIntakeConfigView(): LinearIntakeConfigView {
+  const persistedFull = getPersistedLinearIntakeConfig();
+  const effective = applyEnvOverrides(persistedFull);
+  return {
+    ...toPickerConfig(effective),
+    persisted: toPickerConfig(persistedFull),
+    envOverrides: linearEnvOverrides(),
+  };
+}
+
+/**
+ * NOT-361: persist picker fields only (Team / Assignee / Status).
+ * Never touches syncEnabled or the deleted routing/default-agent rows.
+ */
+export function patchLinearIntakeConfig(patch: LinearIntakeConfigPatch): LinearIntakeConfigView {
+  const normalized = normalizeLinearIntakePickerPatch(patch);
+  const current = getPersistedLinearIntakeConfig();
+  const nextPicker: LinearIntakePickerConfig = {
+    stateFilter: normalized.stateFilter ?? current.stateFilter,
+    teamId: normalized.teamId !== undefined ? normalized.teamId : current.teamId,
+    assigneeMe: normalized.assigneeMe !== undefined ? normalized.assigneeMe : current.assigneeMe,
+  };
+  // Re-validate the merged picker shape (empty status list is rejected above).
+  if (nextPicker.stateFilter.length === 0) {
+    throw new Error("Select at least one workflow status");
+  }
+  setJson("linear.stateFilter", nextPicker.stateFilter);
+  setJson("linear.teamId", nextPicker.teamId);
+  setJson("linear.assigneeMe", nextPicker.assigneeMe);
+  return getLinearIntakeConfigView();
 }
 
 function parseEnvAgentDeckUrl(): { host: string; port: number } | null {
