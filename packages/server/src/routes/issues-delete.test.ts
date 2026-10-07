@@ -42,21 +42,26 @@ async function buildApp() {
 }
 
 function cleanTables() {
+  // Child-first so foreign-key enforcement (never disabled) stays satisfied:
+  // review_publications -> work_items; workflow_events/usage/activity/artifacts
+  // -> worker_sessions; work_items/human_actions -> workflow_instances; every
+  // issue-scoped row -> issues last. failure_causes, queue_entries and
+  // authority_attempts carry no REFERENCES but are still issue-scoped.
   getDb().exec(`
     DELETE FROM review_publications;
-    DELETE FROM work_items;
-    DELETE FROM human_actions;
     DELETE FROM workflow_events;
-    DELETE FROM worker_sessions;
-    DELETE FROM artifacts;
-    DELETE FROM authority_attempts;
-    DELETE FROM failure_causes;
-    DELETE FROM session_activity_events;
-    DELETE FROM findings;
     DELETE FROM usage_events;
+    DELETE FROM session_activity_events;
+    DELETE FROM artifacts;
+    DELETE FROM failure_causes;
+    DELETE FROM findings;
+    DELETE FROM human_actions;
     DELETE FROM issue_source_attachments;
-    DELETE FROM workflow_instances;
+    DELETE FROM work_items;
     DELETE FROM queue_entries;
+    DELETE FROM worker_sessions;
+    DELETE FROM workflow_instances;
+    DELETE FROM authority_attempts;
     DELETE FROM issues;
   `);
 }
@@ -105,6 +110,9 @@ function homeFile(name: string, content = "dealer-owned bytes"): string {
  * for every collected path kind. Returns the file paths the delete must remove.
  */
 function seedFullHistory(issueId: string): { files: string[]; attachmentDir: string } {
+  // A live queue row alongside the settled history: the delete must remove it
+  // in the same transaction as every other issue-scoped row.
+  enqueueIssue(issueId);
   const logFile = homeFile(`.temporal/logs/${issueId}-developer.ndjson`, '{"t":"log"}\n');
   const artifactBlob = homeFile(`artifact-${issueId}.ndjson`, '{"t":"trace"}\n');
   const failureLog = homeFile(`failure-${issueId}.log`, "boom\n");
@@ -277,8 +285,8 @@ test("DELETE 404s for an unknown issue", async () => {
 test("DELETE empties every issue-scoped table and removes blobs/logs with no FK violations", async () => {
   const app = await buildApp();
   const id = await createIssue(app, {}, false);
-  setStatus(id, "done");
   const { files, attachmentDir } = seedFullHistory(id);
+  setStatus(id, "done");
   for (const f of files) assert.ok(fs.existsSync(f), `fixture file must exist: ${f}`);
 
   const del = await app.inject({ method: "DELETE", url: `/api/issues/${id}` });
@@ -515,8 +523,8 @@ test("DELETE of a linear-sourced issue makes zero Linear/GitHub calls and keeps 
     },
     false
   );
-  setStatus(id, "done");
   seedFullHistory(id);
+  setStatus(id, "done");
 
   // Outbound-adapter spy: the delete path must perform no fetch at all, and its
   // module must not import any outbound adapter — source identifiers stay local.

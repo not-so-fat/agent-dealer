@@ -110,6 +110,18 @@ function guard(issueId: string): string | null {
       `close or abort it and let it fully settle first`
     );
   }
+  // Leased/pending work before the instance that owns it: when both are live
+  // the concrete item (with its lease state) is the more exact blocker.
+  const liveItems = listWorkItemsForIssue(issueId).filter(
+    (w) => w.status === "pending" || w.status === "leased"
+  );
+  if (liveItems.length > 0) {
+    const kinds = liveItems.map((w) => `${w.status} work item ${w.id}`).join(", ");
+    return (
+      `Cannot delete issue with ${kinds} — ` +
+      `abort the workflow and let it fully settle first`
+    );
+  }
   const instance = getActiveWorkflowInstance(issueId);
   if (instance) {
     return (
@@ -121,16 +133,6 @@ function guard(issueId: string): string | null {
   if (running) {
     return (
       `Cannot delete issue with a running worker session ${running.id} — ` +
-      `abort the workflow and let it fully settle first`
-    );
-  }
-  const liveItems = listWorkItemsForIssue(issueId).filter(
-    (w) => w.status === "pending" || w.status === "leased"
-  );
-  if (liveItems.length > 0) {
-    const kinds = liveItems.map((w) => `${w.status} work item ${w.id}`).join(", ");
-    return (
-      `Cannot delete issue with ${kinds} — ` +
       `abort the workflow and let it fully settle first`
     );
   }
@@ -183,16 +185,34 @@ function collectDealerPaths(issueId: string): string[] {
 export function removeDealerPathContained(rawPath: string, homeDir: string): string | null {
   let resolved: string;
   try {
-    // realpath resolves symlinks AND `..` — but throws when nothing exists.
-    // Fall back to a normalized absolute path so a `..` escape that was never
-    // created still reads as outside instead of throwing into a removal.
+    // realpath resolves symlinks AND `..`: a live in-home symlink pointing
+    // outside resolves outside and is refused below, never followed.
     resolved = fs.realpathSync(rawPath);
+    // Canonicalize the home root as well: on macOS the temp dir (and a
+    // custom AGENT_DEALER_HOME under it) resolves through a
+    // `/var -> /private/var` symlink, so comparing a realpath'd candidate
+    // against an unresolved home would misread owned files as outside.
+    let home: string;
+    try {
+      home = fs.realpathSync(homeDir);
+    } catch {
+      home = path.resolve(homeDir);
+    }
+    if (resolved !== home && !resolved.startsWith(home + path.sep)) {
+      return rawPath;
+    }
   } catch {
+    // Nothing exists at (part of) this path — judge it purely lexically
+    // against the unresolved home, which resolve() can compare without
+    // seeing through symlinks. A `..` escape that was never created still
+    // reads as outside; a never-created in-root path (e.g. an issue's
+    // source-attachment dir with no attachments) is already clean.
     resolved = path.resolve(rawPath);
-  }
-  const home = path.resolve(homeDir);
-  if (resolved !== home && !resolved.startsWith(home + path.sep)) {
-    return rawPath;
+    const homeLexical = path.resolve(homeDir);
+    if (resolved !== homeLexical && !resolved.startsWith(homeLexical + path.sep)) {
+      return rawPath;
+    }
+    return null;
   }
   // Already gone is already clean — only real removals and real failures report.
   try {
