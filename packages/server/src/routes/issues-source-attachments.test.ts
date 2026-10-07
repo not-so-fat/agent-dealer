@@ -22,9 +22,11 @@ const TARBALL_V1 = Buffer.from("repro-tarball-version-one-bytes");
 const TARBALL_V2 = Buffer.from("repro-tarball-version-two-bytes!!");
 
 /** Current download bytes per URL; flip to simulate expiry/removal. */
-const downloadBytes = new Map<string, Buffer | "http500">();
+const downloadBytes = new Map<string, Buffer | "http500" | "http401">();
 /** Linear issue node answered to GraphQL (reload path). */
 let linearNode: unknown = null;
+/** Authorization headers observed on hosted-file downloads (NOT-367). */
+const seenDownloadAuth: Array<string | null> = [];
 
 const realFetch = globalThis.fetch;
 before(() => {
@@ -47,7 +49,18 @@ before(() => {
         headers: { "Content-Type": "application/json" },
       });
     }
+    const headers = (init as unknown as { headers?: unknown } | undefined)?.headers;
+    const auth =
+      headers instanceof Headers
+        ? headers.get("authorization")
+        : ((headers as Record<string, string> | undefined)?.Authorization ??
+          (headers as Record<string, string> | undefined)?.authorization ??
+          null);
+    seenDownloadAuth.push(auth);
     const fixture = downloadBytes.get(target);
+    if (fixture === "http401") {
+      return new Response("unauthorized", { status: 401 });
+    }
     if (fixture === "http500" || fixture === undefined) {
       return new Response("boom", { status: 500 });
     }
@@ -66,6 +79,7 @@ after(() => {
 beforeEach(() => {
   downloadBytes.clear();
   linearNode = null;
+  seenDownloadAuth.length = 0;
   getDb().exec(`
     DELETE FROM issue_source_attachments;
     DELETE FROM work_items;
@@ -125,6 +139,8 @@ test("import snapshots a hosted .tar.gz and keeps the link as metadata", async (
   const link = rows.find((r) => r.kind === "link")!;
   assert.equal(link.url, LINK_URL);
   assert.equal(link.blobPath, undefined);
+  // NOT-367: the hosted download carried the configured Linear credential.
+  assert.deepEqual(seenDownloadAuth, ["test-key"]);
 
   // The detail carries the same manifest for the Source attachments summary.
   const detail = await app.inject({ method: "GET", url: `/api/issues/${created.id}` });
@@ -144,6 +160,31 @@ test("import fails atomically when a hosted file download fails", async () => {
   });
   assert.equal(res.statusCode, 502, res.body);
   assert.match(res.json().error, /HTTP 500/);
+  // Zero partial state: no issue, no queue entry, no attachment rows.
+  assert.equal(listIssues().length, 0);
+  assert.equal(listQueuedEntries().length, 0);
+  assert.equal(
+    (getDb().prepare("SELECT COUNT(*) AS n FROM issue_source_attachments").get() as { n: number }).n,
+    0
+  );
+  await app.close();
+});
+
+test("import maps an unauthorized (401) download to an auth error with zero rows", async () => {
+  downloadBytes.set(FILE_URL, "http401");
+  const app = await buildApp();
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/issues",
+    payload: { ...BASE_LINEAR, linearAttachments: [FILE_ATT, LINK_ATT] },
+  });
+  assert.equal(res.statusCode, 502, res.body);
+  const message = (res.json() as { error: string }).error;
+  assert.match(message, /HTTP 401/);
+  assert.match(message, /Unauthorized/);
+  assert.match(message, /rejected the download credentials/);
+  assert.match(message, /LINEAR_API_KEY/);
+  assert.ok(!/expired/i.test(message), "a 401 must not blame URL expiry");
   // Zero partial state: no issue, no queue entry, no attachment rows.
   assert.equal(listIssues().length, 0);
   assert.equal(listQueuedEntries().length, 0);

@@ -315,6 +315,125 @@ test("developer prompt section lists local paths and links with the trust bounda
   assert.equal(sourceAttachmentsDeveloperSection(undefined).length, 0);
 });
 
+// NOT-367: Linear's upload host authenticates like GraphQL — the snapshot
+// download must carry Authorization: <LINEAR_API_KEY>, and a 401 must read
+// as an auth failure, never as an expired URL.
+async function withLinearApiKey<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.LINEAR_API_KEY;
+  if (value === undefined) delete process.env.LINEAR_API_KEY;
+  else process.env.LINEAR_API_KEY = value;
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = prev;
+  }
+}
+
+test("staging sends the Linear API key as Authorization on hosted downloads", async () => {
+  await withLinearApiKey("lin_test_key", async () => {
+    const bytes = Buffer.from("auth-bytes");
+    const seenInit: Array<{ headers?: Record<string, string> } | undefined> = [];
+    const staged = await stageSourceAttachments([FILE_ATTACHMENT], {
+      fetchImpl: async (url, init) => {
+        seenInit.push(init);
+        return downloadDouble(bytes)(url);
+      },
+    });
+    try {
+      assert.equal(staged.files.length, 1);
+      assert.equal(seenInit.length, 1);
+      assert.equal(seenInit[0]?.headers?.Authorization, "lin_test_key");
+    } finally {
+      discardStaged(staged);
+    }
+  });
+});
+
+test("staging invents no credentials when LINEAR_API_KEY is missing", async () => {
+  await withLinearApiKey(undefined, async () => {
+    const bytes = Buffer.from("no-key-bytes");
+    let captured: { headers?: Record<string, string> } | undefined;
+    const staged = await stageSourceAttachments([FILE_ATTACHMENT], {
+      fetchImpl: async (url, init) => {
+        captured = init;
+        return downloadDouble(bytes)(url);
+      },
+    });
+    try {
+      assert.equal(staged.files.length, 1, "the attempt still goes out unauthenticated");
+      assert.ok(!captured?.headers?.Authorization, "no Authorization header is invented");
+    } finally {
+      discardStaged(staged);
+    }
+  });
+});
+
+test("staging reports HTTP 401 as rejected credentials when a key is configured", async () => {
+  await withLinearApiKey("lin_test_key", async () => {
+    const fetchImpl = async (): Promise<SourceDownloadResponse> => ({
+      ok: false,
+      status: 401,
+      headers: { get: () => null },
+    });
+    await assert.rejects(
+      () => stageSourceAttachments([FILE_ATTACHMENT], { fetchImpl }),
+      (err: unknown) => {
+        assert.ok(err instanceof SourceAttachmentError);
+        assert.equal(err.httpStatus, 502);
+        assert.match(err.message, /HTTP 401/);
+        assert.match(err.message, /Unauthorized/);
+        assert.match(err.message, /rejected the download credentials/);
+        assert.match(err.message, /LINEAR_API_KEY/);
+        assert.ok(!/expired/i.test(err.message), "a 401 must not blame URL expiry");
+        assert.match(err.message, /Nothing was queued/);
+        return true;
+      }
+    );
+  });
+});
+
+test("staging reports HTTP 401 as missing credentials when no key is configured", async () => {
+  await withLinearApiKey(undefined, async () => {
+    const fetchImpl = async (): Promise<SourceDownloadResponse> => ({
+      ok: false,
+      status: 401,
+      headers: { get: () => null },
+    });
+    await assert.rejects(
+      () => stageSourceAttachments([FILE_ATTACHMENT], { fetchImpl }),
+      (err: unknown) => {
+        assert.ok(err instanceof SourceAttachmentError);
+        assert.equal(err.httpStatus, 502);
+        assert.match(err.message, /HTTP 401/);
+        assert.match(err.message, /Unauthorized/);
+        assert.match(err.message, /LINEAR_API_KEY is not configured/);
+        assert.ok(!/expired/i.test(err.message), "a 401 must not blame URL expiry");
+        return true;
+      }
+    );
+  });
+});
+
+test("a 401 on the second file fails the whole staging with nothing returned", async () => {
+  await withLinearApiKey("lin_test_key", async () => {
+    const second = { id: "att-file-2", title: "b.bin", url: `${HOSTED}-b` };
+    const fetchImpl = async (url: string): Promise<SourceDownloadResponse> => {
+      if (url === HOSTED) return downloadDouble(Buffer.from("first-bytes"))(url);
+      return { ok: false, status: 401, headers: { get: () => null } };
+    };
+    await assert.rejects(
+      () => stageSourceAttachments([FILE_ATTACHMENT, second], { fetchImpl }),
+      (err: unknown) => {
+        assert.ok(err instanceof SourceAttachmentError);
+        assert.match(err.message, /Unauthorized/);
+        assert.match(err.message, /Nothing was queued/);
+        return true;
+      }
+    );
+  });
+});
+
 test("reviewer prompt section carries manifest metadata, never paths or bytes", () => {
   const lines = sourceAttachmentsReviewerSection([
     {
