@@ -198,6 +198,15 @@ export async function fetchAgentDeckStatus(): Promise<AgentDeckStatus> {
   return res.json();
 }
 
+/** NOT-369: macOS idle-sleep hold + optional short sleep-timer notice. */
+export type HostPowerStatus = import("./components/agents/HostPowerStatusView").HostPowerStatus;
+
+export async function fetchHostPower(): Promise<HostPowerStatus> {
+  const res = await fetch(`${API}/api/host-power`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export type DeckListResult =
   | { ok: true; decks: Array<{ id: string; name: string }> }
   | { ok: false; code?: DeckAccessErrorCode; message: string };

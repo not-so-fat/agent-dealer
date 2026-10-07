@@ -695,6 +695,14 @@ export async function healthForAgent(
 }
 
 export async function listAgentsWithHealth(agents: AgentProfile[]): Promise<AgentWithHealth[]> {
+  // NOT-369: ensure the one-time AC sleep-timer notice is computed for the health surface
+  // (informational only — never attached as an AgentHealthIssue / never blocks admission).
+  try {
+    const { ensureSleepTimerCheckedAtStartup } = await import("../power/sleep-timer.js");
+    ensureSleepTimerCheckedAtStartup();
+  } catch {
+    // Best-effort: health listing must not fail over power checks.
+  }
   const agentDeckOnline = await checkAgentDeckHealth();
   const mcpRegistration = checkAgentDeckMcpRegistration();
   const needsDeckAccess = agents.some((a) => a.deckId);
