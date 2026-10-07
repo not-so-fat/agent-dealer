@@ -61,7 +61,7 @@ export interface SourceDownloadResponse {
 }
 export type SourceFetchLike = (
   url: string,
-  init?: { signal?: AbortSignal }
+  init?: { signal?: AbortSignal; headers?: Record<string, string> }
 ) => Promise<SourceDownloadResponse>;
 
 export interface StageSourceAttachmentsOpts {
@@ -135,6 +135,19 @@ function timeoutError(url: string, timeoutMs: number): SourceAttachmentError {
   );
 }
 
+/**
+ * NOT-367: Linear's upload host requires the same Authorization credential as
+ * GraphQL (the raw `LINEAR_API_KEY` value) — a bare fetch answers HTTP 401
+ * even for a fresh attachment URL. Returns the header only when a key is
+ * configured; without one the download goes out unauthenticated and fails
+ * closed on 401 below rather than inventing credentials.
+ */
+function linearDownloadAuthHeaders(): Record<string, string> | undefined {
+  const key = process.env.LINEAR_API_KEY;
+  if (!key) return undefined;
+  return { Authorization: key };
+}
+
 async function downloadWithLimits(
   url: string,
   fetchImpl: SourceFetchLike,
@@ -142,9 +155,13 @@ async function downloadWithLimits(
 ): Promise<{ bytes: Buffer; contentType: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  const authHeaders = linearDownloadAuthHeaders();
   let res: SourceDownloadResponse;
   try {
-    res = await fetchImpl(url, { signal: controller.signal });
+    res = await fetchImpl(url, {
+      signal: controller.signal,
+      ...(authHeaders ? { headers: authHeaders } : {}),
+    });
   } catch (err) {
     clearTimeout(timer);
     if (controller.signal.aborted) throw timeoutError(url, opts.timeoutMs);
@@ -155,6 +172,14 @@ async function downloadWithLimits(
   }
   if (!res.ok) {
     clearTimeout(timer);
+    if (res.status === 401) {
+      throw new SourceAttachmentError(
+        `Linear-hosted file "${opts.title}" could not be snapshotted: HTTP 401 Unauthorized. ` +
+          (authHeaders
+            ? `Linear rejected the download credentials — verify LINEAR_API_KEY is valid and has access to this file, then retry the import/reload. Nothing was queued.`
+            : `The download went out without credentials because LINEAR_API_KEY is not configured — set it and retry the import/reload. Nothing was queued.`)
+      );
+    }
     throw new SourceAttachmentError(
       `Linear-hosted file "${opts.title}" could not be snapshotted: HTTP ${res.status}. ` +
         `The Linear download URL may have expired — retry the import/reload. Nothing was queued.`
