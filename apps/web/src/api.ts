@@ -413,6 +413,19 @@ export async function patchIssue(id: string, patch: UpdateIssueInput): Promise<I
   return res.json();
 }
 
+/**
+ * NOT-363: reload a Linear-sourced `ready` issue's task text from its linked
+ * ticket. Replaces title, description, and acceptance criteria; repository,
+ * agents, and queue position are preserved, and nothing is written back to
+ * Linear. Throws the server's refusal (wrong source, admitted/running, Linear
+ * or contract failure) for the page-level error banner.
+ */
+export async function reloadIssueSource(id: string): Promise<Issue> {
+  const res = await fetch(`${API}/api/issues/${id}/reload-source`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 /** NOT-118: Start moves the issue to the front of the admission queue — there is no bypass,
  * so it either admits immediately or reports where it is waiting and why. */
 export type StartIssueResult = StartIssueResponse;

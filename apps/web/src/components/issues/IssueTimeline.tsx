@@ -11,6 +11,8 @@ const LABELS: Record<string, (e: WorkflowEvent) => string> = {
   // NOT-240: pre-execution configuration change (repository and/or agents) with
   // before/after values in the payload — the durable evidence for the edit.
   "issue.reassigned": () => "Configuration updated",
+  // NOT-363: operator reloaded the task text from the linked Linear ticket.
+  "issue.source_reloaded": () => "Task text reloaded from Linear",
   "workflow.started": () => "Workflow started",
   "worker.started": (e) => `${roleNoun(e.actorType)} started${e.round ? ` (round ${e.round})` : ""}`,
   "worker.completed": (e) => `${roleNoun(e.actorType)} finished${e.round ? ` (round ${e.round})` : ""}`,
