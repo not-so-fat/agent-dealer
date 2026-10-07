@@ -25,7 +25,8 @@ const {
   enqueueIssueWithOutcome,
   dequeueIssue,
   listQueuedEntries,
-  getQueuedEntryForIssue} = await import("../repository/queue-entries.js");
+  getQueuedEntryForIssue,
+  setQueueWaitReason} = await import("../repository/queue-entries.js");
 const { startWorkflow } = await import("./commands.js");
 const {
   sequentialCapacityPolicy,
@@ -34,6 +35,9 @@ const {
   admitNext,
   checkRoleAgentHealthy,
   getAdmissionStatus,
+  listQueuedEntriesForRead,
+  queueStatusForIssue,
+  refreshQueueWaitReasonForIssue,
   setAdmissionHealthCheckerForTests,
   setCapacityPolicyForTests,
   resetCapacityPolicyForTests,
@@ -927,6 +931,24 @@ function linearIssue(
     externalLabel: `NOT-${suffix}`});
 }
 
+/** NOT-371: a Linear-tracked issue pinned to a shared repository (blocker tests). */
+function linearIssueInRepo(suffix: string, externalId: string, repo: string) {
+  const { dev, rev } = seedAgents(`linrepo-${suffix}`);
+  return createIssue({
+    title: `Linear ${suffix}`,
+    description: "d",
+    acceptanceCriteria: "It works",
+    repo,
+    baseBranch: "main",
+    developerAgentId: dev.id,
+    reviewerAgentId: rev.id,
+    maxReviewRounds: 2,
+    maxInfraAttempts: 2,
+    source: "linear",
+    externalId,
+    externalLabel: `NOT-${suffix}`});
+}
+
 function instanceCount(issueId: string): number {
   return (
     getDb().prepare("SELECT COUNT(*) AS n FROM workflow_instances WHERE issue_id = ?").get(issueId) as {
@@ -991,7 +1013,7 @@ test("NOT-215: fixed capacity 2 admits two eligible different-repository issues 
   });
 });
 
-test("NOT-215: same-repository issues never run concurrently; the waiter names the conflict", async () => {
+test("NOT-371: fixed capacity 2 admits two independent same-repository issues in one tick", async () => {
   setMaxActiveIssues(2);
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-admit-samerepo-"));
   const a = readyIssueInRepo("same-a", repo);
@@ -999,28 +1021,110 @@ test("NOT-215: same-repository issues never run concurrently; the waiter names t
   enqueueIssue(a.id);
   enqueueIssue(b.id);
 
-  assert.equal((await admitNext())?.issueId, a.id);
+  const first = await admitNext();
+  assert.equal(first?.issueId, a.id);
   assert.equal(getIssue(a.id)!.status, "developing");
-  assert.equal(getIssue(b.id)!.status, "ready");
-  assert.equal(getActiveWorkflowInstance(b.id), null);
-  assert.equal(instanceCount(b.id), 0);
-
-  const entry = getQueuedEntryForIssue(b.id)!;
-  assert.equal(entry.state, "queued");
-  assert.match(entry.waitReason ?? "", /repository slot/);
-  assert.ok(
-    (entry.waitReason ?? "").includes(repo),
-    `reason names the conflicting repo: ${entry.waitReason}`
-  );
-  assert.ok(
-    (entry.waitReason ?? "").includes(a.title),
-    `reason names the active issue: ${entry.waitReason}`
-  );
-
-  // The repo slot frees when the first issue leaves occupying states — then the waiter admits.
-  releaseToNeedsHuman(a.id);
-  assert.equal((await admitNext())?.issueId, b.id);
   assert.equal(getIssue(b.id)!.status, "developing");
+  assert.equal(listQueuedEntries().length, 0);
+  assert.equal(instanceCount(a.id), 1);
+  assert.equal(instanceCount(b.id), 1);
+  assert.notEqual(
+    getActiveWorkflowInstance(a.id)!.id,
+    getActiveWorkflowInstance(b.id)!.id,
+    "each issue gets its own active workflow instance"
+  );
+
+  // No repository-slot wait reason anywhere — neither persisted nor on read.
+  for (const read of listQueuedEntriesForRead()) {
+    assert.doesNotMatch(read.waitReason ?? "", /repository slot/);
+  }
+
+  // Second tick admits nothing new and duplicates nothing.
+  assert.equal(await admitNext(), null);
+  assert.equal(instanceCount(a.id), 1);
+  assert.equal(instanceCount(b.id), 1);
+});
+
+test("NOT-371: an explicitly blocked same-repository issue waits while a later independent sibling skips ahead", async () => {
+  setMaxActiveIssues(2);
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-admit-blockedrepo-"));
+  const blocked = linearIssueInRepo("blk", "lin-371-blk", repo);
+  const free = readyIssueInRepo("free", repo);
+  setBlockersProviderForTests(
+    async (issues) =>
+      new Map(
+        issues.map((i) => [
+          i.externalId!,
+          i.externalId === "lin-371-blk"
+            ? [{ id: "", identifier: "NOT-1", stateName: "In Progress", stateType: "started" }]
+            : [],
+        ])
+      )
+  );
+  enqueueIssue(blocked.id);
+  enqueueIssue(free.id);
+
+  // The free slot goes to the later independent sibling, not the blocked head.
+  assert.equal((await admitNext())?.issueId, free.id);
+  assert.equal(getIssue(free.id)!.status, "developing");
+  assert.equal(getIssue(blocked.id)!.status, "ready");
+  assert.equal(getActiveWorkflowInstance(blocked.id), null);
+  assert.equal(instanceCount(blocked.id), 0);
+  const entry = getQueuedEntryForIssue(blocked.id)!;
+  assert.equal(entry.state, "queued");
+  assert.match(entry.waitReason ?? "", /waiting on NOT-1/);
+  assert.doesNotMatch(entry.waitReason ?? "", /repository slot/);
+
+  // The declared blocker is satisfied and a slot frees — the next tick admits the waiter.
+  setBlockersProviderForTests(async (issues) => new Map(issues.map((i) => [i.externalId!, []])));
+  releaseToNeedsHuman(free.id);
+  assert.equal((await admitNext())?.issueId, blocked.id);
+  assert.equal(getIssue(blocked.id)!.status, "developing");
+});
+
+test("NOT-371: a stale persisted repository-slot reason never surfaces and clears on refresh", async () => {
+  setMaxActiveIssues(2);
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-admit-stalerepo-"));
+  const a = readyIssueInRepo("stale-a", repo);
+  const b = readyIssueInRepo("stale-b", repo);
+  enqueueIssue(a.id);
+  enqueueIssue(b.id);
+
+  // Simulate a row persisted under the removed NOT-215 exclusion.
+  const stale = `waiting for repository slot — ${repo} already active (Issue stale-a)`;
+  setQueueWaitReason(getQueuedEntryForIssue(b.id)!.id, stale);
+
+  // Read model: the dead reason clears to "next up" while a slot is free.
+  assert.equal(queueStatusForIssue(b.id)?.waitReason, null);
+  assert.equal(listQueuedEntriesForRead().find((e) => e.issueId === b.id)?.waitReason, null);
+
+  // Refresh: the persisted row is overwritten with the current real reason (none — admittable).
+  const refreshed = await refreshQueueWaitReasonForIssue(b.id);
+  assert.equal(refreshed?.waitReason, null);
+  assert.equal(refreshed?.position, 2);
+  assert.equal(getQueuedEntryForIssue(b.id)?.waitReason, null);
+
+  // And the issue itself admits alongside its same-repo sibling.
+  assert.equal((await admitNext())?.issueId, a.id);
+  assert.equal(getIssue(b.id)!.status, "developing");
+});
+
+test("NOT-371: a stale repository-slot row under a full system reads as the live capacity reason", async () => {
+  const a = readyIssue("stalefull-a");
+  const b = readyIssue("stalefull-b");
+  enqueueIssue(a.id);
+  enqueueIssue(b.id);
+  await admitNext();
+  assert.equal(getIssue(a.id)!.status, "developing");
+
+  // Default limit 1: the system is full; overwrite b's persisted reason with the dead text.
+  setQueueWaitReason(
+    getQueuedEntryForIssue(b.id)!.id,
+    "waiting for repository slot — acme/old already active (Issue stalefull-a)"
+  );
+  const read = queueStatusForIssue(b.id)?.waitReason ?? "";
+  assert.match(read, /waiting for slot/);
+  assert.doesNotMatch(read, /repository slot/);
 });
 
 test("NOT-215: blocked/capped entries stay queued while later eligible different-repo entries fill both slots", async () => {

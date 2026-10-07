@@ -82,8 +82,8 @@ export type ActiveIssueRef = { id: string; status: IssueStatus; repo?: string };
  * Single swappable capacity function: global free slots = limit − occupying.
  * `sequential` is fixed(1); the shipping default is fixed(N) where N is the
  * persisted NOT-215 operator setting clamped to the worker/spawn ceiling.
- * Per-repository exclusion (max one active issue per repo) is enforced in the
- * `admitNext` walk, not here — it needs the candidate's repo, not just a count.
+ * NOT-371: repository identity never gates admission — only this global count
+ * plus the shared eligibility rules (readiness, health, caps, declared blockers).
  */
 export type CapacityPolicy = (activeIssues: ActiveIssueRef[]) => number;
 
@@ -127,20 +127,6 @@ export function countOccupyingIssues(): number {
 
 function listOccupyingIssues(): ActiveIssueRef[] {
   return listIssues([...occupyingStatuses]).map((i) => ({ id: i.id, status: i.status, repo: i.repo }));
-}
-
-/** Occupying repos with the active issue's id/title, for the per-repo exclusion reason. */
-function occupyingRepoSlots(): Map<string, { issueId: string; title: string }> {
-  const slots = new Map<string, { issueId: string; title: string }>();
-  for (const issue of listIssues([...occupyingStatuses])) {
-    if (issue.repo) slots.set(issue.repo, { issueId: issue.id, title: issue.title });
-  }
-  return slots;
-}
-
-/** NOT-215: concrete same-repository wait reason naming the active conflict. */
-export function repositorySlotReason(repo: string, activeTitle: string): string {
-  return `waiting for repository slot — ${repo} already active (${activeTitle})`;
 }
 
 /**
@@ -356,10 +342,9 @@ async function evaluateEligibility(issue: Issue, ctx: EligibilityContext): Promi
  * entry via startWorkflowCore (which force-admits the queue entry in the same
  * transaction) — one tick fills every newly free slot, not just one.
  *
- * NOT-215 per-repository exclusion: at most one active issue per repository. A
- * candidate whose repo already has an occupying issue (or one admitted earlier in
- * this same tick) stays queued with a concrete reason naming the active conflict,
- * and never consumes a slot another repository could use.
+ * NOT-371: repository identity is not an admission gate. Independent issues for the
+ * same repository admit concurrently up to the global limit; only declared Linear
+ * blockers (NOT-104) order dependent work.
  *
  * Returns the first issue admitted this tick (null when none). Lowering the limit
  * only drives free slots to 0 — running work is never interrupted or preempted.
@@ -424,8 +409,6 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
   };
 
   const admitted: AdmittedIssue[] = [];
-  // Repos taken by occupying issues, plus issues admitted earlier in this tick.
-  const repoSlots = occupyingRepoSlots();
 
   for (const entry of remaining) {
     // Slots filled mid-walk — stop. The read-time slot overlay
@@ -437,16 +420,6 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
     if (!issue) {
       markQueueEntryRemoved(entry.issueId);
       continue;
-    }
-
-    // Same-repository exclusion first (cheap, deterministic): never burn async
-    // eligibility work on an entry that cannot take a slot anyway.
-    if (issue.repo) {
-      const slot = repoSlots.get(issue.repo);
-      if (slot && slot.issueId !== issue.id) {
-        setQueueWaitReason(entry.id, repositorySlotReason(issue.repo, slot.title));
-        continue;
-      }
     }
 
     const eligibility = await evaluateEligibility(issue, ctx);
@@ -467,31 +440,10 @@ export async function admitNext(): Promise<AdmittedIssue | null> {
         if (capacityPolicy(listOccupyingIssues()) <= 0) {
           throw new StartPreconditionError(409, "no free admission slots");
         }
-        // Re-check the repo slot inside the txn for the same race.
-        if (issue.repo) {
-          const fresh = occupyingRepoSlots();
-          for (const a of admitted) {
-            const admittedIssue = getIssue(a.issueId);
-            if (admittedIssue?.repo) {
-              fresh.set(admittedIssue.repo, {
-                issueId: admittedIssue.id,
-                title: admittedIssue.title,
-              });
-            }
-          }
-          const conflict = fresh.get(issue.repo);
-          if (conflict && conflict.issueId !== issue.id) {
-            throw new StartPreconditionError(
-              409,
-              repositorySlotReason(issue.repo, conflict.title)
-            );
-          }
-        }
         // Force-admit lives inside startWorkflowCore — single owner for start-path-queue-sync.
         return startWorkflowCore(entry.issueId);
       })();
       admitted.push({ issueId: entry.issueId, ...started });
-      if (issue.repo) repoSlots.set(issue.repo, { issueId: issue.id, title: issue.title });
     } catch (err) {
       const message =
         err instanceof StartPreconditionError
@@ -522,6 +474,14 @@ export function slotWaitReason(): string | null {
 }
 
 /**
+ * NOT-371: rows persisted under the removed NOT-215 per-repository exclusion still
+ * carry `waiting for repository slot` text until a tick or refresh overwrites them.
+ * The read model never emits that dead reason — it clears to "next up" (or the live
+ * capacity overlay) so operators never see a gate that no longer exists.
+ */
+const staleRepositorySlotReason = /waiting for repository slot/;
+
+/**
  * The queue as operators read it: 1-based positions (rank, not the raw stored column, which
  * legacy rows may have left sparse) and the current blocker per entry. While capacity is
  * full that blocker *is* the missing slot, so the derived reason wins over whatever an
@@ -533,7 +493,11 @@ export function listQueuedEntriesForRead(): QueueEntryView[] {
   return listQueuedEntries().map((entry, index) => ({
     ...entry,
     position: index + 1,
-    waitReason: slotReason ?? entry.waitReason,
+    waitReason:
+      slotReason ??
+      (entry.waitReason && staleRepositorySlotReason.test(entry.waitReason)
+        ? null
+        : entry.waitReason),
   }));
 }
 
@@ -612,8 +576,9 @@ export async function startIssueViaQueue(issueId: string): Promise<StartIssueOut
 /**
  * NOT-217 strict direct execution: attempt immediate admission for one issue without
  * touching the queue — no enqueue, no move-to-front, no reorder. It bypasses queue
- * *order* only: capacity (global + per-repository), readiness, Linear blockers, agent
- * health, runtime caps, and the active-workflow/frozen-snapshot guard all still refuse.
+ * *order* only: global capacity, readiness, Linear blockers, agent health, runtime
+ * caps, and the active-workflow/frozen-snapshot guard all still refuse (NOT-371:
+ * same-repository siblings never refuse — only a full global limit does).
  *
  * The eligibility + capacity checks are the same ones `admitNext` walks (same rules,
  * same policy, same persisted NOT-215 limit); the check, workflow start, and
@@ -635,17 +600,11 @@ export async function executeIssueNow(issueId: string): Promise<ExecuteIssueOutc
     return { state: "error", code: 409, error: `Issue is ${issue.status} — not startable` };
   }
 
-  // Fail-closed pre-checks, same order as the admitNext walk: global capacity, then the
-  // per-repository exclusion, then the shared eligibility rules. Read-only — the queue
-  // is never written on any path below except startWorkflowCore's own force-admit.
+  // Fail-closed pre-checks, same order as the admitNext walk: global capacity, then
+  // the shared eligibility rules. Read-only — the queue is never written on any path
+  // below except startWorkflowCore's own force-admit.
   if (capacityPolicy(listOccupyingIssues()) <= 0) {
     return { state: "refused", reason: slotWaitReason() ?? "waiting for slot" };
-  }
-  if (issue.repo) {
-    const slot = occupyingRepoSlots().get(issue.repo);
-    if (slot && slot.issueId !== issue.id) {
-      return { state: "refused", reason: repositorySlotReason(issue.repo, slot.title) };
-    }
   }
   const [deckOnline, blockers] = await Promise.all([
     checkAgentDeckHealth(),
@@ -660,8 +619,8 @@ export async function executeIssueNow(issueId: string): Promise<ExecuteIssueOutc
 
   // Atomic check + start + queue transition. Async eligibility above cannot run inside
   // the sync transaction, so re-verify everything a concurrent start could have changed
-  // (occupancy, repo slot, active workflow, readiness via startWorkflowCore) before
-  // writing. A refusal here rolls the transaction back — still no queue mutation.
+  // (occupancy, active workflow, readiness via startWorkflowCore) before writing.
+  // A refusal here rolls the transaction back — still no queue mutation.
   try {
     const started = getDb().transaction(() => {
       const fresh = getIssue(issueId);
@@ -671,12 +630,6 @@ export async function executeIssueNow(issueId: string): Promise<ExecuteIssueOutc
       }
       if (capacityPolicy(listOccupyingIssues()) <= 0) {
         throw new StartPreconditionError(409, slotWaitReason() ?? "waiting for slot");
-      }
-      if (fresh.repo) {
-        const slot = occupyingRepoSlots().get(fresh.repo);
-        if (slot && slot.issueId !== fresh.id) {
-          throw new StartPreconditionError(409, repositorySlotReason(fresh.repo, slot.title));
-        }
       }
       return startWorkflowCore(issueId);
     })();
@@ -695,8 +648,10 @@ export async function executeIssueNow(issueId: string): Promise<ExecuteIssueOutc
 /**
  * NOT-217: re-derive one queued entry's persisted wait reason after an operator edit
  * changed what admission sees (e.g. a new developer agent). Same rule order as the
- * admitNext walk — capacity, repository slot, shared eligibility — cleared (null) when
- * the issue is currently admittable so the row reads "next up". No reorder, no admit.
+ * admitNext walk — capacity, shared eligibility — cleared (null) when the issue is
+ * currently admittable so the row reads "next up". No reorder, no admit.
+ * NOT-371: a stale `waiting for repository slot` row is overwritten here with the
+ * current real reason (or cleared), since repository identity no longer gates.
  */
 export async function refreshQueueWaitReasonForIssue(
   issueId: string
@@ -709,13 +664,6 @@ export async function refreshQueueWaitReasonForIssue(
     const slotReason = slotWaitReason();
     if (slotReason) setQueueWaitReason(entry.id, slotReason);
     return queueStatusForIssue(issueId);
-  }
-  if (issue.repo) {
-    const slot = occupyingRepoSlots().get(issue.repo);
-    if (slot && slot.issueId !== issue.id) {
-      setQueueWaitReason(entry.id, repositorySlotReason(issue.repo, slot.title));
-      return queueStatusForIssue(issueId);
-    }
   }
   const [deckOnline, blockers] = await Promise.all([
     checkAgentDeckHealth(),

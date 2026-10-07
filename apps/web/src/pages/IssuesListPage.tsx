@@ -762,7 +762,7 @@ export default function IssuesListPage({
                         title={
                           admission.ceiling < 2
                             ? `Capped by the worker/spawn ceiling (${admission.ceiling})`
-                            : "How many issues may execute in parallel (max one per repository)"
+                            : "How many issues may execute in parallel (same-repository issues may run together)"
                         }
                         onChange={(e) => void changeLimit(Number(e.target.value))}
                       >
@@ -934,7 +934,7 @@ export default function IssuesListPage({
                 title={
                   admission.ceiling < 2
                     ? `Capped by the worker/spawn ceiling (${admission.ceiling})`
-                    : "How many issues may execute in parallel (max one per repository)"
+                    : "How many issues may execute in parallel (same-repository issues may run together)"
                 }
                 onChange={(e) => void changeLimit(Number(e.target.value))}
               >

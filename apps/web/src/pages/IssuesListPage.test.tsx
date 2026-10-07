@@ -121,3 +121,16 @@ test("routing, counts, list controls, and list behavior are unchanged", () => {
   assert.ok(pageSource.includes("issuesPageText(issuePage)"), "page text retained");
   assert.ok(/flex justify-end/.test(pageSource), "count row right-aligns without an empty label slot");
 });
+
+// NOT-371: independent same-repository issues execute concurrently up to the global
+// limit — the capacity control must not promise "max one per repository".
+test("capacity control no longer promises max one per repository", () => {
+  assert.ok(
+    !pageSource.includes("max one per repository"),
+    "no max-one-per-repository copy remains"
+  );
+  assert.ok(
+    pageSource.includes("How many issues may execute in parallel"),
+    "capacity tooltip still explains the limit"
+  );
+});

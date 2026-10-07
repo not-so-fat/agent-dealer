@@ -1075,12 +1075,12 @@ test("NOT-240: PATCH repository plus agents on an unqueued ready issue succeeds,
   await app.close();
 });
 
-test("NOT-240: PATCH repository on a queued ready issue preserves position and recomputes the repository wait reason", async () => {
+test("NOT-371: PATCH repository onto an active sibling's repo keeps position with no repository wait reason", async () => {
   const { setMaxActiveIssues } = await import("../repository/admission-settings.js");
   const app = await buildApp();
   try {
-    // Two global slots: one admitted issue never blocks on capacity, so the
-    // per-repository exclusion is the reason under test.
+    // Two global slots: one admitted issue never blocks on capacity, so the free
+    // slot proves repository identity alone never gates the queued sibling.
     setMaxActiveIssues(2);
     const mk = (title: string, repo: string) =>
       app.inject({
@@ -1101,7 +1101,8 @@ test("NOT-240: PATCH repository on a queued ready issue preserves position and r
     assert.equal(queueStatusForIssue(queuedId)?.position, 1);
     assert.equal(queueStatusForIssue(queuedId)?.waitReason, null);
 
-    // Move onto the occupied repository: same position, repository-slot wait reason.
+    // Move onto the active sibling's repository: same position, still "next up" —
+    // no repository-slot wait reason is ever synthesized.
     const clash = await app.inject({
       method: "PATCH",
       url: `/api/issues/${queuedId}`,
@@ -1110,9 +1111,9 @@ test("NOT-240: PATCH repository on a queued ready issue preserves position and r
     assert.equal(clash.statusCode, 200, clash.body);
     assert.equal((clash.json() as { repo: string }).repo, "github.com/acme/hot-repo");
     assert.equal(queueStatusForIssue(queuedId)?.position, 1, "a repository change must not reorder");
-    assert.match(queueStatusForIssue(queuedId)?.waitReason ?? "", /repository slot/);
+    assert.equal(queueStatusForIssue(queuedId)?.waitReason, null);
 
-    // Move off to a free repository: stale wait text is cleared, position kept.
+    // Move off to another repository: identical read state, position kept.
     const free = await app.inject({
       method: "PATCH",
       url: `/api/issues/${queuedId}`,
