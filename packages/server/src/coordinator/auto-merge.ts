@@ -42,6 +42,7 @@ import { MERGE_FAILURE_EVIDENCE_KEY, MERGE_FAILURE_RESPONSE_OPTIONS } from "./hu
 import { isMergeConflictFailure, runMergeConflictSync } from "./merge-conflict-sync.js";
 import { triggerLinearPostMerge } from "./linear-merge-verify.js";
 import { startBaseAdvancedScan } from "./base-advanced-scan.js";
+import { acquireHostAwake, releaseHostAwake } from "../power/host-awake.js";
 import {
   OPERATOR_VERIFICATION_RESPONSE_OPTIONS,
   formatOperatorCriteria,
@@ -233,10 +234,13 @@ export function finalizeAutoMerge(issueId: string): Promise<AutoMergeFinalizeRes
   const existing = finalizeInflight.get(issueId);
   if (existing) return existing;
 
+  // NOT-369: hold idle-sleep for the merge/publish step; release when it settles.
+  acquireHostAwake();
   const promise = finalizeAutoMergeOnce(issueId).finally(() => {
     if (finalizeInflight.get(issueId) === promise) {
       finalizeInflight.delete(issueId);
     }
+    releaseHostAwake();
   });
   finalizeInflight.set(issueId, promise);
   return promise;

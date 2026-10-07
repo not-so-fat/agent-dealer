@@ -22,6 +22,8 @@ import { runDeveloperEffect } from "./coordinator/developer-effect.js";
 import { runReviewerEffect } from "./coordinator/reviewer-effect.js";
 import { registerStaticUi } from "./static-ui.js";
 import { cleanupOrphanedWorkerMcpConfig } from "./paths.js";
+import { releaseAllHostAwake } from "./power/host-awake.js";
+import { ensureSleepTimerCheckedAtStartup } from "./power/sleep-timer.js";
 import net from "node:net";
 
 const { mode, envFile } = loadAgentDealerEnv();
@@ -68,18 +70,38 @@ async function main(): Promise<void> {
       // Best-effort: shutdown must never block process exit.
     }
   };
+  // NOT-369: drop any idle-sleep assertion so a clean exit does not leave caffeinate behind.
+  // (caffeinate -w also dies if this process dies uncleanly.)
+  const releaseHostAwakeOnShutdown = (): void => {
+    try {
+      releaseAllHostAwake();
+    } catch {
+      // Best-effort.
+    }
+  };
   process.on("SIGINT", () => {
     removeServerPidFile();
+    releaseHostAwakeOnShutdown();
     void shutdownCapacityHosts().finally(() => process.exit(0));
   });
   process.on("SIGTERM", () => {
     removeServerPidFile();
+    releaseHostAwakeOnShutdown();
     void shutdownCapacityHosts().finally(() => process.exit(0));
   });
-  process.on("exit", removeServerPidFile);
+  process.on("exit", () => {
+    releaseHostAwakeOnShutdown();
+    removeServerPidFile();
+  });
 
   migrate();
   cleanupOrphanedWorkerMcpConfig();
+
+  // NOT-369: one-time AC sleep-timer advice (never changes settings; never sudo).
+  const sleepNotice = ensureSleepTimerCheckedAtStartup();
+  if (sleepNotice) {
+    console.warn(`[startup] ${sleepNotice.message}`);
+  }
 
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });

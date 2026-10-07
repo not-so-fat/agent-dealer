@@ -31,6 +31,7 @@ import {
 } from "../capacity/cursor-individual.js";
 import { registerVersionRoute } from "./version.js";
 import { registerIntakeLinearConfigRoutes } from "./intake-linear-config.js";
+import { getHostPowerStatus } from "../power/status.js";
 
 async function resolveDeckName(deckId?: string): Promise<string | null> {
   if (!deckId) return null;
@@ -195,6 +196,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       issueCount: agents.filter((a) => !a.healthy).length,
     };
   });
+
+  // NOT-369: macOS idle-sleep hold state + one-time short sleep-timer notice.
+  app.get("/api/host-power", async () => getHostPowerStatus());
 
   app.post("/api/agents", async (req, reply) => {
     const input = CreateAgentInput.parse(req.body);
