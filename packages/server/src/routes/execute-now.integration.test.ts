@@ -2,8 +2,9 @@
 //
 // NOT-217 acceptance: strict direct execution bypasses queue order only. Execute now
 // admits an eligible issue immediately (queued or not) and refuses — without any
-// enqueue, move, or reorder — on capacity, repository, readiness, blocker, health, or
-// runtime-cap failure. Concurrent attempts cannot double-start or exceed capacity.
+// enqueue, move, or reorder — on capacity, readiness, blocker, health, or runtime-cap
+// failure (NOT-371: same-repository siblings admit while a global slot is free).
+// Concurrent attempts cannot double-start or exceed capacity.
 
 import { test, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
@@ -232,30 +233,55 @@ test("execute now refuses on an unmet Linear blocker without queue movement", as
   await app.close();
 });
 
-test("execute now refuses when the same repository already has an active issue", async () => {
+test("NOT-371: execute now admits a same-repository issue when a global slot is free", async () => {
   const app = await buildApp();
   const { setMaxActiveIssues } = await import("../repository/admission-settings.js");
   try {
-    // Persisted NOT-215 limit 2: global capacity stays free so the per-repository
-    // exclusion is the reason under test.
+    // Persisted NOT-215 limit 2: the second global slot is free, so the
+    // same-repository sibling must admit — repository identity never refuses.
     setMaxActiveIssues(2);
     const active = await createIssueViaApi(app, "Active", { repo: "acme/same-repo" });
     assert.equal((await app.inject({ method: "POST", url: `/api/issues/${active}/execute` })).statusCode, 200);
 
-    const clash = await createIssueViaApi(app, "Clash", { repo: "acme/same-repo", enqueue: false });
-    const res = await app.inject({ method: "POST", url: `/api/issues/${clash}/execute` });
-    assert.equal(res.statusCode, 409, res.body);
-    const body = res.json() as { state: string; reason: string; queued: boolean };
-    assert.equal(body.state, "refused");
-    assert.match(body.reason, /repository slot/);
-    assert.equal(body.queued, false);
-    assert.equal(getQueuedEntryForIssue(clash), null, "a refused execute never enqueues");
-    assert.equal(listWorkflowInstancesForIssue(clash).length, 0);
+    const sibling = await createIssueViaApi(app, "Sibling", { repo: "acme/same-repo", enqueue: false });
+    const res = await app.inject({ method: "POST", url: `/api/issues/${sibling}/execute` });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal((res.json() as { state: string }).state, "admitted");
+    assert.equal(getIssue(sibling)!.status, "developing");
+    assert.equal(getQueuedEntryForIssue(sibling), null, "success on an unqueued issue writes no queue row");
+    assert.equal(listWorkflowInstancesForIssue(sibling).length, 1);
+  } finally {
+    setMaxActiveIssues(1);
+  }
+  await app.close();
+});
 
-    // A different repository still admits under the same free global slot.
-    const other = await createIssueViaApi(app, "Other repo", { repo: "acme/other-repo", enqueue: false });
-    const otherRes = await app.inject({ method: "POST", url: `/api/issues/${other}/execute` });
-    assert.equal(otherRes.statusCode, 200, otherRes.body);
+test("NOT-371: execute now refuses a same-repository issue at full global capacity without queue mutation", async () => {
+  const app = await buildApp();
+  const { setMaxActiveIssues } = await import("../repository/admission-settings.js");
+  try {
+    setMaxActiveIssues(2);
+    const first = await createIssueViaApi(app, "First", { repo: "acme/same-repo" });
+    const second = await createIssueViaApi(app, "Second", { repo: "acme/same-repo", enqueue: false });
+    assert.equal((await app.inject({ method: "POST", url: `/api/issues/${first}/execute` })).statusCode, 200);
+    assert.equal((await app.inject({ method: "POST", url: `/api/issues/${second}/execute` })).statusCode, 200);
+
+    const q1 = await createIssueViaApi(app, "Q1", { repo: "acme/same-repo" });
+    const res = await app.inject({ method: "POST", url: `/api/issues/${q1}/execute` });
+    assert.equal(res.statusCode, 409, res.body);
+    const body = res.json() as {
+      state: string;
+      reason: string;
+      queued: boolean;
+      position: number | null;
+    };
+    assert.equal(body.state, "refused");
+    assert.match(body.reason, /waiting for slot/);
+    assert.doesNotMatch(body.reason, /repository slot/);
+    assert.equal(body.queued, true);
+    assert.equal(body.position, 1);
+    assert.deepEqual(queuedIds(), [q1], "a refused execute never reorders");
+    assert.equal(listWorkflowInstancesForIssue(q1).length, 0);
   } finally {
     setMaxActiveIssues(1);
   }
