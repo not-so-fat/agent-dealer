@@ -4,6 +4,17 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.15 — 2026-10-07
+
+Linear attachment download auth fix, hard-delete Dealer-local issues, and capacity probe now records why it is unavailable
+
+### Changes
+
+- NOT-367: Linear-hosted attachment snapshot fails with HTTP 401 because download omits LINEAR_API_KEY (#212)
+- NOT-365: Hard-delete a Dealer-local issue without deleting its Linear source (#211)
+- NOT-366: Claude capacity probe has failed silently since Oct 4: store the unavailable reason instead of an empty header (#210)
+- docs: clarify Agent Dealer positioning (#203)
+
 ## 1.2.14 — 2026-10-07
 
 Linear intake: attachments reach Builder sessions, editable task text, and source-issue advance verification
