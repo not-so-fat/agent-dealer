@@ -3,6 +3,13 @@ import { DEFAULT_MAX_CI_ATTEMPTS } from "@agent-dealer/shared";
 import { normalizeReviewerResult, type ReviewerResult } from "./reviewer-result.js";
 import type { PushDivergenceEvidence } from "./human-resolution.js";
 import type { PushRejectionFacts } from "../adapters/git-worktree.js";
+import {
+  authParkReason,
+  MAX_CONSECUTIVE_AUTH_PARKS,
+  repeatedAuthEscalationReason,
+  type AuthFailureRouting,
+  type RuntimeAuthParkEvidence,
+} from "./runtime-auth-park.js";
 
 export type DeveloperOutcome =
   | { kind: "clean_handoff"; branch: string; headSha: string; baseSha: string; prNumber: number; prUrl: string }
@@ -167,6 +174,12 @@ export interface RouteLimits {
    * (`infraAttempts` already spent + 1). Default {@link DEFAULT_NO_PROGRESS_INFRA_ATTEMPTS}.
    */
   noProgressInfraAttempts?: number;
+  /**
+   * NOT-368: high-confidence runtime auth failure context for session_failed / timed_out.
+   * Prepared by the apply path (classify + live probe). Absent / medium-confidence auth
+   * keeps the generic infra-retry path unchanged.
+   */
+  authFailure?: AuthFailureRouting;
 }
 
 function roundsRemain(limits: RouteLimits): boolean {
@@ -205,8 +218,10 @@ export type DeveloperRouteResult =
    * despite reusing one that already carries a failed attempt's commits.
    * NOT-313: `budget: "ci"` marks a CI-repair retry (spends `ci_attempts`);
    * absent means an infra retry (spends `infra_attempts`). Only the CI path sets
-   * it, so existing infra routes keep their exact shape. */
-  | { next: "retry_developer"; reason: string; budget?: "ci" }
+   * it, so existing infra routes keep their exact shape.
+   * NOT-368: `authTransientRetry` marks the one allowed infra retry after a high-confidence
+   * auth failure whose live probe passed (transient); a second high-conf auth then parks. */
+  | { next: "retry_developer"; reason: string; budget?: "ci"; authTransientRetry?: true }
   /** Re-run the coordinator's own publish stage only — no agent spawn. Usually the branch is
    * already on origin and just gh/PR/checks is redone, but a recovered branch whose push has
    * not landed yet is pushed first (developer-effect's runPublishOnlyHandoff decides from the
@@ -222,6 +237,9 @@ export type DeveloperRouteResult =
       /** NOT-280: a worktree blocker's fingerprint — the same unchanged blocker lands on
        * its existing action instead of opening an identical one. */
       blockerFingerprint?: string;
+      /** NOT-368: confirmed runtime login park — stored as human-action evidence so
+       * resolve re-probes before re-queueing. Absent on the 4th repeated-login escalation. */
+      runtimeAuthPark?: RuntimeAuthParkEvidence;
     }
   /** `until` is only known up front when the blocker reports its own reset time (a usage
    * cap). An unreachable Agent Deck gives no ETA, so its retry time comes from the deferral
@@ -357,6 +375,10 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
     case "timed_out": {
       // Same infra budget as above, plus NOT-147: empty tip after N timeout/crashes → human
       // gate so we do not burn attempts 3–4 on a branch that never moved.
+      // NOT-368: a high-confidence runtime auth failure with a still-failing (or already
+      // spent) probe parks for login remediation instead of charging infra.
+      const authPark = routeHighConfidenceAuthFailure(limits);
+      if (authPark) return authPark;
       const reason = infraFailureReason(outcome);
       if (!infraAttemptsRemain(limits)) {
         return {
@@ -427,6 +449,77 @@ function infraFailureReason(outcome: DeveloperOutcome & { kind: "no_pr" | "sessi
  */
 function checksFailedDetails(outcome: DeveloperOutcome & { kind: "checks_failed" }): string {
   return outcome.details?.trim() ? outcome.details : "Developer's PR checks failed.";
+}
+
+/**
+ * NOT-368: high-confidence attributed auth failure → live-probe tie-breaker.
+ * Probe still failing (or the one transient retry already spent) → park with remediation,
+ * no infra charge. Probe passing on the first such failure → one infra retry. After
+ * {@link MAX_CONSECUTIVE_AUTH_PARKS} parks, the next confirmed failure escalates as a
+ * distinct "repeated login failures" policy_escalation (not another auth park).
+ * Medium / unattributed auth never sets `limits.authFailure`, so those stay on the
+ * generic infra-retry path below.
+ */
+function routeHighConfidenceAuthFailure(
+  limits: RouteLimits
+): Extract<DeveloperRouteResult, { next: "human_action" | "retry_developer" }> | null {
+  const auth = limits.authFailure;
+  if (!auth || auth.confidence !== "high") return null;
+
+  if (auth.consecutiveAuthParks >= MAX_CONSECUTIVE_AUTH_PARKS) {
+    return {
+      next: "human_action",
+      actionType: "policy_escalation",
+      reason: repeatedAuthEscalationReason({
+        runtime: auth.runtime,
+        remediation: auth.remediation,
+        rawCause: auth.rawCause,
+        priorParks: auth.consecutiveAuthParks,
+      }),
+    };
+  }
+
+  const shouldPark = auth.probeStillFailing || auth.authTransientRetrySpent;
+  if (shouldPark) {
+    const consecutivePark = auth.consecutiveAuthParks + 1;
+    return {
+      next: "human_action",
+      actionType: "policy_escalation",
+      reason: authParkReason({
+        runtime: auth.runtime,
+        remediation: auth.remediation,
+        rawCause: auth.rawCause,
+      }),
+      runtimeAuthPark: {
+        runtime: auth.runtime,
+        remediation: auth.remediation,
+        rawCause: auth.rawCause,
+        consecutivePark,
+      },
+    };
+  }
+
+  // Probe passed and the one transient retry is still available — charge infra like today.
+  if (!infraAttemptsRemain(limits)) {
+    return {
+      next: "human_action",
+      actionType: "policy_escalation",
+      reason: `${authParkReason({
+        runtime: auth.runtime,
+        remediation: auth.remediation,
+        rawCause: auth.rawCause,
+      })} (infra-attempt limit reached).`,
+    };
+  }
+  return {
+    next: "retry_developer",
+    reason: authParkReason({
+      runtime: auth.runtime,
+      remediation: auth.remediation,
+      rawCause: auth.rawCause,
+    }),
+    authTransientRetry: true,
+  };
 }
 
 /**

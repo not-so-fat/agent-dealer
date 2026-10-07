@@ -10,6 +10,7 @@ import type { IssueOwner, IssueStatus, WorkflowEventType } from "@agent-dealer/s
 import type { DeveloperRouteResult, ReviewerRouteResult } from "./routing.js";
 import type { WorkItemKind } from "../repository/work-items.js";
 import type { PushDivergenceEvidence } from "./human-resolution.js";
+import type { RuntimeAuthParkEvidence } from "./runtime-auth-park.js";
 import { AUTO_MERGE_INTENT } from "./auto-merge.js";
 
 export interface IssueProjection {
@@ -30,6 +31,8 @@ export type NextEffect =
       /** Coordinator-only gh/PR/checks retry — no agent spawn (post-push adapter_failure). */
       publishOnly?: boolean;
       branch?: string;
+      /** NOT-368: this enqueue spent the one transient high-confidence auth retry. */
+      authTransientRetry?: true;
     }
   | {
       kind: "human_action";
@@ -43,6 +46,8 @@ export type NextEffect =
       pushDivergence?: PushDivergenceEvidence;
       /** NOT-280: worktree blocker fingerprint from the route — used to dedupe the action. */
       blockerFingerprint?: string;
+      /** NOT-368: confirmed runtime login park — stored as action evidence for resolve re-probe. */
+      runtimeAuthPark?: RuntimeAuthParkEvidence;
     }
   /** NOT-102: merge the PR after approve, then complete or escalate — runs after the
    * routing transaction so `gh` never holds the SQLite write lock. */
@@ -92,7 +97,13 @@ export function projectDeveloperRoute(
             : `Developer retrying (infra attempt) — ${route.reason}`,
           events: ["worker.failed"],
         },
-        effect: { kind: "enqueue", workItem: "developer", retryReason: route.reason },
+        effect: {
+          kind: "enqueue",
+          workItem: "developer",
+          retryReason: route.reason,
+          // NOT-368: mark the work item so a second high-confidence auth failure parks.
+          ...(route.authTransientRetry ? { authTransientRetry: true as const } : {}),
+        },
         advance: isCiRepair ? "ci" : "infra",
       };
     }
@@ -130,6 +141,9 @@ export function projectDeveloperRoute(
             ? { pushDivergence: route.pushDivergence }
             : {}),
           ...(route.blockerFingerprint ? { blockerFingerprint: route.blockerFingerprint } : {}),
+          ...("runtimeAuthPark" in route && route.runtimeAuthPark
+            ? { runtimeAuthPark: route.runtimeAuthPark }
+            : {}),
         },
         advance: "none",
       };
