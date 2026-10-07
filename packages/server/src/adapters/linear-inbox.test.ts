@@ -314,3 +314,103 @@ test("fetchLinearIntakeMetadata fails clearly without LINEAR_API_KEY", async () 
   delete process.env.LINEAR_API_KEY;
   await assert.rejects(() => fetchLinearIntakeMetadata(), /LINEAR_API_KEY/);
 });
+
+// NOT-362: intake persists Linear's branchName as the Dealer issue's branch.
+async function stubGetLinearIssue(node: Record<string, unknown>): Promise<void> {
+  process.env.LINEAR_API_KEY = "test-key";
+  const { migrate } = await import("../db/index.js");
+  migrate();
+  const realFetch = globalThis.fetch;
+  (globalThis as { __not362RestoreFetch?: typeof fetch }).__not362RestoreFetch = realFetch;
+  globalThis.fetch = (async (_url: unknown) => {
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: async () => JSON.stringify({ data: { issue: node } }),
+    };
+  }) as typeof fetch;
+}
+
+function restoreFetch(): void {
+  const saved = (globalThis as { __not362RestoreFetch?: typeof fetch }).__not362RestoreFetch;
+  if (saved) globalThis.fetch = saved;
+  delete process.env.LINEAR_API_KEY;
+}
+
+async function makeStoredIssue(source: "linear" | "manual", externalId?: string): Promise<string> {
+  const { BUILTIN_AGENT_CLAUDE_ID, BUILTIN_AGENT_CURSOR_ID } = await import("@agent-dealer/shared");
+  const { createIssue } = await import("../repository/issues.js");
+  return createIssue({
+    title: "branch seed",
+    repo: "acme/app",
+    developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+    reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    baseBranch: "main",
+    maxReviewRounds: 3,
+    maxInfraAttempts: 3,
+    source,
+    ...(externalId ? { externalId } : {}),
+  }).id;
+}
+
+test("persistLinearBranchForIssue stores Linear's branchName on the issue", async () => {
+  const { getLinearIssue, persistLinearBranchForIssue } = await import("./linear-inbox.js");
+  const { getIssue } = await import("../repository/issues.js");
+  await stubGetLinearIssue({
+    id: "lin-1",
+    identifier: "NOT-1",
+    title: "one",
+    url: "https://linear.app/x/issue/NOT-1/one",
+    branchName: "yusukemuraoka/ate-4-some-work",
+    state: { name: "Todo" },
+    team: { id: "team-9" },
+    labels: { nodes: [] },
+  });
+  try {
+    const candidate = await getLinearIssue("lin-1");
+    assert.equal(candidate?.branchName, "yusukemuraoka/ate-4-some-work");
+    const issueId = await makeStoredIssue("linear", "lin-1");
+    assert.equal(getIssue(issueId)!.branch, null);
+    await persistLinearBranchForIssue(issueId);
+    assert.equal(getIssue(issueId)!.branch, "yusukemuraoka/ate-4-some-work");
+  } finally {
+    restoreFetch();
+  }
+});
+
+test("persistLinearBranchForIssue falls back to issue-<id> with no Linear branch name", async () => {
+  const { persistLinearBranchForIssue } = await import("./linear-inbox.js");
+  const { getIssue } = await import("../repository/issues.js");
+  await stubGetLinearIssue({
+    id: "lin-2",
+    identifier: "NOT-2",
+    title: "two",
+    url: "https://linear.app/x/issue/NOT-2/two",
+    state: { name: "Todo" },
+    team: { id: "team-9" },
+    labels: { nodes: [] },
+  });
+  try {
+    const issueId = await makeStoredIssue("linear", "lin-2");
+    await persistLinearBranchForIssue(issueId);
+    assert.equal(getIssue(issueId)!.branch, `issue-${issueId}`);
+  } finally {
+    restoreFetch();
+  }
+});
+
+test("persistLinearBranchForIssue leaves manual issues unchanged", async () => {
+  const { persistLinearBranchForIssue } = await import("./linear-inbox.js");
+  const { getIssue } = await import("../repository/issues.js");
+  process.env.LINEAR_API_KEY = "test-key";
+  const { migrate } = await import("../db/index.js");
+  migrate();
+  try {
+    const issueId = await makeStoredIssue("manual");
+    await persistLinearBranchForIssue(issueId);
+    assert.equal(getIssue(issueId)!.branch, null);
+  } finally {
+    delete process.env.LINEAR_API_KEY;
+  }
+});

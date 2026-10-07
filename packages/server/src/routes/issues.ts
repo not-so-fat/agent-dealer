@@ -38,6 +38,7 @@ import { enqueueIssue, enqueueIssueWithOutcome, getQueuedEntryForIssue } from ".
 import { latestSessionFailureForIssue } from "../coordinator/latest-failure.js";
 import { getIssueExecutionAnalysis } from "../read-models/execution-analysis.js";
 import { reloadIssueSourceFromLinear } from "../coordinator/source-reload.js";
+import { persistLinearBranchForIssue } from "../adapters/linear-inbox.js";
 import { deriveLiveProgressFromLog } from "../coordinator/session-progress.js";
 import { branchTipStatusForIssue } from "../coordinator/branch-tip-status.js";
 
@@ -276,6 +277,14 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: err.message });
       }
       throw err;
+    }
+    // NOT-362: seed the issue branch from Linear's own `branchName` (source
+    // `linear` only; manual issues untouched). Best-effort and awaited — the
+    // developer round reads the branch at admission, so it must be stored
+    // before the enqueue below. Never fails the import.
+    if (input.source === "linear" && input.externalId) {
+      await persistLinearBranchForIssue(issue.id).catch(() => null);
+      issue = getIssue(issue.id) ?? issue;
     }
     appendWorkflowEvent({ issueId: issue.id, type: "issue.created", actorType: "human", stage: issue.status });
     // NOT-118: create enqueues, it never starts. Server-side so the UI, CLI and agents all
