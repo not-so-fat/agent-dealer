@@ -1031,3 +1031,38 @@ test("NOT-290: true 0% keeps the red number plus exhausted-block style; neutral 
   assert.ok(!unavailableHtml.includes("text-red-300") && !unavailableHtml.includes("text-yellow-300"), "unavailable stays neutral");
   assert.ok(!unavailableHtml.includes("data-severity"), "unavailable carries no severity");
 });
+
+test("NOT-366: a recorded Claude refresh failure states unavailable and why, never the failure kind", () => {
+  const detail = {
+    message: "Claude /usage reported no 5H/1W plan limits",
+    consecutiveFailures: 3,
+    firstFailureAt: iso(NOW - 3 * 86_400_000),
+    lastFailureAt: iso(NOW - 60_000),
+  };
+  const unavailable = {
+    remainingPercent: null,
+    source: "unavailable",
+    unavailableReason: "unparsable",
+    unavailableDetail: detail,
+    freshUntil: null,
+    expiresAt: null,
+    resetAt: null,
+  };
+  const data = dataWith({
+    runtimes: [
+      {
+        runtime: "claude_code",
+        unavailableReason: "unparsable",
+        windows: [window(unavailable), weekly(unavailable)],
+      },
+    ],
+  });
+  const html = render({ status: "ready", data });
+  assert.match(html, /data-status="unknown"/);
+  const since = new Date(detail.firstFailureAt).toLocaleString();
+  const expected = `unavailable: Claude /usage reported no 5H/1W plan limits (3 consecutive failed refreshes since ${since})`;
+  const claude = summarizeCapacity(data, NOW).find((s) => s.runtime === "Claude")!;
+  assert.equal(claude.detail, `5H: N/A (${expected}); 1W: N/A (${expected})`);
+  assert.ok(html.includes("5H: N/A (unavailable: Claude /usage reported no 5H/1W plan limits (3 consecutive"));
+  assert.ok(!html.includes("no_windows"), "internal failure kind never reaches the DOM");
+});

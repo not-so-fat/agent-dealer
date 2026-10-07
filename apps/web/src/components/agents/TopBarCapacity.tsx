@@ -40,6 +40,7 @@ import { Runtime as RuntimeSchema, isWindowKnown } from "@agent-dealer/shared";
 import { runtimeLabel } from "../../lib/display";
 import { AgentRuntimeIcon } from "./AgentIcon";
 import { capacitySeverity, type CapacitySeverity } from "./capacitySeverity";
+import { capacityUnavailableText } from "./capacityUnavailableText";
 
 export type TopBarCapacityState =
   | { status: "loading" }
@@ -186,6 +187,9 @@ function windowDetail(
     const context = extraContext ? `, ${extraContext}` : "";
     return `${publicLabel}: ${remaining}% available (${100 - remaining}% used${context}${reset})`;
   }
+  // NOT-366: a recorded acquisition failure states why, in server prose.
+  const failure = capacityUnavailableText(w);
+  if (failure !== null) return `${publicLabel}: N/A (${failure})`;
   return `${publicLabel}: N/A (${REASON_TEXT[effectiveWindowReason(w, nowMs, entryReason)]})`;
 }
 
