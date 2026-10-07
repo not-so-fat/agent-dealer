@@ -20,16 +20,19 @@
 // the observed state (idempotent re-raise by stable request id).
 //
 // Safety: this module never touches the Dealer issue's status, never blocks
-// the merge, and never throws — callers `await` it inline on the finalize path
-// and fire-and-forget it from sync cores. A resolution attempt on the raised
-// action answers 409 (no active workflow on a `done` issue) without changing
-// anything; the action is a notice, not a gate.
+// the merge, and never throws — every `done` landing triggers it fire-and-forget
+// (`triggerLinearPostMerge`), so the bounded retry window never holds the merge
+// caller. The raised action is a notice, not a gate: it resolves through a
+// dedicated acknowledge/re-check resolution (no active workflow to advance on a
+// `done` issue), and advancing the Linear issue by hand then re-checking clears
+// it when the re-read verifies.
 
 import { createIssueArtifact } from "../repository/artifacts.js";
 import { listArtifactsForIssueByKind } from "../repository/artifacts-for-issue.js";
 import {
   createHumanAction,
   findOpenHumanActionByRequestId,
+  getHumanAction,
   resolveHumanAction,
 } from "../repository/human-actions.js";
 import { getIssue } from "../repository/issues.js";
@@ -121,7 +124,12 @@ export function setPostMergeDelaysForTests(delays: number[] | null): void {
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => {
+    // Unref'd: this check is fire-and-forget off every `done` landing and must
+    // never hold the merge caller — or a test runner's process — open on its own.
+    const timer = setTimeout(resolve, ms);
+    if (typeof timer.unref === "function") timer.unref();
+  });
 }
 
 /** State types that still mean "the integration has not acted". */
@@ -252,9 +260,14 @@ async function verifyLinearPostMergeInner(issueId: string): Promise<LinearPostMe
       if (!stateId) {
         fallback = "unavailable:no-completed-state";
       } else {
+        // State first, comment second: a rejected state write then posts no
+        // comment, so re-runs do not stack "marked done" comments that were
+        // never true. (A comment failure after a successful state write still
+        // records `failed:…` and the re-run rewrites the same state —
+        // idempotent — before retrying the comment.)
         const label = issue.externalLabel ?? identifier;
-        await postLinearIssueComment(linearId, buildDoneComment(label, dealerIssueUrl(issueId), "View issue"));
         await setLinearIssueState(linearId, stateId);
+        await postLinearIssueComment(linearId, buildDoneComment(label, dealerIssueUrl(issueId), "View issue"));
         fallback = "written";
         dismissOpenStaleAction(issueId, `Dealer fallback advanced Linear ${identifier}; notice cleared.`);
       }
@@ -299,9 +312,12 @@ async function verifyLinearPostMergeInner(issueId: string): Promise<LinearPostMe
           observedStateType: observation?.stateType ?? null,
           fallback,
         },
+        // Acknowledge/re-check only: the Dealer issue is already `done`, so
+        // there is no workflow to resume — resolve through
+        // resolveLinearMergeStaleAction, never the workflow state machine.
         responseOptions: [
-          { choice: "resume", label: "Resume development" },
-          { choice: "close", label: "Close" },
+          { choice: "acknowledge", label: "Acknowledge" },
+          { choice: "recheck", label: "Re-check Linear" },
         ],
         requestId,
       });
@@ -327,9 +343,88 @@ async function verifyLinearPostMergeInner(issueId: string): Promise<LinearPostMe
   return { checked: true, advanced: false, fallback, actionId };
 }
 
-/** Fire-and-forget entry for sync cores (close/abort resolutions) — never throws. */
+/**
+ * Fire-and-forget entry for every `done` landing (merge finalize, external-merge
+ * close, abort resolutions) — never throws, never holds the caller. The check's
+ * bounded retry window (tens of seconds plus read timeouts) must not hold the
+ * merge caller: finalizeAutoMerge is awaited while holding the reviewer session
+ * and slot, and the final_review:merge HTTP path must not wait on it either.
+ */
+const postMergeInflight = new Set<Promise<LinearPostMergeResult>>();
+
 export function triggerLinearPostMerge(issueId: string): void {
-  void verifyLinearPostMerge(issueId).catch((err) => {
+  const pending = verifyLinearPostMerge(issueId).catch((err) => {
     console.error(`[linear-merge-verify] post-merge check for ${issueId} failed:`, err);
+    return { checked: false, reason: "trigger caught" } as LinearPostMergeResult;
   });
+  postMergeInflight.add(pending);
+  void pending.finally(() => {
+    postMergeInflight.delete(pending);
+  });
+}
+
+/**
+ * Test hook — await every post-merge check a test triggered through the
+ * fire-and-forget entry, so assertions on artifacts/actions do not race it.
+ * Loops until none remain (a re-check resolution can trigger another).
+ */
+export async function drainLinearPostMergeForTests(): Promise<void> {
+  for (let guard = 0; guard < 25 && postMergeInflight.size > 0; guard += 1) {
+    await Promise.all([...postMergeInflight]);
+  }
+}
+
+/** True when the action is this module's stale-source notice (any status). */
+export function isLinearMergeStaleAction(action: {
+  actionType: string;
+  evidenceJson: string | null;
+}): boolean {
+  if (action.actionType !== "policy_escalation" || !action.evidenceJson) return false;
+  try {
+    return (JSON.parse(action.evidenceJson) as Record<string, unknown>).linearMergeStale === true;
+  } catch {
+    return false;
+  }
+}
+
+export type ResolveLinearMergeStaleResult =
+  | { ok: true; issueStatus: string; rechecked: boolean }
+  | { ok: false; code: number; error: string };
+
+/**
+ * Dedicated resolution for the stale-source notice. The Dealer issue is already
+ * `done` — there is no active workflow for the generic resolver to advance, so
+ * this resolves the notice directly (the reflection_interaction_required
+ * precedent in routes/human-actions.ts):
+ * - `acknowledge` (plus legacy `close`/`dismiss` labels): close the notice.
+ * - `recheck`: close the notice and re-run the post-merge verification
+ *   fire-and-forget — a human who advanced the Linear issue by hand gets a
+ *   fresh verdict (and a verification artifact) instead of a stuck notice. A
+ *   still-stale issue raises one new action only when the fallback did not
+ *   already write; an already-recorded fallback stays quiet.
+ */
+export function resolveLinearMergeStaleAction(
+  actionId: string,
+  resolvedBy: string,
+  choice: string
+): ResolveLinearMergeStaleResult {
+  const action = getHumanAction(actionId);
+  if (!action) return { ok: false, code: 404, error: "Human action not found" };
+  if (!isLinearMergeStaleAction(action)) {
+    return { ok: false, code: 400, error: `Action ${actionId} is not a Linear post-merge notice` };
+  }
+  if (!action.issueId) return { ok: false, code: 500, error: "Human action has no issue" };
+  if (action.status !== "open") return { ok: false, code: 409, error: "Human action already resolved" };
+  if (choice !== "acknowledge" && choice !== "dismiss" && choice !== "close" && choice !== "recheck") {
+    return {
+      ok: false,
+      code: 400,
+      error: `Invalid choice "${choice}" for Linear post-merge notice (acknowledge or recheck)`,
+    };
+  }
+  resolveHumanAction(actionId, resolvedBy, { choice });
+  const rechecked = choice === "recheck";
+  if (rechecked) triggerLinearPostMerge(action.issueId);
+  const issue = getIssue(action.issueId);
+  return { ok: true, issueStatus: issue?.status ?? "done", rechecked };
 }

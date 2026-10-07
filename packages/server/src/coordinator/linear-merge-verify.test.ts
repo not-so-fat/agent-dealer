@@ -26,6 +26,9 @@ const {
   setPostMergeDelaysForTests,
   LINEAR_MERGE_VERIFY_ARTIFACT_KIND,
   linearMergeStaleRequestId,
+  drainLinearPostMergeForTests,
+  resolveLinearMergeStaleAction,
+  isLinearMergeStaleAction,
 } = await import("./linear-merge-verify.js");
 
 /** Real local checkout so resolveAutoMergeCwd accepts the default legacy repo. */
@@ -120,7 +123,12 @@ async function mergeThroughReview(issueId: string) {
   });
   const review = claimWorkItem(`test-${issueId}-r`, { leaseMs: 60_000 });
   assert.ok(review && review.issueId === issueId);
-  return applyCompletion(review.id, review.leaseToken!, { kind: "verdict", result: okReview });
+  const result = await applyCompletion(review.id, review.leaseToken!, { kind: "verdict", result: okReview });
+  // The merged transition triggers the Linear post-merge check fire-and-forget
+  // (finalizeAutoMerge must not hold the merge caller for the retry window) —
+  // await it here so assertions below do not race it.
+  await drainLinearPostMergeForTests();
+  return result;
 }
 
 interface StubState {
@@ -287,7 +295,9 @@ test("failed fallback twice: exactly one open human action naming identifier, PR
   stubLinear(state);
 
   const issueId = newLinearIssue();
-  await mergeThroughReview(issueId);
+  const first = await mergeThroughReview(issueId);
+  // The merged transition itself succeeds — the post-check never fails it.
+  assert.equal(first.applied, true);
   assert.equal(getIssue(issueId)!.status, "done");
 
   const rerun = await verifyLinearPostMerge(issueId);
@@ -310,7 +320,9 @@ test("unavailable fallback (no completed state): one open human action, issue st
   stubLinear(state);
 
   const issueId = newLinearIssue();
-  await mergeThroughReview(issueId);
+  const first = await mergeThroughReview(issueId);
+  // The merged transition itself succeeds — the post-check never fails it.
+  assert.equal(first.applied, true);
   await verifyLinearPostMerge(issueId);
 
   assert.equal(getIssue(issueId)!.status, "done");
@@ -319,4 +331,105 @@ test("unavailable fallback (no completed state): one open human action, issue st
   assert.equal(open.length, 1);
   assert.match(open[0]!.reason, /NOT-362/);
   assert.ok(open[0]!.reason.includes(PR_URL));
+});
+
+test("stale notice resolves via acknowledge: closes without touching the done issue", async () => {
+  const state = freshStub(staleIssue());
+  state.failStateWriteWith = "no write access";
+  stubLinear(state);
+
+  const issueId = newLinearIssue();
+  await mergeThroughReview(issueId);
+  const open = listHumanActionsForIssue(issueId).filter((a) => a.status === "open");
+  assert.equal(open.length, 1);
+  assert.equal(isLinearMergeStaleAction(open[0]!), true);
+
+  const resolved = resolveLinearMergeStaleAction(open[0]!.id, "tester", "acknowledge");
+  assert.equal(resolved.ok, true);
+  if (!resolved.ok) return;
+  assert.equal(resolved.issueStatus, "done");
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+    0,
+    "acknowledge closes the notice"
+  );
+  assert.equal(getIssue(issueId)!.status, "done", "resolving the notice never moves the done issue");
+
+  const again = resolveLinearMergeStaleAction(open[0]!.id, "tester", "acknowledge");
+  assert.equal(again.ok, false);
+  if (again.ok) return;
+  assert.equal(again.code, 409);
+});
+
+test("stale notice recheck after a hand advance clears with an advanced artifact", async () => {
+  const state = freshStub(staleIssue());
+  state.failStateWriteWith = "no write access";
+  stubLinear(state);
+
+  const issueId = newLinearIssue();
+  await mergeThroughReview(issueId);
+  const open = listHumanActionsForIssue(issueId).filter((a) => a.status === "open");
+  assert.equal(open.length, 1);
+
+  // The human advances the Linear issue by hand; re-check must see it.
+  state.linearIssue = startedIssue();
+  state.failStateWriteWith = null;
+  const rechecked = resolveLinearMergeStaleAction(open[0]!.id, "tester", "recheck");
+  assert.equal(rechecked.ok, true);
+  if (!rechecked.ok) return;
+  assert.equal(rechecked.rechecked, true);
+  await drainLinearPostMergeForTests();
+
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+    0,
+    "a verified re-check raises no new notice"
+  );
+  const contents = verifyArtifacts(issueId).map((a) => JSON.parse(a.contentJson!));
+  assert.ok(contents.some((c) => c.outcome === "stale"), "the original stale verdict is kept");
+  assert.ok(
+    contents.some((c) => c.outcome === "advanced" && c.advancedVia === "state"),
+    "the re-check records the hand-advanced verdict"
+  );
+  assert.equal(getIssue(issueId)!.status, "done");
+});
+
+test("stale-notice resolution rejects unknown actions and bad choices", async () => {
+  const missing = resolveLinearMergeStaleAction("no-such-action", "tester", "acknowledge");
+  assert.equal(missing.ok, false);
+  if (missing.ok) return;
+  assert.equal(missing.code, 404);
+
+  const state = freshStub(staleIssue());
+  state.failStateWriteWith = "no write access";
+  stubLinear(state);
+  const issueId = newLinearIssue();
+  await mergeThroughReview(issueId);
+  const open = listHumanActionsForIssue(issueId).filter((a) => a.status === "open");
+  assert.equal(open.length, 1);
+
+  const badChoice = resolveLinearMergeStaleAction(open[0]!.id, "tester", "resume");
+  assert.equal(badChoice.ok, false);
+  if (badChoice.ok) return;
+  assert.equal(badChoice.code, 400);
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+    1,
+    "a rejected choice leaves the notice open"
+  );
+
+  const { createHumanAction } = await import("../repository/human-actions.js");
+  const other = createHumanAction({
+    issueId,
+    workflowInstanceId: null,
+    actionType: "policy_escalation",
+    reason: "something else",
+    question: "something else?",
+    responseOptions: [{ choice: "close", label: "Close" }],
+  });
+  assert.equal(isLinearMergeStaleAction(other), false);
+  const wrongKind = resolveLinearMergeStaleAction(other.id, "tester", "acknowledge");
+  assert.equal(wrongKind.ok, false);
+  if (wrongKind.ok) return;
+  assert.equal(wrongKind.code, 400);
 });

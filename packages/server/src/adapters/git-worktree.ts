@@ -1317,6 +1317,20 @@ export async function resolveDeveloperWorktree(opts: {
       // issue branch) — cut it at the fetched `origin/<branch>` tip.
       ref = `origin/${opts.branchName}`;
       newBranch = opts.branchName;
+    } else if (reuseRemoteSha === null && !(await branchExists(opts.repo, opts.branchName))) {
+      // NOT-362: the reuse path was taken for a branch that exists nowhere — a
+      // freshly seeded Linear `branchName` (or `issue-<id>` fallback) has no
+      // local ref and the remote never saw it (`git worktree add <path>
+      // <branch>` would reject the unknown ref). Cut it fresh from the base
+      // instead of checking out a branch that does not exist.
+      const fresh = await fetchFreshBase(opts.repo, opts.baseBranch, opts.fetchTimeoutMs);
+      if (!fresh.ok) {
+        return { kind: "base_unavailable", reason: fresh.reason };
+      }
+      ref = fresh.ref;
+      newBranch = opts.branchName;
+      baseSha = fresh.sha;
+      baseRef = fresh.ref;
     } else {
       // NOT-219: when the remote tip is known and the local ref is strictly behind
       // it (an ancestor of it), advance the local ref to the pushed tip before

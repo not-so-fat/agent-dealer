@@ -1343,6 +1343,35 @@ test("NOT-197: a fresh developer branch starts from the fetched origin/<base>, n
   }
 });
 
+test("NOT-362: a seeded Linear branch name that exists nowhere starts round 1 from a fresh base cut", async () => {
+  // Round-1 shape after intake seeding: developer-effect computes
+  // reuseBranch = true from the seeded issue.branch, but the branch has no
+  // local ref and the remote never saw it. Pre-fix this reached
+  // `git worktree add <path> <branch>` with no newBranch and git rejected the
+  // unknown ref; now it cuts the seeded name fresh from the fetched base.
+  const { isoRepo, isoRemote } = makeIsoRepoPair("362seed");
+  const branch = "yusukemuraoka/ate-4-some-work";
+  try {
+    assert.equal(await branchExists(isoRepo, branch), false);
+    const resolved = await resolveDeveloperWorktree({
+      repo: isoRepo,
+      sessionId: "s-362-seed",
+      branchName: branch,
+      baseBranch: "main",
+      reuseBranch: true,
+    });
+    assert.equal(resolved.kind, "created");
+    if (resolved.kind !== "created") return;
+    const originTip = git(isoRepo, "rev-parse", "origin/main");
+    assert.equal(git(resolved.path, "rev-parse", "HEAD"), originTip);
+    assert.equal(git(isoRepo, "rev-parse", branch), originTip);
+    await removeIsoWorktree(isoRepo, resolved.path, branch);
+  } finally {
+    fs.rmSync(isoRepo, { recursive: true, force: true });
+    fs.rmSync(isoRemote, { recursive: true, force: true });
+  }
+});
+
 test("NOT-197: a failed pre-branch fetch returns base_unavailable and creates no branch", async () => {
   const { isoRepo, isoRemote } = makeIsoRepoPair("fail");
   try {

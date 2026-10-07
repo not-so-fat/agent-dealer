@@ -182,6 +182,12 @@ write access, no matching completed state), Dealer raises one open
 `policy_escalation` on the Issues home naming the Linear identifier, the
 merged PR URL, and the observed state (idempotent re-raise by stable request
 id). The Dealer issue itself stays `done` — the action is a notice, not a gate.
+It resolves from the Issues home via **Acknowledge**, or **Re-check Linear**
+after advancing the issue by hand (the re-check re-reads Linear and records a
+fresh verification artifact, clearing the notice when the issue now verifies).
+
+The check runs fire-and-forget off every `done` landing, so the bounded retry
+window never holds the merge caller.
 
 The run-scoped delivery path is unchanged:
 
