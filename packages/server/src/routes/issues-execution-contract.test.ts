@@ -317,6 +317,130 @@ test("an active workflow keeps its frozen contract — later edits are refused",
   await app.close();
 });
 
+// NOT-363: source-reload fixtures — a ready Linear-sourced issue pulls the
+// latest ticket text through POST /api/issues/:id/reload-source.
+const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
+const { queueStatusForIssue } = await import("../coordinator/admission.js");
+const { createWorkerSession, startSession } = await import("../repository/worker-sessions.js");
+
+/** Refreshed Linear description: new exit predicate, wholly new criteria. */
+const RELOADED_DESCRIPTION = [
+  "The Planner improved the ticket after import.",
+  "",
+  "## Builder execution mode",
+  "feature",
+  "",
+  "## Non-goals",
+  "- Selecting a playbook or reasoning about implementation architecture",
+  "- Adding a generic workflow/schema editor",
+  "",
+  "## Exit predicate",
+  "Reloading a Linear-sourced issue pulls the latest ticket text and recompiles the contract.",
+  "",
+  "## One-PR stopping point",
+  "Stop after the refreshed contract freezes and renders.",
+  "",
+  "## Acceptance criteria",
+  "- [ ] Reloaded ticket compiles into the refreshed structured schema",
+  "  Evidence: reload fixtures | run the reload tests | every field asserted",
+  "- [ ] Old local criteria do not survive a source reload",
+  "  Evidence: reload suite | run the reload tests | green",
+  "",
+].join("\n");
+
+const EXPECTED_RELOADED_CONTRACT = {
+  version: "v1",
+  executionMode: "feature",
+  nonGoals: [
+    "Selecting a playbook or reasoning about implementation architecture",
+    "Adding a generic workflow/schema editor",
+  ],
+  exitPredicate: "Reloading a Linear-sourced issue pulls the latest ticket text and recompiles the contract.",
+  onePrStoppingPoint: "Stop after the refreshed contract freezes and renders.",
+  acceptanceCriteria: [
+    {
+      text: "Reloaded ticket compiles into the refreshed structured schema",
+      evidence: "reload fixtures | run the reload tests | every field asserted",
+    },
+    {
+      text: "Old local criteria do not survive a source reload",
+      evidence: "reload suite | run the reload tests | green",
+    },
+  ],
+};
+
+function linearNodeForTest(description: string | null) {
+  return {
+    id: "linear-uuid-1",
+    identifier: "NOT-123",
+    title: "Refreshed title from Linear",
+    description,
+    url: "https://linear.app/not-so-fat/issue/NOT-123/refreshed",
+    state: { name: "Todo" },
+    team: { id: "team-1" },
+    labels: { nodes: [] },
+  };
+}
+
+const realFetch = globalThis.fetch;
+let linearIssueNodeForTest: unknown = null;
+let linearHttpFailsForTest = false;
+
+before(() => {
+  process.env.LINEAR_API_KEY = "test-key";
+  globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
+    if (linearHttpFailsForTest) {
+      return { ok: false, status: 500, headers: new Headers(), text: async () => "boom" };
+    }
+    const body = JSON.parse(String((init as { body?: string })?.body ?? "{}")) as {
+      query?: string;
+      variables?: { id?: string; ids?: string[] };
+    };
+    // Single-issue fetch (getLinearIssue) answers the reload; relation walks
+    // (fetchLinearBlockers, from queue wait-reason classification) answer no
+    // blockers so positions stay comparable.
+    const payload =
+      typeof body.variables?.id === "string"
+        ? { data: { issue: linearIssueNodeForTest } }
+        : { data: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } };
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: async () => JSON.stringify(payload),
+    };
+  }) as typeof fetch;
+});
+
+after(() => {
+  globalThis.fetch = realFetch;
+  delete process.env.LINEAR_API_KEY;
+});
+
+function resetLinearMock(node: unknown, httpFails = false) {
+  linearIssueNodeForTest = node;
+  linearHttpFailsForTest = httpFails;
+}
+
+const LINEAR_ISSUE_PAYLOAD = {
+  title: "NOT-123: stale imported title",
+  description: CONTRACT_DESCRIPTION,
+  // A Dealer-local clarification that a reload must wipe: the refreshed
+  // description's derived criteria replace it, they never merge with it.
+  acceptanceCriteria: "Operator-typed override",
+  source: "linear",
+  externalId: "linear-uuid-1",
+  externalLabel: "NOT-123",
+  externalUrl: "https://linear.app/not-so-fat/issue/NOT-123/stale",
+  ...BASE_AGENTS,
+};
+
+async function createLinearIssue(app: Awaited<ReturnType<typeof buildApp>>) {
+  const res = await app.inject({ method: "POST", url: "/api/issues", payload: LINEAR_ISSUE_PAYLOAD });
+  assert.equal(res.statusCode, 200, res.body);
+  return res.json() as { id: string };
+}
+
 test("NOT-185 + NOT-306: a parked re-freeze updates source and compiled contract atomically", async () => {
   const app = await buildApp();
   const created = (
@@ -370,5 +494,229 @@ test("NOT-185 + NOT-306: a parked re-freeze updates source and compiled contract
     "Importing a Planner-authored Linear ticket yields a versioned frozen execution contract, rescoped.");
   assert.equal(frozen.executionContract?.acceptanceCriteria.length, 1);
   assert.deepStrictEqual(getIssue(created.id)!.executionContract, frozen.executionContract);
+  await app.close();
+});
+
+test("NOT-363: reload-source pulls the latest Linear text and recompiles the contract", async () => {
+  resetLinearMock(linearNodeForTest(RELOADED_DESCRIPTION));
+  const app = await buildApp();
+  const { id } = await createLinearIssue(app);
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/reload-source` });
+  assert.equal(res.statusCode, 200, res.body);
+  const reloaded = res.json() as {
+    title: string;
+    description: string;
+    acceptanceCriteria: string;
+    executionContract: unknown;
+    externalId: string;
+    externalLabel: string;
+  };
+  // Same title convention as import (`<identifier>: <title>`).
+  assert.equal(reloaded.title, "NOT-123: Refreshed title from Linear");
+  assert.equal(reloaded.description, RELOADED_DESCRIPTION);
+  assert.deepStrictEqual(reloaded.executionContract, EXPECTED_RELOADED_CONTRACT);
+  // The derived criteria replace the old local override — never merge with it.
+  assert.ok(reloaded.acceptanceCriteria.includes("- [ ] Reloaded ticket compiles into the refreshed structured schema"));
+  assert.ok(!reloaded.acceptanceCriteria.includes("Operator-typed override"));
+  assert.equal(reloaded.externalId, "linear-uuid-1");
+  assert.equal(reloaded.externalLabel, "NOT-123");
+
+  // One `issue.source_reloaded` event naming Linear with digests, never the text.
+  const reloadEvents = listWorkflowEventsForIssue(id).filter((e) => e.type === "issue.source_reloaded");
+  assert.equal(reloadEvents.length, 1);
+  const payload = JSON.parse(reloadEvents[0]!.payloadJson!) as Record<string, unknown>;
+  assert.equal(payload.source, "linear");
+  assert.equal(payload.externalId, "linear-uuid-1");
+  assert.equal(payload.externalLabel, "NOT-123");
+  for (const key of ["prevTitleDigest", "newTitleDigest", "prevDescriptionDigest", "newDescriptionDigest"]) {
+    assert.match(String(payload[key]), /^[0-9a-f]{16}$/, key);
+  }
+  assert.notEqual(payload.prevTitleDigest, payload.newTitleDigest);
+  assert.notEqual(payload.prevDescriptionDigest, payload.newDescriptionDigest);
+  assert.ok(!reloadEvents[0]!.payloadJson!.includes("Refreshed title from Linear"));
+  assert.ok(!reloadEvents[0]!.payloadJson!.includes("The Planner improved the ticket"));
+  await app.close();
+});
+
+test("NOT-363: reload preserves configuration and the exact queue position", async () => {
+  resetLinearMock(linearNodeForTest(RELOADED_DESCRIPTION));
+  const app = await buildApp();
+  const first = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        ...LINEAR_ISSUE_PAYLOAD,
+        baseBranch: "develop",
+        maxReviewRounds: 5,
+        maxInfraAttempts: 1,
+        autoMerge: true,
+      },
+    })
+  ).json() as { id: string };
+  const second = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: { title: "Queue neighbor", description: "plain", ...BASE_AGENTS },
+    })
+  ).json() as { id: string };
+
+  const before = getIssue(first.id)!;
+  const positionOf = (issueId: string) => queueStatusForIssue(issueId)?.position ?? null;
+  const beforePositions = [positionOf(first.id), positionOf(second.id)];
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${first.id}/reload-source` });
+  assert.equal(res.statusCode, 200, res.body);
+
+  const after = getIssue(first.id)!;
+  assert.equal(after.repo, before.repo);
+  assert.equal(after.baseBranch, "develop");
+  assert.equal(after.developerAgentId, before.developerAgentId);
+  assert.equal(after.reviewerAgentId, before.reviewerAgentId);
+  assert.equal(after.maxReviewRounds, 5);
+  assert.equal(after.maxInfraAttempts, 1);
+  assert.equal(after.autoMerge, true);
+  assert.equal(after.source, "linear");
+  assert.equal(after.externalId, before.externalId);
+  assert.equal(after.externalLabel, before.externalLabel);
+  assert.equal(after.externalUrl, before.externalUrl);
+  assert.equal(after.status, "ready");
+  assert.deepStrictEqual([positionOf(first.id), positionOf(second.id)], beforePositions);
+  await app.close();
+});
+
+test("NOT-363: reload refuses a manual issue with 400 and writes nothing", async () => {
+  resetLinearMock(linearNodeForTest(RELOADED_DESCRIPTION));
+  const app = await buildApp();
+  const created = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: { title: "Manual", description: "plain", acceptanceCriteria: "It works", ...BASE_AGENTS },
+    })
+  ).json() as { id: string };
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${created.id}/reload-source` });
+  assert.equal(res.statusCode, 400, res.body);
+  const untouched = getIssue(created.id)!;
+  assert.equal(untouched.title, "Manual");
+  assert.equal(untouched.description, "plain");
+  assert.equal(untouched.acceptanceCriteria, "It works");
+  assert.ok(!listWorkflowEventsForIssue(created.id).some((e) => e.type === "issue.source_reloaded"));
+  await app.close();
+});
+
+test("NOT-363: reload refuses after admission with 409 and writes nothing", async () => {
+  resetLinearMock(linearNodeForTest(RELOADED_DESCRIPTION));
+  const app = await buildApp();
+  const { id } = await createLinearIssue(app);
+  // Force-admit: POST /start only queues when no slot is free, so admit
+  // through the coordinator core — status leaves `ready` and the workflow
+  // instance goes active, which is what the reload must refuse on.
+  const { startWorkflow } = await import("../coordinator/commands.js");
+  assert.equal(startWorkflow(id).ok, true);
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/reload-source` });
+  assert.equal(res.statusCode, 409, res.body);
+  const untouched = getIssue(id)!;
+  assert.equal(untouched.title, LINEAR_ISSUE_PAYLOAD.title);
+  assert.equal(untouched.description, CONTRACT_DESCRIPTION);
+  assert.equal(untouched.acceptanceCriteria, LINEAR_ISSUE_PAYLOAD.acceptanceCriteria);
+  assert.ok(!listWorkflowEventsForIssue(id).some((e) => e.type === "issue.source_reloaded"));
+  await app.close();
+});
+
+test("NOT-363: reload refuses while a worker session runs with 409 and writes nothing", async () => {
+  resetLinearMock(linearNodeForTest(RELOADED_DESCRIPTION));
+  const app = await buildApp();
+  const { id } = await createLinearIssue(app);
+  const session = createWorkerSession({
+    issueId: id,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "claude_code",
+  });
+  startSession(session.id);
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/reload-source` });
+  assert.equal(res.statusCode, 409, res.body);
+  assert.match((res.json() as { error: string }).error, /running session/);
+  const untouched = getIssue(id)!;
+  assert.equal(untouched.title, LINEAR_ISSUE_PAYLOAD.title);
+  assert.equal(untouched.description, CONTRACT_DESCRIPTION);
+  assert.ok(!listWorkflowEventsForIssue(id).some((e) => e.type === "issue.source_reloaded"));
+  await app.close();
+});
+
+test("NOT-363: a Linear fetch failure leaves task fields and queue state unchanged", async () => {
+  resetLinearMock(null, true);
+  const app = await buildApp();
+  const { id } = await createLinearIssue(app);
+  const positionBefore = queueStatusForIssue(id);
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/reload-source` });
+  assert.equal(res.statusCode, 502, res.body);
+  const untouched = getIssue(id)!;
+  assert.equal(untouched.title, LINEAR_ISSUE_PAYLOAD.title);
+  assert.equal(untouched.description, CONTRACT_DESCRIPTION);
+  assert.equal(untouched.acceptanceCriteria, LINEAR_ISSUE_PAYLOAD.acceptanceCriteria);
+  assert.equal(queueStatusForIssue(id)?.position, positionBefore?.position);
+  assert.ok(!listWorkflowEventsForIssue(id).some((e) => e.type === "issue.source_reloaded"));
+  await app.close();
+});
+
+test("NOT-363: a contract-validation failure on refreshed text leaves everything unchanged", async () => {
+  resetLinearMock(linearNodeForTest(CONTRACT_DESCRIPTION.replace("feature", "teleport")));
+  const app = await buildApp();
+  const { id } = await createLinearIssue(app);
+  const positionBefore = queueStatusForIssue(id);
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/reload-source` });
+  assert.equal(res.statusCode, 400, res.body);
+  assert.match((res.json() as { error: string }).error, /unknown execution mode/);
+  const untouched = getIssue(id)!;
+  assert.equal(untouched.title, LINEAR_ISSUE_PAYLOAD.title);
+  assert.equal(untouched.description, CONTRACT_DESCRIPTION);
+  assert.equal(untouched.acceptanceCriteria, LINEAR_ISSUE_PAYLOAD.acceptanceCriteria);
+  assert.equal(queueStatusForIssue(id)?.position, positionBefore?.position);
+  assert.ok(!listWorkflowEventsForIssue(id).some((e) => e.type === "issue.source_reloaded"));
+  await app.close();
+});
+
+test("NOT-363: the frozen snapshot after reload contains exactly the refreshed text", async () => {
+  resetLinearMock(linearNodeForTest(RELOADED_DESCRIPTION));
+  const app = await buildApp();
+  const { startWorkflow } = await import("../coordinator/commands.js");
+  const { id } = await createLinearIssue(app);
+  assert.equal((await app.inject({ method: "POST", url: `/api/issues/${id}/reload-source` })).statusCode, 200);
+  assert.equal(startWorkflow(id).ok, true);
+
+  const frozen = getTaskSnapshot(getIssue(id)!);
+  assert.equal(frozen.description, RELOADED_DESCRIPTION);
+  assert.ok(frozen.acceptanceCriteria.includes("- [ ] Reloaded ticket compiles into the refreshed structured schema"));
+  assert.ok(!frozen.acceptanceCriteria.includes("Operator-typed override"));
+  assert.deepStrictEqual(frozen.executionContract, EXPECTED_RELOADED_CONTRACT);
+
+  // And the local-edit path freezes exactly what was saved, too.
+  resetLinearMock(linearNodeForTest(RELOADED_DESCRIPTION));
+  const edited = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: { title: "Local edit path", description: "plain", acceptanceCriteria: "saved locally", ...BASE_AGENTS },
+    })
+  ).json() as { id: string };
+  assert.equal(
+    (await app.inject({ method: "PATCH", url: `/api/issues/${edited.id}`, payload: { description: RELOADED_DESCRIPTION } }))
+      .statusCode,
+    200
+  );
+  assert.equal(startWorkflow(edited.id).ok, true);
+  const frozenEdited = getTaskSnapshot(getIssue(edited.id)!);
+  assert.equal(frozenEdited.description, RELOADED_DESCRIPTION);
+  assert.deepStrictEqual(frozenEdited.executionContract, EXPECTED_RELOADED_CONTRACT);
   await app.close();
 });
