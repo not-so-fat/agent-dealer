@@ -44,7 +44,7 @@ import { observeClockJump } from "./clock-jump.js";
 import { admitNext, checkRoleAgentHealthy } from "./admission.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
-import { withHostAwakeHold } from "../power/host-awake.js";
+import { runHeldWork } from "../power/host-awake-lifecycle.js";
 import {
   deferLeasedWorkItemForUsageCap,
   deferLeasedWorkItemForAgentUnhealthy,
@@ -162,13 +162,31 @@ function handleEffectFailure(itemId: string, leaseToken: string, error: unknown)
   })();
 }
 
+/** Test seam: replace the body inside the host-awake hold (lifecycle tests). */
+let processWorkItemHeldForTests:
+  | ((claimed: WorkItem, leaseToken: string) => Promise<void>)
+  | null = null;
+
+export function setProcessWorkItemHeldForTests(
+  fn: ((claimed: WorkItem, leaseToken: string) => Promise<void>) | null
+): void {
+  processWorkItemHeldForTests = fn;
+}
+
 async function processWorkItem(claimed: WorkItem): Promise<void> {
   const leaseToken = claimed.leaseToken;
   if (!leaseToken) return; // not actually leased — defensive
 
   // NOT-369: hold idle-sleep for the whole leased attempt (session + publish).
-  // withHostAwakeHold releases on every outcome — clean exit, crash, timeout, kill.
-  await withHostAwakeHold(() => processWorkItemHeld(claimed, leaseToken));
+  // runHeldWork releases on every outcome — clean exit, crash, timeout, kill.
+  await runHeldWork(() =>
+    (processWorkItemHeldForTests ?? processWorkItemHeld)(claimed, leaseToken)
+  );
+}
+
+/** Drive the real processWorkItem path from lifecycle tests (fake held body). */
+export async function processWorkItemForTests(claimed: WorkItem): Promise<void> {
+  await processWorkItem(claimed);
 }
 
 async function processWorkItemHeld(claimed: WorkItem, leaseToken: string): Promise<void> {

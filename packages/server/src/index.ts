@@ -22,7 +22,7 @@ import { runDeveloperEffect } from "./coordinator/developer-effect.js";
 import { runReviewerEffect } from "./coordinator/reviewer-effect.js";
 import { registerStaticUi } from "./static-ui.js";
 import { cleanupOrphanedWorkerMcpConfig } from "./paths.js";
-import { releaseAllHostAwake } from "./power/host-awake.js";
+import { registerHostAwakeShutdownCleanup } from "./power/host-awake-lifecycle.js";
 import { ensureSleepTimerCheckedAtStartup } from "./power/sleep-timer.js";
 import net from "node:net";
 
@@ -72,25 +72,17 @@ async function main(): Promise<void> {
   };
   // NOT-369: drop any idle-sleep assertion so a clean exit does not leave caffeinate behind.
   // (caffeinate -w also dies if this process dies uncleanly.)
-  const releaseHostAwakeOnShutdown = (): void => {
-    try {
-      releaseAllHostAwake();
-    } catch {
-      // Best-effort.
-    }
-  };
+  // Registered via the lifecycle seam so tests can emit SIGINT/SIGTERM/exit on a fake process.
+  registerHostAwakeShutdownCleanup(process);
   process.on("SIGINT", () => {
     removeServerPidFile();
-    releaseHostAwakeOnShutdown();
     void shutdownCapacityHosts().finally(() => process.exit(0));
   });
   process.on("SIGTERM", () => {
     removeServerPidFile();
-    releaseHostAwakeOnShutdown();
     void shutdownCapacityHosts().finally(() => process.exit(0));
   });
   process.on("exit", () => {
-    releaseHostAwakeOnShutdown();
     removeServerPidFile();
   });
 

@@ -42,7 +42,7 @@ import { MERGE_FAILURE_EVIDENCE_KEY, MERGE_FAILURE_RESPONSE_OPTIONS } from "./hu
 import { isMergeConflictFailure, runMergeConflictSync } from "./merge-conflict-sync.js";
 import { triggerLinearPostMerge } from "./linear-merge-verify.js";
 import { startBaseAdvancedScan } from "./base-advanced-scan.js";
-import { withHostAwakeHold } from "../power/host-awake.js";
+import { runHeldWork } from "../power/host-awake-lifecycle.js";
 import {
   OPERATOR_VERIFICATION_RESPONSE_OPTIONS,
   formatOperatorCriteria,
@@ -224,6 +224,15 @@ export function clearFinalizeInflightForTests(): void {
   finalizeInflight.clear();
 }
 
+/** Test seam: replace finalizeAutoMergeOnce inside the host-awake hold (lifecycle tests). */
+let finalizeOnceForTests: ((issueId: string) => Promise<AutoMergeFinalizeResult>) | null = null;
+
+export function setFinalizeAutoMergeOnceForTests(
+  fn: ((issueId: string) => Promise<AutoMergeFinalizeResult>) | null
+): void {
+  finalizeOnceForTests = fn;
+}
+
 /**
  * Completes an auto-merge parked in `final_review` / system ownership after reviewer
  * approve. Success → done + reflect; failure → needs_human + policy_escalation.
@@ -235,7 +244,9 @@ export function finalizeAutoMerge(issueId: string): Promise<AutoMergeFinalizeRes
   if (existing) return existing;
 
   // NOT-369: hold idle-sleep for the merge/publish step; release when it settles.
-  const promise = withHostAwakeHold(() => finalizeAutoMergeOnce(issueId)).finally(() => {
+  const promise = runHeldWork(() =>
+    (finalizeOnceForTests ?? finalizeAutoMergeOnce)(issueId)
+  ).finally(() => {
     if (finalizeInflight.get(issueId) === promise) {
       finalizeInflight.delete(issueId);
     }
