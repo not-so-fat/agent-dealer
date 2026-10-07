@@ -65,6 +65,36 @@ test("darwin: first acquire spawns caffeinate -i -w <pid>; further acquires do n
   assert.equal(guard.isHoldActive(), true);
 });
 
+test("darwin: unexpected caffeinate exit while holds remain respawns one child", () => {
+  const { spawn, children } = makeFakeSpawner();
+  const guard = new HostAwakeGuard({ platform: "darwin", pid: 55, spawn });
+
+  guard.acquire();
+  guard.acquire();
+  assert.equal(children.length, 1);
+  assert.equal(guard.isHoldActive(), true);
+
+  // Simulate OS/process death of caffeinate without going through release.
+  const first = children[0]!;
+  for (const l of first.exitListeners) l(1, null);
+  assert.equal(guard.holdCount(), 2, "holds must stay");
+  assert.equal(children.length, 2, "must restore exactly one replacement child");
+  assert.equal(guard.isHoldActive(), true);
+  assert.notEqual(children[1], first);
+
+  // Further acquire must not spawn a third while the replacement lives.
+  guard.acquire();
+  assert.equal(children.length, 2);
+  assert.equal(guard.holdCount(), 3);
+
+  guard.release();
+  guard.release();
+  guard.release();
+  assert.equal(guard.holdCount(), 0);
+  assert.equal(guard.isHoldActive(), false);
+  assert.equal(children[1]!.killedWith[0], "SIGTERM");
+});
+
 test("darwin: last release terminates the child; double release is harmless", () => {
   const { spawn, children } = makeFakeSpawner();
   const guard = new HostAwakeGuard({ platform: "darwin", pid: 1, spawn });

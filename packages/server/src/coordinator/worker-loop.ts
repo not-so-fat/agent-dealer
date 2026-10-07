@@ -44,7 +44,7 @@ import { observeClockJump } from "./clock-jump.js";
 import { admitNext, checkRoleAgentHealthy } from "./admission.js";
 import { workerSessionPayload } from "./session-progress.js";
 import { runtimeAvailability } from "../repository/runtime-availability.js";
-import { acquireHostAwake, releaseHostAwake } from "../power/host-awake.js";
+import { withHostAwakeHold } from "../power/host-awake.js";
 import {
   deferLeasedWorkItemForUsageCap,
   deferLeasedWorkItemForAgentUnhealthy,
@@ -167,13 +167,8 @@ async function processWorkItem(claimed: WorkItem): Promise<void> {
   if (!leaseToken) return; // not actually leased — defensive
 
   // NOT-369: hold idle-sleep for the whole leased attempt (session + publish).
-  // Release runs for every outcome — clean exit, crash, timeout, kill, early return.
-  acquireHostAwake();
-  try {
-    await processWorkItemHeld(claimed, leaseToken);
-  } finally {
-    releaseHostAwake();
-  }
+  // withHostAwakeHold releases on every outcome — clean exit, crash, timeout, kill.
+  await withHostAwakeHold(() => processWorkItemHeld(claimed, leaseToken));
 }
 
 async function processWorkItemHeld(claimed: WorkItem, leaseToken: string): Promise<void> {

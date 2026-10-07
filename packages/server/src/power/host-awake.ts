@@ -79,22 +79,9 @@ export class HostAwakeGuard {
   acquire(): void {
     this.holds += 1;
     if (this.platform !== "darwin") return;
-    if (this.holds > 1) return;
-    if (this.child) return;
-    try {
-      const child = this.spawnFn("caffeinate", ["-i", "-w", String(this.pid)]);
-      this.child = child;
-      child.once("exit", () => {
-        if (this.child === child) this.child = null;
-      });
-      child.once("error", () => {
-        if (this.child === child) this.child = null;
-        this.logSpawnFailure("caffeinate child error");
-      });
-    } catch (err) {
-      this.child = null;
-      this.logSpawnFailure(err instanceof Error ? err.message : String(err));
-    }
+    // Always ensure a live child while holds > 0 — including after an unexpected
+    // caffeinate exit (further acquires used to return early when holds > 1).
+    this.ensureChild();
   }
 
   /** Idempotent: releasing when count is already zero is a no-op. */
@@ -122,6 +109,33 @@ export class HostAwakeGuard {
       child.kill("SIGTERM");
     } catch {
       // Best-effort: never fail shutdown or session completion over this.
+    }
+  }
+
+  /**
+   * Spawn caffeinate when missing and holds remain. Called from acquire and from
+   * the unexpected-exit path so the host stays protected for the whole hold window.
+   */
+  private ensureChild(): void {
+    if (this.platform !== "darwin") return;
+    if (this.holds <= 0) return;
+    if (this.child) return;
+    try {
+      const child = this.spawnFn("caffeinate", ["-i", "-w", String(this.pid)]);
+      this.child = child;
+      child.once("exit", () => {
+        if (this.child === child) this.child = null;
+        // Unexpected death while work is still active — restore the assertion.
+        // stopChild clears `this.child` before kill, so intentional release does not respawn.
+        if (this.holds > 0) this.ensureChild();
+      });
+      child.once("error", () => {
+        if (this.child === child) this.child = null;
+        this.logSpawnFailure("caffeinate child error");
+      });
+    } catch (err) {
+      this.child = null;
+      this.logSpawnFailure(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -153,6 +167,19 @@ export function releaseAllHostAwake(): void {
 
 export function isHostAwakeHoldActive(): boolean {
   return activeGuard.isHoldActive();
+}
+
+/**
+ * Production session/merge lifecycle wrapper: acquire → work → release in finally.
+ * Worker-loop and auto-merge call this so every outcome (including throw) releases.
+ */
+export async function withHostAwakeHold<T>(work: () => Promise<T>): Promise<T> {
+  acquireHostAwake();
+  try {
+    return await work();
+  } finally {
+    releaseHostAwake();
+  }
 }
 
 /** Replace the process-wide guard (unit tests). Returns the installed instance. */

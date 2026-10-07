@@ -1,14 +1,18 @@
-// NOT-369: acquire/release through the session lifecycle wrapper used by worker-loop.
-// Drives clean exit, crash, timeout, and kill outcomes with a fake spawner.
+// NOT-369: drive session outcomes through the production withHostAwakeHold wrapper
+// (the same helper worker-loop / auto-merge call). A test-only try/finally mirror
+// would stay green if the production finally were removed — this file must not.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   installHostAwakeForTests,
-  acquireHostAwake,
   releaseHostAwake,
   releaseAllHostAwake,
   isHostAwakeHoldActive,
   getHostAwakeGuard,
+  withHostAwakeHold,
   type CaffeinateChild,
   type CaffeinateSpawner,
 } from "./host-awake.js";
@@ -40,29 +44,45 @@ function installFake(): { children: Fake[]; logs: string[] } {
   return { children, logs };
 }
 
-/** Mirrors worker-loop's acquire → work → finally release. */
-async function runSessionLifecycle(
+/**
+ * Outcomes the worker session can hit. Each path goes through withHostAwakeHold —
+ * the production wrapper processWorkItem / finalizeAutoMerge use.
+ */
+async function runSessionThroughProductionHold(
   outcome: "done" | "failed" | "timed_out" | "cancelled" | "kill"
 ): Promise<void> {
-  acquireHostAwake();
-  try {
-    if (outcome === "kill") {
-      // Coordinator abort / SIGTERM path — still releases in finally.
-      throw new Error("killed");
+  await withHostAwakeHold(async () => {
+    if (outcome === "kill" || outcome === "failed") {
+      throw new Error(outcome === "kill" ? "killed" : "session crashed");
     }
-    // Other outcomes complete normally; release is always in finally.
-    void outcome;
-  } catch {
-    // crash / kill — must not skip release
-  } finally {
-    releaseHostAwake();
-  }
+    if (outcome === "timed_out") {
+      // Timeout path still settles the awaitable (runner surfaces timed_out).
+      return;
+    }
+    if (outcome === "cancelled") {
+      return;
+    }
+    // done
+  }).catch(() => {
+    // crash / kill — hold must still be released by withHostAwakeHold's finally
+  });
 }
 
-test("each session outcome releases the hold (zero live holds afterward)", async () => {
+test("production wiring: worker-loop and auto-merge call withHostAwakeHold", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const workerLoop = readFileSync(join(here, "../coordinator/worker-loop.ts"), "utf8");
+  const autoMerge = readFileSync(join(here, "../coordinator/auto-merge.ts"), "utf8");
+  assert.match(workerLoop, /withHostAwakeHold\s*\(\s*\(\)\s*=>\s*processWorkItemHeld/);
+  assert.match(autoMerge, /withHostAwakeHold\s*\(\s*\(\)\s*=>\s*finalizeAutoMergeOnce/);
+  // Must not keep a local try/finally acquire/release mirror beside the helper.
+  assert.doesNotMatch(workerLoop, /acquireHostAwake\s*\(\s*\)/);
+  assert.doesNotMatch(autoMerge, /acquireHostAwake\s*\(\s*\)/);
+});
+
+test("each session outcome through withHostAwakeHold leaves zero live holds", async () => {
   for (const outcome of ["done", "failed", "timed_out", "cancelled", "kill"] as const) {
     const { children } = installFake();
-    await runSessionLifecycle(outcome);
+    await runSessionThroughProductionHold(outcome);
     assert.equal(getHostAwakeGuard().holdCount(), 0, outcome);
     assert.equal(isHostAwakeHoldActive(), false, outcome);
     assert.equal(children.length, 1, outcome);
@@ -75,14 +95,17 @@ test("each session outcome releases the hold (zero live holds afterward)", async
 
 test("server shutdown releaseAll clears in-flight session holds", async () => {
   const { children } = installFake();
-  acquireHostAwake();
-  assert.equal(isHostAwakeHoldActive(), true);
-  releaseAllHostAwake();
+  await withHostAwakeHold(async () => {
+    assert.equal(isHostAwakeHoldActive(), true);
+    releaseAllHostAwake();
+    assert.equal(getHostAwakeGuard().holdCount(), 0);
+    assert.equal(children[0]!.kills, 1);
+  });
+  // Outer withHostAwakeHold finally still runs — double release is harmless.
   assert.equal(getHostAwakeGuard().holdCount(), 0);
-  assert.equal(children[0]!.kills, 1);
 });
 
-test("linux: lifecycle completes with no spawn and no log", async () => {
+test("linux: withHostAwakeHold completes with no spawn and no log", async () => {
   const logs: string[] = [];
   let spawned = 0;
   installHostAwakeForTests({
@@ -93,9 +116,26 @@ test("linux: lifecycle completes with no spawn and no log", async () => {
     },
     log: (m) => logs.push(m),
   });
-  await runSessionLifecycle("done");
-  await runSessionLifecycle("failed");
+  await runSessionThroughProductionHold("done");
+  await runSessionThroughProductionHold("failed");
   assert.equal(spawned, 0);
   assert.equal(logs.length, 0);
   assert.equal(getHostAwakeGuard().holdCount(), 0);
+});
+
+test("darwin: throwing spawner does not fail the session; at most one log", async () => {
+  const logs: string[] = [];
+  installHostAwakeForTests({
+    platform: "darwin",
+    pid: 9,
+    spawn: () => {
+      throw new Error("ENOENT");
+    },
+    log: (m) => logs.push(m),
+  });
+  await runSessionThroughProductionHold("done");
+  await runSessionThroughProductionHold("kill");
+  assert.equal(getHostAwakeGuard().holdCount(), 0);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0]!, /caffeinate unavailable/);
 });
