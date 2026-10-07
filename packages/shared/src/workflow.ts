@@ -19,6 +19,11 @@ export const WorkflowEventType = z.enum([
    * developer/reviewer assignment). Payload carries before/after repo + agent ids.
    * Emitted transactionally with the PATCH. */
   "issue.reassigned",
+  /** NOT-363: operator reloaded title/description/acceptance criteria from the
+   * linked Linear ticket on a pre-execution `ready` issue. Payload carries the
+   * source, external id/label, and previous/new task-text digests — never the
+   * full description. Emitted transactionally with the reload. */
+  "issue.source_reloaded",
   "workflow.started",
   "worker.started",
   "worker.completed",

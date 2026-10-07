@@ -37,6 +37,7 @@ import { computeHumanWaitMs } from "../coordinator/metrics.js";
 import { enqueueIssue, enqueueIssueWithOutcome, getQueuedEntryForIssue } from "../repository/queue-entries.js";
 import { latestSessionFailureForIssue } from "../coordinator/latest-failure.js";
 import { getIssueExecutionAnalysis } from "../read-models/execution-analysis.js";
+import { reloadIssueSourceFromLinear } from "../coordinator/source-reload.js";
 import { deriveLiveProgressFromLog } from "../coordinator/session-progress.js";
 import { branchTipStatusForIssue } from "../coordinator/branch-tip-status.js";
 
@@ -412,6 +413,26 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     // that admission may see a different (e.g. healthy) agent.
     await refreshQueueWaitReasonForIssue(id);
     return updated;
+  });
+
+  /**
+   * NOT-363: reload a Linear-sourced issue's task text from its linked ticket.
+   * Only while `ready` with no active workflow or running worker — a race
+   * with admission fails closed with 409. Replaces title + description
+   * atomically, recompiles the execution contract, and swaps the acceptance
+   * criteria for the freshly derived ones; repo, agents, policy fields,
+   * auto-merge, queue position, and coordinator-owned fields are preserved.
+   * Queue order is untouched (the write never touches queue_entries) — the
+   * position is preserved by construction.
+   */
+  app.post("/api/issues/:id/reload-source", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const result = await reloadIssueSourceFromLinear(id);
+    if (!result.ok) return reply.status(result.code).send({ error: result.error });
+    // A queued issue keeps its position; re-derive the visible wait reason now
+    // that admission may see a different (e.g. healthy) description.
+    await refreshQueueWaitReasonForIssue(id);
+    return result.issue;
   });
 
   /**

@@ -80,6 +80,8 @@ Exact identifier/URL lookup (`GET /api/intake/linear/lookup`) ignores saved pick
 
 Re-importing a Linear issue that is already present is idempotent: rather than creating a duplicate, it re-enqueues the existing issue when that issue is in a state admission can start.
 
+4. **Refine before execution (NOT-363)** — While the issue is still `ready` with no active workflow or running worker, the Issue Detail offers **Reload from Linear** (Linear-sourced issues only) and **Edit title / description / acceptance criteria** (every pre-execution `ready` issue, even when readiness already passes). Reload pulls the latest ticket title/description through the same adapter and title convention as import (`<identifier>: <title>`), recompiles the execution contract, and replaces the acceptance criteria with the freshly derived ones — old local criteria never survive a reload. Repository, agents, policy limits, auto-merge, and queue position are unchanged, and nothing is written back to Linear. Once execution owns the snapshot (admitted/running), both paths refuse with 409. Dealer never polls Linear after import; attachments are not imported.
+
 ### Repository labels (NOT-251; replaces the NOT-242 confirmation flow)
 
 A Linear issue declares its GitHub repository with an explicit reusable label
@@ -279,6 +281,14 @@ Resolve a Linear identifier or issue URL without relying on the candidate list (
 curl -s 'http://127.0.0.1:2222/api/intake/linear/lookup?q=NOT-103' | jq '.candidate | {id, identifier, title}'
 # q also accepts a Linear issue URL or UUID
 ```
+
+### Reload task text from Linear (NOT-363)
+
+```bash
+curl -s -X POST http://127.0.0.1:2222/api/issues/<issue-id>/reload-source | jq '{title, acceptanceCriteria}'
+```
+
+Only `ready` issues with `source: linear` and no active workflow or running worker. Answers the updated issue plus one `issue.source_reloaded` timeline event (source + external id/label + previous/new text digests, never the full description). Refusals: `400` for a manual issue or an invalid refreshed contract, `404` when the ticket is gone, `409` once admitted/running, `502` when Linear cannot be read — every refusal leaves task fields and queue state untouched.
 
 ### Repository mappings (NOT-260)
 

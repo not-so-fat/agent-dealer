@@ -12,6 +12,7 @@ import {
   guideIssue,
   parkIssueForHuman,
   patchIssue,
+  reloadIssueSource,
   resolveHumanAction,
   startIssue,
   type IssueDetail,
@@ -220,6 +221,8 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   const [swapNotice, setSwapNotice] = useState<string | null>(null);
   /** NOT-239 pre-execution close: two-step inside the low-prominence area below. */
   const [closeConfirming, setCloseConfirming] = useState(false);
+  /** NOT-363: source-reload confirmation — the reload replaces local task-text edits. */
+  const [reloadConfirming, setReloadConfirming] = useState(false);
   /** NOT-239 unambiguous result banner after a successful close. */
   const [closeNotice, setCloseNotice] = useState<string | null>(null);
   /** NOT-272: optional per-action decision note for a product_scope_decision resolve. */
@@ -245,6 +248,20 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
     openActions.some((a) => a.actionType === "attempts_exhausted" || a.actionType === "policy_escalation");
   const canEdit = readiness.ok === false || openActions.some((a) => a.actionType === "product_scope_decision");
   const hasActiveWorkflow = latestWorkflowInstance != null && latestWorkflowInstance.completedAt === null;
+  // NOT-363: the task-text editor stays available for every pre-execution
+  // `ready` issue, even when readiness already passes — the old gate only
+  // opened it on missing fields or an open scope decision.
+  const canTaskEditPreExecution = issue.status === "ready" && !hasActiveWorkflow;
+  const showTaskEditor = canEdit || canTaskEditPreExecution;
+  // NOT-363: Reload from Linear only for an eligible Linear-sourced issue —
+  // `ready`, no active workflow, no running worker. The server re-checks all
+  // of this, so a race answers 409 there instead of landing on a live snapshot.
+  const hasRunningWorker = activeWorkerSession?.status === "running";
+  const canReloadSource =
+    issue.source === "linear" &&
+    issue.status === "ready" &&
+    !hasActiveWorkflow &&
+    !hasRunningWorker;
   // NOT-239: pre-execution Close is for `ready` with no active workflow only — it
   // must never alias Abort on running work, and terminal issues have nothing to close.
   const canClose = issue.status === "ready" && !hasActiveWorkflow;
@@ -285,6 +302,28 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
       refresh();
     } catch (e) {
       fail(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doReloadSource = async () => {
+    setBusy(true);
+    onError(null);
+    try {
+      // NOT-363: the server replaces title/description/acceptance criteria
+      // from Linear and recompiles the contract; the refreshed detail below
+      // shows the new text and contract immediately. Linear/contract failures
+      // surface on the page-level banner with the server's message.
+      await reloadIssueSource(issueId);
+      setReloadConfirming(false);
+      refresh();
+    } catch (e) {
+      // A 409 means admission or a worker won the race: close the
+      // confirmation and refresh to the live state instead of a stale success.
+      setReloadConfirming(false);
+      fail(e);
+      refresh();
     } finally {
       setBusy(false);
     }
@@ -776,10 +815,56 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
           </div>
         )}
 
-        {canEdit && !editing && (
-          <button type="button" className="font-ui-display mb-4 text-xs text-cyber-teal hover:underline" onClick={beginEdit}>
-            Edit title / description / acceptance criteria
-          </button>
+        {(showTaskEditor || canReloadSource) && !editing && !reloadConfirming && (
+          <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1">
+            {showTaskEditor && (
+              <button type="button" className="font-ui-display text-xs text-cyber-teal hover:underline" onClick={beginEdit}>
+                Edit title / description / acceptance criteria
+              </button>
+            )}
+            {canReloadSource && (
+              <button
+                type="button"
+                className="font-ui-display text-xs text-cyber-teal hover:underline"
+                title="Pull the latest title, description, and acceptance criteria from the linked Linear ticket — local edits will be replaced"
+                onClick={() => setReloadConfirming(true)}
+              >
+                Reload from Linear
+              </button>
+            )}
+          </div>
+        )}
+        {/* NOT-363: the reload replaces local title/description/acceptance-criteria
+            edits, so it confirms first — repository, agents, and queue position
+            are unchanged, and nothing is written back to Linear. */}
+        {canReloadSource && reloadConfirming && !editing && (
+          <div className="mb-4 p-3 rounded border border-cyber-teal/30 bg-cyber-teal/5 space-y-2">
+            <p className="text-sm text-white/90 font-medium">
+              Reload the latest task text from Linear{issue.externalLabel ? ` ${issue.externalLabel}` : ""}?
+            </p>
+            <p className="text-sm text-white/70">
+              This replaces the local title, description, and acceptance criteria with the
+              latest ticket text. Local edits will be lost. Repository, agents, and queue
+              position are unchanged, and nothing is written back to Linear.
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="btn-gold px-4 py-1.5 text-sm disabled:opacity-50"
+                disabled={busy}
+                onClick={doReloadSource}
+              >
+                Reload from Linear
+              </button>
+              <button
+                type="button"
+                className="font-ui-display px-4 py-1.5 text-sm text-white/60 hover:text-white"
+                onClick={() => setReloadConfirming(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         )}
         {editing && (
           <div className="mb-4 p-3 rounded border border-white/10 bg-panel-elevated/60 space-y-2">

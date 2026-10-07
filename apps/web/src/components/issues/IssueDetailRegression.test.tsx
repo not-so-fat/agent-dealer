@@ -645,3 +645,72 @@ test("timeline renders configuration updates with their label", () => {
   );
   assert.match(html, /Configuration updated/);
 });
+
+// NOT-363: source reload + always-available pre-execution task editor.
+function linearIssue(extra: Partial<Issue> = {}): Issue {
+  return issueFixture({
+    source: "linear",
+    externalId: "linear-uuid-1",
+    externalLabel: "NOT-123",
+    externalUrl: "https://linear.app/not-so-fat/issue/NOT-123/x",
+    ...extra,
+  });
+}
+
+test("NOT-363: ready Linear issue with passing readiness offers edit and Reload from Linear", () => {
+  const html = renderBody(detailFixture({ issue: linearIssue({ status: "ready" }) }));
+  assert.match(html, /Edit title \/ description \/ acceptance criteria/);
+  assert.match(html, /Reload from Linear/);
+});
+
+test("NOT-363: ready manual issue offers the editor but no Reload from Linear", () => {
+  const html = renderBody(detailFixture({ issue: issueFixture({ status: "ready" }) }));
+  assert.match(html, /Edit title \/ description \/ acceptance criteria/);
+  assert.doesNotMatch(html, /Reload from Linear/);
+});
+
+test("NOT-363: Linear issue with an active workflow offers neither reload nor pre-execution edit", () => {
+  const html = renderBody(
+    detailFixture({
+      issue: linearIssue({ status: "developing" }),
+      latestWorkflowInstance: {
+        id: "33333333-3333-4333-8333-333333333333",
+        issueId: "11111111-1111-4111-8111-111111111111",
+        workflowVersion: "v1",
+        startedAt: "2026-09-20T09:30:00.000Z",
+        completedAt: null,
+        outcome: null,
+      },
+    }),
+  );
+  assert.doesNotMatch(html, /Reload from Linear/);
+  assert.doesNotMatch(html, /Edit title \/ description \/ acceptance criteria/);
+});
+
+test("NOT-363: Linear issue with a running worker keeps the editor but hides Reload from Linear", () => {
+  const html = renderBody(
+    detailFixture({
+      issue: linearIssue({ status: "ready" }),
+      activeWorkerSession: sessionFixture(),
+    }),
+  );
+  assert.match(html, /Edit title \/ description \/ acceptance criteria/);
+  assert.doesNotMatch(html, /Reload from Linear/);
+});
+
+test("NOT-363: timeline renders source reloads with their label", () => {
+  const html = renderToStaticMarkup(
+    <IssueTimeline
+      events={[
+        event({
+          id: "src",
+          type: "issue.source_reloaded",
+          actorType: "human",
+          stage: "ready",
+          payloadJson: JSON.stringify({ source: "linear", externalLabel: "NOT-123" }),
+        }),
+      ]}
+    />,
+  );
+  assert.match(html, /Task text reloaded from Linear/);
+});
