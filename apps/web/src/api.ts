@@ -503,6 +503,26 @@ export async function closeIssue(id: string, closedBy = "web"): Promise<CloseIss
   return res.json();
 }
 
+/**
+ * NOT-365: permanently delete a Dealer-local issue and its Dealer-owned data.
+ * Only `ready`/`done`/`closed` with no active workflow, running session,
+ * live work, or on-disk worktree — anything else answers 409 and changes
+ * nothing. The linked Linear ticket is never touched. Successful deletions
+ * report Dealer-owned files the server could not remove as `residualPaths`.
+ */
+export interface DeleteDealerIssueResult {
+  deleted: boolean;
+  issueId: string;
+  removedQueueEntry: boolean;
+  residualPaths: string[];
+}
+
+export async function deleteDealerIssue(id: string): Promise<DeleteDealerIssueResult> {
+  const res = await fetch(`${API}/api/issues/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readApiError(res));
+  return res.json();
+}
+
 export async function enqueueIssue(issueId: string): Promise<{
   id: string;
   issueId: string;

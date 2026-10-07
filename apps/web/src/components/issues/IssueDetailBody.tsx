@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import type { AgentWithHealth } from "@agent-dealer/shared";
 import {
   abortIssue,
   closeIssue,
+  deleteDealerIssue,
   dequeueIssue,
   enqueueIssue,
   executeIssue,
@@ -157,6 +158,87 @@ export function CloseIssueConfirmation({
 }
 
 /**
+ * NOT-365: the token a typed delete confirmation requires — the displayed
+ * external label (e.g. `NOT-123`) when the issue has one, otherwise the exact
+ * Dealer issue id. Exact match only, enforced by
+ * `isDeleteConfirmationSatisfied` below.
+ */
+export function deleteConfirmationToken(issue: { id: string; externalLabel: string | null }): string {
+  return issue.externalLabel ?? issue.id;
+}
+
+/** Exact-match gate for the typed delete confirmation — no trimming, no case folding. */
+export function isDeleteConfirmationSatisfied(typed: string, expectedToken: string): boolean {
+  return typed === expectedToken;
+}
+
+/**
+ * NOT-365: the low-prominence Dealer-local hard-delete confirmation. Rendered
+ * only inside Issue Detail's secondary "More actions" area (never on
+ * list/queue rows or bulk surfaces) after the operator asks to delete. Unlike
+ * Close issue (retained history) this is permanent local removal — the copy
+ * must say history/evidence/files go and, for Linear-sourced issues, that the
+ * Linear ticket will not be deleted. The confirm control stays disabled until
+ * the typed token matches exactly. Exported so regression tests can assert
+ * the copy without driving the two-step interaction.
+ */
+export function DeleteIssueConfirmation({
+  expectedToken,
+  externalLabel,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  expectedToken: string;
+  externalLabel: string | null;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const [typed, setTyped] = useState("");
+  const satisfied = isDeleteConfirmationSatisfied(typed, expectedToken);
+  return (
+    <div className="mt-2 p-3 rounded border border-red-400/30 bg-red-500/10 space-y-2">
+      <p className="text-sm text-white/90 font-medium">Delete this issue from Dealer?</p>
+      <p className="text-sm text-white/70">
+        This permanently deletes the Dealer-local issue — its history, evidence, and files
+        cannot be recovered.
+        {externalLabel
+          ? ` The Linear ticket ${externalLabel} will not be deleted.`
+          : " There is no linked Linear ticket to affect."}
+      </p>
+      <label className="block text-xs text-white/60">
+        Type <span className="font-mono text-white/85">{expectedToken}</span> to confirm
+        <input
+          className="mt-1 block w-full bg-black/30 border border-white/10 rounded px-3 py-1.5 text-sm text-white/90 font-mono"
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+          placeholder={expectedToken}
+          autoComplete="off"
+        />
+      </label>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          className="px-4 py-1.5 text-sm rounded border border-red-400/50 text-red-200 hover:bg-red-500/20 disabled:opacity-50"
+          disabled={busy || !satisfied}
+          onClick={onConfirm}
+        >
+          Delete from Dealer
+        </button>
+        <button
+          type="button"
+          className="font-ui-display px-4 py-1.5 text-sm text-white/60 hover:text-white"
+          onClick={onCancel}
+        >
+          Keep issue
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
  * NOT-359: confirmation line kept inside the parked swap box after a save —
  * the box stays expanded, the refreshed detail carries the new agents, and this
  * tells the owner a resume continues with them.
@@ -222,6 +304,10 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   const [swapNotice, setSwapNotice] = useState<string | null>(null);
   /** NOT-239 pre-execution close: two-step inside the low-prominence area below. */
   const [closeConfirming, setCloseConfirming] = useState(false);
+  /** NOT-365 Dealer-local hard delete: typed two-step in the same area. */
+  const [deleteConfirming, setDeleteConfirming] = useState(false);
+  /** After a successful delete the detail route is gone — land on the list. */
+  const navigate = useNavigate();
   /** NOT-363: source-reload confirmation — the reload replaces local task-text edits. */
   const [reloadConfirming, setReloadConfirming] = useState(false);
   /** NOT-239 unambiguous result banner after a successful close. */
@@ -266,6 +352,13 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   // NOT-239: pre-execution Close is for `ready` with no active workflow only — it
   // must never alias Abort on running work, and terminal issues have nothing to close.
   const canClose = issue.status === "ready" && !hasActiveWorkflow;
+  // NOT-365: Dealer-local hard delete is for settled states only — `ready`
+  // (possibly queued), `done`, or `closed` — with no active workflow. The
+  // server re-checks every guard (running session, live work, worktree) and
+  // answers 409 there, so this is display gating only.
+  const canDelete =
+    (issue.status === "ready" || issue.status === "done" || issue.status === "closed") &&
+    !hasActiveWorkflow;
   // NOT-240: every `ready` issue with no active workflow is still pre-execution and
   // has no frozen task snapshot — queue membership never decides repairability.
   const canConfigEdit = issue.status === "ready" && !hasActiveWorkflow;
@@ -466,6 +559,38 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
       refresh();
     } catch (e) {
       fail(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doDelete = async () => {
+    setBusy(true);
+    onError(null);
+    try {
+      // NOT-365: the record is gone after this — the refreshed detail below
+      // would 404, so leave the detail route for the active Issues list. The
+      // list remounts and re-fetches issues/queue/history itself; the shell
+      // badge catches up through the human-actions refresh.
+      const result = await deleteDealerIssue(issueId);
+      const label = issue.externalLabel ?? issueId;
+      const residual =
+        result.residualPaths.length > 0
+          ? ` ${result.residualPaths.length} Dealer-owned file(s) could not be removed: ${result.residualPaths.join(", ")}`
+          : "";
+      const notice = issue.externalLabel
+        ? `Issue ${label} deleted from Dealer. The Linear ticket was not deleted.${residual}`
+        : `Issue ${label} permanently deleted from Dealer.${residual}`;
+      setDeleteConfirming(false);
+      onHumanActionsChanged();
+      navigate("/issues", { state: { deletedNotice: notice } });
+    } catch (e) {
+      // A 409 means the server found live work (session, lease, worktree)
+      // this view could not see: close the confirmation and refresh to the
+      // live state instead of a stale success.
+      setDeleteConfirming(false);
+      fail(e);
+      refresh();
     } finally {
       setBusy(false);
     }
@@ -979,32 +1104,59 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
             only here — so an operator opens the issue and reads its context first.
             Remove from queue (above) means "do not run yet" and keeps the issue
             ready; Close issue means "this work is no longer needed" and it will
-            never execute. Never on list rows, queue rows, or bulk surfaces. */}
-        {canClose && (
+            never execute. NOT-365: Delete from Dealer joins them here — permanent
+            local removal with a typed confirmation, never touching Linear.
+            Never on list rows, queue rows, or bulk surfaces. */}
+        {(canClose || canDelete) && (
           <details className="mt-6">
             <summary className="text-xs text-white/45 cursor-pointer hover:text-white/70">More actions</summary>
             <div className="mt-2 space-y-2">
               <p className="text-xs text-white/45">
-                Remove from queue means do not run yet — the issue stays ready and can run
-                later. Close issue means this work is no longer needed — it will never execute.
+                {canClose
+                  ? "Remove from queue means do not run yet — the issue stays ready and can run later. Close issue means this work is no longer needed — it will never execute, but history is kept."
+                  : "This work is finished — there is nothing left to close or abort."}
+                {canDelete
+                  ? " Delete from Dealer permanently removes the local issue, its history, and its files."
+                  : ""}
               </p>
-              {!closeConfirming ? (
-                <button
-                  type="button"
-                  className="font-ui-display text-xs text-white/50 hover:text-red-300 underline underline-offset-2 disabled:opacity-50"
-                  disabled={busy}
-                  title="Retire this issue without running it — removes any queue entry, keeps history as closed work"
-                  onClick={() => setCloseConfirming(true)}
-                >
-                  Close issue
-                </button>
-              ) : (
-                <CloseIssueConfirmation
-                  busy={busy}
-                  onConfirm={() => void doClose()}
-                  onCancel={() => setCloseConfirming(false)}
-                />
-              )}
+              {canClose &&
+                (!closeConfirming ? (
+                  <button
+                    type="button"
+                    className="font-ui-display text-xs text-white/50 hover:text-red-300 underline underline-offset-2 disabled:opacity-50"
+                    disabled={busy}
+                    title="Retire this issue without running it — removes any queue entry, keeps history as closed work"
+                    onClick={() => setCloseConfirming(true)}
+                  >
+                    Close issue
+                  </button>
+                ) : (
+                  <CloseIssueConfirmation
+                    busy={busy}
+                    onConfirm={() => void doClose()}
+                    onCancel={() => setCloseConfirming(false)}
+                  />
+                ))}
+              {canDelete &&
+                (!deleteConfirming ? (
+                  <button
+                    type="button"
+                    className="font-ui-display text-xs text-white/50 hover:text-red-300 underline underline-offset-2 disabled:opacity-50"
+                    disabled={busy}
+                    title="Permanently delete the Dealer-local issue, its history, and its files — the Linear ticket is not deleted"
+                    onClick={() => setDeleteConfirming(true)}
+                  >
+                    Delete from Dealer
+                  </button>
+                ) : (
+                  <DeleteIssueConfirmation
+                    expectedToken={deleteConfirmationToken(issue)}
+                    externalLabel={issue.externalLabel}
+                    busy={busy}
+                    onConfirm={() => void doDelete()}
+                    onCancel={() => setDeleteConfirming(false)}
+                  />
+                ))}
             </div>
           </details>
         )}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import type { AgentWithHealth, HumanAction, LinearCandidate } from "@agent-dealer/shared";
 import {
   canSubmitNewIssue,
@@ -62,6 +62,17 @@ type Props = {
 
 const RESOLVED_BY = "web";
 
+/**
+ * NOT-365: the one-shot deletion notice a successful Dealer-local hard delete
+ * carries over `navigate("/issues", { state: { deletedNotice } })`. Pure so
+ * regression tests can pin the contract without mounting the page.
+ */
+export function deletedNoticeFromLocationState(state: unknown): string | null {
+  if (typeof state !== "object" || state === null) return null;
+  const notice = (state as { deletedNotice?: unknown }).deletedNotice;
+  return typeof notice === "string" && notice.length > 0 ? notice : null;
+}
+
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
   const min = Math.floor(ms / 60_000);
@@ -118,6 +129,12 @@ export default function IssuesListPage({
   const [reviewerAgentId, setReviewerAgentId] = useState("");
   const [autoMerge, setAutoMerge] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // NOT-365: one-shot "deleted from Dealer" notice carried on the navigation
+  // state after Issue Detail deletes an issue. Dismissible; the page remounts
+  // on every detail→list navigation so the notice never lingers.
+  const location = useLocation();
+  const deletedNotice = deletedNoticeFromLocationState(location.state);
+  const [deletedNoticeDismissed, setDeletedNoticeDismissed] = useState(false);
   const [queue, setQueue] = useState<QueueEntryRow[]>([]);
   const [admission, setAdmission] = useState<AdmissionStatus | null>(null);
   const [limitBusy, setLimitBusy] = useState(false);
@@ -453,6 +470,19 @@ export default function IssuesListPage({
       </div>
 
       {error && <p className="text-sm text-red-300 mb-3">{error}</p>}
+
+      {deletedNotice && !deletedNoticeDismissed && (
+        <div className="mb-3 p-3 rounded border border-white/15 bg-white/[0.04] flex items-start justify-between gap-3">
+          <p className="text-sm text-white/85">{deletedNotice}</p>
+          <button
+            type="button"
+            className="font-ui-display shrink-0 text-xs text-white/50 hover:text-white"
+            onClick={() => setDeletedNoticeDismissed(true)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {showFirstIssue && (
         <FirstIssueStrip
