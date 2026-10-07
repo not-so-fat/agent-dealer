@@ -76,6 +76,27 @@ claude auth login    # or `/login` in a session, or export ANTHROPIC_API_KEY=…
 
 Then `agent-dealer doctor`, or just let the queue re-evaluate — an issue whose agent fails this preflight **waits in the queue with the auth message as its wait reason** rather than being admitted. It does not spend infra attempts and does not park on a human.
 
+### Mid-run login failure — park for a human, do not burn infra (NOT-368)
+
+When a developer or reviewer session *already running* dies because the runtime is not
+logged in (Muse / Codex / Claude Code / Cursor, including Cursor keychain stuck-auth),
+Dealer classifies the death as `authentication_configuration`. Routing then uses the
+live auth probe as a tie-breaker:
+
+| Signal | Route | Budget |
+| --- | --- | --- |
+| High-confidence attributed auth + probe still failing (`runtime_auth` / `cursor_keychain`) | `policy_escalation` carrying that runtime's remediation text | **no** infra attempt |
+| High-confidence attributed auth + probe now passing (transient) | one `retry_developer` through the normal infra path | +1 infra attempt |
+| Second high-confidence auth on the same issue after that transient retry | park again (even if the probe passes) | **no** infra attempt |
+| Medium / unattributed auth (shared `Not logged in` with no vendor anchor) | unchanged generic infra retry | +1 infra attempt |
+
+Consecutive auth parks are capped at **3** per issue. The 4th confirmed failure escalates
+as a distinct `policy_escalation` naming **repeated login failures** (not another login
+park). Resolving an auth park re-runs the auth probe: still failing → action stays open
+with the remediation shown again and nothing is spawned; passing → resume re-queues the
+developer on the salvaged WIP branch/commit with no round or infra charge (same resume
+path as a NOT-93 deck-interaction park).
+
 Two related notes:
 
 - `cursor-agent status` failing for an unclassifiable reason (non-zero exit, timeout) is also reported as `runtime_auth`, worded "Could not confirm Cursor auth". Silence is not evidence of health, and waiting a tick is cheaper than a burnt round.
@@ -83,7 +104,7 @@ Two related notes:
 
 Whenever a runtime reworded one of these strings, add its capture to `packages/shared/src/fixtures/runtime-auth/` and extend `runtime-auth-health.ts` — never a phrasing typed from memory. That is the exact mistake NOT-133 was.
 
-Related: NOT-114 (keychain branch), NOT-113 (failure strip), NOT-128 (runtime-auth failures should not spend developer attempts).
+Related: NOT-114 (keychain branch), NOT-113 (failure strip), NOT-128 (runtime-auth failures should not spend developer attempts), NOT-368 (mid-run auth park).
 
 ## Coordinator lease / heartbeat (NOT-113)
 

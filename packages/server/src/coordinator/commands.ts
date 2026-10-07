@@ -13,13 +13,20 @@ import type {
   HumanActionType,
   Issue,
   IssueStatus,
+  Runtime,
   SourceAttachmentRecord,
+  UpdateIssueInput,
   WorkflowEvent,
   WorkflowInstance,
   WorkflowEventType,
 } from "@agent-dealer/shared";
-import { canTransitionIssue, ExecutionContractError, tryCompileContract } from "@agent-dealer/shared";
-import type { UpdateIssueInput } from "@agent-dealer/shared";
+import {
+  canTransitionIssue,
+  ExecutionContractError,
+  isCursorKeychainStuckOutput,
+  runtimeAuthClassificationForLog,
+  tryCompileContract,
+} from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 import {
   getIssue,
@@ -56,7 +63,7 @@ import { ensureIssueRepoCheckout } from "../adapters/managed-repo.js";
 import { reconcileFinding, resolveFindingsAbsentFromRound } from "../repository/findings.js";
 import { normalizeReviewerResult } from "./reviewer-result.js";
 import { getAgent } from "../repository/agents.js";
-import { githubIssuesSync, invalidateMuseHealthCache } from "../adapters/agent-health.js";
+import { githubIssuesSync, invalidateMuseHealthCache, runtimeIssuesUncached } from "../adapters/agent-health.js";
 import { recordMuseCapabilityOverride, type MuseCapabilityEvidence } from "../adapters/muse-capability.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import { listSourceAttachments } from "../repository/source-attachments.js";
@@ -74,8 +81,8 @@ import { completeSession, getActiveWorkerSessionForIssue, getWorkerSession, list
 import { killRunProcess } from "../runners/spawn-cli.js";
 import { buildProfileSnapshot, serializeProfileSnapshot } from "./profile-snapshot.js";
 import { workerSessionPayload } from "./session-progress.js";
-import { reasonForWorkerFailedEvent } from "./failure-reason.js";
-import { recordCausesForWorkerFailedEvent } from "./failure-cause.js";
+import { reasonForWorkerFailedEvent, readSpawnLogFailureText } from "./failure-reason.js";
+import { classifyAttemptFailure, recordCausesForWorkerFailedEvent } from "./failure-cause.js";
 import {
   routeDeveloperOutcome,
   routeReviewerOutcome,
@@ -97,6 +104,16 @@ import {
   type HumanResolution,
   type PushDivergenceEvidence,
 } from "./human-resolution.js";
+import {
+  AUTH_TRANSIENT_RETRY_PAYLOAD_KEY,
+  RUNTIME_AUTH_PARK_EVIDENCE_KEY,
+  authProbeConfirmsFailure,
+  defaultRemediationForRuntime,
+  gateRuntimeAuthParkResume,
+  parseRuntimeAuthParkEvidence,
+  remediationFromProbe,
+  type AuthFailureRouting,
+} from "./runtime-auth-park.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
 import { triggerLinearPostMerge } from "./linear-merge-verify.js";
 import { conflictRepairSpent, queueConflictRepairRound } from "./merge-conflict-sync.js";
@@ -652,6 +669,27 @@ export async function applyCompletion(
     return applyBaseConflictCompletion(workItemId, leaseToken, outcome);
   }
 
+  // NOT-368: classify + live-probe outside the write txn (network/CLI must never hold
+  // the SQLite lock). Developer and reviewer session deaths both participate — medium /
+  // unattributed keep today's infra-retry path inside the role's route function.
+  let authFailure: AuthFailureRouting | undefined;
+  const authKind = getWorkItem(workItemId)?.kind;
+  if (
+    (outcome.kind === "session_failed" || outcome.kind === "timed_out") &&
+    (authKind === "developer" || authKind === "reviewer")
+  ) {
+    try {
+      authFailure = await prepareAuthFailureRouting(workItemId, {
+        kind: outcome.kind,
+        reason: "reason" in outcome ? outcome.reason : undefined,
+        logPath: "logPath" in outcome ? outcome.logPath : undefined,
+      });
+    } catch (err) {
+      console.error("[coordinator] prepareAuthFailureRouting", workItemId, err);
+      authFailure = undefined;
+    }
+  }
+
   const routed = getDb().transaction((): ApplyResult => {
     const before = getWorkItem(workItemId);
     if (!before) return { applied: false, reason: "not_found" };
@@ -669,7 +707,7 @@ export async function applyCompletion(
     const item = finishWorkItem(workItemId, leaseToken, { status: "done", result: outcome });
     if (!item) return { applied: false, reason: "lease_lost" };
 
-    return routeAppliedOutcome(issue, instance, item, outcome);
+    return routeAppliedOutcome(issue, instance, item, outcome, authFailure);
   })();
 
   if (routed.applied && routed.pendingAutoMerge) {
@@ -677,6 +715,77 @@ export async function applyCompletion(
     return finalizeAutoMerge(getWorkItem(workItemId)!.issueId);
   }
   return routed;
+}
+
+/**
+ * NOT-368: when a developer or reviewer session_failed / timed_out with a high-confidence
+ * attributed auth cause, run the runtime's live auth probe and gather consecutive-park /
+ * transient-retry state for the role's route function.
+ */
+async function prepareAuthFailureRouting(
+  workItemId: string,
+  outcome: { kind: "session_failed" | "timed_out"; reason?: string; logPath?: string }
+): Promise<AuthFailureRouting | undefined> {
+  const item = getWorkItem(workItemId);
+  if (!item || (item.kind !== "developer" && item.kind !== "reviewer")) return undefined;
+  const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
+  const logPath = session?.logPath ?? outcome.logPath ?? null;
+  const runtimeHint = (session?.runtime ?? null) as Runtime | null;
+  const causes = classifyAttemptFailure({
+    outcomeKind: outcome.kind,
+    outcomeReason: outcome.reason ?? null,
+    logPath,
+    runtime: runtimeHint,
+  });
+  const primary = causes.find((c) => c.primary) ?? causes[0];
+  if (!primary || primary.code !== "authentication_configuration") return undefined;
+  // Medium / unattributed ("Not logged in" with no vendor) keep the generic infra retry.
+  if (primary.confidence !== "high") return undefined;
+
+  const haystack = `${readSpawnLogFailureText(logPath)}\n${outcome.reason ?? ""}`;
+  const classified = isCursorKeychainStuckOutput(haystack)
+    ? { runtime: "cursor_local" as const, issue: { code: "cursor_keychain" as const, message: defaultRemediationForRuntime("cursor_local", true) } }
+    : runtimeAuthClassificationForLog(haystack, runtimeHint);
+  const runtime = classified?.runtime ?? runtimeHint;
+  if (!runtime) return undefined;
+
+  const remediation =
+    classified?.issue.message?.trim() ||
+    defaultRemediationForRuntime(runtime, classified?.issue.code === "cursor_keychain");
+  const probeIssues = await runtimeIssuesUncached(runtime);
+  const probeStillFailing = authProbeConfirmsFailure(probeIssues);
+  const probeRemediation = remediationFromProbe(probeIssues, remediation);
+
+  return {
+    confidence: "high",
+    runtime,
+    remediation: probeStillFailing ? probeRemediation : remediation,
+    rawCause: primary.rawReason,
+    probeStillFailing,
+    consecutiveAuthParks: countConsecutiveAuthParks(item.issueId),
+    authTransientRetrySpent: issueSpentAuthTransientRetry(item.issueId),
+  };
+}
+
+/** Count trailing auth-park human actions on the issue (newest streak). */
+function countConsecutiveAuthParks(issueId: string): number {
+  const actions = listHumanActionsForIssue(issueId);
+  let n = 0;
+  for (let i = actions.length - 1; i >= 0; i--) {
+    if (parseRuntimeAuthParkEvidence(actions[i]!.evidenceJson) == null) break;
+    n++;
+  }
+  return n;
+}
+
+/** True when any prior developer/reviewer work item on this issue spent the transient auth retry. */
+function issueSpentAuthTransientRetry(issueId: string): boolean {
+  for (const w of listWorkItemsForIssue(issueId)) {
+    if (w.kind !== "developer" && w.kind !== "reviewer") continue;
+    const payload = parseWorkItemPayload(w.payloadJson);
+    if (payload[AUTH_TRANSIENT_RETRY_PAYLOAD_KEY] === true) return true;
+  }
+  return false;
 }
 
 function parseWorkItemPayload(json: string | null): Record<string, unknown> {
@@ -1185,11 +1294,12 @@ export function routeAppliedOutcome(
   issue: Issue,
   instance: WorkflowInstance,
   item: WorkItem,
-  outcome: DeveloperOutcome | ReviewerOutcome
+  outcome: DeveloperOutcome | ReviewerOutcome,
+  authFailure?: AuthFailureRouting
 ): ApplyResult {
   return item.kind === "developer"
-    ? applyDeveloper(issue, instance, item, outcome as DeveloperOutcome)
-    : applyReviewer(issue, instance, item, outcome as ReviewerOutcome);
+    ? applyDeveloper(issue, instance, item, outcome as DeveloperOutcome, authFailure)
+    : applyReviewer(issue, instance, item, outcome as ReviewerOutcome, authFailure);
 }
 
 interface EventEmitter {
@@ -1256,7 +1366,8 @@ function applyDeveloper(
   issue: Issue,
   instance: WorkflowInstance,
   item: WorkItem,
-  outcome: DeveloperOutcome
+  outcome: DeveloperOutcome,
+  authFailure?: AuthFailureRouting
 ): ApplyResult {
   const route = routeDeveloperOutcome(outcome, {
     currentRound: issue.currentRound,
@@ -1265,6 +1376,7 @@ function applyDeveloper(
     maxInfraAttempts: issue.maxInfraAttempts,
     ciAttempts: issue.ciAttempts,
     maxCiAttempts: issue.maxCiAttempts,
+    ...(authFailure ? { authFailure } : {}),
   });
   const { projection, effect, advance } = projectDeveloperRoute(route, issue.status, issue.currentRound);
 
@@ -1357,7 +1469,8 @@ function applyReviewer(
   issue: Issue,
   instance: WorkflowInstance,
   item: WorkItem,
-  outcome: ReviewerOutcome
+  outcome: ReviewerOutcome,
+  authFailure?: AuthFailureRouting
 ): ApplyResult {
   let route: ReturnType<typeof routeReviewerOutcome> = routeReviewerOutcome(
     outcome,
@@ -1367,6 +1480,7 @@ function applyReviewer(
       infraAttempts: issue.infraAttempts,
       maxInfraAttempts: issue.maxInfraAttempts,
       autoMerge: issue.autoMerge,
+      ...(authFailure ? { authFailure } : {}),
     },
     issue.headSha!
   );
@@ -1575,6 +1689,8 @@ function applyEffect(
         ...(effect.retryReason ? { retryReason: effect.retryReason } : {}),
         ...(effect.publishOnly ? { publishOnly: true } : {}),
         ...(effect.branch ? { branch: effect.branch } : {}),
+        // NOT-368: persist that this infra retry spent the one transient auth retry.
+        ...(effect.authTransientRetry ? { [AUTH_TRANSIENT_RETRY_PAYLOAD_KEY]: true } : {}),
         profileSnapshot: queuedProfileSnapshot(issue, kind),
       },
       idempotencyKey,
@@ -1599,6 +1715,11 @@ function applyEffect(
       actionType === "policy_escalation" && !resumeAsReviewer
         ? (effect.pushDivergence ?? null)
         : null;
+    // NOT-368: confirmed runtime login park — resolve re-probes before re-queueing.
+    // Reviewer-origin parks keep resumeAsReviewer (re-queue reviewer) AND auth-park
+    // evidence (so resolve still re-probes); the two are not mutually exclusive.
+    const runtimeAuthPark =
+      actionType === "policy_escalation" ? (effect.runtimeAuthPark ?? null) : null;
     // NOT-280: an unchanged worktree blocker (same fingerprint) lands on the action it
     // already raised — still open, or reopened when a Resume changed nothing — instead of
     // opening an identical one on every Resume.
@@ -1623,9 +1744,11 @@ function applyEffect(
           ? { review: reviewerOutcome.result, ...(nonConvergence ? { nonConvergence } : {}) }
           : pushDivergence
             ? { [PUSH_DIVERGENCE_EVIDENCE_KEY]: pushDivergence }
-            : blockerFingerprint
-              ? { [WORKTREE_BLOCKER_EVIDENCE_KEY]: { fingerprint: blockerFingerprint } }
-              : undefined,
+            : runtimeAuthPark
+              ? { [RUNTIME_AUTH_PARK_EVIDENCE_KEY]: runtimeAuthPark }
+              : blockerFingerprint
+                ? { [WORKTREE_BLOCKER_EVIDENCE_KEY]: { fingerprint: blockerFingerprint } }
+                : undefined,
       // issueNow.headSha, not issue.headSha: a stale outcome that itself exhausted the
       // infra budget already patched the newly observed head onto the issue above — the
       // pre-transition issue param would still carry the stale SHA a "resume" must not reuse.
@@ -2444,6 +2567,47 @@ export async function resolveHumanActionAndAdvanceAsync(
       resumeLiveHeadSha = null;
     }
   }
+  // NOT-368: re-probe before resolving a runtime-auth park. A still-failing probe keeps
+  // the action open (no spawn); only a passing probe proceeds to resume on the salvaged
+  // branch without charging a round or infra attempt.
+  if (choice === "resume") {
+    const authParkAction = getHumanAction(actionId);
+    const authParkEvidence = authParkAction
+      ? parseRuntimeAuthParkEvidence(authParkAction.evidenceJson)
+      : null;
+    if (authParkAction?.status === "open" && authParkEvidence) {
+      let probeIssues: Awaited<ReturnType<typeof runtimeIssuesUncached>> = [];
+      try {
+        probeIssues = await runtimeIssuesUncached(authParkEvidence.runtime);
+      } catch (err) {
+        console.error("[coordinator] auth-park resolve probe", actionId, err);
+        probeIssues = [
+          {
+            code: "runtime_auth",
+            message: authParkEvidence.remediation,
+          },
+        ];
+      }
+      const gate = gateRuntimeAuthParkResume({
+        evidence: authParkEvidence,
+        probeStillFailing: authProbeConfirmsFailure(probeIssues),
+        probeRemediation: remediationFromProbe(probeIssues, authParkEvidence.remediation),
+      });
+      if (!gate.proceed) {
+        // Refresh the open action's reason so the operator sees the remediation again.
+        try {
+          updateOpenHumanAction(actionId, {
+            reason: gate.message,
+            question: questionFor("policy_escalation", gate.message, false),
+          });
+        } catch {
+          // Best-effort — the 409 below is what keeps the action open.
+        }
+        return { ok: false, code: 409, error: gate.message };
+      }
+    }
+  }
+
   // NOT-196: the `gh` PR-state read runs here, outside any DB transaction — the sync
   // core below only consumes the pre-read state. Only close choices on issues with a
   // PR number pay for the call; anything unreadable resolves to "unknown" (or

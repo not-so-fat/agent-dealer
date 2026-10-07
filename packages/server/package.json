@@ -19,7 +19,8 @@
     "start": "node dist/index.js",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:migrate-to-issues": "tsx src/db/migrate-to-issues.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 node ../../scripts/run-workspace-tests.mjs"
   },
   "dependencies": {
     "@agent-dealer/shared": "1.2.15",

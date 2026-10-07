@@ -169,6 +169,18 @@ export function setRunCommandForTests(fn: RunCommandFn | null): void {
   runCommandImpl = fn ?? defaultRunCommand;
 }
 
+/** Test override for {@link runtimeIssuesUncached} — NOT-368 auth-park probe stubbing. */
+type RuntimeIssuesUncachedFn = (runtime: Runtime) => Promise<AgentHealthIssue[]> | AgentHealthIssue[];
+let runtimeIssuesUncachedForTests: RuntimeIssuesUncachedFn | null = null;
+
+/**
+ * Replace the live auth probe in coordinator tests. Pass `null` to restore the real probe.
+ * Cleared by {@link clearAgentHealthCaches}.
+ */
+export function setRuntimeIssuesUncachedForTests(fn: RuntimeIssuesUncachedFn | null): void {
+  runtimeIssuesUncachedForTests = fn;
+}
+
 function runCommand(
   cmd: string,
   args: string[],
@@ -194,6 +206,7 @@ export function clearAgentHealthCaches(): void {
   githubIssueCache = null;
   cursorSoftFailStreak = 0;
   cursorLastHealthyAt = null;
+  runtimeIssuesUncachedForTests = null;
   resetMuseCapabilityStateForTests();
 }
 
@@ -348,6 +361,9 @@ async function museRuntimeIssues(): Promise<AgentHealthIssue[]> {
 
 /** Exported for direct testing — bypasses the 60s cache in runtimeIssues(). */
 export async function runtimeIssuesUncached(runtime: Runtime): Promise<AgentHealthIssue[]> {
+  if (runtimeIssuesUncachedForTests) {
+    return await runtimeIssuesUncachedForTests(runtime);
+  }
   const issues: AgentHealthIssue[] = [];
 
   if (runtime === "claude_code") {

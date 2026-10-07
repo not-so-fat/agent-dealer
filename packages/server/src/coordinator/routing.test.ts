@@ -1,6 +1,17 @@
 // packages/server/src/coordinator/routing.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  CLAUDE_AUTH_REMEDIATION,
+  CODEX_AUTH_REMEDIATION,
+  CURSOR_KEYCHAIN_REMEDIATION,
+  MUSE_AUTH_REMEDIATION,
+  runtimeAuthClassificationForLog,
+  type Runtime,
+} from "@agent-dealer/shared";
 import {
   routeDeveloperOutcome,
   routeReviewerOutcome,
@@ -8,6 +19,44 @@ import {
   type ReviewerOutcome,
   type RouteLimits,
 } from "./routing.js";
+import { MAX_CONSECUTIVE_AUTH_PARKS, type AuthFailureRouting } from "./runtime-auth-park.js";
+
+const FIXTURE_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../shared/src/fixtures/runtime-auth"
+);
+
+function fixtureText(name: string): string {
+  return readFileSync(join(FIXTURE_DIR, name), "utf8");
+}
+
+/** NOT-114 keychain has no capture file — same reconstruction used by runtime-auth-health tests. */
+const CURSOR_KEYCHAIN_STDERR = `Cursor couldn't save your login to the macOS keychain (errSecDuplicateItem, security exit code 45).
+The keychain item is stuck. Delete it and sign in again:
+  security delete-generic-password -s cursor-access-token -a cursor-user
+  agent login
+`;
+
+function highConfAuthFromLog(
+  runtime: Runtime,
+  logText: string,
+  opts: Partial<Omit<AuthFailureRouting, "confidence" | "runtime" | "remediation" | "rawCause">> & {
+    remediation?: string;
+  } = {}
+): AuthFailureRouting {
+  const classified = runtimeAuthClassificationForLog(logText, runtime);
+  assert.ok(classified, `expected auth classification for ${runtime}`);
+  assert.ok(classified.runtime, `expected attributed runtime for ${runtime}`);
+  return {
+    confidence: "high",
+    runtime: classified.runtime,
+    remediation: opts.remediation ?? classified.issue.message,
+    rawCause: logText.trim().slice(0, 500),
+    probeStillFailing: opts.probeStillFailing ?? true,
+    consecutiveAuthParks: opts.consecutiveAuthParks ?? 0,
+    authTransientRetrySpent: opts.authTransientRetrySpent ?? false,
+  };
+}
 
 const REVIEW_ROUNDS_LEFT: RouteLimits = { currentRound: 1, maxReviewRounds: 3, infraAttempts: 0, maxInfraAttempts: 3 };
 const REVIEW_AT_LIMIT: RouteLimits = { currentRound: 3, maxReviewRounds: 3, infraAttempts: 0, maxInfraAttempts: 3 };
@@ -600,4 +649,175 @@ test("muse_cron_used escalates to the operator without spending any budget, even
       reason: "muse_cron_used: the Muse session called cron_create",
     });
   }
+});
+
+// --- NOT-368: high-confidence runtime auth park (probe tie-breaker) ---
+
+const AUTH_PARK_CASES: Array<{
+  runtime: Runtime;
+  log: string;
+  remediation: string;
+}> = [
+  {
+    runtime: "muse_code",
+    log: fixtureText("muse-exec-missing-credentials.txt"),
+    remediation: MUSE_AUTH_REMEDIATION,
+  },
+  {
+    runtime: "codex_local",
+    log: fixtureText("codex-exec-logged-out.txt"),
+    remediation: CODEX_AUTH_REMEDIATION,
+  },
+  {
+    runtime: "claude_code",
+    log: fixtureText("claude-print-logged-out.txt"),
+    remediation: CLAUDE_AUTH_REMEDIATION,
+  },
+  {
+    runtime: "cursor_local",
+    log: CURSOR_KEYCHAIN_STDERR,
+    remediation: CURSOR_KEYCHAIN_REMEDIATION,
+  },
+];
+
+test("NOT-368: high-confidence auth + probe still failing parks with remediation; infraAttempts unchanged", () => {
+  const infraBefore = INFRA_ATTEMPTS_LEFT.infraAttempts;
+  for (const { runtime, log, remediation } of AUTH_PARK_CASES) {
+    const authFailure = highConfAuthFromLog(runtime, log, { probeStillFailing: true });
+    const outcome: DeveloperOutcome = { kind: "session_failed", reason: log.trim().slice(0, 200) };
+    const result = routeDeveloperOutcome(outcome, { ...INFRA_ATTEMPTS_LEFT, authFailure });
+    assert.equal(result.next, "human_action", runtime);
+    assert.equal((result as { actionType: string }).actionType, "policy_escalation", runtime);
+    const reason = (result as { reason: string }).reason;
+    assert.match(reason, new RegExp(remediation.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), runtime);
+    assert.ok((result as { runtimeAuthPark?: { remediation: string } }).runtimeAuthPark, runtime);
+    assert.equal(
+      (result as { runtimeAuthPark: { remediation: string } }).runtimeAuthPark.remediation,
+      remediation,
+      runtime
+    );
+    // Routing never mutates limits — park means projection advance:none (no infra charge).
+    assert.equal(INFRA_ATTEMPTS_LEFT.infraAttempts, infraBefore, runtime);
+  }
+});
+
+test("NOT-368: high-confidence auth + probe passing takes one infra retry; second parks even when probe passes", () => {
+  const log = fixtureText("muse-exec-missing-credentials.txt");
+  const outcome: DeveloperOutcome = { kind: "session_failed", reason: "missing meta credentials" };
+
+  const first = routeDeveloperOutcome(outcome, {
+    ...INFRA_ATTEMPTS_LEFT,
+    authFailure: highConfAuthFromLog("muse_code", log, {
+      probeStillFailing: false,
+      authTransientRetrySpent: false,
+    }),
+  });
+  assert.equal(first.next, "retry_developer");
+  assert.equal((first as { authTransientRetry?: true }).authTransientRetry, true);
+  // Projection would increment infraAttempts by exactly 1 on retry_developer (advance:infra).
+
+  const second = routeDeveloperOutcome(outcome, {
+    ...INFRA_ATTEMPTS_LEFT,
+    infraAttempts: INFRA_ATTEMPTS_LEFT.infraAttempts + 1,
+    authFailure: highConfAuthFromLog("muse_code", log, {
+      probeStillFailing: false,
+      authTransientRetrySpent: true,
+    }),
+  });
+  assert.equal(second.next, "human_action");
+  assert.equal((second as { actionType: string }).actionType, "policy_escalation");
+  assert.ok((second as { runtimeAuthPark?: unknown }).runtimeAuthPark);
+  assert.match((second as { reason: string }).reason, /muse login|META_API_KEY/i);
+});
+
+test("NOT-368: medium-confidence / unattributed auth keeps retry_developer and infra charge", () => {
+  // Shared "Not logged in" with no vendor anchor and no recorded runtime → medium cause;
+  // prepareAuthFailureRouting omits authFailure, so routing is unchanged from today.
+  const outcome: DeveloperOutcome = { kind: "session_failed", reason: "Not logged in" };
+  const result = routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT);
+  assert.deepStrictEqual(result, {
+    next: "retry_developer",
+    reason: "Not logged in",
+  });
+});
+
+test("NOT-368: 4th consecutive confirmed auth park escalates as repeated login failures", () => {
+  const log = fixtureText("muse-exec-missing-credentials.txt");
+  const outcome: DeveloperOutcome = { kind: "session_failed", reason: "missing meta credentials" };
+  const result = routeDeveloperOutcome(outcome, {
+    ...INFRA_ATTEMPTS_LEFT,
+    authFailure: highConfAuthFromLog("muse_code", log, {
+      probeStillFailing: true,
+      consecutiveAuthParks: MAX_CONSECUTIVE_AUTH_PARKS,
+    }),
+  });
+  assert.equal(result.next, "human_action");
+  assert.equal((result as { actionType: string }).actionType, "policy_escalation");
+  assert.match((result as { reason: string }).reason, /Repeated .* login failures/i);
+  assert.equal((result as { runtimeAuthPark?: unknown }).runtimeAuthPark, undefined);
+});
+
+test("NOT-368: reviewer high-confidence auth + probe still failing parks with remediation (no infra retry)", () => {
+  for (const { runtime, log, remediation } of AUTH_PARK_CASES) {
+    const authFailure = highConfAuthFromLog(runtime, log, { probeStillFailing: true });
+    const outcome: ReviewerOutcome = { kind: "session_failed", reason: log.trim().slice(0, 200) };
+    const result = routeReviewerOutcome(
+      outcome,
+      { ...INFRA_ATTEMPTS_LEFT, authFailure },
+      PINNED_HEAD
+    );
+    assert.equal(result.next, "human_action", runtime);
+    assert.equal((result as { actionType: string }).actionType, "policy_escalation", runtime);
+    assert.match(
+      (result as { reason: string }).reason,
+      new RegExp(remediation.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      runtime
+    );
+    assert.ok((result as { runtimeAuthPark?: unknown }).runtimeAuthPark, runtime);
+  }
+});
+
+test("NOT-368: reviewer high-confidence auth + probe passing takes one infra retry_reviewer; second parks", () => {
+  const log = fixtureText("muse-exec-missing-credentials.txt");
+  const outcome: ReviewerOutcome = { kind: "session_failed", reason: "missing meta credentials" };
+
+  const first = routeReviewerOutcome(
+    outcome,
+    {
+      ...INFRA_ATTEMPTS_LEFT,
+      authFailure: highConfAuthFromLog("muse_code", log, {
+        probeStillFailing: false,
+        authTransientRetrySpent: false,
+      }),
+    },
+    PINNED_HEAD
+  );
+  assert.equal(first.next, "retry_reviewer");
+  assert.equal((first as { headSha: string }).headSha, PINNED_HEAD);
+  assert.equal((first as { authTransientRetry?: true }).authTransientRetry, true);
+
+  const second = routeReviewerOutcome(
+    outcome,
+    {
+      ...INFRA_ATTEMPTS_LEFT,
+      infraAttempts: INFRA_ATTEMPTS_LEFT.infraAttempts + 1,
+      authFailure: highConfAuthFromLog("muse_code", log, {
+        probeStillFailing: false,
+        authTransientRetrySpent: true,
+      }),
+    },
+    PINNED_HEAD
+  );
+  assert.equal(second.next, "human_action");
+  assert.ok((second as { runtimeAuthPark?: unknown }).runtimeAuthPark);
+});
+
+test("NOT-368: reviewer medium-confidence / unattributed auth keeps retry_reviewer", () => {
+  const outcome: ReviewerOutcome = { kind: "session_failed", reason: "Not logged in" };
+  const result = routeReviewerOutcome(outcome, INFRA_ATTEMPTS_LEFT, PINNED_HEAD);
+  assert.deepStrictEqual(result, {
+    next: "retry_reviewer",
+    headSha: PINNED_HEAD,
+    reason: "Not logged in",
+  });
 });
