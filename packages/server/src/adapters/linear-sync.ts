@@ -18,8 +18,18 @@ const STATE_BY_EVENT: Record<LinearSyncEvent, string> = {
 
 const workflowStateCache = new Map<string, Map<string, string>>();
 
+/** Test hook — drop cached team workflow states between cases. */
+export function clearWorkflowStateCacheForTests(): void {
+  workflowStateCache.clear();
+}
+
 function webBaseUrl(): string {
   return process.env.AGENT_DEALER_WEB_URL ?? "http://localhost:2222";
+}
+
+/** Link back to a Dealer issue for Linear comments. */
+export function dealerIssueUrl(issueId: string): string {
+  return `${webBaseUrl()}/?issue=${issueId}`;
 }
 
 async function linearMutate(operation: string, query: string, variables?: Record<string, unknown>): Promise<unknown> {
@@ -48,7 +58,9 @@ async function getWorkflowStates(teamId: string): Promise<Map<string, string>> {
   return map;
 }
 
-async function commentCreate(issueId: string, body: string): Promise<void> {
+/** Post a comment on a Linear issue — shared by the run-scoped delivery path and
+ * NOT-362's post-merge fallback (which reuses this writer instead of adding a second). */
+export async function postLinearIssueComment(issueId: string, body: string): Promise<void> {
   await linearMutate(
     "commentCreate",
     `mutation Comment($issueId: String!, $body: String!) {
@@ -58,7 +70,8 @@ async function commentCreate(issueId: string, body: string): Promise<void> {
   );
 }
 
-async function issueUpdateState(issueId: string, stateId: string): Promise<void> {
+/** Move a Linear issue to a workflow state by id — shared writer, see above. */
+export async function setLinearIssueState(issueId: string, stateId: string): Promise<void> {
   await linearMutate(
     "issueUpdateState",
     `mutation UpdateIssue($issueId: String!, $stateId: String!) {
@@ -68,16 +81,31 @@ async function issueUpdateState(issueId: string, stateId: string): Promise<void>
   );
 }
 
+/**
+ * Resolve the team's completed-state id for the terminal event — the one
+ * STATE_BY_EVENT mapping (NOT-362 reuses this resolution for the fallback
+ * instead of adding a second writer). Null when the team has no matching state.
+ */
+export async function resolveCompletedStateId(teamId: string): Promise<string | null> {
+  const states = await getWorkflowStates(teamId);
+  return states.get(STATE_BY_EVENT.done.toLowerCase()) ?? null;
+}
 
 
-function buildComment(run: Run): string {
-  const label = run.externalLabel ?? run.externalId ?? run.id;
-  const link = `${webBaseUrl()}/?run=${run.id}`;
+
+/** The Dealer comment posted alongside the terminal write — one voice for the
+ * run-scoped delivery path and NOT-362's post-merge fallback. */
+export function buildDoneComment(label: string, link: string, linkLabel = "View run"): string {
   return [
     `**agent-dealer** — approved and marked done (${label})`,
     ``,
-    `[View run](${link})`,
+    `[${linkLabel}](${link})`,
   ].join("\n");
+}
+
+function buildComment(run: Run): string {
+  const label = run.externalLabel ?? run.externalId ?? run.id;
+  return buildDoneComment(label, `${webBaseUrl()}/?run=${run.id}`);
 }
 
 function recordSyncAttempt(
@@ -110,13 +138,12 @@ export async function syncLinearForRun(run: Run, event: LinearSyncEvent): Promis
   }
 
   const targetStateName = STATE_BY_EVENT[event];
-  const states = await getWorkflowStates(issue.teamId);
-  const stateId = states.get(targetStateName.toLowerCase());
+  const stateId = await resolveCompletedStateId(issue.teamId);
 
   try {
-    await commentCreate(run.externalId, buildComment(run));
+    await postLinearIssueComment(run.externalId, buildComment(run));
     if (stateId) {
-      await issueUpdateState(run.externalId, stateId);
+      await setLinearIssueState(run.externalId, stateId);
     } else {
       recordSyncAttempt(run, event, false, {
         error: `Workflow state not found: ${targetStateName}`,

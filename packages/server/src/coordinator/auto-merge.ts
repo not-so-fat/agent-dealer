@@ -40,6 +40,7 @@ import {
 } from "../repository/human-actions.js";
 import { MERGE_FAILURE_EVIDENCE_KEY, MERGE_FAILURE_RESPONSE_OPTIONS } from "./human-resolution.js";
 import { isMergeConflictFailure, runMergeConflictSync } from "./merge-conflict-sync.js";
+import { triggerLinearPostMerge } from "./linear-merge-verify.js";
 import { startBaseAdvancedScan } from "./base-advanced-scan.js";
 import {
   OPERATOR_VERIFICATION_RESPONSE_OPTIONS,
@@ -364,6 +365,15 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
       triggerReflect: true,
     };
   })();
+  // NOT-362: the merge landed — confirm the Linear source issue advanced (or
+  // advance/flag it). Fire-and-forget: the check's bounded retry window (tens of
+  // seconds) must not hold this finalize, which runs while holding the reviewer
+  // session and slot. Never touches this issue's status, so it cannot change
+  // the merge's result. Runs on every `done` landing, including the
+  // already-merged recovery path.
+  if (merged.issueStatus === "done") {
+    triggerLinearPostMerge(issueId);
+  }
   // NOT-356: the base just moved under every other open Dealer PR on this repo +
   // base — probe them and resolve the idle conflicting ones. Background and
   // self-contained: nothing it does can change this merge's result. Only for a

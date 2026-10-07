@@ -1091,13 +1091,16 @@ export async function runDeveloperEffect(
       payload,
     });
 
-  // issue.branch is only ever written on a verified clean_handoff (design: it's ground
-  // truth, not agent self-report), so a first-round attempt after an earlier retryable
+  // issue.branch is ground truth for the branch NAME (written on a verified
+  // clean_handoff, or seeded from Linear's branchName at intake — NOT-362), but
+  // not for the branch's EXISTENCE: a seeded branch has no local ref and the
+  // remote never saw it. A first-round attempt after an earlier retryable
   // failure in the SAME round (no_pr/session_failed/timed_out/checks_failed all remove
   // their worktree but leave the local branch ref behind) would otherwise re-run
   // `git worktree add -b <same name>` and fail with "branch already exists" — a review
   // round reproduced this directly. Check the branch itself, not just issue.branch, and
-  // reuse it (preserving whatever local commits it already carries) when it's there.
+  // reuse it (preserving whatever local commits it already carries) when it's there
+  // (resolveDeveloperWorktree cuts a nonexistent reuse-path branch fresh from base).
   const branchName = issue.branch ?? `issue-${issue.id}`;
   let repoPath: string;
   let desiredWorktreePath: string;
@@ -1120,7 +1123,11 @@ export async function runDeveloperEffect(
     return { kind: "adapter_failure", reason: `repository checkout failed: ${String(err)}` };
   }
 
-  const reuseBranch = issue.branch != null || (await branchExists(repoPath, branchName));
+  // NOT-362: a seeded issue.branch names a branch that exists nowhere yet — the
+  // local ref is the only existence signal honest enough for reuse accounting
+  // below (a seeded name must not count as "prior commits to reuse").
+  const localBranchPreexists = await branchExists(repoPath, branchName);
+  const reuseBranch = issue.branch != null || localBranchPreexists;
 
   let worktreePath: string;
   // NOT-172: whether the retry-resolution reused an existing checkout (source for
@@ -1450,7 +1457,7 @@ export async function runDeveloperEffect(
             worktreePath,
             baseRef: `origin/${baseBranch}`,
           }).catch(() => null);
-          if ((ahead !== null && ahead > 0) || (ahead === null && issue.branch != null)) {
+          if ((ahead !== null && ahead > 0) || (ahead === null && localBranchPreexists)) {
             reuseKinds.push("commit");
           }
         }
@@ -1680,7 +1687,7 @@ export async function runDeveloperEffect(
           worktreePath,
           baseRef: `origin/${baseBranch}`,
         }).catch(() => null);
-        if ((endAhead !== null && endAhead > 0) || (endAhead === null && issue.branch != null)) {
+        if ((endAhead !== null && endAhead > 0) || (endAhead === null && localBranchPreexists)) {
           emitCheckpointObserved({
             issueId: issue.id,
             workflowInstanceId: instance.id,

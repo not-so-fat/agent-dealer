@@ -3,6 +3,10 @@ import { getHumanAction, listOpenHumanActions } from "../repository/human-action
 import { resolveHumanActionAndAdvanceAsync } from "../coordinator/commands.js";
 import { normalizeResolutionNote } from "../coordinator/human-resolution.js";
 import { triggerIssueReflect, resolveReflectionInteractionAction } from "../coordinator/reflect-trigger.js";
+import {
+  isLinearMergeStaleAction,
+  resolveLinearMergeStaleAction,
+} from "../coordinator/linear-merge-verify.js";
 import { resolveOutboundDeliveryAction } from "../queue/approve-deliver.js";
 
 export async function registerHumanActionRoutes(app: FastifyInstance): Promise<void> {
@@ -52,6 +56,22 @@ export async function registerHumanActionRoutes(app: FastifyInstance): Promise<v
       const deliveryResult = await resolveOutboundDeliveryAction(id, resolvedBy, choice);
       if (!deliveryResult.ok) return reply.status(deliveryResult.code).send({ error: deliveryResult.error });
       return { runStatus: deliveryResult.runStatus, delivered: deliveryResult.delivered };
+    }
+
+    // NOT-362: the stale-source notice sits on an already-`done` issue with no
+    // active workflow to advance — the generic resolver would 409 on "no active
+    // workflow for this action" and the notice could never close. Resolve it
+    // directly (same shape as the reflection branch above); `recheck` re-runs
+    // the post-merge verification fire-and-forget.
+    if (action.actionType === "policy_escalation" && isLinearMergeStaleAction(action)) {
+      const staleResult = resolveLinearMergeStaleAction(id, resolvedBy, choice);
+      if (!staleResult.ok) return reply.status(staleResult.code).send({ error: staleResult.error });
+      return {
+        issueStatus: staleResult.issueStatus,
+        nextWorkItemId: null,
+        instanceCompleted: false,
+        restarted: false,
+      };
     }
 
     // Awaits undraft+merge when final_review:complete (NOT-102) — sync resolve alone would

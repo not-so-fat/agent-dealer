@@ -324,6 +324,12 @@ export const LinearCandidate = z.object({
   labels: z.array(z.string()).optional(),
   teamId: z.string().optional(),
   /**
+   * NOT-362: Linear's own suggested branch name for the issue. Intake persists
+   * it as the Dealer issue's branch so Linear's GitHub integration can link
+   * the PR on repositories it covers.
+   */
+  branchName: z.string().optional(),
+  /**
    * NOT-242: server-resolved repository hint read from explicit `repo:` labels.
    * Raw labels stay on the candidate; this is the deterministic read of them.
    */

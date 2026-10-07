@@ -31,10 +31,11 @@ export type BranchProgress =
   | { state: "published"; branch: string; ahead: number };
 
 /**
- * The branch a developer round works on. `issue.branch` is only written on a verified
- * clean_handoff (it is ground truth, not agent self-report), so an attempt that died before
- * that still left its commits on the conventional name — which is why the fallback here has
- * to match developer-effect.ts's.
+ * The branch a developer round works on. `issue.branch` is the branch NAME (written
+ * on a verified clean_handoff, or seeded from Linear's branchName at intake —
+ * NOT-362), so an attempt that died before any handoff still left its commits on
+ * the conventional name — which is why the fallback here has to match
+ * developer-effect.ts's.
  */
 export function developerBranchName(issue: { id: string; branch: string | null }): string {
   return issue.branch ?? `issue-${issue.id}`;
