@@ -72,5 +72,6 @@ test("GET /api/host-power returns hold line and at most one sleep-timer notice",
 
   await app.close();
   resetSleepTimerNoticeForTests();
-  installHostAwakeForTests({ platform: "linux" });
+  // Restore process-default platform (linux on CI, darwin locally).
+  installHostAwakeForTests();
 });

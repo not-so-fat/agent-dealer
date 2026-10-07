@@ -18,7 +18,7 @@ export type HostPowerStatus = {
   sleepTimerNotice: SleepTimerNotice | null;
 };
 
-export function hostPowerStatusLine(holdActive: boolean, platform = process.platform): string {
+export function hostPowerStatusLine(holdActive: boolean, platform: string = process.platform): string {
   if (platform !== "darwin") {
     return "Host awake hold: n/a (macOS only)";
   }
@@ -29,11 +29,13 @@ export function hostPowerStatusLine(holdActive: boolean, platform = process.plat
 
 /** Snapshot for GET /api/host-power and the Agents health area. */
 export function getHostPowerStatus(): HostPowerStatus {
-  const platform = process.platform;
+  const guard = getHostAwakeGuard();
+  // Prefer the guard's platform so unit tests can inject `darwin` on Linux CI.
+  const platform = guard.getPlatform();
   // Ensure the one-time startup check has run even if index.ts forgot.
   ensureSleepTimerCheckedAtStartup();
   const holdActive = isHostAwakeHoldActive();
-  const holdCount = getHostAwakeGuard().holdCount();
+  const holdCount = guard.holdCount();
   return {
     platform,
     holdActive,

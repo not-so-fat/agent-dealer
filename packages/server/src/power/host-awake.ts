@@ -61,6 +61,11 @@ export class HostAwakeGuard {
     this.log = opts.log ?? ((msg) => console.warn(msg));
   }
 
+  /** Platform this guard was constructed for (injectable in tests). */
+  getPlatform(): string {
+    return this.platform;
+  }
+
   /** True when a live caffeinate child is held (darwin + count > 0 + spawn ok). */
   isHoldActive(): boolean {
     return this.child != null && this.holds > 0;
