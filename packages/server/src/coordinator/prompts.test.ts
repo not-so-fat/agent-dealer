@@ -534,3 +534,99 @@ test("NOT-316: untagged reviewer prompt carries no tag-judging section", () => {
   assert.doesNotMatch(without, /## Criterion tags/);
   assert.equal(buildReviewerPrompt(reviewerBase), without);
 });
+
+// NOT-364: the frozen attachment manifest renders in the developer prompt as
+// local file paths plus link metadata with the trust boundary — and stays out
+// entirely when the manifest is empty.
+test("NOT-364: developer prompt lists frozen attachment files and links", () => {
+  const withManifest = buildDeveloperPrompt({
+    taskSnapshot: {
+      ...taskSnapshot,
+      sourceAttachments: [
+        {
+          linearAttachmentId: "att-file-1",
+          kind: "file",
+          title: "repro.tar.gz",
+          safeFileName: "repro.tar.gz",
+          blobPath: "/blobs/repro.tar.gz",
+          sizeBytes: 18,
+          sha256: "ab".repeat(32),
+          url: "https://uploads.linear.app/a/repro.tar.gz",
+        },
+        {
+          linearAttachmentId: "att-link-1",
+          kind: "link",
+          title: "Design doc",
+          url: "https://docs.example.com/x",
+        },
+      ],
+    },
+    round: 1,
+  });
+  assert.match(withManifest, /## Source attachments \(untrusted ticket inputs/);
+  assert.match(withManifest, /`\.agent-dealer-inputs\/linear\/repro\.tar\.gz`/);
+  assert.match(withManifest, /link: "Design doc" — https:\/\/docs\.example\.com\/x/);
+  assert.match(withManifest, /never commit them/);
+  assert.match(withManifest, /never extract archives outside a fresh contained directory/);
+  // Repair rounds see the same frozen section.
+  const repair = buildDeveloperPrompt({
+    taskSnapshot: {
+      ...taskSnapshot,
+      sourceAttachments: [
+        {
+          linearAttachmentId: "att-file-1",
+          kind: "file",
+          title: "repro.tar.gz",
+          safeFileName: "repro.tar.gz",
+          blobPath: "/blobs/repro.tar.gz",
+          sizeBytes: 18,
+          sha256: "ab".repeat(32),
+          url: "https://uploads.linear.app/a/repro.tar.gz",
+        },
+      ],
+    },
+    round: 2,
+  });
+  assert.match(repair, /`\.agent-dealer-inputs\/linear\/repro\.tar\.gz`/);
+});
+
+test("NOT-364: attachment-free developer prompts render no source-attachment section", () => {
+  const without = buildDeveloperPrompt({ taskSnapshot, round: 1 });
+  assert.doesNotMatch(without, /## Source attachments/);
+  assert.equal(buildDeveloperPrompt({ taskSnapshot, round: 1 }), without);
+});
+
+// NOT-364: reviewers get the immutable manifest as metadata only — no
+// worktree path, no server blob path, no file contents.
+test("NOT-364: reviewer prompt carries manifest metadata without file paths", () => {
+  const prompt = buildReviewerPrompt({
+    ...reviewerBase,
+    taskSnapshot: {
+      ...taskSnapshot,
+      sourceAttachments: [
+        {
+          linearAttachmentId: "att-file-1",
+          kind: "file",
+          title: "repro.tar.gz",
+          safeFileName: "repro.tar.gz",
+          blobPath: "/blobs/repro.tar.gz",
+          sizeBytes: 18,
+          sha256: "ab".repeat(32),
+          url: "https://uploads.linear.app/a/repro.tar.gz",
+        },
+        {
+          linearAttachmentId: "att-link-1",
+          kind: "link",
+          title: "Design doc",
+          url: "https://docs.example.com/x",
+        },
+      ],
+    },
+  });
+  assert.match(prompt, /## Source attachments \(frozen manifest — metadata only/);
+  assert.match(prompt, /"repro\.tar\.gz"/);
+  assert.doesNotMatch(prompt, /\.agent-dealer-inputs/);
+  assert.doesNotMatch(prompt, /\/blobs\//);
+  const without = buildReviewerPrompt(reviewerBase);
+  assert.doesNotMatch(without, /## Source attachments/);
+});

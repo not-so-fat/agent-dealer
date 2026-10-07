@@ -28,10 +28,10 @@ function downloadDouble(
   bytes: Buffer,
   opts: { contentType?: string; streamed?: boolean; seen?: string[] } = {}
 ): (url: string) => Promise<SourceDownloadResponse> {
-  return async (url: string) => {
+  return async (url: string): Promise<SourceDownloadResponse> => {
     opts.seen?.push(url);
     const headers = {
-      get: (name: string) => {
+      get: (name: string): string | null => {
         if (name === "content-type") return opts.contentType ?? "application/gzip";
         if (name === "content-length") return String(bytes.byteLength);
         return null;
@@ -57,7 +57,7 @@ function downloadDouble(
           cancel: async () => {},
         }),
       },
-    } as unknown as SourceDownloadResponse["body"];
+    } as unknown as SourceDownloadResponse;
   };
 }
 

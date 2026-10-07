@@ -22,6 +22,7 @@ import IssueStatusBadge from "./IssueStatusBadge";
 import AgentAssignmentEditor from "./AgentAssignmentEditor";
 import IssueConfigurationSection from "./IssueConfiguration";
 import ExecutionContractSummary from "./ExecutionContractSummary";
+import SourceAttachmentsSection from "./SourceAttachmentsSection";
 import IssueTimeline from "./IssueTimeline";
 import ExecutionAnalysisSection from "./ExecutionAnalysisSection";
 import HumanActionCard from "./HumanActionCard";
@@ -566,6 +567,11 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
             description stays the only authoring surface, so this renders no
             inputs. Absent for legacy/contract-free issues. */}
         {issue.executionContract && <ExecutionContractSummary contract={issue.executionContract} />}
+
+        {/* NOT-364: durable Linear source attachments — files with safe name,
+            size and checksum; links as labeled metadata only. Empty/absent
+            renders nothing. */}
+        <SourceAttachmentsSection attachments={detail.sourceAttachments} />
 
         {/* Workflow rail: current node/owner is above; next allowed action here. */}
         <div className="mb-4 p-3 rounded border border-white/10 bg-panel-elevated/40 flex items-start justify-between gap-3">

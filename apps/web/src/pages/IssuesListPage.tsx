@@ -428,6 +428,9 @@ export default function IssuesListPage({
         externalId: selectedLinear?.id,
         externalLabel: selectedLinear?.identifier,
         externalUrl: selectedLinear?.url,
+        // NOT-364: lookup-time attachment metadata — the server snapshots every
+        // Linear-hosted file before the issue is queued; links stay metadata.
+        linearAttachments: selectedLinear?.attachments,
       });
       setShowCreate(false);
       resetForm();

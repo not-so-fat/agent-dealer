@@ -383,7 +383,7 @@ test("nodeToCandidate drops malformed attachments and coerces source metadata", 
 test("getLinearIssue carries attachment metadata on exact lookup", async () => {
   process.env.LINEAR_API_KEY = "test-key";
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () => ({
+  globalThis.fetch = (async (_url: unknown) => ({
     ok: true,
     status: 200,
     headers: new Headers(),
