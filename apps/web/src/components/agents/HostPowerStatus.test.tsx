@@ -3,12 +3,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { HostPowerStatusView, type HostPowerStatus } from "./HostPowerStatusView.js";
+import {
+  HostPowerStatusView,
+  hostPowerSleepNoticeDismissKey,
+  type HostPowerStatus,
+} from "./HostPowerStatusView.js";
 
 (globalThis as { React?: unknown }).React ??= React;
 
 const base: HostPowerStatus = {
   platform: "darwin",
+  serverInstanceId: "pid-test-aaa",
   holdActive: true,
   holdCount: 1,
   holdStatusLine: "Host awake hold: active (caffeinate -i)",
@@ -43,4 +48,14 @@ test("idle hold line with no notice renders only the status line", () => {
   );
   assert.match(html, /Host awake hold: idle/);
   assert.doesNotMatch(html, /host-power-sleep-notice/);
+});
+
+test("dismissal key is scoped to serverInstanceId (once per server start)", () => {
+  const a = hostPowerSleepNoticeDismissKey("pid-1-abc");
+  const b = hostPowerSleepNoticeDismissKey("pid-2-def");
+  assert.match(a, /pid-1-abc/);
+  assert.match(b, /pid-2-def/);
+  assert.notEqual(a, b, "restart must get a distinct dismissal identity");
+  // Same message across restarts must not share a key — key is instance id, not message.
+  assert.equal(hostPowerSleepNoticeDismissKey("pid-1-abc"), a);
 });

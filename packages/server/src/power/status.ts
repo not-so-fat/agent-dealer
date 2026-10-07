@@ -7,8 +7,13 @@ import {
   type SleepTimerNotice,
 } from "./sleep-timer.js";
 
+/** Stable for this server process; changes on restart so dismissal does not leak. */
+const SERVER_INSTANCE_ID = `${process.pid}-${Date.now().toString(36)}`;
+
 export type HostPowerStatus = {
   platform: string;
+  /** Identifies this server process for once-per-start notice dismissal. */
+  serverInstanceId: string;
   /** True when a live caffeinate child is held for active Dealer work. */
   holdActive: boolean;
   holdCount: number;
@@ -38,6 +43,7 @@ export function getHostPowerStatus(): HostPowerStatus {
   const holdCount = guard.holdCount();
   return {
     platform,
+    serverInstanceId: SERVER_INSTANCE_ID,
     holdActive,
     holdCount,
     holdStatusLine: hostPowerStatusLine(holdActive, platform),

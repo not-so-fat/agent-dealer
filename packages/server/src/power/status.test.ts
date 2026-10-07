@@ -56,12 +56,14 @@ test("GET /api/host-power returns hold line and at most one sleep-timer notice",
   const res = await app.inject({ method: "GET", url: "/api/host-power" });
   assert.equal(res.statusCode, 200);
   const body = res.json() as {
+    serverInstanceId: string;
     holdActive: boolean;
     holdStatusLine: string;
     sleepTimerNotice: { fixCommand: string } | null;
   };
   assert.equal(body.holdActive, true);
   assert.match(body.holdStatusLine, /Host awake hold: active/);
+  assert.ok(body.serverInstanceId, "dismissal identity must include a server instance id");
   assert.ok(body.sleepTimerNotice);
   assert.equal(body.sleepTimerNotice.fixCommand, SLEEP_TIMER_FIX_COMMAND);
 

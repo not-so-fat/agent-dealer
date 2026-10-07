@@ -1,8 +1,10 @@
 // NOT-369: presentational host-power hold line + dismissible sleep-timer notice.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export type HostPowerStatus = {
   platform: string;
+  /** Server process id — dismissal is scoped to this instance (once per start). */
+  serverInstanceId: string;
   holdActive: boolean;
   holdCount: number;
   holdStatusLine: string;
@@ -13,29 +15,44 @@ export type HostPowerStatus = {
   } | null;
 };
 
-const DISMISS_KEY = "agent-dealer:host-power-sleep-notice-dismissed";
+const DISMISS_KEY_PREFIX = "agent-dealer:host-power-sleep-notice-dismissed:";
+
+function dismissStorageKey(serverInstanceId: string): string {
+  return `${DISMISS_KEY_PREFIX}${serverInstanceId}`;
+}
+
+function readDismissed(serverInstanceId: string): boolean {
+  if (typeof localStorage === "undefined") return false;
+  try {
+    // localStorage so every tab for this server instance shares one dismissal.
+    return localStorage.getItem(dismissStorageKey(serverInstanceId)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeDismissed(serverInstanceId: string): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(dismissStorageKey(serverInstanceId), "1");
+  } catch {
+    // ignore quota / private-mode failures
+  }
+}
 
 export function HostPowerStatusView({ status }: { status: HostPowerStatus }) {
-  const [dismissed, setDismissed] = useState(() => {
-    if (typeof sessionStorage === "undefined") return false;
-    try {
-      return sessionStorage.getItem(DISMISS_KEY) === status.sleepTimerNotice?.message;
-    } catch {
-      return false;
-    }
-  });
+  const [dismissed, setDismissed] = useState(() => readDismissed(status.serverInstanceId));
+
+  // Server restart → new instance id; re-read so a prior dismissal does not suppress the notice.
+  useEffect(() => {
+    setDismissed(readDismissed(status.serverInstanceId));
+  }, [status.serverInstanceId]);
 
   const notice = status.sleepTimerNotice;
   const showNotice = Boolean(notice) && !dismissed;
 
   const dismiss = () => {
-    if (notice) {
-      try {
-        sessionStorage.setItem(DISMISS_KEY, notice.message);
-      } catch {
-        // ignore
-      }
-    }
+    writeDismissed(status.serverInstanceId);
     setDismissed(true);
   };
 
@@ -63,4 +80,9 @@ export function HostPowerStatusView({ status }: { status: HostPowerStatus }) {
       )}
     </div>
   );
+}
+
+/** Test helper — dismissal key shape used by the view. */
+export function hostPowerSleepNoticeDismissKey(serverInstanceId: string): string {
+  return dismissStorageKey(serverInstanceId);
 }
