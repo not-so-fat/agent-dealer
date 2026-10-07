@@ -61,13 +61,28 @@ export function authProbeConfirmsFailure(issues: readonly AgentHealthIssue[]): b
   return issues.some((i) => i.code === "runtime_auth" || i.code === "cursor_keychain");
 }
 
-/** Prefer the probe's own remediation text when present; else the classified one. */
+/**
+ * Prefer the probe's own remediation text when present; else the classified one.
+ *
+ * Exception (NOT-368 repair): a classified / parked Cursor keychain remediation must
+ * not be replaced by ordinary `runtime_auth` probe copy. `cursor-agent status` often
+ * reports a plain login failure while the stuck keychain still blocks `agent login` —
+ * swapping in generic login instructions tells the operator to do exactly what remains
+ * impossible. Only a probe that itself reports `cursor_keychain` may update that text.
+ */
 export function remediationFromProbe(
   issues: readonly AgentHealthIssue[],
   fallback: string
 ): string {
-  const hit = issues.find((i) => i.code === "runtime_auth" || i.code === "cursor_keychain");
-  return hit?.message?.trim() ? hit.message : fallback;
+  const keychainHit = issues.find((i) => i.code === "cursor_keychain");
+  if (keychainHit?.message?.trim()) return keychainHit.message;
+
+  if (fallback.trim() === CURSOR_KEYCHAIN_REMEDIATION) {
+    return fallback;
+  }
+
+  const authHit = issues.find((i) => i.code === "runtime_auth");
+  return authHit?.message?.trim() ? authHit.message : fallback;
 }
 
 export function defaultRemediationForRuntime(runtime: Runtime, keychain = false): string {
