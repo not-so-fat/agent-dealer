@@ -98,6 +98,7 @@ import {
   type PushDivergenceEvidence,
 } from "./human-resolution.js";
 import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
+import { triggerLinearPostMerge } from "./linear-merge-verify.js";
 import { conflictRepairSpent, queueConflictRepairRound } from "./merge-conflict-sync.js";
 import {
   OPERATOR_VERIFICATION_ARTIFACT_KIND,
@@ -2453,7 +2454,18 @@ export async function resolveHumanActionAndAdvanceAsync(
     externalMergeState,
     note: opts?.note,
   });
-  if (!result.ok || !result.pendingMerge) return result;
+  if (!result.ok || !result.pendingMerge) {
+    // NOT-362: the sync core may have landed a terminal merge without going
+    // through finalize (external-merge close-as-done) — confirm the Linear
+    // source post-check. Fire-and-forget: never blocks the response, and the
+    // check itself never touches the issue's status. Non-Linear issues return
+    // unchecked with no network call.
+    if (result.ok && result.issueStatus === "done") {
+      const doneAction = getHumanAction(actionId);
+      if (doneAction?.issueId) triggerLinearPostMerge(doneAction.issueId);
+    }
+    return result;
+  }
 
   const action = getHumanAction(actionId);
   if (!action?.issueId) {
@@ -3015,7 +3027,11 @@ export async function abortIssueAsync(
   } catch {
     externalMergeState = undefined;
   }
-  return abortIssue(issueId, resolvedBy, deps, { externalMergeState });
+  const aborted = abortIssue(issueId, resolvedBy, deps, { externalMergeState });
+  // NOT-362: an abort that landed as `done` means the PR was merged outside
+  // Dealer — same post-check as every other terminal merged transition.
+  if (aborted.ok && aborted.issueStatus === "done") triggerLinearPostMerge(issueId);
+  return aborted;
 }
 
 /**

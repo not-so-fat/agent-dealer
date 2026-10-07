@@ -45,6 +45,7 @@ import {
   storeStagedAttachments,
 } from "../coordinator/source-attachments.js";
 import { listSourceAttachments, replaceSourceAttachments } from "../repository/source-attachments.js";
+import { persistLinearBranchForIssue } from "../adapters/linear-inbox.js";
 import { deriveLiveProgressFromLog } from "../coordinator/session-progress.js";
 import { branchTipStatusForIssue } from "../coordinator/branch-tip-status.js";
 
@@ -321,6 +322,14 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       throw err;
     }
     if (staged) discardStaged(staged);
+    // NOT-362: seed the issue branch from Linear's own `branchName` (source
+    // `linear` only; manual issues untouched). Best-effort and awaited — the
+    // developer round reads the branch at admission, so it must be stored
+    // before the enqueue below. Never fails the import.
+    if (input.source === "linear" && input.externalId) {
+      await persistLinearBranchForIssue(issue.id).catch(() => null);
+      issue = getIssue(issue.id) ?? issue;
+    }
     appendWorkflowEvent({ issueId: issue.id, type: "issue.created", actorType: "human", stage: issue.status });
     // NOT-118: create enqueues, it never starts. Server-side so the UI, CLI and agents all
     // behave the same — callers hold no workflow logic. `enqueue: false` creates a draft.

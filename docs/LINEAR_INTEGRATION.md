@@ -38,7 +38,7 @@ flowchart TB
 | **API key** | `LINEAR_API_KEY` env-only — never stored in SQLite |
 | **Settings** | Filters in SQLite, seeded with defaults; `LINEAR_STATE_FILTER` / `LINEAR_TEAM_ID` env override saved values when set. Edit Team / Assignee / Status from **New issue → From Linear** (gear beside the open-inbox picker) — NOT-361; no global Configuration page |
 | **Automation** | REST API first; orchestrator agents create issues directly |
-| **Write-back** | Non-blocking comment + status, but only on the run-scoped delivery `done` path — see [Status write-back](#status-write-back) |
+| **Write-back** | Status comes from Linear's GitHub integration; Dealer verifies it post-merge and only then falls back to one completed-state write — see [Status write-back](#status-write-back) |
 
 ## Configuration
 
@@ -174,20 +174,44 @@ Rules:
 
 ### Status write-back
 
-> **By design since NOT-71.** Dealer does not write issue status back to Linear. Linear's
-> own **GitHub integration** links the PR to the issue (it attaches PR #59 to NOT-71, for
-> example) and drives issue state from the PR lifecycle, so a second writer here would
-> fight it. `LinearSyncEvent` is therefore narrowed to the one event that still fires:
-> `done`, from `queue/approve-deliver.ts` on the run-scoped outbound-delivery approval.
+> **Changed in NOT-362.** Dealer still does not write issue status as the PR
+> lifecycle runs — Linear's own **GitHub integration** links the PR to the
+> issue and drives issue state from it, so a second writer there would fight
+> it. But Dealer no longer trusts that delegation blindly: after the
+> coordinator's terminal merged transition for a `source = linear` issue, it
+> re-reads the Linear issue and confirms it advanced, and every outcome is
+> recorded as an artifact on the Dealer issue.
 
-When it does fire (and `syncEnabled`), it posts a non-blocking comment and sets status:
+**The check** (`coordinator/linear-merge-verify.ts`, bounded retry window so the
+integration has time to act): the Linear issue counts as advanced when either
+its state type left `backlog`/`unstarted`, or its attachments contain the
+merged PR URL.
+
+**The conditional fallback:** when the check still sees a stale issue and
+`linear.syncEnabled` is true, Dealer writes the issue to the team's completed
+state and posts the Dealer comment — reusing `syncLinearForRun`'s state
+resolution (`linear-sync.ts`), never a second writer. It fires only after the
+integration has demonstrably not acted, so it never races a working
+integration, and it writes at most once per issue (a recorded fallback guards
+re-runs).
+
+**The human action:** when the fallback is unavailable or itself fails (no API
+write access, no matching completed state), Dealer raises one open
+`policy_escalation` on the Issues home naming the Linear identifier, the
+merged PR URL, and the observed state (idempotent re-raise by stable request
+id). The Dealer issue itself stays `done` — the action is a notice, not a gate.
+It resolves from the Issues home via **Acknowledge**, or **Re-check Linear**
+after advancing the issue by hand (the re-check re-reads Linear and records a
+fresh verification artifact, clearing the notice when the issue now verifies).
+
+The check runs fire-and-forget off every `done` landing, so the bounded retry
+window never holds the merge caller.
+
+The run-scoped delivery path is unchanged:
 
 | agent-dealer event | Linear status | Fired by |
 |--------------------|---------------|----------|
 | `done` | **Done** | `queue/approve-deliver.ts` — outbound delivery approval |
-
-Issue-workflow status (In Progress / In Review / Done as the PR opens, reviews and merges)
-comes from Linear's GitHub integration, not from here.
 
 > **TODO (P2):** Make this event → Linear status mapping **configurable per team** (`linear.statusMap` in intake config). It hardcodes names in `packages/server/src/adapters/linear-sync.ts` (`STATE_BY_EVENT`) and resolves workflow states case-insensitively against the issue's Linear team.
 
@@ -235,6 +259,7 @@ Response headers of interest (on every GraphQL POST):
 | From Linear (filter editor) | `fetchLinearIntakeMetadata` (teams + states + viewer); config via SQLite | On editor open / save |
 | Kick lookup | `getLinearIssue` | One per lookup |
 | Delivery sync | `getLinearIssue`, `getWorkflowStates`, `commentCreate`, `issueUpdateState` | Few per approved delivery |
+| Post-merge verify (NOT-362) | `readLinearPostMergeState` (≤3 reads); fallback reuses `getWorkflowStates`, `commentCreate`, `issueUpdateState` at most once per issue | Few per merged Linear issue |
 
 A healthy overnight run with a non-empty Linear queue should be on the order of **tens to low hundreds** of API-key requests per hour from dealer alone — not thousands. If `remaining` hits 0, something else on the same key (another dealer home, scripts, tools) or a bug is amplifying calls.
 
