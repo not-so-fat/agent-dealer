@@ -158,7 +158,14 @@ test("infra-class retries — including a stale re-review — spend the infra bu
   );
   assert.equal(reviewerRetry.advance, "infra");
   // The infra retry re-pins the SAME head — it is not a "the head moved" stale re-review.
-  assert.deepStrictEqual(reviewerRetry.effect, { kind: "enqueue", workItem: "reviewer", atHeadSha: PINNED_HEAD });
+  // retryReason is threaded so the next reviewer session (and auth-transient marker) can
+  // show why this infra attempt was spent.
+  assert.deepStrictEqual(reviewerRetry.effect, {
+    kind: "enqueue",
+    workItem: "reviewer",
+    atHeadSha: PINNED_HEAD,
+    retryReason: "Review publication to GitHub failed.",
+  });
 
   // A stale re-review (the head genuinely moved) is also bounded on the infra budget —
   // an unbounded chain of these could otherwise spawn reviewer sessions indefinitely.
