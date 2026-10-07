@@ -5,7 +5,7 @@
 // terminates the child. Non-darwin is a no-op. Spawn failures log once and
 // never fail the caller.
 
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 
 /** Minimal child surface the guard needs — real `spawn` or a test fake. */
 export type CaffeinateChild = {
@@ -27,11 +27,17 @@ export type HostAwakeOptions = {
 };
 
 function defaultSpawn(command: string, args: string[]): CaffeinateChild {
-  const child: ChildProcessWithoutNullStreams = spawn(command, args, {
+  const child: ChildProcess = spawn(command, args, {
     stdio: "ignore",
     detached: false,
   });
-  return child;
+  return {
+    pid: child.pid,
+    kill: (signal) => child.kill(signal),
+    once: (event, listener) => {
+      child.once(event, listener);
+    },
+  };
 }
 
 /**
