@@ -4,6 +4,14 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.3.0 — 2026-10-07
+
+Run independent issues in the same repository concurrently
+
+### Changes
+
+- NOT-371: Allow independent same-repository issues to execute concurrently (#218)
+
 ## 1.2.16 — 2026-10-07
 
 Keep the host awake during Dealer work, park runtime login failures for a human, and fix agent-dealer stop crash on macOS
