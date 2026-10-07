@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveHumanActionOutcome, parseHumanResolution } from "./human-resolution.js";
+import {
+  resolveHumanActionOutcome,
+  parseHumanResolution,
+  gateRuntimeAuthParkResume,
+  authProbeConfirmsFailure,
+  RUNTIME_AUTH_PARK_EVIDENCE_KEY,
+  type RuntimeAuthParkEvidence,
+} from "./human-resolution.js";
+import { MUSE_AUTH_REMEDIATION } from "@agent-dealer/shared";
 
 // Reviewer finding #8: an unrecognized choice must be rejected, not silently treated as "close".
 test("parseHumanResolution rejects a choice not in that action type's allowed set", () => {
@@ -135,4 +143,51 @@ test("operator_verification repair queues another repair round; verified/waive n
     () => resolveHumanActionOutcome({ actionType: "operator_verification", choice: "verified", note: "ok" }),
     /Unrecognized operator_verification choice/
   );
+});
+
+// --- NOT-368: resolve-time auth-park re-probe ---
+
+const AUTH_PARK_EVIDENCE: RuntimeAuthParkEvidence = {
+  runtime: "muse_code",
+  remediation: MUSE_AUTH_REMEDIATION,
+  rawCause: "missing meta credentials: run muse login or set META_API_KEY",
+  consecutivePark: 1,
+};
+
+test("NOT-368: authProbeConfirmsFailure is true for runtime_auth and cursor_keychain only", () => {
+  assert.equal(authProbeConfirmsFailure([{ code: "runtime_auth", message: MUSE_AUTH_REMEDIATION }]), true);
+  assert.equal(
+    authProbeConfirmsFailure([{ code: "cursor_keychain", message: "keychain stuck" }]),
+    true
+  );
+  assert.equal(authProbeConfirmsFailure([{ code: "cli_missing", message: "install muse" }]), false);
+  assert.equal(authProbeConfirmsFailure([]), false);
+});
+
+test("NOT-368: still-failing resolve probe keeps the action open (no spawn)", () => {
+  const gate = gateRuntimeAuthParkResume({
+    evidence: AUTH_PARK_EVIDENCE,
+    probeStillFailing: true,
+    probeRemediation: MUSE_AUTH_REMEDIATION,
+  });
+  assert.equal(gate.proceed, false);
+  if (!gate.proceed) {
+    assert.match(gate.message, /still not authenticated/i);
+    assert.match(gate.remediation, /muse login|META_API_KEY/i);
+  }
+});
+
+test("NOT-368: passing resolve probe allows resume — same infra roundKind as deck_interaction (no charge)", () => {
+  const gate = gateRuntimeAuthParkResume({
+    evidence: AUTH_PARK_EVIDENCE,
+    probeStillFailing: false,
+  });
+  assert.deepStrictEqual(gate, { proceed: true });
+  // Resume of a policy_escalation (auth park) reuses the NOT-93 park path: startNewRound
+  // with roundKind "infra" resets budgets but does not increment them — no round / infra charge.
+  const resume = resolveHumanActionOutcome({ actionType: "policy_escalation", choice: "resume" });
+  assert.equal(resume.issueStatus, "developing");
+  assert.equal(resume.startNewRound, true);
+  assert.equal(resume.roundKind, "infra");
+  assert.equal(RUNTIME_AUTH_PARK_EVIDENCE_KEY, "runtimeAuthPark");
 });

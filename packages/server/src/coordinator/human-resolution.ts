@@ -1,5 +1,21 @@
 import type { HumanActionType } from "@agent-dealer/shared";
 
+// NOT-368: auth-park evidence + resolve-time re-probe gate live in runtime-auth-park.ts;
+// re-exported here so the park/resume contract stays discoverable next to NOT-93's
+// deck_interaction_required resume (same roundKind: infra, no review-round spend).
+export {
+  AUTH_TRANSIENT_RETRY_PAYLOAD_KEY,
+  MAX_CONSECUTIVE_AUTH_PARKS,
+  RUNTIME_AUTH_PARK_EVIDENCE_KEY,
+  authProbeConfirmsFailure,
+  gateRuntimeAuthParkResume,
+  isRuntimeAuthParkAction,
+  parseRuntimeAuthParkEvidence,
+  remediationFromProbe,
+  type AuthParkResolveGate,
+  type RuntimeAuthParkEvidence,
+} from "./runtime-auth-park.js";
+
 export type HumanResolution =
   | { actionType: "final_review"; choice: "complete" | "merge" | "repair" | "close" }
   | { actionType: "attempts_exhausted"; choice: "retry" | "close" }
