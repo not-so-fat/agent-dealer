@@ -756,3 +756,68 @@ test("NOT-368: 4th consecutive confirmed auth park escalates as repeated login f
   assert.match((result as { reason: string }).reason, /Repeated .* login failures/i);
   assert.equal((result as { runtimeAuthPark?: unknown }).runtimeAuthPark, undefined);
 });
+
+test("NOT-368: reviewer high-confidence auth + probe still failing parks with remediation (no infra retry)", () => {
+  for (const { runtime, log, remediation } of AUTH_PARK_CASES) {
+    const authFailure = highConfAuthFromLog(runtime, log, { probeStillFailing: true });
+    const outcome: ReviewerOutcome = { kind: "session_failed", reason: log.trim().slice(0, 200) };
+    const result = routeReviewerOutcome(
+      outcome,
+      { ...INFRA_ATTEMPTS_LEFT, authFailure },
+      PINNED_HEAD
+    );
+    assert.equal(result.next, "human_action", runtime);
+    assert.equal((result as { actionType: string }).actionType, "policy_escalation", runtime);
+    assert.match(
+      (result as { reason: string }).reason,
+      new RegExp(remediation.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      runtime
+    );
+    assert.ok((result as { runtimeAuthPark?: unknown }).runtimeAuthPark, runtime);
+  }
+});
+
+test("NOT-368: reviewer high-confidence auth + probe passing takes one infra retry_reviewer; second parks", () => {
+  const log = fixtureText("muse-exec-missing-credentials.txt");
+  const outcome: ReviewerOutcome = { kind: "session_failed", reason: "missing meta credentials" };
+
+  const first = routeReviewerOutcome(
+    outcome,
+    {
+      ...INFRA_ATTEMPTS_LEFT,
+      authFailure: highConfAuthFromLog("muse_code", log, {
+        probeStillFailing: false,
+        authTransientRetrySpent: false,
+      }),
+    },
+    PINNED_HEAD
+  );
+  assert.equal(first.next, "retry_reviewer");
+  assert.equal((first as { headSha: string }).headSha, PINNED_HEAD);
+  assert.equal((first as { authTransientRetry?: true }).authTransientRetry, true);
+
+  const second = routeReviewerOutcome(
+    outcome,
+    {
+      ...INFRA_ATTEMPTS_LEFT,
+      infraAttempts: INFRA_ATTEMPTS_LEFT.infraAttempts + 1,
+      authFailure: highConfAuthFromLog("muse_code", log, {
+        probeStillFailing: false,
+        authTransientRetrySpent: true,
+      }),
+    },
+    PINNED_HEAD
+  );
+  assert.equal(second.next, "human_action");
+  assert.ok((second as { runtimeAuthPark?: unknown }).runtimeAuthPark);
+});
+
+test("NOT-368: reviewer medium-confidence / unattributed auth keeps retry_reviewer", () => {
+  const outcome: ReviewerOutcome = { kind: "session_failed", reason: "Not logged in" };
+  const result = routeReviewerOutcome(outcome, INFRA_ATTEMPTS_LEFT, PINNED_HEAD);
+  assert.deepStrictEqual(result, {
+    next: "retry_reviewer",
+    headSha: PINNED_HEAD,
+    reason: "Not logged in",
+  });
+});
