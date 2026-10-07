@@ -322,10 +322,12 @@ function issueBlobDir(issueId: string): string {
 
 /**
  * Move staged files into the Dealer-owned blob dir and return the final
- * records (files + links). The blob path is deterministic per
- * (issue, safe name), so a reload that re-snapshots identical content lands
- * on the same bytes; rows are written separately by the caller inside its
- * own transaction.
+ * records (files + links). The blob path is content-addressed per
+ * (issue, sha256, safe name), so a staged reload NEVER overwrites a live
+ * blob: the old rows keep pointing at untouched bytes until the caller's
+ * transaction swaps the rows, and a failed transaction leaves the prior
+ * snapshot's bytes verifiable. Rows are written separately by the caller
+ * inside its own transaction; disused blobs are pruned after commit.
  */
 export function storeStagedAttachments(
   issueId: string,
@@ -334,13 +336,23 @@ export function storeStagedAttachments(
   const dir = issueBlobDir(issueId);
   const records: SourceAttachmentRecord[] = [];
   for (const f of staged.files) {
-    const dest = path.resolve(dir, f.safeFileName);
-    if (dest !== path.join(dir, f.safeFileName) || path.basename(dest) !== f.safeFileName) {
+    const blobFileName = `${f.sha256}-${f.safeFileName}`;
+    const dest = path.resolve(dir, blobFileName);
+    if (dest !== path.join(dir, blobFileName) || path.basename(dest) !== blobFileName) {
       throw new SourceAttachmentError(
         `Refusing to snapshot "${f.title}": the safe file name escapes the blob directory. Nothing was queued.`
       );
     }
-    fs.copyFileSync(f.tempPath, dest);
+    if (fs.existsSync(dest)) {
+      const digest = createHash("sha256").update(fs.readFileSync(dest)).digest("hex");
+      if (digest !== f.sha256) {
+        throw new SourceAttachmentError(
+          `Refusing to snapshot "${f.title}": a different file already occupies the snapshot path. Nothing was queued.`
+        );
+      }
+    } else {
+      fs.copyFileSync(f.tempPath, dest);
+    }
     records.push({
       linearAttachmentId: f.linearAttachmentId,
       kind: "file",
@@ -369,6 +381,32 @@ export function storeStagedAttachments(
  * rows (and the caller's text writes, when composed in the same transaction
  * by the caller — see source-reload) untouched.
  */
+/**
+ * Delete staged-but-never-committed blob files: every `after` blob not
+ * referenced by `before` (best-effort). Called when the caller's transaction
+ * throws after `storeStagedAttachments` already copied bytes, so a failed
+ * import/reload leaves no orphan blobs behind. Only touches paths inside
+ * the Dealer-owned blob dir.
+ */
+export function pruneUncommittedBlobs(
+  before: readonly SourceAttachmentRecord[],
+  after: readonly SourceAttachmentRecord[]
+): void {
+  const keep = new Set(before.map((r) => r.blobPath).filter((p): p is string => Boolean(p)));
+  for (const row of after) {
+    if (row.blobPath && !keep.has(row.blobPath)) {
+      try {
+        const resolved = path.resolve(row.blobPath);
+        if (resolved.startsWith(path.resolve(getSourceAttachmentsDir()) + path.sep)) {
+          fs.rmSync(resolved, { force: true });
+        }
+      } catch {
+        // retain on failure
+      }
+    }
+  }
+}
+
 /**
  * Delete blob files the new snapshot no longer references (best-effort: a
  * leftover is retained-history, never a correctness issue). Only touches
@@ -402,7 +440,12 @@ export async function reconcileSourceAttachments(
   const staged = await stageSourceAttachments(attachments, opts);
   try {
     const records = storeStagedAttachments(issueId, staged);
-    getDb().transaction(() => replaceSourceAttachments(issueId, records))();
+    try {
+      getDb().transaction(() => replaceSourceAttachments(issueId, records))();
+    } catch (err) {
+      pruneUncommittedBlobs(before, records);
+      throw err;
+    }
     pruneDisusedBlobs(before, records);
     return records;
   } finally {

@@ -23,6 +23,7 @@ import { getLinearIssue } from "../adapters/linear-inbox.js";
 import {
   discardStaged,
   pruneDisusedBlobs,
+  pruneUncommittedBlobs,
   SourceAttachmentError,
   stageSourceAttachments,
   storeStagedAttachments,
@@ -122,10 +123,12 @@ export async function reloadIssueSourceFromLinear(
 
   // NOT-364: staged all-or-nothing attachment reconciliation, reusing the same
   // operation as import. Every hosted file downloads (and the refreshed
-  // contract compiles) BEFORE the write transaction; the rows then swap
-  // inside that transaction, so a failed reload preserves the old task text
-  // AND the old attachment snapshot. Removed Linear files disappear from the
-  // pre-execution snapshot; their blobs are pruned after a successful commit.
+  // contract compiles) BEFORE the write transaction; staged bytes land on
+  // content-addressed paths the live rows never reference, and the rows then
+  // swap inside that transaction, so a failed reload preserves the old task
+  // text AND the old attachment snapshot (old blob bytes stay verifiable).
+  // Removed Linear files disappear from the pre-execution snapshot; their
+  // blobs are pruned after a successful commit.
   const prevAttachments = listSourceAttachments(issueId);
   let staged: Awaited<ReturnType<typeof stageSourceAttachments>> | null = null;
   try {
@@ -185,6 +188,10 @@ export async function reloadIssueSourceFromLinear(
     pruneDisusedBlobs(prevAttachments, nextAttachmentRecords);
     return { ok: true, issue: updated };
   } catch (err) {
+    // The staged bytes landed on content-addressed paths the old rows never
+    // reference, so the prior snapshot is intact — drop the orphaned new
+    // blobs before answering.
+    pruneUncommittedBlobs(prevAttachments, nextAttachmentRecords);
     const code = (err as { code?: number }).code;
     const message = err instanceof Error ? err.message : String(err);
     if (code === 404 || code === 409) return { ok: false, code, error: message };

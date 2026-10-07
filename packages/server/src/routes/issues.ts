@@ -1,5 +1,6 @@
 // packages/server/src/routes/issues.ts
 import fs from "node:fs";
+import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import {
   CreateIssueInput,
@@ -45,6 +46,7 @@ import {
   storeStagedAttachments,
 } from "../coordinator/source-attachments.js";
 import { listSourceAttachments, replaceSourceAttachments } from "../repository/source-attachments.js";
+import { getSourceAttachmentsDir } from "../paths.js";
 import { persistLinearBranchForIssue } from "../adapters/linear-inbox.js";
 import { deriveLiveProgressFromLog } from "../coordinator/session-progress.js";
 import { branchTipStatusForIssue } from "../coordinator/branch-tip-status.js";
@@ -300,12 +302,16 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     // NOT-306: an ambiguous/malformed execution contract in the ticket
     // description is a 400 with an actionable message, never a silent drop.
     let issue: Issue;
+    // The issue id minted inside the transaction, so a throw after the blob
+    // copy can remove the orphaned bytes (rows roll back; files do not).
+    let createdIssueId: string | null = null;
     try {
       // The issue row and its attachment rows commit in one transaction — a
       // throw below the staging point (contract error, blob-store failure)
       // rolls back to zero rows, never a partially hydrated issue.
       issue = getDb().transaction((): Issue => {
         const created = createIssue(input);
+        createdIssueId = created.id;
         if (staged) {
           replaceSourceAttachments(created.id, storeStagedAttachments(created.id, staged));
         }
@@ -313,6 +319,16 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       })();
     } catch (err) {
       if (staged) discardStaged(staged);
+      if (createdIssueId) {
+        try {
+          const orphanDir = path.resolve(getSourceAttachmentsDir(), createdIssueId);
+          if (orphanDir.startsWith(path.resolve(getSourceAttachmentsDir()) + path.sep)) {
+            fs.rmSync(orphanDir, { recursive: true, force: true });
+          }
+        } catch {
+          // orphan blobs are retained history, never a correctness issue
+        }
+      }
       if (err instanceof ExecutionContractError) {
         return reply.status(400).send({ error: err.message });
       }

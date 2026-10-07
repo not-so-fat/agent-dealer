@@ -278,13 +278,13 @@ test("reload reconciles added, changed, and removed attachments atomically", asy
   assert.equal(changed.sha256, createHash("sha256").update(TARBALL_V2).digest("hex"));
   assert.deepEqual(fs.readFileSync(changed.blobPath!), TARBALL_V2);
   assert.ok(rows.some((r) => r.linearAttachmentId === "att-file-3"));
-  // Removed files disappear from the pre-execution snapshot (no att-file-2
-  // was ever here, but the changed file's old blob path is either reused or
-  // pruned — either way the bytes on record are the new ones).
+  // Removed files disappear from the pre-execution snapshot. Blob paths are
+  // content-addressed, so the changed file lands on a new path with the new
+  // bytes and the old blob is pruned.
   assert.deepEqual(fs.readFileSync(changed.blobPath!), TARBALL_V2);
   assert.ok(!rows.some((r) => r.linearAttachmentId === "att-file-2"));
-  // Old blob bytes are gone when the path changed; reused paths carry new bytes.
-  if (changed.blobPath !== oldBlob) assert.ok(!fs.existsSync(oldBlob));
+  assert.notEqual(changed.blobPath, oldBlob);
+  assert.ok(!fs.existsSync(oldBlob));
   await app.close();
 });
 
@@ -364,6 +364,68 @@ test("the frozen manifest survives later row changes; legacy snapshots read empt
   });
   replaceSourceAttachments(legacy.id, frozen);
   assert.deepEqual(getTaskSnapshot(getIssue(legacy.id)!).sourceAttachments, []);
+});
+
+test("reload race with admission (in-transaction 409) leaves prior blob bytes untouched", async () => {
+  downloadBytes.set(FILE_URL, TARBALL_V1);
+  const app = await buildApp();
+  const created = (await (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: { ...BASE_LINEAR, linearAttachments: [FILE_ATT] },
+    })
+  ).json()) as { id: string };
+  const beforeRows = listSourceAttachments(created.id);
+  assert.equal(beforeRows.length, 1);
+  const beforeBlobPath = beforeRows[0]!.blobPath!;
+  const beforeHash = createHash("sha256").update(fs.readFileSync(beforeBlobPath)).digest("hex");
+
+  // The refreshed ticket carries changed bytes for the same attachment id.
+  downloadBytes.set(FILE_URL, TARBALL_V2);
+  const { reloadIssueSourceFromLinear } = await import("../coordinator/source-reload.js");
+  const { startWorkflowInstance } = await import("../repository/workflow-events.js");
+  const { getSourceAttachmentsDir } = await import("../paths.js");
+  const result = await reloadIssueSourceFromLinear(created.id, {
+    fetchLinearIssue: async (externalId: string) => {
+      // Admission wins the race mid-flight: by the time the write
+      // transaction runs, an active workflow owns the issue, so the
+      // in-transaction guard must answer 409 with no partial write.
+      startWorkflowInstance(created.id, "dev_reviewer_v1");
+      return {
+        id: externalId,
+        identifier: "NOT-1",
+        title: "Reloaded title",
+        description: "Do the thing, reloaded.",
+        url: "https://linear.app/not-so-fat/issue/NOT-1/x",
+        attachments: [{ id: "att-file-1", title: "repro.tar.gz", url: FILE_URL }],
+      };
+    },
+  });
+  if (result.ok) assert.fail("expected the admission race to answer 409");
+  assert.equal(result.code, 409);
+
+  // Old task text and old attachment rows preserved — and, crucially, the
+  // old blob path still holds the old bytes (a pre-fix store overwrote the
+  // deterministic path before the transaction, breaking the frozen sha256).
+  const { getIssue } = await import("../repository/issues.js");
+  assert.equal(getIssue(created.id)!.title, BASE_LINEAR.title);
+  const afterRows = listSourceAttachments(created.id);
+  assert.deepEqual(
+    afterRows.map((r) => r.linearAttachmentId),
+    ["att-file-1"]
+  );
+  assert.equal(afterRows[0]!.blobPath, beforeBlobPath);
+  assert.deepEqual(fs.readFileSync(afterRows[0]!.blobPath!), TARBALL_V1);
+  assert.equal(
+    createHash("sha256").update(fs.readFileSync(afterRows[0]!.blobPath!)).digest("hex"),
+    beforeHash
+  );
+  // The staged-but-never-committed V2 bytes were pruned, not left behind.
+  assert.deepEqual(fs.readdirSync(path.join(getSourceAttachmentsDir(), created.id)), [
+    path.basename(beforeBlobPath),
+  ]);
+  await app.close();
 });
 
 test("failed reload preserves the old task text and attachment snapshot", async () => {
