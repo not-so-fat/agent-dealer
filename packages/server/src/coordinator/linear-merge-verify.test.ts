@@ -289,6 +289,31 @@ test("stale twice: exactly one completed-state write plus one comment, issue sta
   assert.ok(contents.some((c) => c.fallback === "written"));
 });
 
+test("concurrent stale checks join one in-flight run: single fallback write", async () => {
+  const state = freshStub(staleIssue());
+  stubLinear(state);
+
+  // A done issue reached without the merge path (which would already have run
+  // the check): overlapping checks must share one in-flight run instead of
+  // each writing the fallback.
+  const { transitionIssue } = await import("../repository/issues.js");
+  const issueId = newLinearIssue();
+  transitionIssue(issueId, "developing", { prUrl: PR_URL });
+  transitionIssue(issueId, "reviewing");
+  transitionIssue(issueId, "final_review");
+  transitionIssue(issueId, "done");
+
+  const [first, second] = await Promise.all([
+    verifyLinearPostMerge(issueId),
+    verifyLinearPostMerge(issueId),
+  ]);
+  assert.equal(first.checked, true);
+  assert.equal(second.checked, true);
+  assert.equal(getIssue(issueId)!.status, "done");
+  assert.equal(state.calls.stateWrites, 1);
+  assert.equal(state.calls.comments, 1);
+});
+
 test("failed fallback twice: exactly one open human action naming identifier, PR URL, state", async () => {
   const state = freshStub(staleIssue());
   state.failStateWriteWith = "no write access";

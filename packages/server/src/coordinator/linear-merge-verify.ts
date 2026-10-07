@@ -189,11 +189,27 @@ function staleReasonText(opts: {
  * the one human action. Records an artifact in every direction. Never throws
  * and never touches the Dealer issue's status.
  */
+// NOT-362 round 3: per-issue in-flight guard. The stale fallback records
+// `fallback: "written"` only via the artifact written *after* the Linear state
+// + comment mutations, so two overlapping checks for one issue (finalize's
+// done-already branch re-entered by recovery, or abort/resolve racing
+// finalize) could both observe stale and each write. Concurrent checks for one
+// issue join the in-flight run instead of running twice; sequential re-runs
+// still execute and stay single-write via the artifact guard.
+const verifyInflightByIssue = new Map<string, Promise<LinearPostMergeResult>>();
+
 export async function verifyLinearPostMerge(issueId: string): Promise<LinearPostMergeResult> {
+  const inflight = verifyInflightByIssue.get(issueId);
+  if (inflight) return inflight;
+  const pending = verifyLinearPostMergeInner(issueId).then(
+    (result) => result,
+    (err) => ({ checked: false, reason: err instanceof Error ? err.message : String(err) } as LinearPostMergeResult)
+  );
+  verifyInflightByIssue.set(issueId, pending);
   try {
-    return await verifyLinearPostMergeInner(issueId);
-  } catch (err) {
-    return { checked: false, reason: err instanceof Error ? err.message : String(err) };
+    return await pending;
+  } finally {
+    if (verifyInflightByIssue.get(issueId) === pending) verifyInflightByIssue.delete(issueId);
   }
 }
 

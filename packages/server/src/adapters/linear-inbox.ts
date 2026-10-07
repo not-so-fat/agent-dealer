@@ -9,7 +9,7 @@ import type {
 } from "@agent-dealer/shared";
 import { resolveLinearRepoWithMappings } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
-import { getIssue } from "../repository/issues.js";
+import { getIssue, listIssuesByExternalId } from "../repository/issues.js";
 import { DEFAULT_LINEAR_STATE_FILTER, getLinearIntakeConfig } from "../repository/intake-settings.js";
 import { listRepositoryMappings } from "../repository/repository-mappings.js";
 import { LinearApiKeyMissingError, linearGraphqlRequest } from "./linear-graphql.js";
@@ -509,6 +509,8 @@ export async function lookupLinearIssue(raw: string): Promise<LinearCandidate | 
  * manual (`source != 'linear'`) issues are untouched, and a Linear issue with
  * no branch name falls back to the conventional `issue-<id>` — the same value
  * `developerBranchName` would derive, materialized so the stored row says it.
+ * First pass only: a second Dealer issue for the same ticket (NOT-141) keeps
+ * `issue-<id>` so it never reuses the first pass's branch.
  * Best-effort: an unreadable Linear (no key, outage) leaves the branch null
  * and never fails the import.
  */
@@ -517,6 +519,24 @@ export async function persistLinearBranchForIssue(issueId: string): Promise<stri
     const issue = getIssue(issueId);
     if (!issue || issue.source !== "linear" || !issue.externalId) return issue?.branch ?? null;
     if (issue.branch) return issue.branch;
+    // NOT-362 round 3: Linear's branchName is per Linear ticket, but each Dealer
+    // issue needs a unique branch per pass. routes/issues.ts (NOT-141) creates a
+    // fresh Dealer issue when an earlier pass for the same ticket is done/closed,
+    // and auto-merge squashes without deleting the branch — so a second pass
+    // seeded with the same Linear name would check out the first pass's branch
+    // (still holding pre-squash commits) and `gh pr view <branch>` could return
+    // the old MERGED PR. Seed the Linear name only for the first pass; later
+    // passes keep the conventional `issue-<id>`.
+    const priorPass = listIssuesByExternalId(issue.source, issue.externalId).some(
+      (row) => row.id !== issue.id
+    );
+    if (priorPass) {
+      const fallback = `issue-${issue.id}`;
+      getDb()
+        .prepare("UPDATE issues SET branch = ?, updated_at = ? WHERE id = ? AND branch IS NULL")
+        .run(fallback, new Date().toISOString(), issue.id);
+      return getIssue(issue.id)?.branch ?? fallback;
+    }
     const candidate = await getLinearIssue(issue.externalId);
     const branch = candidate?.branchName?.trim() || `issue-${issue.id}`;
     getDb()

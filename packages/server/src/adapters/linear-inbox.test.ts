@@ -400,6 +400,36 @@ test("persistLinearBranchForIssue falls back to issue-<id> with no Linear branch
   }
 });
 
+test("persistLinearBranchForIssue seeds issue-<id> on a second pass for the same ticket", async () => {
+  const { persistLinearBranchForIssue } = await import("./linear-inbox.js");
+  const { getIssue, transitionIssue } = await import("../repository/issues.js");
+  await stubGetLinearIssue({
+    id: "lin-3",
+    identifier: "NOT-3",
+    title: "three",
+    url: "https://linear.app/x/issue/NOT-3/three",
+    branchName: "owner/ate-3-shared-linear-branch",
+    state: { name: "Todo" },
+    team: { id: "team-9" },
+    labels: { nodes: [] },
+  });
+  try {
+    const firstId = await makeStoredIssue("linear", "lin-3");
+    await persistLinearBranchForIssue(firstId);
+    assert.equal(getIssue(firstId)!.branch, "owner/ate-3-shared-linear-branch");
+    // The first pass ran to completion (NOT-141): the ticket is re-imported as
+    // a fresh Dealer issue. Reusing the Linear branch would check out the old
+    // branch (still holding pre-squash commits) and `gh pr view <branch>` could
+    // return the old MERGED PR — so the second pass must not reuse it.
+    transitionIssue(firstId, "closed");
+    const secondId = await makeStoredIssue("linear", "lin-3");
+    await persistLinearBranchForIssue(secondId);
+    assert.equal(getIssue(secondId)!.branch, `issue-${secondId}`);
+  } finally {
+    restoreFetch();
+  }
+});
+
 test("persistLinearBranchForIssue leaves manual issues unchanged", async () => {
   const { persistLinearBranchForIssue } = await import("./linear-inbox.js");
   const { getIssue } = await import("../repository/issues.js");
