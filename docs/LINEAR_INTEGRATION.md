@@ -80,7 +80,7 @@ Exact identifier/URL lookup (`GET /api/intake/linear/lookup`) ignores saved pick
 
 Re-importing a Linear issue that is already present is idempotent: rather than creating a duplicate, it re-enqueues the existing issue when that issue is in a state admission can start.
 
-4. **Refine before execution (NOT-363)** — While the issue is still `ready` with no active workflow or running worker, the Issue Detail offers **Reload from Linear** (Linear-sourced issues only) and **Edit title / description / acceptance criteria** (every pre-execution `ready` issue, even when readiness already passes). Reload pulls the latest ticket title/description through the same adapter and title convention as import (`<identifier>: <title>`), recompiles the execution contract, and replaces the acceptance criteria with the freshly derived ones — old local criteria never survive a reload. Repository, agents, policy limits, auto-merge, and queue position are unchanged, and nothing is written back to Linear. Once execution owns the snapshot (admitted/running), both paths refuse with 409. Dealer never polls Linear after import; attachments are not imported.
+4. **Refine before execution (NOT-363)** — While the issue is still `ready` with no active workflow or running worker, the Issue Detail offers **Reload from Linear** (Linear-sourced issues only) and **Edit title / description / acceptance criteria** (every pre-execution `ready` issue, even when readiness already passes). Reload pulls the latest ticket title/description through the same adapter and title convention as import (`<identifier>: <title>`), recompiles the execution contract, and replaces the acceptance criteria with the freshly derived ones — old local criteria never survive a reload. Repository, agents, policy limits, auto-merge, and queue position are unchanged, and nothing is written back to Linear. Once execution owns the snapshot (admitted/running), both paths refuse with 409. Dealer never polls Linear after import; a reload also reconciles [issue attachments](#issue-attachments-not-364).
 
 ### Repository labels (NOT-251; replaces the NOT-242 confirmation flow)
 
@@ -122,6 +122,24 @@ Dealer never creates or mutates Linear labels — it only reads and validates
 them, and never writes them back. See
 [Production setup](PROD_SETUP.md) for the one-time Linear label, template,
 and Triage Rule setup that automates the input.
+
+### Issue attachments (NOT-364)
+
+A Linear issue's own file attachments (e.g. `repro.tar.gz`) are snapshotted
+into Dealer-owned storage so a Builder working the issue receives durable
+local bytes — never just the ticket text or an expiring Linear download URL:
+
+| Topic | Behavior |
+|-------|----------|
+| **What's covered** | The issue's own `attachments` connection: Linear-hosted file uploads and external link attachments. |
+| **Hosted files** | Downloaded at import and at every **Reload from Linear**, before any issue/queue row is written. Bytes live under `<AGENT_DEALER_HOME>/source-attachments/<issueId>/` with the safe file name, content type, byte size, and SHA-256 recorded beside the row. |
+| **Size limits** | 100 MiB per file, 250 MiB total per issue. An oversized or failed download refuses the whole import/reload with an actionable error (400 for limit violations, 502 for download failures) — a partially hydrated issue is never created or queued. |
+| **Reload** | Reconciled by stable Linear attachment id, staged all-or-nothing: new/changed files replace the prior snapshot only after every download succeeds; removed Linear files disappear. A failed reload preserves the old task text and attachments. |
+| **Frozen for the run** | The attachment manifest freezes with the task snapshot at workflow start — a later Linear edit cannot silently change the inputs repair rounds see. Every developer attempt re-materializes the same frozen bytes under `.agent-dealer-inputs/linear/` in its worktree (git-ignored via `info/exclude`); worktree copies vanish with normal worktree cleanup. Reviewers receive the manifest metadata only, never file contents. |
+| **External links** | Listed as links (title, URL, subtitle/source metadata) in the manifest, the developer prompt, and Issue Detail — never downloaded, never promised as offline files. |
+| **Explicitly excluded** | Files embedded only in Linear comments or synced Slack threads are never queried and never snapshotted. Archives are never auto-extracted. |
+| **Trust boundary** | Attachments are untrusted ticket inputs: the developer prompt says to inspect only what the task needs, never commit them, never extract archives outside a fresh contained directory, and never fetch external-link targets automatically. Nothing Dealer generates is uploaded back to Linear. |
+| **Retention** | Source blobs are retained with the issue history (`closed` issues stay queryable; there is no hard-delete path). |
 
 ### Repository mappings (NOT-260)
 

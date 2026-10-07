@@ -33,6 +33,8 @@ export const WorkflowEventType = z.enum([
   "worktree.ready",
   /** NOT-315: pre-spawn dependency provisioning settled (ran or skipped). */
   "worktree.deps_ready",
+  /** NOT-364: frozen Linear source attachments materialized into the worktree. */
+  "inputs.materialized",
   "deck.connected",
   "brief.resolved",
   "branch.pushed",

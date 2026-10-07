@@ -20,6 +20,18 @@ import { getIssue } from "../repository/issues.js";
 import { appendWorkflowEvent, getActiveWorkflowInstance } from "../repository/workflow-events.js";
 import { getActiveWorkerSessionForIssue } from "../repository/worker-sessions.js";
 import { getLinearIssue } from "../adapters/linear-inbox.js";
+import {
+  discardStaged,
+  pruneDisusedBlobs,
+  pruneUncommittedBlobs,
+  SourceAttachmentError,
+  stageSourceAttachments,
+  storeStagedAttachments,
+} from "./source-attachments.js";
+import {
+  listSourceAttachments,
+  replaceSourceAttachments,
+} from "../repository/source-attachments.js";
 
 export type ReloadSourceResult =
   | { ok: true; issue: Issue }
@@ -109,6 +121,31 @@ export async function reloadIssueSourceFromLinear(
   const prevTitleDigest = digestTaskText(issue.title);
   const prevDescriptionDigest = digestTaskText(issue.description);
 
+  // NOT-364: staged all-or-nothing attachment reconciliation, reusing the same
+  // operation as import. Every hosted file downloads (and the refreshed
+  // contract compiles) BEFORE the write transaction; staged bytes land on
+  // content-addressed paths the live rows never reference, and the rows then
+  // swap inside that transaction, so a failed reload preserves the old task
+  // text AND the old attachment snapshot (old blob bytes stay verifiable).
+  // Removed Linear files disappear from the pre-execution snapshot; their
+  // blobs are pruned after a successful commit.
+  const prevAttachments = listSourceAttachments(issueId);
+  let staged: Awaited<ReturnType<typeof stageSourceAttachments>> | null = null;
+  try {
+    staged = await stageSourceAttachments(candidate.attachments);
+  } catch (err) {
+    if (err instanceof SourceAttachmentError) {
+      return { ok: false, code: err.httpStatus, error: err.message };
+    }
+    throw err;
+  }
+  let nextAttachmentRecords;
+  try {
+    nextAttachmentRecords = storeStagedAttachments(issueId, staged);
+  } finally {
+    discardStaged(staged);
+  }
+
   try {
     const updated = getDb().transaction((): Issue => {
       const fresh = getIssue(issueId);
@@ -128,6 +165,7 @@ export async function reloadIssueSourceFromLinear(
           acceptance_criteria: nextAcceptanceCriteria,
           updated_at: now,
         });
+      replaceSourceAttachments(issueId, nextAttachmentRecords);
       appendWorkflowEvent({
         issueId,
         type: "issue.source_reloaded",
@@ -147,8 +185,13 @@ export async function reloadIssueSourceFromLinear(
       if (!next) throw Object.assign(new Error("Not found"), { code: 404 });
       return next;
     })();
+    pruneDisusedBlobs(prevAttachments, nextAttachmentRecords);
     return { ok: true, issue: updated };
   } catch (err) {
+    // The staged bytes landed on content-addressed paths the old rows never
+    // reference, so the prior snapshot is intact — drop the orphaned new
+    // blobs before answering.
+    pruneUncommittedBlobs(prevAttachments, nextAttachmentRecords);
     const code = (err as { code?: number }).code;
     const message = err instanceof Error ? err.message : String(err);
     if (code === 404 || code === 409) return { ok: false, code, error: message };

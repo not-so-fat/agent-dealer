@@ -23,6 +23,7 @@ import type {
   QueueMoveTarget,
   ReportFilterState,
   RuntimeCapacityResponse,
+  SourceAttachmentRecord,
   RuntimeModelsResponse,
   StartIssueResponse,
   UpdateAgentInput,
@@ -269,6 +270,12 @@ export interface IssueDetail {
       preserved: boolean;
     } | null;
   } | null;
+  /**
+   * NOT-364: durable Linear source attachments — files with safe name, size
+   * and checksum; links as labeled metadata only. Empty when the issue has
+   * none (or predates attachment snapshots).
+   */
+  sourceAttachments?: SourceAttachmentRecord[];
   /** NOT-103: whether this issue is in the admission queue. */
   queued?: boolean;
   /** NOT-118: queue position (1-based) and current wait reason while it is queued. */

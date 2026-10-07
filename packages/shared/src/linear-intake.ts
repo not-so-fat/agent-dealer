@@ -205,3 +205,63 @@ export function resolveLinearRepoLabels(labels: readonly string[] | undefined): 
     return { status: "invalid", labels: [raw], error: (err as Error).message };
   }
 }
+
+/**
+ * NOT-364: a Linear issue attachment as returned by the direct GraphQL query.
+ * `subtitle` and `source` are Linear's own optional metadata (present on link
+ * attachments that point at external documents, often absent on uploaded
+ * files). Files that exist only inside Linear *comments* never appear here —
+ * the query reads the issue's own `attachments` connection only.
+ */
+export const LinearAttachment = z.object({
+  /** Stable Linear attachment id — the reconciliation key across reloads. */
+  id: z.string(),
+  /** Display name (`repro.tar.gz`) or link title. */
+  title: z.string(),
+  /** Download URL for hosted files (short-lived) or the external target for links. */
+  url: z.string(),
+  subtitle: z.string().optional(),
+  /** Linear's source metadata, coerced to a string by the adapter when needed. */
+  source: z.string().optional(),
+});
+export type LinearAttachment = z.infer<typeof LinearAttachment>;
+
+/**
+ * NOT-364: Linear-hosted file uploads live under Linear's own upload hosts;
+ * everything else is an ordinary external link. Hosted files are snapshotted
+ * into Dealer-owned storage at import/reload so a queued Builder never needs
+ * the (expiring) Linear URL; links are metadata only and never downloaded.
+ */
+export function isLinearHostedAttachmentUrl(rawUrl: string): boolean {
+  let host: string;
+  try {
+    host = new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return host === "uploads.linear.app" || host.endsWith(".uploads.linear.app") || host === "linear.app" || host.endsWith(".linear.app");
+}
+
+/**
+ * NOT-364: a durable Dealer-side record of one Linear issue attachment.
+ * `kind: "file"` rows carry a Dealer-owned `blobPath` plus integrity fields;
+ * `kind: "link"` rows carry source metadata only and must never be presented
+ * as offline-available files.
+ */
+export const SourceAttachmentRecord = z.object({
+  linearAttachmentId: z.string(),
+  kind: z.enum(["file", "link"]),
+  title: z.string(),
+  /** Worktree-local safe basename for files — absent on links. */
+  safeFileName: z.string().optional(),
+  /** Dealer-owned blob path for downloaded files — absent on links. */
+  blobPath: z.string().optional(),
+  contentType: z.string().optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
+  sha256: z.string().optional(),
+  /** The Linear (possibly expiring) URL for files, the external target for links. */
+  url: z.string(),
+  subtitle: z.string().optional(),
+  source: z.string().optional(),
+});
+export type SourceAttachmentRecord = z.infer<typeof SourceAttachmentRecord>;

@@ -1,5 +1,6 @@
 // packages/server/src/routes/issues.ts
 import fs from "node:fs";
+import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import {
   CreateIssueInput,
@@ -38,6 +39,14 @@ import { enqueueIssue, enqueueIssueWithOutcome, getQueuedEntryForIssue } from ".
 import { latestSessionFailureForIssue } from "../coordinator/latest-failure.js";
 import { getIssueExecutionAnalysis } from "../read-models/execution-analysis.js";
 import { reloadIssueSourceFromLinear } from "../coordinator/source-reload.js";
+import {
+  discardStaged,
+  SourceAttachmentError,
+  stageSourceAttachments,
+  storeStagedAttachments,
+} from "../coordinator/source-attachments.js";
+import { listSourceAttachments, replaceSourceAttachments } from "../repository/source-attachments.js";
+import { getSourceAttachmentsDir } from "../paths.js";
 import { persistLinearBranchForIssue } from "../adapters/linear-inbox.js";
 import { deriveLiveProgressFromLog } from "../coordinator/session-progress.js";
 import { branchTipStatusForIssue } from "../coordinator/branch-tip-status.js";
@@ -187,6 +196,9 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       // NOT-358: usage-cap / deck-outage wait behind an availability window, if any —
       // the dashboard offers "Park for human" next to the wait notice.
       capWait: capWaitForIssue(id),
+      // NOT-364: durable Linear source attachments — files with safe name, size
+      // and checksum plus Dealer blob path; links as labeled metadata only.
+      sourceAttachments: listSourceAttachments(id),
     };
   });
 
@@ -267,17 +279,65 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
         } satisfies ExistingIssueConflict);
       }
     }
+    // NOT-364: snapshot Linear-hosted files BEFORE any row exists. The
+    // From-Linear form sends the lookup-time attachment metadata; every hosted
+    // file streams into the staging dir here, so an HTTP failure, timeout, or
+    // limit breach refuses the whole create with zero issue/queue/attachment
+    // rows. External links pass through as metadata (never downloaded).
+    // Non-Linear sources ignore the field; re-imports of a live issue return
+    // above and never re-download (use Reload from Linear pre-execution).
+    const snapshotAttachments =
+      input.source === "linear" && (input.linearAttachments?.length ?? 0) > 0;
+    let staged: Awaited<ReturnType<typeof stageSourceAttachments>> | null = null;
+    if (snapshotAttachments) {
+      try {
+        staged = await stageSourceAttachments(input.linearAttachments ?? []);
+      } catch (err) {
+        if (err instanceof SourceAttachmentError) {
+          return reply.status(err.httpStatus).send({ error: err.message });
+        }
+        throw err;
+      }
+    }
     // NOT-306: an ambiguous/malformed execution contract in the ticket
     // description is a 400 with an actionable message, never a silent drop.
     let issue: Issue;
+    // The issue id minted inside the transaction, so a throw after the blob
+    // copy can remove the orphaned bytes (rows roll back; files do not).
+    let createdIssueId: string | null = null;
     try {
-      issue = createIssue(input);
+      // The issue row and its attachment rows commit in one transaction — a
+      // throw below the staging point (contract error, blob-store failure)
+      // rolls back to zero rows, never a partially hydrated issue.
+      issue = getDb().transaction((): Issue => {
+        const created = createIssue(input);
+        createdIssueId = created.id;
+        if (staged) {
+          replaceSourceAttachments(created.id, storeStagedAttachments(created.id, staged));
+        }
+        return created;
+      })();
     } catch (err) {
+      if (staged) discardStaged(staged);
+      if (createdIssueId) {
+        try {
+          const orphanDir = path.resolve(getSourceAttachmentsDir(), createdIssueId);
+          if (orphanDir.startsWith(path.resolve(getSourceAttachmentsDir()) + path.sep)) {
+            fs.rmSync(orphanDir, { recursive: true, force: true });
+          }
+        } catch {
+          // orphan blobs are retained history, never a correctness issue
+        }
+      }
       if (err instanceof ExecutionContractError) {
         return reply.status(400).send({ error: err.message });
       }
+      if (err instanceof SourceAttachmentError) {
+        return reply.status(err.httpStatus).send({ error: err.message });
+      }
       throw err;
     }
+    if (staged) discardStaged(staged);
     // NOT-362: seed the issue branch from Linear's own `branchName` (source
     // `linear` only; manual issues untouched). Best-effort and awaited — the
     // developer round reads the branch at admission, so it must be stored

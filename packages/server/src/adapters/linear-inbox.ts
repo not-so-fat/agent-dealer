@@ -1,4 +1,5 @@
 import type {
+  LinearAttachment,
   LinearCandidate,
   LinearCandidatesPage,
   LinearIntakeConfig,
@@ -20,6 +21,15 @@ export { DEFAULT_LINEAR_STATE_FILTER };
 export const LINEAR_CANDIDATE_PAGE_SIZE = 50;
 const PAGE_SIZE = LINEAR_CANDIDATE_PAGE_SIZE;
 
+interface LinearAttachmentNode {
+  id: string;
+  title?: string | null;
+  url?: string | null;
+  subtitle?: string | null;
+  /** Linear's source metadata — a string in practice, coerced defensively. */
+  source?: unknown;
+}
+
 interface LinearIssueNode {
   id: string;
   identifier: string;
@@ -29,6 +39,7 @@ interface LinearIssueNode {
   state?: { name: string };
   team?: { id: string };
   labels?: { nodes: Array<{ name: string }> };
+  attachments?: { nodes: LinearAttachmentNode[] };
   branchName?: string | null;
 }
 
@@ -62,11 +73,43 @@ async function linearQuery(
  * deterministic (one valid label resolves, zero is unresolved, several
  * conflict, a bad value is invalid) and never guesses from anything else.
  */
+/**
+ * NOT-364: the issue's own `attachments` connection — file uploads and
+ * external links attached to the ticket itself. Comment bodies and files
+ * uploaded only inside comments are never queried and never snapshotted.
+ * `source` is Linear's own metadata scalar; non-string values are coerced to
+ * a short string so the contract stays stable regardless of shape.
+ */
+export function nodeToAttachment(a: LinearAttachmentNode): LinearAttachment | null {
+  if (!a || typeof a.id !== "string" || !a.id) return null;
+  if (typeof a.url !== "string" || !a.url) return null;
+  const out: LinearAttachment = {
+    id: a.id,
+    title: typeof a.title === "string" && a.title ? a.title : a.id,
+    url: a.url,
+  };
+  if (typeof a.subtitle === "string" && a.subtitle) out.subtitle = a.subtitle;
+  if (typeof a.source === "string" && a.source) {
+    out.source = a.source;
+  } else if (a.source != null && typeof a.source === "object") {
+    try {
+      const rendered = JSON.stringify(a.source);
+      if (rendered && rendered !== "{}") out.source = rendered;
+    } catch {
+      // ignore unserializable source metadata
+    }
+  }
+  return out;
+}
+
 export function nodeToCandidate(
   n: LinearIssueNode,
   mappings?: readonly LinearRepositoryMapping[],
 ): LinearCandidate {
   const labels = n.labels?.nodes.map((l) => l.name) ?? [];
+  const attachments = (n.attachments?.nodes ?? [])
+    .map(nodeToAttachment)
+    .filter((a): a is LinearAttachment => a !== null);
   return {
     id: n.id,
     identifier: n.identifier,
@@ -81,6 +124,9 @@ export function nodeToCandidate(
       : {}),
     labels,
     repoResolution: resolveLinearRepoWithMappings(labels, mappings ?? []),
+    // Always present (possibly empty) so the UI can distinguish "no
+    // attachments" from "queried before attachments existed".
+    attachments,
   };
 }
 
@@ -94,6 +140,7 @@ const ISSUE_FIELDS = `
   state { name }
   team { id }
   labels { nodes { name } }
+  attachments { nodes { id title url subtitle source } }
 `;
 
 export async function getLinearViewer(): Promise<LinearViewer | null> {

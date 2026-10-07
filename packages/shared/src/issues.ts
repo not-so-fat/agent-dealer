@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { GitHubRepoInput } from "./github-repo.js";
+import { LinearAttachment } from "./linear-intake.js";
 import { ExecutionContractV1 } from "./execution-contract.js";
 
 export const IssueStatus = z.enum([
@@ -108,6 +109,15 @@ export const CreateIssueInput = z.object({
    * `false` creates a draft that sits outside the queue until someone adds or starts it.
    */
   enqueue: z.boolean().default(true),
+  /**
+   * NOT-364: Linear issue attachment metadata captured by the From-Linear form
+   * at lookup time. The server snapshots every Linear-hosted file before the
+   * issue/queue rows are written (atomic: any download/limit failure refuses
+   * the whole create); external links are stored as metadata only. Ignored
+   * for non-Linear sources. Never a stored issue field — rows live in
+   * `issue_source_attachments`.
+   */
+  linearAttachments: z.array(LinearAttachment).optional(),
 });
 /** Wire/API body shape — defaults applied by `CreateIssueInput.parse` / repository. */
 export type CreateIssueInput = z.input<typeof CreateIssueInput>;

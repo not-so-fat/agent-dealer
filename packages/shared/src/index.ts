@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { LinearRepoResolution } from "./linear-intake.js";
+import { LinearAttachment, LinearRepoResolution } from "./linear-intake.js";
 import { Runtime } from "./runtime.js";
 import { AgentWithHealth } from "./agents.js";
 import { PhaseBudget, RunBudget } from "./budget.js";
@@ -334,6 +334,11 @@ export const LinearCandidate = z.object({
    * Raw labels stay on the candidate; this is the deterministic read of them.
    */
   repoResolution: LinearRepoResolution.optional(),
+  /**
+   * NOT-364: the issue's own file/link attachments (never comment uploads).
+   * Hosted files are snapshotted at import/reload; links stay metadata only.
+   */
+  attachments: z.array(LinearAttachment).optional(),
 });
 export type LinearCandidate = z.infer<typeof LinearCandidate>;
 

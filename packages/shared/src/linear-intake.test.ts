@@ -9,8 +9,11 @@ import {
   LinearIntakeMetadata,
 } from "./index.js";
 import {
+  LinearAttachment,
   LinearRepoResolution,
+  SourceAttachmentRecord,
   extractRepoLabels,
+  isLinearHostedAttachmentUrl,
   normalizeLinearIntakePickerPatch,
   normalizeMappingLabel,
   normalizeRepositoryMappings,
@@ -235,6 +238,62 @@ test("LinearIntakeConfigView and Patch reject deleted routing fields and empty s
   );
   const patch = LinearIntakeConfigPatch.parse({ assigneeMe: true, teamId: "t-1" });
   assert.deepEqual(patch, { assigneeMe: true, teamId: "t-1" });
+});
+
+// NOT-364: Linear-hosted files vs external links, and the durable record shape.
+test("isLinearHostedAttachmentUrl distinguishes Linear uploads from external links", () => {
+  assert.equal(isLinearHostedAttachmentUrl("https://uploads.linear.app/abc/repro.tar.gz"), true);
+  assert.equal(isLinearHostedAttachmentUrl("https://files.uploads.linear.app/x.zip"), true);
+  assert.equal(isLinearHostedAttachmentUrl("https://linear.app/issue/attachment/x"), true);
+  assert.equal(isLinearHostedAttachmentUrl("https://docs.google.com/document/d/x"), false);
+  assert.equal(isLinearHostedAttachmentUrl("https://github.com/acme/app/archive/refs/heads/main.zip"), false);
+  assert.equal(isLinearHostedAttachmentUrl("https://evil-linear.app.evil.com/x.tar.gz"), false);
+  assert.equal(isLinearHostedAttachmentUrl("not a url"), false);
+});
+
+test("LinearAttachment and SourceAttachmentRecord parse the attachment contract", () => {
+  const file = LinearAttachment.parse({
+    id: "att-1",
+    title: "repro.tar.gz",
+    url: "https://uploads.linear.app/abc/repro.tar.gz",
+  });
+  assert.equal(file.subtitle, undefined);
+  const link = LinearAttachment.parse({
+    id: "att-2",
+    title: "Design doc",
+    url: "https://docs.example.com/x",
+    subtitle: "Spec",
+    source: "google-docs",
+  });
+  assert.equal(link.subtitle, "Spec");
+  const record = SourceAttachmentRecord.parse({
+    linearAttachmentId: "att-1",
+    kind: "file",
+    title: "repro.tar.gz",
+    safeFileName: "repro.tar.gz",
+    blobPath: "/data/source-attachments/issue-1/repro.tar.gz",
+    contentType: "application/gzip",
+    sizeBytes: 12,
+    sha256: "abc",
+    url: "https://uploads.linear.app/abc/repro.tar.gz",
+  });
+  assert.equal(record.kind, "file");
+  // Attachments stay optional so older candidates still parse.
+  const bare = LinearCandidate.parse({
+    id: "uuid-1",
+    identifier: "NOT-1",
+    title: "t",
+    url: "https://linear.app/x/issue/NOT-1/t",
+  });
+  assert.equal(bare.attachments, undefined);
+  const withAttachments = LinearCandidate.parse({
+    id: "uuid-1",
+    identifier: "NOT-1",
+    title: "t",
+    url: "https://linear.app/x/issue/NOT-1/t",
+    attachments: [file, link],
+  });
+  assert.equal(withAttachments.attachments?.length, 2);
 });
 
 test("LinearCandidatesPage and LinearIntakeMetadata parse the picker contracts", () => {

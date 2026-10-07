@@ -566,3 +566,31 @@ CREATE INDEX IF NOT EXISTS idx_queue_entries_queued_position
   ON queue_entries(position) WHERE state = 'queued';
 -- NOT-173: the read model loads every queue-entry row for an issue set.
 CREATE INDEX IF NOT EXISTS idx_queue_entries_issue ON queue_entries(issue_id);
+
+-- NOT-364: durable snapshots of a Linear issue's own file/link attachments.
+-- One row per (issue, Linear attachment id): hosted files carry a Dealer-owned
+-- blob_path plus integrity fields so a queued Builder never needs the
+-- expiring Linear URL; links carry source metadata only. Blobs live under
+-- <datadir>/source-attachments/<issueId>/ and are retained with the issue
+-- history (there is no hard delete — `closed` issues stay queryable).
+CREATE TABLE IF NOT EXISTS issue_source_attachments (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL REFERENCES issues(id),
+  linear_attachment_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('file', 'link')),
+  title TEXT NOT NULL,
+  safe_file_name TEXT,
+  blob_path TEXT,
+  content_type TEXT,
+  size_bytes INTEGER,
+  sha256 TEXT,
+  url TEXT NOT NULL,
+  subtitle TEXT,
+  source TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_source_attachments_issue_linear
+  ON issue_source_attachments(issue_id, linear_attachment_id);
+CREATE INDEX IF NOT EXISTS idx_issue_source_attachments_issue
+  ON issue_source_attachments(issue_id);
