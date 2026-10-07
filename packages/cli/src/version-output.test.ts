@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import http from "node:http";
 import net from "node:net";
 import { runCli } from "./index.js";
 import { runStart } from "./start.js";
@@ -8,24 +10,31 @@ import { getVersion } from "./version.js";
 
 const EXPECTED = `Agent Dealer version ${getVersion()}`;
 
-// No real sockets or child processes: health probing goes through global
-// fetch (stubbed per test, mirroring lifecycle.contract.test.ts) and TCP
+// No real sockets or child processes: health probing goes through node:http
+// (NOT-370: probes avoid undici fetch; http.get is stubbed per test) and TCP
 // reachability goes through net.connect (patched per test).
 let serviceUp = false;
 let tcpOpen = false;
 
-async function stubFetch(input: RequestInfo | URL): Promise<Response> {
-  const url = String(input);
-  if (url.endsWith("/health")) {
-    if (serviceUp) {
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+type StubResponse = EventEmitter & { statusCode: number; resume: () => void };
+type StubRequest = EventEmitter & { destroy: () => void };
+
+function stubHttpGet(url: unknown, callback?: (res: StubResponse) => void): StubRequest {
+  const request = new EventEmitter() as StubRequest;
+  request.destroy = () => {};
+  process.nextTick(() => {
+    if (serviceUp && String(url).endsWith("/health")) {
+      const response = new EventEmitter() as StubResponse;
+      response.statusCode = 200;
+      response.resume = () => {};
+      callback?.(response);
+      response.emit("data", Buffer.from(JSON.stringify({ ok: true })));
+      response.emit("end");
+    } else {
+      request.emit("error", new Error("connect ECONNREFUSED (test stub)"));
     }
-    throw new Error("connect ECONNREFUSED (test stub)");
-  }
-  throw new Error(`unexpected fetch in test: ${url}`);
+  });
+  return request;
 }
 
 function stubConnect(): net.Socket {
@@ -37,11 +46,11 @@ function stubConnect(): net.Socket {
 }
 
 async function withServiceIO(options: { up: boolean; tcp: boolean }, fn: () => Promise<void>): Promise<void> {
-  const originalFetch = globalThis.fetch;
+  const originalGet = http.get;
   const originalConnect = net.connect;
   serviceUp = options.up;
   tcpOpen = options.tcp;
-  globalThis.fetch = stubFetch as typeof fetch;
+  (http as unknown as { get: unknown }).get = stubHttpGet;
   (net as unknown as { connect: unknown }).connect = stubConnect;
   // Isolate run state from the developer's real home, and simulate a normal
   // operator terminal (a supervisor env marker would legitimately silence output).
@@ -52,7 +61,7 @@ async function withServiceIO(options: { up: boolean; tcp: boolean }, fn: () => P
   try {
     await fn();
   } finally {
-    globalThis.fetch = originalFetch;
+    (http as unknown as { get: unknown }).get = originalGet;
     (net as unknown as { connect: unknown }).connect = originalConnect;
     if (originalHome === undefined) delete process.env.AGENT_DEALER_HOME;
     else process.env.AGENT_DEALER_HOME = originalHome;

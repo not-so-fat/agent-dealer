@@ -1,6 +1,11 @@
-import { listListeningPids, probeAgentDealer } from "./ports.js";
+import { listListeningPids, probeAgentDealer, type AgentDealerProbe } from "./ports.js";
 import { clearRunState, isProcessAlive, readRunState } from "./runtime-state.js";
 import { loadProdEnvFile, resolveBundledListenPort } from "./env.js";
+
+export interface StopDeps {
+  /** Override for unit tests; production always uses the real health probe. */
+  probe?: typeof probeAgentDealer;
+}
 
 function terminatePid(pid: number, label: string): boolean {
   if (!isProcessAlive(pid)) {
@@ -18,21 +23,36 @@ function terminatePid(pid: number, label: string): boolean {
   }
 }
 
-async function waitForShutdown(host: string, port: number): Promise<void> {
+// NOT-370: a probe that rejects (reset listener, torn-down socket) means "down", never a
+// crash — stop already signaled the PIDs and must still report and exit.
+async function safeProbe(
+  host: string,
+  port: number,
+  probe: typeof probeAgentDealer,
+): Promise<AgentDealerProbe> {
+  try {
+    return await probe(host, port);
+  } catch {
+    return { up: false, url: `http://${host}:${port}` };
+  }
+}
+
+async function waitForShutdown(host: string, port: number, probe: typeof probeAgentDealer): Promise<void> {
   for (let i = 0; i < 20; i += 1) {
-    const probe = await probeAgentDealer(host, port);
-    if (!probe.up) {
+    const result = await safeProbe(host, port, probe);
+    if (!result.up) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
 }
 
-export async function runStop(): Promise<number> {
+export async function runStop(deps: StopDeps = {}): Promise<number> {
   loadProdEnvFile();
   const host = "127.0.0.1";
   const state = readRunState();
   const port = state?.port ?? resolveBundledListenPort();
+  const probeFn = deps.probe ?? probeAgentDealer;
   let stopped = 0;
 
   if (state) {
@@ -50,7 +70,7 @@ export async function runStop(): Promise<number> {
   // port falls back to the bundled 2222, which belongs to the default install.
   const isolatedHome = Boolean(process.env.AGENT_DEALER_HOME?.trim());
 
-  let probe = await probeAgentDealer(host, port);
+  let probe = await safeProbe(host, port, probeFn);
   if (probe.up) {
     if (!isolatedHome) {
       for (const pid of listListeningPids(port)) {
@@ -60,8 +80,8 @@ export async function runStop(): Promise<number> {
       }
     }
     if (!isolatedHome || state) {
-      await waitForShutdown(host, port);
-      probe = await probeAgentDealer(host, port);
+      await waitForShutdown(host, port, probeFn);
+      probe = await safeProbe(host, port, probeFn);
     }
   }
 
