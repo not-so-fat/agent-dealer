@@ -4,6 +4,16 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.16 — 2026-10-07
+
+Keep the host awake during Dealer work, park runtime login failures for a human, and fix agent-dealer stop crash on macOS
+
+### Changes
+
+- NOT-369: Keep the host awake while Dealer work is active: hold a macOS sleep assertion and warn when the sleep timer is short (#216)
+- NOT-370: `agent-dealer stop` crashes after success with undici setTypeOfService EINVAL on macOS (#215)
+- NOT-368: A runtime login failure mid-run is retried as a generic crash: park it for a human instead of burning the infra budget (#214)
+
 ## 1.2.15 — 2026-10-07
 
 Linear attachment download auth fix, hard-delete Dealer-local issues, and capacity probe now records why it is unavailable
