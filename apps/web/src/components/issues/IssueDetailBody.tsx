@@ -239,6 +239,73 @@ export function DeleteIssueConfirmation({
 }
 
 /**
+ * NOT-365: collaborators for the Dealer-local delete side-effect sequence. The
+ * component passes its live hooks/state; regression tests pass stubs — either
+ * way `executeDeleteIssueFlow` below runs the real navigation/refresh path.
+ */
+export interface DeleteIssueFlowDeps {
+  /** DELETE request — resolves with the server's residual paths. */
+  removeIssue: (issueId: string) => Promise<{ residualPaths: string[] }>;
+  /** Leave the (now 404) detail route for the Issues list with the notice. */
+  navigateToIssues: (deletedNotice: string) => void;
+  onHumanActionsChanged: () => void;
+  closeConfirmation: () => void;
+  reportError: (error: unknown) => void;
+  refresh: () => void;
+}
+
+/** Success notice for a deleted issue — Linear-sourced issues always carry the
+ * ticket-spared sentence; unremoved Dealer-owned files are named explicitly. */
+export function buildDeleteSuccessNotice(args: {
+  issueId: string;
+  externalLabel: string | null;
+  residualPaths: string[];
+}): string {
+  const label = args.externalLabel ?? args.issueId;
+  const residual =
+    args.residualPaths.length > 0
+      ? ` ${args.residualPaths.length} Dealer-owned file(s) could not be removed: ${args.residualPaths.join(", ")}`
+      : "";
+  return args.externalLabel
+    ? `Issue ${label} deleted from Dealer. The Linear ticket was not deleted.${residual}`
+    : `Issue ${label} permanently deleted from Dealer.${residual}`;
+}
+
+/**
+ * NOT-365: the Dealer-local delete side-effect sequence — `doDelete` delegates
+ * here, so this is the real path and not a test double. On success the detail
+ * route is gone (a refresh would 404), so it closes the confirmation, refreshes
+ * the shell's human-action badge, and navigates to the active Issues list —
+ * which remounts and re-fetches issues/queue/history itself — with the deletion
+ * notice. On refusal (a 409 over live work this view could not see) it closes
+ * the confirmation, reports the server's error, and refreshes to the live state
+ * instead of a stale success. Never throws: the outcome is the return value.
+ */
+export async function executeDeleteIssueFlow(
+  issueId: string,
+  issue: { externalLabel: string | null },
+  deps: DeleteIssueFlowDeps
+): Promise<"deleted" | "refused"> {
+  try {
+    const result = await deps.removeIssue(issueId);
+    const notice = buildDeleteSuccessNotice({
+      issueId,
+      externalLabel: issue.externalLabel,
+      residualPaths: result.residualPaths,
+    });
+    deps.closeConfirmation();
+    deps.onHumanActionsChanged();
+    deps.navigateToIssues(notice);
+    return "deleted";
+  } catch (e) {
+    deps.closeConfirmation();
+    deps.reportError(e);
+    deps.refresh();
+    return "refused";
+  }
+}
+
+/**
  * NOT-359: confirmation line kept inside the parked swap box after a save —
  * the box stays expanded, the refreshed detail carries the new agents, and this
  * tells the owner a resume continues with them.
@@ -568,29 +635,22 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
     setBusy(true);
     onError(null);
     try {
-      // NOT-365: the record is gone after this — the refreshed detail below
-      // would 404, so leave the detail route for the active Issues list. The
-      // list remounts and re-fetches issues/queue/history itself; the shell
-      // badge catches up through the human-actions refresh.
-      const result = await deleteDealerIssue(issueId);
-      const label = issue.externalLabel ?? issueId;
-      const residual =
-        result.residualPaths.length > 0
-          ? ` ${result.residualPaths.length} Dealer-owned file(s) could not be removed: ${result.residualPaths.join(", ")}`
-          : "";
-      const notice = issue.externalLabel
-        ? `Issue ${label} deleted from Dealer. The Linear ticket was not deleted.${residual}`
-        : `Issue ${label} permanently deleted from Dealer.${residual}`;
-      setDeleteConfirming(false);
-      onHumanActionsChanged();
-      navigate("/issues", { state: { deletedNotice: notice } });
-    } catch (e) {
-      // A 409 means the server found live work (session, lease, worktree)
-      // this view could not see: close the confirmation and refresh to the
-      // live state instead of a stale success.
-      setDeleteConfirming(false);
-      fail(e);
-      refresh();
+      // NOT-365: the record is gone after this — the flow below leaves the
+      // detail route for the active Issues list on success (a refresh would
+      // 404), and closes the confirmation plus refreshes to the live state on
+      // a 409 over work this view could not see.
+      await executeDeleteIssueFlow(
+        issueId,
+        { externalLabel: issue.externalLabel },
+        {
+          removeIssue: deleteDealerIssue,
+          navigateToIssues: (deletedNotice) => navigate("/issues", { state: { deletedNotice } }),
+          onHumanActionsChanged,
+          closeConfirmation: () => setDeleteConfirming(false),
+          reportError: (e) => fail(e),
+          refresh,
+        }
+      );
     } finally {
       setBusy(false);
     }
