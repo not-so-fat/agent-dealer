@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildIssueFilter,
+  getLinearIssue,
   LINEAR_CANDIDATE_PAGE_SIZE,
   listLinearCandidates,
   fetchLinearIntakeMetadata,
@@ -313,4 +314,182 @@ test("fetchLinearIntakeMetadata walks team pages beyond Linear's default first p
 test("fetchLinearIntakeMetadata fails clearly without LINEAR_API_KEY", async () => {
   delete process.env.LINEAR_API_KEY;
   await assert.rejects(() => fetchLinearIntakeMetadata(), /LINEAR_API_KEY/);
+});
+
+// NOT-364: issue attachment metadata on candidates — hosted files and external
+// links, without regressing labels, repo resolution, or the 50-item page bound.
+test("nodeToCandidate carries file and link attachments with stable ids", () => {
+  const c = nodeToCandidate({
+    id: "uuid-1",
+    identifier: "NOT-364",
+    title: "t",
+    url: "https://linear.app/x/issue/NOT-364/t",
+    labels: { nodes: [{ name: "repo:github.com/not-so-fat/agent-dealer" }] },
+    attachments: {
+      nodes: [
+        {
+          id: "att-file-1",
+          title: "repro.tar.gz",
+          url: "https://uploads.linear.app/abc/repro.tar.gz",
+        },
+        {
+          id: "att-link-1",
+          title: "Design doc",
+          url: "https://docs.example.com/x",
+          subtitle: "Spec",
+          source: "google-docs",
+        },
+      ],
+    },
+  });
+  assert.equal(c.attachments?.length, 2);
+  assert.deepEqual(c.attachments?.[0], {
+    id: "att-file-1",
+    title: "repro.tar.gz",
+    url: "https://uploads.linear.app/abc/repro.tar.gz",
+  });
+  assert.deepEqual(c.attachments?.[1], {
+    id: "att-link-1",
+    title: "Design doc",
+    url: "https://docs.example.com/x",
+    subtitle: "Spec",
+    source: "google-docs",
+  });
+  // Labels and repo resolution are untouched by the attachment connection.
+  assert.deepEqual(c.labels, ["repo:github.com/not-so-fat/agent-dealer"]);
+  assert.equal(c.repoResolution?.status, "resolved");
+});
+
+test("nodeToCandidate drops malformed attachments and coerces source metadata", () => {
+  const c = nodeToCandidate({
+    id: "uuid-1",
+    identifier: "NOT-364",
+    title: "t",
+    url: "https://linear.app/x/issue/NOT-364/t",
+    labels: { nodes: [] },
+    attachments: {
+      nodes: [
+        { id: "", title: "no id", url: "https://uploads.linear.app/x" },
+        { id: "att-no-url", title: "no url", url: "" },
+        { id: "att-obj-source", title: "f", url: "https://uploads.linear.app/f", source: { kind: "slack" } },
+      ],
+    },
+  });
+  assert.equal(c.attachments?.length, 1);
+  assert.equal(c.attachments?.[0]?.id, "att-obj-source");
+  assert.equal(c.attachments?.[0]?.source, `{"kind":"slack"}`);
+});
+
+test("getLinearIssue carries attachment metadata on exact lookup", async () => {
+  process.env.LINEAR_API_KEY = "test-key";
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    text: async () =>
+      JSON.stringify({
+        data: {
+          issue: {
+            id: "linear-uuid-9",
+            identifier: "NOT-9",
+            title: "exact",
+            url: "https://linear.app/x/issue/NOT-9/exact",
+            state: { name: "Todo" },
+            team: { id: "team-1" },
+            labels: { nodes: [] },
+            attachments: {
+              nodes: [
+                { id: "a1", title: "repro.tar.gz", url: "https://uploads.linear.app/a/repro.tar.gz" },
+              ],
+            },
+          },
+        },
+      }),
+  })) as typeof fetch;
+  try {
+    const found = await getLinearIssue("NOT-9");
+    assert.equal(found?.identifier, "NOT-9");
+    assert.equal(found?.attachments?.length, 1);
+    assert.equal(found?.attachments?.[0]?.title, "repro.tar.gz");
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.LINEAR_API_KEY;
+  }
+});
+
+test("nodeToCandidate defaults missing attachments to an empty list", () => {
+  const c = nodeToCandidate({
+    id: "uuid-1",
+    identifier: "NOT-1",
+    title: "t",
+    url: "https://linear.app/x/issue/NOT-1/t",
+    labels: { nodes: [] },
+  });
+  assert.deepEqual(c.attachments, []);
+});
+
+// NOT-364: the candidate page still requests one bounded page and now carries
+// the attachments connection on every issue selection.
+test("listLinearCandidates queries attachments within the single 50-item page", async () => {
+  process.env.AGENT_DEALER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-linear-inbox-att-"));
+  process.env.LINEAR_API_KEY = "test-key";
+  delete process.env.LINEAR_STATE_FILTER;
+  delete process.env.LINEAR_TEAM_ID;
+
+  const { migrate } = await import("../db/index.js");
+  migrate();
+  const { patchLinearIntakeConfig } = await import("../repository/intake-settings.js");
+  patchLinearIntakeConfig({ stateFilter: ["Todo"], teamId: null, assigneeMe: false });
+
+  const requests: Array<{ query: string }> = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
+    const body = JSON.parse(String((init as { body?: string })?.body ?? "{}")) as { query?: string };
+    requests.push({ query: body.query ?? "" });
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: async () =>
+        JSON.stringify({
+          data: {
+            issues: {
+              nodes: [
+                {
+                  id: "i1",
+                  identifier: "NOT-1",
+                  title: "one",
+                  url: "https://linear.app/x/issue/NOT-1/one",
+                  state: { name: "Todo" },
+                  team: { id: "team-9" },
+                  labels: { nodes: [] },
+                  attachments: {
+                    nodes: [
+                      { id: "a1", title: "repro.tar.gz", url: "https://uploads.linear.app/a/repro.tar.gz" },
+                      { id: "a2", title: "Doc", url: "https://docs.example.com/x", subtitle: "s" },
+                    ],
+                  },
+                },
+              ],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        }),
+    };
+  }) as typeof fetch;
+
+  try {
+    const page = await listLinearCandidates();
+    assert.equal(page.candidates.length, 1);
+    assert.equal(requests.length, 1, "still a single page — no cursor walk");
+    assert.match(requests[0]!.query, /attachments\s*\{\s*nodes\s*\{\s*id title url subtitle source\s*\}\s*\}/);
+    assert.match(requests[0]!.query, new RegExp(`first:\\s*${LINEAR_CANDIDATE_PAGE_SIZE}`));
+    assert.equal(page.candidates[0]!.attachments?.length, 2);
+    assert.equal(page.candidates[0]!.attachments?.[0]?.id, "a1");
+    assert.equal(page.candidates[0]!.attachments?.[1]?.subtitle, "s");
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.LINEAR_API_KEY;
+  }
 });

@@ -41,6 +41,19 @@ export function cleanupOrphanedWorkerMcpConfig(): void {
 }
 
 /**
+ * NOT-364: Dealer-owned blobs for Linear issue-source attachments. Content is
+ * addressed under `<dir>/<issueId>/`; rows in `issue_source_attachments` point
+ * here. Retained with the issue history — worktree copies are removed with
+ * normal worktree cleanup, but these blobs survive until the issue row itself
+ * is gone (and there is no hard-delete path: `closed` issues stay queryable).
+ */
+export function getSourceAttachmentsDir(): string {
+  const dir = path.join(getDataDir(), "source-attachments");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
  * Root for Dealer-managed repository clones and session worktrees (NOT-149).
  * Defaults under AGENT_DEALER_HOME; override with AGENT_DEALER_EXECUTION_ROOT for a
  * mounted disk / cloud volume.

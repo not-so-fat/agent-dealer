@@ -38,6 +38,13 @@ import { enqueueIssue, enqueueIssueWithOutcome, getQueuedEntryForIssue } from ".
 import { latestSessionFailureForIssue } from "../coordinator/latest-failure.js";
 import { getIssueExecutionAnalysis } from "../read-models/execution-analysis.js";
 import { reloadIssueSourceFromLinear } from "../coordinator/source-reload.js";
+import {
+  discardStaged,
+  SourceAttachmentError,
+  stageSourceAttachments,
+  storeStagedAttachments,
+} from "../coordinator/source-attachments.js";
+import { listSourceAttachments, replaceSourceAttachments } from "../repository/source-attachments.js";
 import { deriveLiveProgressFromLog } from "../coordinator/session-progress.js";
 import { branchTipStatusForIssue } from "../coordinator/branch-tip-status.js";
 
@@ -186,6 +193,9 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       // NOT-358: usage-cap / deck-outage wait behind an availability window, if any —
       // the dashboard offers "Park for human" next to the wait notice.
       capWait: capWaitForIssue(id),
+      // NOT-364: durable Linear source attachments — files with safe name, size
+      // and checksum plus Dealer blob path; links as labeled metadata only.
+      sourceAttachments: listSourceAttachments(id),
     };
   });
 
@@ -266,17 +276,51 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
         } satisfies ExistingIssueConflict);
       }
     }
+    // NOT-364: snapshot Linear-hosted files BEFORE any row exists. The
+    // From-Linear form sends the lookup-time attachment metadata; every hosted
+    // file streams into the staging dir here, so an HTTP failure, timeout, or
+    // limit breach refuses the whole create with zero issue/queue/attachment
+    // rows. External links pass through as metadata (never downloaded).
+    // Non-Linear sources ignore the field; re-imports of a live issue return
+    // above and never re-download (use Reload from Linear pre-execution).
+    const snapshotAttachments =
+      input.source === "linear" && (input.linearAttachments?.length ?? 0) > 0;
+    let staged: Awaited<ReturnType<typeof stageSourceAttachments>> | null = null;
+    if (snapshotAttachments) {
+      try {
+        staged = await stageSourceAttachments(input.linearAttachments ?? []);
+      } catch (err) {
+        if (err instanceof SourceAttachmentError) {
+          return reply.status(err.httpStatus).send({ error: err.message });
+        }
+        throw err;
+      }
+    }
     // NOT-306: an ambiguous/malformed execution contract in the ticket
     // description is a 400 with an actionable message, never a silent drop.
     let issue: Issue;
     try {
-      issue = createIssue(input);
+      // The issue row and its attachment rows commit in one transaction — a
+      // throw below the staging point (contract error, blob-store failure)
+      // rolls back to zero rows, never a partially hydrated issue.
+      issue = getDb().transaction((): Issue => {
+        const created = createIssue(input);
+        if (staged) {
+          replaceSourceAttachments(created.id, storeStagedAttachments(created.id, staged));
+        }
+        return created;
+      })();
     } catch (err) {
+      if (staged) discardStaged(staged);
       if (err instanceof ExecutionContractError) {
         return reply.status(400).send({ error: err.message });
       }
+      if (err instanceof SourceAttachmentError) {
+        return reply.status(err.httpStatus).send({ error: err.message });
+      }
       throw err;
     }
+    if (staged) discardStaged(staged);
     appendWorkflowEvent({ issueId: issue.id, type: "issue.created", actorType: "human", stage: issue.status });
     // NOT-118: create enqueues, it never starts. Server-side so the UI, CLI and agents all
     // behave the same — callers hold no workflow logic. `enqueue: false` creates a draft.

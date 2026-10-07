@@ -21,6 +21,10 @@ import type { EffectContext } from "./effect-registry.js";
 import type { DeveloperOutcome } from "./routing.js";
 import { CONFLICTING_FILES_MAX, runMergeConflictSync } from "./merge-conflict-sync.js";
 import { getTaskSnapshot } from "./commands.js";
+import {
+  materializeSourceAttachments,
+  SourceAttachmentError,
+} from "./source-attachments.js";
 import { extractOperatorCriteria } from "./operator-criteria.js";
 import { buildDeveloperPrompt } from "./prompts.js";
 import { guidanceForNextSession } from "./guidance.js";
@@ -1246,6 +1250,26 @@ export async function runDeveloperEffect(
   milestone("worktree.ready", `Developer · worktree ready (round ${round})`, {
     worktreePath: shortWorktreePath(worktreePath),
   });
+
+  // NOT-364: re-materialize the FROZEN attachment manifest's durable files
+  // under `.agent-dealer-inputs/linear/` for every attempt — first, repair,
+  // and retry rounds all see the same bytes at the same prompt-listed,
+  // git-ignored path. A missing or corrupt blob fails closed (no spawn on
+  // partial inputs) instead of running the session without its ticket files.
+  try {
+    const materialized = materializeSourceAttachments(worktreePath, taskSnapshot.sourceAttachments);
+    if (materialized.length > 0) {
+      milestone("inputs.materialized", `Developer · source attachments ready (round ${round})`, {
+        files: materialized.map((m) => m.relativePath),
+      });
+    }
+  } catch (err) {
+    const reason =
+      err instanceof SourceAttachmentError
+        ? err.message
+        : `source attachment materialization failed: ${String(err)}`;
+    return { kind: "adapter_failure", reason };
+  }
 
   // NOT-172: capture the worktree HEAD as this session's input-SHA baseline before
   // the agent spawns — developer work items are never enqueued with an input SHA,

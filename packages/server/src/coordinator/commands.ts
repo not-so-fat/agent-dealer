@@ -13,6 +13,7 @@ import type {
   HumanActionType,
   Issue,
   IssueStatus,
+  SourceAttachmentRecord,
   WorkflowEvent,
   WorkflowInstance,
   WorkflowEventType,
@@ -58,6 +59,7 @@ import { getAgent } from "../repository/agents.js";
 import { githubIssuesSync, invalidateMuseHealthCache } from "../adapters/agent-health.js";
 import { recordMuseCapabilityOverride, type MuseCapabilityEvidence } from "../adapters/muse-capability.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
+import { listSourceAttachments } from "../repository/source-attachments.js";
 import {
   cancelWorkItem,
   enqueueWorkItem,
@@ -162,6 +164,14 @@ export interface TaskSnapshotContent {
    * snapshot. Null for legacy/contract-free issues.
    */
   executionContract: ExecutionContractV1 | null;
+  /**
+   * NOT-364: the Linear source-attachment manifest frozen at workflow start,
+   * read from the durable `issue_source_attachments` rows. A later Linear
+   * edit (or reload) cannot silently change the inputs a queued or running
+   * session sees — only a pre-execution reload replaces the rows, and the
+   * next admission freezes the new manifest. Absent on legacy snapshots.
+   */
+  sourceAttachments?: SourceAttachmentRecord[];
 }
 
 /** Reads the frozen snapshot back; falls back to live issue fields for an item queued before NOT-61. */
@@ -173,7 +183,17 @@ export function getTaskSnapshot(issue: Issue): TaskSnapshotContent {
       // Snapshots frozen before NOT-306 carry no contract — derive it from the
       // frozen source description so old workflows still render what they ran.
       if (parsed.executionContract === undefined) {
-        return { ...parsed, executionContract: tryCompileContract(parsed.description) };
+        return {
+          ...parsed,
+          executionContract: tryCompileContract(parsed.description),
+          // NOT-364: pre-attachment snapshots carry no manifest — empty, not live
+          // rows, so a running workflow never gains inputs mid-flight.
+          sourceAttachments: parsed.sourceAttachments ?? [],
+        };
+      }
+      // NOT-364: pre-attachment snapshots carry no manifest — same rule.
+      if (parsed.sourceAttachments === undefined) {
+        return { ...parsed, sourceAttachments: [] };
       }
       return parsed;
     } catch {
@@ -188,6 +208,9 @@ export function getTaskSnapshot(issue: Issue): TaskSnapshotContent {
     baseBranch: issue.baseBranch,
     workflowVersion: WORKFLOW_VERSION,
     executionContract: tryCompileContract(issue.description),
+    // Live-field fallback is pre-freeze by definition (no workflow owns a
+    // snapshot yet) — current rows are exactly what the freeze would capture.
+    sourceAttachments: listSourceAttachments(issue.id),
   };
 }
 
@@ -365,6 +388,9 @@ function freezeTaskSnapshot(issue: Issue): void {
       baseBranch: issue.baseBranch,
       workflowVersion: WORKFLOW_VERSION,
       executionContract: tryCompileContract(issue.description),
+      // NOT-364: freeze the attachment manifest with the text — later Linear
+      // edits cannot silently change the inputs repair rounds see.
+      sourceAttachments: listSourceAttachments(issue.id),
     } satisfies TaskSnapshotContent,
   });
 }

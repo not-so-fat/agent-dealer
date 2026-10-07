@@ -9,7 +9,11 @@
 // the reviewer to run `git diff` itself: a claude reviewer's read-only tool set
 // (`READ_ONLY_BUILTIN_TOOLS` in args.ts) has no Bash at all, so it cannot shell out —
 // every artifact it needs to judge must already be in the prompt.
-import type { ExecutionContractV1, Finding } from "@agent-dealer/shared";
+import type { ExecutionContractV1, Finding, SourceAttachmentRecord } from "@agent-dealer/shared";
+import {
+  sourceAttachmentsDeveloperSection,
+  sourceAttachmentsReviewerSection,
+} from "./source-attachments.js";
 import { MUSE_SANDBOX_CAPABILITIES } from "../runners/muse-code-args.js";
 import {
   checkMuseVisualQa,
@@ -34,6 +38,9 @@ export interface TaskSnapshot {
   /** NOT-306: frozen execution contract compiled from the ticket. Absent/null
    * for legacy issues — prompts then render exactly what they always did. */
   executionContract?: ExecutionContractV1 | null;
+  /** NOT-364: frozen Linear source-attachment manifest. Absent/empty renders
+   * nothing so attachment-free prompts stay byte-for-byte. */
+  sourceAttachments?: SourceAttachmentRecord[];
 }
 
 /**
@@ -387,6 +394,10 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
       ? tagSemanticsDeveloperSection(input.taskSnapshot.acceptanceCriteria)
       : []),
     ...executionContractSection(input.taskSnapshot.executionContract),
+    // NOT-364: frozen source-attachment manifest — local file paths plus
+    // external-link metadata and the trust boundary. Empty/absent renders
+    // nothing so attachment-free prompts stay byte-for-byte.
+    ...sourceAttachmentsDeveloperSection(input.taskSnapshot.sourceAttachments),
   );
 
   if (input.findings?.length) {
@@ -555,6 +566,9 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
     // the tags, so untagged reviewer prompts stay byte-for-byte.
     ...tagSemanticsReviewerSection(input.taskSnapshot.acceptanceCriteria),
     ...executionContractSection(input.taskSnapshot.executionContract),
+    // NOT-364: the immutable manifest as metadata only — reviewers have no
+    // shell, so no file bytes and no worktree path are promised.
+    ...sourceAttachmentsReviewerSection(input.taskSnapshot.sourceAttachments),
     `## Diff (base ${input.baseSha.slice(0, 8)} → head ${input.headSha.slice(0, 8)})`,
     "```diff",
     formatDiffForPrompt(input.diff).text,
