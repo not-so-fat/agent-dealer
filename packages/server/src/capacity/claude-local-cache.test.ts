@@ -41,6 +41,7 @@ const {
   parseClaudeCachedUtilization,
   probeDiagnosticLogPath,
   readClaudeLocalCache,
+  recordClaudeAcquisitionFailure,
   refreshClaudeCapacityIfStale,
   resetClaudeCapacityRefreshState,
   runClaudeCapacityProbe,
@@ -132,7 +133,8 @@ const throwingRunner: ProbeRunner = () => {
 function seedWindowAges(
   fiveHourAgeMs: number | null,
   weeklyAgeMs: number | null,
-  nowMs: number = NOW_MS
+  nowMs: number = NOW_MS,
+  expectedPersisted?: number
 ): void {
   const readings: AdapterWindowReading[] = [];
   const role = (five: boolean, ageMs: number): AdapterWindowReading => ({
@@ -151,7 +153,10 @@ function seedWindowAges(
   });
   if (fiveHourAgeMs !== null) readings.push(role(true, fiveHourAgeMs));
   if (weeklyAgeMs !== null) readings.push(role(false, weeklyAgeMs));
-  assert.equal(recordClaudeWindowReadings(readings, "claude_code", nowMs), readings.length);
+  assert.equal(
+    recordClaudeWindowReadings(readings, "claude_code", nowMs),
+    expectedPersisted ?? readings.length
+  );
 }
 
 function successRunner(atMs: number = NOW_MS): ProbeRunner {
@@ -934,4 +939,207 @@ test("a full ~/.claude.json-shaped file yields 5H/1W from the subtree only", () 
   const claude = snap.runtimes.find((r) => r.runtime === "claude_code")!;
   assert.equal(claude.windows.find((w) => w.displayLabel === "5H")!.remainingPercent, 91);
   assert.equal(claude.windows.find((w) => w.displayLabel === "1W")!.remainingPercent, 77);
+});
+
+// ---------------------------------------------------------------------------
+// NOT-366: the re-validated `/usage` contract and unavailable-reason rows
+// ---------------------------------------------------------------------------
+
+/**
+ * Sanitized shape of a real `claude -p "/usage"` stream-json run at 2.1.292
+ * (Dealer's exact probe argv, re-validated 2026-10-07): `system/init`, then
+ * the synthetic assistant event carrying `local_command_run` and
+ * `usage_report.rate_limits.limits[]`, then a `result` event with
+ * `local_command: "usage"`, `num_turns: 0`, `total_cost_usd: 0` — and no
+ * `usage_report` of its own (which is why `--output-format json`, printing
+ * only the result, never shows it). `apiKeySource` other than `none` yields
+ * the cost-summary-only variant: no `usage_report` at all.
+ */
+function liveUsageStream(
+  observedMs: number,
+  opts: { apiKeySource?: string; withReport?: boolean } = {}
+): string {
+  const withReport = opts.withReport ?? true;
+  const events: Array<Record<string, unknown>> = [
+    { type: "system", subtype: "init", apiKeySource: opts.apiKeySource ?? "none", claude_code_version: "2.1.292" },
+    {
+      type: "assistant",
+      message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: "<omitted>" }] },
+      local_command_source: "<omitted>",
+      timestamp: new Date(observedMs).toISOString(),
+      local_command_run: { command: "usage", args: "" },
+      ...(withReport
+        ? {
+            usage_report: {
+              session: { total_cost_usd: 0, total_api_duration_ms: 0 },
+              rate_limits: {
+                limits: [
+                  {
+                    kind: "session",
+                    group: "session",
+                    percent: 6,
+                    resets_at: new Date(observedMs + 4 * 3600_000).toISOString().replace("Z", "535018+00:00"),
+                    scope: null,
+                    severity: "normal",
+                    is_active: true,
+                  },
+                  {
+                    kind: "weekly_all",
+                    group: "weekly",
+                    percent: 5,
+                    resets_at: new Date(observedMs + 5 * 86_400_000).toISOString().replace("Z", "535047+00:00"),
+                    scope: null,
+                    severity: "normal",
+                    is_active: false,
+                  },
+                ],
+                extra_usage: { is_enabled: false },
+              },
+            },
+          }
+        : {}),
+    },
+    { type: "result", subtype: "success", is_error: false, num_turns: 0, total_cost_usd: 0, local_command: "usage" },
+  ];
+  return events.map((e) => JSON.stringify(e)).join("\n");
+}
+
+function streamRunner(stdout: (atMs: number) => string, atMs: () => number): ProbeRunner {
+  return async () => ({ stdout: stdout(atMs()), exitCode: 0, timedOut: false, spawnError: null });
+}
+
+test("re-validated 2.1.292 /usage stream yields both five_hour and weekly", async () => {
+  const { extractClaudeUsageReportLimits } = await import("./claude-local-cache.js");
+  const readings = extractClaudeUsageReportLimits(parseNdjson(liveUsageStream(NOW_MS)), NOW_MS);
+  assert.ok(readings);
+  assert.deepEqual(readings!.map((w) => w.criticalRole).sort(), ["five_hour", "weekly"]);
+  // The full probe accepts it: marker present, exactly $0, both roles.
+  const result = await runClaudeCapacityProbe(NOW_MS, {
+    runner: streamRunner((ms) => liveUsageStream(ms), () => NOW_MS),
+    bin: "/fake/claude",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.authSource, "none");
+  const snap = getRuntimeCapacitySnapshot(NOW_MS + 1000);
+  const claude = snap.runtimes.find((r) => r.runtime === "claude_code")!;
+  assert.equal(claude.windows.find((w) => w.criticalRole === "five_hour")!.remainingPercent, 94);
+  assert.equal(claude.windows.find((w) => w.criticalRole === "weekly")!.remainingPercent, 95);
+});
+
+test("no_windows failure persists an unavailable row; streak rises to 3 then a success clears it", async () => {
+  const failing = streamRunner((ms) => liveUsageStream(ms, { withReport: false }), () => clock);
+  let clock = NOW_MS;
+  const firstIso = new Date(NOW_MS).toISOString();
+  // Backoff after n failures: 14m · 2^n → attempts at +0, +29m, +86m, +199m.
+  const attemptAt = [NOW_MS, NOW_MS + 29 * 60_000, NOW_MS + 86 * 60_000];
+  for (const [i, at] of attemptAt.entries()) {
+    clock = at;
+    const outcome = await maybeProbeClaudeCapacity(at, { runner: failing, bin: "/fake/claude" });
+    assert.equal(outcome.probed, true);
+    assert.equal(outcome.failureKind, "no_windows");
+    const rows = listCapacitySnapshots("claude_code");
+    assert.equal(rows.length, 2, "one stored row per critical window");
+    for (const row of rows) {
+      assert.ok(row.unavailableReason, "unavailable_reason is populated");
+      assert.equal(row.source, "unavailable");
+      assert.ok(row.unavailableDetail);
+      assert.equal(row.unavailableDetail!.consecutiveFailures, i + 1);
+      assert.equal(row.unavailableDetail!.firstFailureAt, firstIso);
+      assert.equal(row.unavailableDetail!.lastFailureAt, new Date(at).toISOString());
+      assert.match(row.unavailableDetail!.message, /no 5H\/1W plan limits/);
+    }
+  }
+  // Read model: N/A with the operator text, never the internal identifier.
+  const failedSnap = getRuntimeCapacitySnapshot(clock);
+  const failedClaude = failedSnap.runtimes.find((r) => r.runtime === "claude_code")!;
+  assert.ok(failedClaude.windows.every((w) => w.remainingPercent === null && w.unavailableDetail));
+  assert.ok(!JSON.stringify(failedSnap).includes("no_windows"));
+
+  clock = NOW_MS + 199 * 60_000;
+  const ok = await maybeProbeClaudeCapacity(clock, {
+    runner: streamRunner((ms) => liveUsageStream(ms), () => clock),
+    bin: "/fake/claude",
+  });
+  assert.equal(ok.ok, true);
+  for (const row of listCapacitySnapshots("claude_code")) {
+    assert.equal(row.unavailableReason, null);
+    assert.equal(row.unavailableDetail, null);
+    assert.equal(row.source, "observed_event");
+  }
+  // The next failure starts a new streak at 1.
+  clock = NOW_MS + 260 * 60_000;
+  await maybeProbeClaudeCapacity(clock, { runner: failing, bin: "/fake/claude" });
+  for (const row of listCapacitySnapshots("claude_code")) {
+    assert.equal(row.unavailableDetail!.consecutiveFailures, 1);
+    assert.equal(row.unavailableDetail!.firstFailureAt, new Date(clock).toISOString());
+  }
+});
+
+test("a live-session reading between failures restarts the streak instead of inflating it", async () => {
+  let clock = NOW_MS;
+  const failing = streamRunner((ms) => liveUsageStream(ms, { withReport: false }), () => clock);
+  for (const at of [NOW_MS, NOW_MS + 29 * 60_000, NOW_MS + 86 * 60_000]) {
+    clock = at;
+    await maybeProbeClaudeCapacity(at, { runner: failing, bin: "/fake/claude" });
+  }
+  assert.equal(listCapacitySnapshots("claude_code")[0]!.unavailableDetail!.consecutiveFailures, 3);
+  // A live session (not the probe) lands both windows and clears the stored detail.
+  seedWindowAges(0, 0, NOW_MS + 100 * 60_000);
+  for (const row of listCapacitySnapshots("claude_code")) assert.equal(row.unavailableDetail, null);
+  // Once that reading lapses (5H reset passed, 1W expired), the next failure is #1.
+  clock = NOW_MS + 200 * 60_000;
+  const outcome = await maybeProbeClaudeCapacity(clock, { runner: failing, bin: "/fake/claude" });
+  assert.equal(outcome.failureKind, "no_windows");
+  const rows = listCapacitySnapshots("claude_code");
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    assert.equal(row.unavailableDetail!.consecutiveFailures, 1);
+    assert.equal(row.unavailableDetail!.firstFailureAt, new Date(clock).toISOString());
+  }
+});
+
+test("an API-key auth source is named in the stored reason", async () => {
+  const outcome = await maybeProbeClaudeCapacity(NOW_MS, {
+    runner: streamRunner((ms) => liveUsageStream(ms, { withReport: false, apiKeySource: "ANTHROPIC_API_KEY" }), () => NOW_MS),
+    bin: "/fake/claude",
+  });
+  assert.equal(outcome.failureKind, "no_windows");
+  const row = listCapacitySnapshots("claude_code")[0]!;
+  assert.match(row.unavailableDetail!.message, /authenticated via ANTHROPIC_API_KEY/);
+});
+
+test("a failure leaves a current reading alone and keeps a stale one's value for arbitration", async () => {
+  // 5H current (10m old), 1W stale (20m old — past the 15m freshness).
+  seedWindowAges(10 * 60_000, 20 * 60_000);
+  assert.equal(recordClaudeAcquisitionFailure({ failureKind: "timeout", authSource: null }, NOW_MS), 1);
+  const rows = listCapacitySnapshots("claude_code");
+  const five = rows.find((r) => r.criticalRole === "five_hour")!;
+  const weekly = rows.find((r) => r.criticalRole === "weekly")!;
+  assert.equal(five.unavailableReason, null);
+  assert.equal(five.source, "observed_event");
+  assert.equal(weekly.unavailableReason, "missing");
+  assert.equal(weekly.unavailableDetail!.message, "the Claude /usage refresh timed out");
+  assert.equal(weekly.observedAt, new Date(NOW_MS - 20 * 60_000).toISOString());
+  // Re-ingesting the same stale sample (every poll does) must not wipe the reason.
+  seedWindowAges(null, 20 * 60_000, NOW_MS, 0);
+  assert.equal(
+    listCapacitySnapshots("claude_code").find((r) => r.criticalRole === "weekly")!.unavailableReason,
+    "missing"
+  );
+});
+
+test("a fresh observed_event reading wins over a stored unavailable row and leaves no reason", () => {
+  // Failure recorded at NOW with no prior reading at all.
+  assert.equal(recordClaudeAcquisitionFailure({ failureKind: "no_windows", authSource: null }, NOW_MS), 2);
+  // A live session's reading observed 2 minutes before the failure stamp.
+  seedWindowAges(2 * 60_000, 2 * 60_000);
+  const snap = getRuntimeCapacitySnapshot(NOW_MS + 60_000);
+  const claude = snap.runtimes.find((r) => r.runtime === "claude_code")!;
+  for (const w of claude.windows) {
+    assert.ok(w.remainingPercent !== null, "the rendered window shows the value");
+    assert.equal(w.unavailableReason, null);
+    assert.equal(w.unavailableDetail ?? null, null);
+    assert.equal(w.source, "observed_event");
+  }
+  assert.equal(claude.unavailableReason, null);
 });

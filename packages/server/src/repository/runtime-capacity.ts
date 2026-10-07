@@ -17,6 +17,7 @@ import type {
   CapacityWindowSnapshot,
   Runtime,
 } from "@agent-dealer/shared";
+import { CapacityUnavailableDetail } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 
 interface CapacitySnapshotRow {
@@ -36,6 +37,7 @@ interface CapacitySnapshotRow {
   unavailable_reason: string | null;
   evidence_ref: string | null;
   critical_role: string | null;
+  unavailable_detail: string | null;
 }
 
 export interface RecordCapacityWindowInput {
@@ -55,6 +57,19 @@ export interface RecordCapacityWindowInput {
   /** Server-side pointer only — never credentials or raw payloads. */
   evidenceRef?: string | null;
   criticalRole?: CapacityCriticalRole | null;
+  /** NOT-366: acquisition-failure explanation + streak; null on success. */
+  unavailableDetail?: CapacityUnavailableDetail | null;
+}
+
+/** Stored JSON → validated detail; anything malformed reads as absent. */
+function parseUnavailableDetail(raw: string | null): CapacityUnavailableDetail | null {
+  if (!raw) return null;
+  try {
+    const parsed = CapacityUnavailableDetail.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 function rowToSnapshot(row: CapacitySnapshotRow): CapacityWindowSnapshot {
@@ -72,6 +87,7 @@ function rowToSnapshot(row: CapacitySnapshotRow): CapacityWindowSnapshot {
     expiresAt: row.expires_at,
     source: row.source as CapacitySource,
     unavailableReason: row.unavailable_reason as CapacityUnavailableReason | null,
+    unavailableDetail: parseUnavailableDetail(row.unavailable_detail),
     criticalRole: row.critical_role as CapacityCriticalRole | null,
   };
 }
@@ -87,13 +103,13 @@ export function recordCapacitySnapshots(runtime: Runtime, windows: RecordCapacit
       runtime, window_key, provider_bucket, duration_minutes, display_label,
       used_value, used_unit, remaining_percent, reset_at, observed_at,
       fresh_until, expires_at, source, unavailable_reason, evidence_ref,
-      critical_role
+      critical_role, unavailable_detail
     )
     VALUES (
       @runtime, @window_key, @provider_bucket, @duration_minutes, @display_label,
       @used_value, @used_unit, @remaining_percent, @reset_at, @observed_at,
       @fresh_until, @expires_at, @source, @unavailable_reason, @evidence_ref,
-      @critical_role
+      @critical_role, @unavailable_detail
     )
     ON CONFLICT(runtime, window_key) DO UPDATE SET
       provider_bucket = excluded.provider_bucket,
@@ -109,7 +125,8 @@ export function recordCapacitySnapshots(runtime: Runtime, windows: RecordCapacit
       source = excluded.source,
       unavailable_reason = excluded.unavailable_reason,
       evidence_ref = excluded.evidence_ref,
-      critical_role = excluded.critical_role
+      critical_role = excluded.critical_role,
+      unavailable_detail = excluded.unavailable_detail
   `);
   const run = getDb().transaction((rows: RecordCapacityWindowInput[]) => {
     for (const w of rows) {
@@ -130,6 +147,7 @@ export function recordCapacitySnapshots(runtime: Runtime, windows: RecordCapacit
         unavailable_reason: w.unavailableReason ?? null,
         evidence_ref: w.evidenceRef ?? null,
         critical_role: w.criticalRole ?? null,
+        unavailable_detail: w.unavailableDetail ? JSON.stringify(w.unavailableDetail) : null,
       });
     }
   });

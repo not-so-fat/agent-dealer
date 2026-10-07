@@ -222,3 +222,40 @@ test("GET /api/runtime-capacity serves a configured Codex account without spawni
   assert.equal(codex[0].unavailableReason, "missing");
   await app.close();
 });
+
+test("GET /api/runtime-capacity explains a failed Claude refresh in operator text (NOT-366)", async () => {
+  clearAllCapacitySnapshots();
+  createAgent({
+    name: "route-claude-unavailable",
+    runtime: "claude_code",
+    deckId: "55555555-5555-4555-8555-555555555555",
+  });
+  const { recordClaudeAcquisitionFailure } = await import("../capacity/claude-local-cache.js");
+  const now = Date.now();
+  recordClaudeAcquisitionFailure({ failureKind: "no_windows", authSource: null }, now - 60_000, {
+    count: 1,
+    firstFailureMs: now - 60_000,
+  });
+  recordClaudeAcquisitionFailure({ failureKind: "no_windows", authSource: null }, now, {
+    count: 2,
+    firstFailureMs: now - 60_000,
+  });
+
+  const app = await buildApp();
+  const res = await app.inject({ method: "GET", url: "/api/runtime-capacity" });
+  assert.equal(res.statusCode, 200);
+  const body = RuntimeCapacityResponse.parse(res.json());
+  const claude = body.runtimes.find((r) => r.runtime === "claude_code")!;
+  assert.equal(claude.windows.length, 2);
+  for (const w of claude.windows) {
+    assert.equal(w.remainingPercent, null);
+    assert.ok(w.unavailableReason);
+    assert.equal(w.unavailableDetail?.message, "Claude /usage reported no 5H/1W plan limits");
+    assert.equal(w.unavailableDetail?.consecutiveFailures, 2);
+    assert.equal(w.unavailableDetail?.firstFailureAt, new Date(now - 60_000).toISOString());
+  }
+  const raw = JSON.stringify(res.json());
+  assert.ok(!raw.includes("no_windows"), "internal failure kind never leaves the server");
+  assert.ok(!raw.includes("evidence"), "no evidence pointers leak to the browser");
+  await app.close();
+});

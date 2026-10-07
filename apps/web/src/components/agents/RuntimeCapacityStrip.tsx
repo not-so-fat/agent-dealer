@@ -20,6 +20,7 @@ import type {
 import { fetchRuntimeCapacity } from "../../api";
 import { runtimeLabel } from "../../lib/display";
 import { capacitySeverity, type CapacitySeverity } from "./capacitySeverity";
+import { capacityUnavailableText } from "./capacityUnavailableText";
 
 const REASON_TEXT: Record<CapacityUnavailableReason, string> = {
   unsupported: "not reported by provider",
@@ -101,7 +102,7 @@ function windowRow(
     label,
     kind: "unknown",
     reason,
-    title: `${label}: N/A (${REASON_TEXT[reason]})`,
+    title: `${label}: N/A (${capacityUnavailableText(w) ?? REASON_TEXT[reason]})`,
   };
 }
 

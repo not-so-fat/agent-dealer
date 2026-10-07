@@ -52,6 +52,21 @@ export type CapacityUnavailableReason = z.infer<typeof CapacityUnavailableReason
 export const CapacityCriticalRole = z.enum(["five_hour", "weekly"]);
 export type CapacityCriticalRole = z.infer<typeof CapacityCriticalRole>;
 
+/**
+ * NOT-366: why a window could not be acquired, as operator-readable text plus
+ * the failure streak — so a three-day break reads differently from one
+ * transient miss. `message` is plain prose (never an internal failure-kind
+ * or sentinel identifier). Absent/null whenever the window carries a reading
+ * from a successful acquisition.
+ */
+export const CapacityUnavailableDetail = z.object({
+  message: z.string().min(1),
+  consecutiveFailures: z.number().int().positive(),
+  firstFailureAt: z.string(),
+  lastFailureAt: z.string(),
+});
+export type CapacityUnavailableDetail = z.infer<typeof CapacityUnavailableDetail>;
+
 export const CapacityWindowSnapshot = z.object({
   /** Stable per-runtime key for this window (e.g. `weekly_all_models`). */
   windowKey: z.string().min(1),
@@ -76,6 +91,8 @@ export const CapacityWindowSnapshot = z.object({
   expiresAt: z.string().nullable(),
   source: CapacitySource,
   unavailableReason: CapacityUnavailableReason.nullable(),
+  /** NOT-366: acquisition-failure explanation and streak (see above). */
+  unavailableDetail: CapacityUnavailableDetail.nullable().optional(),
   criticalRole: CapacityCriticalRole.nullable(),
 });
 export type CapacityWindowSnapshot = z.infer<typeof CapacityWindowSnapshot>;

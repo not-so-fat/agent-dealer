@@ -411,6 +411,10 @@ CREATE TABLE IF NOT EXISTS runtime_capacity_snapshots (
   -- it collapsed into) — never re-derived client-side from a window key or
   -- label, which cannot disambiguate multiple same-duration buckets.
   critical_role TEXT,
+  -- NOT-366: JSON acquisition-failure streak for an unavailable row
+  -- (operator summary, consecutive-failure count, first/last failure time).
+  -- Null on every successful reading.
+  unavailable_detail TEXT,
   PRIMARY KEY (runtime, window_key)
 );
 

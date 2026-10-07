@@ -308,3 +308,37 @@ test("NOT-266: each runtime label stays grouped with its own values on narrow wi
   assert.match(html, /capacity-entry-claude_code/);
   assert.match(html, /capacity-entry-cursor_local-na/);
 });
+
+test("NOT-366: a recorded Claude refresh failure titles each chip with the reason, never the failure kind", () => {
+  const firstFailureAt = new Date(Date.now() - 3 * 86_400_000).toISOString();
+  const unavailable = {
+    remainingPercent: null,
+    source: "unavailable",
+    unavailableReason: "unparsable",
+    unavailableDetail: {
+      message: "Claude /usage reported no 5H/1W plan limits",
+      consecutiveFailures: 3,
+      firstFailureAt,
+      lastFailureAt: new Date(Date.now() - 60_000).toISOString(),
+    },
+  };
+  const failed = {
+    generatedAt: new Date().toISOString(),
+    runtimes: [
+      {
+        runtime: "claude_code",
+        unavailableReason: "unparsable",
+        windows: [
+          window({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, criticalRole: "five_hour", ...unavailable }),
+          window({ windowKey: "weekly", displayLabel: "1W", criticalRole: "weekly", ...unavailable }),
+        ],
+      },
+    ],
+  } as unknown as RuntimeCapacityResponse;
+  const out = renderToStaticMarkup(React.createElement(RuntimeCapacityStripView, { data: failed }));
+  const since = new Date(firstFailureAt).toLocaleString();
+  const why = `unavailable: Claude /usage reported no 5H/1W plan limits (3 consecutive failed refreshes since ${since})`;
+  assert.ok(out.includes(`5H: N/A (${why})`), "5H chip states unavailable and why");
+  assert.ok(out.includes(`1W: N/A (${why})`), "1W chip states unavailable and why");
+  assert.ok(!out.includes("no_windows"), "internal failure kind never reaches the DOM");
+});

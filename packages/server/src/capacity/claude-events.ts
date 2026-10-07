@@ -340,6 +340,17 @@ export function extractClaudeCapacityFromEvents(
   return { runtime: CLAUDE_RUNTIME, windows: [...byKey.values()], unavailable: [] };
 }
 
+let claudeCriticalReadingSeq = 0;
+
+/**
+ * Monotonic count of successful Claude 5H/1W writes from any source (probe,
+ * local cache, live session). The probe's in-memory failure streak compares
+ * against it so a non-probe success breaks the streak too (NOT-366).
+ */
+export function claudeCriticalReadingWriteSeq(): number {
+  return claudeCriticalReadingSeq;
+}
+
 /**
  * Persist Claude window readings as normalized capacity snapshots
  * (per-window upserts — siblings not in this observation are left untouched,
@@ -362,19 +373,27 @@ export function recordClaudeWindowReadings(
     (n) => n.unavailableReason === null && n.remainingPercent !== null
   );
   if (persistable.length === 0) return null;
-  const storedObservedAt = new Map(
-    listCapacitySnapshots(runtime).map((row) => [row.windowKey, row.observedAt])
-  );
+  const stored = new Map(listCapacitySnapshots(runtime).map((row) => [row.windowKey, row]));
   const fresh = persistable.filter((w) => {
-    const prev = storedObservedAt.get(w.windowKey);
-    if (!prev) return true;
-    const prevMs = Date.parse(prev);
+    const prevRow = stored.get(w.windowKey);
+    if (!prevRow) return true;
+    // NOT-366: an unavailable row (probe failure recorded over a stale
+    // reading) keeps the last-good value and its `observedAt` only for this
+    // arbitration. With no last-good value any reading wins; otherwise only
+    // a strictly newer one does — re-ingesting the same stale cache sample
+    // every poll must not wipe the recorded failure reason.
+    const unavailable = prevRow.source === "unavailable" || prevRow.unavailableReason !== null;
+    if (unavailable && prevRow.remainingPercent === null) return true;
+    const prevMs = Date.parse(prevRow.observedAt);
     const nextMs = Date.parse(w.observedAt);
     if (!Number.isFinite(prevMs)) return true;
     if (!Number.isFinite(nextMs)) return false;
-    return nextMs >= prevMs;
+    return unavailable ? nextMs > prevMs : nextMs >= prevMs;
   });
   if (fresh.length === 0) return 0;
+  if (fresh.some((w) => w.criticalRole === "five_hour" || w.criticalRole === "weekly")) {
+    claudeCriticalReadingSeq += 1;
+  }
   recordCapacitySnapshots(
     runtime,
     fresh.map((w) => ({
