@@ -1,4 +1,6 @@
 import { execSync } from "node:child_process";
+import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 
 export interface AgentDealerProbe {
@@ -6,20 +8,59 @@ export interface AgentDealerProbe {
   url: string;
 }
 
+// NOT-370: local probes intentionally use node:http instead of the global fetch (undici).
+// When a localhost peer has just been killed, undici's HTTP/1.1 write path can throw
+// `setTypeOfService EINVAL` synchronously outside the fetch promise (notably on macOS),
+// which no try/catch around fetch can observe and which crashes the CLI. node:http
+// surfaces the same resets/refusals as ordinary request errors, which resolve to null.
 async function fetchJson(url: string, timeoutMs = 2000): Promise<Record<string, unknown> | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) {
-      return null;
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value: Record<string, unknown> | null): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      request?.destroy();
+      done(null);
+    }, timeoutMs);
+    // A stuck probe must never keep a lifecycle command alive on its own.
+    timer.unref?.();
+
+    let request: http.ClientRequest | undefined;
+    try {
+      const transport = url.startsWith("https:") ? https : http;
+      request = transport.get(url, (response) => {
+        const status = response.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          response.resume();
+          done(null);
+          return;
+        }
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => {
+          chunks.push(Buffer.from(chunk));
+        });
+        response.on("end", () => {
+          try {
+            const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            done(parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null);
+          } catch {
+            done(null);
+          }
+        });
+        response.on("error", () => done(null));
+      });
+    } catch {
+      done(null);
+      return;
     }
-    return (await response.json()) as Record<string, unknown>;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
+    request.on("error", () => done(null));
+  });
 }
 
 export async function isTcpPortOpen(host: string, port: number): Promise<boolean> {
