@@ -21,7 +21,7 @@ export const MAX_CONSECUTIVE_AUTH_PARKS = 3;
 /** Evidence key on a policy_escalation raised for a confirmed runtime login failure. */
 export const RUNTIME_AUTH_PARK_EVIDENCE_KEY = "runtimeAuthPark";
 
-/** Work-item payload flag: this developer retry spent the one transient auth retry. */
+/** Work-item payload flag: this developer/reviewer retry spent the one transient auth retry. */
 export const AUTH_TRANSIENT_RETRY_PAYLOAD_KEY = "authTransientRetry";
 
 export type RuntimeAuthParkEvidence = {

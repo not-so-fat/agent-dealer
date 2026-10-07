@@ -230,7 +230,14 @@ export function projectReviewerRoute(
           currentIntent: `Reviewer retrying (infra attempt) at ${route.headSha.slice(0, 8)} — ${route.reason}`,
           events: ["worker.failed"],
         },
-        effect: { kind: "enqueue", workItem: "reviewer", atHeadSha: route.headSha },
+        effect: {
+          kind: "enqueue",
+          workItem: "reviewer",
+          atHeadSha: route.headSha,
+          retryReason: route.reason,
+          // NOT-368: mark the work item so a second high-confidence auth failure parks.
+          ...(route.authTransientRetry ? { authTransientRetry: true as const } : {}),
+        },
         advance: "infra",
         hasVerdict,
       };
@@ -242,7 +249,14 @@ export function projectReviewerRoute(
           currentIntent: route.reason,
           events: [hasVerdict ? "worker.completed" : "worker.failed", ...verdictEvents],
         },
-        effect: { kind: "human_action", actionType: route.actionType, reason: route.reason },
+        effect: {
+          kind: "human_action",
+          actionType: route.actionType,
+          reason: route.reason,
+          ...("runtimeAuthPark" in route && route.runtimeAuthPark
+            ? { runtimeAuthPark: route.runtimeAuthPark }
+            : {}),
+        },
         advance: "none",
         hasVerdict,
       };

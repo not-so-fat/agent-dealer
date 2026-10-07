@@ -559,12 +559,16 @@ export type ReviewerRouteResult =
    * these (the head kept moving faster than the reviewer could catch up) would otherwise
    * let the coordinator spawn reviewer sessions indefinitely. */
   | { next: "retry_reviewer_at_new_head"; headSha: string }
-  /** Bounded infra retry — a fresh reviewer session at the SAME already-verified head. */
-  | { next: "retry_reviewer"; headSha: string; reason: string }
+  /** Bounded infra retry — a fresh reviewer session at the SAME already-verified head.
+   * NOT-368: `authTransientRetry` marks the one allowed infra retry after a high-confidence
+   * auth failure whose live probe passed (same contract as developer retry_developer). */
+  | { next: "retry_reviewer"; headSha: string; reason: string; authTransientRetry?: true }
   | {
       next: "human_action";
       actionType: "attempts_exhausted" | "policy_escalation" | "product_scope_decision";
       reason: string;
+      /** NOT-368: confirmed runtime login park — same evidence shape as the developer path. */
+      runtimeAuthPark?: RuntimeAuthParkEvidence;
     }
   /** See DeveloperRouteResult's defer_work — `until` is absent for an unreachable deck. */
   | { next: "defer_work"; reason: string; until?: string };
@@ -586,6 +590,30 @@ export function routeReviewerOutcome(
     case "session_failed":
     case "deck_failure":
     case "publish_failed": {
+      // NOT-368: reviewer login deaths use the same auth-park tie-breaker as developers.
+      // Only session_failed carries auth (timed_out is folded into session_failed for reviewers).
+      if (outcome.kind === "session_failed") {
+        const authPark = routeHighConfidenceAuthFailure(limits);
+        if (authPark) {
+          if (authPark.next === "human_action") {
+            return {
+              next: "human_action",
+              actionType: authPark.actionType,
+              reason: authPark.reason,
+              ...("runtimeAuthPark" in authPark && authPark.runtimeAuthPark
+                ? { runtimeAuthPark: authPark.runtimeAuthPark }
+                : {}),
+            };
+          }
+          // Transient auth retry → fresh reviewer at the pinned head (not a developer round).
+          return {
+            next: "retry_reviewer",
+            headSha: pinnedHeadSha,
+            reason: authPark.reason,
+            ...(authPark.authTransientRetry ? { authTransientRetry: true as const } : {}),
+          };
+        }
+      }
       const reason =
         outcome.kind === "deck_failure"
           ? `Agent Deck ${outcome.reason}`

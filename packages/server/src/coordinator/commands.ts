@@ -670,18 +670,20 @@ export async function applyCompletion(
   }
 
   // NOT-368: classify + live-probe outside the write txn (network/CLI must never hold
-  // the SQLite lock). Only high-confidence attributed auth failures produce a context;
-  // medium / unattributed keep today's infra-retry path inside routeDeveloperOutcome.
+  // the SQLite lock). Developer and reviewer session deaths both participate — medium /
+  // unattributed keep today's infra-retry path inside the role's route function.
   let authFailure: AuthFailureRouting | undefined;
+  const authKind = getWorkItem(workItemId)?.kind;
   if (
     (outcome.kind === "session_failed" || outcome.kind === "timed_out") &&
-    getWorkItem(workItemId)?.kind === "developer"
+    (authKind === "developer" || authKind === "reviewer")
   ) {
     try {
-      authFailure = await prepareAuthFailureRouting(
-        workItemId,
-        outcome as Extract<DeveloperOutcome, { kind: "session_failed" | "timed_out" }>
-      );
+      authFailure = await prepareAuthFailureRouting(workItemId, {
+        kind: outcome.kind,
+        reason: "reason" in outcome ? outcome.reason : undefined,
+        logPath: "logPath" in outcome ? outcome.logPath : undefined,
+      });
     } catch (err) {
       console.error("[coordinator] prepareAuthFailureRouting", workItemId, err);
       authFailure = undefined;
@@ -716,16 +718,16 @@ export async function applyCompletion(
 }
 
 /**
- * NOT-368: when a developer session_failed / timed_out with a high-confidence attributed
- * auth cause, run the runtime's live auth probe and gather consecutive-park / transient-
- * retry state for routeDeveloperOutcome.
+ * NOT-368: when a developer or reviewer session_failed / timed_out with a high-confidence
+ * attributed auth cause, run the runtime's live auth probe and gather consecutive-park /
+ * transient-retry state for the role's route function.
  */
 async function prepareAuthFailureRouting(
   workItemId: string,
-  outcome: DeveloperOutcome & { kind: "session_failed" | "timed_out" }
+  outcome: { kind: "session_failed" | "timed_out"; reason?: string; logPath?: string }
 ): Promise<AuthFailureRouting | undefined> {
   const item = getWorkItem(workItemId);
-  if (!item || item.kind !== "developer") return undefined;
+  if (!item || (item.kind !== "developer" && item.kind !== "reviewer")) return undefined;
   const session = item.workerSessionId ? getWorkerSession(item.workerSessionId) : null;
   const logPath = session?.logPath ?? outcome.logPath ?? null;
   const runtimeHint = (session?.runtime ?? null) as Runtime | null;
@@ -776,10 +778,10 @@ function countConsecutiveAuthParks(issueId: string): number {
   return n;
 }
 
-/** True when any prior developer work item on this issue spent the transient auth retry. */
+/** True when any prior developer/reviewer work item on this issue spent the transient auth retry. */
 function issueSpentAuthTransientRetry(issueId: string): boolean {
   for (const w of listWorkItemsForIssue(issueId)) {
-    if (w.kind !== "developer") continue;
+    if (w.kind !== "developer" && w.kind !== "reviewer") continue;
     const payload = parseWorkItemPayload(w.payloadJson);
     if (payload[AUTH_TRANSIENT_RETRY_PAYLOAD_KEY] === true) return true;
   }
@@ -1297,7 +1299,7 @@ export function routeAppliedOutcome(
 ): ApplyResult {
   return item.kind === "developer"
     ? applyDeveloper(issue, instance, item, outcome as DeveloperOutcome, authFailure)
-    : applyReviewer(issue, instance, item, outcome as ReviewerOutcome);
+    : applyReviewer(issue, instance, item, outcome as ReviewerOutcome, authFailure);
 }
 
 interface EventEmitter {
@@ -1467,7 +1469,8 @@ function applyReviewer(
   issue: Issue,
   instance: WorkflowInstance,
   item: WorkItem,
-  outcome: ReviewerOutcome
+  outcome: ReviewerOutcome,
+  authFailure?: AuthFailureRouting
 ): ApplyResult {
   let route: ReturnType<typeof routeReviewerOutcome> = routeReviewerOutcome(
     outcome,
@@ -1477,6 +1480,7 @@ function applyReviewer(
       infraAttempts: issue.infraAttempts,
       maxInfraAttempts: issue.maxInfraAttempts,
       autoMerge: issue.autoMerge,
+      ...(authFailure ? { authFailure } : {}),
     },
     issue.headSha!
   );
@@ -1712,10 +1716,10 @@ function applyEffect(
         ? (effect.pushDivergence ?? null)
         : null;
     // NOT-368: confirmed runtime login park — resolve re-probes before re-queueing.
+    // Reviewer-origin parks keep resumeAsReviewer (re-queue reviewer) AND auth-park
+    // evidence (so resolve still re-probes); the two are not mutually exclusive.
     const runtimeAuthPark =
-      actionType === "policy_escalation" && !resumeAsReviewer
-        ? (effect.runtimeAuthPark ?? null)
-        : null;
+      actionType === "policy_escalation" ? (effect.runtimeAuthPark ?? null) : null;
     // NOT-280: an unchanged worktree blocker (same fingerprint) lands on the action it
     // already raised — still open, or reopened when a Resume changed nothing — instead of
     // opening an identical one on every Resume.
