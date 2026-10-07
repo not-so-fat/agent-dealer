@@ -121,7 +121,7 @@ function seedFullHistory(issueId: string): { files: string[]; attachmentDir: str
   fs.writeFileSync(attachmentBlob, "%PDF-bytes");
 
   const instance = startWorkflowInstance(issueId, "dev-reviewer-v1");
-  const session = createWorkerSession({ issueId, role: "developer", round: 1 });
+  const session = createWorkerSession({ issueId, role: "developer", round: 1, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
   const created = appendWorkflowEvent({
     issueId,
     type: "issue.created",
@@ -157,12 +157,12 @@ function seedFullHistory(issueId: string): { files: string[]; attachmentDir: str
   reconcileFinding({
     issueId,
     fingerprint: "fp-1",
-    severity: "major",
+    severity: "blocking",
     title: "Race",
     rationale: "racy",
     round: 1,
   });
-  createIssueArtifact({ issueId, workerSessionId: session.id, kind: "dev_trace", blobPath: artifactBlob, author: "developer" });
+  createIssueArtifact({ issueId, workerSessionId: session.id, kind: "dev_trace", blobPath: artifactBlob, author: "agent" });
   recordUsageEvent({ issueId, workerSessionId: session.id, role: "developer" });
   recordFailureCauses([
     {
@@ -188,7 +188,7 @@ function seedFullHistory(issueId: string): { files: string[]; attachmentDir: str
   insertSessionActivityEvent({
     issueId,
     workerSessionId: session.id,
-    activityKind: "assistant",
+    activityKind: "assistant_output",
     state: "completed",
     summary: "did a thing",
   });
@@ -203,8 +203,8 @@ function seedFullHistory(issueId: string): { files: string[]; attachmentDir: str
       sizeBytes: 10,
       sha256: "abc",
       url: "https://linear.app/file/att-1",
-      subtitle: null,
-      source: null,
+      subtitle: undefined,
+      source: undefined,
     },
   ]);
   // A settled (closed) authority attempt for this issue — deleted, never blocking.
@@ -367,7 +367,7 @@ test("DELETE refuses an active workflow instance, running session, and live work
   {
     const id = await createIssue(app, {}, false);
     seedFullHistory(id);
-    const session = createWorkerSession({ issueId: id, role: "developer", round: 2 });
+    const session = createWorkerSession({ issueId: id, role: "developer", round: 2, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
     startSession(session.id);
     await assertRefused409(app, id, /running worker session/, snapshotAll());
     cleanTables();
@@ -414,7 +414,7 @@ test("DELETE refuses active authority attempts and existing worktrees", async ()
     seedFullHistory(id);
     const wt = fs.mkdtempSync(path.join(getDataDir(), "wt-"));
     fs.writeFileSync(path.join(wt, "wip.txt"), "uncommitted");
-    const session = createWorkerSession({ issueId: id, role: "developer", round: 3 });
+    const session = createWorkerSession({ issueId: id, role: "developer", round: 3, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
     completeSession(session.id, { status: "failed", worktreePath: wt });
     await assertRefused409(app, id, new RegExp(wt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), snapshotAll());
     fs.rmSync(wt, { recursive: true, force: true });
@@ -425,7 +425,7 @@ test("DELETE refuses active authority attempts and existing worktrees", async ()
   {
     const id = await createIssue(app, {}, false);
     seedFullHistory(id);
-    const session = createWorkerSession({ issueId: id, role: "developer", round: 3 });
+    const session = createWorkerSession({ issueId: id, role: "developer", round: 3, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
     completeSession(session.id, { status: "done", worktreePath: path.join(getDataDir(), "wt-long-gone") });
     const del = await app.inject({ method: "DELETE", url: `/api/issues/${id}` });
     assert.equal(del.statusCode, 200, del.body);
@@ -492,7 +492,7 @@ test("DELETE reports safe-path cleanup failures as residuals after the record de
   fs.mkdirSync(lockedDir, { recursive: true });
   const blob = path.join(lockedDir, "trace.ndjson");
   fs.writeFileSync(blob, "{}\n");
-  const session = createWorkerSession({ issueId: id, role: "developer", round: 1 });
+  const session = createWorkerSession({ issueId: id, role: "developer", round: 1, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
   completeSession(session.id, { status: "done", logPath: blob });
   fs.chmodSync(lockedDir, 0o555);
   try {
@@ -552,6 +552,19 @@ test("DELETE of a linear-sourced issue makes zero Linear/GitHub calls and keeps 
   assert.ok(!moduleSource.includes("adapters/github"), "no GitHub client usage");
   assert.ok(!/[^a-z]fetch\(/.test(moduleSource), "delete command must not call fetch");
   await app.close();
+});
+
+test("lifecycle docs distinguish Remove from queue, Close, Abort, and Delete", () => {
+  // Documentation assertion for the NOT-365 issue-lifecycle section: the four
+  // operator actions must be named together with their distinct promises, and
+  // the stale "no hard-delete path" claim must be gone.
+  const doc = fs.readFileSync(new URL("../../../../docs/LINEAR_INTEGRATION.md", import.meta.url), "utf8");
+  assert.match(doc, /Issue lifecycle: queue, close, abort, delete/);
+  for (const action of ["Remove from queue", "Close issue", "Abort workflow", "Delete from Dealer"]) {
+    assert.ok(doc.includes(action), `lifecycle docs must name ${action}`);
+  }
+  assert.match(doc, /Linear ticket.*(unchanged|not be deleted|will not be deleted)/);
+  assert.ok(!doc.includes("there is no hard-delete path"), "stale no-hard-delete claim must be gone");
 });
 
 test("DELETE closes over queue history: admitted/removed rows for the issue go too", async () => {
