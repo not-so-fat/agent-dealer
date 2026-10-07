@@ -19,7 +19,14 @@ import type {
 import type { IssueDetail as WebIssueDetail } from "../../api.js";
 import IssueTimeline from "./IssueTimeline.js";
 import IssueStatusBadge from "./IssueStatusBadge.js";
-import IssueDetailBody, { CloseIssueConfirmation } from "./IssueDetailBody.js";
+import IssueDetailBody, {
+  CloseIssueConfirmation,
+  DeleteIssueConfirmation,
+  deleteConfirmationToken,
+  executeDeleteIssueFlow,
+  isDeleteConfirmationSatisfied,
+  type DeleteIssueFlowDeps,
+} from "./IssueDetailBody.js";
 import IssueConfigurationSection, { IssueConfigurationEditor } from "./IssueConfiguration.js";
 
 function event(extra: Partial<WorkflowEvent>): WorkflowEvent {
@@ -570,7 +577,10 @@ test("NOT-239: terminal issues show neither Close issue nor Abort workflow", () 
     const html = renderBody(detailFixture({ issue: issueFixture({ status }) }));
     assert.doesNotMatch(html, /Close issue/, `no Close for ${status}`);
     assert.doesNotMatch(html, /Abort workflow/, `no Abort for ${status}`);
-    assert.doesNotMatch(html, /More actions/, `no overflow for ${status}`);
+    // NOT-365: Delete from Dealer owns the overflow on terminal states — the
+    // More-actions area stays, with the permanent-removal action only.
+    assert.match(html, /More actions/, `overflow kept for ${status}`);
+    assert.match(html, /Delete from Dealer/, `Delete kept for ${status}`);
   }
 });
 
@@ -713,4 +723,257 @@ test("NOT-363: timeline renders source reloads with their label", () => {
     />,
   );
   assert.match(html, /Task text reloaded from Linear/);
+});
+
+// NOT-365: Dealer-local hard delete — a separate low-prominence action that
+// never touches the Linear ticket.
+
+test("NOT-365: ready issue keeps Close issue and gains a separate Delete from Dealer", () => {
+  const html = renderBody(
+    detailFixture({ issue: issueFixture({ status: "ready" }), queued: false, queueEntry: null }),
+  );
+  assert.match(html, /More actions/);
+  assert.match(html, /Close issue/);
+  assert.match(html, /Delete from Dealer/);
+  // Permanent-removal copy lives beside (never inside) the Close confirmation.
+  assert.match(html, /permanently removes the local issue/);
+  assert.doesNotMatch(html, /Abort workflow/);
+});
+
+test("NOT-365: delete confirmation requires the external label and spares the Linear ticket", () => {
+  const html = renderToStaticMarkup(
+    <DeleteIssueConfirmation
+      expectedToken="NOT-123"
+      externalLabel="NOT-123"
+      busy={false}
+      onConfirm={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+  assert.match(html, /Delete this issue from Dealer\?/);
+  assert.match(html, /permanently deletes the Dealer-local issue/);
+  assert.match(html, /history, evidence, and files/);
+  assert.match(html, /cannot be recovered/);
+  assert.match(html, /The Linear ticket NOT-123 will not be deleted/);
+  assert.match(html, /NOT-123/);
+  // The confirm control starts disabled: an empty typed value never matches.
+  assert.match(html, /disabled/);
+  assert.match(html, /Keep issue/);
+});
+
+test("NOT-365: delete confirmation for a manual issue names the Dealer id instead", () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  assert.equal(deleteConfirmationToken({ id, externalLabel: null }), id);
+  assert.equal(
+    deleteConfirmationToken({ id, externalLabel: "NOT-123" }),
+    "NOT-123",
+  );
+  const html = renderToStaticMarkup(
+    <DeleteIssueConfirmation
+      expectedToken={id}
+      externalLabel={null}
+      busy={false}
+      onConfirm={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+  assert.match(html, /There is no linked Linear ticket to affect/);
+  assert.doesNotMatch(html, /will not be deleted/);
+});
+
+test("NOT-365: typed delete confirmation is an exact match — mismatch stays disabled", () => {
+  assert.equal(isDeleteConfirmationSatisfied("NOT-123", "NOT-123"), true);
+  assert.equal(isDeleteConfirmationSatisfied("", "NOT-123"), false);
+  assert.equal(isDeleteConfirmationSatisfied("not-123", "NOT-123"), false);
+  assert.equal(isDeleteConfirmationSatisfied("NOT-123 ", "NOT-123"), false);
+  assert.equal(isDeleteConfirmationSatisfied(" NOT-123", "NOT-123"), false);
+  assert.equal(isDeleteConfirmationSatisfied("NOT-124", "NOT-123"), false);
+});
+
+test("NOT-365: active and parked issues show no Delete from Dealer", () => {
+  const activeInstance: WorkflowInstance = {
+    id: "33333333-3333-4333-8333-333333333333",
+    issueId: "11111111-1111-4111-8111-111111111111",
+    workflowVersion: "v1",
+    startedAt: "2026-09-20T09:30:00.000Z",
+    completedAt: null,
+    outcome: null,
+  };
+  for (const status of ["developing", "reviewing", "repairing", "final_review", "needs_human"] as const) {
+    const html = renderBody(
+      detailFixture({
+        issue: issueFixture({ status }),
+        latestWorkflowInstance: status === "needs_human" ? null : activeInstance,
+      }),
+    );
+    assert.doesNotMatch(html, /Delete from Dealer/, `no Delete for ${status}`);
+    assert.doesNotMatch(html, /permanently removes the local issue/, `no delete copy for ${status}`);
+  }
+});
+
+test("NOT-365: delete has no shortcut on list, queue, or bulk surfaces", async () => {
+  // Structural guard mirroring the NOT-239 Close check: the only non-test web
+  // source allowed to surface the Delete action is the Issue Detail body
+  // (secondary area) — the API client exposes `deleteDealerIssue` (no spaces)
+  // for it, the list page only renders the post-delete *notice*, and
+  // list/queue/bulk surfaces name nothing.
+  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { join, relative } = await import("node:path");
+  const srcDir = fileURLToPath(new URL("../../", import.meta.url));
+  const hits: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!/\.(ts|tsx)$/.test(name) || /\.test\./.test(name)) continue;
+      if (readFileSync(full, "utf8").includes("Delete from Dealer")) hits.push(relative(srcDir, full));
+    }
+  };
+  walk(srcDir);
+  assert.deepEqual(hits.sort(), ["components/issues/IssueDetailBody.tsx"]);
+});
+
+test("NOT-365: successful delete navigates to the list with the Linear-sparing notice", async () => {
+  // No DOM harness exists in this repo (server-rendered assertions only), so
+  // the suite drives the exact flow `doDelete` delegates to — stubbed
+  // collaborators, real sequencing, copy, and navigation contract.
+  const calls: string[] = [];
+  const navigations: Array<{ to: string; notice: string }> = [];
+  const deps: DeleteIssueFlowDeps = {
+    removeIssue: async (id) => {
+      calls.push(`remove:${id}`);
+      return { residualPaths: [] };
+    },
+    navigateToIssues: (notice) => {
+      navigations.push({ to: "/issues", notice });
+    },
+    onHumanActionsChanged: () => calls.push("humanActions"),
+    closeConfirmation: () => calls.push("close"),
+    reportError: () => calls.push("error"),
+    refresh: () => calls.push("refresh"),
+  };
+  const outcome = await executeDeleteIssueFlow(
+    "11111111-1111-4111-8111-111111111111",
+    { externalLabel: "NOT-123" },
+    deps,
+  );
+  assert.equal(outcome, "deleted");
+  // DELETE, then confirmation cleared, then the shell badge refresh — and no
+  // error banner or detail refresh on the success path (the route is gone).
+  assert.deepEqual(calls, ["remove:11111111-1111-4111-8111-111111111111", "close", "humanActions"]);
+  assert.equal(navigations.length, 1, "success must navigate away from the deleted detail route");
+  const [nav] = navigations;
+  assert.ok(nav);
+  assert.equal(nav.to, "/issues");
+  assert.match(nav.notice, /Issue NOT-123 deleted from Dealer/);
+  assert.match(nav.notice, /The Linear ticket was not deleted/);
+  const { deletedNoticeFromLocationState } = await import("../../pages/IssuesListPage.js");
+  assert.equal(
+    deletedNoticeFromLocationState({ deletedNotice: nav.notice }),
+    nav.notice,
+    "the navigated notice must survive the list page's location-state reader",
+  );
+});
+
+test("NOT-365: successful delete with residuals names them in the notice and still navigates", async () => {
+  const notices: string[] = [];
+  const outcome = await executeDeleteIssueFlow(
+    "11111111-1111-4111-8111-111111111111",
+    { externalLabel: "NOT-123" },
+    {
+      removeIssue: async () => ({ residualPaths: ["/home/blob-a.ndjson", "/home/blob-b.log"] }),
+      navigateToIssues: (n) => {
+        notices.push(n);
+      },
+      onHumanActionsChanged: () => {},
+      closeConfirmation: () => {},
+      reportError: () => {},
+      refresh: () => {},
+    },
+  );
+  assert.equal(outcome, "deleted");
+  assert.equal(notices.length, 1);
+  const [notice] = notices;
+  assert.ok(notice);
+  assert.match(notice, /The Linear ticket was not deleted/);
+  assert.match(
+    notice,
+    /2 Dealer-owned file\(s\) could not be removed: \/home\/blob-a\.ndjson, \/home\/blob-b\.log/,
+  );
+});
+
+test("NOT-365: successful delete of a manual issue names permanent local removal", async () => {
+  const notices: string[] = [];
+  const outcome = await executeDeleteIssueFlow(
+    "11111111-1111-4111-8111-111111111111",
+    { externalLabel: null },
+    {
+      removeIssue: async () => ({ residualPaths: [] }),
+      navigateToIssues: (n) => {
+        notices.push(n);
+      },
+      onHumanActionsChanged: () => {},
+      closeConfirmation: () => {},
+      reportError: () => {},
+      refresh: () => {},
+    },
+  );
+  assert.equal(outcome, "deleted");
+  assert.equal(notices.length, 1);
+  const [notice] = notices;
+  assert.ok(notice);
+  assert.match(notice, /11111111-1111-4111-8111-111111111111 permanently deleted from Dealer/);
+  assert.doesNotMatch(notice, /Linear ticket was not deleted/);
+});
+
+test("NOT-365: refused delete closes the confirmation, reports, and refreshes without navigating", async () => {
+  const failure = new Error(
+    "Cannot delete issue with a running worker session s-1 — abort the workflow and let it fully settle first",
+  );
+  const calls: string[] = [];
+  let navigated = false;
+  let reported: unknown = null;
+  const outcome = await executeDeleteIssueFlow(
+    "11111111-1111-4111-8111-111111111111",
+    { externalLabel: "NOT-123" },
+    {
+      removeIssue: async () => {
+        throw failure;
+      },
+      navigateToIssues: () => {
+        navigated = true;
+      },
+      onHumanActionsChanged: () => calls.push("humanActions"),
+      closeConfirmation: () => calls.push("close"),
+      reportError: (e) => {
+        reported = e;
+      },
+      refresh: () => calls.push("refresh"),
+    },
+  );
+  assert.equal(outcome, "refused");
+  assert.equal(navigated, false, "a refused delete must stay on the detail route");
+  // The stale confirmation clears, the server's 409 reaches the banner, and the
+  // detail refreshes to the live state — the badge has nothing to catch up on.
+  assert.deepEqual(calls, ["close", "refresh"]);
+  assert.equal(reported, failure);
+});
+
+test("NOT-365: list-page deletion notice reads the navigation state and nothing else", async () => {
+  const { deletedNoticeFromLocationState } = await import("../../pages/IssuesListPage.js");
+  assert.equal(
+    deletedNoticeFromLocationState({
+      deletedNotice: "Issue NOT-123 deleted from Dealer. The Linear ticket was not deleted.",
+    }),
+    "Issue NOT-123 deleted from Dealer. The Linear ticket was not deleted.",
+  );
+  assert.equal(deletedNoticeFromLocationState(null), null);
+  assert.equal(deletedNoticeFromLocationState(undefined), null);
+  assert.equal(deletedNoticeFromLocationState({}), null);
+  assert.equal(deletedNoticeFromLocationState({ deletedNotice: "" }), null);
+  assert.equal(deletedNoticeFromLocationState({ deletedNotice: 42 }), null);
 });

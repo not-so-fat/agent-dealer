@@ -82,6 +82,28 @@ Re-importing a Linear issue that is already present is idempotent: rather than c
 
 4. **Refine before execution (NOT-363)** — While the issue is still `ready` with no active workflow or running worker, the Issue Detail offers **Reload from Linear** (Linear-sourced issues only) and **Edit title / description / acceptance criteria** (every pre-execution `ready` issue, even when readiness already passes). Reload pulls the latest ticket title/description through the same adapter and title convention as import (`<identifier>: <title>`), recompiles the execution contract, and replaces the acceptance criteria with the freshly derived ones — old local criteria never survive a reload. Repository, agents, policy limits, auto-merge, and queue position are unchanged, and nothing is written back to Linear. Once execution owns the snapshot (admitted/running), both paths refuse with 409. Dealer never polls Linear after import; a reload also reconciles [issue attachments](#issue-attachments-not-364).
 
+### Issue lifecycle: queue, close, abort, delete (NOT-365)
+
+Four operator actions with four different promises. All four are
+Dealer-local — none of them deletes, archives, closes, or edits the Linear
+ticket:
+
+| Action | Where | What it does | What survives |
+|--------|-------|--------------|---------------|
+| **Remove from queue** | Issue Detail, queued `ready` issue | Takes the issue out of admission; it stays `ready` and can run later | Everything — issue, queue history, evidence |
+| **Close issue** (NOT-239) | Issue Detail → More actions; `ready` with no active workflow | Retires work that should never run: status → `closed`, the live queue entry is removed, one `issue.closed` event is recorded | History and evidence stay queryable as closed work |
+| **Abort workflow** | Issue Detail workflow rail; active workflow | Stops the current run and closes the issue | History, evidence, and the branch/PR work so far |
+| **Delete from Dealer** (NOT-365) | Issue Detail → More actions; `ready`/`done`/`closed` with nothing live | Permanently deletes the local issue row, every issue-scoped row, and Dealer-owned blobs/logs in one transaction | Nothing local — the Linear ticket (status, comments, labels, attachments) is unchanged |
+
+Delete is the only irreversible one. It requires typing the displayed
+external label (e.g. `NOT-123`) or, for manual issues, the exact Dealer
+issue id; it answers 409 naming the blocker while any workflow instance,
+running worker session, leased/pending work item, active authority attempt,
+or existing on-disk worktree is still live (close/abort and let the issue
+fully settle first); and Dealer-owned files it could not remove are reported
+as explicit residual paths on the successful deletion rather than failing it
+or touching anything outside `AGENT_DEALER_HOME`.
+
 ### Repository labels (NOT-251; replaces the NOT-242 confirmation flow)
 
 A Linear issue declares its GitHub repository with an explicit reusable label
@@ -139,7 +161,7 @@ local bytes — never just the ticket text or an expiring Linear download URL:
 | **External links** | Listed as links (title, URL, subtitle/source metadata) in the manifest, the developer prompt, and Issue Detail — never downloaded, never promised as offline files. |
 | **Explicitly excluded** | Files embedded only in Linear comments or synced Slack threads are never queried and never snapshotted. Archives are never auto-extracted. |
 | **Trust boundary** | Attachments are untrusted ticket inputs: the developer prompt says to inspect only what the task needs, never commit them, never extract archives outside a fresh contained directory, and never fetch external-link targets automatically. Nothing Dealer generates is uploaded back to Linear. |
-| **Retention** | Source blobs are retained with the issue history (`closed` issues stay queryable; there is no hard-delete path). |
+| **Retention** | Source blobs are retained with the issue history (`closed` issues stay queryable) until the issue itself is removed with **Delete from Dealer** (NOT-365), which deletes the blobs with the issue and never touches the Linear originals. |
 
 ### Repository mappings (NOT-260)
 

@@ -26,6 +26,7 @@ import {
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { abortIssueAsync, applyParkedEdit, canEditParkedIssue, capWaitForIssue, checkIssueReadiness, closeReadyIssue, parkCapWait, PARKED_EDITABLE_FIELDS } from "../coordinator/commands.js";
+import { deleteDealerIssue } from "../coordinator/delete-issue.js";
 import { getAgent } from "../repository/agents.js";
 import {
   executeIssueNow,
@@ -583,6 +584,25 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     const result = closeReadyIssue(id, body?.closedBy?.trim() || "human");
     if (!result.ok) return reply.status(result.code).send({ error: result.error });
     return { issueStatus: result.issueStatus, alreadyClosed: result.alreadyClosed };
+  });
+
+  /**
+   * NOT-365: permanently delete a Dealer-local issue and its Dealer-owned data.
+   * Only `ready`/`done`/`closed` with no active workflow, running session,
+   * leased/pending work, active authority attempt, or on-disk worktree — anything
+   * else answers 409 naming the blocker and changes nothing. A queued `ready`
+   * issue loses its live queue row in the same transaction. The linked Linear
+   * ticket is never touched: this path makes no Linear or GitHub call.
+   *
+   * File cleanup runs after the commit and stays inside AGENT_DEALER_HOME;
+   * anything it could not (or would not) remove is reported as `residualPaths`
+   * on the successful deletion rather than resurrecting the row.
+   */
+  app.delete("/api/issues/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const result = deleteDealerIssue(id);
+    if (!result.ok) return reply.status(result.code).send({ error: result.error });
+    return { deleted: true, issueId: id, removedQueueEntry: result.removedQueueEntry, residualPaths: result.residualPaths };
   });
 
   app.post("/api/issues/:id/guidance", async (req, reply) => {
