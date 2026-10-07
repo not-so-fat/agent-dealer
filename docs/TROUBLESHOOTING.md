@@ -128,6 +128,32 @@ Investigated against long `cursor_local` runs and the NOT-103 “presumed dead�
 - Lower values only for faster crash recovery in labs; too-low leases amplify false “presumed dead” under GC pauses.
 - Failure reasons on the issue timeline / detail strip are the operator-facing fix for mid-run Cursor auth death; do not conflate that with lease tuning.
 
+### Keep the Mac awake while Dealer work is active (NOT-369)
+
+On macOS, while Dealer has a leased worker session or a merge/publish in flight, the server
+holds a single idle-sleep assertion via `caffeinate -i -w <server pid>`. The hold drops when
+the last active item finishes (or on server shutdown). Linux and Windows are unchanged.
+
+**What this does not cover**
+
+- Closing the lid with no external display still sleeps (Apple policy).
+- Logging out (or killing the Dealer server) ends the hold — `caffeinate -w` tracks the server pid.
+- The display is not kept on; only idle sleep is inhibited.
+- Dealer never changes `pmset` for you and never wakes a machine that is already asleep.
+
+**Short AC sleep timer.** If `pmset -g custom` reports AC Power `sleep` between 1 and 29 minutes,
+the Agents page shows one dismissible notice per server start with the fix:
+
+```bash
+sudo pmset -c sleep 0
+```
+
+Dealer only holds the machine awake while work is active; a 1-minute AC timer still sleeps the
+host between sessions. The check is read-only — it never runs `sudo` and never writes settings.
+The Agents health area also shows a one-line hold status (`Host awake hold: active|idle`).
+
+Host-suspend *detection* (`host.suspended` timeline events) is unchanged — see below.
+
 ### Host sleep is not a crash (NOT-124 / NOT-125)
 
 The reasoning above holds for a *running* host. It does not hold for one that sleeps: the
