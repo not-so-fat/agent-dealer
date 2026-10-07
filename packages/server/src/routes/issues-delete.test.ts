@@ -30,6 +30,8 @@ const { getSourceAttachmentsDir } = await import("../paths.js");
 const { countIssueScopedRows, removeDealerPathContained, ISSUE_SCOPED_TABLES } = await import(
   "../coordinator/delete-issue.js"
 );
+const { managedWorktreePath, managedWorktreesRoot } = await import("../adapters/managed-repo.js");
+const { parseGitHubRepoInput } = await import("@agent-dealer/shared");
 
 before(() => {
   migrate();
@@ -94,6 +96,21 @@ async function createIssue(
 
 function setStatus(issueId: string, status: string): void {
   getDb().prepare("UPDATE issues SET status = ? WHERE id = ?").run(status, issueId);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Fake a linked-worktree checkout at `dir` whose HEAD sits on `branch` (or is
+ * detached when `branch` is null) — `.git` file plus gitdir, no git binary. */
+function fakeLinkedWorktree(dir: string, branch: string | null): void {
+  fs.mkdirSync(path.join(dir, "gitdir"), { recursive: true });
+  fs.writeFileSync(path.join(dir, ".git"), "gitdir: ./gitdir\n");
+  fs.writeFileSync(
+    path.join(dir, "gitdir", "HEAD"),
+    branch === null ? "0123456789abcdef0123456789abcdef01234567\n" : `ref: refs/heads/${branch}\n`
+  );
 }
 
 /** Write a Dealer-owned file under AGENT_DEALER_HOME and return its path. */
@@ -433,6 +450,117 @@ test("DELETE refuses active authority attempts and existing worktrees", async ()
   await app.close();
 });
 
+test("DELETE refuses an unrecorded checkout at a session's deterministic managed path", async () => {
+  const app = await buildApp();
+  // The checkout exists on disk but no row names it — the deps-throw /
+  // salvage-conflict exits that return before patchRunningSession records it.
+  const id = await createIssue(app, {}, false);
+  seedFullHistory(id);
+  const identity = parseGitHubRepoInput(getIssue(id)!.repo).identity;
+  const session = createWorkerSession({ issueId: id, role: "developer", round: 9, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
+  completeSession(session.id, { status: "failed" });
+  const unrecorded = managedWorktreePath(identity, session.id, "developer");
+  fs.mkdirSync(unrecorded, { recursive: true });
+  fs.writeFileSync(path.join(unrecorded, "wip.txt"), "uncommitted");
+  try {
+    await assertRefused409(app, id, new RegExp(escapeRegExp(unrecorded)), snapshotAll());
+  } finally {
+    fs.rmSync(unrecorded, { recursive: true, force: true });
+    cleanTables();
+  }
+  await app.close();
+});
+
+test("DELETE refuses an unrecorded checkout at a session's legacy-local path", async () => {
+  const app = await buildApp();
+  const id = await createIssue(app, {}, false);
+  seedFullHistory(id);
+  const legacyRepo = fs.mkdtempSync(path.join(getDataDir(), "legacy-repo-"));
+  getDb().prepare("UPDATE issues SET repo = ? WHERE id = ?").run(legacyRepo, id);
+  const session = createWorkerSession({ issueId: id, role: "developer", round: 9, agentId: BUILTIN_AGENT_CLAUDE_ID, runtime: "claude_code" });
+  completeSession(session.id, { status: "failed" });
+  const unrecorded = path.join(legacyRepo, ".agent-dealer-worktrees", `${session.id}-developer`);
+  fs.mkdirSync(unrecorded, { recursive: true });
+  fs.writeFileSync(path.join(unrecorded, "wip.txt"), "uncommitted");
+  try {
+    await assertRefused409(app, id, new RegExp(escapeRegExp(unrecorded)), snapshotAll());
+  } finally {
+    fs.rmSync(legacyRepo, { recursive: true, force: true });
+    cleanTables();
+  }
+  await app.close();
+});
+
+test("DELETE refuses a branch-holding checkout under another session's name", async () => {
+  const app = await buildApp();
+  const id = await createIssue(app, {}, false);
+  seedFullHistory(id);
+  getDb().prepare("UPDATE issues SET branch = ? WHERE id = ?").run("dealer/issue-mine", id);
+  const identity = parseGitHubRepoInput(getIssue(id)!.repo).identity;
+  // A reused leftover under another session's deterministic name — no row of
+  // this issue names it, but its HEAD still sits on the issue branch.
+  const holder = path.join(managedWorktreesRoot(identity), "some-other-session-developer");
+  fakeLinkedWorktree(holder, "dealer/issue-mine");
+  try {
+    await assertRefused409(app, id, new RegExp(escapeRegExp(holder)), snapshotAll());
+  } finally {
+    fs.rmSync(holder, { recursive: true, force: true });
+    cleanTables();
+  }
+  await app.close();
+});
+
+test("DELETE refuses a worktree path recorded in human-action evidence", async () => {
+  const app = await buildApp();
+  const id = await createIssue(app, {}, false);
+  seedFullHistory(id);
+  const preserved = fs.mkdtempSync(path.join(getDataDir(), "preserved-"));
+  createHumanAction({
+    issueId: id,
+    actionType: "policy_escalation",
+    reason: "push rejected; checkout preserved",
+    question: "What now?",
+    evidence: { pushDivergence: { worktreePath: preserved } },
+  });
+  try {
+    await assertRefused409(app, id, new RegExp(escapeRegExp(preserved)), snapshotAll());
+  } finally {
+    fs.rmSync(preserved, { recursive: true, force: true });
+    cleanTables();
+  }
+  await app.close();
+});
+
+test("DELETE ignores other-branch checkouts, detached HEADs, and relative evidence paths", async () => {
+  const app = await buildApp();
+  const id = await createIssue(app, {}, false);
+  seedFullHistory(id);
+  getDb().prepare("UPDATE issues SET branch = ? WHERE id = ?").run("dealer/issue-mine", id);
+  const identity = parseGitHubRepoInput(getIssue(id)!.repo).identity;
+  const root = managedWorktreesRoot(identity);
+  const otherBranch = path.join(root, "other-issue-session-developer");
+  const detached = path.join(root, "reviewer-detached-reviewer");
+  fakeLinkedWorktree(otherBranch, "dealer/issue-someone-else");
+  fakeLinkedWorktree(detached, null);
+  // A relative in-repo pointer is never a checkout — only absolute paths qualify.
+  createHumanAction({
+    issueId: id,
+    actionType: "policy_escalation",
+    reason: "note",
+    question: "note?",
+    evidence: { pushDivergence: { worktreePath: "src/relative-pointer.txt" } },
+  });
+  try {
+    const del = await app.inject({ method: "DELETE", url: `/api/issues/${id}` });
+    assert.equal(del.statusCode, 200, del.body);
+  } finally {
+    fs.rmSync(otherBranch, { recursive: true, force: true });
+    fs.rmSync(detached, { recursive: true, force: true });
+    cleanTables();
+  }
+  await app.close();
+});
+
 test("file cleanup removes in-root files, never follows out-of-root paths, reports failures as residuals", async () => {
   const home = getDataDir();
   // Outside sentinel: must never be touched by any path below.
@@ -462,6 +590,32 @@ test("file cleanup removes in-root files, never follows out-of-root paths, repor
   assert.equal(removeDealerPathContained(link, home), link);
   assert.ok(fs.existsSync(sentinel), "symlink target outside the home must survive");
   assert.ok(fs.lstatSync(link).isSymbolicLink(), "the link itself must not be followed into removal");
+
+  // The Dealer home root itself is never removable — a corrupted path resolving
+  // there reports as residual instead of wiping the whole home.
+  assert.equal(removeDealerPathContained(home, home), home);
+  assert.ok(fs.existsSync(home), "home root must survive");
+  assert.ok(fs.existsSync(path.join(home, "sub")), "home contents must survive");
+
+  // In-home symlink to an in-home file: the link itself is removed, the target
+  // survives, and nothing reports as residual.
+  const linkTarget = homeFile("link-target.txt", "keep me");
+  const inLink = path.join(home, "in-link.txt");
+  fs.symlinkSync(linkTarget, inLink);
+  assert.equal(removeDealerPathContained(inLink, home), null);
+  assert.ok(!fs.existsSync(inLink), "the in-home link itself must be removed");
+  assert.ok(fs.existsSync(linkTarget), "the in-home link target must survive");
+  fs.rmSync(linkTarget, { force: true });
+
+  // Outside link pointing in: neither the link nor its target is ours — both
+  // stay, and the path reports as residual.
+  const inwardTarget = homeFile("inward-target.txt", "keep me");
+  const inward = path.join(outsideDir, "inward.txt");
+  fs.symlinkSync(inwardTarget, inward);
+  assert.equal(removeDealerPathContained(inward, home), inward);
+  assert.ok(fs.lstatSync(inward).isSymbolicLink(), "outside link must stay");
+  assert.ok(fs.existsSync(inwardTarget), "in-home target of an outside link must stay");
+  fs.rmSync(inwardTarget, { force: true });
 
   // An induced unlink failure (read-only parent dir) reports a residual.
   const lockedDir = path.join(home, "locked");
@@ -546,7 +700,17 @@ test("DELETE of a linear-sourced issue makes zero Linear/GitHub calls and keeps 
     new URL("../coordinator/delete-issue.js", import.meta.url).pathname.replace(/\.js$/, ".ts"),
     "utf8"
   );
-  assert.ok(!moduleSource.includes("adapters/"), "delete command must not import any outbound adapter");
+  // Only local git/repo-path adapters (worktree-guard path computation) — no
+  // outbound adapter may be imported.
+  const adapterImports = [
+    ...moduleSource.matchAll(/from\s+["']([^"']*adapters\/[^"']+)["']/g),
+  ].map((m) => m[1]);
+  for (const imp of adapterImports) {
+    assert.ok(
+      imp.endsWith("adapters/managed-repo.js") || imp.endsWith("adapters/git-worktree.js"),
+      `delete command must not import outbound adapter ${imp}`
+    );
+  }
   assert.ok(!moduleSource.includes("linear-inbox"), "no Linear client usage");
   assert.ok(!moduleSource.includes("linear-graphql"), "no Linear client usage");
   assert.ok(!moduleSource.includes("adapters/github"), "no GitHub client usage");
