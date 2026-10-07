@@ -1075,6 +1075,29 @@ test("no_windows failure persists an unavailable row; streak rises to 3 then a s
   }
 });
 
+test("a live-session reading between failures restarts the streak instead of inflating it", async () => {
+  let clock = NOW_MS;
+  const failing = streamRunner((ms) => liveUsageStream(ms, { withReport: false }), () => clock);
+  for (const at of [NOW_MS, NOW_MS + 29 * 60_000, NOW_MS + 86 * 60_000]) {
+    clock = at;
+    await maybeProbeClaudeCapacity(at, { runner: failing, bin: "/fake/claude" });
+  }
+  assert.equal(listCapacitySnapshots("claude_code")[0]!.unavailableDetail!.consecutiveFailures, 3);
+  // A live session (not the probe) lands both windows and clears the stored detail.
+  seedWindowAges(0, 0, NOW_MS + 100 * 60_000);
+  for (const row of listCapacitySnapshots("claude_code")) assert.equal(row.unavailableDetail, null);
+  // Once that reading lapses (5H reset passed, 1W expired), the next failure is #1.
+  clock = NOW_MS + 200 * 60_000;
+  const outcome = await maybeProbeClaudeCapacity(clock, { runner: failing, bin: "/fake/claude" });
+  assert.equal(outcome.failureKind, "no_windows");
+  const rows = listCapacitySnapshots("claude_code");
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    assert.equal(row.unavailableDetail!.consecutiveFailures, 1);
+    assert.equal(row.unavailableDetail!.firstFailureAt, new Date(clock).toISOString());
+  }
+});
+
 test("an API-key auth source is named in the stored reason", async () => {
   const outcome = await maybeProbeClaudeCapacity(NOW_MS, {
     runner: streamRunner((ms) => liveUsageStream(ms, { withReport: false, apiKeySource: "ANTHROPIC_API_KEY" }), () => NOW_MS),

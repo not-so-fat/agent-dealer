@@ -340,6 +340,17 @@ export function extractClaudeCapacityFromEvents(
   return { runtime: CLAUDE_RUNTIME, windows: [...byKey.values()], unavailable: [] };
 }
 
+let claudeCriticalReadingSeq = 0;
+
+/**
+ * Monotonic count of successful Claude 5H/1W writes from any source (probe,
+ * local cache, live session). The probe's in-memory failure streak compares
+ * against it so a non-probe success breaks the streak too (NOT-366).
+ */
+export function claudeCriticalReadingWriteSeq(): number {
+  return claudeCriticalReadingSeq;
+}
+
 /**
  * Persist Claude window readings as normalized capacity snapshots
  * (per-window upserts — siblings not in this observation are left untouched,
@@ -380,6 +391,9 @@ export function recordClaudeWindowReadings(
     return unavailable ? nextMs > prevMs : nextMs >= prevMs;
   });
   if (fresh.length === 0) return 0;
+  if (fresh.some((w) => w.criticalRole === "five_hour" || w.criticalRole === "weekly")) {
+    claudeCriticalReadingSeq += 1;
+  }
   recordCapacitySnapshots(
     runtime,
     fresh.map((w) => ({

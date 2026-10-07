@@ -122,6 +122,7 @@ import {
 import { configuredCapacityRuntimes } from "./service.js";
 import {
   CLAUDE_RUNTIME,
+  claudeCriticalReadingWriteSeq,
   extractClaudeCapacityFromEvents,
   normalizeClaudeResetsAt,
   recordClaudeCapacityFromEvents,
@@ -1108,6 +1109,8 @@ let claudeProbeInFlight: Promise<ProbeRunResult> | null = null;
 let lastClaudeProbeAttemptMs = 0;
 let consecutiveClaudeProbeFailures = 0;
 let firstClaudeProbeFailureMs: number | null = null;
+/** Success-write sequence seen when the current failure streak began. */
+let claudeProbeStreakReadingSeq = 0;
 
 /** Test helper — clear single-flight, attempt, and backoff state. */
 export function resetClaudeCapacityRefreshState(): void {
@@ -1190,6 +1193,14 @@ export async function maybeProbeClaudeCapacity(
         consecutiveClaudeProbeFailures = 0;
         firstClaudeProbeFailureMs = null;
       } else {
+        // Any successful 5H/1W reading since the streak began (local cache
+        // or a live session, not just this probe) ends it: start fresh.
+        const seq = claudeCriticalReadingWriteSeq();
+        if (consecutiveClaudeProbeFailures === 0 || seq !== claudeProbeStreakReadingSeq) {
+          consecutiveClaudeProbeFailures = 0;
+          firstClaudeProbeFailureMs = null;
+          claudeProbeStreakReadingSeq = seq;
+        }
         consecutiveClaudeProbeFailures += 1;
         firstClaudeProbeFailureMs ??= nowMs;
         try {
