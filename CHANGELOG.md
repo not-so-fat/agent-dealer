@@ -4,6 +4,16 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.2.14 — 2026-10-07
+
+Linear intake: attachments reach Builder sessions, editable task text, and source-issue advance verification
+
+### Changes
+
+- NOT-364: Snapshot Linear file attachments and expose them to Builder sessions (#208)
+- NOT-362: Merged work silently leaves its Linear source issue stale: carry Linear's branch name and verify the issue advanced (#207)
+- NOT-363: Reload a Linear-sourced Dealer issue and edit its task text before execution (#206)
+
 ## 1.2.13 — 2026-10-06
 
 Inline Linear intake filters for large workspaces; parked swap box expanded by default
