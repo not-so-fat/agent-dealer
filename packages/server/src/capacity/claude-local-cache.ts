@@ -73,7 +73,11 @@
 //   probe's `usage_report.rate_limits.limits[]` is this exact same shape and
 //   shares the same role mapping (`limitEntryRole`).
 //
-// Probe argv (verified live at 2.1.283):
+// Probe argv (first verified at 2.1.283; re-validated live at 2.1.292 on
+// 2026-10-07 — NOT-366: stream-json still carries `usage_report` on the
+// synthetic assistant event; `--output-format json` prints only the result
+// event and so never shows it; a non-subscription auth source yields a cost
+// summary with no report at all. See docs/RUNTIME_CAPACITY.md):
 // - `-p "/usage"` — the fixed local slash-command; never interpolated, never
 //   a natural-language prompt. Resolved entirely locally: no model call, no
 //   tokens, no cost.

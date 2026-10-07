@@ -500,7 +500,8 @@ Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
   across concurrent readers; at most one attempt per account per 14 minutes
   while healthy, backing off exponentially (14m → 28m → 56m → ~2h, 8h cap)
   on failure. Never retried per UI poll.
-- Argv (verified live at 2.1.283): `claude -p "/usage" --model haiku
+- Argv (re-validated live at 2.1.292 on 2026-10-07 — see "NOT-366
+  re-validation" below): `claude -p "/usage" --model haiku
   --max-turns 1 --tools "" --strict-mcp-config --no-session-persistence
   --output-format stream-json --verbose --max-budget-usd 0.01`. `--bare` is
   deliberately avoided so the account's ambient OAuth login applies (the
@@ -533,8 +534,28 @@ Probe contract (`runClaudeCapacityProbe`, `maybeProbeClaudeCapacity`):
   corroboration, any `rate_limit_event` and a re-read of the local cache
   (the probe run refreshes Claude's own file); the union must cover both
   critical roles, or last-good rows are kept. Every attempt appends one JSON
-  line (timestamps, budget, exit, cost, windows, outcome — never
-  prompt/output/credentials) to `<data-dir>/capacity/claude-probe.log`.
+  line (timestamps, budget, exit, cost, windows, outcome, the init event's
+  `authSource` name — never prompt/output/credentials) to
+  `<data-dir>/capacity/claude-probe.log`.
+- **Failure is stored, not inferred (NOT-366).** A failed attempt records
+  itself on every critical window that has no current reading
+  (`recordClaudeAcquisitionFailure`): `source: unavailable`, an
+  `unavailable_reason` (`unparsable` when a payload arrived without trusted
+  windows, `missing` for spawn/timeout/exit failures), and an
+  `unavailable_detail` JSON column carrying an operator-readable `message`,
+  `consecutiveFailures`, `firstFailureAt`, and `lastFailureAt`. The streak
+  continues from the stored rows, so it survives a server restart and a
+  three-day break reads differently from one transient miss. A window that
+  still has a current reading is left alone. A stale last-good row keeps its
+  value and `observedAt` only for newer-wins arbitration; read-time
+  classification never shows it as a number. Any successful reading (probe,
+  local cache, or a live session's `rate_limit_event`) rewrites the row with
+  no detail, which clears the reason and streak. The API serves
+  `unavailableDetail` per window; the header and strip tooltips render
+  `N/A (unavailable: <message> (<n> consecutive failed refreshes since
+  <time>))`. Internal failure-kind identifiers (`no_windows`, `timeout`, …)
+  stay in `claude-probe.log` and never reach the row, the API, or the DOM
+  (NOT-266).
 
 `GET /api/runtime-capacity` runs one background refresh (free cache
 ingest, then the probe gate) without blocking the read. `doctor` reports
@@ -543,6 +564,52 @@ the cache age from `cachedUsageUtilization.fetchedAtMs` — never file mtime
 notes when the free refresh has been explicitly disabled — age labels only,
 never values or ids. Tests inject a fake probe runner; CI performs no live
 provider request.
+
+### NOT-366 re-validation (2026-10-07, Claude Code 2.1.292)
+
+Report: `claude -p "/usage" --output-format json` returns no `usage_report`
+key, and `~/.claude.json` has no usable shape, so the probe looked
+permanently broken. Re-validation against the current CLI found that the
+acquisition path still works, and that the report had two causes:
+
+- **`--output-format json` hides the report by design.** That format prints
+  only the terminal `result` event (`local_command: "usage"`, `num_turns:
+  0`, `total_cost_usd: 0`, no `usage_report`). Dealer uses `stream-json`,
+  where the synthetic assistant event (`model: "<synthetic>"`) carries
+  `local_command_run: {command: "usage"}` and
+  `usage_report.rate_limits.limits[]` — `{kind: "session", group:
+  "session", percent, resets_at, severity, is_active}` and `{kind:
+  "weekly_all", group: "weekly", …}` — plus `usage_report.session` cost
+  totals and `rate_limits.extra_usage`. `resets_at` now has microseconds
+  and a `+00:00` offset (e.g. `…T15:49:59.535018+00:00`), which
+  `normalizeClaudeResetsAt` already accepts. Dealer's exact probe argv on
+  2.1.292 cost $0, finished in about 3s, and produced both
+  `claude_unified_five_hour` and `claude_unified_seven_day` through the
+  shipped parser. `cachedUsageUtilization` in `~/.claude.json` was refreshed
+  by the same run: `fetchedAtMs`, plus `utilization.five_hour`, `seven_day`,
+  and `limits[]` among about 25 other buckets.
+- **A non-subscription auth source has no plan limits to report.** With
+  `ANTHROPIC_API_KEY` (or another overriding auth source) in the spawn env,
+  the init event reports `apiKeySource: "ANTHROPIC_API_KEY"` and `/usage`
+  resolves to the local cost summary only (`Total cost: $0.0000 …`). That
+  run still has the local-command marker and exactly $0 cost, but has no
+  `usage_report`. This is the exact `{"ok":false,"failureKind":"no_windows",
+  "exitCode":0,"costUsd":0}` signature. The probe now records `authSource`
+  and names it in the stored reason ("the CLI is authenticated via
+  ANTHROPIC_API_KEY, which has no 5H/1W subscription windows").
+
+The production `claude-probe.log` for 2026-09-27 → 2026-10-07 shows the
+probe is not uniformly failing. Successes alternate with intermittent
+`no_windows` and `timeout` streaks, and the 10:52Z and 11:08Z runs on
+2026-10-07 succeeded. **Decision:** keep `/usage` (stream-json) as the
+supported acquisition path and keep scheduling it. It still yields the
+account-wide 5H/1W pair at $0. Failures are no longer silent, because each
+one is persisted with its reason and streak (above). Dealer relies on: the
+local-command marker, `total_cost_usd === 0`, and
+`usage_report.rate_limits.limits[]` entries named `session` and
+`weekly_all`. The cache re-read and any `rate_limit_event` are only
+corroboration. A fixture of the 2.1.292 stream is pinned in
+`claude-local-cache.test.ts`.
 
 Upgrade note: the refresh runs inside the deployed server process, so
 restart the server after upgrading — a still-running pre-upgrade server
