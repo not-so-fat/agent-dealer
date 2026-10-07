@@ -108,7 +108,13 @@ import path from "node:path";
 import { getDataDir } from "../db/index.js";
 import { resolveClaudeBin } from "../cli-env.js";
 import { parseNdjson } from "../runners/stream-json.js";
-import { listCapacitySnapshots } from "../repository/runtime-capacity.js";
+import { listCapacitySnapshots, recordCapacitySnapshots } from "../repository/runtime-capacity.js";
+import {
+  deriveWindowLabel,
+  isWindowKnown,
+  type CapacityUnavailableDetail,
+  type CapacityUnavailableReason,
+} from "@agent-dealer/shared";
 import { configuredCapacityRuntimes } from "./service.js";
 import {
   CLAUDE_RUNTIME,
@@ -618,6 +624,24 @@ export interface ProbeRunResult {
   timedOut: boolean;
   durationMs: number;
   failureKind: ProbeFailureKind | null;
+  /**
+   * NOT-366: the init event's `apiKeySource` (`none` = subscription login;
+   * otherwise the name of the overriding auth source, e.g.
+   * `ANTHROPIC_API_KEY`). Never a credential value. Under a non-subscription
+   * auth source `/usage` resolves to a local cost summary with no
+   * `usage_report` at all — the observed `no_windows` signature.
+   */
+  authSource?: string | null;
+}
+
+function probeAuthSource(events: Array<Record<string, unknown>>): string | null {
+  for (const e of events) {
+    if (e.type !== "system" || e.subtype !== "init") continue;
+    const src = (e as { apiKeySource?: unknown }).apiKeySource;
+    // Allow-list the shape so only a source *name* can ever be recorded.
+    if (typeof src === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(src)) return src;
+  }
+  return null;
 }
 
 function probeCostFromEvents(events: Array<Record<string, unknown>>): number | null {
@@ -815,6 +839,7 @@ export async function runClaudeCapacityProbe(
     events = [];
   }
   const costUsd = probeCostFromEvents(events);
+  const authSource = probeAuthSource(events);
   // Fail-closed structural checks (reviewer-requested, 2026-09-27, PR #165):
   // the whole design rests on `/usage` resolving as a local command that
   // never reaches the model. If either assumption is violated — no local-
@@ -827,8 +852,8 @@ export async function runClaudeCapacityProbe(
   // This also makes a future CLI-behavior change loud (backoff engages,
   // logged as a distinct failure kind) instead of silently becoming a
   // recurring paid probe again.
-  if (!hasLocalUsageCommandMarker(events)) return fail("not_local_command", { costUsd });
-  if (costUsd !== 0) return fail("unexpected_cost", { costUsd });
+  if (!hasLocalUsageCommandMarker(events)) return fail("not_local_command", { costUsd, authSource });
+  if (costUsd !== 0) return fail("unexpected_cost", { costUsd, authSource });
   // Primary signal: the `/usage` local command's own structured result.
   // Present on every successful run (verified live) — most reliable source.
   let usageReportRoles = new Set<string>();
@@ -877,13 +902,16 @@ export async function runClaudeCapacityProbe(
     // Advisory — stream coverage below still counts.
   }
   const covered = new Set([...usageReportRoles, ...streamRoles, ...cacheRoles]);
-  if (spawnResult.exitCode !== 0 && covered.size === 0) return fail("nonzero_exit", { costUsd });
+  if (spawnResult.exitCode !== 0 && covered.size === 0) {
+    return fail("nonzero_exit", { costUsd, authSource });
+  }
   if (!covered.has("five_hour") || !covered.has("weekly")) {
-    // A `/usage` run should always carry both roles directly in
-    // `usage_report.rate_limits.limits[]` (verified live) — a `no_windows`
-    // streak here means something changed upstream and is worth revisiting,
-    // but since the refresh is free it is not itself a cost problem.
-    return fail("no_windows", { costUsd });
+    // A subscription-authenticated `/usage` run carries both roles directly
+    // in `usage_report.rate_limits.limits[]` (re-verified live at 2.1.292).
+    // `no_windows` means the report was absent — e.g. an API-key auth source
+    // (see `authSource`), or the CLI's own plan-limits fetch failing — and
+    // is persisted as the window's unavailable reason (NOT-366).
+    return fail("no_windows", { costUsd, authSource });
   }
   const out: ProbeRunResult = {
     ok: true,
@@ -893,6 +921,7 @@ export async function runClaudeCapacityProbe(
     timedOut: false,
     durationMs,
     failureKind: null,
+    authSource,
   };
   logProbeOutcome(out);
   appendProbeDiagnostic({
@@ -904,6 +933,112 @@ export async function runClaudeCapacityProbe(
     ...out,
   });
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Unavailable-reason persistence (NOT-366)
+// ---------------------------------------------------------------------------
+
+/**
+ * Operator-readable cause for a failed refresh. Deliberately prose: the
+ * internal `ProbeFailureKind` identifiers stay in the diagnostic log and
+ * never reach the stored row, the API, or the header (NOT-266).
+ */
+export function claudeProbeFailureMessage(
+  kind: ProbeFailureKind,
+  authSource: string | null = null
+): string {
+  switch (kind) {
+    case "spawn":
+      return "the Claude CLI could not be started for the /usage refresh";
+    case "timeout":
+      return "the Claude /usage refresh timed out";
+    case "nonzero_exit":
+      return "the Claude /usage refresh exited with an error";
+    case "no_windows":
+      if (authSource !== null && authSource !== "none") {
+        return (
+          `Claude /usage reported no plan limits: the CLI is authenticated via ${authSource}, ` +
+          "which has no 5H/1W subscription windows"
+        );
+      }
+      return "Claude /usage reported no 5H/1W plan limits";
+    case "not_local_command":
+      return "Claude /usage did not run as a local command, so its result was not trusted";
+    case "unexpected_cost":
+      return "the Claude /usage refresh could not be verified as free, so its result was rejected";
+  }
+}
+
+function failureUnavailableReason(kind: ProbeFailureKind): CapacityUnavailableReason {
+  // A payload arrived but yielded no trusted windows vs. no payload at all.
+  return kind === "no_windows" || kind === "not_local_command" || kind === "unexpected_cost"
+    ? "unparsable"
+    : "missing";
+}
+
+/**
+ * Record a failed refresh on every critical window that has no current
+ * reading, so absence of data is stored with its cause instead of inferred
+ * from an empty header. A window still carrying a current reading is left
+ * alone (a fresh reading always wins). An existing stale row keeps its
+ * last-good value and `observedAt` — only so newer-wins arbitration in
+ * `recordClaudeWindowReadings` still works — and is flagged
+ * `source: unavailable`, so read-time classification never shows it as a
+ * number. The streak (count + first failure) continues from whatever is
+ * already stored, so it survives a server restart; any successful reading
+ * rewrites the row with no detail, clearing it.
+ */
+export function recordClaudeAcquisitionFailure(
+  result: Pick<ProbeRunResult, "failureKind" | "authSource">,
+  nowMs = Date.now(),
+  inMemoryStreak: { count: number; firstFailureMs: number | null } = { count: 1, firstFailureMs: nowMs }
+): number {
+  const kind = result.failureKind;
+  if (!kind) return 0;
+  const rows = new Map(listCapacitySnapshots(CLAUDE_RUNTIME).map((r) => [r.windowKey, r]));
+  let prevCount = 0;
+  let firstMs = inMemoryStreak.firstFailureMs ?? nowMs;
+  for (const identity of Object.values(CACHE_WINDOW_IDENTITIES)) {
+    const detail = rows.get(identity.windowKey)?.unavailableDetail;
+    if (!detail) continue;
+    prevCount = Math.max(prevCount, detail.consecutiveFailures);
+    const ms = Date.parse(detail.firstFailureAt);
+    if (Number.isFinite(ms)) firstMs = Math.min(firstMs, ms);
+  }
+  const nowIso = new Date(nowMs).toISOString();
+  const unavailableDetail: CapacityUnavailableDetail = {
+    message: claudeProbeFailureMessage(kind, result.authSource ?? null),
+    consecutiveFailures: Math.max(prevCount + 1, inMemoryStreak.count, 1),
+    firstFailureAt: new Date(Math.min(firstMs, nowMs)).toISOString(),
+    lastFailureAt: nowIso,
+  };
+  const writes = Object.values(CACHE_WINDOW_IDENTITIES).flatMap((identity) => {
+    const row = rows.get(identity.windowKey);
+    if (row && isWindowKnown(row, nowMs)) return [];
+    return [
+      {
+        windowKey: identity.windowKey,
+        providerBucket: identity.providerBucket,
+        durationMinutes: identity.durationMinutes,
+        displayLabel: row?.displayLabel ?? deriveWindowLabel(identity.durationMinutes, identity.providerBucket),
+        usedValue: row?.usedValue ?? null,
+        usedUnit: row?.usedUnit ?? null,
+        remainingPercent: row?.remainingPercent ?? null,
+        resetAt: row?.resetAt ?? null,
+        observedAt: row?.observedAt ?? nowIso,
+        freshUntil: row?.freshUntil ?? null,
+        expiresAt: row?.expiresAt ?? null,
+        source: "unavailable" as const,
+        unavailableReason: failureUnavailableReason(kind),
+        evidenceRef: CLAUDE_PROBE_EVIDENCE_REF,
+        criticalRole: identity.criticalRole,
+        unavailableDetail,
+      },
+    ];
+  });
+  if (writes.length > 0) recordCapacitySnapshots(CLAUDE_RUNTIME, writes);
+  return writes.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -968,12 +1103,14 @@ export interface ProbeGateOutcome {
 let claudeProbeInFlight: Promise<ProbeRunResult> | null = null;
 let lastClaudeProbeAttemptMs = 0;
 let consecutiveClaudeProbeFailures = 0;
+let firstClaudeProbeFailureMs: number | null = null;
 
 /** Test helper — clear single-flight, attempt, and backoff state. */
 export function resetClaudeCapacityRefreshState(): void {
   claudeProbeInFlight = null;
   lastClaudeProbeAttemptMs = 0;
   consecutiveClaudeProbeFailures = 0;
+  firstClaudeProbeFailureMs = null;
 }
 
 /** Test helper — observe backoff/attempt state without spawning. */
@@ -1045,7 +1182,21 @@ export async function maybeProbeClaudeCapacity(
     claudeProbeInFlight = run;
     try {
       const result = await run;
-      consecutiveClaudeProbeFailures = result.ok ? 0 : consecutiveClaudeProbeFailures + 1;
+      if (result.ok) {
+        consecutiveClaudeProbeFailures = 0;
+        firstClaudeProbeFailureMs = null;
+      } else {
+        consecutiveClaudeProbeFailures += 1;
+        firstClaudeProbeFailureMs ??= nowMs;
+        try {
+          recordClaudeAcquisitionFailure(result, nowMs, {
+            count: consecutiveClaudeProbeFailures,
+            firstFailureMs: firstClaudeProbeFailureMs,
+          });
+        } catch {
+          // Advisory — the failure is still in the diagnostic log.
+        }
+      }
       return {
         probed: true,
         reason: "completed",

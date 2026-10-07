@@ -362,17 +362,22 @@ export function recordClaudeWindowReadings(
     (n) => n.unavailableReason === null && n.remainingPercent !== null
   );
   if (persistable.length === 0) return null;
-  const storedObservedAt = new Map(
-    listCapacitySnapshots(runtime).map((row) => [row.windowKey, row.observedAt])
-  );
+  const stored = new Map(listCapacitySnapshots(runtime).map((row) => [row.windowKey, row]));
   const fresh = persistable.filter((w) => {
-    const prev = storedObservedAt.get(w.windowKey);
-    if (!prev) return true;
-    const prevMs = Date.parse(prev);
+    const prevRow = stored.get(w.windowKey);
+    if (!prevRow) return true;
+    // NOT-366: an unavailable row (probe failure recorded over a stale
+    // reading) keeps the last-good value and its `observedAt` only for this
+    // arbitration. With no last-good value any reading wins; otherwise only
+    // a strictly newer one does — re-ingesting the same stale cache sample
+    // every poll must not wipe the recorded failure reason.
+    const unavailable = prevRow.source === "unavailable" || prevRow.unavailableReason !== null;
+    if (unavailable && prevRow.remainingPercent === null) return true;
+    const prevMs = Date.parse(prevRow.observedAt);
     const nextMs = Date.parse(w.observedAt);
     if (!Number.isFinite(prevMs)) return true;
     if (!Number.isFinite(nextMs)) return false;
-    return nextMs >= prevMs;
+    return unavailable ? nextMs > prevMs : nextMs >= prevMs;
   });
   if (fresh.length === 0) return 0;
   recordCapacitySnapshots(

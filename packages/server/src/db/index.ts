@@ -463,6 +463,10 @@ export function migrate(): void {
   if (!capacityCols.some((c) => c.name === "critical_role")) {
     db.exec("ALTER TABLE runtime_capacity_snapshots ADD COLUMN critical_role TEXT");
   }
+  // NOT-366: acquisition-failure streak on a table that predates it.
+  if (!capacityCols.some((c) => c.name === "unavailable_detail")) {
+    db.exec("ALTER TABLE runtime_capacity_snapshots ADD COLUMN unavailable_detail TEXT");
+  }
 
   // NOT-249: normalized Cursor-team billing snapshot for databases created
   // before schema.sql declared the table (same upgrade-path pattern as
