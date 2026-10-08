@@ -30,6 +30,12 @@ import type { ReviewerOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
 import { extractOperatorCriteria } from "./operator-criteria.js";
 import { buildReviewerPrompt, formatDiffForPrompt, TOTAL_DIFF_LIMIT } from "./prompts.js";
+import {
+  cleanupStagedVisualArtifacts,
+  resolveReviewerVisualEvidence,
+  toReviewerVisualEvidenceInput,
+  type VisualEvidenceFetcher,
+} from "./reviewer-visual-evidence.js";
 import { readLatestVisualQa } from "./visual-qa.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realReviewerSpawn, reviewerSessionLogPath, type ReviewerSpawn } from "./spawn.js";
@@ -45,6 +51,7 @@ import {
   createRoleWorktree,
   safeRemoveWorktree,
   isWorktreeClean,
+  listChangedFiles,
   mergeBase,
   fetchRef,
   diffShas,
@@ -140,6 +147,10 @@ export interface ReviewerEffectDeps {
   /** Test-only seam: fake `get_bound_deck` so a deckId-bearing profile can exercise the
    * real deck-connection path without a reachable Agent Deck. */
   deckCallTool?: DeckToolCaller;
+  /** Test-only seam: fake Visual run lookup + artifact downloads so tests stage
+   * fixture files without a reachable GitHub. Defaults to the `github`
+   * adapter's NOT-384 methods. */
+  visualEvidenceFetcher?: VisualEvidenceFetcher | null;
 }
 
 const defaultDeps: ReviewerEffectDeps = { spawn: realReviewerSpawn, github: realGithubAdapter };
@@ -152,6 +163,13 @@ const EVENT_FOR_VERDICT: Record<ReviewerVerdict, ReviewEvent> = {
 
 /** Best-effort: the worker never writes, so a non-clean checkout here is unexpected, not valuable work. */
 async function bestEffortRemove(repo: string, worktreePath: string): Promise<void> {
+  try {
+    // NOT-384: staged visual evidence goes first, so no residue survives the
+    // attempt even when the worktree removal below fails.
+    cleanupStagedVisualArtifacts(worktreePath);
+  } catch {
+    // same courtesy as below — staging cleanup must never fail the attempt
+  }
   try {
     await safeRemoveWorktree({ repo, path: worktreePath, role: "reviewer" });
   } catch {
@@ -397,6 +415,22 @@ export async function runReviewerEffect(
     const baseSha = await mergeBase({ repo: worktreePath, base: `origin/${baseBranch}`, head: headSha });
     const diff = await diffShas({ worktreePath, baseSha, headSha });
     const { truncated: diffTruncated, omittedPaths } = formatDiffForPrompt(diff);
+    // NOT-384: SHA-bound CI visual evidence for this head (never throws —
+    // every failure mode resolves to `missing` with a reason, and a missing
+    // or failed capture never counts as a visual pass).
+    const changedFiles = await listChangedFiles({ worktreePath, baseSha, headSha }).catch(() => null);
+    const visualEvidence = toReviewerVisualEvidenceInput(
+      await resolveReviewerVisualEvidence({
+        issueId: issue.id,
+        workerSessionId: sessionId,
+        worktreePath,
+        baseSha,
+        headSha,
+        changedFiles,
+        github: deps.github,
+        fetcher: deps.visualEvidenceFetcher ?? null,
+      })
+    );
 
     const openFindings = listFindingsForIssue(issue.id).filter(
       (f) => f.status === "open" || f.status === "recurring"
@@ -422,6 +456,7 @@ export async function runReviewerEffect(
       deckId: snapshot?.deckId ?? null,
       guidance: guidance.length ? guidance : undefined,
       operatorCriteria: operatorCriteria.length > 0 ? operatorCriteria : undefined,
+      visualEvidence,
       visualQa: visualQaRecord ? { record: visualQaRecord, pinnedHeadSha: headSha } : undefined,
     });
 

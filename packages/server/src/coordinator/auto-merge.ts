@@ -50,6 +50,7 @@ import {
   hasOperatorVerificationForHead,
   operatorVerificationRequestId,
 } from "./operator-criteria.js";
+import { readVisualEvidenceHold, type VisualEvidenceHold } from "./reviewer-visual-evidence.js";
 
 const run = promisify(execFile);
 
@@ -396,6 +397,15 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
   return merged;
 }
 
+/** One visual-evidence hold, for the gate's reason/question. */
+function formatVisualHold(hold: VisualEvidenceHold): string {
+  return (
+    `CI visual evidence for this head is ${hold.state}: ${hold.reason} ` +
+    `Head: \`${hold.headSha}\`. ` +
+    `Missing/unusable artifacts: ${hold.missingArtifacts.map((name) => `\`${name}\``).join(", ")}.`
+  );
+}
+
 /**
  * NOT-314: the `[operator]` merge gate. After reviewer approve and before the
  * `gh` merge: when the frozen snapshot holds operator criteria and no result is
@@ -404,9 +414,16 @@ async function finalizeAutoMergeOnce(issueId: string): Promise<AutoMergeFinalize
  * unmerged and the issue parks in `needs_human` with an `operator_verification`
  * action listing each criterion and its command.
  *
- * Returns null when the merge may proceed (no operator criteria, a recorded
- * result for this head, or no workflow to gate). Idempotent: a second finalize
- * for the same head reuses the open action instead of raising another.
+ * NOT-384: a UI-affecting head whose recorded CI visual evidence is `missing`
+ * or `failed` holds at the same gate — same action type, same intent, same
+ * verified/waive/repair resolutions. One open action covers the whole head
+ * (criteria and visual items together), so one recorded result releases it;
+ * no repair round is ever queued for missing evidence alone.
+ *
+ * Returns null when the merge may proceed (no operator criteria, no visual
+ * hold, a recorded result for this head, or no workflow to gate). Idempotent:
+ * a second finalize for the same head reuses the open action instead of
+ * raising another.
  *
  * Fail-closed: when operator criteria exist, every non-proceed path returns a
  * result (never null), so a missing head SHA or an unexpected status blocks the
@@ -419,8 +436,9 @@ export function gateOperatorVerification(issueId: string): AutoMergeFinalizeResu
     const active = getActiveWorkflowInstance(issueId);
     if (!active) return null;
     const criteria = getOperatorCriteriaForIssue(current);
-    if (criteria.length === 0) return null;
     const head = current.headSha;
+    const visualHold = head ? readVisualEvidenceHold(issueId, head) : null;
+    if (criteria.length === 0 && !visualHold) return null;
     if (head && hasOperatorVerificationForHead(issueId, head)) return null;
     if (current.status === "done") return null;
     // Only the auto-merge park (or an already-gated issue) is gated — any other
@@ -505,6 +523,8 @@ export function gateOperatorVerification(issueId: string): AutoMergeFinalizeResu
       };
     }
 
+    // One open action covers the whole head — criteria items, visual hold, or
+    // both — so reuse is by head alone, never per hold flavor.
     const existing = findOpenHumanAction(issueId, "operator_verification");
     if (existing && operatorActionHeadSha(existing) === head) {
       if (current.status !== "needs_human") {
@@ -524,16 +544,32 @@ export function gateOperatorVerification(issueId: string): AutoMergeFinalizeResu
     }
 
     const shortHead = head.slice(0, 8);
-    const reason =
+    const criteriaReason =
       `Reviewer approved ${shortHead}, but ${criteria.length} acceptance ` +
       `${criteria.length === 1 ? "criterion requires" : "criteria require"} a human operator ` +
       `to verify (tagged [operator] in the frozen task snapshot) and no result is recorded ` +
       `for this head. The PR stays unmerged until the result is recorded:\n` +
       formatOperatorCriteria(criteria).join("\n");
+    // Criteria-only keeps the exact NOT-314 text; a visual hold appends its
+    // own section (or stands alone), always naming the head SHA and the
+    // missing artifacts.
+    const reason = !visualHold
+      ? criteriaReason
+      : criteria.length === 0
+        ? `Reviewer approved ${shortHead}, but the head changes the web app and no result is recorded ` +
+          `for this head. The PR stays unmerged until the result is recorded:\n` +
+          formatVisualHold(visualHold)
+        : `${criteriaReason}\nAdditionally, the head changes the web app: ${formatVisualHold(visualHold)}`;
     transitionIssue(issueId, "needs_human", {
       currentOwner: "human",
       currentIntent: OPERATOR_VERIFICATION_INTENT,
     });
+    const questionSuffix =
+      visualHold && criteria.length === 0
+        ? `Verify the rendered UI for this head by hand and paste what you checked, waive with a reason, ` +
+          `or send the work back for another repair round?`
+        : `Paste the probe output to record verification, waive with a reason, ` +
+          `or send the work back for another repair round?`;
     // Head-pinned request_id: a concurrent finalize for the same head dedupes
     // onto this action through createHumanAction's open-request conflict path;
     // new commits after the gate get a fresh action with their own commands.
@@ -542,10 +578,14 @@ export function gateOperatorVerification(issueId: string): AutoMergeFinalizeResu
       workflowInstanceId: active.id,
       actionType: "operator_verification",
       reason,
-      question:
-        `${reason}\n\nPaste the probe output to record verification, waive with a reason, ` +
-        `or send the work back for another repair round?`,
-      evidence: { operatorVerification: { criteria, headSha: head } },
+      question: `${reason}\n\n${questionSuffix}`,
+      evidence: {
+        operatorVerification: {
+          criteria,
+          headSha: head,
+          ...(visualHold ? { visualEvidence: visualHold } : {}),
+        },
+      },
       responseOptions: [...OPERATOR_VERIFICATION_RESPONSE_OPTIONS],
       requestId: operatorVerificationRequestId(head),
     });

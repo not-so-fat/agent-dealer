@@ -17,7 +17,8 @@ const { listArtifactsForIssueByKind } = await import("../repository/artifacts-fo
 const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
   "../repository/workflow-events.js"
 );
-const { claimWorkItem, getWorkItem } = await import("../repository/work-items.js");
+const { claimWorkItem, getWorkItem, listWorkItemsForIssue } = await import("../repository/work-items.js");
+const { createIssueArtifact } = await import("../repository/artifacts.js");
 const {
   startWorkflow,
   applyCompletion,
@@ -444,4 +445,139 @@ test("responseOptionsFor(operator_verification) matches the gate's stored option
       { choice: "repair", label: "Another repair round" },
     ]
   );
+});
+
+// NOT-384: a UI-affecting head whose recorded CI visual evidence is `missing`
+// holds at the same gate — one operator_verification action naming the head
+// SHA and the missing artifacts, no merge, and crucially no repair round.
+function recordVisualEvidence(
+  issueId: string,
+  opts: { headSha: string; state: "available" | "missing" | "failed" }
+): void {
+  createIssueArtifact({
+    issueId,
+    kind: "visual_evidence",
+    content: {
+      headSha: opts.headSha,
+      baseSha: "base1",
+      uiAffecting: true,
+      state: opts.state,
+      runId: opts.state === "missing" ? null : 42,
+      artifactNames: opts.state === "available" ? ["ui-screenshots", "ui-baseline", "ui-diff"] : [],
+      reason:
+        opts.state === "available"
+          ? null
+          : opts.state === "failed"
+            ? "Visual run 42 for this head concluded failure — its captures are unusable"
+            : "no Visual workflow run found for head abc123",
+    },
+    author: "system",
+  });
+}
+
+function assertNoRepairWorkScheduled(issueId: string): void {
+  const pending = listWorkItemsForIssue(issueId).filter(
+    (item) => item.status === "pending" || item.status === "leased"
+  );
+  assert.deepEqual(
+    pending.map((item) => item.kind),
+    [],
+    "missing visual evidence must never schedule a repair round"
+  );
+}
+
+for (const state of ["missing", "failed"] as const) {
+  test(`NOT-384: ${state} visual evidence on a UI head raises operator_verification and never a repair round`, async () => {
+    let merges = 0;
+    setMergePrForTests(async () => {
+      merges += 1;
+      return { ok: true };
+    });
+
+    const issueId = newIssue("It works");
+    startWorkflow(issueId);
+    recordVisualEvidence(issueId, { headSha: "abc123", state });
+    const result = await approve(issueId);
+
+    assert.equal(result.applied, true);
+    if (result.applied) {
+      assert.equal(result.issueStatus, "needs_human");
+      assert.equal(result.nextWorkItemId, null, "the gate queues no repair round");
+      assert.ok(result.humanActionId);
+    }
+    assert.equal(merges, 0, "the merge adapter must not run behind the gate");
+    assertNoRepairWorkScheduled(issueId);
+
+    const action = openOperatorAction(issueId);
+    assert.match(action.question, /abc123/, "the action names the head SHA");
+    assert.match(action.question, /ui-screenshots/, "the action names the missing artifacts");
+    assert.match(action.question, new RegExp(state), "the action names the evidence state");
+    const evidence = JSON.parse(action.evidenceJson!) as {
+      operatorVerification: {
+        headSha: string;
+        visualEvidence: { state: string; headSha: string; missingArtifacts: string[] };
+      };
+    };
+    assert.equal(evidence.operatorVerification.headSha, "abc123");
+    assert.equal(evidence.operatorVerification.visualEvidence.state, state);
+    assert.ok(evidence.operatorVerification.visualEvidence.missingArtifacts.length > 0);
+    const options = JSON.parse(action.responseOptionsJson!) as Array<{ choice: string }>;
+    assert.deepEqual(
+      options.map((o) => o.choice),
+      ["verified", "waive", "repair"]
+    );
+  });
+}
+
+test("NOT-384: available visual evidence on a UI head merges normally", async () => {
+  const calls: Array<{ cwd: string; number: number }> = [];
+  setMergePrForTests(async (opts) => {
+    calls.push(opts);
+    return { ok: true };
+  });
+
+  const issueId = newIssue("It works");
+  startWorkflow(issueId);
+  recordVisualEvidence(issueId, { headSha: "abc123", state: "available" });
+  const result = await approve(issueId);
+
+  assert.equal(result.applied, true);
+  if (result.applied) assert.equal(result.issueStatus, "done");
+  assert.deepEqual(calls, [{ cwd: managedCwd, number: 42 }]);
+  assert.equal(getIssue(issueId)!.status, "done");
+});
+
+test("NOT-384: [operator] criteria plus a visual hold raise one action naming both", async () => {
+  let merges = 0;
+  setMergePrForTests(async () => {
+    merges += 1;
+    return { ok: true };
+  });
+
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  recordVisualEvidence(issueId, { headSha: "abc123", state: "missing" });
+  await approve(issueId);
+
+  assert.equal(merges, 0);
+  const open = listHumanActionsForIssue(issueId).filter((a) => a.status === "open");
+  assert.equal(open.length, 1, "criteria and visual hold share one action for the head");
+  assert.equal(open[0]!.actionType, "operator_verification");
+  assert.match(open[0]!.question, /sign in with SSO/);
+  assert.match(open[0]!.question, /ui-screenshots/);
+  const evidence = JSON.parse(open[0]!.evidenceJson!) as {
+    operatorVerification: { criteria: unknown[]; visualEvidence: { state: string } };
+  };
+  assert.equal(evidence.operatorVerification.criteria.length, 1);
+  assert.equal(evidence.operatorVerification.visualEvidence.state, "missing");
+
+  // One recorded result releases the combined action — a second finalize for
+  // the same head reuses it instead of raising another.
+  const again = await finalizeAutoMerge(issueId);
+  assert.equal(again.humanActionId, open[0]!.id);
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+    1
+  );
+  assert.equal(merges, 0);
 });

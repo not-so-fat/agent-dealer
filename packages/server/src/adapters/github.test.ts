@@ -21,6 +21,7 @@ import {
   CHECKS_EVIDENCE_GH_LOG_MAX_BUFFER,
   CHECKS_FAILURE_GENERIC_REASON,
   PR_VIEW_FIELDS,
+  parseWorkflowRunInfo,
   type GithubAdapter,
   type ChecksSnapshot,
   type GhExec,
@@ -939,4 +940,105 @@ test("NOT-252: formatChecksFailureDetails labels the excerpt as untrusted, not i
     excerpt: "",
   });
   assert.match(noExcerpt, /excerpt unavailable/);
+});
+
+test("NOT-384: listWorkflowRunsForCommit filters by workflow and exact commit, parsing runs", async () => {
+  const { exec, calls } = queuedExec([
+    {
+      stdout: JSON.stringify([
+        { databaseId: 42, headSha: HEAD_SHA, conclusion: "success", status: "completed" },
+        { databaseId: 41, headSha: "other", conclusion: null, status: "in_progress" },
+      ]),
+    },
+  ]);
+  const runs = await createGithubAdapter(exec).listWorkflowRunsForCommit!({
+    cwd: "/repo",
+    workflow: "visual.yml",
+    commitSha: HEAD_SHA,
+  });
+  assert.deepEqual(calls[0], [
+    "run",
+    "list",
+    "--workflow",
+    "visual.yml",
+    "--commit",
+    HEAD_SHA,
+    "--limit",
+    "5",
+    "--json",
+    "databaseId,headSha,conclusion,status",
+  ]);
+  assert.deepEqual(runs, [
+    { databaseId: 42, headSha: HEAD_SHA, conclusion: "success", status: "completed" },
+    { databaseId: 41, headSha: "other", conclusion: null, status: "in_progress" },
+  ]);
+});
+
+test("NOT-384: listWorkflowRunsForCommit returns [] when the workflow never ran, skips malformed rows, throws on gh failure", async () => {
+  const empty = queuedExec([{ stdout: "[]" }]);
+  assert.deepEqual(
+    await createGithubAdapter(empty.exec).listWorkflowRunsForCommit!({
+      cwd: "/repo",
+      workflow: "visual.yml",
+      commitSha: HEAD_SHA,
+    }),
+    []
+  );
+  const malformed = queuedExec([
+    {
+      stdout: JSON.stringify([
+        { databaseId: "nope", headSha: HEAD_SHA },
+        { databaseId: 42 },
+        null,
+        { databaseId: 43, headSha: HEAD_SHA, conclusion: "", status: "" },
+      ]),
+    },
+  ]);
+  assert.deepEqual(await createGithubAdapter(malformed.exec).listWorkflowRunsForCommit!({
+    cwd: "/repo",
+    workflow: "visual.yml",
+    commitSha: HEAD_SHA,
+  }), [{ databaseId: 43, headSha: HEAD_SHA, conclusion: null, status: null }]);
+  const failing = queuedExec([{ error: "HTTP 401" }]);
+  await assert.rejects(
+    createGithubAdapter(failing.exec).listWorkflowRunsForCommit!({
+      cwd: "/repo",
+      workflow: "visual.yml",
+      commitSha: HEAD_SHA,
+    }),
+    /gh run list failed/
+  );
+});
+
+test("NOT-384: parseWorkflowRunInfo rejects rows without a numeric id and head SHA", () => {
+  assert.equal(parseWorkflowRunInfo(null), null);
+  assert.equal(parseWorkflowRunInfo({ databaseId: 1 }), null);
+  assert.equal(parseWorkflowRunInfo({ databaseId: 1, headSha: "" }), null);
+  assert.deepEqual(parseWorkflowRunInfo({ databaseId: 1, headSha: "h" }), {
+    databaseId: 1,
+    headSha: "h",
+    conclusion: null,
+    status: null,
+  });
+});
+
+test("NOT-384: downloadRunArtifact downloads one named artifact into the dest dir, throwing on gh failure", async () => {
+  const { exec, calls } = queuedExec([{ stdout: "" }]);
+  await createGithubAdapter(exec).downloadRunArtifact!({
+    cwd: "/repo",
+    runId: 42,
+    name: "ui-diff",
+    destDir: "/store/ui-diff",
+  });
+  assert.deepEqual(calls[0], ["run", "download", "42", "--name", "ui-diff", "--dir", "/store/ui-diff"]);
+  const failing = queuedExec([{ error: "no such artifact" }]);
+  await assert.rejects(
+    createGithubAdapter(failing.exec).downloadRunArtifact!({
+      cwd: "/repo",
+      runId: 42,
+      name: "ui-diff",
+      destDir: "/store/ui-diff",
+    }),
+    /gh run download failed/
+  );
 });

@@ -21,6 +21,18 @@ import { withRepoLock } from "../runners/process-registry.js";
  * worker cwd and `bind_workspace` to that path can succeed. */
 export const WORKTREES_DIR_NAME = ".agent-dealer-worktrees";
 
+/** Directory name for coordinator-staged CI visual artifacts inside a reviewer
+ * worktree (NOT-384). The reviewer has no shell, so it cannot list the worktree
+ * root itself — but its file tools read paths the prompt names, and only paths
+ * inside the worktree are readable under Claude Code's `--restricted` file
+ * confinement. The directory is untracked and ignored by `isWorktreeClean`
+ * below, so staged evidence never reads as reviewer dirt. It only ever exists
+ * in detached-HEAD reviewer checkouts (developer sessions never create it); a
+ * developer-side file of the same hidden name would be ignored by the clean
+ * check too, but salvage (`git add -A`) still sweeps it up, so nothing is lost —
+ * and the coordinator never stages it anywhere but a reviewer worktree. */
+export const REVIEWER_VISUAL_STAGING_DIR_NAME = ".agent-dealer-visual";
+
 const execFileAsync = promisify(execFile);
 
 /** Sees every `git` command this adapter runs, before it runs (test seam — NOT-355
@@ -260,8 +272,38 @@ async function readOnlyStatus(worktreePath: string): Promise<string> {
   return (await git(worktreePath, ["--no-optional-locks", "status", "--porcelain"])).stdout;
 }
 
+/** True when a `git status --porcelain` line names only the coordinator-staged
+ * visual-evidence directory (NOT-384) — `?? .agent-dealer-visual/` for the
+ * untracked dir, or a path under it. Anything else on the line means real dirt. */
+function isVisualStagingStatusLine(line: string): boolean {
+  const entry = line.slice(0, 2);
+  if (entry !== "??") return false;
+  const shown = line.slice(3).trim().replace(/^"|"$/g, "");
+  return shown === REVIEWER_VISUAL_STAGING_DIR_NAME || shown.startsWith(`${REVIEWER_VISUAL_STAGING_DIR_NAME}/`);
+}
+
 export async function isWorktreeClean(worktreePath: string): Promise<boolean> {
-  return (await readOnlyStatus(worktreePath)).trim().length === 0;
+  const out = (await readOnlyStatus(worktreePath)).trim();
+  if (!out) return true;
+  return out
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .every(isVisualStagingStatusLine);
+}
+
+/** Repo-relative paths changed between `baseSha` and `headSha` (NOT-384: the
+ * UI-affecting classifier's input). Empty when the SHAs match. */
+export async function listChangedFiles(opts: {
+  worktreePath: string;
+  baseSha: string;
+  headSha: string;
+}): Promise<string[]> {
+  const { stdout } = await git(opts.worktreePath, ["diff", "--name-only", opts.baseSha, opts.headSha]);
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 }
 
 /** Commit message for a timeout salvage tip (NOT-145). */

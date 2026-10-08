@@ -415,6 +415,30 @@ export function formatChecksFailureDetails(opts: {
   return parts.join("\n");
 }
 
+/**
+ * NOT-384: one GitHub Actions workflow run, as `gh run list --json
+ * databaseId,headSha,conclusion,status` reports it. `conclusion` is null until
+ * the run completes; `status` is one of queued / in_progress / completed (plus
+ * requested / waiting / pending while scheduling).
+ */
+export interface WorkflowRunInfo {
+  databaseId: number;
+  headSha: string;
+  conclusion: string | null;
+  status: string | null;
+}
+
+export function parseWorkflowRunInfo(raw: unknown): WorkflowRunInfo | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const row = raw as Record<string, unknown>;
+  if (typeof row.databaseId !== "number" || typeof row.headSha !== "string" || !row.headSha) {
+    return null;
+  }
+  const conclusion = typeof row.conclusion === "string" && row.conclusion ? row.conclusion : null;
+  const status = typeof row.status === "string" && row.status ? row.status : null;
+  return { databaseId: row.databaseId, headSha: row.headSha, conclusion, status };
+}
+
 export type CreatePrResult = { ok: true; number: number; url: string } | { ok: false; reason: string; noCommits: boolean };
 
 const NO_COMMITS_PATTERN = /no commits between/i;
@@ -489,6 +513,32 @@ export interface GithubAdapter {
    * UNKNOWN (today's wait), never as a conflict.
    */
   prMergeableState?(opts: { cwd: string; number: number }): Promise<PrMergeableState>;
+  /**
+   * NOT-384: workflow runs of `workflow` (file name, e.g. `visual.yml`) for
+   * exactly `commitSha`, newest first (`gh run list --workflow --commit`).
+   * Empty when the workflow never ran for that commit — the common "Visual did
+   * not run" case. Throws when `gh` itself fails (auth, network): callers
+   * treat that as unusable evidence, never as a pass.
+   * Optional so existing fakes keep compiling — a missing implementation means
+   * the lookup is unavailable, never "no run".
+   */
+  listWorkflowRunsForCommit?(opts: {
+    cwd: string;
+    workflow: string;
+    commitSha: string;
+  }): Promise<WorkflowRunInfo[]>;
+  /**
+   * NOT-384: downloads one artifact `name` from `runId` into `destDir`
+   * (`gh run download <run-id> --name <name> --dir <destDir>` — a single named
+   * artifact extracts directly into `destDir`). Throws when `gh` fails or the
+   * artifact is absent; callers catch per artifact. Optional, same as above.
+   */
+  downloadRunArtifact?(opts: {
+    cwd: string;
+    runId: number;
+    name: string;
+    destDir: string;
+  }): Promise<void>;
   /**
    * Publishes the reviewer's validated verdict against `number` explicitly — required for
    * a detached-HEAD reviewer worktree, same reason as `viewPr`'s `number`. `event`
@@ -584,6 +634,46 @@ export function createGithubAdapter(exec: GhExec = defaultExec): GithubAdapter {
         return parsePrMergeableState(raw?.mergeable);
       } catch {
         return "UNKNOWN";
+      }
+    },
+
+    async listWorkflowRunsForCommit({ cwd, workflow, commitSha }) {
+      try {
+        const { stdout } = await exec(
+          [
+            "run",
+            "list",
+            "--workflow",
+            workflow,
+            "--commit",
+            commitSha,
+            "--limit",
+            "5",
+            "--json",
+            "databaseId,headSha,conclusion,status",
+          ],
+          { cwd }
+        );
+        const rows = JSON.parse(stdout) as unknown[];
+        if (!Array.isArray(rows)) return [];
+        const runs: WorkflowRunInfo[] = [];
+        for (const row of rows) {
+          const parsed = parseWorkflowRunInfo(row);
+          if (parsed) runs.push(parsed);
+        }
+        return runs;
+      } catch (err) {
+        const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
+        throw new Error(`gh run list failed: ${message}`);
+      }
+    },
+
+    async downloadRunArtifact({ cwd, runId, name, destDir }) {
+      try {
+        await exec(["run", "download", String(runId), "--name", name, "--dir", destDir], { cwd });
+      } catch (err) {
+        const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
+        throw new Error(`gh run download failed: ${message}`);
       }
     },
 
