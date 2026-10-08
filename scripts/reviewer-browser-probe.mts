@@ -57,7 +57,7 @@ function usage(): string {
     "  --deck <deck-id>                   Agent Deck id (live runs)",
     "  --model <id>                       runtime model override",
     "  --effort <low|medium|high>          reasoning effort override",
-    "  --timeout-ms <n>                   reviewer wall clock (default: REVIEWER_TIMEOUT_MS)",
+    "  --timeout-ms <n>                   reviewer wall clock (default: REVIEWER_TIMEOUT_MS; manifest gains a .timeout suffix)",
     "  --out-dir <dir>                    manifest directory (default: stdout only)",
     "  --app-route <path>                 mocks-free route (default: /issues)",
     "  --app-interaction <text>           required interaction state",
@@ -65,7 +65,7 @@ function usage(): string {
     "  --preview-artifact <path>          coordinator-preview: artifact (repeatable)",
     "  --playwright-server <cmd...>       playwright-mcp: stdio server argv, e.g.",
     "                                     --playwright-server npx -- -y @playwright/mcp@1.2.3",
-    "  --cancel-after-ms <n>              abort the spawn after n ms (cancellation control)",
+    "  --cancel-after-ms <n>              abort the spawn after n ms (cancellation control; manifest gains a .cancel suffix)",
     "  --no-sanitize                      keep absolute home paths (default: sanitize to ~)",
     "  --dry-run                          print exact launch only; spawn nothing",
     "  --help                             this text",
@@ -277,7 +277,13 @@ async function main(): Promise<void> {
     const bytes = canonicalProbeJson(committed);
     if (outDir) {
       fs.mkdirSync(outDir, { recursive: true });
-      const file = path.join(outDir, probeManifestFilename(runtime, contract));
+      const file = path.join(
+        outDir,
+        probeManifestFilename(runtime, contract, {
+          timeout: timeoutMs !== undefined,
+          cancel: cancelAfterMs !== undefined,
+        })
+      );
       fs.writeFileSync(file, bytes);
       console.log(`[reviewer-probe] status=${committed.status} reason=${committed.statusReason}`);
       console.log(`[reviewer-probe] manifest: ${file}`);

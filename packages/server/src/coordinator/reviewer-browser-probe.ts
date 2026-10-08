@@ -658,6 +658,14 @@ export interface RunReviewerBrowserProbeOptions {
   previewArtifacts?: string[];
   /** Abort signal: cancellation must still clean up every child + temp dir. */
   signal?: AbortSignal;
+  /**
+   * NOT-382: after the probe-owned deadline fires (timeout) or the caller
+   * aborts, how long the probe waits for the spawn to settle — so the manifest
+   * observes the reaped child and its exit code instead of racing the kill —
+   * before proceeding to cleanup anyway. Default 10s covers spawnCli's
+   * SIGTERM→SIGKILL backstop; tests pass a small value for speed.
+   */
+  spawnSettleGraceMs?: number;
   /** Probe id override (tests); default random UUID. */
   probeId?: string;
   /**
@@ -667,6 +675,25 @@ export interface RunReviewerBrowserProbeOptions {
    * to launch (e.g. `npx @playwright/mcp@<pinned>`).
    */
   playwrightServer?: { command: string; args: string[] };
+}
+
+/**
+ * NOT-382: wait for an already-started spawn race to settle, up to `graceMs`.
+ * Returns null on grace expiry — the caller proceeds to cleanup regardless so
+ * a spawn that never settles cannot wedge the probe past its own deadline.
+ */
+async function awaitSpawnSettled<T>(outcome: Promise<T>, graceMs: number): Promise<T | null> {
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      outcome,
+      new Promise<null>((resolve) => {
+        graceTimer = setTimeout(() => resolve(null), graceMs);
+      }),
+    ]);
+  } finally {
+    if (graceTimer) clearTimeout(graceTimer);
+  }
 }
 
 /**
@@ -686,6 +713,7 @@ export async function runReviewerBrowserProbe(
   const appRoute = opts.appRoute ?? "/issues";
   const appInteraction = opts.appInteraction ?? "open the first issue and expand its timeline";
   const timeoutMs = opts.timeoutMs ?? reviewerSessionTimeoutMs();
+  const spawnSettleGraceMs = opts.spawnSettleGraceMs ?? 10_000;
 
   if (!SHA_HEX_RE.test(opts.headSha)) {
     throw new Error(`probe headSha must be a 40-char hex SHA (got ${JSON.stringify(opts.headSha)})`);
@@ -870,7 +898,7 @@ export async function runReviewerBrowserProbe(
         startedAt,
         endedAt,
         timedOut: false,
-        cancelled: false,
+        cancelled: Boolean(opts.signal?.aborted),
         exitCode: null,
         launch: { bin, argv, cwd: worktreePath ?? opts.repoPath, mcpConfigPath: null, mcpEnvKeys: [], policy },
         cleanup,
@@ -895,7 +923,7 @@ export async function runReviewerBrowserProbe(
           startedAt,
           endedAt: d.now().toISOString(),
           timedOut: false,
-          cancelled: false,
+          cancelled: Boolean(opts.signal?.aborted),
           exitCode: null,
           launch: {
             bin,
@@ -928,7 +956,7 @@ export async function runReviewerBrowserProbe(
           startedAt,
           endedAt: d.now().toISOString(),
           timedOut: false,
-          cancelled: false,
+          cancelled: Boolean(opts.signal?.aborted),
           exitCode: null,
           launch: {
             bin,
@@ -985,10 +1013,57 @@ export async function runReviewerBrowserProbe(
         childPids.push(pid);
       },
     };
-    const spawned = await d.spawn(spawnInput);
-    exitCode = spawned.exitCode;
-    timedOut = spawned.timedOut;
-    transcript = spawned.transcript;
+    // NOT-382: enforce the deadline HERE, not only inside the spawn. The probe
+    // used to `await d.spawn(...)` bare: a spawn that never settles (wedged
+    // CLI, or a fake that ignores timeoutMs/signal) hung the probe forever
+    // with neither timedOut nor cancelled recorded. The spawn's own
+    // timeout/signal handling still does the actual killing; the probe owns
+    // the deadline so the manifest always records which bound fired.
+    const spawnOutcome = d.spawn(spawnInput).then(
+      (result) => ({ kind: "spawned" as const, result }),
+      (error: unknown) => ({ kind: "spawn-error" as const, error })
+    );
+    let probeTimer: ReturnType<typeof setTimeout> | undefined;
+    const probeTimeout = new Promise<{ kind: "timeout" }>((resolve) => {
+      // Deliberately NOT unref'd: the deadline must hold the event loop even
+      // when the spawn left no live handles behind.
+      probeTimer = setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
+    });
+    let onProbeAbort: (() => void) | undefined;
+    const probeAborted = new Promise<{ kind: "aborted" }>((resolve) => {
+      if (!opts.signal) return; // no signal: stays pending, the race ignores it
+      if (opts.signal.aborted) {
+        resolve({ kind: "aborted" });
+        return;
+      }
+      onProbeAbort = () => resolve({ kind: "aborted" });
+      opts.signal.addEventListener("abort", onProbeAbort, { once: true });
+    });
+    try {
+      const winner = await Promise.race([spawnOutcome, probeTimeout, probeAborted]);
+      if (winner.kind === "spawn-error") throw winner.error;
+      if (winner.kind === "spawned") {
+        exitCode = winner.result.exitCode;
+        timedOut = winner.result.timedOut;
+        transcript = winner.result.transcript;
+      } else {
+        // The probe deadline fired first (timeout) or the caller aborted: stop
+        // waiting, but give the real spawn's kill path a bounded grace to
+        // settle so cleanup observes the reaped child instead of racing it. A
+        // spawn that never settles still proceeds after the grace.
+        if (winner.kind === "timeout") timedOut = true;
+        const late = await awaitSpawnSettled(spawnOutcome, spawnSettleGraceMs);
+        if (late?.kind === "spawned") {
+          exitCode = late.result.exitCode;
+          transcript = late.result.transcript;
+        }
+        // A late spawn-error changes nothing: the deadline outcome already won.
+        // `cancelled` is recorded from opts.signal.aborted at manifest time.
+      }
+    } finally {
+      if (probeTimer) clearTimeout(probeTimer);
+      if (onProbeAbort) opts.signal?.removeEventListener("abort", onProbeAbort);
+    }
 
     const report = parseReviewerBrowserProbeReport(transcript);
     let headShaVerified = false;
@@ -1201,7 +1276,18 @@ export function overlayPlaywrightMcpConfig(opts: {
   }
 }
 
-/** Manifest filename for one (runtime, contract) probe. */
-export function probeManifestFilename(runtime: ReviewerBrowserProbeRuntime, contract: ReviewerBrowserProbeContract): string {
-  return `${runtime}.${contract}.probe.json`;
+/**
+ * Manifest filename for one (runtime, contract) probe. Control runs take a
+ * `.timeout` / `.cancel` suffix when the matching CLI flag is set, so the four
+ * NOT-382 operator controls never overwrite the positive manifest or each
+ * other when they share one --out-dir.
+ */
+export function probeManifestFilename(
+  runtime: ReviewerBrowserProbeRuntime,
+  contract: ReviewerBrowserProbeContract,
+  opts?: { timeout?: boolean; cancel?: boolean }
+): string {
+  const timeoutSuffix = opts?.timeout ? ".timeout" : "";
+  const cancelSuffix = opts?.cancel ? ".cancel" : "";
+  return `${runtime}.${contract}${timeoutSuffix}${cancelSuffix}.probe.json`;
 }
