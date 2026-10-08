@@ -10,8 +10,8 @@
       "path": "/issues/{{issueId}}",
       "needsSeededIssue": true,
       "steps": [
-        { "action": "click", "by": "role", "value": "button", "name": "More actions" },
-        { "action": "waitFor", "by": "role", "value": "button", "name": "Close issue" }
+        { "action": "click", "by": "role", "value": "button", "name": "Edit title / description / acceptance criteria" },
+        { "action": "waitFor", "by": "role", "value": "button", "name": "Save" }
       ]
     },
     { "name": "agents", "path": "/agents" },

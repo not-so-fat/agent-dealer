@@ -59,10 +59,16 @@ summary — no browser is ever required inside the builder sandbox.
    the ARIA role, `name` the accessible name), `label` (accessible name), or
    `testid` (`data-testid`). Raw CSS/XPath selectors are rejected. Steps run
    against the base build too, so every selector must already exist there — a
-   `data-testid` added by the same PR fails the baseline capture. (The
-   `<summary>` elements expose the implicit ARIA `button` role, so the issue
-   detail route clicks the `button` named `More actions` with no markup
-   change.)
+   `data-testid` added by the same PR fails the baseline capture. Target real
+   `<button>`/`<a>` elements: `<summary>` disclosures are NOT matched by
+   Playwright's `getByRole("button", …)` in Chromium (proven by a CI failure
+   at `d1951ff`, where the markup was present but the click timed out). The
+   issue detail route therefore clicks the `button` named
+   `Edit title / description / acceptance criteria` — rendered for every
+   `ready` fixture issue with no active workflow, opening the task-text editor
+   with no server mutation — and waits for the `button` named `Save` that the
+   opened editor reveals. Never step on `Run next`, `Execute now`, or
+   `Add to queue`: those mutate server state.
 3. The route-list loader (`scripts/ci-visual/route-list.ts`), plan builder
    (`scripts/ci-visual/plan.ts`), and width verdict
    (`scripts/ci-visual/width-check.mjs`) are pure functions with unit tests
