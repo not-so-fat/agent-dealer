@@ -1169,7 +1169,7 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
             Never on list rows, queue rows, or bulk surfaces. */}
         {(canClose || canDelete) && (
           <details className="mt-6">
-            <summary data-testid="more-actions-toggle" className="text-xs text-white/45 cursor-pointer hover:text-white/70">More actions</summary>
+            <summary className="text-xs text-white/45 cursor-pointer hover:text-white/70">More actions</summary>
             <div className="mt-2 space-y-2">
               <p className="text-xs text-white/45">
                 {canClose

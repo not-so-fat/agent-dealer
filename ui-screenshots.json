@@ -10,7 +10,7 @@
       "path": "/issues/{{issueId}}",
       "needsSeededIssue": true,
       "steps": [
-        { "action": "click", "by": "testid", "value": "more-actions-toggle" },
+        { "action": "click", "by": "role", "value": "button", "name": "More actions" },
         { "action": "waitFor", "by": "role", "value": "button", "name": "Close issue" }
       ]
     },
