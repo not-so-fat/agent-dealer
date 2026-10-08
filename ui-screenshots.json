@@ -1,8 +1,19 @@
 {
-  "widths": [1280, 320],
+  "viewports": [
+    { "width": 1440, "height": 900 },
+    { "width": 390, "height": 800 }
+  ],
   "routes": [
     { "name": "issues-home", "path": "/issues" },
-    { "name": "issue-detail", "path": "/issues/{{issueId}}", "needsSeededIssue": true },
+    {
+      "name": "issue-detail",
+      "path": "/issues/{{issueId}}",
+      "needsSeededIssue": true,
+      "steps": [
+        { "action": "click", "by": "role", "value": "button", "name": "Edit title / description / acceptance criteria" },
+        { "action": "waitFor", "by": "role", "value": "button", "name": "Save" }
+      ]
+    },
     { "name": "agents", "path": "/agents" },
     { "name": "execution-report", "path": "/reports/execution" }
   ]

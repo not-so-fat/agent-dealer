@@ -1,8 +1,9 @@
 // scripts/ci-visual/capture.mts
 //
-// CI driver for the `visual` job (NOT-312). Runs under tsx with stdlib only:
-// loads ui-screenshots.json, seeds a deterministic fixture issue through the
-// public API, resolves `{{issueId}}`, and writes plan.json for visual.spec.mjs.
+// CI driver for the `visual` job (NOT-312, NOT-383). Runs under tsx with stdlib
+// only: loads ui-screenshots.json, seeds a deterministic fixture issue plus a
+// guidance timeline event through the public API, resolves `{{issueId}}`, and
+// writes plan.json for visual.spec.mjs.
 // The browser capture itself happens in the Playwright spec, which asserts
 // every listed route actually renders (failing the job otherwise).
 //
@@ -91,12 +92,25 @@ async function main(): Promise<void> {
     throw new Error(`seed issue ${seed.id} did not read back`);
   }
 
+  // NOT-383: give the fixture a real timeline (beyond `issue.created`) through
+  // the public API, so the issue detail capture shows timeline content.
+  await postJson(`${baseUrl}/api/issues/${seed.id}/guidance`, {
+    markdown: "CI visual fixture guidance — deterministic timeline content (NOT-383).",
+  });
+  const detail = (await readJson(`${baseUrl}/api/issues/${seed.id}`)) as {
+    timeline?: Array<{ type?: unknown }>;
+  };
+  const timelineTypes = Array.isArray(detail.timeline) ? detail.timeline.map((e) => e.type) : [];
+  if (!timelineTypes.includes("guidance.added")) {
+    throw new Error(`seed issue ${seed.id} timeline is missing the guidance event`);
+  }
+
   const seeds: Record<string, string> = { issueId: seed.id };
   const resolvedRoutes = list.routes.map((route) => ({
     ...route,
     path: resolveSeededPath(route.path, seeds),
   }));
-  const plan = buildScreenshotPlan(resolvedRoutes, list.widths);
+  const plan = buildScreenshotPlan(resolvedRoutes, list.viewports);
 
   fs.mkdirSync(outDir, { recursive: true });
   const shots = plan.map((shot) => ({
@@ -104,13 +118,17 @@ async function main(): Promise<void> {
     route: shot.route,
     url: `${baseUrl}${shot.path}`,
     width: shot.width,
+    height: shot.height,
+    viewport: shot.viewport,
+    steps: shot.steps,
     filename: shot.filename,
   }));
   fs.writeFileSync(path.join(outDir, "plan.json"), `${JSON.stringify(shots, null, 2)}\n`);
 
-  console.log(`[ci-visual] seeded issue ${seed.id}`);
+  console.log(`[ci-visual] seeded issue ${seed.id} (timeline events: ${timelineTypes.length})`);
   for (const shot of shots) {
-    console.log(`[ci-visual] shot ${shot.filename} ${shot.route} ${shot.width}px`);
+    const steps = shot.steps.length > 0 ? ` steps=${shot.steps.length}` : "";
+    console.log(`[ci-visual] shot ${shot.filename} ${shot.route} ${shot.viewport}${steps}`);
   }
 }
 
