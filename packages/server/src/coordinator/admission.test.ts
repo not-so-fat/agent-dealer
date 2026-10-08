@@ -1197,6 +1197,138 @@ test("NOT-215: lowering 2 → 1 never preempts; admission pauses until occupancy
   assert.equal(getIssue(c.id)!.status, "developing");
 });
 
+test("NOT-378: limit 5 fills all five slots in one tick across same and different repositories; a sixth waits on global capacity", async () => {
+  setMaxActiveIssues(5);
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-admit-five-"));
+  const same1 = readyIssueInRepo("five-s1", repo);
+  const same2 = readyIssueInRepo("five-s2", repo);
+  const same3 = readyIssueInRepo("five-s3", repo);
+  const diff1 = readyIssue("five-d1");
+  const diff2 = readyIssue("five-d2");
+  const sixth = readyIssue("five-d3");
+  enqueueIssue(same1.id);
+  enqueueIssue(same2.id);
+  enqueueIssue(same3.id);
+  enqueueIssue(diff1.id);
+  enqueueIssue(diff2.id);
+  enqueueIssue(sixth.id);
+
+  const first = await admitNext();
+  assert.equal(first?.issueId, same1.id);
+  for (const issue of [same1, same2, same3, diff1, diff2]) {
+    assert.equal(getIssue(issue.id)!.status, "developing");
+    assert.equal(instanceCount(issue.id), 1);
+  }
+  const instanceIds = new Set(
+    [same1, same2, same3, diff1, diff2].map((issue) => getActiveWorkflowInstance(issue.id)!.id)
+  );
+  assert.equal(instanceIds.size, 5, "each issue gets its own active workflow instance");
+
+  assert.equal(getIssue(sixth.id)!.status, "ready");
+  assert.equal(getActiveWorkflowInstance(sixth.id), null);
+  assert.equal(instanceCount(sixth.id), 0);
+  // Live global wait reason on read — never a repository-slot reason anywhere.
+  const live = queueStatusForIssue(sixth.id)?.waitReason ?? "";
+  assert.match(live, /waiting for slot/);
+  assert.doesNotMatch(live, /repository slot/);
+  for (const read of listQueuedEntriesForRead()) {
+    assert.doesNotMatch(read.waitReason ?? "", /repository slot/);
+  }
+
+  // A second tick persists the slot reason and admits nothing new.
+  assert.equal(await admitNext(), null);
+  assert.match(getQueuedEntryForIssue(sixth.id)?.waitReason ?? "", /waiting for slot/);
+  assert.equal(instanceCount(sixth.id), 0);
+});
+
+test("NOT-378: declared blockers skip ahead correctly with five slots; the waiter admits once its blocker clears", async () => {
+  setMaxActiveIssues(5);
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-admit-fiveblk-"));
+  const blocked = linearIssueInRepo("fblk", "lin-378-blk", repo);
+  setBlockersProviderForTests(
+    async (issues) =>
+      new Map(
+        issues.map((i) => [
+          i.externalId!,
+          i.externalId === "lin-378-blk"
+            ? [{ id: "", identifier: "NOT-1", stateName: "In Progress", stateType: "started" }]
+            : [],
+        ])
+      )
+  );
+  const free = [
+    readyIssueInRepo("fblk-f1", repo),
+    readyIssueInRepo("fblk-f2", repo),
+    readyIssue("fblk-f3"),
+    readyIssue("fblk-f4"),
+    readyIssue("fblk-f5"),
+  ];
+  enqueueIssue(blocked.id);
+  for (const issue of free) enqueueIssue(issue.id);
+
+  assert.equal((await admitNext())?.issueId, free[0]!.id);
+  for (const issue of free) {
+    assert.equal(getIssue(issue.id)!.status, "developing");
+    assert.equal(instanceCount(issue.id), 1);
+  }
+  assert.equal(getIssue(blocked.id)!.status, "ready");
+  assert.equal(getActiveWorkflowInstance(blocked.id), null);
+  assert.equal(instanceCount(blocked.id), 0);
+  const entry = getQueuedEntryForIssue(blocked.id)!;
+  assert.equal(entry.state, "queued");
+  assert.match(entry.waitReason ?? "", /waiting on NOT-1/);
+  assert.doesNotMatch(entry.waitReason ?? "", /repository slot/);
+
+  // The declared blocker is satisfied and a slot frees — the next tick admits the waiter.
+  setBlockersProviderForTests(async (issues) => new Map(issues.map((i) => [i.externalId!, []])));
+  releaseToNeedsHuman(free[0]!.id);
+  assert.equal((await admitNext())?.issueId, blocked.id);
+  assert.equal(getIssue(blocked.id)!.status, "developing");
+});
+
+test("NOT-378: lowering 5 → 2 never preempts; admission pauses until occupancy drops below 2", async () => {
+  setMaxActiveIssues(5);
+  const active = [
+    readyIssue("low5-a"),
+    readyIssue("low5-b"),
+    readyIssue("low5-c"),
+    readyIssue("low5-d"),
+    readyIssue("low5-e"),
+  ];
+  for (const issue of active) enqueueIssue(issue.id);
+  await admitNext();
+  for (const issue of active) {
+    assert.equal(getIssue(issue.id)!.status, "developing");
+  }
+
+  setMaxActiveIssues(2);
+  const waiter = readyIssue("low5-w");
+  enqueueIssue(waiter.id);
+  assert.equal(await admitNext(), null);
+  for (const issue of active) {
+    assert.equal(getIssue(issue.id)!.status, "developing", "lowering never stops running work");
+  }
+  assert.equal(getIssue(waiter.id)!.status, "ready");
+  assert.match(getQueuedEntryForIssue(waiter.id)?.waitReason ?? "", /waiting for slot/);
+
+  const over = getAdmissionStatus();
+  assert.equal(over.active, 5);
+  assert.equal(over.limit, 2);
+  assert.equal(over.overCap, true);
+
+  // Occupancy at the new limit is still not enough — it must fall *below* 2.
+  releaseToNeedsHuman(active[0]!.id);
+  releaseToNeedsHuman(active[1]!.id);
+  releaseToNeedsHuman(active[2]!.id);
+  assert.equal(await admitNext(), null);
+  assert.equal(getIssue(waiter.id)!.status, "ready");
+  assert.equal(getAdmissionStatus().overCap, false);
+
+  releaseToNeedsHuman(active[3]!.id);
+  assert.equal((await admitNext())?.issueId, waiter.id);
+  assert.equal(getIssue(waiter.id)!.status, "developing");
+});
+
 test("NOT-215: restart recovery observes the persisted setting without duplicate admission", async () => {
   setMaxActiveIssues(2);
   const a = readyIssue("rs-a");
