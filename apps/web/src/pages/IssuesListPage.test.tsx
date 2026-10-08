@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 const dir = dirname(fileURLToPath(import.meta.url));
 const pageSource = readFileSync(join(dir, "IssuesListPage.tsx"), "utf8");
 const appSource = readFileSync(join(dir, "..", "App.tsx"), "utf8");
+const apiSource = readFileSync(join(dir, "..", "api.ts"), "utf8");
 
 test("primary Issues label remains in the navigation/header", () => {
   assert.ok(appSource.includes('to="/issues"'), "nav still routes to /issues");
@@ -132,5 +133,48 @@ test("capacity control no longer promises max one per repository", () => {
   assert.ok(
     pageSource.includes("How many issues may execute in parallel"),
     "capacity tooltip still explains the limit"
+  );
+});
+
+// NOT-378: the Admission queue dropdown stays compact and in place, renders its
+// options from AdmissionStatus.options (1–5 from the server), and saves through
+// PUT /api/queue/settings — no new settings page, no per-repository control.
+test("admission limit dropdown renders server options and saves through the settings route", () => {
+  assert.ok(
+    pageSource.includes("admission.options.map((o) => ("),
+    "dropdown options render from AdmissionStatus.options"
+  );
+  assert.ok(
+    pageSource.includes("admission.options.includes(admission.maxActiveIssues)"),
+    "dropdown value binds to the persisted setting"
+  );
+  assert.ok(
+    pageSource.includes("onChange={(e) => void changeLimit(Number(e.target.value))}"),
+    "changing the dropdown calls the limit saver"
+  );
+  assert.ok(
+    pageSource.includes("await updateAdmissionSettings(value)"),
+    "the saver persists through updateAdmissionSettings"
+  );
+  assert.ok(
+    apiSource.includes("/api/queue/settings") && apiSource.includes('method: "PUT"'),
+    "updateAdmissionSettings saves through PUT /api/queue/settings"
+  );
+});
+
+test("cap tooltip compares the ceiling against the shared hard maximum", async () => {
+  const { MAX_ACTIVE_ISSUES_HARD_MAX } = await import("@agent-dealer/shared");
+  assert.equal(MAX_ACTIVE_ISSUES_HARD_MAX, 5, "shared hard maximum is 5");
+  assert.ok(
+    pageSource.includes("admission.ceiling < MAX_ACTIVE_ISSUES_HARD_MAX"),
+    "capped tooltip shows whenever the ceiling is below the hard maximum"
+  );
+  assert.ok(
+    !pageSource.includes("admission.ceiling < 2"),
+    "no stale ceiling-of-2 comparison remains"
+  );
+  assert.ok(
+    !pageSource.includes("ConfigurationPage"),
+    "still no separate settings page for the limit"
   );
 });
