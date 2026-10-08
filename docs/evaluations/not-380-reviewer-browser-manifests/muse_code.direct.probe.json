@@ -1,0 +1,124 @@
+{
+  "appPath": {
+    "interaction": "open the first issue and expand its timeline",
+    "mocksFree": true,
+    "route": "/issues"
+  },
+  "artifacts": [],
+  "browser": {
+    "attempted": false,
+    "binary": null,
+    "detail": "muse_code is the known unsupported control: Google Chrome.app headless aborts in-session (TransformProcessType -> _RegisterApplication, SIGABRT exit 134), loopback listen() fails with EPERM, and no headless shell is provisioned — see docs/evaluations/muse-code/chrome-headless-screenshot.md",
+    "launched": false,
+    "version": null
+  },
+  "cancelled": false,
+  "cleanup": {
+    "childProcessesRemaining": 0,
+    "detail": "control probe spawned nothing; no preview server exists in probe v1",
+    "previewServerStopped": true,
+    "tempDirRemoved": true
+  },
+  "contract": "direct",
+  "endedAt": "2026-10-08T16:09:36.846Z",
+  "exitCode": null,
+  "headSha": "0145f953d8aa3f05884bf02259525af7bd6939c6",
+  "launch": {
+    "argv": [
+      "(muse_code reviewer argv is not wired through buildReviewerArgs; prompt sha256 c493f6b132ddf41ef721c502e719e900de227322c645f839ac10aacc420a6f81)"
+    ],
+    "bin": "~/.local/bin/muse",
+    "cwd": ".",
+    "mcpConfigPath": null,
+    "mcpEnvKeys": [],
+    "policy": {
+      "outboundMutation": false,
+      "publishReview": false,
+      "resolveHumanAction": false,
+      "worktreeWrite": false
+    }
+  },
+  "loopback": {
+    "attempted": false,
+    "detail": "muse_code is the known unsupported control: Google Chrome.app headless aborts in-session (TransformProcessType -> _RegisterApplication, SIGABRT exit 134), loopback listen() fails with EPERM, and no headless shell is provisioned — see docs/evaluations/muse-code/chrome-headless-screenshot.md",
+    "succeeded": false
+  },
+  "negativeControls": [
+    {
+      "action": "(not attempted — control probe spawns nothing)",
+      "denied": true,
+      "detail": "muse_code is the known unsupported control: Google Chrome.app headless aborts in-session (TransformProcessType -> _RegisterApplication, SIGABRT exit 134), loopback listen() fails with EPERM, and no headless shell is provisioned — see docs/evaluations/muse-code/chrome-headless-screenshot.md",
+      "exitStatus": null,
+      "expected": "deny",
+      "id": "source-write",
+      "observed": "not attempted"
+    },
+    {
+      "action": "(not attempted — control probe spawns nothing)",
+      "denied": true,
+      "detail": "muse_code is the known unsupported control: Google Chrome.app headless aborts in-session (TransformProcessType -> _RegisterApplication, SIGABRT exit 134), loopback listen() fails with EPERM, and no headless shell is provisioned — see docs/evaluations/muse-code/chrome-headless-screenshot.md",
+      "exitStatus": null,
+      "expected": "deny",
+      "id": "external-navigation",
+      "observed": "not attempted"
+    },
+    {
+      "action": "(not attempted — control probe spawns nothing)",
+      "denied": true,
+      "detail": "muse_code is the known unsupported control: Google Chrome.app headless aborts in-session (TransformProcessType -> _RegisterApplication, SIGABRT exit 134), loopback listen() fails with EPERM, and no headless shell is provisioned — see docs/evaluations/muse-code/chrome-headless-screenshot.md",
+      "exitStatus": null,
+      "expected": "deny",
+      "id": "personal-profile",
+      "observed": "not attempted"
+    },
+    {
+      "action": "(not attempted — control probe spawns nothing)",
+      "denied": true,
+      "detail": "muse_code is the known unsupported control: Google Chrome.app headless aborts in-session (TransformProcessType -> _RegisterApplication, SIGABRT exit 134), loopback listen() fails with EPERM, and no headless shell is provisioned — see docs/evaluations/muse-code/chrome-headless-screenshot.md",
+      "exitStatus": null,
+      "expected": "deny",
+      "id": "service-tool-mutation",
+      "observed": "not attempted"
+    },
+    {
+      "action": "(not attempted — control probe spawns nothing)",
+      "denied": true,
+      "detail": "muse_code is the known unsupported control: Google Chrome.app headless aborts in-session (TransformProcessType -> _RegisterApplication, SIGABRT exit 134), loopback listen() fails with EPERM, and no headless shell is provisioned — see docs/evaluations/muse-code/chrome-headless-screenshot.md",
+      "exitStatus": null,
+      "expected": "deny",
+      "id": "out-of-root-file",
+      "observed": "not attempted"
+    }
+  ],
+  "notes": "muse_code is the known unsupported control: Google Chrome.app headless aborts in-session (TransformProcessType -> _RegisterApplication, SIGABRT exit 134), loopback listen() fails with EPERM, and no headless shell is provisioned — see docs/evaluations/muse-code/chrome-headless-screenshot.md",
+  "probeId": "d19387b9-4d6a-4659-a38b-b3531b889f13",
+  "runtime": "muse_code",
+  "runtimeVersion": "Muse Code 1.4.3 (1.4.3-R5018.1)",
+  "schemaVersion": 1,
+  "startedAt": "2026-10-08T16:09:36.820Z",
+  "status": "blocked",
+  "statusReason": "muse_code is the known unsupported control: Google Chrome.app headless aborts in-session (TransformProcessType -> _RegisterApplication, SIGABRT exit 134), loopback listen() fails with EPERM, and no headless shell is provisioned — see docs/evaluations/muse-code/chrome-headless-screenshot.md",
+  "timedOut": false,
+  "verdictBinding": {
+    "headShaVerified": false,
+    "manifestSha256": "dfe37a727ff02393afd738b2687e11624f3fa50a1f0cc99b4d38b93097cf69c1"
+  },
+  "viewports": [
+    {
+      "detail": "muse_code is the known unsupported control: Google Chrome.app headless aborts in-session (TransformProcessType -> _RegisterApplication, SIGABRT exit 134), loopback listen() fails with EPERM, and no headless shell is provisioned — see docs/evaluations/muse-code/chrome-headless-screenshot.md",
+      "height": 900,
+      "interactionStateReached": false,
+      "screenshotPath": null,
+      "screenshotSha256": null,
+      "width": 1440
+    },
+    {
+      "detail": "muse_code is the known unsupported control: Google Chrome.app headless aborts in-session (TransformProcessType -> _RegisterApplication, SIGABRT exit 134), loopback listen() fails with EPERM, and no headless shell is provisioned — see docs/evaluations/muse-code/chrome-headless-screenshot.md",
+      "height": 800,
+      "interactionStateReached": false,
+      "screenshotPath": null,
+      "screenshotSha256": null,
+      "width": 390
+    }
+  ]
+}

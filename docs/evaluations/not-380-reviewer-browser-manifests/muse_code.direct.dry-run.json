@@ -1,0 +1,24 @@
+{
+  "argv": [
+    "(muse_code reviewer argv is not wired through buildReviewerArgs)"
+  ],
+  "bin": "~/.local/bin/muse",
+  "contract": "direct",
+  "dryRun": true,
+  "headSha": "0145f953d8aa3f05884bf02259525af7bd6939c6",
+  "mcpConfigPath": null,
+  "promptChars": 3148,
+  "promptSha256": "84a0a966dedd6a060aed53fe7b28506dcd99577fa8872155f2bc8d55eb65f875",
+  "readOnlyPreflight": "blocked: muse_code is not wired through the shared arg builder — its developer argv is built in coordinator/muse-spawn.ts",
+  "runtime": "muse_code",
+  "viewports": [
+    {
+      "height": 900,
+      "width": 1440
+    },
+    {
+      "height": 800,
+      "width": 390
+    }
+  ]
+}
