@@ -79,12 +79,12 @@ Probe harness (checked in, NOT production integration):
   reviewer worktree → `prepareWorkerDeckConnection` → `buildReviewerArgs` +
   `assertReviewerReadOnly` → `realReviewerSpawn` (injectable seam; tests fake
   it, the operator runs it for real).
-- `packages/server/src/coordinator/reviewer-browser-probe.test.ts` — 36
+- `packages/server/src/coordinator/reviewer-browser-probe.test.ts` — 37
   focused tests: report parsing, fail-closed on missing fields / unexecuted
   probe / omitted controls, every-viewport interaction requirement, status
   computation, manifest determinism + hash, prompt pinning, overlay refusals,
   runner lifecycle with fakes, probe-owned timeout/cancellation enforcement
-  (NOT-382).
+  (NOT-382), control-run manifest filenames.
 - `scripts/reviewer-browser-probe.mts` — operator CLI. Live runs refuse without
   `REVIEWER_PROBE_LIVE=1` (paid session); `--dry-run` prints the exact
   bin/argv/policy/preflight and spawns nothing.
@@ -142,6 +142,8 @@ REVIEWER_PROBE_LIVE=1 node --import tsx scripts/reviewer-browser-probe.mts \
 # Cancellation control (one per runtime; aborts mid-session, asserts zero survivors)
 # NOT-382: the earlier --cancel-after-ms 30000 runs were inconclusive (both
 # reviewers finished before the abort, cancelled=false). 3s aborts mid-session.
+# Manifests: claude_code.direct.cancel.probe.json, codex_local.direct.cancel.probe.json
+# (--cancel-after-ms adds a .cancel suffix so controls never overwrite the positive manifest).
 REVIEWER_PROBE_LIVE=1 node --import tsx scripts/reviewer-browser-probe.mts \
   --runtime claude_code --contract direct --repo /path/to/agent-dealer \
   --head <HEAD> --deck <deck> --cancel-after-ms 3000 \
@@ -154,6 +156,8 @@ REVIEWER_PROBE_LIVE=1 node --import tsx scripts/reviewer-browser-probe.mts \
 # Forced-timeout control (one per runtime; no reviewer finishes a full report in
 # 10s — expect status=not_run with cleanup.childProcessesRemaining=0 and
 # cleanup.tempDirRemoved=true)
+# Manifests: claude_code.direct.timeout.probe.json, codex_local.direct.timeout.probe.json
+# (--timeout-ms adds a .timeout suffix so controls never overwrite the positive manifest).
 REVIEWER_PROBE_LIVE=1 node --import tsx scripts/reviewer-browser-probe.mts \
   --runtime claude_code --contract direct --repo /path/to/agent-dealer \
   --head <HEAD> --deck <deck> --timeout-ms 10000 \

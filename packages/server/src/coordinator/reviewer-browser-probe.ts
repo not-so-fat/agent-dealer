@@ -1276,7 +1276,18 @@ export function overlayPlaywrightMcpConfig(opts: {
   }
 }
 
-/** Manifest filename for one (runtime, contract) probe. */
-export function probeManifestFilename(runtime: ReviewerBrowserProbeRuntime, contract: ReviewerBrowserProbeContract): string {
-  return `${runtime}.${contract}.probe.json`;
+/**
+ * Manifest filename for one (runtime, contract) probe. Control runs take a
+ * `.timeout` / `.cancel` suffix when the matching CLI flag is set, so the four
+ * NOT-382 operator controls never overwrite the positive manifest or each
+ * other when they share one --out-dir.
+ */
+export function probeManifestFilename(
+  runtime: ReviewerBrowserProbeRuntime,
+  contract: ReviewerBrowserProbeContract,
+  opts?: { timeout?: boolean; cancel?: boolean }
+): string {
+  const timeoutSuffix = opts?.timeout ? ".timeout" : "";
+  const cancelSuffix = opts?.cancel ? ".cancel" : "";
+  return `${runtime}.${contract}${timeoutSuffix}${cancelSuffix}.probe.json`;
 }

@@ -752,6 +752,31 @@ test("manifest filenames are unique per (runtime, contract)", () => {
   assert.equal(probeManifestFilename("claude_code", "direct"), "claude_code.direct.probe.json");
 });
 
+test("control-run manifest filenames never overwrite the positive manifest (NOT-382)", () => {
+  assert.equal(
+    probeManifestFilename("claude_code", "direct", { timeout: true }),
+    "claude_code.direct.timeout.probe.json"
+  );
+  assert.equal(
+    probeManifestFilename("claude_code", "direct", { cancel: true }),
+    "claude_code.direct.cancel.probe.json"
+  );
+  assert.equal(
+    probeManifestFilename("codex_local", "direct", { timeout: true, cancel: true }),
+    "codex_local.direct.timeout.cancel.probe.json"
+  );
+  // All four operator controls + the positive manifest are distinct files.
+  const names = new Set([
+    probeManifestFilename("claude_code", "direct"),
+    probeManifestFilename("claude_code", "direct", { timeout: true }),
+    probeManifestFilename("claude_code", "direct", { cancel: true }),
+    probeManifestFilename("codex_local", "direct"),
+    probeManifestFilename("codex_local", "direct", { timeout: true }),
+    probeManifestFilename("codex_local", "direct", { cancel: true }),
+  ]);
+  assert.equal(names.size, 6);
+});
+
 test("canonical JSON sorts keys deterministically", () => {
   assert.equal(canonicalProbeJson({ b: 1, a: { d: 4, c: 3 } }), `{\n  "a": {\n    "c": 3,\n    "d": 4\n  },\n  "b": 1\n}\n`);
 });
