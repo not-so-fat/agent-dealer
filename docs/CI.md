@@ -1,19 +1,39 @@
 # CI
 
-## Visual screenshots job (NOT-312)
+## Visual screenshots job (NOT-312, NOT-383)
 
 Builder sandboxes cannot run a browser, so rendered evidence for UI acceptance
 criteria comes from CI instead of from the builder. The `Visual` workflow
 (`.github/workflows/visual.yml`, job `visual`) boots the real server with a
 temp `AGENT_DEALER_HOME`, seeds one deterministic draft issue through the
-public `POST /api/issues` API, and captures every route listed in
-`ui-screenshots.json` with Playwright (chromium) at 1280px and 320px widths.
-The PNGs are uploaded as the `ui-screenshots` artifact (one PNG per
-(route, width)), and the job summary links each image name to its route and
-width. The spec fails the job when a listed route does not render (empty body
-or the app's "not a destination" 404 page), so a typo'd route can never
-silently produce a blank screenshot. The job needs no secrets; workflow
-permissions stay `contents: read`.
+public `POST /api/issues` API plus a guidance timeline event through
+`POST /api/issues/:id/guidance`, and captures every route listed in
+`ui-screenshots.json` with Playwright (chromium) at the required `1440x900`
+and `390x800` viewports — running each route's `steps` (if any) before the
+screenshot. The same plan is captured twice in one run: once against the PR
+head and once against the PR base commit (built in a detached worktree; the
+baseline tree is never edited), using the head config and scripts both times
+so filenames pair up.
+
+Three artifacts are uploaded (one PNG per (route, viewport)):
+
+- `ui-screenshots` — the head captures.
+- `ui-baseline` — the base captures of the same plan.
+- `ui-diff` — one `diff-<shot>.png` per (route, viewport) plus `SUMMARY.md`,
+  a table of route, viewport, steps, changed pixel count and ratio, head SHA,
+  and base SHA.
+
+The diff is report-only: a nonzero pixel diff never fails the job — it is
+evidence for reviewers. The job summary carries the head table, the baseline
+table, and the diff table. The spec fails the job when a listed route does
+not render (empty body or the app's "not a destination" 404 page), so a
+typo'd route can never silently produce a blank screenshot. It also fails the
+job when a page is wider than its viewport after the steps run
+(`document.documentElement.scrollWidth` must be no greater than the viewport
+width), naming the route and viewport. Playwright and the diff libraries
+(`pixelmatch`, `pngjs`) are installed in a scratch directory only — the repo
+takes no new dependency for CI-only browser and image tooling. The job needs
+no secrets; workflow permissions stay `contents: read`.
 
 The workflow only triggers when a PR touches `apps/web/**` or
 `packages/shared/**` (plus its own inputs: `ui-screenshots.json`,
@@ -22,8 +42,8 @@ PR changing neither tree skips the job instead of failing it.
 
 ### Tagging a visual AC `[ci]`
 
-Write the AC so the route and width are explicit, e.g.
-`[ci] CI job `visual` uploads a screenshot of /reports/execution at 320px`.
+Write the AC so the route and viewport are explicit, e.g.
+`[ci] CI job `visual` uploads a screenshot of /reports/execution at 390x800`.
 The evidence is the Actions run link plus the artifact file list in the job
 summary — no browser is ever required inside the builder sandbox.
 
@@ -33,10 +53,18 @@ summary — no browser is ever required inside the builder sandbox.
    `ui-screenshots.json`. The path must start with `/`; use the
    `{{issueId}}` placeholder for a page needing the seeded fixture issue
    (set `"needsSeededIssue": true` to document that).
-2. The route-list loader (`scripts/ci-visual/route-list.ts`) and plan builder
-   (`scripts/ci-visual/plan.ts`) are pure functions with unit tests
+2. Optionally add a `steps` list of `{ "action", "by", "value", "name?" }`
+   interactions, executed in order before the screenshot. `action` is `click`
+   or `waitFor`; `by` is a stable selector engine only — `role` (`value` is
+   the ARIA role, `name` the accessible name), `label` (accessible name), or
+   `testid` (`data-testid`). Raw CSS/XPath selectors are rejected.
+3. The route-list loader (`scripts/ci-visual/route-list.ts`), plan builder
+   (`scripts/ci-visual/plan.ts`), and width verdict
+   (`scripts/ci-visual/width-check.mjs`) are pure functions with unit tests
    (`scripts/ci-visual/*.test.ts`, run under `npm run test:unit`) — extend
-   them, not the Playwright spec, when config semantics change.
+   them, not the Playwright spec, when config semantics change. Viewports are
+   explicit `{ "width", "height" }` objects; the legacy `widths` key is
+   rejected with a migration hint.
 
 ## Baseline-failure gate (NOT-274)
 
