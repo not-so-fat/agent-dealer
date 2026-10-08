@@ -27,6 +27,8 @@ import {
 } from "./source-attachments.js";
 import { extractOperatorCriteria } from "./operator-criteria.js";
 import { buildDeveloperPrompt } from "./prompts.js";
+import { VISUAL_QA_EXCLUDE_LINE, collectDeveloperVisualQa } from "./visual-qa.js";
+import { ensureWorktreeExcluded } from "../adapters/worktree-exclude.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realDeveloperSpawn, developerSessionLogPath, type DeveloperSpawn, type DeveloperSpawnResult } from "./spawn.js";
 import {
@@ -1278,6 +1280,16 @@ export async function runDeveloperEffect(
     return { kind: "adapter_failure", reason };
   }
 
+  // NOT-381: git-ignore the transient visual-QA directory before the session
+  // spawns, so worker screenshots neither dirty the tree (which would break the
+  // verification receipt's clean gate and the handoff's clean check) nor get
+  // swept into a salvage commit — screenshots must never reach the product repo.
+  try {
+    ensureWorktreeExcluded(worktreePath, VISUAL_QA_EXCLUDE_LINE);
+  } catch (err) {
+    return { kind: "adapter_failure", reason: `visual-QA worktree exclude failed: ${String(err)}` };
+  }
+
   // NOT-172: capture the worktree HEAD as this session's input-SHA baseline before
   // the agent spawns — developer work items are never enqueued with an input SHA,
   // so without this the sampler's HEAD diff (and the session_end fallback) have
@@ -1444,6 +1456,9 @@ export async function runDeveloperEffect(
       worktreePath,
       deckId: snapshot?.deckId ?? null,
       museDeveloper: isMuse,
+      // NOT-381: runtime-aware visual-QA guidance (Muse preflight vs the
+      // capable-runtime in-session attempt).
+      runtime,
       guidance: guidance.length ? guidance : undefined,
       scopeDecisionNote,
       conflictRepair,
@@ -2141,6 +2156,27 @@ export async function runDeveloperEffect(
         reason: `Branch already pushed (${branchName}); ${identity.reason}`,
         publishable: { branch: branchName },
       };
+    }
+
+    // NOT-381: collect the structured Visual QA receipt against the just-pushed
+    // head, before the checks wait. Accepted screenshots move to Dealer-owned
+    // storage and the transient worktree directory is removed; a rejection is
+    // persisted loudly but never blocks the handoff — visual QA is evidence
+    // for review, not a gate, so a bad receipt must not burn another round.
+    try {
+      const visual = collectDeveloperVisualQa({
+        issueId: issue.id,
+        sessionId,
+        worktreePath,
+        conclusion: extractConclusion(spawned.transcript),
+        expectedHeadSha: localHead,
+      });
+      if (visual.kind === "rejected") {
+        console.warn(`[dealer] visual QA receipt rejected for ${issue.id}: ${visual.reason}`);
+      }
+    } catch (err) {
+      // Evidence must never fail the handoff it describes.
+      console.warn(`[dealer] visual QA collection failed for ${issue.id}: ${String(err)}`);
     }
 
     milestone("checks.started", `Developer · waiting on checks (round ${round})`, {
