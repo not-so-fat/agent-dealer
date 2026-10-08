@@ -57,7 +57,7 @@ const num = (name: string, dflt: number): number => Number(process.env[name] ?? 
 
 export const coordinatorConfig = {
   get maxConcurrency(): number {
-    return num("MAX_COORDINATOR_CONCURRENCY", 2);
+    return num("MAX_COORDINATOR_CONCURRENCY", 5);
   },
   get leaseMs(): number {
     // Default 60s — coordinator Node-worker liveness, not Cursor think time. See
