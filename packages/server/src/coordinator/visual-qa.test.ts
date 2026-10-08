@@ -307,6 +307,44 @@ test("NOT-381: screenshot symlink fails loudly", () => {
   }
 });
 
+test("NOT-381: symlinked artifact directory fails loudly (realpath escapes the worktree)", () => {
+  const dir = writeWorktree({ "keep.txt": "x" });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-visualqa-out-"));
+  try {
+    fs.writeFileSync(path.join(outside, "desktop-1440x900.png"), "x");
+    fs.writeFileSync(path.join(outside, "mobile-390x800.png"), "x");
+    fs.symlinkSync(outside, path.join(dir, VISUAL_QA_DIR_NAME));
+    const v = validateVisualQaReceipt(parsedVerified(), { expectedHeadSha: HEAD_A, worktreePath: dir });
+    assert.equal(v.ok, false);
+    assert.match((v as { reason: string }).reason, /visual-artifact directory is a symlink, refusing/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("NOT-381: symlinked subdirectory fails loudly (intermediate symlink escapes the worktree)", () => {
+  const dir = writeWorktree({ [`${VISUAL_QA_DIR_NAME}/desktop-1440x900.png`]: "x" });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-visualqa-out-"));
+  try {
+    fs.writeFileSync(path.join(outside, "mobile-390x800.png"), "x");
+    fs.symlinkSync(outside, path.join(dir, VISUAL_QA_DIR_NAME, "sub"));
+    const base = parsedVerified();
+    const v = validateVisualQaReceipt(
+      {
+        ...base,
+        screenshots: [`${VISUAL_QA_DIR_NAME}/desktop-1440x900.png`, `${VISUAL_QA_DIR_NAME}/sub/mobile-390x800.png`],
+      },
+      { expectedHeadSha: HEAD_A, worktreePath: dir }
+    );
+    assert.equal(v.ok, false);
+    assert.match((v as { reason: string }).reason, /traverses a symlink, refusing/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("NOT-381: screenshot path traversal and absolute paths fail loudly", () => {
   const dir = writeWorktree({
     "evil.png": "x",

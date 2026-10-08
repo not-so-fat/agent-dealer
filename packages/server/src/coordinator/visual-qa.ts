@@ -296,7 +296,39 @@ export function validateVisualQaReceipt(
     );
   }
 
-  const visualDir = path.resolve(opts.worktreePath, VISUAL_QA_DIR_NAME);
+  const worktreeResolved = path.resolve(opts.worktreePath);
+  const visualDir = path.join(worktreeResolved, VISUAL_QA_DIR_NAME);
+  // Realpath containment: lexical checks alone cannot see a symlinked visual
+  // dir or subdirectory pointing outside the worktree (`lstat` follows
+  // intermediate symlinks), so bind every path to its real location.
+  let worktreeReal: string;
+  try {
+    worktreeReal = fs.realpathSync(worktreeResolved);
+  } catch {
+    worktreeReal = worktreeResolved;
+  }
+  // The artifact dir itself must be a real directory inside the worktree —
+  // never a symlink, even one pointing back inside.
+  let visualDirReal: string | null = null;
+  try {
+    const dirStat = fs.lstatSync(visualDir);
+    if (dirStat.isSymbolicLink()) {
+      return invalid("verified Visual QA receipt visual-artifact directory is a symlink, refusing");
+    }
+    if (dirStat.isDirectory()) {
+      try {
+        visualDirReal = fs.realpathSync(visualDir);
+      } catch {
+        return invalid("verified Visual QA receipt visual-artifact directory is unreadable, refusing");
+      }
+      if (visualDirReal !== worktreeReal && !visualDirReal.startsWith(worktreeReal + path.sep)) {
+        return invalid("verified Visual QA receipt visual-artifact directory escapes the worktree, refusing");
+      }
+    }
+  } catch {
+    // Missing dir: the per-file checks below report the missing screenshots.
+    visualDirReal = null;
+  }
   for (const declared of receipt.screenshots) {
     if (!declared || declared.trim().length === 0) {
       return invalid("verified Visual QA receipt names an empty screenshot path");
@@ -304,11 +336,29 @@ export function validateVisualQaReceipt(
     if (path.isAbsolute(declared)) {
       return invalid(`verified Visual QA receipt names an absolute screenshot path, refusing: "${declared}"`);
     }
-    const resolved = path.resolve(opts.worktreePath, declared);
+    const resolved = path.resolve(worktreeResolved, declared);
     if (resolved !== visualDir && !resolved.startsWith(visualDir + path.sep)) {
       return invalid(
         `verified Visual QA receipt screenshot escapes the visual-artifact directory, refusing: "${declared}"`
       );
+    }
+    // Reject a symlinked intermediate component (symlinked subdirectory),
+    // not just a symlinked final file.
+    const relParts = path.relative(worktreeResolved, resolved).split(path.sep);
+    let prefix = worktreeResolved;
+    for (let i = 0; i < relParts.length - 1; i++) {
+      prefix = path.join(prefix, relParts[i]!);
+      let partStat: fs.Stats;
+      try {
+        partStat = fs.lstatSync(prefix);
+      } catch {
+        break; // Missing component: the file check below reports it.
+      }
+      if (partStat.isSymbolicLink()) {
+        return invalid(
+          `verified Visual QA receipt screenshot traverses a symlink, refusing: "${declared}"`
+        );
+      }
     }
     let st: fs.Stats;
     try {
@@ -321,6 +371,29 @@ export function validateVisualQaReceipt(
     }
     if (!st.isFile()) {
       return invalid(`verified Visual QA receipt screenshot is not a regular file: "${declared}"`);
+    }
+    // Bind the file to its real location: it must sit inside the real
+    // artifact dir, which itself sits inside the real worktree.
+    let fileReal: string;
+    try {
+      fileReal = fs.realpathSync(resolved);
+    } catch {
+      return invalid(`verified Visual QA receipt screenshot is missing: "${declared}"`);
+    }
+    if (!visualDirReal) {
+      try {
+        visualDirReal = fs.realpathSync(visualDir);
+      } catch {
+        return invalid(`verified Visual QA receipt screenshot is missing: "${declared}"`);
+      }
+      if (visualDirReal !== worktreeReal && !visualDirReal.startsWith(worktreeReal + path.sep)) {
+        return invalid("verified Visual QA receipt visual-artifact directory escapes the worktree, refusing");
+      }
+    }
+    if (fileReal !== visualDirReal && !fileReal.startsWith(visualDirReal + path.sep)) {
+      return invalid(
+        `verified Visual QA receipt screenshot escapes the visual-artifact directory, refusing: "${declared}"`
+      );
     }
     if (st.size === 0) {
       return invalid(`verified Visual QA receipt screenshot is empty: "${declared}"`);

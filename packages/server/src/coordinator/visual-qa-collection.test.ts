@@ -265,6 +265,57 @@ test("NOT-381: screenshot symlink rejects loudly", () => {
   }
 });
 
+test("NOT-381: symlinked artifact directory rejects loudly and stores no blobs", () => {
+  const { issueId, sessionId } = freshIds();
+  const dir = writeWorktree({ "keep.txt": "x" });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-visqa-out-"));
+  try {
+    fs.writeFileSync(path.join(outside, "desktop-1440x900.png"), "outside-bytes");
+    fs.writeFileSync(path.join(outside, "mobile-390x800.png"), "outside-bytes");
+    fs.symlinkSync(outside, path.join(dir, VISUAL_QA_DIR_NAME));
+    const result = collectDeveloperVisualQa({
+      issueId,
+      sessionId,
+      worktreePath: dir,
+      conclusion: verifiedConclusion(HEAD_A),
+      expectedHeadSha: HEAD_A,
+    });
+    assert.equal(result.kind, "rejected");
+    assert.match((result as { reason: string }).reason, /visual-artifact directory is a symlink, refusing/);
+    assert.equal(latestIssueArtifact(issueId, VISUAL_QA_RECEIPT_KIND), null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("NOT-381: symlinked subdirectory rejects loudly and stores no blobs", () => {
+  const { issueId, sessionId } = freshIds();
+  const dir = writeWorktree({ [`${VISUAL_QA_DIR_NAME}/desktop-1440x900.png`]: "x" });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-visqa-out-"));
+  try {
+    fs.writeFileSync(path.join(outside, "mobile-390x800.png"), "outside-bytes");
+    fs.symlinkSync(outside, path.join(dir, VISUAL_QA_DIR_NAME, "sub"));
+    const conclusion = verifiedConclusion(HEAD_A).replace(
+      `${VISUAL_QA_DIR_NAME}/mobile-390x800.png`,
+      `${VISUAL_QA_DIR_NAME}/sub/mobile-390x800.png`
+    );
+    const result = collectDeveloperVisualQa({
+      issueId,
+      sessionId,
+      worktreePath: dir,
+      conclusion,
+      expectedHeadSha: HEAD_A,
+    });
+    assert.equal(result.kind, "rejected");
+    assert.match((result as { reason: string }).reason, /traverses a symlink, refusing/);
+    assert.equal(latestIssueArtifact(issueId, VISUAL_QA_RECEIPT_KIND), null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("NOT-381: screenshot path traversal rejects loudly", () => {
   const { issueId, sessionId } = freshIds();
   const dir = writeWorktree({ "evil.png": "x", [`${VISUAL_QA_DIR_NAME}/desktop-1440x900.png`]: "x" });
