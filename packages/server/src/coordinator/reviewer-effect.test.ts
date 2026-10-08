@@ -860,3 +860,61 @@ test("NOT-225 regression: a non-zero reviewer exit keeps its session_failed beha
   const crashReason = (outcome as { reason?: string }).reason ?? "";
   assert.ok(!crashReason.includes("could not start"), "a spawned-then-crashed session is not a setup failure");
 });
+
+test("NOT-384: available visual evidence stages CI artifacts under the reviewer worktree and cites them", async () => {
+  const { isWorktreeClean } = await import("../adapters/git-worktree.js");
+  const { reviewerVisualStagingDir } = await import("./reviewer-visual-evidence.js");
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  const uiSpawn: SpawnFn = async (input) => {
+    fs.mkdirSync(path.join(input.cwd, "apps", "web", "src"), { recursive: true });
+    fs.writeFileSync(path.join(input.cwd, "apps", "web", "src", "app.tsx"), "export const App = () => null;\n");
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", "ui change");
+    return { exitCode: 0, transcript: "Implementation conclusion: changed the web app.", logPath: "/dev/null", timedOut: false };
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: uiSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+  assert.equal(getIssue(issueId)!.status, "reviewing", "test setup: UI change did not reach reviewing");
+
+  let seenPrompt = "";
+  let seenCwd = "";
+  let cleanDuringSpawn: boolean | null = null;
+  const fetcher = {
+    async findRunForHead({ headSha }: { cwd: string; headSha: string }) {
+      return { databaseId: 4242, headSha, conclusion: "success", status: "completed" };
+    },
+    async downloadArtifact({ name, destDir }: { cwd: string; runId: number; name: string; destDir: string }) {
+      fs.mkdirSync(destDir, { recursive: true });
+      fs.writeFileSync(path.join(destDir, "issues-home-1440x900.png"), `png-${name}`);
+      fs.writeFileSync(path.join(destDir, "issues-home-390x800.png"), `png-${name}`);
+      if (name === "ui-diff") fs.writeFileSync(path.join(destDir, "SUMMARY.md"), "## UI diff\n\nhead: `h`\n");
+    },
+  };
+  const capturingSpawn: ReviewerSpawnFn = async (input) => {
+    seenPrompt = input.prompt;
+    seenCwd = input.cwd;
+    cleanDuringSpawn = await isWorktreeClean(input.cwd);
+    return verdictSpawn({ verdict: "approved" })(input);
+  };
+  registerEffectHandler("reviewer", (ctx) =>
+    runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: capturingSpawn, github, visualEvidenceFetcher: fetcher })
+  );
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "final_review");
+  const stagingDir = reviewerVisualStagingDir(seenCwd);
+  assert.ok(stagingDir.startsWith(seenCwd + path.sep), "staging dir is inside the reviewer worktree");
+  assert.ok(seenPrompt.includes(stagingDir), "reviewer input must name the staged directory");
+  assert.ok(seenPrompt.includes(issue.headSha!), "reviewer input must cite the head SHA");
+  assert.ok(seenPrompt.includes("## UI diff"), "reviewer input must embed the diff summary");
+  assert.match(seenPrompt, /1440x900 and 390x800/);
+  assert.equal(cleanDuringSpawn, true, "the worktree reports clean with staged evidence present");
+  const visual = listArtifactsForIssue(issueId).find((a) => a.kind === "visual_evidence");
+  assert.ok(visual, "expected a recorded visual_evidence artifact");
+  assert.equal(JSON.parse(visual!.contentJson!).state, "available");
+  assert.equal(fs.existsSync(stagingDir), false, "the staging directory is gone after the attempt");
+  assert.equal(fs.existsSync(seenCwd), false, "the reviewer worktree is removed after the attempt");
+});

@@ -362,6 +362,26 @@ artifact from any other HEAD is no evidence.
   returns `ok:false`; unit-tested). Kept as the documented second choice if a
   future runtime makes reviewer-driven browsing enforceable without a shell.
 
+## NOT-384 follow-up: staged CI artifacts and Codex Local read confinement
+
+NOT-384 implements the reviewer side of contract (C) with CI artifacts instead
+of a coordinator-run browser: after CI is green, Dealer looks up the `Visual`
+workflow run for exactly the reviewed head SHA, downloads `ui-screenshots`,
+`ui-baseline`, and `ui-diff` into issue-artifact storage, and stages a
+read-only copy at `<reviewer-worktree>/.agent-dealer-visual/` for the reviewer
+to judge. Staging inside the worktree is load-bearing for Claude Code
+reviewers, whose file tools are confined to the worktree (`--restricted`): an
+artifact stored outside the worktree cannot be read there.
+
+Codex Local reviewers run under a `read-only` sandbox that restricts writes
+but still permits reads outside the worktree (live probes at head `3a435b04`,
+per NOT-384). The staged artifacts are therefore readable by Codex Local
+reviewers too — but this change provides no read confinement for them: a Codex
+Local reviewer can still read paths outside the worktree, and confining those
+reads is an explicit non-goal. The negative-control table above is unchanged by
+this follow-up: "isolated by construction" rows still rest on the reviewer
+launching no browser of its own, not on worktree read confinement.
+
 ## Appendix
 
 - Manifest schema: `ReviewerBrowserProbeManifest` (zod) in

@@ -630,3 +630,96 @@ test("NOT-364: reviewer prompt carries manifest metadata without file paths", ()
   const without = buildReviewerPrompt(reviewerBase);
   assert.doesNotMatch(without, /## Source attachments/);
 });
+
+// NOT-384: available visual evidence cites the staged paths, both SHAs, and
+// the diff summary, and instructs the reviewer to judge both viewports.
+test("NOT-384: reviewer prompt cites staged SHA-bound screenshots and diff for available evidence", () => {
+  const prompt = buildReviewerPrompt({
+    ...reviewerBase,
+    visualEvidence: {
+      state: "available",
+      headSha: "b".repeat(40),
+      baseSha: "a".repeat(40),
+      runId: 42,
+      staged: {
+        stagedDir: "/wt/.agent-dealer-visual",
+        screenshotsDir: "/wt/.agent-dealer-visual/ui-screenshots",
+        baselineDir: "/wt/.agent-dealer-visual/ui-baseline",
+        diffDir: "/wt/.agent-dealer-visual/ui-diff",
+        summaryPath: "/wt/.agent-dealer-visual/ui-diff/SUMMARY.md",
+      },
+      summary: "## UI diff (base vs head, report-only)\n\n| `issues-home` | 1440x900 | 12 |",
+      files: {
+        "ui-screenshots": { files: ["issues-home-1440x900.png"], total: 8 },
+        "ui-baseline": { files: ["issues-home-1440x900.png"], total: 8 },
+        "ui-diff": { files: ["SUMMARY.md", "diff-issues-home-1440x900.png"], total: 9 },
+      },
+      reason: null,
+    },
+  });
+  assert.match(prompt, /## Visual evidence \(CI-captured at b{8}\)/);
+  assert.ok(prompt.includes("/wt/.agent-dealer-visual/ui-screenshots/"), "staged head captures must be named");
+  assert.ok(prompt.includes("/wt/.agent-dealer-visual/ui-baseline/"), "staged baseline must be named");
+  assert.ok(prompt.includes("/wt/.agent-dealer-visual/ui-diff/"), "staged diff must be named");
+  assert.ok(prompt.includes("`bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`"), "head SHA must be cited");
+  assert.ok(prompt.includes("`aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`"), "base SHA must be cited");
+  assert.match(prompt, /run 42/);
+  assert.match(prompt, /1440x900 and 390x800/);
+  assert.match(prompt, /Judge the screenshots and the base-vs-head diff at both viewports/);
+  assert.match(prompt, /nonzero pixel diff is evidence, never an automatic failure/);
+  assert.match(prompt, /## UI diff \(base vs head, report-only\)/);
+  assert.match(prompt, /visual QA: verified/);
+});
+
+// NOT-384: missing and failed evidence name the state and forbid a visual
+// pass — and forbid a blocking finding about the evidence itself, since Dealer
+// holds the head for an operator instead of queuing a repair round.
+test("NOT-384: reviewer prompt forbids a visual pass for missing evidence", () => {
+  const prompt = buildReviewerPrompt({
+    ...reviewerBase,
+    visualEvidence: {
+      state: "missing",
+      headSha: "b".repeat(40),
+      baseSha: "a".repeat(40),
+      runId: null,
+      staged: null,
+      summary: null,
+      files: null,
+      reason: "no Visual workflow run found for head bbbbbbbb",
+    },
+  });
+  assert.match(prompt, /## Visual evidence: missing/);
+  assert.ok(prompt.includes("`bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`"), "head SHA must be named");
+  assert.match(prompt, /no Visual workflow run found/);
+  assert.match(prompt, /Do NOT report a visual pass/);
+  assert.match(prompt, /visual QA: not run \(missing\)/);
+  assert.match(prompt, /Do not raise a blocking finding about the missing evidence itself/);
+  assert.match(prompt, /never start solely for missing visual evidence/);
+});
+
+test("NOT-384: reviewer prompt forbids a visual pass for failed evidence", () => {
+  const prompt = buildReviewerPrompt({
+    ...reviewerBase,
+    visualEvidence: {
+      state: "failed",
+      headSha: "b".repeat(40),
+      baseSha: "a".repeat(40),
+      runId: 43,
+      staged: null,
+      summary: null,
+      files: null,
+      reason: "Visual run 43 for this head concluded failure — its captures are unusable",
+    },
+  });
+  assert.match(prompt, /## Visual evidence: failed/);
+  assert.match(prompt, /concluded failure/);
+  assert.match(prompt, /Do NOT report a visual pass/);
+  assert.match(prompt, /visual QA: not run \(failed\)/);
+  assert.match(prompt, /Do not raise a blocking finding about the missing evidence itself/);
+});
+
+test("NOT-384: no visual evidence produces byte-for-byte the same reviewer prompt as before", () => {
+  const without = buildReviewerPrompt(reviewerBase);
+  assert.doesNotMatch(without, /## Visual evidence/);
+  assert.equal(buildReviewerPrompt({ ...reviewerBase, visualEvidence: undefined }), without);
+});
