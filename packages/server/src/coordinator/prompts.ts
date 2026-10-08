@@ -9,7 +9,7 @@
 // the reviewer to run `git diff` itself: a claude reviewer's read-only tool set
 // (`READ_ONLY_BUILTIN_TOOLS` in args.ts) has no Bash at all, so it cannot shell out —
 // every artifact it needs to judge must already be in the prompt.
-import type { ExecutionContractV1, Finding, SourceAttachmentRecord } from "@agent-dealer/shared";
+import type { ExecutionContractV1, Finding, Runtime, SourceAttachmentRecord } from "@agent-dealer/shared";
 import {
   sourceAttachmentsDeveloperSection,
   sourceAttachmentsReviewerSection,
@@ -20,6 +20,12 @@ import {
   museVisualQaPromptSection,
   type MuseVisualQaStatus,
 } from "../adapters/muse-visual-qa.js";
+import {
+  capableDeveloperVisualQaPromptSection,
+  developerVisualQaPolicy,
+  visualQaReviewerSection,
+  type VisualQaRecord,
+} from "./visual-qa.js";
 import {
   formatVerificationReceiptSection,
   type VerificationReceipt,
@@ -104,6 +110,10 @@ export interface DeveloperPromptInput {
    * coordinator-side `checkMuseVisualQa()` preflight when `museDeveloper` is set;
    * tests inject a fixed status. Ignored for non-Muse developers. */
   museVisualQa?: MuseVisualQaStatus;
+  /** NOT-381: the developer session's runtime. `muse_code` (or legacy
+   * `museDeveloper`) takes the Muse preflight above; every other runtime gets
+   * the capable-runtime in-session visual-QA section. */
+  runtime?: Runtime | string | null;
   /** Human guidance markdown added since this issue's previous worker session (design
    * doc "Guidance semantics") — a one-shot CLI process never inherits a running session,
    * so this is how guidance actually reaches the next developer/reviewer input. */
@@ -418,9 +428,13 @@ export function buildDeveloperPrompt(input: DeveloperPromptInput): string {
   if (input.museDeveloper) parts.push(...museEnvironmentLimitsSection());
   // NOT-303: the screenshot-path preflight verdict is embedded before the session
   // starts, so the worker reads it instead of discovering the Chrome.app abort
-  // mid-session. Non-Muse developers are untouched.
-  if (input.museDeveloper) {
+  // mid-session. NOT-381: non-Muse runtimes get the capable-runtime in-session
+  // attempt instead of the old blanket no-browser assumption.
+  const visualQaPolicy = input.museDeveloper ? "muse" : developerVisualQaPolicy(input.runtime);
+  if (visualQaPolicy === "muse") {
     parts.push(...museVisualQaPromptSection(input.museVisualQa ?? checkMuseVisualQa()));
+  } else {
+    parts.push(...capableDeveloperVisualQaPromptSection());
   }
 
   parts.push(
@@ -464,6 +478,11 @@ export interface ReviewerPromptInput {
    * `not_applicable` head, which the coordinator maps to absent) renders
    * nothing so non-UI prompts stay byte-for-byte. */
   visualEvidence?: ReviewerVisualEvidenceInput;
+  /** NOT-381: the latest coordinator-validated visual-QA record for the issue
+   * (or the latest loud rejection), SHA-checked against the pinned head inside
+   * the section. Absent renders nothing so receipt-free reviews stay
+   * byte-for-byte. */
+  visualQa?: { record: VisualQaRecord; pinnedHeadSha: string } | null;
 }
 
 const REVIEWER_RESULT_SHAPE =
@@ -647,6 +666,9 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
   // NOT-384: SHA-bound CI captures for this head (or the missing/failed
   // notice) — rendered only when the coordinator resolved visual evidence.
   parts.push(...visualEvidenceSection(input.visualEvidence));
+  // NOT-381: the coordinator-validated visual receipt (or loud rejection),
+  // SHA-bound to the pinned head — the raw conclusion line above is unverified.
+  parts.push(...visualQaReviewerSection(input.visualQa?.record ?? null, input.visualQa?.pinnedHeadSha ?? input.headSha));
 
   if (input.findings?.length) {
     parts.push(`## Findings from prior rounds (verify each is actually resolved)`);

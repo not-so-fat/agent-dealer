@@ -308,9 +308,63 @@ test("NOT-303: museDeveloper prompt names the pre-installed headless shell when 
   assert.match(prompt, /Google Chrome\.app/);
 });
 
-test("NOT-303: a non-Muse developer prompt has no visual-QA section", () => {
+// NOT-381: non-Muse runtimes attempt in-session browser verification instead of
+// the old blanket no-browser assumption — the prompt carries the bounded probe,
+// the real-app requirement, the default viewports, and the receipt format.
+test("NOT-381: a non-Muse developer prompt carries the capable-runtime visual-QA section", () => {
   const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1, deckId: "deck-1", worktreePath: "/wt" });
-  assert.doesNotMatch(prompt, /## Visual QA/);
+  assert.match(prompt, /## Visual QA \(in-session browser verification\)/);
+  assert.match(prompt, /ONE bounded capability probe/);
+  assert.match(prompt, /REAL backend and frontend/);
+  assert.match(prompt, /1440x900/);
+  assert.match(prompt, /390x800/);
+  assert.match(prompt, /do not install browsers or packages/);
+  assert.match(prompt, /do not retry the failed capability/);
+  assert.match(prompt, /do not weaken any sandbox flag/);
+  assert.match(prompt, /never commit it/);
+  assert.doesNotMatch(prompt, /RegisterApplication/);
+});
+
+// NOT-381: the policy is runtime-aware — Muse (boolean or runtime id) keeps the
+// NOT-303 preflight, Claude Code / Codex Local / Cursor Local get the attempt.
+test("NOT-381: runtime policy keeps Muse behavior and gives capable runtimes the attempt", () => {
+  const saved = process.env.MUSE_HEADLESS_SHELL_BIN;
+  delete process.env.MUSE_HEADLESS_SHELL_BIN;
+  try {
+    for (const runtime of ["claude_code", "codex_local", "cursor_local"] as const) {
+      const prompt = buildDeveloperPrompt({
+        taskSnapshot,
+        round: 1,
+        deckId: "deck-1",
+        worktreePath: "/wt",
+        runtime,
+      });
+      assert.match(prompt, /## Visual QA \(in-session browser verification\)/, runtime);
+      assert.match(prompt, /ONE bounded capability probe/, runtime);
+      assert.doesNotMatch(prompt, /RegisterApplication/);
+    }
+    const museByRuntime = buildDeveloperPrompt({
+      taskSnapshot,
+      round: 1,
+      deckId: "deck-1",
+      worktreePath: "/wt",
+      runtime: "muse_code",
+    });
+    assert.match(museByRuntime, /## Visual QA \(screenshots\)/);
+    assert.match(museByRuntime, /RegisterApplication/);
+    assert.match(museByRuntime, /Visual QA: not run/);
+    const museByFlag = buildDeveloperPrompt({
+      taskSnapshot,
+      round: 1,
+      deckId: "deck-1",
+      worktreePath: "/wt",
+      museDeveloper: true,
+      runtime: "claude_code",
+    });
+    assert.match(museByFlag, /RegisterApplication/, "museDeveloper flag keeps the Muse preflight");
+  } finally {
+    if (saved !== undefined) process.env.MUSE_HEADLESS_SHELL_BIN = saved;
+  }
 });
 
 test("NOT-303: reviewer prompt states a missing screenshot is never a pass", () => {
@@ -594,6 +648,100 @@ test("NOT-364: attachment-free developer prompts render no source-attachment sec
   const without = buildDeveloperPrompt({ taskSnapshot, round: 1 });
   assert.doesNotMatch(without, /## Source attachments/);
   assert.equal(buildDeveloperPrompt({ taskSnapshot, round: 1 }), without);
+});
+
+// NOT-381: the reviewer input carries the coordinator-validated visual receipt
+// SHA-bound to the pinned head; unavailable is a routing state, never a pass.
+test("NOT-381: reviewer prompt includes the validated visual receipt bound to the pinned head", () => {
+  const headSha = "b".repeat(40);
+  const prompt = buildReviewerPrompt({
+    ...reviewerBase,
+    visualQa: {
+      pinnedHeadSha: headSha,
+      record: {
+        kind: "receipt",
+        createdAt: "2026-10-08T00:00:00.000Z",
+        content: {
+          status: "verified",
+          headSha,
+          realApp: "real (no mocks)",
+          scenario: "/widgets/new — fill the form and submit",
+          viewports: ["1440x900", "390x800"],
+          commands: "npm run dev; capture",
+          screenshots: [
+            { fileName: "0-desktop.png", blobPath: "/blobs/0-desktop.png", sizeBytes: 10, sha256: "ab".repeat(32) },
+          ],
+          capability: null,
+          note: null,
+          recordedAt: "2026-10-08T00:00:00.000Z",
+        },
+      },
+    },
+  });
+  assert.match(prompt, /## Visual QA \(developer receipt — SHA-bound to this head\)/);
+  assert.match(prompt, new RegExp(headSha));
+  assert.match(prompt, /real \(no mocks\)/);
+  assert.match(prompt, /0-desktop\.png/);
+});
+
+test("NOT-381: reviewer prompt presents unavailable and not-required receipts without normalizing to a pass", () => {
+  const unavailable = buildReviewerPrompt({
+    ...reviewerBase,
+    visualQa: {
+      pinnedHeadSha: reviewerBase.headSha,
+      record: {
+        kind: "receipt",
+        createdAt: "2026-10-08T00:00:00.000Z",
+        content: {
+          status: "unavailable",
+          headSha: reviewerBase.headSha,
+          realApp: null,
+          scenario: null,
+          viewports: [],
+          commands: null,
+          screenshots: [],
+          capability: "loopback listen: EPERM",
+          note: null,
+          recordedAt: "2026-10-08T00:00:00.000Z",
+        },
+      },
+    },
+  });
+  assert.match(unavailable, /## Visual QA \(UNAVAILABLE — not verified\)/);
+  assert.match(unavailable, /loopback listen: EPERM/);
+  assert.match(unavailable, /never a pass/);
+  assert.doesNotMatch(unavailable, /SHA-bound to this head/);
+
+  const notRequired = buildReviewerPrompt({
+    ...reviewerBase,
+    visualQa: {
+      pinnedHeadSha: reviewerBase.headSha,
+      record: {
+        kind: "receipt",
+        createdAt: "2026-10-08T00:00:00.000Z",
+        content: {
+          status: "not_required",
+          headSha: null,
+          realApp: null,
+          scenario: null,
+          viewports: [],
+          commands: null,
+          screenshots: [],
+          capability: null,
+          note: null,
+          recordedAt: "2026-10-08T00:00:00.000Z",
+        },
+      },
+    },
+  });
+  assert.match(notRequired, /## Visual QA \(not required/);
+  assert.doesNotMatch(notRequired, /SHA-bound to this head/);
+
+  const without = buildReviewerPrompt(reviewerBase);
+  assert.doesNotMatch(without, /## Visual QA \(developer receipt/);
+  assert.doesNotMatch(without, /## Visual QA \(UNAVAILABLE/);
+  assert.equal(buildReviewerPrompt({ ...reviewerBase, visualQa: undefined }), without);
+  assert.equal(buildReviewerPrompt({ ...reviewerBase, visualQa: null }), without);
 });
 
 // NOT-364: reviewers get the immutable manifest as metadata only — no

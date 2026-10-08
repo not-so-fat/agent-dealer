@@ -21,8 +21,10 @@ Live runs (see the evaluation doc for the exact commands) write sanitized
 - `claude_code.direct.probe.json` + `codex_local.direct.probe.json` (required)
 - `claude_code.playwright-mcp.probe.json` + `codex_local.playwright-mcp.probe.json`
 - `claude_code.coordinator-preview.probe.json` + `codex_local.coordinator-preview.probe.json`
-- one `--cancel-after-ms` run per runtime (cancellation control)
-- one `--timeout-ms 10000` run per runtime (forced-timeout control)
+- `claude_code.direct.cancel.probe.json` + `codex_local.direct.cancel.probe.json`
+  (cancellation control; `--cancel-after-ms` adds the `.cancel` suffix)
+- `claude_code.direct.timeout.probe.json` + `codex_local.direct.timeout.probe.json`
+  (forced-timeout control; `--timeout-ms` adds the `.timeout` suffix)
 - reviewer screenshots referenced by the manifests (PNG files beside them)
 
 Every manifest records the tested HEAD (`headSha`), runtime/binary versions,

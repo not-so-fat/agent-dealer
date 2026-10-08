@@ -67,6 +67,19 @@ export function getVisualEvidenceDir(): string {
 }
 
 /**
+ * NOT-381: Dealer-owned blobs for collected developer visual-QA screenshots.
+ * Content is addressed under `<dir>/<issueId>/`; `visual_qa_receipt` artifact
+ * rows point here. Retained with the issue history like source attachments —
+ * the worktree's transient `.agent-dealer-visual-qa/` directory is removed on
+ * collection, but these blobs survive until the issue row itself is gone.
+ */
+export function getVisualQaDir(): string {
+  const dir = path.join(getDataDir(), "visual-qa");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
  * Root for Dealer-managed repository clones and session worktrees (NOT-149).
  * Defaults under AGENT_DEALER_HOME; override with AGENT_DEALER_EXECUTION_ROOT for a
  * mounted disk / cloud volume.

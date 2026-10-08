@@ -36,6 +36,7 @@ import {
   toReviewerVisualEvidenceInput,
   type VisualEvidenceFetcher,
 } from "./reviewer-visual-evidence.js";
+import { readLatestVisualQa } from "./visual-qa.js";
 import { guidanceForNextSession } from "./guidance.js";
 import { realReviewerSpawn, reviewerSessionLogPath, type ReviewerSpawn } from "./spawn.js";
 import {
@@ -439,6 +440,9 @@ export async function runReviewerEffect(
     // treat missing operator evidence as a defect (Dealer gates the merge), but
     // the probe and doc must exist. Rendered only when non-empty.
     const operatorCriteria = extractOperatorCriteria(taskSnapshot.acceptanceCriteria);
+    // NOT-381: the latest coordinator-validated visual receipt (or loud
+    // rejection), SHA-checked against the pinned head inside the prompt section.
+    const visualQaRecord = readLatestVisualQa(issue.id);
     const prompt = buildReviewerPrompt({
       taskSnapshot,
       round: workItem.round,
@@ -453,6 +457,7 @@ export async function runReviewerEffect(
       guidance: guidance.length ? guidance : undefined,
       operatorCriteria: operatorCriteria.length > 0 ? operatorCriteria : undefined,
       visualEvidence,
+      visualQa: visualQaRecord ? { record: visualQaRecord, pinnedHeadSha: headSha } : undefined,
     });
 
     // NOT-83 review finding — see developer-effect.ts's identical check for the full
