@@ -389,6 +389,108 @@ reads is an explicit non-goal. The negative-control table above is unchanged by
 this follow-up: "isolated by construction" rows still rest on the reviewer
 launching no browser of its own, not on worktree read confinement.
 
+### Operator verification (NOT-384)
+
+Proves the NOT-384 `[operator]` criterion: one real Dealer-run issue that
+changes the web app reaches review after NOT-383 has landed, and the
+reviewer's output cites the SHA-bound CI screenshots and diff for the exact
+head at both viewports. Run on a host with the Dealer daemon up, `gh`
+authenticated, and Agent Deck reachable. The staged reviewer-worktree copy
+(`<reviewer-worktree>/.agent-dealer-visual/`) is deleted when the attempt
+ends, so the `visual_evidence` issue-artifact row (its `stagedDir`, `runId`,
+and `headSha`) plus the retained `blobPath` bytes are the lasting record —
+read those, not the worktree.
+
+1. Create a UI-change issue (the change must touch a `VISUAL_WORKFLOW_PATHS`
+   path — `apps/web/**`, `packages/shared/**`, `ui-screenshots.json`,
+   `scripts/ci-visual/**`, or `.github/workflows/visual.yml` — or the head
+   classifies `not_applicable` and proves nothing):
+
+```bash
+agent-dealer issue create \
+  --title "NOT-384 probe: <visible UI change>" \
+  --repo github.com/<org>/<repo> \
+  --developer-agent <developer-agent-id> \
+  --reviewer-agent <reviewer-agent-id> \
+  --description "<what to change and where>" \
+  --acceptance-criteria "- [ ] [agent] <UI-visible criterion naming the affected path>"
+```
+
+Record the returned issue id as `<issueId>`.
+
+2. Start it and wait until it is past review:
+
+```bash
+agent-dealer issue start <issueId>
+agent-dealer issue show <issueId>   # poll .issue.status until past review (final_review / needs_human / done)
+```
+
+3. Capture the evidence once:
+
+```bash
+agent-dealer issue show <issueId> --include evidence > /tmp/not384-evidence.json
+```
+
+4. Read the lasting `visual_evidence` record (expect `state: available`):
+
+```bash
+jq '.evidence.artifacts[] | select(.kind=="visual_evidence") | {artifactId: .id, workerSessionId, blobPath, content: (.contentJson | fromjson | {headSha, baseSha, state, runId, stagedDir, artifactNames, reason})}' /tmp/not384-evidence.json
+```
+
+`stagedDir` is the deleted worktree copy (`<reviewer-worktree>/.agent-dealer-visual/`);
+the three staged subdirs are `<stagedDir>/ui-screenshots`, `<stagedDir>/ui-baseline`,
+`<stagedDir>/ui-diff`.
+
+5. Independent SHA check — the record must name the exact PR head and base (a
+   run for any other SHA never counts):
+
+```bash
+jq -r '.issue | {issueId: .id, headSha, prNumber}' /tmp/not384-evidence.json
+gh pr view <prNumber> --json headRefOid,baseRefOid --jq '{headRefOid, baseRefOid}'
+```
+
+6. Confirm the retained bytes survived staging cleanup:
+
+```bash
+BLOB=$(jq -r '.evidence.artifacts[] | select(.kind=="visual_evidence") | .blobPath' /tmp/not384-evidence.json)
+ls -R "$BLOB"
+grep -E "head|base" "$BLOB/ui-diff/SUMMARY.md" | head -5
+```
+
+Expect `ui-screenshots/`, `ui-baseline/`, and `ui-diff/` PNGs at both
+`1440x900` and `390x800`, plus a `SUMMARY.md` naming the head and base SHAs.
+
+7. Reviewer output excerpt — the reviewer must cite the screenshots and diff
+   for the exact head (the published PR review body carries the same
+   `Evidence assessment` section):
+
+```bash
+jq -r '.evidence.workerSessions[] | select(.role=="reviewer") | {id, sessionRef, inputSha, status}' /tmp/not384-evidence.json
+jq -r '.evidence.artifacts[] | select(.kind=="reviewer_transcript") | {artifactId: .id, workerSessionId, blobPath}' /tmp/not384-evidence.json
+grep -a -o 'visual QA: [^"\\]*' <reviewer-transcript-blobPath> | tail -5
+```
+
+Expect `visual QA: verified (<n> shots at <head8>)` naming the judged shots.
+
+8. Pass / fail:
+
+- PASS: `visual_evidence` state is `available`, its `headSha`/`baseSha` equal
+  the `gh` PR SHAs, the `blobPath` holds both viewports plus a SHA-naming
+  `SUMMARY.md`, and the reviewer excerpt cites the screenshots and diff for
+  the exact head.
+- FAIL (still record everything): state `missing`/`failed` (record its
+  `reason` and the open `operator_verification` action), any SHA/blob
+  mismatch, or the reviewer wrote `visual QA: not run` / cited nothing.
+
+PR-body checklist (copy verbatim, filling each line):
+
+- Dealer issue id: `<issueId>`
+- Reviewer run/session ids: `<reviewer workerSessionId>` (+ `sessionRef`), `visual_evidence` artifact `<id>`, `reviewer_transcript` artifact `<id>`
+- Head SHA: `<headSha>` (base `<baseSha>`, Visual run `<runId>`)
+- Staged artifact paths: `<stagedDir>` + `ui-screenshots/` / `ui-baseline/` / `ui-diff/` (deleted after the attempt — the `visual_evidence` row above is the evidence)
+- Retained bytes: `<blobPath>` listing excerpt (both viewports + `SUMMARY.md` head/base lines)
+- Reviewer output excerpt: the `visual QA: verified (…)` line(s) from step 7
+
 ## Appendix
 
 - Manifest schema: `ReviewerBrowserProbeManifest` (zod) in
