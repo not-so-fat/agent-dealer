@@ -54,6 +54,19 @@ export function getSourceAttachmentsDir(): string {
 }
 
 /**
+ * NOT-384: Dealer-owned bytes for CI visual evidence (downloaded `ui-screenshots` /
+ * `ui-baseline` / `ui-diff` artifacts). Content lives under
+ * `<dir>/<issueId>/<headSha>/`; `visual_evidence` issue-artifact rows point
+ * here via `blobPath`. Retained with the issue history like source-attachment
+ * blobs — reviewer-worktree copies are removed with normal worktree cleanup.
+ */
+export function getVisualEvidenceDir(): string {
+  const dir = path.join(getDataDir(), "visual-evidence");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
  * Root for Dealer-managed repository clones and session worktrees (NOT-149).
  * Defaults under AGENT_DEALER_HOME; override with AGENT_DEALER_EXECUTION_ROOT for a
  * mounted disk / cloud volume.

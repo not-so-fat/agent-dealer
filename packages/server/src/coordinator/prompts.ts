@@ -28,6 +28,7 @@ import {
   formatOperatorCriteria,
   type OperatorCriterion,
 } from "./operator-criteria.js";
+import type { ReviewerVisualEvidenceInput } from "./reviewer-visual-evidence.js";
 
 export interface TaskSnapshot {
   title: string;
@@ -459,6 +460,10 @@ export interface ReviewerPromptInput {
   /** NOT-314: the frozen snapshot's `[operator]` criteria, parsed by the
    * coordinator. Renders the not-a-defect section; empty/absent renders nothing. */
   operatorCriteria?: OperatorCriterion[];
+  /** NOT-384: SHA-bound CI visual evidence for this head. Absent (or a
+   * `not_applicable` head, which the coordinator maps to absent) renders
+   * nothing so non-UI prompts stay byte-for-byte. */
+  visualEvidence?: ReviewerVisualEvidenceInput;
 }
 
 const REVIEWER_RESULT_SHAPE =
@@ -546,6 +551,63 @@ export function formatDiffForPrompt(diff: string): FormattedDiff {
   };
 }
 
+/**
+ * NOT-384: SHA-bound CI visual evidence for this head. `available` names the
+ * staged paths, both SHAs, and the diff summary, and instructs the reviewer to
+ * judge the screenshots and the base-vs-head diff at both viewports. `missing`
+ * and `failed` name the state and forbid a visual pass — and forbid a blocking
+ * finding about the missing evidence itself, since Dealer holds the head for a
+ * human operator automatically (a repair round must never start solely for
+ * missing visual evidence). Absent renders nothing.
+ */
+function visualEvidenceSection(evidence: ReviewerVisualEvidenceInput | undefined): string[] {
+  if (!evidence) return [];
+  const head8 = evidence.headSha.slice(0, 8);
+  if (evidence.state === "available") {
+    const staged = evidence.staged;
+    const lines = [
+      `## Visual evidence (CI-captured at ${head8})`,
+      `The \`Visual\` CI workflow captured this exact head (\`${evidence.headSha}\`, base \`${evidence.baseSha}\`${evidence.runId != null ? `, run ${evidence.runId}` : ""}) at the required viewports (1440x900 and 390x800), running each route's interaction steps before the screenshot. Judge the screenshots and the base-vs-head diff at both viewports — a nonzero pixel diff is evidence, never an automatic failure; decide whether the rendered changes match the task. A genuine rendered defect IS a coding finding; captures you cannot judge are a risk, never a pass.`,
+      ``,
+    ];
+    if (staged) {
+      lines.push(
+        `- Head captures: \`${staged.screenshotsDir}/\``,
+        `- Baseline captures: \`${staged.baselineDir}/\``,
+        `- Diffs and summary: \`${staged.diffDir}/\``,
+        ``
+      );
+    }
+    if (evidence.files) {
+      for (const name of ["ui-screenshots", "ui-baseline", "ui-diff"] as const) {
+        const listing = evidence.files[name];
+        const extra =
+          listing.total > listing.files.length ? ` (+${listing.total - listing.files.length} more)` : "";
+        lines.push(
+          `\`${name}/\` (${listing.total} files${extra}): ${listing.files.map((f) => `\`${f}\``).join(", ") || "(empty)"}`
+        );
+      }
+      lines.push(``);
+    }
+    lines.push(
+      `### Diff summary (\`SUMMARY.md\`${staged?.summaryPath ? ` at \`${staged.summaryPath}\`` : ""})`,
+      evidence.summary ?? "(the staged ui-diff directory has no SUMMARY.md — judge the diff PNGs directly)",
+      ``,
+      `Read the PNGs with your file tools — every path above is inside your read-only checkout. Record \`visual QA: verified (<n> shots at ${head8})\` in \`evidenceAssessment\`, naming the shots you judged.`,
+      ``
+    );
+    return lines;
+  }
+  const reason = evidence.reason ?? "no usable CI visual captures";
+  return [
+    `## Visual evidence: ${evidence.state} — no usable CI captures for this head`,
+    `The \`Visual\` CI workflow produced no usable screenshots for this exact head (\`${evidence.headSha}\`, base \`${evidence.baseSha}\`): ${reason}.`,
+    ``,
+    `Do NOT report a visual pass: write \`visual QA: not run (${evidence.state})\` in \`evidenceAssessment\`. Do not raise a blocking finding about the missing evidence itself — Dealer holds this head for a human operator automatically, and a repair round must never start solely for missing visual evidence. Judge only the code in the diff.`,
+    ``,
+  ];
+}
+
 export function buildReviewerPrompt(input: ReviewerPromptInput): string {
   const parts = [
     input.round === 1
@@ -582,6 +644,9 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
   if (input.checksSummary) {
     parts.push(`## CI checks`, input.checksSummary, ``);
   }
+  // NOT-384: SHA-bound CI captures for this head (or the missing/failed
+  // notice) — rendered only when the coordinator resolved visual evidence.
+  parts.push(...visualEvidenceSection(input.visualEvidence));
 
   if (input.findings?.length) {
     parts.push(`## Findings from prior rounds (verify each is actually resolved)`);
