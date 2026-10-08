@@ -4,6 +4,7 @@
 // behavior for missing fields or an unexecuted probe.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -753,6 +754,101 @@ test("manifest filenames are unique per (runtime, contract)", () => {
 
 test("canonical JSON sorts keys deterministically", () => {
   assert.equal(canonicalProbeJson({ b: 1, a: { d: 4, c: 3 } }), `{\n  "a": {\n    "c": 3,\n    "d": 4\n  },\n  "b": 1\n}\n`);
+});
+
+test("runner enforces its own timeout when the spawn never settles (NOT-382)", async () => {
+  // A real but already-reaped pid: proves the child-process accounting runs on
+  // the timeout path (reaped → zero remaining).
+  const reapedPid = spawnSync("true").pid;
+  assert.ok(typeof reapedPid === "number" && reapedPid > 0, "expected a reaped pid from spawnSync(true)");
+  const manifest = await runReviewerBrowserProbe(
+    {
+      runtime: "claude_code",
+      contract: "direct",
+      repoPath: "/tmp/fake-repo",
+      headSha: HEAD,
+      deckId: "deck-1",
+      probeId: "probe-timeout-382",
+      timeoutMs: 50,
+      spawnSettleGraceMs: 25,
+    },
+    {
+      createWorktree: (async () => ({ path: "/tmp/wt", role: "reviewer", ref: HEAD, detached: true })) as never,
+      removeWorktree: (async () => ({ removed: true })) as never,
+      prepareDeck: async () => ({ ok: true, mcpConfigPath: "/tmp/fake-deck.json" }),
+      releaseDeck: async () => {},
+      readHead: (async () => HEAD) as never,
+      now: () => new Date("2026-10-08T00:00:00.000Z"),
+      // Never settles and ignores timeoutMs/signal — pre-fix the probe hung on
+      // this await forever with neither timedOut nor cancelled recorded.
+      spawn: (async (input: { onSpawn?: (pid: number) => void }) => {
+        input.onSpawn?.(reapedPid);
+        await new Promise<never>(() => {});
+        throw new Error("unreachable");
+      }) as never,
+    }
+  );
+  assert.equal(manifest.timedOut, true);
+  assert.equal(manifest.cancelled, false);
+  assert.equal(manifest.status, "not_run");
+  assert.match(manifest.statusReason, /timed out/);
+  assert.equal(manifest.cleanup.childProcessesRemaining, 0);
+  assert.equal(manifest.cleanup.tempDirRemoved, true);
+});
+
+test("runner records cancellation when the signal aborts mid-session (NOT-382)", async () => {
+  const controller = new AbortController();
+  const manifest = await runReviewerBrowserProbe(
+    {
+      runtime: "claude_code",
+      contract: "direct",
+      repoPath: "/tmp/fake-repo",
+      headSha: HEAD,
+      deckId: "deck-1",
+      probeId: "probe-cancel-382",
+      timeoutMs: 60_000,
+      spawnSettleGraceMs: 500,
+      signal: controller.signal,
+    },
+    {
+      createWorktree: (async () => ({ path: "/tmp/wt", role: "reviewer", ref: HEAD, detached: true })) as never,
+      removeWorktree: (async () => ({ removed: true })) as never,
+      prepareDeck: async () => ({ ok: true, mcpConfigPath: "/tmp/fake-deck.json" }),
+      releaseDeck: async () => {},
+      readHead: (async () => HEAD) as never,
+      now: () => new Date("2026-10-08T00:00:00.000Z"),
+      // Never settles on its own; kills its real child on abort exactly like
+      // spawnCli does, so the probe must observe zero survivors. The abort is
+      // scheduled from inside the fake so it lands mid-session.
+      spawn: (async (input: { onSpawn?: (pid: number) => void; signal?: AbortSignal }) => {
+        const child = spawn("sleep", ["30"]);
+        assert.ok(child.pid, "expected sleep to spawn");
+        child.unref();
+        child.on("error", () => {});
+        input.onSpawn?.(child.pid);
+        input.signal?.addEventListener(
+          "abort",
+          () => {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // already gone — the probe's kill(0) check confirms it
+            }
+          },
+          { once: true }
+        );
+        setTimeout(() => controller.abort(new Error("--cancel-after-ms elapsed (test)")), 20);
+        await new Promise<never>(() => {});
+        throw new Error("unreachable");
+      }) as never,
+    }
+  );
+  assert.equal(manifest.cancelled, true);
+  assert.equal(manifest.timedOut, false);
+  assert.equal(manifest.status, "not_run");
+  assert.match(manifest.statusReason, /cancelled/);
+  assert.equal(manifest.cleanup.childProcessesRemaining, 0);
+  assert.equal(manifest.cleanup.tempDirRemoved, true);
 });
 
 test("withManifestHash is stable for identical manifests", () => {
