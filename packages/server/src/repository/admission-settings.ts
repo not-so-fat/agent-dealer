@@ -1,8 +1,8 @@
 // packages/server/src/repository/admission-settings.ts
 //
 // NOT-215: persisted operator setting for active-issue admission concurrency
-// (`maxActiveIssues`, default 1, first slice 1–2). Stored in intake_settings so it
-// survives server restart; read fresh from the DB on every tick so restart
+// (`maxActiveIssues`, default 1, NOT-378 range 1–5). Stored in intake_settings so
+// it survives server restart; read fresh from the DB on every tick so restart
 // recovery and the coordinator loop observe it without any in-memory reload.
 
 import { DEFAULT_MAX_ACTIVE_ISSUES, MAX_ACTIVE_ISSUES_HARD_MAX } from "@agent-dealer/shared";
@@ -22,8 +22,8 @@ const num = (name: string, dflt: number): number => Number(process.env[name] ?? 
  * admission — a direct import would be a module cycle).
  */
 export function workerSpawnCeiling(): number {
-  const coordinator = num("MAX_COORDINATOR_CONCURRENCY", 2);
-  const spawns = num("MAX_CONCURRENT_RUNS", 2);
+  const coordinator = num("MAX_COORDINATOR_CONCURRENCY", 5);
+  const spawns = num("MAX_CONCURRENT_RUNS", 5);
   const safe = (n: number): number => (Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0);
   return Math.min(safe(coordinator), safe(spawns));
 }
@@ -71,7 +71,7 @@ export function getEffectiveMaxActiveIssues(): number {
 }
 
 /**
- * Persist a new operator limit. Rejects non-integers, values outside 1..2, and
+ * Persist a new operator limit. Rejects non-integers, values outside 1..5, and
  * values above the effective worker/spawn ceiling (those could never execute).
  * Throws `{ code: 400 }` for route handling.
  */

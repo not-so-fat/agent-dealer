@@ -46,11 +46,12 @@ export const MoveQueueEntryInput = z.object({
 export type MoveQueueEntryInput = z.infer<typeof MoveQueueEntryInput>;
 
 /**
- * NOT-215: operator-chosen active-issue admission limit. First slice allows 1–2;
- * the server additionally caps the accepted value at the effective
- * worker/spawn ceiling so a selected value is always real executable concurrency.
+ * NOT-215: operator-chosen active-issue admission limit. NOT-378 widens the
+ * range to 1–5; the server additionally caps the accepted value at the
+ * effective worker/spawn ceiling so a selected value is always real
+ * executable concurrency. Five is the explicit safety ceiling — no unlimited mode.
  */
-export const MAX_ACTIVE_ISSUES_HARD_MAX = 2;
+export const MAX_ACTIVE_ISSUES_HARD_MAX = 5;
 export const DEFAULT_MAX_ACTIVE_ISSUES = 1;
 
 export const AdmissionSettingsInput = z.object({

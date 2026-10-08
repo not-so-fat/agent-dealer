@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import type { AgentWithHealth, HumanAction, LinearCandidate } from "@agent-dealer/shared";
+import { MAX_ACTIVE_ISSUES_HARD_MAX } from "@agent-dealer/shared";
 import {
   canSubmitNewIssue,
   insertLookedUpLinearCandidate,
@@ -760,7 +761,7 @@ export default function IssuesListPage({
                         value={admission.options.includes(admission.maxActiveIssues) ? admission.maxActiveIssues : admission.limit}
                         disabled={limitBusy}
                         title={
-                          admission.ceiling < 2
+                          admission.ceiling < MAX_ACTIVE_ISSUES_HARD_MAX
                             ? `Capped by the worker/spawn ceiling (${admission.ceiling})`
                             : "How many issues may execute in parallel (same-repository issues may run together)"
                         }
@@ -932,7 +933,7 @@ export default function IssuesListPage({
                 value={admission.options.includes(admission.maxActiveIssues) ? admission.maxActiveIssues : admission.limit}
                 disabled={limitBusy}
                 title={
-                  admission.ceiling < 2
+                  admission.ceiling < MAX_ACTIVE_ISSUES_HARD_MAX
                     ? `Capped by the worker/spawn ceiling (${admission.ceiling})`
                     : "How many issues may execute in parallel (same-repository issues may run together)"
                 }

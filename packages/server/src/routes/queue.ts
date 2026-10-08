@@ -27,7 +27,7 @@ export async function registerQueueRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /**
-   * NOT-215: operator-chosen active-issue limit (1–2, never above the effective
+   * NOT-215: operator-chosen active-issue limit (1–5, never above the effective
    * worker/spawn ceiling). Persisted in the DB — survives page reload and server
    * restart. Raising fills free slots on the next tick; lowering only pauses new
    * admissions, never interrupts running work.

@@ -7,7 +7,7 @@ let activeSpawnCount = 0;
 const spawnWaiters: Array<() => void> = [];
 
 export function maxConcurrentSpawns(): number {
-  return Number(process.env.MAX_CONCURRENT_RUNS ?? 2);
+  return Number(process.env.MAX_CONCURRENT_RUNS ?? 5);
 }
 
 export async function acquireSpawnSlot(): Promise<void> {
