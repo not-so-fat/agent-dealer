@@ -61,12 +61,13 @@ function validReport(overrides: Partial<ReviewerBrowserProbeReport> = {}): Revie
       version: "chromium 1.2.3",
       detail: "launched headless",
     },
-    viewports: [...REVIEWER_BROWSER_VIEWPORTS].map((v, i) => ({
+    viewports: [...REVIEWER_BROWSER_VIEWPORTS].map((v) => ({
       width: v.width,
       height: v.height,
       screenshotPath: `/tmp/probe/shot-${v.width}.png`,
       screenshotSha256: SHOT,
-      interactionStateReached: i === 0,
+      // A pass requires the interactive state at EVERY required viewport.
+      interactionStateReached: true,
       detail: "captured after interaction",
     })),
     appPath: { route: "/issues", interaction: "opened first issue", mocksFree: true },
@@ -248,6 +249,68 @@ test("status: missing required viewport fails", () => {
   });
   assert.equal(status, "fail");
   assert.match(reason, /390x800/);
+});
+
+test("status: an omitted attempted control fails and names the missing id", () => {
+  const single = computeProbeStatus({
+    report: validReport({ negativeControls: [deniedControl("source-write")] }),
+    contract: "direct",
+    expectedHeadSha: HEAD,
+    headShaVerified: true,
+    cleanup: cleanCleanup(),
+    timedOut: false,
+    cancelled: false,
+  });
+  assert.equal(single.status, "fail");
+  assert.match(single.reason, /not attempted/);
+  assert.match(single.reason, /external-navigation/);
+  // One dropped id out of five still fails, naming exactly that id.
+  const dropped = validReport({
+    negativeControls: [...REVIEWER_ATTEMPTED_CONTROL_IDS]
+      .filter((id) => id !== "personal-profile")
+      .map(deniedControl),
+  });
+  const partial = computeProbeStatus({
+    report: dropped,
+    contract: "direct",
+    expectedHeadSha: HEAD,
+    headShaVerified: true,
+    cleanup: cleanCleanup(),
+    timedOut: false,
+    cancelled: false,
+  });
+  assert.equal(partial.status, "fail");
+  assert.match(partial.reason, /personal-profile/);
+});
+
+test("status: interaction at only one viewport is blocked, never pass", () => {
+  const oneViewport = validReport();
+  oneViewport.viewports[1] = { ...oneViewport.viewports[1], interactionStateReached: false, detail: "static route only" };
+  const direct = computeProbeStatus({
+    report: oneViewport,
+    contract: "direct",
+    expectedHeadSha: HEAD,
+    headShaVerified: true,
+    cleanup: cleanCleanup(),
+    timedOut: false,
+    cancelled: false,
+  });
+  assert.equal(direct.status, "blocked");
+  assert.match(direct.reason, /interactive state/);
+  const preview = computeProbeStatus({
+    report: validReport({
+      browser: { attempted: false, launched: false, binary: null, version: null, detail: "coordinator-owned" },
+      viewports: oneViewport.viewports,
+    }),
+    contract: "coordinator-preview",
+    expectedHeadSha: HEAD,
+    headShaVerified: true,
+    cleanup: cleanCleanup(),
+    timedOut: false,
+    cancelled: false,
+  });
+  assert.equal(preview.status, "blocked");
+  assert.match(preview.reason, /interactive state/);
 });
 
 test("status: clean run without a browser launch is blocked, not fail", () => {

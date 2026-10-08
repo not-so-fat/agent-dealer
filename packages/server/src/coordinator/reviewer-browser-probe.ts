@@ -25,10 +25,11 @@
 // Fail-closed rules (all covered by reviewer-browser-probe.test.ts):
 // - no parseable reviewer report → `not_run`, never `pass`;
 // - missing/invalid report fields → `not_run`, never a partial `pass`;
-// - head-SHA mismatch, any negative control observed as allowed, or any leaked
-//   child process / leftover temp dir → `fail`;
-// - `pass` additionally requires one interactive viewport state plus (browser
-//   launched OR coordinator-preview artifacts present);
+// - head-SHA mismatch, any missing attempted negative control, any negative
+//   control observed as allowed, or any leaked child process / leftover temp
+//   dir → `fail`;
+// - `pass` additionally requires an interactive state at EVERY required
+//   viewport plus (browser launched OR coordinator-preview artifacts present);
 // - executed cleanly but the capability is unavailable → `blocked` (a
 //   verification-routing state, never a coding defect).
 import { createHash, randomUUID } from "node:crypto";
@@ -411,8 +412,9 @@ function sha256Hex(bytes: string): string {
 
 /**
  * Compute the probe status fail-closed. Order matters: unexecuted → not_run;
- * any violation (SHA mismatch, allowed control, leaked process, leftover temp)
- * → fail; capability missing but clean → blocked; otherwise pass.
+ * any violation (SHA mismatch, missing attempted control, allowed control,
+ * leaked process, leftover temp) → fail; capability missing but clean →
+ * blocked; otherwise pass.
  */
 export function computeProbeStatus(opts: {
   report: ReviewerBrowserProbeReport | null;
@@ -431,6 +433,14 @@ export function computeProbeStatus(opts: {
   }
   if (report.headSha.toLowerCase() !== expectedHeadSha.toLowerCase() || !headShaVerified) {
     return { status: "fail", reason: "report HEAD does not match the coordinator-verified pinned SHA" };
+  }
+  const reportedIds = new Set(report.negativeControls.map((c) => c.id));
+  const missingControls = REVIEWER_ATTEMPTED_CONTROL_IDS.filter((id) => !reportedIds.has(id));
+  if (missingControls.length > 0) {
+    return {
+      status: "fail",
+      reason: `negative control not attempted: ${missingControls.join(", ")}`,
+    };
   }
   const allowed = report.negativeControls.filter((c) => !c.denied);
   if (allowed.length > 0) {
@@ -456,7 +466,11 @@ export function computeProbeStatus(opts: {
       reason: `missing required viewport ${missingViewport.width}x${missingViewport.height}`,
     };
   }
-  const interacted = [...viewports.values()].some((v) => v.interactionStateReached);
+  // NOT-380 deliverable 3 + AC: the interactive state must be reached at EVERY
+  // required viewport (1440x900 AND 390x800) — one is never enough for a pass.
+  const interacted = REVIEWER_BROWSER_VIEWPORTS.every(
+    (v) => viewports.get(`${v.width}x${v.height}`)?.interactionStateReached === true
+  );
   if (contract === "coordinator-preview") {
     if (report.artifacts.length === 0) {
       return { status: "blocked", reason: "no coordinator preview artifacts to judge (capability unavailable)" };

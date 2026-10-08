@@ -22,6 +22,7 @@ Live runs (see the evaluation doc for the exact commands) write sanitized
 - `claude_code.playwright-mcp.probe.json` + `codex_local.playwright-mcp.probe.json`
 - `claude_code.coordinator-preview.probe.json` + `codex_local.coordinator-preview.probe.json`
 - one `--cancel-after-ms` run per runtime (cancellation control)
+- one `--timeout-ms 10000` run per runtime (forced-timeout control)
 - reviewer screenshots referenced by the manifests (PNG files beside them)
 
 Every manifest records the tested HEAD (`headSha`), runtime/binary versions,
