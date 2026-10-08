@@ -1,10 +1,16 @@
 # NOT-312: browser screenshots for UI acceptance criteria.
+# NOT-383: required viewports, route interactions, base-vs-head diff, width check.
 #
 # The builder sandbox cannot run a browser, so rendered evidence comes from CI:
 # this workflow boots the real server, seeds fixtures through the public API,
-# captures each route in ui-screenshots.json with Playwright (chromium) at
-# desktop and 320px widths, and uploads the PNGs as the `ui-screenshots`
-# artifact for reviewers.
+# captures each route in ui-screenshots.json with Playwright (chromium) at the
+# required 1440x900 and 390x800 viewports — running each route's interaction
+# steps before the screenshot — and uploads three artifacts for reviewers:
+# `ui-screenshots` (head captures), `ui-baseline` (base captures of the same
+# plan), and `ui-diff` (per-route/viewport pixel diffs plus a SUMMARY.md table
+# with changed pixel counts, head SHA, and base SHA). The diff is report-only:
+# a nonzero diff never fails the job. Every capture must fit its viewport width
+# (document.scrollWidth <= viewport width), which DOES fail the job.
 #
 # The `paths` filter is the "skipped, not failed" mechanism: a PR touching
 # neither apps/web nor packages/shared never triggers this workflow.
@@ -37,11 +43,23 @@ permissions:
 jobs:
   visual:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
+      # Full history so the base commit is available for the baseline worktree.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve head and base SHAs
+        run: |
+          echo "HEAD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "BASE_SHA=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_ENV"
+          else
+            echo "BASE_SHA=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -78,29 +96,95 @@ jobs:
           tail -n 100 server.log || true
           exit 1
 
-      # Playwright lives in a scratch install on purpose: the repo takes no
-      # new dependency (and no lockfile churn) for a CI-only browser.
-      - name: Install Playwright (chromium)
+      # Playwright and the diff libraries live in a scratch install on purpose:
+      # the repo takes no new dependency (and no lockfile churn) for CI-only
+      # browser and image tooling.
+      - name: Install Playwright (chromium) and diff libraries
         run: |
           mkdir -p "${RUNNER_TEMP}/ci-visual-pw"
           cd "${RUNNER_TEMP}/ci-visual-pw"
           npm init -y >/dev/null 2>&1
-          npm install @playwright/test@1.49.1
+          npm install @playwright/test@1.49.1 pixelmatch@5.3.0 pngjs@7.0.0
           npx playwright install --with-deps chromium
 
-      - name: Seed fixtures and write screenshot plan
+      - name: Seed fixtures and write head screenshot plan
         run: npx tsx scripts/ci-visual/capture.mts --base-url http://127.0.0.1:3221 --config ui-screenshots.json --out-dir ui-screenshots
 
-      - name: Capture screenshots
+      - name: Capture head screenshots
         env:
           CI_VISUAL_PLAN: ${{ github.workspace }}/ui-screenshots/plan.json
           CI_VISUAL_OUT_DIR: ${{ github.workspace }}/ui-screenshots
+          CI_VISUAL_LABEL: head
         run: |
-          cp scripts/ci-visual/visual.spec.mjs "${RUNNER_TEMP}/ci-visual-pw/visual.spec.mjs"
+          cp scripts/ci-visual/visual.spec.mjs scripts/ci-visual/width-check.mjs "${RUNNER_TEMP}/ci-visual-pw/"
           cd "${RUNNER_TEMP}/ci-visual-pw"
           npx playwright test visual.spec.mjs --reporter=list
 
-      - name: Upload screenshots
+      - name: Stop head server
+        if: always()
+        run: |
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" 2>/dev/null || true
+          fi
+
+      # Baseline: the same plan (head config + head scripts, so filenames pair
+      # up) captured against the base commit's server and web build in a
+      # detached worktree. The baseline tree is never edited.
+      - name: Build base worktree
+        run: |
+          git worktree add --detach "${RUNNER_TEMP}/ci-visual-base" "$BASE_SHA"
+          cd "${RUNNER_TEMP}/ci-visual-base"
+          npm ci
+          npm run build
+
+      - name: Start base server
+        env:
+          AGENT_DEALER_ENV: development
+          AGENT_DEALER_HOME: ${{ runner.temp }}/agent-dealer-home-base
+          AGENT_DEALER_UI_DIST: ${{ runner.temp }}/ci-visual-base/apps/web/dist
+          PORT: "3221"
+        run: |
+          node "${RUNNER_TEMP}/ci-visual-base/packages/server/dist/index.js" > base-server.log 2>&1 &
+          echo $! > base-server.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3221/health >/dev/null; then
+              echo "Base server ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Base server failed to start"
+          tail -n 100 base-server.log || true
+          exit 1
+
+      - name: Seed fixtures and write baseline screenshot plan
+        run: npx tsx scripts/ci-visual/capture.mts --base-url http://127.0.0.1:3221 --config ui-screenshots.json --out-dir ui-baseline
+
+      - name: Capture baseline screenshots
+        env:
+          CI_VISUAL_PLAN: ${{ github.workspace }}/ui-baseline/plan.json
+          CI_VISUAL_OUT_DIR: ${{ github.workspace }}/ui-baseline
+          CI_VISUAL_LABEL: baseline
+        run: |
+          cd "${RUNNER_TEMP}/ci-visual-pw"
+          npx playwright test visual.spec.mjs --reporter=list
+
+      - name: Stop base server
+        if: always()
+        run: |
+          if [ -f base-server.pid ]; then
+            kill "$(cat base-server.pid)" 2>/dev/null || true
+          fi
+
+      # Report-only: diff.mjs exits 0 whenever the summary was written, so a
+      # nonzero pixel diff is evidence, never a failure.
+      - name: Diff baseline vs head
+        run: |
+          cp scripts/ci-visual/diff.mjs "${RUNNER_TEMP}/ci-visual-pw/"
+          cd "${RUNNER_TEMP}/ci-visual-pw"
+          node diff.mjs --baseline "${{ github.workspace }}/ui-baseline" --head "${{ github.workspace }}/ui-screenshots" --plan "${{ github.workspace }}/ui-screenshots/plan.json" --out "${{ github.workspace }}/ui-diff" --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA"
+
+      - name: Upload head screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -108,12 +192,35 @@ jobs:
           path: ui-screenshots/*.png
           if-no-files-found: error
 
-      - name: Stop server
+      - name: Upload baseline screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-baseline
+          path: ui-baseline/*.png
+          if-no-files-found: error
+
+      - name: Upload diff and summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-diff
+          path: ui-diff/**
+          if-no-files-found: error
+
+      - name: Stop servers and clean up base worktree
         if: always()
         run: |
           if [ -f server.pid ]; then
             kill "$(cat server.pid)" 2>/dev/null || true
           fi
+          if [ -f base-server.pid ]; then
+            kill "$(cat base-server.pid)" 2>/dev/null || true
+          fi
+          git worktree remove --force "${RUNNER_TEMP}/ci-visual-base" 2>/dev/null || true
           if [ -f server.log ]; then
             tail -n 50 server.log || true
+          fi
+          if [ -f base-server.log ]; then
+            tail -n 50 base-server.log || true
           fi
