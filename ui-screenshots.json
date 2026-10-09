@@ -5,6 +5,7 @@
   ],
   "routes": [
     { "name": "issues-home", "path": "/issues" },
+    { "name": "issues-oldest-first", "path": "/issues?direction=asc" },
     {
       "name": "issue-detail",
       "path": "/issues/{{issueId}}",
