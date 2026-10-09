@@ -76,6 +76,22 @@ test("no indication when no filter is active", () => {
   );
 });
 
+// NOT-385: sorting is shareable URL state but never a filter — a reversed
+// direction alone shows no filtered badge, while a real filter beside it
+// still does.
+test("a reversed direction alone is not a filter", () => {
+  const html = renderAt("/issues?direction=asc");
+  assert.ok(
+    !html.includes('data-testid="filters-active-indicator"'),
+    "direction alone shows no filtered badge"
+  );
+  const filtered = renderAt("/issues?direction=asc&q=NOT-175");
+  assert.ok(
+    filtered.includes('data-testid="filters-active-indicator"'),
+    "a real filter beside the direction still shows the badge"
+  );
+});
+
 test("toggle expands to the full filter form and collapses it again", () => {
   assert.ok(
     pageSource.includes("const [filtersOpen, setFiltersOpen] = useState(false)"),
@@ -111,7 +127,7 @@ test("expand/apply/clear flow keeps every existing filter and its URL behavior",
     "Reset",
     "Reset filters",
     "onClick={resetFilters}",
-    "serializeIssuesQuery(formToIssuesFilters(next))",
+    "applyIssuesFormQuery(search, next)",
     "setSearchParams({})",
     "setIssuesPageQuery",
   ]) {

@@ -120,7 +120,15 @@ test("routing, counts, list controls, and list behavior are unchanged", () => {
   // The range/page count stays above the issue rows, right-aligned.
   assert.ok(pageSource.includes("issuesRangeText(issuePage)"), "range text retained");
   assert.ok(pageSource.includes("issuesPageText(issuePage)"), "page text retained");
-  assert.ok(/flex justify-end/.test(pageSource), "count row right-aligns without an empty label slot");
+  // NOT-385: the header row now carries the sort + order controls on the
+  // left; the counts stay right-aligned via justify-between, and the row
+  // wraps on narrow viewports instead of overflowing.
+  const headerRow = pageSource.match(
+    /<div className="([^"]*)">\s*<IssuesSortControls[\s\S]*?issuesRangeText\(issuePage\)/
+  );
+  assert.ok(headerRow, "sort controls sit in the header row above the issue rows");
+  assert.ok(headerRow[1].includes("justify-between"), `counts stay right-aligned (got: ${headerRow[1]})`);
+  assert.ok(headerRow[1].includes("flex-wrap"), `narrow viewports wrap (got: ${headerRow[1]})`);
 });
 
 // NOT-371: independent same-repository issues execute concurrently up to the global
@@ -160,6 +168,24 @@ test("admission limit dropdown renders server options and saves through the sett
     apiSource.includes("/api/queue/settings") && apiSource.includes('method: "PUT"'),
     "updateAdmissionSettings saves through PUT /api/queue/settings"
   );
+});
+
+// NOT-385: the sort select plus its one adjacent order control — both read the
+// applied URL, write back through the view-model (filters survive, page
+// resets), and list fetching follows the same applied filters.
+test("sort controls read the URL and toggle through the direction view-model", () => {
+  for (const token of [
+    "IssuesSortControls",
+    "issuesSortFromSearch(search)",
+    "issuesDirectionFromSearch(search)",
+    "onSortChange={changeSort}",
+    "onToggleDirection={toggleDirection}",
+    "toggleIssuesDirectionQuery(search)",
+    "setIssuesSortQuery(search, sort)",
+    "refreshIssues(appliedRef.current)",
+  ]) {
+    assert.ok(pageSource.includes(token), `sort wiring kept: ${token}`);
+  }
 });
 
 test("cap tooltip compares the ceiling against the shared hard maximum", async () => {
