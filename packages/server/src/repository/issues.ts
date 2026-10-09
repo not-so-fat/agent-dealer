@@ -195,6 +195,14 @@ export function listIssues(status?: IssueStatus | IssueStatus[]): Issue[] {
 export const ISSUES_LIST_DEFAULT_LIMIT = 25;
 export const ISSUES_LIST_MAX_LIMIT = 100;
 
+/**
+ * NOT-385: Issues history direction — `latest` (the only sort key) maps to
+ * `updated_at`; `desc` is newest-first (the default) and `asc` is the
+ * oldest-first reverse.
+ */
+export type IssuesListDirection = "asc" | "desc";
+export const DEFAULT_ISSUES_LIST_DIRECTION: IssuesListDirection = "desc";
+
 export interface IssuesListQuery {
   /** Free text matched case-insensitively against title and external label. */
   search?: string;
@@ -207,6 +215,8 @@ export interface IssuesListQuery {
   page?: number;
   /** Values outside 1..100 fall back to the default / clamp to the max. */
   limit?: number;
+  /** `asc` reverses to oldest-first; anything else means newest-first. */
+  direction?: IssuesListDirection;
 }
 
 export interface IssuesListResult {
@@ -227,6 +237,9 @@ function escapeLikePattern(raw: string): string {
  * Ordering is `updated_at DESC, rowid DESC` so pages are repeatable when many
  * rows share a timestamp; the filter applies before pagination so `total` and
  * `totalPages` describe the full matching cohort.
+ * NOT-385: `direction: "asc"` reverses both to `updated_at ASC, rowid ASC` —
+ * the tie-breaker always follows the timestamp direction so equal-timestamp
+ * rows paginate without duplicates or skips in either direction.
  */
 export function queryIssues(query: IssuesListQuery = {}): IssuesListResult {
   const db = getDb();
@@ -276,8 +289,11 @@ export function queryIssues(query: IssuesListQuery = {}): IssuesListResult {
     .get(...params) as { total: number };
   const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
   const offset = (page - 1) * limit;
+  // NOT-385: the direction is a ternary over literals, never interpolated —
+  // anything but an explicit "asc" orders newest-first.
+  const dir = query.direction === "asc" ? "ASC" : "DESC";
   const rows = db
-    .prepare(`SELECT * FROM issues ${where} ORDER BY updated_at DESC, rowid DESC LIMIT ? OFFSET ?`)
+    .prepare(`SELECT * FROM issues ${where} ORDER BY updated_at ${dir}, rowid ${dir} LIMIT ? OFFSET ?`)
     .all(...params, limit, offset) as IssueRow[];
   return { rows: rows.map(rowToIssue), page, limit, total, totalPages };
 }

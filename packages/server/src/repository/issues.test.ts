@@ -172,6 +172,55 @@ test("NOT-228: page/limit bounds clamp instead of erroring", () => {
   assert.equal(empty.totalPages, 0);
 });
 
+test("NOT-385: the default direction is newest-first by updated_at", () => {
+  const oldId = createIssue(makeInput("NOT385 default old")).id;
+  const newId = createIssue(makeInput("NOT385 default new")).id;
+  getDb().prepare("UPDATE issues SET updated_at = ? WHERE id = ?").run("2026-08-01T00:00:00.000Z", oldId);
+  getDb().prepare("UPDATE issues SET updated_at = ? WHERE id = ?").run("2026-09-01T00:00:00.000Z", newId);
+  for (const query of [{ search: "NOT385 default" }, { search: "NOT385 default", direction: "desc" as const }]) {
+    const res = queryIssues(query);
+    assert.deepEqual(
+      res.rows.map((i) => i.id),
+      [newId, oldId],
+      `newest updated_at first (${JSON.stringify(query)})`
+    );
+  }
+  // Anything but an explicit "asc" falls back to newest-first.
+  const fallback = queryIssues({ search: "NOT385 default", direction: "sideways" as never });
+  assert.deepEqual(fallback.rows.map((i) => i.id), [newId, oldId]);
+});
+
+test("NOT-385: ascending reverses to oldest-first with an ascending rowid tiebreaker", () => {
+  const stamp = "2026-09-01T00:00:00.000Z";
+  const ids = ["NOT385 tie one", "NOT385 tie two", "NOT385 tie three"].map(
+    (t) => createIssue(makeInput(t)).id
+  );
+  for (const id of ids) {
+    getDb().prepare("UPDATE issues SET updated_at = ? WHERE id = ?").run(stamp, id);
+  }
+  const first = queryIssues({ search: "NOT385 tie", direction: "asc", limit: 2, page: 1 });
+  const second = queryIssues({ search: "NOT385 tie", direction: "asc", limit: 2, page: 2 });
+  assert.equal(first.total, 3);
+  assert.equal(first.totalPages, 2);
+  // Oldest rowid first: creation order was one, two, three.
+  assert.deepEqual(first.rows.map((i) => i.id), [ids[0], ids[1]]);
+  assert.deepEqual(second.rows.map((i) => i.id), [ids[2]]);
+  const again = queryIssues({ search: "NOT385 tie", direction: "asc", limit: 2, page: 1 });
+  assert.deepEqual(again.rows.map((i) => i.id), first.rows.map((i) => i.id), "repeatable");
+  assert.deepEqual(
+    new Set([...first.rows, ...second.rows].map((i) => i.id)).size,
+    3,
+    "pages neither duplicate nor skip rows"
+  );
+  // The reverse is the exact mirror of the default across the same cohort.
+  const descAll = queryIssues({ search: "NOT385 tie", limit: 10 });
+  const ascAll = queryIssues({ search: "NOT385 tie", direction: "asc", limit: 10 });
+  assert.deepEqual(
+    ascAll.rows.map((i) => i.id),
+    [...descAll.rows.map((i) => i.id)].reverse()
+  );
+});
+
 test("NOT-228: needsAttention returns only issues with an open human action", () => {
   const flagged = createIssue(makeInput("NOT228 flagged attention"));
   const quiet = createIssue(makeInput("NOT228 quiet no-action"));
