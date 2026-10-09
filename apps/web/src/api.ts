@@ -35,6 +35,7 @@ import type {
 } from "@agent-dealer/shared";
 import { ExecutionReportResponse as ExecutionReportSchema, serializeExecutionReportQuery } from "@agent-dealer/shared";
 import { clearCachedRuntimeModels, fetchRuntimeModelsDeduped } from "./lib/runtimeModelsCache";
+import type { IssuesSortDirection } from "./lib/issuesList.js";
 
 const API = "";
 
@@ -332,6 +333,12 @@ export interface IssuesListQuery {
   repo?: string;
   needsAttention?: boolean;
   page?: number;
+  /**
+   * NOT-385: list direction — `desc` is newest-first (the default), `asc` is
+   * the oldest-first reverse. Latest is the only sort key, so no key travels:
+   * the server orders by `updated_at` by definition.
+   */
+  direction?: IssuesSortDirection;
 }
 
 /**
@@ -362,6 +369,9 @@ export async function fetchIssuesPage(query: IssuesListQuery): Promise<IssuesLis
   // Always send the page so the server answers the paginated shape; page 1 is
   // still canonicalized out of the browser URL by the view-model.
   qs.set("page", String(query.page && query.page > 1 ? Math.floor(query.page) : 1));
+  // NOT-385: always send the resolved direction so the request states its own
+  // order — the browser URL still canonicalizes the default away.
+  qs.set("direction", query.direction ?? "desc");
   qs.sort();
   const res = await fetch(`${API}/api/issues?${qs.toString()}`);
   if (!res.ok) throw new Error(await readApiError(res));

@@ -32,19 +32,24 @@ import {
   type QueueEntryRow,
 } from "../api";
 import {
+  applyIssuesFormQuery,
   EMPTY_ISSUES_FORM,
-  formToIssuesFilters,
   hasActiveIssuesFilters,
+  issuesDirectionFromSearch,
   issuesPageText,
   issuesRangeText,
+  issuesSortFromSearch,
   searchToIssuesFilters,
   searchToIssuesForm,
-  serializeIssuesQuery,
   setIssuesPageQuery,
+  setIssuesSortQuery,
+  toggleIssuesDirectionQuery,
   ISSUE_STATUS_OPTIONS,
   type IssuesFilterForm,
+  type IssuesSortKey,
 } from "../lib/issuesList";
 import IssueStatusBadge from "../components/issues/IssueStatusBadge";
+import IssuesSortControls from "../components/issues/IssuesSortControls";
 import FirstIssueStrip from "../components/issues/FirstIssueStrip";
 import { dismissFirstIssue, isFirstIssueDismissed, shouldShowFirstIssueStrip } from "../lib/firstIssue";
 import RepositoryPicker from "../components/issues/RepositoryPicker";
@@ -285,9 +290,9 @@ export default function IssuesListPage({
     }
   };
 
-  /** Apply writes the draft to the URL and returns to page 1. */
+  /** Apply writes the draft to the URL, returns to page 1, and keeps the sort + direction. */
   const applyFilters = (next: IssuesFilterForm) => {
-    const qs = serializeIssuesQuery(formToIssuesFilters(next));
+    const qs = applyIssuesFormQuery(search, next);
     setSearchParams(qs ? Object.fromEntries(new URLSearchParams(qs)) : {});
   };
 
@@ -299,6 +304,17 @@ export default function IssuesListPage({
   /** Previous/Next change only the applied page — draft edits stay in the form. */
   const gotoPage = (page: number) => {
     const qs = setIssuesPageQuery(search, page);
+    setSearchParams(qs ? Object.fromEntries(new URLSearchParams(qs)) : {});
+  };
+
+  /** NOT-385: sort select and order toggle — filters survive, page resets to 1. */
+  const changeSort = (sort: IssuesSortKey) => {
+    const qs = setIssuesSortQuery(search, sort);
+    setSearchParams(qs ? Object.fromEntries(new URLSearchParams(qs)) : {});
+  };
+
+  const toggleDirection = () => {
+    const qs = toggleIssuesDirectionQuery(search);
     setSearchParams(qs ? Object.fromEntries(new URLSearchParams(qs)) : {});
   };
 
@@ -1066,7 +1082,13 @@ export default function IssuesListPage({
         </div>
       ) : (
         <div>
-          <div className="flex justify-end mb-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <IssuesSortControls
+              sort={issuesSortFromSearch(search)}
+              direction={issuesDirectionFromSearch(search)}
+              onSortChange={changeSort}
+              onToggleDirection={toggleDirection}
+            />
             <p className="text-xs text-white/40 tabular-nums">
               {issuesRangeText(issuePage)}
               {issuesPageText(issuePage) ? ` · ${issuesPageText(issuePage)}` : ""}

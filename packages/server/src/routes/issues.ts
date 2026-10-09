@@ -93,6 +93,7 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       needsAttention?: string;
       page?: string;
       limit?: string;
+      direction?: string;
     };
     const toRow = (openActionIssueIds: Set<string | null>) => (issue: {
       id: string;
@@ -125,6 +126,10 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
         requested.length > 0
           ? requested
           : IssueStatus.options.filter((s) => s !== "closed");
+      // NOT-385: the direction is allowlisted — only an explicit `asc` reverses
+      // to oldest-first; an absent or unknown value renders newest-first
+      // instead of failing the list.
+      const direction = query.direction?.trim() === "asc" ? "asc" : "desc";
       const result = queryIssues({
         search: query.q,
         status: statuses as IssueStatus[] | undefined,
@@ -132,6 +137,7 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
         needsAttention: query.needsAttention === "1" || query.needsAttention === "true",
         page: query.page !== undefined ? Number(query.page) : undefined,
         limit: query.limit !== undefined ? Number(query.limit) : undefined,
+        direction,
       });
       const openActionIssueIds = new Set(listOpenHumanActions().map((a) => a.issueId));
       return {

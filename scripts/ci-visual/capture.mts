@@ -1,9 +1,10 @@
 // scripts/ci-visual/capture.mts
 //
 // CI driver for the `visual` job (NOT-312, NOT-383). Runs under tsx with stdlib
-// only: loads ui-screenshots.json, seeds a deterministic fixture issue plus a
-// guidance timeline event through the public API, resolves `{{issueId}}`, and
-// writes plan.json for visual.spec.mjs.
+// only: loads ui-screenshots.json, seeds deterministic fixture issues (two
+// drafts since NOT-385, so list order is visible) plus a guidance timeline
+// event through the public API, resolves `{{issueId}}`, and writes plan.json
+// for visual.spec.mjs.
 // The browser capture itself happens in the Playwright spec, which asserts
 // every listed route actually renders (failing the job otherwise).
 //
@@ -81,6 +82,22 @@ async function main(): Promise<void> {
   if (typeof seed.id !== "string" || seed.id === "") {
     throw new Error("seed issue response is missing an id");
   }
+  // NOT-385: a second draft so the newest-first and oldest-first Issues
+  // captures show opposite row orders — with two rows the direction-aware
+  // tie-breaker guarantees the reverse even when timestamps collide.
+  const seed2 = (await postJson(`${baseUrl}/api/issues`, {
+    title: "CI visual fixture (second)",
+    description: "Second deterministic seed so list order is visible (NOT-385).",
+    acceptanceCriteria: "Screenshots render for the configured routes.",
+    repo: "not-so-fat/agent-dealer",
+    developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+    reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    enqueue: false,
+    source: "manual",
+  })) as { id?: unknown };
+  if (typeof seed2.id !== "string" || seed2.id === "") {
+    throw new Error("second seed issue response is missing an id");
+  }
   // GET /api/issues/:id returns `{ issue, timeline, ... }` (see
   // registerIssueRoutes) — the id lives under `issue`, not top-level.
   const confirmed = (await readJson(`${baseUrl}/api/issues/${seed.id}`)) as {
@@ -125,7 +142,7 @@ async function main(): Promise<void> {
   }));
   fs.writeFileSync(path.join(outDir, "plan.json"), `${JSON.stringify(shots, null, 2)}\n`);
 
-  console.log(`[ci-visual] seeded issue ${seed.id} (timeline events: ${timelineTypes.length})`);
+  console.log(`[ci-visual] seeded issues ${seed.id} and ${seed2.id} (timeline events: ${timelineTypes.length})`);
   for (const shot of shots) {
     const steps = shot.steps.length > 0 ? ` steps=${shot.steps.length}` : "";
     console.log(`[ci-visual] shot ${shot.filename} ${shot.route} ${shot.viewport}${steps}`);

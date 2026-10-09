@@ -901,6 +901,93 @@ test("NOT-228: limit clamps to 100 and out-of-range pages keep totals", async ()
   await app.close();
 });
 
+// NOT-385: Latest with no direction renders newest-first; the ascending
+// reverse renders the same cohort oldest-first, and an unknown direction
+// falls back to newest-first instead of failing.
+test("NOT-385: direction defaults to newest-first, asc reverses, unknown falls back", async () => {
+  const app = await buildApp();
+  const oldIssue = await r228Seed(app, "R385 order old");
+  const newIssue = await r228Seed(app, "R385 order new");
+  getDb().prepare("UPDATE issues SET updated_at = ? WHERE id = ?").run("2026-08-01T00:00:00.000Z", oldIssue.id);
+  getDb().prepare("UPDATE issues SET updated_at = ? WHERE id = ?").run("2026-09-01T00:00:00.000Z", newIssue.id);
+  const q = encodeURIComponent("R385 order");
+  const newest = await r228Get(app, `?q=${q}&page=1&limit=10`);
+  assert.deepEqual(newest.issues.map((i) => i.id), [newIssue.id, oldIssue.id]);
+  const explicitDesc = await r228Get(app, `?q=${q}&page=1&limit=10&direction=desc`);
+  assert.deepEqual(explicitDesc.issues.map((i) => i.id), [newIssue.id, oldIssue.id]);
+  const oldest = await r228Get(app, `?q=${q}&page=1&limit=10&direction=asc`);
+  assert.deepEqual(oldest.issues.map((i) => i.id), [oldIssue.id, newIssue.id]);
+  assert.equal(oldest.total, newest.total);
+  const fallback = await r228Get(app, `?q=${q}&page=1&limit=10&direction=sideways`);
+  assert.deepEqual(fallback.issues.map((i) => i.id), [newIssue.id, oldIssue.id]);
+  await app.close();
+});
+
+// NOT-385: equal `updated_at` rows paginate without duplicates or skips in
+// either direction — the rowid tie-breaker follows the timestamp direction
+// before LIMIT/OFFSET applies.
+test("NOT-385: equal timestamps paginate repeatably in both directions", async () => {
+  const app = await buildApp();
+  const ids: string[] = [];
+  for (const title of ["R385 tie one", "R385 tie two", "R385 tie three"]) {
+    ids.push((await r228Seed(app, title)).id);
+  }
+  for (const id of ids) {
+    getDb().prepare("UPDATE issues SET updated_at = ? WHERE id = ?").run("2026-09-01T00:00:00.000Z", id);
+  }
+  const q = encodeURIComponent("R385 tie");
+  const descFirst = await r228Get(app, `?q=${q}&limit=2&page=1`);
+  const descSecond = await r228Get(app, `?q=${q}&limit=2&page=2`);
+  assert.deepEqual(descFirst.issues.map((i) => i.id), [ids[2], ids[1]]);
+  assert.deepEqual(descSecond.issues.map((i) => i.id), [ids[0]]);
+  const ascFirst = await r228Get(app, `?q=${q}&limit=2&page=1&direction=asc`);
+  const ascSecond = await r228Get(app, `?q=${q}&limit=2&page=2&direction=asc`);
+  assert.deepEqual(ascFirst.issues.map((i) => i.id), [ids[0], ids[1]]);
+  assert.deepEqual(ascSecond.issues.map((i) => i.id), [ids[2]]);
+  for (const [first, second] of [[descFirst, descSecond], [ascFirst, ascSecond]] as const) {
+    assert.equal(first.total, 3);
+    assert.equal(first.totalPages, 2);
+    assert.deepEqual(
+      new Set([...first.issues, ...second.issues].map((i) => i.id)).size,
+      3,
+      "pages neither duplicate nor skip rows"
+    );
+  }
+  await app.close();
+});
+
+// NOT-385: the direction composes with every filter — the reverse renders the
+// same result set, only oldest-first.
+test("NOT-385: direction coexists with the search, status, repo, and attention filters", async () => {
+  const app = await buildApp();
+  const repo = "github.com/r385/filtered";
+  const keep = await r228Seed(app, "R385 filter keep me", { repo });
+  const moved = await r228Seed(app, "R385 filter moved on", { repo });
+  await r228Seed(app, "R385 filter other repo", { repo: "github.com/r385/elsewhere" });
+  transitionIssue(moved.id, "developing");
+  createHumanAction({
+    issueId: moved.id,
+    actionType: "final_review",
+    reason: "Reviewer approved",
+    question: "Accept?",
+    responseOptions: ["complete"],
+  });
+  getDb().prepare("UPDATE issues SET updated_at = ? WHERE id = ?").run("2026-08-01T00:00:00.000Z", keep.id);
+  getDb().prepare("UPDATE issues SET updated_at = ? WHERE id = ?").run("2026-09-01T00:00:00.000Z", moved.id);
+  const q = encodeURIComponent("R385 filter");
+  const repoParam = encodeURIComponent(repo);
+  const newest = await r228Get(app, `?q=${q}&repo=${repoParam}&page=1&limit=10`);
+  assert.deepEqual(newest.issues.map((i) => i.id), [moved.id, keep.id]);
+  const oldest = await r228Get(app, `?q=${q}&repo=${repoParam}&page=1&limit=10&direction=asc`);
+  assert.deepEqual(oldest.issues.map((i) => i.id), [keep.id, moved.id]);
+  assert.equal(oldest.total, newest.total);
+  const byStatus = await r228Get(app, `?q=${q}&status=developing&page=1&limit=10&direction=asc`);
+  assert.deepEqual(byStatus.issues.map((i) => i.id), [moved.id]);
+  const attention = await r228Get(app, `?q=${q}&needsAttention=1&page=1&limit=10&direction=asc`);
+  assert.deepEqual(attention.issues.map((i) => i.id), [moved.id]);
+  await app.close();
+});
+
 test("NOT-217: PATCH reviewer-only edit records before/after reviewers without touching the developer", async () => {
   const app = await buildApp();
   const created = (
