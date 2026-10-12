@@ -251,6 +251,13 @@ test("NOT-439: past, malformed, or unrelated timestamps fall back and never crea
   assert.equal(detectUsageCapFromNdjson(timestampOnly, "claude_code", nowMs), null);
   assert.equal(runtimeAvailability("claude_code", nowMs).available, true);
 
+  // An unrelated future stamp inside accepted cap text is not a reset.
+  const unrelatedStamp =
+    '{"type":"result","is_error":true,"result":"[2026-10-12T19:30:00Z] Rate limit exceeded for this account."}';
+  const unrelatedCap = detectUsageCapFromNdjson(unrelatedStamp, "claude_code", nowMs);
+  assert.ok(unrelatedCap);
+  assert.equal(unrelatedCap!.unavailableUntil, fallback);
+
   // A cap signal whose reset is in the past still detects, but uses the fallback.
   const pastReset =
     '{"type":"result","is_error":true,"result":"Rate limit exceeded. Your usage window resets at 2020-01-01T00:00:00Z."}';

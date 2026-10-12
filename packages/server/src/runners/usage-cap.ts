@@ -41,10 +41,13 @@ function parseResetsAt(raw: unknown): Date | null {
 /**
  * Provider reset timestamps embedded in already-classified cap-error text
  * (NOT-439). ISO-8601 only (`2026-10-12T18:59:01Z`, optional fractional
- * seconds or numeric offset) — never consulted to decide whether a cap
- * exists, only to place the boundary of one the cap classifier accepted.
+ * seconds or numeric offset), and only when introduced by reset phrasing
+ * ("resets at", "reset_at:", "until", "retry after") so unrelated stamps in
+ * the same stderr/log text are ignored. Never consulted to decide whether a
+ * cap exists, only to place the boundary of one the cap classifier accepted.
  */
-const RESET_TIMESTAMP_RE = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})/g;
+const RESET_TIMESTAMP_RE =
+  /\b(?:resets?(?:_at)?|until|retry\s+after)\b[^\d\n]{0,20}(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))/gi;
 
 /**
  * Shared reset extractor for every hard-cap path (NOT-439): structured
@@ -63,8 +66,8 @@ export function extractUsageCapReset(
     if (d && d.getTime() > nowMs) return d.toISOString();
   }
   if (typeof input.text === "string" && input.text) {
-    for (const candidate of input.text.match(RESET_TIMESTAMP_RE) ?? []) {
-      const ms = Date.parse(candidate);
+    for (const [, candidate] of input.text.matchAll(RESET_TIMESTAMP_RE)) {
+      const ms = Date.parse(candidate!);
       if (Number.isFinite(ms) && ms > nowMs) return new Date(ms).toISOString();
     }
   }
