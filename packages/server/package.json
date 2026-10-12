@@ -1,6 +1,6 @@
 {
   "name": "@agent-dealer/server",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "type": "module",
   "main": "dist/index.js",
   "files": [
@@ -23,7 +23,7 @@
     "test": "AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 npm run build -w @agent-dealer/shared && AGENT_DEALER_SKIP_GITHUB_HEALTH=1 AGENT_DEALER_SKIP_AGENT_HEALTH=1 node ../../scripts/run-workspace-tests.mjs"
   },
   "dependencies": {
-    "@agent-dealer/shared": "1.3.0",
+    "@agent-dealer/shared": "1.3.1",
     "@fastify/cors": "^11.0.1",
     "@fastify/static": "^8.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",

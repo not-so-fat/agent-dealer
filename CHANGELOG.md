@@ -4,6 +4,15 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.3.1 — 2026-10-08
+
+Raise the configurable global execution limit to 5 and add a browser-capable reviewer sandbox probe
+
+### Changes
+
+- NOT-380: Prove a browser-capable read-only reviewer sandbox contract (#221)
+- NOT-378: Raise the configurable global execution limit from 2 to 5 (#220)
+
 ## 1.3.0 — 2026-10-07
 
 Run independent issues in the same repository concurrently
