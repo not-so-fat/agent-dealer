@@ -4,6 +4,20 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.3.2 — 2026-10-12
+
+Newest-first Latest view with reverse control, SHA-bound CI visual artifacts for reviewers, in-sandbox visual QA receipts, browser probe timeout fixes, amended execution contracts at product-scope pauses
+
+### Changes
+
+- NOT-422: Adopt amended execution contracts at product-scope pauses (#229)
+- NOT-399: Agent Dealer (dealer side): inventory what agent-dealer has versus what Botmancers would need for a queue, status listener and non-laptop runner (#228)
+- NOT-385: Agent Dealer: make “Latest” newest-first and add a reverse-order control (#227)
+- NOT-384: Dealer: give reviewers SHA-bound CI visual artifacts and treat missing ones as unverified (#226)
+- NOT-381: Prefer in-sandbox visual QA on browser-capable developer runtimes and persist SHA-bound receipts (#222)
+- NOT-382: Reviewer browser probe: --timeout-ms and --cancel-after-ms controls never trigger (#225)
+- NOT-383: CI visual job: required viewports, route interactions, base-vs-head diff, and width assertion (#224)
+
 ## 1.3.1 — 2026-10-08
 
 Raise the configurable global execution limit to 5 and add a browser-capable reviewer sandbox probe
