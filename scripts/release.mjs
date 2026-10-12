@@ -126,12 +126,14 @@ function prepare(level, summary) {
   if (!level || !summary) die('usage: prepare <patch|minor|major|X.Y.Z> --summary "<one line>"');
   if (out("git", ["status", "--porcelain", "--untracked-files=no"])) die("working tree has uncommitted changes");
   if (out("git", ["rev-parse", "--abbrev-ref", "HEAD"]) !== "main") die("run from main");
-  run("git", ["fetch", "-q", "origin"]);
+  run("git", ["fetch", "-q", "--tags", "origin"]);
   if (out("git", ["rev-parse", "HEAD"]) !== out("git", ["rev-parse", "origin/main"])) die("main is not at origin/main; pull first");
   check();
   const current = readJson("package.json").version;
   const version = bump(current, level);
   const prevTag = `v${current}`;
+  // Fail before any mutation: the changelog range is prevTag..HEAD, so a missing tag means the last release was never finished.
+  if (!out("git", ["tag", "--list", prevTag])) die(`tag ${prevTag} is missing; the ${current} release was not finished. Tag the ${current} merge commit and create its GitHub release first, then re-run prepare`);
   console.log(`[release] ${current} -> ${version}`);
   run("git", ["checkout", "-b", `release/${version}`]);
   setVersion(version);
