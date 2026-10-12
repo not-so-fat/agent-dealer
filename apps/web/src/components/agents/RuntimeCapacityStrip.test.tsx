@@ -342,3 +342,109 @@ test("NOT-366: a recorded Claude refresh failure titles each chip with the reaso
   assert.ok(out.includes(`1W: N/A (${why})`), "1W chip states unavailable and why");
   assert.ok(!out.includes("no_windows"), "internal failure kind never reaches the DOM");
 });
+
+// NOT-440: the active hard cap overlays the compact strip.
+const { selectStripRows } = await import("./RuntimeCapacityStrip.js");
+const CAP_NOW = Date.parse("2026-10-12T18:20:00.000Z");
+const CAP_RESET = "2026-10-12T18:59:01.000Z";
+
+function capWindow(over: Record<string, unknown>) {
+  return window({
+    resetAt: "2026-10-16T02:00:00.000Z",
+    observedAt: "2026-10-12T18:03:00.000Z",
+    freshUntil: "2026-10-12T19:03:00.000Z",
+    expiresAt: "2026-10-12T19:03:00.000Z",
+    ...over,
+  });
+}
+
+function pairEntry(runtime: string, windowRole: string | null, extra: unknown[] = []) {
+  return {
+    runtime,
+    unavailableReason: null,
+    windows: [
+      capWindow({ windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: 50, resetAt: CAP_RESET, criticalRole: "five_hour" }),
+      capWindow({ windowKey: "weekly", displayLabel: "1W", remainingPercent: 52, criticalRole: "weekly" }),
+      ...extra,
+    ],
+    activeCap: { unavailableUntil: CAP_RESET, reason: `${runtime} usage capped`, windowRole },
+  };
+}
+
+function capData(...runtimes: unknown[]): RuntimeCapacityResponse {
+  return { generatedAt: new Date(CAP_NOW).toISOString(), runtimes } as unknown as RuntimeCapacityResponse;
+}
+
+test("NOT-440: reproduced Muse cap renders 5H 0% (critical) and 1W 52%", () => {
+  const markup = renderToStaticMarkup(
+    React.createElement(RuntimeCapacityStripView, { data: capData(pairEntry("muse_code", "five_hour")), nowMs: CAP_NOW })
+  );
+  const five = markup.match(/data-testid="capacity-window-five_hour"[\s\S]*?<\/span><\/span>/)?.[0] ?? "";
+  const week = markup.match(/data-testid="capacity-window-weekly"[\s\S]*?<\/span><\/span>/)?.[0] ?? "";
+  assert.match(five, /5H/);
+  assert.match(five, /data-severity="critical"[^>]*>0%/);
+  assert.match(five, /capped until/);
+  assert.match(week, /1W/);
+  assert.match(week, /52%/);
+  assert.ok(!markup.includes("50%"), "stored 5H value is not presented while capped");
+});
+
+test("NOT-440: mapped caps per runtime zero only the mapped compact row; diagnostics never render", () => {
+  const diagnostic = capWindow({ windowKey: "muse_account_usage", displayLabel: "muse_account_usage", remainingPercent: 90, criticalRole: null });
+  const cursorEntry = {
+    runtime: "cursor_local",
+    unavailableReason: null,
+    windows: [capWindow({ windowKey: "billing_cycle", displayLabel: "September 2026", remainingPercent: 70, resetAt: "2026-11-01T00:00:00.000Z" })],
+    activeCap: { unavailableUntil: "2026-11-01T00:00:00.000Z", reason: "cursor capped", windowRole: "billing_cycle" },
+  };
+  const cases = [
+    { entry: pairEntry("claude_code", "five_hour"), expected: [["5H", 0], ["1W", 52]] },
+    { entry: pairEntry("codex_local", "weekly"), expected: [["5H", 50], ["1W", 0]] },
+    { entry: pairEntry("muse_code", "five_hour", [diagnostic]), expected: [["5H", 0], ["1W", 52]] },
+    { entry: cursorEntry, expected: [["1M", 0]] },
+  ];
+  for (const c of cases) {
+    const rows = selectStripRows(c.entry as unknown as RuntimeCapacityResponse["runtimes"][number], CAP_NOW);
+    assert.deepEqual(
+      rows.map((r) => [r.label, r.kind === "known" ? r.remaining : r.kind]),
+      c.expected,
+      c.entry.runtime
+    );
+  }
+});
+
+test("NOT-440: an unmapped cap renders an explicit capped state, never positive percentages", () => {
+  const cursorEntry = {
+    runtime: "cursor_local",
+    unavailableReason: null,
+    windows: [capWindow({ windowKey: "billing_cycle", displayLabel: "September 2026", remainingPercent: 70 })],
+    activeCap: { unavailableUntil: CAP_RESET, reason: "cursor capped", windowRole: null },
+  };
+  const markup = renderToStaticMarkup(
+    React.createElement(RuntimeCapacityStripView, {
+      data: capData(pairEntry("muse_code", null), cursorEntry),
+      nowMs: CAP_NOW,
+    })
+  );
+  assert.equal((markup.match(/data-testid="capacity-window-capped"/g) ?? []).length, 2);
+  assert.match(markup, />capped</);
+  assert.ok(!/>\d+%</.test(markup), "no percentage renders while the runtime is capped");
+});
+
+test("NOT-440: at and after unavailableUntil the overlay is gone and snapshot rules apply", () => {
+  for (const offset of [0, 1]) {
+    const nowMs = Date.parse(CAP_RESET) + offset;
+    const entry = pairEntry("muse_code", "five_hour");
+    // Server-side classification at the boundary: the 5H reset has passed.
+    entry.windows[0] = capWindow({
+      windowKey: "five_hour", displayLabel: "5H", durationMinutes: 300, remainingPercent: null,
+      resetAt: CAP_RESET, criticalRole: "five_hour", unavailableReason: "expired", source: "unavailable",
+    });
+    const rows = selectStripRows(entry as unknown as RuntimeCapacityResponse["runtimes"][number], nowMs);
+    assert.deepEqual(
+      rows.map((r) => [r.label, r.kind === "known" ? r.remaining : r.kind]),
+      [["5H", "unknown"], ["1W", 52]],
+      `offset ${offset}ms`
+    );
+  }
+});

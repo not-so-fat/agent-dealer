@@ -29,16 +29,22 @@
 // AgentRuntimeIcon mapping, selected by the raw runtime key) instead of a
 // visible provider-name span. The name survives as `aria-label` plus the
 // full-detail `title`; the logo image itself is decorative (`alt=""`).
+//
+// NOT-440: an active hard cap mapped to a compact window renders that row as
+// 0% (siblings unchanged, block exhausted); an unmapped cap replaces the rows
+// with an explicit `capped` row so no positive percentage implies usability.
 import type {
   CapacityUnavailableReason,
   CapacityWindowSnapshot,
   Runtime,
+  RuntimeCapacityActiveCap,
   RuntimeCapacityEntry,
   RuntimeCapacityResponse,
 } from "@agent-dealer/shared";
 import { Runtime as RuntimeSchema, isWindowKnown } from "@agent-dealer/shared";
 import { runtimeLabel } from "../../lib/display";
 import { AgentRuntimeIcon } from "./AgentIcon";
+import { activeCapAt, cappedUntilText } from "./capacityActiveCap";
 import { capacitySeverity, type CapacitySeverity } from "./capacitySeverity";
 import { capacityUnavailableText } from "./capacityUnavailableText";
 
@@ -68,7 +74,8 @@ const WEEKLY_LABEL = "1W";
  * runtime when the block-level treatment (deliberately) says it didn't. */
 export type TopBarWindowValue =
   | { key: string; label: string; kind: "known"; remaining: number; rawRemaining: number; detail: string; isCritical: boolean }
-  | { key: string; label: string; kind: "unknown"; reason: CapacityUnavailableReason; detail: string; isCritical: boolean };
+  | { key: string; label: string; kind: "unknown"; reason: CapacityUnavailableReason; detail: string; isCritical: boolean }
+  | { key: string; label: string; kind: "capped"; detail: string; isCritical: boolean };
 
 /**
  * NOT-266 explicit presentation selection: the compact UI never infers
@@ -114,8 +121,10 @@ export type PerRuntimeSummary = {
   runtimeKey: Runtime;
   /** Labeled rows in display order: exactly 5H+1W, exactly one 1M, or none. */
   windows: TopBarWindowValue[];
-  /** True when any known presented row is at 0% remaining. */
+  /** True when any known presented row is at 0% remaining, or the runtime is capped. */
   exhausted: boolean;
+  /** NOT-440: the active hard cap still holding at render time, if any. */
+  activeCap: RuntimeCapacityActiveCap | null;
   detail: string;
 };
 
@@ -257,6 +266,36 @@ function summarizeCursorBilling(
   return summarizeWindow(w, entry, nowMs, true, CURSOR_BILLING_LABEL, "current billing cycle");
 }
 
+/** A compact row the active cap exhausted: an effective 0%, keyed like the row it replaces. */
+function cappedZeroWindow(key: string, label: string, cap: RuntimeCapacityActiveCap): TopBarWindowValue {
+  return {
+    key,
+    label,
+    kind: "known",
+    remaining: 0,
+    rawRemaining: 0,
+    detail: `${label}: 0% available (${cappedUntilText(cap)})`,
+    isCritical: true,
+  };
+}
+
+/** The whole-runtime capped state for a cap no compact window can be proven for. */
+function cappedSummary(
+  runtime: string,
+  runtimeKey: Runtime,
+  cap: RuntimeCapacityActiveCap
+): PerRuntimeSummary {
+  const detail = "capped window not identified";
+  return {
+    runtime,
+    runtimeKey,
+    windows: [{ key: "capped", label: "capped", kind: "capped", detail, isCritical: true }],
+    exhausted: true,
+    activeCap: cap,
+    detail,
+  };
+}
+
 /** One entry per runtime account under the NOT-266 selection rule — exactly
  * the 5H/1W pair (deterministically ordered, missing halves synthesized as
  * public N/A rows) for Claude/Codex/Muse, exactly one `1M` billing-cycle
@@ -272,18 +311,24 @@ export function summarizeCapacity(
   return data.runtimes.map((entry) => {
     const runtime = runtimeLabel(entry.runtime as Runtime);
     const runtimeKey = entry.runtime as Runtime;
+    const cap = activeCapAt(entry, nowMs);
     if (entry.runtime === "cursor_local") {
       const billing = entry.windows.find((w) => w.windowKey === CURSOR_BILLING_WINDOW_KEY) ?? null;
-      if (billing === null) {
+      if (cap !== null && cap.windowRole !== "billing_cycle") return cappedSummary(runtime, runtimeKey, cap);
+      if (cap === null && billing === null) {
         return {
           runtime,
           runtimeKey,
           windows: [],
           exhausted: false,
+          activeCap: null,
           detail: `N/A (${REASON_TEXT[entry.unavailableReason ?? "missing"]})`,
         };
       }
-      const row = summarizeCursorBilling(billing, entry, nowMs);
+      const row =
+        cap !== null
+          ? cappedZeroWindow(billing?.windowKey ?? CURSOR_BILLING_WINDOW_KEY, CURSOR_BILLING_LABEL, cap)
+          : summarizeCursorBilling(billing!, entry, nowMs);
       // Decided from the raw provider value, never the rounded display
       // value — rounding a small nonzero remainder (e.g. 0.4%) down to 0%
       // must not falsely exhaust it.
@@ -292,35 +337,48 @@ export function summarizeCapacity(
         runtimeKey,
         windows: [row],
         exhausted: row.kind === "known" && row.rawRemaining === 0,
+        activeCap: cap,
         detail: row.detail,
       };
     }
     if (PAIR_RUNTIMES.has(entry.runtime)) {
+      if (cap !== null && cap.windowRole !== "five_hour" && cap.windowRole !== "weekly") {
+        return cappedSummary(runtime, runtimeKey, cap);
+      }
       const { fiveHour, weekly } = selectCriticalPair(entry.windows);
       const fiveRow =
-        fiveHour !== null
-          ? summarizeWindow(fiveHour, entry, nowMs, true, FIVE_HOUR_LABEL)
-          : missingPairWindow(FIVE_HOUR_LABEL, entry);
+        cap?.windowRole === "five_hour"
+          ? cappedZeroWindow(fiveHour?.windowKey ?? `missing:${FIVE_HOUR_LABEL}`, FIVE_HOUR_LABEL, cap)
+          : fiveHour !== null
+            ? summarizeWindow(fiveHour, entry, nowMs, true, FIVE_HOUR_LABEL)
+            : missingPairWindow(FIVE_HOUR_LABEL, entry);
       const weeklyRow =
-        weekly !== null
-          ? summarizeWindow(weekly, entry, nowMs, true, WEEKLY_LABEL)
-          : missingPairWindow(WEEKLY_LABEL, entry);
+        cap?.windowRole === "weekly"
+          ? cappedZeroWindow(weekly?.windowKey ?? `missing:${WEEKLY_LABEL}`, WEEKLY_LABEL, cap)
+          : weekly !== null
+            ? summarizeWindow(weekly, entry, nowMs, true, WEEKLY_LABEL)
+            : missingPairWindow(WEEKLY_LABEL, entry);
       const windows = [fiveRow, weeklyRow];
       const exhausted = windows.some((w) => w.kind === "known" && w.rawRemaining === 0);
       const detail = windows.map((w) => w.detail).join("; ");
-      return { runtime, runtimeKey, windows, exhausted, detail };
+      return { runtime, runtimeKey, windows, exhausted, activeCap: cap, detail };
     }
+    if (cap !== null) return cappedSummary(runtime, runtimeKey, cap);
     return {
       runtime,
       runtimeKey,
       windows: [],
       exhausted: false,
+      activeCap: null,
       detail: `N/A (${REASON_TEXT[entry.unavailableReason ?? "missing"]})`,
     };
   });
 }
 
 function blockTitle(s: PerRuntimeSummary): string {
+  if (s.activeCap !== null) {
+    return `${s.runtime} ${cappedUntilText(s.activeCap)}: ${s.detail}`;
+  }
   if (s.exhausted) {
     return `${s.runtime} exhausted — a capacity window is at 0%: ${s.detail}`;
   }
@@ -400,37 +458,50 @@ export function TopBarCapacityView({
                 <span className="text-white/35">N/A</span>
               ) : (
                 <span className="inline-flex flex-col leading-tight">
-                  {s.windows.map((w) => (
-                    <span
-                      key={w.key}
-                      data-window={w.label}
-                      data-window-known={w.kind === "known" ? "true" : "false"}
-                      className="inline-flex items-center gap-1 whitespace-nowrap tabular-nums"
-                    >
-                      <span className="text-white/40">{w.label}</span>
-                      {w.kind === "known" ? (
-                        (() => {
-                          // NOT-290: severity keys off the raw provider value,
-                          // never the rounded display value — 9.6% (shown as
-                          // 10%) stays critical and 29.6% (shown as 30%)
-                          // stays warning. A true 0% is critical, so it keeps
-                          // the existing red number plus the exhausted-block
-                          // treatment above.
-                          const severity = capacitySeverity(w.rawRemaining);
-                          return (
-                            <span
-                              data-severity={severity}
-                              className={TOPBAR_SEVERITY_CLASSNAME[severity]}
-                            >
-                              {w.remaining}%
-                            </span>
-                          );
-                        })()
-                      ) : (
-                        <span className="text-white/35">N/A</span>
-                      )}
-                    </span>
-                  ))}
+                  {s.windows.map((w) =>
+                    w.kind === "capped" ? (
+                      <span
+                        key={w.key}
+                        data-window="capped"
+                        data-window-known="false"
+                        className="inline-flex items-center gap-1 whitespace-nowrap"
+                      >
+                        <span data-severity="critical" className={TOPBAR_SEVERITY_CLASSNAME.critical}>
+                          {w.label}
+                        </span>
+                      </span>
+                    ) : (
+                      <span
+                        key={w.key}
+                        data-window={w.label}
+                        data-window-known={w.kind === "known" ? "true" : "false"}
+                        className="inline-flex items-center gap-1 whitespace-nowrap tabular-nums"
+                      >
+                        <span className="text-white/40">{w.label}</span>
+                        {w.kind === "known" ? (
+                          (() => {
+                            // NOT-290: severity keys off the raw provider value,
+                            // never the rounded display value — 9.6% (shown as
+                            // 10%) stays critical and 29.6% (shown as 30%)
+                            // stays warning. A true 0% is critical, so it keeps
+                            // the existing red number plus the exhausted-block
+                            // treatment above.
+                            const severity = capacitySeverity(w.rawRemaining);
+                            return (
+                              <span
+                                data-severity={severity}
+                                className={TOPBAR_SEVERITY_CLASSNAME[severity]}
+                              >
+                                {w.remaining}%
+                              </span>
+                            );
+                          })()
+                        ) : (
+                          <span className="text-white/35">N/A</span>
+                        )}
+                      </span>
+                    )
+                  )}
                 </span>
               )}
             </span>

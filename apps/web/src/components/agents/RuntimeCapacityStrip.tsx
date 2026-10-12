@@ -10,15 +10,20 @@
 // as public N/A chips — plus Cursor's one `billing_cycle` window labeled
 // `1M`. Failure sentinels and model-specific/overage/diagnostic extras stay
 // in the API for diagnostics but never render here.
+//
+// NOT-440: an active hard cap mapped to a compact window renders that row as
+// 0% (siblings unchanged); an unmapped cap replaces the rows with `capped`.
 import { useEffect, useState } from "react";
 import type {
   CapacityUnavailableReason,
   CapacityWindowSnapshot,
   Runtime,
+  RuntimeCapacityActiveCap,
   RuntimeCapacityResponse,
 } from "@agent-dealer/shared";
 import { fetchRuntimeCapacity } from "../../api";
 import { runtimeLabel } from "../../lib/display";
+import { activeCapAt, cappedUntilText } from "./capacityActiveCap";
 import { capacitySeverity, type CapacitySeverity } from "./capacitySeverity";
 import { capacityUnavailableText } from "./capacityUnavailableText";
 
@@ -44,7 +49,8 @@ const SEVERITY_CLASSNAME: Record<CapacitySeverity, string> = {
  */
 export type StripRow =
   | { key: string; label: string; kind: "known"; remaining: number; rawRemaining: number; title: string }
-  | { key: string; label: string; kind: "unknown"; reason: CapacityUnavailableReason; title: string };
+  | { key: string; label: string; kind: "unknown"; reason: CapacityUnavailableReason; title: string }
+  | { key: string; label: string; kind: "capped"; title: string };
 
 const PAIR_RUNTIMES: ReadonlySet<string> = new Set([
   "claude_code",
@@ -106,29 +112,79 @@ function windowRow(
   };
 }
 
+/** A compact row the active cap exhausted: an effective 0%, keyed like the row it replaces. */
+function cappedZeroRow(key: string, label: string, cap: RuntimeCapacityActiveCap): StripRow {
+  return {
+    key,
+    label,
+    kind: "known",
+    remaining: 0,
+    rawRemaining: 0,
+    title: `${label}: 0% remaining, ${cappedUntilText(cap)}`,
+  };
+}
+
+function cappedRow(runtime: Runtime, cap: RuntimeCapacityActiveCap): StripRow {
+  return {
+    key: "capped",
+    label: "capped",
+    kind: "capped",
+    title: `${runtimeLabel(runtime)} ${cappedUntilText(cap)}`,
+  };
+}
+
 /**
- * NOT-266 selection for one runtime entry. Exported for tests.
+ * NOT-266 selection for one runtime entry, with the NOT-440 active-cap
+ * overlay. Exported for tests.
  */
 export function selectStripRows(
-  entry: RuntimeCapacityResponse["runtimes"][number]
+  entry: RuntimeCapacityResponse["runtimes"][number],
+  nowMs = Date.now()
 ): StripRow[] {
+  const cap = activeCapAt(entry, nowMs);
   if (entry.runtime === "cursor_local") {
     const billing = entry.windows.find((w) => w.windowKey === CURSOR_BILLING_WINDOW_KEY) ?? null;
+    if (cap !== null) {
+      return cap.windowRole === "billing_cycle"
+        ? [cappedZeroRow(billing?.windowKey ?? CURSOR_BILLING_WINDOW_KEY, CURSOR_BILLING_LABEL, cap)]
+        : [cappedRow(entry.runtime, cap)];
+    }
     if (billing === null) return [];
     return [windowRow(billing, CURSOR_BILLING_LABEL, "current billing cycle")];
   }
   if (PAIR_RUNTIMES.has(entry.runtime)) {
+    if (cap !== null && cap.windowRole !== "five_hour" && cap.windowRole !== "weekly") {
+      return [cappedRow(entry.runtime, cap)];
+    }
     const fiveHour = entry.windows.find((w) => w.criticalRole === "five_hour") ?? null;
     const weekly = entry.windows.find((w) => w.criticalRole === "weekly") ?? null;
     return [
-      pairRow(fiveHour, FIVE_HOUR_LABEL, entry.unavailableReason, "missing-5H"),
-      pairRow(weekly, WEEKLY_LABEL, entry.unavailableReason, "missing-1W"),
+      cap?.windowRole === "five_hour"
+        ? cappedZeroRow(fiveHour?.windowKey ?? "missing-5H", FIVE_HOUR_LABEL, cap)
+        : pairRow(fiveHour, FIVE_HOUR_LABEL, entry.unavailableReason, "missing-5H"),
+      cap?.windowRole === "weekly"
+        ? cappedZeroRow(weekly?.windowKey ?? "missing-1W", WEEKLY_LABEL, cap)
+        : pairRow(weekly, WEEKLY_LABEL, entry.unavailableReason, "missing-1W"),
     ];
   }
+  if (cap !== null) return [cappedRow(entry.runtime, cap)];
   return [];
 }
 
 function StripChip({ row }: { row: StripRow }) {
+  if (row.kind === "capped") {
+    return (
+      <span
+        data-testid="capacity-window-capped"
+        title={row.title}
+        className="inline-flex items-center gap-1 rounded border border-white/15 bg-white/5 px-1.5 py-0.5 whitespace-nowrap"
+      >
+        <span data-severity="critical" className={SEVERITY_CLASSNAME.critical}>
+          {row.label}
+        </span>
+      </span>
+    );
+  }
   const known = row.kind === "known";
   return (
     <span
@@ -159,7 +215,7 @@ function StripChip({ row }: { row: StripRow }) {
   );
 }
 
-export function RuntimeCapacityStripView({ data }: { data: RuntimeCapacityResponse }) {
+export function RuntimeCapacityStripView({ data, nowMs }: { data: RuntimeCapacityResponse; nowMs?: number }) {
   if (data.runtimes.length === 0) return null;
   return (
     <div
@@ -168,7 +224,7 @@ export function RuntimeCapacityStripView({ data }: { data: RuntimeCapacityRespon
     >
       <span className="uppercase tracking-wider text-white/30">Runtime capacity</span>
       {data.runtimes.map((entry: RuntimeCapacityResponse["runtimes"][number]) => {
-        const rows = selectStripRows(entry);
+        const rows = selectStripRows(entry, nowMs);
         return (
         <span
           key={entry.runtime}
