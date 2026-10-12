@@ -32,6 +32,11 @@ const {
 const { setMuseCapabilityProbeForTests, settleMuseCapabilityCheckForTests } = await import(
   "./muse-capability.js"
 );
+const { recordMuseUsageCap } = await import("../runners/usage-cap.js");
+const {
+  runtimeAvailability,
+  clearAllRuntimeAvailability,
+} = await import("../repository/runtime-availability.js");
 
 migrate();
 // NOT-277: health never runs the real (billed) Muse capability probe in tests.
@@ -565,6 +570,68 @@ test("a muse probe that fails for any other reason is runtime_unknown, not a gue
   assert.deepEqual(issues.map((i) => i.code), ["runtime_unknown"]);
   assert.match(issues[0]!.message, /panic: something else broke/);
   assert.doesNotMatch(issues[0]!.message, /muse login/);
+});
+
+// ---------------------------------------------------------------------------
+// NOT-439: agent health renders the exact provider boundary from persisted
+// availability — the reproduced Muse message resolves to 11:59 AM in
+// America/Los_Angeles, not the 11:46 AM of the old 30-minute fallback.
+// ---------------------------------------------------------------------------
+
+test("NOT-439: persisted muse provider reset renders the exact boundary, not the fallback", async () => {
+  clearAllRuntimeAvailability();
+  clearAgentHealthCaches();
+  try {
+    // Pinned incident replay: the provider said resets-at 18:59:01Z while the
+    // old fallback stored 18:46:20.154Z. Timezone-safe assertions on the
+    // stored instant itself.
+    const incidentNow = Date.parse("2026-10-12T18:16:20.154Z");
+    const cap = recordMuseUsageCap(
+      {
+        kind: "usage_cap",
+        message: "Subscription quota exhausted. Your usage window resets at 2026-10-12T18:59:01Z",
+      },
+      incidentNow
+    );
+    assert.equal(cap?.unavailableUntil, "2026-10-12T18:59:01.000Z");
+    const stored = runtimeAvailability("muse_code", incidentNow);
+    assert.equal(stored.available, false);
+    if (!stored.available) assert.equal(stored.until, "2026-10-12T18:59:01.000Z");
+    const la = { hour: "2-digit", minute: "2-digit", timeZone: "America/Los_Angeles" } as const;
+    assert.equal(new Date("2026-10-12T18:59:01.000Z").toLocaleTimeString("en-US", la), "11:59 AM");
+    // The superseded fallback instant renders differently, proving the
+    // assertion distinguishes the two.
+    assert.equal(new Date("2026-10-12T18:46:20.154Z").toLocaleTimeString("en-US", la), "11:46 AM");
+
+    // Live surface: a guaranteed-future provider reset flows verbatim from
+    // persisted availability into the usage_capped health message.
+    const future = new Date(Date.now() + 2 * 3600_000);
+    future.setMilliseconds(0);
+    const resetIso = future.toISOString();
+    const live = recordMuseUsageCap(
+      { kind: "usage_cap", message: `Subscription quota exhausted. Resets at ${resetIso}` },
+    );
+    assert.equal(live?.unavailableUntil, resetIso);
+    const stub = stubMuse(`cat ${JSON.stringify(path.join(FIXTURES, "muse-version.txt"))}`);
+    const agent = createAgent({ name: "muse-capped", runtime: "muse_code", deckId: randomUUID() });
+    const result = await withMuseEnv(
+      { MUSE_CLI: stub.bin, META_API_KEY: "k", configHome: emptyConfigHome() },
+      () => healthForAgent(agent, true, undefined, true, null, NO_GITHUB)
+    );
+    const issue = result.issues.find((i) => i.code === "usage_capped");
+    assert.ok(issue, "expected a usage_capped issue from persisted availability");
+    const expectedRendering = new Date(resetIso).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    assert.ok(
+      issue!.message.includes(expectedRendering),
+      `expected health message ${JSON.stringify(issue!.message)} to render ${expectedRendering}`
+    );
+  } finally {
+    clearAllRuntimeAvailability();
+    clearAgentHealthCaches();
+  }
 });
 
 test("a muse probe that hangs past the timeout is runtime_unknown", async () => {
