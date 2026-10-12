@@ -512,3 +512,253 @@ test("failed reload preserves the old task text and attachment snapshot", async 
   );
   await app.close();
 });
+
+// NOT-422: parked scope reload — the same atomic reconciliation as the
+// pre-execution path, preserving the active workflow and the open action.
+const PARKED_CONTRACT_V1 = [
+  "Ship the friend-path run command.",
+  "",
+  "## Builder execution mode",
+  "feature",
+  "",
+  "## Non-goals",
+  "- Rewriting the installer",
+  "",
+  "## Exit predicate",
+  "The friend-path run command works on a clean machine with operator proof.",
+  "",
+  "## One-PR stopping point",
+  "Stop after the run command lands with its regression test.",
+  "",
+  "## Acceptance criteria",
+  "- [ ] Friend-path run works",
+  "  Evidence: run fixtures | run the tests | green",
+  "- [ ] [operator] Clean-machine proof attached",
+  "  Evidence: operator run | paste the output | reviewed",
+  "",
+].join("\n");
+
+const PARKED_CONTRACT_V2 = [
+  "Ship the friend-path run command.",
+  "",
+  "## Builder execution mode",
+  "feature",
+  "",
+  "## Non-goals",
+  "- Rewriting the installer",
+  "",
+  "## Exit predicate",
+  "The friend-path run command works with simulator proof; clean-machine proof moved out.",
+  "",
+  "## One-PR stopping point",
+  "Stop after the run command lands with its regression test.",
+  "",
+  "## Acceptance criteria",
+  "- [ ] Friend-path run works",
+  "  Evidence: run fixtures | run the tests | green",
+  "- [ ] Simulator proof attached",
+  "  Evidence: simulator run | paste the output | reviewed",
+  "",
+].join("\n");
+
+function parkedNodeWith(description: string, attachments: unknown[]) {
+  return { ...linearNodeWith(attachments), description };
+}
+
+let scopeAttachCounter = 0;
+
+async function parkScopeWithAttachments(app: Awaited<ReturnType<typeof buildApp>>) {
+  const { startWorkflow, applyCompletion } = await import("../coordinator/commands.js");
+  const { claimWorkItem } = await import("../repository/work-items.js");
+  const { ReviewerResult } = await import("../coordinator/reviewer-result.js");
+  const { getIssue } = await import("../repository/issues.js");
+  scopeAttachCounter += 1;
+  const created = (await (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        ...BASE_LINEAR,
+        externalId: `linear-uuid-scope-att-${scopeAttachCounter}`,
+        description: PARKED_CONTRACT_V1,
+        linearAttachments: [FILE_ATT, LINK_ATT],
+      },
+    })
+  ).json()) as { id: string };
+  assert.equal(startWorkflow(created.id).ok, true);
+  const dev = claimWorkItem("scope-att-test", { leaseMs: 60_000 })!;
+  await applyCompletion(dev.id, dev.leaseToken!, {
+    kind: "clean_handoff",
+    branch: "b",
+    headSha: "abc",
+    baseSha: "base",
+    prNumber: 1,
+    prUrl: "https://gh/pr/1",
+  });
+  const rev = claimWorkItem("scope-att-test", { leaseMs: 60_000 })!;
+  await applyCompletion(rev.id, rev.leaseToken!, {
+    kind: "verdict",
+    result: ReviewerResult.parse({
+      verdict: "escalated",
+      productScopeQuestion: "Is clean-machine proof still required?",
+      baseSha: "b",
+      headSha: "h",
+      acceptanceCriteriaAssessment: "ok",
+      evidenceAssessment: "ok",
+      findings: [],
+      risks: [],
+    }),
+  });
+  assert.equal(getIssue(created.id)!.status, "needs_human");
+  return created.id;
+}
+
+test("NOT-422: parked scope reload recompiles the contract, reconciles attachments, and preserves the workflow", async () => {
+  downloadBytes.set(FILE_URL, TARBALL_V1);
+  const app = await buildApp();
+  const id = await parkScopeWithAttachments(app);
+  const { getIssue } = await import("../repository/issues.js");
+  const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
+  const { getHumanAction, listHumanActionsForIssue } = await import("../repository/human-actions.js");
+  const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
+  const { getTaskSnapshot } = await import("../coordinator/commands.js");
+
+  const before = getIssue(id)!;
+  const instanceBefore = getActiveWorkflowInstance(id)!;
+  const actionBefore = listHumanActionsForIssue(id).find((a) => a.actionType === "product_scope_decision")!;
+  const sessionsBefore = listWorkerSessionsForIssue(id);
+  const frozenBefore = getTaskSnapshot(before);
+  const oldBlob = listSourceAttachments(id).find((r) => r.kind === "file")!.blobPath!;
+  assert.ok(fs.existsSync(oldBlob));
+
+  // Linear now: amended contract (the [operator] criterion is gone), the same
+  // file id with new bytes, a brand-new file, and the link removed.
+  const FILE_B_URL = "https://uploads.linear.app/abc/b.bin";
+  const TARBALL_B = Buffer.from("brand-new-bytes");
+  downloadBytes.set(FILE_URL, TARBALL_V2);
+  downloadBytes.set(FILE_B_URL, TARBALL_B);
+  linearNode = parkedNodeWith(PARKED_CONTRACT_V2, [
+    { id: "att-file-1", title: "repro.tar.gz", url: FILE_URL },
+    { id: "att-file-3", title: "b.bin", url: FILE_B_URL },
+  ]);
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/reload-source` });
+  assert.equal(res.statusCode, 200, res.body);
+  const reloaded = res.json() as {
+    title: string;
+    description: string;
+    acceptanceCriteria: string;
+    executionContract: { exitPredicate: string; acceptanceCriteria: Array<{ text: string }> };
+  };
+  assert.equal(reloaded.title, "NOT-1: Reloaded title");
+  assert.equal(reloaded.description, PARKED_CONTRACT_V2);
+  assert.equal(
+    reloaded.executionContract.exitPredicate,
+    "The friend-path run command works with simulator proof; clean-machine proof moved out."
+  );
+  assert.ok(!reloaded.acceptanceCriteria.includes("[operator] Clean-machine proof attached"));
+  assert.ok(reloaded.acceptanceCriteria.includes("Simulator proof attached"));
+
+  // Attachments reconciled atomically: changed bytes land, the new file
+  // appears, the removed link disappears, and the old blob is pruned.
+  const rows = listSourceAttachments(id);
+  assert.deepEqual(
+    rows.map((r) => r.linearAttachmentId).sort(),
+    ["att-file-1", "att-file-3"]
+  );
+  const changed = rows.find((r) => r.linearAttachmentId === "att-file-1")!;
+  assert.equal(changed.sha256, createHash("sha256").update(TARBALL_V2).digest("hex"));
+  assert.deepEqual(fs.readFileSync(changed.blobPath!), TARBALL_V2);
+  assert.ok(!fs.existsSync(oldBlob));
+
+  // Everything else is preserved: repository/configuration, workflow
+  // instance, PR/head/branch, rounds, counters, sessions, and the open action.
+  const after = getIssue(id)!;
+  const preserved = (issue: typeof after) => ({
+    repo: issue.repo,
+    baseBranch: issue.baseBranch,
+    developerAgentId: issue.developerAgentId,
+    reviewerAgentId: issue.reviewerAgentId,
+    maxReviewRounds: issue.maxReviewRounds,
+    maxInfraAttempts: issue.maxInfraAttempts,
+    maxCiAttempts: issue.maxCiAttempts,
+    autoMerge: issue.autoMerge,
+    status: issue.status,
+    currentRound: issue.currentRound,
+    infraAttempts: issue.infraAttempts,
+    ciAttempts: issue.ciAttempts,
+    branch: issue.branch,
+    baseSha: issue.baseSha,
+    headSha: issue.headSha,
+    prNumber: issue.prNumber,
+    prUrl: issue.prUrl,
+    source: issue.source,
+    externalId: issue.externalId,
+    externalLabel: issue.externalLabel,
+    externalUrl: issue.externalUrl,
+  });
+  assert.deepEqual(preserved(after), preserved(before));
+  assert.equal(getActiveWorkflowInstance(id)!.id, instanceBefore.id);
+  assert.deepEqual(getHumanAction(actionBefore.id)!, { ...actionBefore });
+  assert.deepEqual(listWorkerSessionsForIssue(id), sessionsBefore);
+  assert.equal(listWorkflowEventsForIssue(id).filter((e) => e.type === "issue.source_reloaded").length, 1);
+
+  // The frozen snapshot still carries the old text AND the old manifest until Resume.
+  const frozenAfter = getTaskSnapshot(after);
+  assert.equal(frozenAfter.description, PARKED_CONTRACT_V1);
+  assert.ok(frozenAfter.acceptanceCriteria.includes("[operator] Clean-machine proof attached"));
+  assert.deepEqual(frozenAfter.sourceAttachments, frozenBefore.sourceAttachments);
+  assert.ok(frozenAfter.sourceAttachments!.some((a) => a.linearAttachmentId === "att-link-1"));
+  await app.close();
+});
+
+test("NOT-422: failed parked reloads preserve prior text, attachments, workflow, and the open action", async () => {
+  const { getIssue } = await import("../repository/issues.js");
+  const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
+  const { getHumanAction, listHumanActionsForIssue } = await import("../repository/human-actions.js");
+
+  async function expectIntact(id: string, label: string) {
+    const issue = getIssue(id)!;
+    assert.equal(issue.title, BASE_LINEAR.title, `${label}: title intact`);
+    assert.equal(issue.description, PARKED_CONTRACT_V1, `${label}: description intact`);
+    assert.ok(issue.acceptanceCriteria!.includes("[operator] Clean-machine proof attached"), `${label}: criteria intact`);
+    const rows = listSourceAttachments(id);
+    assert.deepEqual(
+      rows.map((r) => r.linearAttachmentId).sort(),
+      ["att-file-1", "att-link-1"],
+      `${label}: attachment rows intact`
+    );
+    const file = rows.find((r) => r.kind === "file")!;
+    assert.deepEqual(fs.readFileSync(file.blobPath!), TARBALL_V1, `${label}: blob bytes intact`);
+    const action = listHumanActionsForIssue(id).find((a) => a.actionType === "product_scope_decision")!;
+    assert.equal(getHumanAction(action.id)!.status, "open", `${label}: scope action still open`);
+    assert.ok(getActiveWorkflowInstance(id), `${label}: workflow still active`);
+    assert.equal(issue.status, "needs_human", `${label}: still parked`);
+    assert.ok(!listWorkflowEventsForIssue(id).some((e) => e.type === "issue.source_reloaded"), `${label}: no reload event`);
+  }
+
+  // A new file whose download fails: 502, prior snapshot untouched.
+  downloadBytes.set(FILE_URL, TARBALL_V1);
+  const app = await buildApp();
+  const failedId = await parkScopeWithAttachments(app);
+  const BAD_URL = "https://uploads.linear.app/abc/missing.bin";
+  downloadBytes.set(BAD_URL, "http500");
+  linearNode = parkedNodeWith(PARKED_CONTRACT_V2, [
+    { id: "att-file-1", title: "repro.tar.gz", url: FILE_URL },
+    { id: "att-file-9", title: "missing.bin", url: BAD_URL },
+  ]);
+  const failed = await app.inject({ method: "POST", url: `/api/issues/${failedId}/reload-source` });
+  assert.equal(failed.statusCode, 502, failed.body);
+  await expectIntact(failedId, "download failure");
+
+  // A malformed amended contract: actionable 400, prior snapshot untouched.
+  const badId = await parkScopeWithAttachments(app);
+  const malformed = PARKED_CONTRACT_V2.replace("feature", "teleport");
+  downloadBytes.set(FILE_URL, TARBALL_V1);
+  linearNode = parkedNodeWith(malformed, [{ id: "att-file-1", title: "repro.tar.gz", url: FILE_URL }]);
+  const bad = await app.inject({ method: "POST", url: `/api/issues/${badId}/reload-source` });
+  assert.equal(bad.statusCode, 400, bad.body);
+  assert.match((bad.json() as { error: string }).error, /unknown execution mode/);
+  await expectIntact(badId, "contract failure");
+  await app.close();
+});
