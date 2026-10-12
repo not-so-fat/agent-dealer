@@ -97,12 +97,35 @@ export const CapacityWindowSnapshot = z.object({
 });
 export type CapacityWindowSnapshot = z.infer<typeof CapacityWindowSnapshot>;
 
+/**
+ * NOT-440: compact window an active hard cap exhausts — the tagged 5H/1W
+ * critical pair, or Cursor's `billing_cycle` window.
+ */
+export const CapacityCapWindowRole = z.enum(["five_hour", "weekly", "billing_cycle"]);
+export type CapacityCapWindowRole = z.infer<typeof CapacityCapWindowRole>;
+
+/**
+ * NOT-440: the runtime's active hard cap (the same `runtime_availability` row
+ * that blocks admission and marks agent health). Stored snapshots stay raw
+ * provider observations; compact surfaces overlay this state on top of them.
+ * `windowRole` is null when no compact window can be proven from structured
+ * cap metadata or a reset match — the runtime then reads as capped outright.
+ */
+export const RuntimeCapacityActiveCap = z.object({
+  unavailableUntil: z.string(),
+  reason: z.string(),
+  windowRole: CapacityCapWindowRole.nullable(),
+});
+export type RuntimeCapacityActiveCap = z.infer<typeof RuntimeCapacityActiveCap>;
+
 export const RuntimeCapacityEntry = z.object({
   runtime: Runtime,
   /** All windows the provider reports for this runtime account. */
   windows: z.array(CapacityWindowSnapshot),
   /** Whole-entry fallback reason when no window carries a current value. */
   unavailableReason: CapacityUnavailableReason.nullable(),
+  /** NOT-440: active hard cap, or null/absent when the runtime is not capped. */
+  activeCap: RuntimeCapacityActiveCap.nullable().optional(),
 });
 export type RuntimeCapacityEntry = z.infer<typeof RuntimeCapacityEntry>;
 

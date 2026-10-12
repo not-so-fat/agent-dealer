@@ -18,6 +18,10 @@ export interface UsageCapDetection {
   unavailableUntil: string;
   reason: string;
   evidence: Record<string, unknown>;
+  /** Provider-reported reset (NOT-440); null when `unavailableUntil` is the fallback cooldown. */
+  providerResetAt: string | null;
+  /** Structured provider limit type (NOT-440), e.g. Claude `rateLimitType`; null when unreported. */
+  limitType: string | null;
 }
 
 /** Structured / result-error prose — no bare "limit reached" (NOT-117). */
@@ -82,8 +86,9 @@ function fallbackUntil(nowMs = Date.now()): string {
 function resolveUnavailableUntil(
   input: { resets?: unknown[]; text?: string },
   nowMs: number
-): string {
-  return extractUsageCapReset(input, nowMs) ?? fallbackUntil(nowMs);
+): Pick<UsageCapDetection, "unavailableUntil" | "providerResetAt"> {
+  const providerResetAt = extractUsageCapReset(input, nowMs);
+  return { unavailableUntil: providerResetAt ?? fallbackUntil(nowMs), providerResetAt };
 }
 
 function capReason(runtime: Runtime, detail: string): string {
@@ -104,17 +109,19 @@ function signalFromRateLimitInfo(
   nowMs: number
 ): UsageCapDetection | null {
   if (!isHardCapRateLimitInfo(info)) return null;
-  const unavailableUntil = resolveUnavailableUntil(
+  const until = resolveUnavailableUntil(
     {
       resets: [info.resetsAt, info.overageResetsAt, info.overage_resets_at, info.resets_at],
     },
     nowMs
   );
-  const limitType = String(info.rateLimitType ?? info.rate_limit_type ?? "plan");
+  const rawLimitType = info.rateLimitType ?? info.rate_limit_type;
+  const limitType = typeof rawLimitType === "string" && rawLimitType ? rawLimitType : null;
   return {
-    unavailableUntil,
-    reason: capReason(runtime, `${limitType} limit rejected`),
+    ...until,
+    reason: capReason(runtime, `${limitType ?? "plan"} limit rejected`),
     evidence: { ...evidence, rate_limit_info: info },
+    limitType,
   };
 }
 
@@ -129,6 +136,8 @@ function signalFromApiRetry(e: StreamEvent, runtime: Runtime, nowMs: number): Us
     unavailableUntil: fallbackUntil(nowMs),
     reason: capReason(runtime, err.replace("_", " ")),
     evidence: { event: e },
+    providerResetAt: null,
+    limitType: null,
   };
 }
 
@@ -137,7 +146,8 @@ function signalFromResultError(e: StreamEvent, runtime: Runtime, nowMs: number):
   const text = typeof e.result === "string" ? e.result : "";
   if (!CAP_ERROR_RE.test(text)) return null;
   return {
-    unavailableUntil: resolveUnavailableUntil({ text }, nowMs),
+    ...resolveUnavailableUntil({ text }, nowMs),
+    limitType: null,
     reason: capReason(runtime, "session ended with cap error"),
     evidence: { result: text.slice(0, 500) },
   };
@@ -179,7 +189,8 @@ function codexCapFromEvents(events: StreamEvent[], runtime: Runtime, nowMs: numb
       }
       if (CAP_ERROR_RE.test(msg)) {
         return {
-          unavailableUntil: resolveUnavailableUntil({ text: msg }, nowMs),
+          ...resolveUnavailableUntil({ text: msg }, nowMs),
+          limitType: null,
           reason: capReason(runtime, msg.slice(0, 120) || "turn failed"),
           evidence: { turn_failed: err },
         };
@@ -187,7 +198,8 @@ function codexCapFromEvents(events: StreamEvent[], runtime: Runtime, nowMs: numb
     }
     if (e.type === "error" && typeof e.message === "string" && CAP_ERROR_RE.test(e.message)) {
       return {
-        unavailableUntil: resolveUnavailableUntil({ text: e.message }, nowMs),
+        ...resolveUnavailableUntil({ text: e.message }, nowMs),
+        limitType: null,
         reason: capReason(runtime, e.message.slice(0, 120)),
         evidence: { error: e.message },
       };
@@ -263,7 +275,8 @@ export function detectUsageCapFromRawLog(raw: string, runtime: Runtime, nowMs = 
     const haystack = textFallbackHaystack(raw, events);
     if (CAP_FALLBACK_RE.test(haystack)) {
       return {
-        unavailableUntil: resolveUnavailableUntil({ text: haystack }, nowMs),
+        ...resolveUnavailableUntil({ text: haystack }, nowMs),
+        limitType: null,
         reason: capReason(runtime, "stderr/log matched usage-cap pattern"),
         evidence: { matched: haystack.slice(0, 300) },
       };
@@ -290,6 +303,8 @@ export function recordUsageCapFromLog(logPath: string, runtime: Runtime, nowMs =
     unavailableUntil: cap.unavailableUntil,
     reason: cap.reason,
     evidence: cap.evidence,
+    providerResetAt: cap.providerResetAt,
+    limitType: cap.limitType,
   });
   return cap;
 }
@@ -310,6 +325,8 @@ export function recordUsageCapFromEvents(
     unavailableUntil: cap.unavailableUntil,
     reason: cap.reason,
     evidence: cap.evidence,
+    providerResetAt: cap.providerResetAt,
+    limitType: cap.limitType,
   });
   return cap;
 }
@@ -326,7 +343,8 @@ export function recordMuseUsageCap(
 ): UsageCapDetection | null {
   if (failure?.kind !== "usage_cap") return null;
   const cap: UsageCapDetection = {
-    unavailableUntil: resolveUnavailableUntil({ text: failure.message }, nowMs),
+    ...resolveUnavailableUntil({ text: failure.message }, nowMs),
+    limitType: null,
     reason: capReason("muse_code", failure.message.slice(0, 120) || "usage cap"),
     evidence: { muse_failure: failure },
   };
@@ -335,6 +353,8 @@ export function recordMuseUsageCap(
     unavailableUntil: cap.unavailableUntil,
     reason: cap.reason,
     evidence: cap.evidence,
+    providerResetAt: cap.providerResetAt,
+    limitType: cap.limitType,
   });
   return cap;
 }

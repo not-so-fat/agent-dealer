@@ -425,6 +425,14 @@ export function migrate(): void {
       );
     `);
   }
+  // NOT-440: normalized cap metadata for capacity reconciliation.
+  const runtimeAvailCols = db.prepare("PRAGMA table_info(runtime_availability)").all() as Array<{ name: string }>;
+  if (!runtimeAvailCols.some((c) => c.name === "provider_reset_at")) {
+    db.exec("ALTER TABLE runtime_availability ADD COLUMN provider_reset_at TEXT");
+  }
+  if (!runtimeAvailCols.some((c) => c.name === "limit_type")) {
+    db.exec("ALTER TABLE runtime_availability ADD COLUMN limit_type TEXT");
+  }
 
   // NOT-245: normalized capacity snapshots for databases created before
   // schema.sql declared the table (same upgrade-path pattern as queue_entries).
