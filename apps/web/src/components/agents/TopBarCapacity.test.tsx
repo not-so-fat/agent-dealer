@@ -1066,3 +1066,102 @@ test("NOT-366: a recorded Claude refresh failure states unavailable and why, nev
   assert.ok(html.includes("5H: N/A (unavailable: Claude /usage reported no 5H/1W plan limits (3 consecutive"));
   assert.ok(!html.includes("no_windows"), "internal failure kind never reaches the DOM");
 });
+
+// NOT-440: the active hard cap overlays the top bar.
+const CAP_NOW = Date.parse("2026-10-12T18:20:00.000Z");
+const CAP_RESET = "2026-10-12T18:59:01.000Z";
+
+function capWindow(over: Record<string, unknown>) {
+  return window({
+    observedAt: "2026-10-12T18:03:00.000Z",
+    freshUntil: "2026-10-12T19:03:00.000Z",
+    expiresAt: "2026-10-12T19:03:00.000Z",
+    ...over,
+  });
+}
+
+function capPair(runtime: string, windowRole: string | null, extra: unknown[] = []) {
+  return {
+    runtime,
+    unavailableReason: null,
+    windows: [
+      capWindow({ remainingPercent: 50, resetAt: CAP_RESET }),
+      capWindow({
+        windowKey: "weekly", durationMinutes: 10080, displayLabel: "1W", remainingPercent: 52,
+        resetAt: "2026-10-16T02:00:00.000Z", criticalRole: "weekly",
+      }),
+      ...extra,
+    ],
+    activeCap: { unavailableUntil: CAP_RESET, reason: `${runtime} usage capped`, windowRole },
+  };
+}
+
+function capData(...runtimes: unknown[]): RuntimeCapacityResponse {
+  return { generatedAt: iso(CAP_NOW), runtimes } as unknown as RuntimeCapacityResponse;
+}
+
+function renderCap(data: RuntimeCapacityResponse, nowMs = CAP_NOW): string {
+  return renderToStaticMarkup(
+    React.createElement(TopBarCapacityView, { state: { status: "ready", data }, nowMs })
+  );
+}
+
+test("NOT-440: reproduced Muse cap renders 5H 0% (critical, exhausted) and 1W 52%", () => {
+  const markup = renderCap(capData(capPair("muse_code", "five_hour")));
+  const five = markup.match(/data-window="5H"[\s\S]*?<\/span><\/span>/)?.[0] ?? "";
+  const week = markup.match(/data-window="1W"[\s\S]*?<\/span><\/span>/)?.[0] ?? "";
+  assert.match(five, /data-severity="critical"[^>]*>0%/);
+  assert.match(week, /52%/);
+  assert.match(markup, /data-exhausted="true"/);
+  assert.match(markup, /Muse Code capped until/);
+  assert.ok(!markup.includes(">50%<"), "stored 5H value is not presented while capped");
+});
+
+test("NOT-440: mapped caps per runtime zero only the mapped row; diagnostics never render", () => {
+  const diagnostic = capWindow({ windowKey: "muse_account_usage", displayLabel: "muse_account_usage", remainingPercent: 90, criticalRole: null });
+  const cursorEntry = {
+    runtime: "cursor_local",
+    unavailableReason: null,
+    windows: [capWindow({ windowKey: "billing_cycle", displayLabel: "September 2026", remainingPercent: 70, resetAt: "2026-11-01T00:00:00.000Z", criticalRole: null })],
+    activeCap: { unavailableUntil: "2026-11-01T00:00:00.000Z", reason: "cursor capped", windowRole: "billing_cycle" },
+  };
+  const cases = [
+    { entry: capPair("claude_code", "five_hour"), expected: [["5H", 0], ["1W", 52]] },
+    { entry: capPair("codex_local", "weekly"), expected: [["5H", 50], ["1W", 0]] },
+    { entry: capPair("muse_code", "five_hour", [diagnostic]), expected: [["5H", 0], ["1W", 52]] },
+    { entry: cursorEntry, expected: [["1M", 0]] },
+  ];
+  for (const c of cases) {
+    const [summary] = summarizeCapacity(capData(c.entry), CAP_NOW);
+    assert.deepEqual(
+      summary!.windows.map((w) => [w.label, w.kind === "known" ? w.remaining : w.kind]),
+      c.expected,
+      c.entry.runtime
+    );
+    assert.equal(summary!.exhausted, true, c.entry.runtime);
+    assert.ok(!summary!.detail.includes("muse_account_usage"));
+  }
+});
+
+test("NOT-440: an unmapped cap renders an explicit capped state, never positive percentages", () => {
+  const markup = renderCap(capData(capPair("muse_code", null)));
+  assert.match(markup, /data-window="capped"/);
+  assert.match(markup, />capped</);
+  assert.match(markup, /aria-label="Muse Code capacity"/);
+  assert.ok(!/>\d+%</.test(markup), "no percentage renders while the runtime is capped");
+  assert.ok(!markup.includes('data-status="ready"'), "no ready summary from positive stored values");
+});
+
+test("NOT-440: at and after unavailableUntil the overlay is gone and snapshot rules apply", () => {
+  for (const offset of [0, 1]) {
+    const nowMs = Date.parse(CAP_RESET) + offset;
+    const [summary] = summarizeCapacity(capData(capPair("muse_code", "five_hour")), nowMs);
+    assert.equal(summary!.activeCap, null, `offset ${offset}ms`);
+    // The 5H reset has passed, so the stored 50% reads expired; 1W stays current.
+    assert.deepEqual(
+      summary!.windows.map((w) => [w.label, w.kind === "known" ? w.remaining : w.kind]),
+      [["5H", "unknown"], ["1W", 52]]
+    );
+    assert.equal(summary!.exhausted, false);
+  }
+});

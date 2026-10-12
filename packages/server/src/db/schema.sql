@@ -473,7 +473,11 @@ CREATE TABLE IF NOT EXISTS runtime_availability (
   unavailable_until TEXT NOT NULL,
   reason TEXT NOT NULL,
   evidence_json TEXT,
-  observed_at TEXT NOT NULL
+  observed_at TEXT NOT NULL,
+  -- NOT-440: provider-reported reset (null when unavailable_until is the
+  -- fallback cooldown) and structured provider limit type, if any.
+  provider_reset_at TEXT,
+  limit_type TEXT
 );
 
 -- NOT-171: append-only normalized failure-cause evidence. A derived view over

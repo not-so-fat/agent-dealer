@@ -252,3 +252,269 @@ test("a past reset time is never presented as current capacity", async () => {
   assert.equal(muse.windows[0].unavailableReason, "expired");
   assert.equal(muse.unavailableReason, "expired");
 });
+
+// NOT-440: active hard caps overlay the compact read model without rewriting
+// stored provider observations.
+const NOT440_NOW = Date.parse("2026-10-12T18:20:00.000Z");
+const NOT440_RESET = "2026-10-12T18:59:01.000Z";
+const NOT440_WEEKLY_RESET = "2026-10-16T02:00:00.000Z";
+
+async function seedPair(
+  runtime: "claude_code" | "codex_local" | "muse_code",
+  windows: Array<{
+    windowKey: string;
+    criticalRole: "five_hour" | "weekly" | null;
+    remainingPercent: number;
+    resetAt: string;
+    durationMinutes?: number;
+  }>
+): Promise<void> {
+  const { recordCapacitySnapshots } = await import("../repository/runtime-capacity.js");
+  recordCapacitySnapshots(
+    runtime,
+    windows.map((w) => ({
+      windowKey: w.windowKey,
+      providerBucket: "all_models",
+      durationMinutes: w.durationMinutes ?? (w.criticalRole === "weekly" ? 10080 : 300),
+      displayLabel: w.criticalRole === "weekly" ? "1W" : "5H",
+      usedValue: 100 - w.remainingPercent,
+      usedUnit: "percent",
+      remainingPercent: w.remainingPercent,
+      resetAt: w.resetAt,
+      observedAt: "2026-10-12T18:03:00.000Z",
+      freshUntil: "2026-10-12T19:03:00.000Z",
+      expiresAt: "2026-10-12T19:03:00.000Z",
+      source: "observed_event",
+      unavailableReason: null,
+      criticalRole: w.criticalRole,
+    }))
+  );
+}
+
+async function seedReproducedMuse(): Promise<void> {
+  await seedPair("muse_code", [
+    { windowKey: "five_hour", criticalRole: "five_hour", remainingPercent: 50, resetAt: NOT440_RESET },
+    { windowKey: "weekly", criticalRole: "weekly", remainingPercent: 52, resetAt: NOT440_WEEKLY_RESET },
+  ]);
+}
+
+function storedMuseRemaining(): Record<string, number | null> {
+  const rows = getDb()
+    .prepare("SELECT window_key, remaining_percent FROM runtime_capacity_snapshots WHERE runtime = 'muse_code'")
+    .all() as Array<{ window_key: string; remaining_percent: number | null }>;
+  return Object.fromEntries(rows.map((r) => [r.window_key, r.remaining_percent]));
+}
+
+const { getDb } = await import("../db/index.js");
+const { clearAllRuntimeAvailability, recordRuntimeAvailability, runtimeAvailability } = await import(
+  "../repository/runtime-availability.js"
+);
+const { recordMuseUsageCap } = await import("../runners/usage-cap.js");
+const { resolveCapWindowRole } = await import("./service.js");
+
+test("NOT-440: reproduced Muse cap maps to 5H without modifying stored snapshots", async () => {
+  clearAllCapacitySnapshots();
+  clearAllRuntimeAvailability();
+  await seedReproducedMuse();
+  assert.deepEqual(storedMuseRemaining(), { five_hour: 50, weekly: 52 });
+  recordMuseUsageCap(
+    { kind: "usage_cap", message: `Subscription quota exhausted. Usage resets at 2026-10-12T18:59:01Z.` },
+    Date.parse("2026-10-12T18:16:00.000Z")
+  );
+
+  const snap = getRuntimeCapacitySnapshot(NOT440_NOW);
+  const muse = snap.runtimes.find((r) => r.runtime === "muse_code")!;
+  assert.deepEqual(muse.activeCap, {
+    unavailableUntil: NOT440_RESET,
+    reason: muse.activeCap!.reason,
+    windowRole: "five_hour",
+  });
+  assert.match(muse.activeCap!.reason, /muse_code usage capped/);
+  // Windows remain the raw provider observation; the overlay is activeCap.
+  assert.equal(muse.windows.find((w) => w.criticalRole === "five_hour")!.remainingPercent, 50);
+  assert.equal(muse.windows.find((w) => w.criticalRole === "weekly")!.remainingPercent, 52);
+  assert.deepEqual(storedMuseRemaining(), { five_hour: 50, weekly: 52 });
+  // Admission/health read the same row.
+  assert.deepEqual(runtimeAvailability("muse_code", NOT440_NOW), {
+    available: false,
+    until: NOT440_RESET,
+    reason: muse.activeCap!.reason,
+  });
+});
+
+test("NOT-440: overlay is absent at and after unavailableUntil; history is kept", async () => {
+  for (const offset of [0, 1]) {
+    clearAllCapacitySnapshots();
+    clearAllRuntimeAvailability();
+    await seedReproducedMuse();
+    recordMuseUsageCap(
+      { kind: "usage_cap", message: `Subscription quota exhausted. Usage resets at 2026-10-12T18:59:01Z.` },
+      Date.parse("2026-10-12T18:16:00.000Z")
+    );
+    const atMs = Date.parse(NOT440_RESET) + offset;
+    const snap = getRuntimeCapacitySnapshot(atMs);
+    const muse = snap.runtimes.find((r) => r.runtime === "muse_code")!;
+    assert.equal(muse.activeCap, null, `offset ${offset}ms`);
+    // Normal classification resumes: the 5H reset has passed, 1W is still current.
+    const fiveHour = muse.windows.find((w) => w.criticalRole === "five_hour")!;
+    assert.equal(fiveHour.remainingPercent, null);
+    assert.equal(fiveHour.unavailableReason, "expired");
+    assert.equal(muse.windows.find((w) => w.criticalRole === "weekly")!.remainingPercent, 52);
+    assert.deepEqual(storedMuseRemaining(), { five_hour: 50, weekly: 52 });
+    const capRows = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM runtime_availability WHERE runtime = 'muse_code'")
+      .get() as { n: number };
+    assert.equal(capRows.n, 0, "lazy cleanup cleared the expired cap row");
+    assert.deepEqual(runtimeAvailability("muse_code", atMs), { available: true });
+  }
+});
+
+test("NOT-440: a cap with no provider reset or role stays unmapped (explicit capped)", async () => {
+  clearAllCapacitySnapshots();
+  clearAllRuntimeAvailability();
+  await seedReproducedMuse();
+  // Fallback cooldown that happens to land on the 5H reset is still not a provider boundary.
+  recordRuntimeAvailability({
+    runtime: "muse_code",
+    unavailableUntil: NOT440_RESET,
+    reason: "muse_code usage capped — usage cap",
+  });
+  const muse = getRuntimeCapacitySnapshot(NOT440_NOW).runtimes.find((r) => r.runtime === "muse_code")!;
+  assert.equal(muse.activeCap!.windowRole, null);
+  assert.equal(muse.activeCap!.unavailableUntil, NOT440_RESET);
+  assert.deepEqual(storedMuseRemaining(), { five_hour: 50, weekly: 52 });
+});
+
+const tagged = (
+  windowKey: string,
+  criticalRole: "five_hour" | "weekly" | null,
+  resetAt: string
+) => ({
+  windowKey,
+  providerBucket: "all_models",
+  durationMinutes: 300,
+  displayLabel: "5H",
+  usedValue: 50,
+  usedUnit: "percent",
+  remainingPercent: 50,
+  resetAt,
+  observedAt: "2026-10-12T18:03:00.000Z",
+  freshUntil: "2026-10-12T19:03:00.000Z",
+  expiresAt: "2026-10-12T19:03:00.000Z",
+  source: "observed_event" as const,
+  unavailableReason: null,
+  criticalRole,
+});
+
+test("NOT-440: cap window role resolution per runtime (metadata first, then reset match)", () => {
+  const pair = [tagged("five_hour", "five_hour", NOT440_RESET), tagged("weekly", "weekly", NOT440_WEEKLY_RESET)];
+  const cases: Array<{
+    name: string;
+    runtime: "claude_code" | "codex_local" | "muse_code" | "cursor_local";
+    cap: { providerResetAt: string | null; limitType: string | null };
+    windows: ReturnType<typeof tagged>[];
+    expected: "five_hour" | "weekly" | "billing_cycle" | null;
+  }> = [
+    {
+      name: "Claude five_hour metadata wins even without a reset match",
+      runtime: "claude_code",
+      cap: { providerResetAt: "2026-10-12T20:00:00.000Z", limitType: "five_hour" },
+      windows: pair,
+      expected: "five_hour",
+    },
+    {
+      name: "Claude seven_day metadata maps to weekly",
+      runtime: "claude_code",
+      cap: { providerResetAt: null, limitType: "seven_day" },
+      windows: pair,
+      expected: "weekly",
+    },
+    {
+      name: "Claude model-specific limit stays unmapped despite a matching weekly reset",
+      runtime: "claude_code",
+      cap: { providerResetAt: NOT440_WEEKLY_RESET, limitType: "seven_day_sonnet" },
+      windows: pair,
+      expected: null,
+    },
+    {
+      name: "Codex reset match on the weekly window",
+      runtime: "codex_local",
+      cap: { providerResetAt: NOT440_WEEKLY_RESET, limitType: null },
+      windows: pair,
+      expected: "weekly",
+    },
+    {
+      name: "Muse reset match on the 5H window (within tolerance)",
+      runtime: "muse_code",
+      cap: { providerResetAt: "2026-10-12T18:59:30.000Z", limitType: null },
+      windows: pair,
+      expected: "five_hour",
+    },
+    {
+      name: "Muse reset outside tolerance stays unmapped",
+      runtime: "muse_code",
+      cap: { providerResetAt: "2026-10-12T19:05:00.000Z", limitType: null },
+      windows: pair,
+      expected: null,
+    },
+    {
+      name: "Cursor reset match on the billing cycle",
+      runtime: "cursor_local",
+      cap: { providerResetAt: "2026-11-01T00:00:00.000Z", limitType: null },
+      windows: [tagged("billing_cycle", null, "2026-11-01T00:00:00.000Z")],
+      expected: "billing_cycle",
+    },
+    {
+      name: "Untagged diagnostic window with a matching reset never maps",
+      runtime: "muse_code",
+      cap: { providerResetAt: "2026-10-13T00:00:00.000Z", limitType: null },
+      windows: [...pair, tagged("muse_account_usage", null, "2026-10-13T00:00:00.000Z")],
+      expected: null,
+    },
+    {
+      name: "Fallback cooldown (no provider reset) never maps",
+      runtime: "codex_local",
+      cap: { providerResetAt: null, limitType: null },
+      windows: pair,
+      expected: null,
+    },
+    {
+      name: "Ambiguous reset matching both pair windows stays unmapped",
+      runtime: "codex_local",
+      cap: { providerResetAt: NOT440_RESET, limitType: null },
+      windows: [tagged("five_hour", "five_hour", NOT440_RESET), tagged("weekly", "weekly", NOT440_RESET)],
+      expected: null,
+    },
+  ];
+  for (const c of cases) {
+    assert.equal(resolveCapWindowRole(c.runtime, c.cap, c.windows), c.expected, c.name);
+  }
+});
+
+test("NOT-440: Claude structured rate_limit_event persists limit type and maps through the read model", async () => {
+  clearAllCapacitySnapshots();
+  clearAllRuntimeAvailability();
+  await seedPair("claude_code", [
+    { windowKey: "five_hour", criticalRole: "five_hour", remainingPercent: 40, resetAt: NOT440_RESET },
+    { windowKey: "weekly", criticalRole: "weekly", remainingPercent: 70, resetAt: NOT440_WEEKLY_RESET },
+  ]);
+  const { recordUsageCapFromEvents } = await import("../runners/usage-cap.js");
+  recordUsageCapFromEvents(
+    [
+      {
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "seven_day",
+          resetsAt: Math.floor(Date.parse(NOT440_WEEKLY_RESET) / 1000),
+        },
+      },
+    ],
+    "claude_code",
+    NOT440_NOW
+  );
+  const claude = getRuntimeCapacitySnapshot(NOT440_NOW).runtimes.find((r) => r.runtime === "claude_code")!;
+  assert.equal(claude.activeCap!.windowRole, "weekly");
+  assert.equal(claude.activeCap!.unavailableUntil, NOT440_WEEKLY_RESET);
+  clearAllRuntimeAvailability();
+});

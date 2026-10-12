@@ -5,20 +5,27 @@
 // profiles sharing one account produce one entry — each carrying whatever
 // windows the provider actually reported.
 //
-// Connection health, hard-cap availability, and remaining capacity stay
-// separate states: this service never reads `runtime_availability` and its
-// output never implies health. Only normalized snapshots leave this module —
-// evidence refs and raw provider payloads stay server-side.
+// Connection health and remaining capacity stay separate states: output never
+// implies health. Only normalized snapshots leave this module — evidence refs
+// and raw provider payloads stay server-side.
+//
+// NOT-440: an active hard cap (the same `runtime_availability` row that blocks
+// admission) rides alongside the windows as `activeCap`; stored snapshots are
+// never rewritten, and the overlay disappears with the row's lazy cleanup.
 
 import type {
+  CapacityCapWindowRole,
+  CapacityCriticalRole,
   CapacityUnavailableReason,
   CapacityWindowSnapshot,
   Runtime,
+  RuntimeCapacityActiveCap,
   RuntimeCapacityEntry,
   RuntimeCapacityResponse,
 } from "@agent-dealer/shared";
 import { isWindowKnown, Runtime as RuntimeSchema } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
+import { activeRuntimeCap, type ActiveRuntimeCap } from "../repository/runtime-availability.js";
 import {
   listAllCapacitySnapshots,
   recordCapacitySnapshots,
@@ -102,6 +109,69 @@ function classifyWindow(
   };
 }
 
+const PAIR_RUNTIMES: ReadonlySet<Runtime> = new Set(["claude_code", "codex_local", "muse_code"]);
+const CURSOR_BILLING_WINDOW_KEY = "billing_cycle";
+
+/** Structured provider limit types that name a compact critical window. */
+const LIMIT_TYPE_ROLE: Record<string, CapacityCriticalRole> = {
+  five_hour: "five_hour",
+  seven_day: "weekly",
+};
+
+/** A cap reset and a snapshot reset within this distance name the same boundary. */
+const RESET_MATCH_TOLERANCE_MS = 60_000;
+
+/** The compact role a stored window presents under, or null when it never renders compactly. */
+function compactRole(runtime: Runtime, w: CapacityWindowSnapshot): CapacityCapWindowRole | null {
+  if (runtime === "cursor_local") return w.windowKey === CURSOR_BILLING_WINDOW_KEY ? "billing_cycle" : null;
+  if (PAIR_RUNTIMES.has(runtime)) return w.criticalRole;
+  return null;
+}
+
+/**
+ * Which compact window an active cap exhausts: structured limit metadata
+ * first (a reported non-compact limit stays unmapped), then a tightly bounded
+ * match between the provider reset and exactly one tagged snapshot reset.
+ * A fallback-cooldown cap (no provider reset) is never matched.
+ */
+export function resolveCapWindowRole(
+  runtime: Runtime,
+  cap: Pick<ActiveRuntimeCap, "providerResetAt" | "limitType">,
+  windows: CapacityWindowSnapshot[]
+): CapacityCapWindowRole | null {
+  if (cap.limitType !== null) {
+    const role = LIMIT_TYPE_ROLE[cap.limitType] ?? null;
+    return role !== null && PAIR_RUNTIMES.has(runtime) ? role : null;
+  }
+  if (cap.providerResetAt === null) return null;
+  const capResetMs = Date.parse(cap.providerResetAt);
+  if (!Number.isFinite(capResetMs)) return null;
+  const matched = new Set<CapacityCapWindowRole>();
+  for (const w of windows) {
+    const role = compactRole(runtime, w);
+    if (role === null || w.resetAt === null) continue;
+    const resetMs = Date.parse(w.resetAt);
+    if (Number.isFinite(resetMs) && Math.abs(resetMs - capResetMs) <= RESET_MATCH_TOLERANCE_MS) {
+      matched.add(role);
+    }
+  }
+  return matched.size === 1 ? [...matched][0]! : null;
+}
+
+function activeCapFor(
+  runtime: Runtime,
+  windows: CapacityWindowSnapshot[],
+  nowMs: number
+): RuntimeCapacityActiveCap | null {
+  const cap = activeRuntimeCap(runtime, nowMs);
+  if (cap === null) return null;
+  return {
+    unavailableUntil: cap.unavailableUntil,
+    reason: cap.reason,
+    windowRole: resolveCapWindowRole(runtime, cap, windows),
+  };
+}
+
 /**
  * Read model for `GET /api/runtime-capacity`: every configured runtime, its
  * windows with freshness applied, and an explicit unavailable reason whenever
@@ -122,14 +192,15 @@ export function getRuntimeCapacitySnapshot(nowMs = Date.now()): RuntimeCapacityR
   const entries: RuntimeCapacityEntry[] = [...runtimes]
     .sort()
     .map((runtime): RuntimeCapacityEntry => {
-      const windows = (byRuntime.get(runtime) ?? []).map((w) => classifyWindow(w, nowMs).snapshot);
+      const raw = byRuntime.get(runtime) ?? [];
+      const windows = raw.map((w) => classifyWindow(w, nowMs).snapshot);
       const knownCount = windows.filter((w) => w.unavailableReason === null).length;
       let unavailableReason: CapacityUnavailableReason | null = null;
       if (knownCount === 0) {
         const first = windows.find((w) => w.unavailableReason)?.unavailableReason;
         unavailableReason = first ?? "missing";
       }
-      return { runtime, windows, unavailableReason };
+      return { runtime, windows, unavailableReason, activeCap: activeCapFor(runtime, raw, nowMs) };
     });
   return { runtimes: entries, generatedAt: new Date(nowMs).toISOString() };
 }
