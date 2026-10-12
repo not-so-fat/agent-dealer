@@ -387,7 +387,7 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
 
   const fail = (e: unknown) => onError(String(e));
 
-  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, liveProgress, latestSessionFailure, branchTipStatus, queued, queueEntry, capWait } = detail;
+  const { issue, timeline, humanActions, usageSummary, readiness, humanWaitMs, interventionCount, latestWorkflowInstance, activeWorkerSession, liveProgress, latestSessionFailure, branchTipStatus, queued, queueEntry, capWait, pendingSnapshotChangedFields } = detail;
   const developerAgent = agents.find((a) => a.id === issue.developerAgentId);
   const developerBlocked = developerAgent && !developerAgent.healthy;
   const developerBlockReason = developerAgent?.issues[0]?.message ?? "Developer agent is unhealthy";
@@ -400,8 +400,14 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   const isParkedForSwap =
     issue.status === "needs_human" &&
     openActions.some((a) => a.actionType === "attempts_exhausted" || a.actionType === "policy_escalation");
-  const canEdit = readiness.ok === false || openActions.some((a) => a.actionType === "product_scope_decision");
+  const hasRunningWorker = activeWorkerSession?.status === "running";
+  const hasOpenScopeDecision = openActions.some((a) => a.actionType === "product_scope_decision");
   const hasActiveWorkflow = latestWorkflowInstance != null && latestWorkflowInstance.completedAt === null;
+  // NOT-422: a product-scope pause on an active workflow is contract-editable
+  // only while no worker runs — the server additionally requires nothing
+  // pending/leased and answers 409 there when a resume won the race.
+  const canEdit =
+    readiness.ok === false || (hasOpenScopeDecision && !hasRunningWorker);
   // NOT-363: the task-text editor stays available for every pre-execution
   // `ready` issue, even when readiness already passes — the old gate only
   // opened it on missing fields or an open scope decision.
@@ -410,12 +416,19 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
   // NOT-363: Reload from Linear only for an eligible Linear-sourced issue —
   // `ready`, no active workflow, no running worker. The server re-checks all
   // of this, so a race answers 409 there instead of landing on a live snapshot.
-  const hasRunningWorker = activeWorkerSession?.status === "running";
+  // NOT-422: the parked exception — a `needs_human` product-scope pause with an
+  // active workflow reloads the same way while no worker runs.
   const canReloadSource =
     issue.source === "linear" &&
-    issue.status === "ready" &&
-    !hasActiveWorkflow &&
-    !hasRunningWorker;
+    !hasRunningWorker &&
+    ((issue.status === "ready" && !hasActiveWorkflow) ||
+      (issue.status === "needs_human" && hasActiveWorkflow && hasOpenScopeDecision));
+  // NOT-422: the parked scope pause keeps the scope action open across an edit
+  // or reload — a Resume still applies the amended task to the next snapshot.
+  const isParkedScopePause =
+    issue.status === "needs_human" && hasActiveWorkflow && hasOpenScopeDecision;
+  const pendingSnapshotFields = pendingSnapshotChangedFields ?? [];
+  const showPendingSnapshotNotice = isParkedScopePause && pendingSnapshotFields.length > 0;
   // NOT-239: pre-execution Close is for `ready` with no active workflow only — it
   // must never alias Abort on running work, and terminal issues have nothing to close.
   const canClose = issue.status === "ready" && !hasActiveWorkflow;
@@ -480,7 +493,7 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
       setReloadConfirming(false);
       refresh();
     } catch (e) {
-      // A 409 means admission or a worker won the race: close the
+      // A 409 means admission, a resume, or a worker won the race: close the
       // confirmation and refresh to the live state instead of a stale success.
       setReloadConfirming(false);
       fail(e);
@@ -1006,6 +1019,21 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
           </div>
         )}
 
+        {/* NOT-422: the amended task/contract at a scope pause is pending until
+            Resume — the frozen snapshot still carries the old text, and Resume
+            stays a separate explicit action so the operator inspects first. */}
+        {showPendingSnapshotNotice && (
+          <div className="mb-4 p-3 rounded border border-cyber-teal/30 bg-cyber-teal/5">
+            <p className="text-xs text-cyber-teal font-medium uppercase tracking-wide">
+              Amended contract pending for the next snapshot
+            </p>
+            <p className="text-sm text-white/80 mt-0.5">
+              Changed: {pendingSnapshotFields.join(", ")}. Resume applies the amended
+              task to the next developer round — the running snapshot is unchanged until then.
+            </p>
+          </div>
+        )}
+
         {(showTaskEditor || canReloadSource) && !editing && !reloadConfirming && (
           <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1">
             {showTaskEditor && (
@@ -1027,7 +1055,9 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
         )}
         {/* NOT-363: the reload replaces local title/description/acceptance-criteria
             edits, so it confirms first — repository, agents, and queue position
-            are unchanged, and nothing is written back to Linear. */}
+            are unchanged, and nothing is written back to Linear.
+            NOT-422: at a parked scope pause the workflow, PR, branch, and open
+            scope action are likewise preserved — Resume still applies the result. */}
         {canReloadSource && reloadConfirming && !editing && (
           <div className="mb-4 p-3 rounded border border-cyber-teal/30 bg-cyber-teal/5 space-y-2">
             <p className="text-sm text-white/90 font-medium">
@@ -1035,8 +1065,10 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
             </p>
             <p className="text-sm text-white/70">
               This replaces the local title, description, and acceptance criteria with the
-              latest ticket text. Local edits will be lost. Repository, agents, and queue
-              position are unchanged, and nothing is written back to Linear.
+              latest ticket text. Local edits will be lost.{" "}
+              {isParkedScopePause
+                ? "The workflow, PR, branch, and open scope decision are preserved — Resume applies the reloaded contract to the next snapshot."
+                : "Repository, agents, and queue position are unchanged, and nothing is written back to Linear."}
             </p>
             <div className="flex gap-2">
               <button

@@ -241,13 +241,20 @@ export function getTaskSnapshot(issue: Issue): TaskSnapshotContent {
  * NOT-358: the same parked-edit surface covers an open `policy_escalation` (e.g. after a
  * developer budget failure) so the owner can swap the developer and/or reviewer agent
  * profile and resume in the same worktree instead of recreating the issue.
+ *
+ * NOT-422: an open `product_scope_decision` on an active workflow is contract-editable
+ * the same way — title/description/acceptance-criteria only (no agent swap, see
+ * `parkedEditableFields`) — so the operator can adopt an amended contract and resume
+ * without aborting. A running session is checked separately by `applyParkedEdit` and
+ * the PATCH guard, which fail closed with 409.
  */
 export function canEditParkedIssue(issue: Issue): boolean {
   if (issue.status !== "needs_human") return false;
   if (!getActiveWorkflowInstance(issue.id)) return false;
   if (
     !findOpenHumanAction(issue.id, "attempts_exhausted") &&
-    !findOpenHumanAction(issue.id, "policy_escalation")
+    !findOpenHumanAction(issue.id, "policy_escalation") &&
+    !findOpenHumanAction(issue.id, "product_scope_decision")
   ) {
     return false;
   }
@@ -303,6 +310,41 @@ export const PARKED_EDITABLE_FIELDS: ReadonlySet<string> = new Set([
   "reviewerAgentId",
 ]);
 
+/**
+ * NOT-422: the task-text subset of `PARKED_EDITABLE_FIELDS`. A product-scope pause
+ * adopts an amended contract only — repository, agents, policy, rounds, PR, branch
+ * and worktree all stay exactly as the running workflow saw them, so an agent swap
+ * at that park is a 409, not a silent accept.
+ */
+export const PARKED_TASK_EDITABLE_FIELDS: ReadonlySet<string> = new Set([
+  "title",
+  "description",
+  "acceptanceCriteria",
+]);
+
+/**
+ * NOT-422: which parked-edit fields the issue's open actions allow. An open
+ * `attempts_exhausted` or `policy_escalation` keeps the full re-scope-plus-swap
+ * surface; a pure `product_scope_decision` park (neither of those open) allows
+ * the task-text subset only.
+ */
+export function parkedEditableFields(issueId: string): ReadonlySet<string> {
+  if (
+    findOpenHumanAction(issueId, "attempts_exhausted") ||
+    findOpenHumanAction(issueId, "policy_escalation")
+  ) {
+    return PARKED_EDITABLE_FIELDS;
+  }
+  return PARKED_TASK_EDITABLE_FIELDS;
+}
+
+/** Human-readable field list for the parked-edit 409, matching the allowed set. */
+export function parkedEditableFieldsLabel(issueId: string): string {
+  return parkedEditableFields(issueId) === PARKED_EDITABLE_FIELDS
+    ? "title, description, acceptanceCriteria, developerAgentId and reviewerAgentId"
+    : "title, description and acceptanceCriteria";
+}
+
 export type ParkedEditResult = { ok: true; issue: Issue } | { ok: false; code: number; error: string };
 
 /**
@@ -324,12 +366,13 @@ export function applyParkedEdit(issueId: string, patch: UpdateIssueInput): Parke
       if (!getActiveWorkflowInstance(issueId) || !canEditParkedIssue(fresh)) {
         return { ok: false, code: 409, error: "Cannot edit an issue with an active workflow" };
       }
-      const blocked = Object.keys(patch).filter((k) => !PARKED_EDITABLE_FIELDS.has(k));
+      const allowed = parkedEditableFields(issueId);
+      const blocked = Object.keys(patch).filter((k) => !allowed.has(k));
       if (blocked.length > 0) {
         return {
           ok: false,
           code: 409,
-          error: `Only title, description, acceptanceCriteria, developerAgentId and reviewerAgentId can be edited while parked (got: ${blocked.join(", ")})`,
+          error: `Only ${parkedEditableFieldsLabel(issueId)} can be edited while parked (got: ${blocked.join(", ")})`,
         };
       }
       for (const role of ["developerAgentId", "reviewerAgentId"] as const) {
@@ -374,12 +417,11 @@ export function applyParkedEdit(issueId: string, patch: UpdateIssueInput): Parke
 }
 
 /**
- * Re-freezes the snapshot when the operator edited title/description/criteria
- * (or the contract compiled from the description); returns the changed fields
- * (empty = no-op). Source and compiled contract always re-freeze atomically —
- * one artifact write carries both, so they can never diverge.
+ * Live-vs-frozen task diff behind both the resume re-freeze and the Issue Detail
+ * pending-snapshot notice: the fields a resume would re-freeze (empty = in sync).
+ * Read-only — freezing stays with `refreshTaskSnapshotIfEdited` below.
  */
-function refreshTaskSnapshotIfEdited(issue: Issue): string[] {
+export function diffTaskSnapshotFromLive(issue: Issue): string[] {
   const frozen = getTaskSnapshot(issue);
   const liveContract = tryCompileContract(issue.description);
   const changed: string[] = [];
@@ -389,6 +431,17 @@ function refreshTaskSnapshotIfEdited(issue: Issue): string[] {
   if (JSON.stringify(frozen.executionContract ?? null) !== JSON.stringify(liveContract ?? null)) {
     changed.push("executionContract");
   }
+  return changed;
+}
+
+/**
+ * Re-freezes the snapshot when the operator edited title/description/criteria
+ * (or the contract compiled from the description); returns the changed fields
+ * (empty = no-op). Source and compiled contract always re-freeze atomically —
+ * one artifact write carries both, so they can never diverge.
+ */
+function refreshTaskSnapshotIfEdited(issue: Issue): string[] {
+  const changed = diffTaskSnapshotFromLive(issue);
   if (changed.length > 0) freezeTaskSnapshot(issue);
   return changed;
 }
@@ -2468,9 +2521,13 @@ export function resolveHumanActionAndAdvance(
     // read the re-scoped task. An unedited issue writes nothing.
     // NOT-358: a policy_escalation park is editable the same way (title/description/
     // criteria as well as agent profiles), so its resume re-freezes too.
+    // NOT-422: a product_scope_decision resume re-freezes the amended contract the
+    // same way — the pre-start branch returned above, so this is the active-workflow
+    // pause only. The one-shot scope note still rides the next developer payload.
     if (
       (action.actionType === "attempts_exhausted" && resolution.choice === "retry") ||
-      (action.actionType === "policy_escalation" && resolution.choice === "resume")
+      (action.actionType === "policy_escalation" && resolution.choice === "resume") ||
+      (action.actionType === "product_scope_decision" && resolution.choice === "resume")
     ) {
       const changedFields = refreshTaskSnapshotIfEdited(issueNow);
       if (changedFields.length > 0) {
