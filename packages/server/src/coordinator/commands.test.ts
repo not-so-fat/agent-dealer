@@ -35,11 +35,13 @@ const {
   resolveHumanActionAndAdvance,
   resolveHumanActionAndAdvanceAsync,
   getTaskSnapshot,
+  diffTaskSnapshotFromLive,
   canEditParkedIssue,
   parkCapWait,
   TASK_SNAPSHOT_ARTIFACT_KIND,
   checkIssueReadiness,
   abortIssue} = await import("./commands.js");
+const { replaceSourceAttachments, listSourceAttachments } = await import("../repository/source-attachments.js");
 const { ReviewerResult } = await import("./reviewer-result.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { setMergePrForTests, clearFinalizeInflightForTests } = await import("./auto-merge.js");
@@ -658,6 +660,70 @@ test("NOT-422: product-scope resume after an edit freezes one new snapshot befor
 test("NOT-422: product-scope resume with no edit creates no new snapshot artifact or refresh event", async () => {
   const { issueId, actionId } = await parkAtProductScope();
   const resolved = resolveHumanActionAndAdvance(actionId, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+  assert.equal(snapshotArtifacts(issueId).length, 1);
+  assert.equal(listWorkflowEventsForIssue(issueId).filter((e) => e.type === "task_snapshot.refreshed").length, 0);
+});
+
+test("NOT-422: attachment-only row change re-freezes the manifest on product-scope resume", async () => {
+  const { issueId, actionId } = await parkAtProductScope();
+  assert.equal(snapshotArtifacts(issueId).length, 1);
+  // The post-reload row state with the text untouched: a new file manifest.
+  replaceSourceAttachments(issueId, [
+    {
+      linearAttachmentId: "att-file-1",
+      kind: "file",
+      title: "repro.tar.gz",
+      safeFileName: "repro.tar.gz",
+      blobPath: "/blobs/repro.tar.gz",
+      contentType: "application/gzip",
+      sizeBytes: 12,
+      sha256: "v2-sha",
+      url: "https://uploads.linear.app/abc/repro.tar.gz",
+    },
+  ]);
+  assert.deepEqual(diffTaskSnapshotFromLive(getIssue(issueId)!), ["sourceAttachments"]);
+
+  const resolved = resolveHumanActionAndAdvance(actionId, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+
+  assert.equal(snapshotArtifacts(issueId).length, 2);
+  assert.deepEqual(getTaskSnapshot(getIssue(issueId)!).sourceAttachments, listSourceAttachments(issueId));
+  const events = listWorkflowEventsForIssue(issueId);
+  const refreshed = events.filter((e) => e.type === "task_snapshot.refreshed");
+  assert.equal(refreshed.length, 1);
+  assert.deepEqual(JSON.parse(refreshed[0].payloadJson!).changedFields, ["sourceAttachments"]);
+  const types = events.map((e) => e.type);
+  assert.ok(types.indexOf("task_snapshot.refreshed") < types.lastIndexOf("repair.started"));
+});
+
+test("NOT-422: product-scope resume with an unchanged attachment manifest creates no refresh", async () => {
+  const issueId = newIssue();
+  replaceSourceAttachments(issueId, [
+    {
+      linearAttachmentId: "att-file-1",
+      kind: "file",
+      title: "repro.tar.gz",
+      safeFileName: "repro.tar.gz",
+      blobPath: "/blobs/repro.tar.gz",
+      contentType: "application/gzip",
+      sizeBytes: 12,
+      sha256: "v1-sha",
+      url: "https://uploads.linear.app/abc/repro.tar.gz",
+    },
+    { linearAttachmentId: "att-link-1", kind: "link", title: "Design doc", url: "https://docs.example.com/spec" },
+  ]);
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, {
+    kind: "verdict",
+    result: { ...okReview("escalated"), productScopeQuestion: "Still needed?" },
+  });
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "product_scope_decision")!;
+  // Rows frozen at start, untouched since — the diff must be empty, not a
+  // false-positive manifest change from the row round-trip.
+  assert.deepEqual(diffTaskSnapshotFromLive(getIssue(issueId)!), []);
+  const resolved = resolveHumanActionAndAdvance(action.id, "yusuke", "resume");
   assert.equal(resolved.ok, true);
   assert.equal(snapshotArtifacts(issueId).length, 1);
   assert.equal(listWorkflowEventsForIssue(issueId).filter((e) => e.type === "task_snapshot.refreshed").length, 0);

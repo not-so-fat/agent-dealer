@@ -1,6 +1,7 @@
 // NOT-364: atomic Linear attachment import and reload reconciliation.
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -660,7 +661,8 @@ test("NOT-422: parked scope reload recompiles the contract, reconciles attachmen
   assert.ok(reloaded.acceptanceCriteria.includes("Simulator proof attached"));
 
   // Attachments reconciled atomically: changed bytes land, the new file
-  // appears, the removed link disappears, and the old blob is pruned.
+  // appears, and the removed link disappears. The replaced blob is retained —
+  // the frozen snapshot still references it until Resume re-freezes.
   const rows = listSourceAttachments(id);
   assert.deepEqual(
     rows.map((r) => r.linearAttachmentId).sort(),
@@ -669,7 +671,7 @@ test("NOT-422: parked scope reload recompiles the contract, reconciles attachmen
   const changed = rows.find((r) => r.linearAttachmentId === "att-file-1")!;
   assert.equal(changed.sha256, createHash("sha256").update(TARBALL_V2).digest("hex"));
   assert.deepEqual(fs.readFileSync(changed.blobPath!), TARBALL_V2);
-  assert.ok(!fs.existsSync(oldBlob));
+  assert.ok(fs.existsSync(oldBlob), "blob still referenced by the frozen snapshot is retained");
 
   // Everything else is preserved: repository/configuration, workflow
   // instance, PR/head/branch, rounds, counters, sessions, and the open action.
@@ -709,6 +711,78 @@ test("NOT-422: parked scope reload recompiles the contract, reconciles attachmen
   assert.ok(frozenAfter.acceptanceCriteria.includes("[operator] Clean-machine proof attached"));
   assert.deepEqual(frozenAfter.sourceAttachments, frozenBefore.sourceAttachments);
   assert.ok(frozenAfter.sourceAttachments!.some((a) => a.linearAttachmentId === "att-link-1"));
+  await app.close();
+});
+
+test("NOT-422: attachment-only parked reload shows sourceAttachments pending and Resume re-freezes the manifest", async () => {
+  downloadBytes.set(FILE_URL, TARBALL_V1);
+  const app = await buildApp();
+  const id = await parkScopeWithAttachments(app);
+  const { getIssue } = await import("../repository/issues.js");
+  const { listWorkflowEventsForIssue } = await import("../repository/workflow-events.js");
+  const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
+  const { getTaskSnapshot, resolveHumanActionAndAdvance, TASK_SNAPSHOT_ARTIFACT_KIND } = await import(
+    "../coordinator/commands.js"
+  );
+  const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
+  const { materializeSourceAttachments } = await import("../coordinator/source-attachments.js");
+
+  const oldBlob = listSourceAttachments(id).find((r) => r.kind === "file")!.blobPath!;
+  const snapshotsBefore = listArtifactsForIssue(id).filter((a) => a.kind === TASK_SNAPSHOT_ARTIFACT_KIND).length;
+  assert.equal(snapshotsBefore, 1);
+
+  // Linear changed only the inputs: identical contract text (and the same
+  // derived title), new bytes for the file, the link removed.
+  downloadBytes.set(FILE_URL, TARBALL_V2);
+  linearNode = {
+    ...parkedNodeWith(PARKED_CONTRACT_V1, [{ id: "att-file-1", title: "repro.tar.gz", url: FILE_URL }]),
+    title: "import me",
+  };
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/reload-source` });
+  assert.equal(res.statusCode, 200, res.body);
+
+  // Text byte-identical, rows swapped, the replaced blob retained for the
+  // frozen snapshot that still references it.
+  const parked = getIssue(id)!;
+  assert.equal(parked.title, BASE_LINEAR.title);
+  assert.equal(parked.description, PARKED_CONTRACT_V1);
+  assert.ok(parked.acceptanceCriteria!.includes("[operator] Clean-machine proof attached"));
+  assert.deepEqual(
+    listSourceAttachments(id).map((r) => r.linearAttachmentId),
+    ["att-file-1"]
+  );
+  assert.ok(fs.existsSync(oldBlob), "replaced blob retained while the frozen snapshot references it");
+  assert.ok(getTaskSnapshot(parked).sourceAttachments!.some((a) => a.linearAttachmentId === "att-link-1"));
+
+  // Issue Detail reads the amended inputs as pending for the next snapshot —
+  // and only the manifest is pending.
+  const detail = (await app.inject({ method: "GET", url: `/api/issues/${id}` })).json() as {
+    pendingSnapshotChangedFields: string[];
+  };
+  assert.deepEqual(detail.pendingSnapshotChangedFields, ["sourceAttachments"]);
+
+  // Resume re-freezes exactly one new snapshot carrying the amended manifest.
+  const action = listHumanActionsForIssue(id).find((a) => a.actionType === "product_scope_decision")!;
+  const resolved = resolveHumanActionAndAdvance(action.id, "operator", "resume");
+  assert.equal(resolved.ok, true);
+  const snapshots = listArtifactsForIssue(id).filter((a) => a.kind === TASK_SNAPSHOT_ARTIFACT_KIND);
+  assert.equal(snapshots.length, snapshotsBefore + 1);
+  const events = listWorkflowEventsForIssue(id);
+  const refreshed = events.filter((e) => e.type === "task_snapshot.refreshed");
+  assert.equal(refreshed.length, 1);
+  assert.deepEqual(JSON.parse(refreshed[0].payloadJson!).changedFields, ["sourceAttachments"]);
+  const types = events.map((e) => e.type);
+  assert.ok(types.indexOf("task_snapshot.refreshed") < types.lastIndexOf("repair.started"));
+
+  const snap = getTaskSnapshot(getIssue(id)!);
+  assert.equal(snap.sourceAttachments!.length, 1);
+  assert.equal(snap.sourceAttachments![0]!.sha256, createHash("sha256").update(TARBALL_V2).digest("hex"));
+  // The next round materializes the amended bytes — never "stored bytes are missing".
+  const worktree = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-scope-att-only-"));
+  execFileSync("git", ["init", "-q"], { cwd: worktree });
+  const materialized = materializeSourceAttachments(worktree, snap.sourceAttachments);
+  assert.equal(materialized.length, 1);
+  assert.deepEqual(fs.readFileSync(path.join(worktree, materialized[0]!.relativePath)), TARBALL_V2);
   await app.close();
 });
 

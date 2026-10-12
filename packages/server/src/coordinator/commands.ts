@@ -417,6 +417,26 @@ export function applyParkedEdit(issueId: string, patch: UpdateIssueInput): Parke
 }
 
 /**
+ * Stable identity-plus-bytes key for one attachment manifest entry. blobPath is
+ * excluded: it is content-addressed from the compared fields under an
+ * environment-local root, so it must never count as a task change.
+ */
+function attachmentDiffKey(r: SourceAttachmentRecord): string {
+  return JSON.stringify({
+    linearAttachmentId: r.linearAttachmentId,
+    kind: r.kind,
+    title: r.title,
+    safeFileName: r.safeFileName ?? null,
+    contentType: r.contentType ?? null,
+    sizeBytes: r.sizeBytes ?? null,
+    sha256: r.sha256 ?? null,
+    url: r.url,
+    subtitle: r.subtitle ?? null,
+    source: r.source ?? null,
+  });
+}
+
+/**
  * Live-vs-frozen task diff behind both the resume re-freeze and the Issue Detail
  * pending-snapshot notice: the fields a resume would re-freeze (empty = in sync).
  * Read-only — freezing stays with `refreshTaskSnapshotIfEdited` below.
@@ -431,14 +451,24 @@ export function diffTaskSnapshotFromLive(issue: Issue): string[] {
   if (JSON.stringify(frozen.executionContract ?? null) !== JSON.stringify(liveContract ?? null)) {
     changed.push("executionContract");
   }
+  // NOT-422: a parked Linear reload can swap the attachment rows without
+  // touching the text. Without this, an attachment-only change never
+  // re-freezes on resume — the next round keeps the stale manifest (and its
+  // pruned blobs) and the amended inputs are never shown as pending.
+  const frozenManifest = (frozen.sourceAttachments ?? []).map(attachmentDiffKey).sort();
+  const liveManifest = listSourceAttachments(issue.id).map(attachmentDiffKey).sort();
+  if (JSON.stringify(frozenManifest) !== JSON.stringify(liveManifest)) {
+    changed.push("sourceAttachments");
+  }
   return changed;
 }
 
 /**
- * Re-freezes the snapshot when the operator edited title/description/criteria
- * (or the contract compiled from the description); returns the changed fields
- * (empty = no-op). Source and compiled contract always re-freeze atomically —
- * one artifact write carries both, so they can never diverge.
+ * Re-freezes the snapshot when the operator edited title/description/criteria,
+ * the attachment manifest (or the contract compiled from the description);
+ * returns the changed fields (empty = no-op). Source and compiled contract
+ * always re-freeze atomically — one artifact write carries both, so they can
+ * never diverge.
  */
 function refreshTaskSnapshotIfEdited(issue: Issue): string[] {
   const changed = diffTaskSnapshotFromLive(issue);

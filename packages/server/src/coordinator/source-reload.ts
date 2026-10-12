@@ -22,6 +22,7 @@ import { listWorkItemsForIssue } from "../repository/work-items.js";
 import { appendWorkflowEvent, getActiveWorkflowInstance } from "../repository/workflow-events.js";
 import { getActiveWorkerSessionForIssue } from "../repository/worker-sessions.js";
 import { getLinearIssue } from "../adapters/linear-inbox.js";
+import { getTaskSnapshot } from "./commands.js";
 import {
   discardStaged,
   pruneDisusedBlobs,
@@ -212,7 +213,16 @@ export async function reloadIssueSourceFromLinear(
       if (!next) throw Object.assign(new Error("Not found"), { code: 404 });
       return next;
     })();
-    pruneDisusedBlobs(prevAttachments, nextAttachmentRecords);
+    // NOT-422: a parked reload swaps the live rows while the frozen snapshot
+    // still references the old manifest — until a resume re-freezes, pruning
+    // those blobs would strand the next materialization on missing bytes.
+    // Retain anything the frozen snapshot still lists (a leftover is
+    // retained-history, never a correctness issue); the pre-execution path has
+    // no frozen snapshot, so it keeps pruning replaced/removed blobs.
+    const liveRecords = getActiveWorkflowInstance(issueId)
+      ? [...nextAttachmentRecords, ...(getTaskSnapshot(updated).sourceAttachments ?? [])]
+      : nextAttachmentRecords;
+    pruneDisusedBlobs(prevAttachments, liveRecords);
     return { ok: true, issue: updated };
   } catch (err) {
     // The staged bytes landed on content-addressed paths the old rows never
