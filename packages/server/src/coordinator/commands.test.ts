@@ -16,7 +16,7 @@ const { createIssue, getIssue, updateIssue } = await import("../repository/issue
 const { listWorkflowEventsForIssue, getActiveWorkflowInstance } = await import(
   "../repository/workflow-events.js"
 );
-const { createHumanAction, getHumanAction, listHumanActionsForIssue } = await import(
+const { createHumanAction, getHumanAction, listHumanActionsForIssue, resolveHumanAction } = await import(
   "../repository/human-actions.js"
 );
 const { setResumeLiveHeadReaderForTests } = await import("./resume-live-head.js");
@@ -487,6 +487,180 @@ test("NOT-185: closing an edited attempts_exhausted issue does not re-freeze the
   const resolved = resolveHumanActionAndAdvance(actionId, "yusuke", "close");
   assert.equal(resolved.ok, true);
   assert.equal(snapshotArtifacts(issueId).length, 1);
+});
+
+/** NOT-422: park at an active-workflow `product_scope_decision` the way a reviewer's escalated verdict does. */
+async function parkAtProductScope(): Promise<{ issueId: string; actionId: string }> {
+  const issueId = newIssue();
+  startWorkflow(issueId);
+  await complete(issueId, cleanHandoff);
+  await complete(issueId, {
+    kind: "verdict",
+    result: { ...okReview("escalated"), productScopeQuestion: "Should deleted users retain sessions?" },
+  });
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "product_scope_decision")!;
+  return { issueId, actionId: action.id };
+}
+
+test("NOT-422: canEditParkedIssue is true at an open product_scope_decision with nothing pending or leased", async () => {
+  const { issueId } = await parkAtProductScope();
+  assert.equal(canEditParkedIssue(getIssue(issueId)!), true);
+
+  const instance = getActiveWorkflowInstance(issueId)!;
+  const item = enqueueWorkItem({
+    issueId,
+    workflowInstanceId: instance.id,
+    kind: "developer",
+    round: 1,
+    payload: {},
+    idempotencyKey: `${instance.id}:test:n422-pending`,
+  });
+  assert.equal(canEditParkedIssue(getIssue(issueId)!), false, "a pending work item blocks the edit");
+  const leased = claim(issueId);
+  assert.equal(leased.id, item.id);
+  assert.equal(canEditParkedIssue(getIssue(issueId)!), false, "a leased work item blocks the edit");
+  cancelWorkItem(item.id);
+  assert.equal(canEditParkedIssue(getIssue(issueId)!), true);
+});
+
+test("NOT-422: other open action types keep the parked-edit surface closed", async () => {
+  const { issueId, actionId } = await parkAtProductScope();
+  // Close the scope decision without advancing (repository-level): needs_human +
+  // active workflow + no open action is not contract-editable.
+  resolveHumanAction(actionId, "test", { choice: "resume" });
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  assert.equal(canEditParkedIssue(getIssue(issueId)!), false, "no open action");
+  // And a non-contract-editable open action does not open it either.
+  createHumanAction({
+    issueId,
+    actionType: "final_review",
+    reason: "r",
+    question: "q",
+    responseOptions: [{ choice: "merge", label: "Merge" }],
+  });
+  assert.equal(canEditParkedIssue(getIssue(issueId)!), false, "final_review is not contract-editable");
+  // applyParkedEdit fails closed the same way, with no row or event change.
+  const before = getIssue(issueId)!;
+  const eventsBefore = listWorkflowEventsForIssue(issueId).length;
+  const refused = applyParkedEdit(issueId, { title: "Nope" });
+  assert.equal(refused.ok, false);
+  if (refused.ok !== false) return;
+  assert.equal(refused.code, 409);
+  assert.deepEqual(getIssue(issueId)!, before);
+  assert.equal(listWorkflowEventsForIssue(issueId).length, eventsBefore);
+});
+
+test("NOT-422: applyParkedEdit at a scope pause accepts task text but rejects swaps, locked fields, pending items and running sessions", async () => {
+  const { issueId, actionId } = await parkAtProductScope();
+  const before = getIssue(issueId)!;
+
+  const edited = applyParkedEdit(issueId, {
+    title: "Rescoped title",
+    description: "d2",
+    acceptanceCriteria: "It works, and also does Y",
+  });
+  assert.equal(edited.ok, true);
+  if (edited.ok !== true) return;
+  assert.equal(edited.issue.title, "Rescoped title");
+  assert.equal(edited.issue.description, "d2");
+  assert.equal(edited.issue.acceptanceCriteria, "It works, and also does Y");
+  // Everything else stays as the running workflow saw it, the scope action
+  // stays open, and the snapshot still carries the old text until Resume.
+  assert.equal(edited.issue.repo, before.repo);
+  assert.equal(edited.issue.baseBranch, before.baseBranch);
+  assert.equal(edited.issue.developerAgentId, before.developerAgentId);
+  assert.equal(edited.issue.reviewerAgentId, before.reviewerAgentId);
+  assert.equal(edited.issue.branch, before.branch);
+  assert.equal(edited.issue.headSha, before.headSha);
+  assert.equal(getHumanAction(actionId)!.status, "open");
+  assert.equal(snapshotArtifacts(issueId).length, 1);
+  assert.equal(getTaskSnapshot(getIssue(issueId)!).description, "d");
+
+  // An agent swap at a scope pause is a 409 — the task-text allowlist names no roles.
+  const swap = applyParkedEdit(issueId, { developerAgentId: BUILTIN_AGENT_CURSOR_ID });
+  assert.equal(swap.ok, false);
+  if (swap.ok !== false) return;
+  assert.equal(swap.code, 409);
+  assert.match(swap.error, /Only title, description and acceptanceCriteria can be edited while parked/);
+  assert.equal(getIssue(issueId)!.developerAgentId, before.developerAgentId);
+
+  for (const patch of [{ repo: "acme/other" }, { maxReviewRounds: 5 }, { autoMerge: true }]) {
+    const blocked = applyParkedEdit(issueId, patch);
+    assert.equal(blocked.ok, false, JSON.stringify(patch));
+    if (blocked.ok !== false) return;
+    assert.equal(blocked.code, 409);
+  }
+
+  // A pending work item blocks the edit; cancelling it re-opens the surface.
+  const instance = getActiveWorkflowInstance(issueId)!;
+  const item = enqueueWorkItem({
+    issueId,
+    workflowInstanceId: instance.id,
+    kind: "developer",
+    round: 1,
+    payload: {},
+    idempotencyKey: `${instance.id}:test:n422-pending-2`,
+  });
+  const queued = applyParkedEdit(issueId, { title: "Racing edit" });
+  assert.equal(queued.ok, false);
+  if (queued.ok !== false) return;
+  assert.equal(queued.code, 409);
+  cancelWorkItem(item.id);
+  assert.equal(applyParkedEdit(issueId, { title: "After cancel" }).ok, true);
+
+  // An actively running session blocks the edit even with nothing pending/leased.
+  const session = createWorkerSession({
+    issueId,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "claude_code",
+  });
+  startSession(session.id);
+  const running = applyParkedEdit(issueId, { title: "Racing session" });
+  assert.equal(running.ok, false);
+  if (running.ok !== false) return;
+  assert.equal(running.code, 409);
+  assert.match(running.error, /actively running session/);
+  completeSession(session.id, { status: "done" });
+  const afterSession = applyParkedEdit(issueId, { title: "After session" });
+  assert.equal(afterSession.ok, true);
+});
+
+test("NOT-422: product-scope resume after an edit freezes one new snapshot before repair.started, note still riding", async () => {
+  const { issueId, actionId } = await parkAtProductScope();
+  assert.equal(snapshotArtifacts(issueId).length, 1);
+  updateIssue(issueId, { description: "d2", acceptanceCriteria: "It works, and also does Y" });
+
+  const resolved = resolveHumanActionAndAdvance(actionId, "yusuke", "resume", { note: "Scope says Y" });
+  assert.equal(resolved.ok, true);
+
+  assert.equal(snapshotArtifacts(issueId).length, 2);
+  const snap = getTaskSnapshot(getIssue(issueId)!);
+  assert.equal(snap.description, "d2");
+  assert.equal(snap.acceptanceCriteria, "It works, and also does Y");
+  assert.equal(snap.title, "Coordinate me");
+
+  const events = listWorkflowEventsForIssue(issueId);
+  const refreshed = events.filter((e) => e.type === "task_snapshot.refreshed");
+  assert.equal(refreshed.length, 1);
+  assert.deepEqual(JSON.parse(refreshed[0].payloadJson!).changedFields, ["description", "acceptanceCriteria"]);
+  assert.equal(JSON.parse(refreshed[0].payloadJson!).actionId, actionId);
+  assert.equal(refreshed[0].actorType, "human");
+  const types = events.map((e) => e.type);
+  assert.ok(types.indexOf("task_snapshot.refreshed") < types.lastIndexOf("repair.started"));
+  const pending = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
+  assert.deepEqual(pending.map((i) => [i.kind, i.round]), [["developer", 1]]);
+  // The one-shot scope-decision note still accompanies that same work item.
+  assert.equal((JSON.parse(pending[0].payloadJson!) as { scopeDecisionNote?: string }).scopeDecisionNote, "Scope says Y");
+});
+
+test("NOT-422: product-scope resume with no edit creates no new snapshot artifact or refresh event", async () => {
+  const { issueId, actionId } = await parkAtProductScope();
+  const resolved = resolveHumanActionAndAdvance(actionId, "yusuke", "resume");
+  assert.equal(resolved.ok, true);
+  assert.equal(snapshotArtifacts(issueId).length, 1);
+  assert.equal(listWorkflowEventsForIssue(issueId).filter((e) => e.type === "task_snapshot.refreshed").length, 0);
 });
 
 test("resolving policy_escalation:resume resets the infra-attempt budget without spending a review round", async () => {
