@@ -38,8 +38,49 @@ function parseResetsAt(raw: unknown): Date | null {
   return Number.isFinite(d.getTime()) ? d : null;
 }
 
+/**
+ * Provider reset timestamps embedded in already-classified cap-error text
+ * (NOT-439). ISO-8601 only (`2026-10-12T18:59:01Z`, optional fractional
+ * seconds or numeric offset) — never consulted to decide whether a cap
+ * exists, only to place the boundary of one the cap classifier accepted.
+ */
+const RESET_TIMESTAMP_RE = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})/g;
+
+/**
+ * Shared reset extractor for every hard-cap path (NOT-439): structured
+ * numeric seconds/milliseconds first, then provider reset timestamps in
+ * already-classified cap-error text. Returns the normalized ISO-8601 instant
+ * of the first finite future reset, or null when no trustworthy future reset
+ * is present (absent, past, or malformed). Never creates a cap by itself —
+ * callers invoke it only after their existing cap classifier has matched.
+ */
+export function extractUsageCapReset(
+  input: { resets?: unknown[]; text?: string },
+  nowMs = Date.now()
+): string | null {
+  for (const raw of input.resets ?? []) {
+    const d = parseResetsAt(raw);
+    if (d && d.getTime() > nowMs) return d.toISOString();
+  }
+  if (typeof input.text === "string" && input.text) {
+    for (const candidate of input.text.match(RESET_TIMESTAMP_RE) ?? []) {
+      const ms = Date.parse(candidate);
+      if (Number.isFinite(ms) && ms > nowMs) return new Date(ms).toISOString();
+    }
+  }
+  return null;
+}
+
 function fallbackUntil(nowMs = Date.now()): string {
   return new Date(nowMs + usageCapFallbackCooldownMs()).toISOString();
+}
+
+/** Provider reset when trustworthy, otherwise the configured fallback cooldown. */
+function resolveUnavailableUntil(
+  input: { resets?: unknown[]; text?: string },
+  nowMs: number
+): string {
+  return extractUsageCapReset(input, nowMs) ?? fallbackUntil(nowMs);
 }
 
 function capReason(runtime: Runtime, detail: string): string {
@@ -60,12 +101,12 @@ function signalFromRateLimitInfo(
   nowMs: number
 ): UsageCapDetection | null {
   if (!isHardCapRateLimitInfo(info)) return null;
-  const reset =
-    parseResetsAt(info.resetsAt) ??
-    parseResetsAt(info.overageResetsAt) ??
-    parseResetsAt(info.overage_resets_at) ??
-    parseResetsAt(info.resets_at);
-  const unavailableUntil = reset && reset.getTime() > nowMs ? reset.toISOString() : fallbackUntil(nowMs);
+  const unavailableUntil = resolveUnavailableUntil(
+    {
+      resets: [info.resetsAt, info.overageResetsAt, info.overage_resets_at, info.resets_at],
+    },
+    nowMs
+  );
   const limitType = String(info.rateLimitType ?? info.rate_limit_type ?? "plan");
   return {
     unavailableUntil,
@@ -93,7 +134,7 @@ function signalFromResultError(e: StreamEvent, runtime: Runtime, nowMs: number):
   const text = typeof e.result === "string" ? e.result : "";
   if (!CAP_ERROR_RE.test(text)) return null;
   return {
-    unavailableUntil: fallbackUntil(nowMs),
+    unavailableUntil: resolveUnavailableUntil({ text }, nowMs),
     reason: capReason(runtime, "session ended with cap error"),
     evidence: { result: text.slice(0, 500) },
   };
@@ -135,7 +176,7 @@ function codexCapFromEvents(events: StreamEvent[], runtime: Runtime, nowMs: numb
       }
       if (CAP_ERROR_RE.test(msg)) {
         return {
-          unavailableUntil: fallbackUntil(nowMs),
+          unavailableUntil: resolveUnavailableUntil({ text: msg }, nowMs),
           reason: capReason(runtime, msg.slice(0, 120) || "turn failed"),
           evidence: { turn_failed: err },
         };
@@ -143,7 +184,7 @@ function codexCapFromEvents(events: StreamEvent[], runtime: Runtime, nowMs: numb
     }
     if (e.type === "error" && typeof e.message === "string" && CAP_ERROR_RE.test(e.message)) {
       return {
-        unavailableUntil: fallbackUntil(nowMs),
+        unavailableUntil: resolveUnavailableUntil({ text: e.message }, nowMs),
         reason: capReason(runtime, e.message.slice(0, 120)),
         evidence: { error: e.message },
       };
@@ -219,7 +260,7 @@ export function detectUsageCapFromRawLog(raw: string, runtime: Runtime, nowMs = 
     const haystack = textFallbackHaystack(raw, events);
     if (CAP_FALLBACK_RE.test(haystack)) {
       return {
-        unavailableUntil: fallbackUntil(nowMs),
+        unavailableUntil: resolveUnavailableUntil({ text: haystack }, nowMs),
         reason: capReason(runtime, "stderr/log matched usage-cap pattern"),
         evidence: { matched: haystack.slice(0, 300) },
       };
@@ -272,8 +313,9 @@ export function recordUsageCapFromEvents(
 
 /**
  * NOT-181: Muse's usage-cap signal is the parsed failure kind (runners/muse-code-jsonl.ts), not a
- * Claude-shaped log event. Muse reports no reset time (NOT-177: real cap payload never observed),
- * so the deferral uses the fallback cooldown.
+ * Claude-shaped log event. NOT-439: the 2026-10-12 incident proved Muse does report a reset
+ * timestamp in the failure message (`... resets at 2026-10-12T18:59:01Z`), so the deferral
+ * preserves it and uses the fallback cooldown only when no trustworthy future reset is present.
  */
 export function recordMuseUsageCap(
   failure: { kind: string; message: string } | null,
@@ -281,7 +323,7 @@ export function recordMuseUsageCap(
 ): UsageCapDetection | null {
   if (failure?.kind !== "usage_cap") return null;
   const cap: UsageCapDetection = {
-    unavailableUntil: fallbackUntil(nowMs),
+    unavailableUntil: resolveUnavailableUntil({ text: failure.message }, nowMs),
     reason: capReason("muse_code", failure.message.slice(0, 120) || "usage cap"),
     evidence: { muse_failure: failure },
   };
