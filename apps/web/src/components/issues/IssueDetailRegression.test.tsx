@@ -963,6 +963,109 @@ test("NOT-365: refused delete closes the confirmation, reports, and refreshes wi
   assert.equal(reported, failure);
 });
 
+// NOT-422: product-scope pause contract adoption — the parked scope action
+// keeps Edit, Reload from Linear, and the separate Resume, with the amended
+// task shown as pending for the next snapshot.
+function scopeActionFixture(extra: Partial<HumanAction> = {}): HumanAction {
+  return {
+    id: "77777777-7777-4777-8777-777777777777",
+    issueId: "11111111-1111-4111-8111-111111111111",
+    runId: null,
+    workflowInstanceId: "33333333-3333-4333-8333-333333333333",
+    actionType: "product_scope_decision",
+    reason: "reviewer needs a scope call",
+    question: "Is clean-machine proof still required?",
+    evidenceJson: null,
+    responseOptionsJson: JSON.stringify([{ choice: "resume", label: "Resume" }]),
+    continuationPreviewJson: null,
+    requestId: null,
+    status: "open",
+    resolutionJson: null,
+    resolvedBy: null,
+    requestedAt: "2026-09-20T09:45:00.000Z",
+    resolvedAt: null,
+    ...extra,
+  };
+}
+
+const PARKED_SCOPE_INSTANCE: WorkflowInstance = {
+  id: "33333333-3333-4333-8333-333333333333",
+  issueId: "11111111-1111-4111-8111-111111111111",
+  workflowVersion: "v1",
+  startedAt: "2026-09-20T09:30:00.000Z",
+  completedAt: null,
+  outcome: null,
+};
+
+test("NOT-422: parked scope pause offers edit, reload, the pending notice, and Resume", () => {
+  const html = renderBody(
+    detailFixture({
+      issue: linearIssue({ status: "needs_human" }),
+      latestWorkflowInstance: PARKED_SCOPE_INSTANCE,
+      humanActions: [scopeActionFixture()],
+      readiness: { ok: true, missing: [] },
+      pendingSnapshotChangedFields: ["description", "acceptanceCriteria", "executionContract"],
+    }),
+  );
+  assert.match(html, /Edit title \/ description \/ acceptance criteria/);
+  assert.match(html, /Reload from Linear/);
+  assert.match(html, /Amended contract pending for the next snapshot/);
+  assert.match(html, /Changed: description, acceptanceCriteria, executionContract/);
+  assert.match(html, /Resume applies the amended task to the next developer round/);
+  assert.match(html, /Resume/);
+});
+
+test("NOT-422: parked scope pause without edits shows the controls but no pending notice", () => {
+  const html = renderBody(
+    detailFixture({
+      issue: linearIssue({ status: "needs_human" }),
+      latestWorkflowInstance: PARKED_SCOPE_INSTANCE,
+      humanActions: [scopeActionFixture()],
+      readiness: { ok: true, missing: [] },
+      pendingSnapshotChangedFields: [],
+    }),
+  );
+  assert.match(html, /Edit title \/ description \/ acceptance criteria/);
+  assert.match(html, /Reload from Linear/);
+  assert.match(html, /Resume/);
+  assert.doesNotMatch(html, /Amended contract pending for the next snapshot/);
+});
+
+test("NOT-422: parked scope pause with a running worker hides the contract-mutation controls", () => {
+  const html = renderBody(
+    detailFixture({
+      issue: linearIssue({ status: "needs_human" }),
+      latestWorkflowInstance: PARKED_SCOPE_INSTANCE,
+      humanActions: [scopeActionFixture()],
+      readiness: { ok: true, missing: [] },
+      activeWorkerSession: sessionFixture(),
+      pendingSnapshotChangedFields: ["description"],
+    }),
+  );
+  assert.doesNotMatch(html, /Edit title \/ description \/ acceptance criteria/);
+  assert.doesNotMatch(html, /Reload from Linear/);
+  // Resume stays a separate explicit action, and the pending notice is
+  // informational — neither mutates the contract.
+  assert.match(html, /Resume/);
+  assert.match(html, /Amended contract pending for the next snapshot/);
+});
+
+test("NOT-422: parked scope pause on a manual issue offers edit but no Reload from Linear", () => {
+  const html = renderBody(
+    detailFixture({
+      issue: issueFixture({ status: "needs_human" }),
+      latestWorkflowInstance: PARKED_SCOPE_INSTANCE,
+      humanActions: [scopeActionFixture()],
+      readiness: { ok: true, missing: [] },
+      pendingSnapshotChangedFields: ["title"],
+    }),
+  );
+  assert.match(html, /Edit title \/ description \/ acceptance criteria/);
+  assert.doesNotMatch(html, /Reload from Linear/);
+  assert.match(html, /Amended contract pending for the next snapshot/);
+  assert.match(html, /Resume/);
+});
+
 test("NOT-365: list-page deletion notice reads the navigation state and nothing else", async () => {
   const { deletedNoticeFromLocationState } = await import("../../pages/IssuesListPage.js");
   assert.equal(
