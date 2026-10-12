@@ -686,6 +686,331 @@ test("NOT-363: a contract-validation failure on refreshed text leaves everything
   await app.close();
 });
 
+// NOT-422: product-scope pause contract adoption — a `needs_human` issue with an
+// active workflow and an open `product_scope_decision` accepts PATCH task edits
+// and Linear source reload while nothing runs and nothing is pending/leased.
+const { startWorkflow } = await import("../coordinator/commands.js");
+const { enqueueWorkItem, cancelWorkItem } = await import("../repository/work-items.js");
+const { getActiveWorkflowInstance } = await import("../repository/workflow-events.js");
+const { getHumanAction } = await import("../repository/human-actions.js");
+
+let scopeParkCounter = 0;
+
+async function parkLinearAtProductScope(app: Awaited<ReturnType<typeof buildApp>>) {
+  // Unique external ids per park: several tests park more than one issue, and
+  // a repeated import of a live ticket is a 409, not a second row (NOT-141).
+  scopeParkCounter += 1;
+  const suffix = scopeParkCounter;
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/issues",
+    payload: { ...LINEAR_ISSUE_PAYLOAD, externalId: `linear-uuid-scope-${suffix}` },
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  const { id } = res.json() as { id: string };
+  assert.equal(startWorkflow(id).ok, true);
+  const dev = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  await applyCompletion(dev.id, dev.leaseToken!, {
+    kind: "clean_handoff",
+    branch: "b",
+    headSha: "abc",
+    baseSha: "base",
+    prNumber: 1,
+    prUrl: "https://gh/pr/1",
+  });
+  const rev = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  await applyCompletion(rev.id, rev.leaseToken!, {
+    kind: "verdict",
+    result: ReviewerResult.parse({
+      verdict: "escalated",
+      productScopeQuestion: "Should deleted users retain sessions?",
+      baseSha: "b",
+      headSha: "h",
+      acceptanceCriteriaAssessment: "ok",
+      evidenceAssessment: "ok",
+      findings: [],
+      risks: [],
+    }),
+  });
+  assert.equal(getIssue(id)!.status, "needs_human");
+  return id;
+}
+
+test("NOT-422: a product-scope pause accepts PATCH task edits and reports them pending for the next snapshot", async () => {
+  const app = await buildApp();
+  const id = await parkLinearAtProductScope(app);
+  const actionId = listHumanActionsForIssue(id).find((a) => a.actionType === "product_scope_decision")!.id;
+
+  const patchRes = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${id}`,
+    payload: { description: RELOADED_DESCRIPTION },
+  });
+  assert.equal(patchRes.statusCode, 200, patchRes.body);
+  const patched = patchRes.json() as { description: string; executionContract: unknown };
+  assert.equal(patched.description, RELOADED_DESCRIPTION);
+  assert.deepStrictEqual(patched.executionContract, EXPECTED_RELOADED_CONTRACT);
+
+  // The scope action stays open and the frozen snapshot stays stale until Resume.
+  assert.equal(getHumanAction(actionId)!.status, "open");
+  assert.equal(getTaskSnapshot(getIssue(id)!).description, CONTRACT_DESCRIPTION);
+
+  const detail = (await app.inject({ method: "GET", url: `/api/issues/${id}` })).json() as {
+    pendingSnapshotChangedFields: string[];
+  };
+  assert.ok(detail.pendingSnapshotChangedFields.includes("description"));
+  assert.ok(detail.pendingSnapshotChangedFields.includes("executionContract"));
+  await app.close();
+});
+
+test("NOT-422: a product-scope pause accepts Linear source reload and preserves the workflow", async () => {
+  resetLinearMock(linearNodeForTest(RELOADED_DESCRIPTION));
+  const app = await buildApp();
+  const id = await parkLinearAtProductScope(app);
+  const before = getIssue(id)!;
+  const instanceBefore = getActiveWorkflowInstance(id)!;
+  const actionId = listHumanActionsForIssue(id).find((a) => a.actionType === "product_scope_decision")!.id;
+
+  const res = await app.inject({ method: "POST", url: `/api/issues/${id}/reload-source` });
+  assert.equal(res.statusCode, 200, res.body);
+  const reloaded = res.json() as {
+    title: string;
+    description: string;
+    acceptanceCriteria: string;
+    executionContract: unknown;
+  };
+  assert.equal(reloaded.title, "NOT-123: Refreshed title from Linear");
+  assert.equal(reloaded.description, RELOADED_DESCRIPTION);
+  assert.deepStrictEqual(reloaded.executionContract, EXPECTED_RELOADED_CONTRACT);
+  assert.ok(reloaded.acceptanceCriteria.includes("- [ ] Reloaded ticket compiles into the refreshed structured schema"));
+  assert.ok(!reloaded.acceptanceCriteria.includes("Operator-typed override"));
+
+  const after = getIssue(id)!;
+  assert.equal(after.status, "needs_human");
+  assert.equal(after.repo, before.repo);
+  assert.equal(after.baseBranch, before.baseBranch);
+  assert.equal(after.developerAgentId, before.developerAgentId);
+  assert.equal(after.reviewerAgentId, before.reviewerAgentId);
+  assert.equal(after.maxReviewRounds, before.maxReviewRounds);
+  assert.equal(after.maxInfraAttempts, before.maxInfraAttempts);
+  assert.equal(after.autoMerge, before.autoMerge);
+  assert.equal(after.currentRound, before.currentRound);
+  assert.equal(after.infraAttempts, before.infraAttempts);
+  assert.equal(after.branch, before.branch);
+  assert.equal(after.baseSha, before.baseSha);
+  assert.equal(after.headSha, before.headSha);
+  assert.equal(after.prNumber, before.prNumber);
+  assert.equal(after.prUrl, before.prUrl);
+  assert.equal(getActiveWorkflowInstance(id)!.id, instanceBefore.id);
+  assert.equal(getHumanAction(actionId)!.status, "open");
+  const reloadEvents = listWorkflowEventsForIssue(id).filter((e) => e.type === "issue.source_reloaded");
+  assert.equal(reloadEvents.length, 1);
+  assert.equal(reloadEvents[0]!.stage, "needs_human");
+  // Still stale until the explicit Resume re-freezes.
+  assert.equal(getTaskSnapshot(after).description, CONTRACT_DESCRIPTION);
+  await app.close();
+});
+
+test("NOT-422: PATCH at a scope pause fails closed on pending/leased work, running sessions, and other parks", async () => {
+  const app = await buildApp();
+  const patch = (id: string, payload: object) => app.inject({ method: "PATCH", url: `/api/issues/${id}`, payload });
+
+  // Pending work blocks the edit with no row or event change.
+  const pendingId = await parkLinearAtProductScope(app);
+  const pendingInstance = getActiveWorkflowInstance(pendingId)!;
+  const item = enqueueWorkItem({
+    issueId: pendingId,
+    workflowInstanceId: pendingInstance.id,
+    kind: "developer",
+    round: 1,
+    payload: {},
+    idempotencyKey: `${pendingInstance.id}:test:n422-route-pending`,
+  });
+  const beforePending = JSON.stringify(getIssue(pendingId));
+  const eventsPending = listWorkflowEventsForIssue(pendingId).length;
+  assert.equal((await patch(pendingId, { title: "Racing edit" })).statusCode, 409);
+
+  // Leased work blocks it too.
+  const leased = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  assert.equal(leased.id, item.id);
+  assert.equal((await patch(pendingId, { title: "Racing edit" })).statusCode, 409);
+  cancelWorkItem(item.id);
+  assert.equal(JSON.stringify(getIssue(pendingId)), beforePending);
+  assert.equal(listWorkflowEventsForIssue(pendingId).length, eventsPending);
+
+  // A running session blocks the edit.
+  const runningId = await parkLinearAtProductScope(app);
+  const session = createWorkerSession({
+    issueId: runningId,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "claude_code",
+  });
+  startSession(session.id);
+  const beforeRunning = JSON.stringify(getIssue(runningId));
+  const eventsRunning = listWorkflowEventsForIssue(runningId).length;
+  const runningRes = await patch(runningId, { title: "Racing session" });
+  assert.equal(runningRes.statusCode, 409);
+  assert.match((runningRes.json() as { error: string }).error, /actively running session/);
+  assert.equal(JSON.stringify(getIssue(runningId)), beforeRunning);
+  assert.equal(listWorkflowEventsForIssue(runningId).length, eventsRunning);
+
+  // An agent swap at a scope pause is a 409, not a silent accept.
+  const swapId = await parkLinearAtProductScope(app);
+  const swapRes = await patch(swapId, { developerAgentId: BUILTIN_AGENT_CURSOR_ID });
+  assert.equal(swapRes.statusCode, 409);
+  assert.match((swapRes.json() as { error: string }).error, /Only title, description and acceptanceCriteria/);
+
+  // A final_review pause is a different park — still 409 on an active workflow.
+  const { id: finalId } = await createLinearIssue(app);
+  assert.equal(startWorkflow(finalId).ok, true);
+  const finalDev = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  await applyCompletion(finalDev.id, finalDev.leaseToken!, {
+    kind: "clean_handoff",
+    branch: "b",
+    headSha: "abc",
+    baseSha: "base",
+    prNumber: 1,
+    prUrl: "https://gh/pr/1",
+  });
+  const finalRev = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  await applyCompletion(finalRev.id, finalRev.leaseToken!, {
+    kind: "verdict",
+    result: ReviewerResult.parse({
+      verdict: "approved",
+      baseSha: "b",
+      headSha: "h",
+      acceptanceCriteriaAssessment: "ok",
+      evidenceAssessment: "ok",
+      findings: [],
+      risks: [],
+    }),
+  });
+  assert.equal(getIssue(finalId)!.status, "final_review");
+  const beforeFinal = JSON.stringify(getIssue(finalId));
+  const eventsFinal = listWorkflowEventsForIssue(finalId).length;
+  assert.equal((await patch(finalId, { title: "Wrong park" })).statusCode, 409);
+  assert.equal(JSON.stringify(getIssue(finalId)), beforeFinal);
+  assert.equal(listWorkflowEventsForIssue(finalId).length, eventsFinal);
+  await app.close();
+});
+
+test("NOT-422: reload at a scope pause fails closed on pending/leased work, running sessions, and other parks", async () => {
+  resetLinearMock(linearNodeForTest(RELOADED_DESCRIPTION));
+  const app = await buildApp();
+  const reload = (id: string) => app.inject({ method: "POST", url: `/api/issues/${id}/reload-source` });
+
+  const pendingId = await parkLinearAtProductScope(app);
+  const pendingInstance = getActiveWorkflowInstance(pendingId)!;
+  const item = enqueueWorkItem({
+    issueId: pendingId,
+    workflowInstanceId: pendingInstance.id,
+    kind: "developer",
+    round: 1,
+    payload: {},
+    idempotencyKey: `${pendingInstance.id}:test:n422-route-reload-pending`,
+  });
+  const beforePending = JSON.stringify(getIssue(pendingId));
+  const eventsPending = listWorkflowEventsForIssue(pendingId).length;
+  assert.equal((await reload(pendingId)).statusCode, 409);
+  const leased = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  assert.equal(leased.id, item.id);
+  assert.equal((await reload(pendingId)).statusCode, 409);
+  cancelWorkItem(item.id);
+  assert.equal(JSON.stringify(getIssue(pendingId)), beforePending);
+  assert.equal(listWorkflowEventsForIssue(pendingId).length, eventsPending);
+  assert.ok(!listWorkflowEventsForIssue(pendingId).some((e) => e.type === "issue.source_reloaded"));
+
+  const runningId = await parkLinearAtProductScope(app);
+  const session = createWorkerSession({
+    issueId: runningId,
+    role: "developer",
+    round: 1,
+    agentId: BUILTIN_AGENT_CLAUDE_ID,
+    runtime: "claude_code",
+  });
+  startSession(session.id);
+  const beforeRunning = JSON.stringify(getIssue(runningId));
+  const runningRes = await reload(runningId);
+  assert.equal(runningRes.statusCode, 409);
+  assert.match((runningRes.json() as { error: string }).error, /actively running session/);
+  assert.equal(JSON.stringify(getIssue(runningId)), beforeRunning);
+
+  // An attempts-exhausted park accepts PATCH but never a source reload.
+  const exhausted = (
+    await app.inject({
+      method: "POST",
+      url: "/api/issues",
+      payload: {
+        ...LINEAR_ISSUE_PAYLOAD,
+        externalId: "linear-uuid-exhausted",
+        title: "NOT-123: exhausted",
+        maxReviewRounds: 1,
+      },
+    })
+  ).json() as { id: string };
+  assert.equal(startWorkflow(exhausted.id).ok, true);
+  const exhaustedDev = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  await applyCompletion(exhaustedDev.id, exhaustedDev.leaseToken!, {
+    kind: "clean_handoff",
+    branch: "b",
+    headSha: "abc",
+    baseSha: "base",
+    prNumber: 1,
+    prUrl: "https://gh/pr/1",
+  });
+  const exhaustedRev = claimWorkItem("route-test", { leaseMs: 60_000 })!;
+  await applyCompletion(exhaustedRev.id, exhaustedRev.leaseToken!, {
+    kind: "verdict",
+    result: ReviewerResult.parse({
+      verdict: "changes_requested",
+      baseSha: "b",
+      headSha: "h",
+      acceptanceCriteriaAssessment: "ok",
+      evidenceAssessment: "ok",
+      findings: [],
+      risks: [],
+    }),
+  });
+  assert.ok(listHumanActionsForIssue(exhausted.id).some((a) => a.actionType === "attempts_exhausted" && a.status === "open"));
+  const beforeExhausted = JSON.stringify(getIssue(exhausted.id));
+  const eventsExhausted = listWorkflowEventsForIssue(exhausted.id).length;
+  assert.equal((await reload(exhausted.id)).statusCode, 409);
+  assert.equal(JSON.stringify(getIssue(exhausted.id)), beforeExhausted);
+  assert.equal(listWorkflowEventsForIssue(exhausted.id).length, eventsExhausted);
+  await app.close();
+});
+
+test("NOT-422: a malformed amended contract at a scope pause is a 400 that changes nothing", async () => {
+  resetLinearMock(linearNodeForTest(CONTRACT_DESCRIPTION.replace("feature", "teleport")));
+  const app = await buildApp();
+
+  const patchId = await parkLinearAtProductScope(app);
+  const beforePatch = JSON.stringify(getIssue(patchId));
+  const eventsPatch = listWorkflowEventsForIssue(patchId).length;
+  const badPatch = await app.inject({
+    method: "PATCH",
+    url: `/api/issues/${patchId}`,
+    payload: { description: CONTRACT_DESCRIPTION.replace("feature", "teleport") },
+  });
+  assert.equal(badPatch.statusCode, 400, badPatch.body);
+  assert.match((badPatch.json() as { error: string }).error, /unknown execution mode/);
+  assert.equal(JSON.stringify(getIssue(patchId)), beforePatch);
+  assert.equal(listWorkflowEventsForIssue(patchId).length, eventsPatch);
+
+  const reloadId = await parkLinearAtProductScope(app);
+  const beforeReload = JSON.stringify(getIssue(reloadId));
+  const eventsReload = listWorkflowEventsForIssue(reloadId).length;
+  const badReload = await app.inject({ method: "POST", url: `/api/issues/${reloadId}/reload-source` });
+  assert.equal(badReload.statusCode, 400, badReload.body);
+  assert.match((badReload.json() as { error: string }).error, /unknown execution mode/);
+  assert.equal(JSON.stringify(getIssue(reloadId)), beforeReload);
+  assert.equal(listWorkflowEventsForIssue(reloadId).length, eventsReload);
+  assert.ok(!listWorkflowEventsForIssue(reloadId).some((e) => e.type === "issue.source_reloaded"));
+  await app.close();
+});
+
 test("NOT-363: the frozen snapshot after reload contains exactly the refreshed text", async () => {
   resetLinearMock(linearNodeForTest(RELOADED_DESCRIPTION));
   const app = await buildApp();
