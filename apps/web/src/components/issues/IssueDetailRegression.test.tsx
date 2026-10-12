@@ -1012,7 +1012,8 @@ test("NOT-422: parked scope pause offers edit, reload, the pending notice, and R
   assert.match(html, /Amended contract pending for the next snapshot/);
   assert.match(html, /Changed: description, acceptanceCriteria, executionContract/);
   assert.match(html, /Resume applies the amended task to the next developer round/);
-  assert.match(html, /Resume/);
+  // The separate Resume button itself — not just the notice text above.
+  assert.match(html, /<button[^>]*>\s*Resume\s*<\/button>/);
 });
 
 test("NOT-422: parked scope pause without edits shows the controls but no pending notice", () => {
@@ -1027,7 +1028,7 @@ test("NOT-422: parked scope pause without edits shows the controls but no pendin
   );
   assert.match(html, /Edit title \/ description \/ acceptance criteria/);
   assert.match(html, /Reload from Linear/);
-  assert.match(html, /Resume/);
+  assert.match(html, /<button[^>]*>\s*Resume\s*<\/button>/);
   assert.doesNotMatch(html, /Amended contract pending for the next snapshot/);
 });
 
@@ -1046,7 +1047,7 @@ test("NOT-422: parked scope pause with a running worker hides the contract-mutat
   assert.doesNotMatch(html, /Reload from Linear/);
   // Resume stays a separate explicit action, and the pending notice is
   // informational — neither mutates the contract.
-  assert.match(html, /Resume/);
+  assert.match(html, /<button[^>]*>\s*Resume\s*<\/button>/);
   assert.match(html, /Amended contract pending for the next snapshot/);
 });
 
@@ -1063,7 +1064,7 @@ test("NOT-422: parked scope pause on a manual issue offers edit but no Reload fr
   assert.match(html, /Edit title \/ description \/ acceptance criteria/);
   assert.doesNotMatch(html, /Reload from Linear/);
   assert.match(html, /Amended contract pending for the next snapshot/);
-  assert.match(html, /Resume/);
+  assert.match(html, /<button[^>]*>\s*Resume\s*<\/button>/);
 });
 
 test("NOT-365: list-page deletion notice reads the navigation state and nothing else", async () => {

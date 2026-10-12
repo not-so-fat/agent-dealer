@@ -16,6 +16,7 @@ const { createIssue, getIssue } = await import("../repository/issues.js");
 const {
   startWorkflow,
   applyCompletion,
+  applyParkedEdit,
   resolveHumanActionAndAdvance,
   getTaskSnapshot,
   diffTaskSnapshotFromLive,
@@ -98,7 +99,35 @@ const CONTRACT_V2 = [
 const REMOVED_CRITERION = "[operator] Clean-machine proof attached";
 const AMENDED_EXIT = "The friend-path run command works with simulator proof; clean-machine proof moved out.";
 
-test("NOT-422: reviewer escalation → scope-pause reload → Resume → both roles enforce only the amended snapshot", async () => {
+async function adoptViaReload(issueId: string): Promise<void> {
+  // The operator reloads the amended Linear ticket at the pause (injected
+  // fetch — no network; the CommonJS fetch mock lives in the route suites).
+  const reloaded = await reloadIssueSourceFromLinear(issueId, {
+    fetchLinearIssue: async (externalId: string) => ({
+      id: externalId,
+      identifier: "NOT-405",
+      title: "Friend-path run, rescoped",
+      description: CONTRACT_V2,
+      url: "https://linear.app/not-so-fat/issue/NOT-405/x",
+      attachments: [],
+    }),
+  });
+  assert.equal(reloaded.ok, true);
+}
+
+async function adoptViaLocalEdit(issueId: string): Promise<void> {
+  // The Dealer-local path: the same amended contract saved through the
+  // parked-edit surface instead of a Linear reload.
+  const { compileExecutionContract } = await import("@agent-dealer/shared");
+  const edited = applyParkedEdit(issueId, {
+    title: "NOT-405: friend-path run, rescoped",
+    description: CONTRACT_V2,
+    acceptanceCriteria: compileExecutionContract(CONTRACT_V2).acceptanceCriteria,
+  });
+  assert.equal(edited.ok, true);
+}
+
+async function runScopePauseAdoptionFlow(adopt: (issueId: string) => Promise<void>): Promise<void> {
   const issueId = createIssue({
     title: "NOT-405: friend-path run",
     description: CONTRACT_V1,
@@ -144,19 +173,9 @@ test("NOT-422: reviewer escalation → scope-pause reload → Resume → both ro
   // The frozen snapshot still enforces the old operator criterion.
   assert.ok(getTaskSnapshot(issueBefore).acceptanceCriteria.includes(REMOVED_CRITERION));
 
-  // The operator reloads the amended Linear ticket at the pause (injected
-  // fetch — no network; the CommonJS fetch mock lives in the route suites).
-  const reloaded = await reloadIssueSourceFromLinear(issueId, {
-    fetchLinearIssue: async (externalId: string) => ({
-      id: externalId,
-      identifier: "NOT-405",
-      title: "Friend-path run, rescoped",
-      description: CONTRACT_V2,
-      url: "https://linear.app/not-so-fat/issue/NOT-405/x",
-      attachments: [],
-    }),
-  });
-  assert.equal(reloaded.ok, true);
+  // The operator adopts the amended contract at the pause — reload or local
+  // edit depending on the variant under test.
+  await adopt(issueId);
   // The amended task is pending inspection: live rows changed, the open
   // action and every workflow identity preserved, the snapshot untouched.
   const parked = getIssue(issueId)!;
@@ -193,13 +212,18 @@ test("NOT-422: reviewer escalation → scope-pause reload → Resume → both ro
   const pendingDev = listWorkItemsForIssue(issueId).filter((i) => i.status === "pending");
   assert.equal(pendingDev.length, 1);
   assert.equal(pendingDev[0]!.kind, "developer");
-  assert.equal(
-    (JSON.parse(pendingDev[0]!.payloadJson!) as { scopeDecisionNote?: string }).scopeDecisionNote,
-    "Clean-machine proof moved to NOT-421; enforce simulator proof."
-  );
+  assert.equal(pendingDev[0]!.workflowInstanceId, instanceBefore.id);
+  const devPayload = JSON.parse(pendingDev[0]!.payloadJson!) as { scopeDecisionNote?: string };
+  assert.equal(devPayload.scopeDecisionNote, "Clean-machine proof moved to NOT-421; enforce simulator proof.");
 
-  // The next developer prompt enforces only the amended snapshot.
-  const developerPrompt = buildDeveloperPrompt({ taskSnapshot: getTaskSnapshot(resumed), round: resumed.currentRound });
+  // The next developer prompt — built the way the developer effect builds it,
+  // from this work item's own round and one-shot note over the frozen
+  // snapshot — enforces only the amended snapshot.
+  const developerPrompt = buildDeveloperPrompt({
+    taskSnapshot: getTaskSnapshot(resumed),
+    round: pendingDev[0]!.round,
+    scopeDecisionNote: devPayload.scopeDecisionNote,
+  });
   assert.ok(developerPrompt.includes(AMENDED_EXIT));
   assert.ok(developerPrompt.includes("Simulator proof attached"));
   assert.ok(!developerPrompt.includes(REMOVED_CRITERION));
@@ -221,9 +245,16 @@ test("NOT-422: reviewer escalation → scope-pause reload → Resume → both ro
   assert.equal(reviewRound.status, "reviewing");
   assert.equal(getActiveWorkflowInstance(issueId)!.id, instanceBefore.id);
   assert.equal(reviewRound.branch, "dealer/not-405");
+  // The following reviewer work item — claimed the way the effect worker
+  // claims it — carries the same workflow instance, and its prompt inputs
+  // (this item's round over the frozen snapshot) enforce the amended
+  // snapshot with no escalation for the removed criterion recurring.
+  const rev2 = claimWorkItem("scope-contract-test", { leaseMs: 60_000 })!;
+  assert.equal(rev2.kind, "reviewer");
+  assert.equal(rev2.workflowInstanceId, instanceBefore.id);
   const reviewerPrompt = buildReviewerPrompt({
     taskSnapshot: getTaskSnapshot(reviewRound),
-    round: reviewRound.currentRound,
+    round: rev2.round,
     baseSha: "a".repeat(40),
     headSha: "b".repeat(40),
     diff: "diff --git a/x b/x\n+added line\n",
@@ -232,4 +263,12 @@ test("NOT-422: reviewer escalation → scope-pause reload → Resume → both ro
   assert.ok(reviewerPrompt.includes("Simulator proof attached"));
   assert.ok(!reviewerPrompt.includes(REMOVED_CRITERION));
   assert.ok(!reviewerPrompt.includes("clean machine with operator proof"));
+}
+
+test("NOT-422: reviewer escalation → scope-pause reload → Resume → both roles enforce only the amended snapshot", async () => {
+  await runScopePauseAdoptionFlow(adoptViaReload);
+});
+
+test("NOT-422: reviewer escalation → scope-pause local edit → Resume → both roles enforce only the amended snapshot", async () => {
+  await runScopePauseAdoptionFlow(adoptViaLocalEdit);
 });
