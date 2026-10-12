@@ -68,13 +68,29 @@ its windows with freshness applied, and an explicit entry-level
 `unavailableReason` when no window is current. Normalized snapshots only —
 `evidence_ref` and raw provider payloads never leave the server.
 
+### Active hard caps (NOT-440)
+
+Each entry also carries `activeCap` — `{ unavailableUntil, reason,
+windowRole }` or null — read from the same `runtime_availability` row (and
+lazy cleanup) that blocks admission and marks agent health. `windowRole`
+(`five_hour`, `weekly`, or Cursor's `billing_cycle`) is resolved from the
+cap's structured provider limit type first (Claude `rateLimitType`
+`five_hour`/`seven_day`; any other reported type stays unmapped), then from a
+±60 s match between the cap's provider reset and exactly one tagged compact
+window's `resetAt`. A fallback-cooldown cap carries no provider reset and is
+never matched. Compact surfaces render a mapped cap as 0% on that row
+(siblings unchanged) and an unmapped cap as `capped`; stored snapshots are
+never rewritten, and at `unavailableUntil` the overlay disappears and normal
+freshness/reset classification resumes.
+
 ## Persistence
 
 `runtime_capacity_snapshots(runtime, window_key, …)` — one row per window, so
 a provider can report several independently resetting windows per account.
 Writes are per-window upserts; a partial re-observation never deletes a
 still-valid sibling window. Independent of `runtime_availability` (NOT-111
-hard caps): capacity snapshots neither read nor clear hard-cap rows, and
+hard caps): capacity snapshot writes neither read nor clear hard-cap rows
+(only the read model overlays them, see Active hard caps), and
 connection health stays a separate state — green health never implies known
 capacity.
 
