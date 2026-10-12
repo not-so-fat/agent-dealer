@@ -295,6 +295,12 @@ export interface IssueDetail {
    * the detail offers "Park for human" next to the wait notice.
    */
   capWait?: { kind: "usage_capped" | "deck_unavailable"; until: string; reason: string } | null;
+  /**
+   * NOT-422: live-vs-frozen task diff — the fields a parked resume would
+   * re-freeze into a new task snapshot (empty = in sync, or pre-freeze).
+   * Absent on older servers; treat as in sync.
+   */
+  pendingSnapshotChangedFields?: string[];
 }
 
 export interface IssueEvidence {

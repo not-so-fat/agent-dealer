@@ -25,7 +25,7 @@ import {
 } from "../repository/workflow-events.js";
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
-import { abortIssueAsync, applyParkedEdit, canEditParkedIssue, capWaitForIssue, checkIssueReadiness, closeReadyIssue, parkCapWait, PARKED_EDITABLE_FIELDS } from "../coordinator/commands.js";
+import { abortIssueAsync, applyParkedEdit, canEditParkedIssue, capWaitForIssue, checkIssueReadiness, closeReadyIssue, diffTaskSnapshotFromLive, parkCapWait, parkedEditableFields, parkedEditableFieldsLabel } from "../coordinator/commands.js";
 import { deleteDealerIssue } from "../coordinator/delete-issue.js";
 import { getAgent } from "../repository/agents.js";
 import {
@@ -206,6 +206,10 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       // NOT-364: durable Linear source attachments — files with safe name, size
       // and checksum plus Dealer blob path; links as labeled metadata only.
       sourceAttachments: listSourceAttachments(id),
+      // NOT-422: live-vs-frozen task diff — the fields a parked resume would
+      // re-freeze into a new task snapshot (empty = in sync, or pre-freeze).
+      // Issue Detail renders the pending-snapshot notice off this.
+      pendingSnapshotChangedFields: diffTaskSnapshotFromLive(issue),
     };
   });
 
@@ -392,18 +396,21 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       if (getActiveWorkerSessionForIssue(id)) {
         return "Cannot edit an issue with an actively running session";
       }
-      // NOT-185: the one active-workflow exception — parked at an open attempts_exhausted
-      // or policy_escalation action with nothing pending/leased. A resume re-freezes the
-      // snapshot (task fields) and the next round's profile snapshot (agent fields).
+      // NOT-185: the active-workflow exception — parked at an open attempts_exhausted,
+      // policy_escalation, or (NOT-422) product_scope_decision action with nothing
+      // pending/leased. A resume re-freezes the snapshot (task fields) and, at an
+      // attempts/policy park, the next round's profile snapshot (agent fields).
       if (getActiveWorkflowInstance(id)) {
         if (!canEditParkedIssue(fresh)) {
           return "Cannot edit an issue with an active workflow";
         }
         // Only the re-frozen inputs may change at the park: repo/base branch, the review
-        // budget and autoMerge stay as the running workflow saw them.
-        const blocked = Object.keys(parsed.data).filter((k) => !PARKED_EDITABLE_FIELDS.has(k));
+        // budget and autoMerge stay as the running workflow saw them — and at a pure
+        // product-scope pause the agents stay too (task text only).
+        const allowed = parkedEditableFields(id);
+        const blocked = Object.keys(parsed.data).filter((k) => !allowed.has(k));
         if (blocked.length > 0) {
-          return `Only title, description, acceptanceCriteria, developerAgentId and reviewerAgentId can be edited while parked (got: ${blocked.join(", ")})`;
+          return `Only ${parkedEditableFieldsLabel(id)} can be edited while parked (got: ${blocked.join(", ")})`;
         }
       }
       return null;
@@ -494,7 +501,10 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
   /**
    * NOT-363: reload a Linear-sourced issue's task text from its linked ticket.
    * Only while `ready` with no active workflow or running worker — a race
-   * with admission fails closed with 409. Replaces title + description
+   * with admission fails closed with 409. NOT-422 adds the parked exception:
+   * a `needs_human` product-scope pause (open `product_scope_decision`, no
+   * running session, nothing pending/leased) reloads the same way and keeps
+   * the action open for an explicit Resume. Replaces title + description
    * atomically, recompiles the execution contract, and swaps the acceptance
    * criteria for the freshly derived ones; repo, agents, policy fields,
    * auto-merge, queue position, and coordinator-owned fields are preserved.

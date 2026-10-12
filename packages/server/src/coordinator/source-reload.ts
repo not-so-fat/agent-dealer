@@ -17,9 +17,12 @@ import {
 } from "@agent-dealer/shared";
 import { getDb } from "../db/index.js";
 import { getIssue } from "../repository/issues.js";
+import { findOpenHumanAction } from "../repository/human-actions.js";
+import { listWorkItemsForIssue } from "../repository/work-items.js";
 import { appendWorkflowEvent, getActiveWorkflowInstance } from "../repository/workflow-events.js";
 import { getActiveWorkerSessionForIssue } from "../repository/worker-sessions.js";
 import { getLinearIssue } from "../adapters/linear-inbox.js";
+import { getTaskSnapshot } from "./commands.js";
 import {
   discardStaged,
   pruneDisusedBlobs,
@@ -47,18 +50,42 @@ export function digestTaskText(text: string | null): string {
  * workflow and no running worker. Anything else answers 409 and changes
  * nothing, so a reload that races admission fails closed instead of landing
  * on a live snapshot.
+ *
+ * NOT-422: the one active-workflow exception — a `needs_human` product-scope
+ * pause (open `product_scope_decision`, no running session, nothing
+ * pending/leased), mirroring `canEditParkedIssue`. The write still touches
+ * only title/description/acceptance-criteria plus the attachment rows: the
+ * workflow instance, PR/head/branch, worktree, rounds, counters, and the open
+ * action itself are preserved, and a product-scope resume re-freezes the
+ * amended text into a new task snapshot.
  */
 function reloadConflict(issue: Issue): string | null {
-  if (issue.status !== "ready") {
-    return `Cannot reload the source of an issue that is ${issue.status}`;
+  if (issue.status === "ready") {
+    if (getActiveWorkerSessionForIssue(issue.id)) {
+      return "Cannot reload the source of an issue with an actively running session";
+    }
+    if (getActiveWorkflowInstance(issue.id)) {
+      return "Cannot reload the source of an issue with an active workflow";
+    }
+    return null;
   }
-  if (getActiveWorkerSessionForIssue(issue.id)) {
-    return "Cannot reload the source of an issue with an actively running session";
+  if (
+    issue.status === "needs_human" &&
+    getActiveWorkflowInstance(issue.id) &&
+    findOpenHumanAction(issue.id, "product_scope_decision")
+  ) {
+    if (getActiveWorkerSessionForIssue(issue.id)) {
+      return "Cannot reload the source of an issue with an actively running session";
+    }
+    if (listWorkItemsForIssue(issue.id).some((w) => w.status === "pending" || w.status === "leased")) {
+      return "Cannot reload the source of an issue with pending or leased work";
+    }
+    return null;
   }
   if (getActiveWorkflowInstance(issue.id)) {
     return "Cannot reload the source of an issue with an active workflow";
   }
-  return null;
+  return `Cannot reload the source of an issue that is ${issue.status}`;
 }
 
 /**
@@ -69,9 +96,10 @@ function reloadConflict(issue: Issue): string | null {
  *
  * `fetchLinearIssue` is injectable for tests; production passes the shared
  * `getLinearIssue` adapter. The Linear fetch happens outside the write
- * transaction, and the pre-execution guard runs twice — once for the fast
- * path, once inside the transaction — so a race with admission answers 409
- * with no partial write and no timeline event.
+ * transaction, and the eligibility guard runs twice — once for the fast
+ * path, once inside the transaction — so a race with admission, a resume, a
+ * running session, or pending/leased work answers 409 with no partial write
+ * and no timeline event.
  */
 export async function reloadIssueSourceFromLinear(
   issueId: string,
@@ -185,7 +213,16 @@ export async function reloadIssueSourceFromLinear(
       if (!next) throw Object.assign(new Error("Not found"), { code: 404 });
       return next;
     })();
-    pruneDisusedBlobs(prevAttachments, nextAttachmentRecords);
+    // NOT-422: a parked reload swaps the live rows while the frozen snapshot
+    // still references the old manifest — until a resume re-freezes, pruning
+    // those blobs would strand the next materialization on missing bytes.
+    // Retain anything the frozen snapshot still lists (a leftover is
+    // retained-history, never a correctness issue); the pre-execution path has
+    // no frozen snapshot, so it keeps pruning replaced/removed blobs.
+    const liveRecords = getActiveWorkflowInstance(issueId)
+      ? [...nextAttachmentRecords, ...(getTaskSnapshot(updated).sourceAttachments ?? [])]
+      : nextAttachmentRecords;
+    pruneDisusedBlobs(prevAttachments, liveRecords);
     return { ok: true, issue: updated };
   } catch (err) {
     // The staged bytes landed on content-addressed paths the old rows never
