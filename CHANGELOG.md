@@ -4,6 +4,16 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.3.3 — 2026-10-13
+
+Preserve provider reset timestamps across every hard usage-cap path and reconcile active runtime caps into compact capacity displays
+
+### Changes
+
+- NOT-440: Reconcile active runtime caps into compact capacity displays (#233)
+- NOT-439: Preserve provider reset timestamps across every hard usage-cap path (#232)
+- Release script: verify the previous version tag before mutating anything (#231)
+
 ## 1.3.2 — 2026-10-12
 
 Newest-first Latest view with reverse control, SHA-bound CI visual artifacts for reviewers, in-sandbox visual QA receipts, browser probe timeout fixes, amended execution contracts at product-scope pauses
