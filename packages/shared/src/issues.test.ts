@@ -67,8 +67,18 @@ test("CreateIssueInput defaults baseBranch to main and maxReviewRounds to 3", ()
   assert.equal(parsed.baseBranch, "main");
   assert.equal(parsed.maxReviewRounds, 3);
   assert.equal(parsed.source, "manual");
-  assert.equal(parsed.autoMerge, false);
   assert.equal(parsed.repo, "github.com/acme/app");
+});
+
+test("NOT-489: CreateIssueInput defaults an omitted autoMerge to true and preserves an explicit false", () => {
+  const base = {
+    title: "Fix login bug",
+    repo: "acme/app",
+    developerAgentId: "22222222-2222-2222-2222-222222222222",
+    reviewerAgentId: "33333333-3333-3333-3333-333333333333"};
+  assert.equal(CreateIssueInput.parse(base).autoMerge, true);
+  assert.equal(CreateIssueInput.parse({ ...base, autoMerge: false }).autoMerge, false);
+  assert.equal(CreateIssueInput.parse({ ...base, autoMerge: true }).autoMerge, true);
 });
 
 test("CreateIssueInput rejects local filesystem paths (NOT-149)", () => {

@@ -122,6 +122,30 @@ test("NOT-118: POST /api/issues with enqueue:false creates a draft that is not q
   await app.close();
 });
 
+test("NOT-489: POST /api/issues without autoMerge persists true; an explicit false persists false; both still enqueue", async () => {
+  const app = await buildApp();
+  const payload = { title: "Agent-created", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "It works" };
+
+  const omittedRes = await app.inject({ method: "POST", url: "/api/issues", payload });
+  assert.equal(omittedRes.statusCode, 200);
+  const omitted = omittedRes.json() as { id: string; autoMerge: boolean; queue: string };
+  assert.equal(omitted.autoMerge, true);
+  assert.equal(getIssue(omitted.id)!.autoMerge, true);
+  assert.equal((getDb().prepare("SELECT auto_merge FROM issues WHERE id = ?").get(omitted.id) as { auto_merge: number }).auto_merge, 1);
+  assert.equal(omitted.queue, "enqueued");
+  assert.equal(getQueuedEntryForIssue(omitted.id)?.state, "queued");
+
+  const optedOutRes = await app.inject({ method: "POST", url: "/api/issues", payload: { ...payload, title: "Final review please", autoMerge: false } });
+  assert.equal(optedOutRes.statusCode, 200);
+  const optedOut = optedOutRes.json() as { id: string; autoMerge: boolean; queue: string };
+  assert.equal(optedOut.autoMerge, false);
+  assert.equal(getIssue(optedOut.id)!.autoMerge, false);
+  assert.equal((getDb().prepare("SELECT auto_merge FROM issues WHERE id = ?").get(optedOut.id) as { auto_merge: number }).auto_merge, 0);
+  assert.equal(optedOut.queue, "enqueued");
+  assert.equal(getQueuedEntryForIssue(optedOut.id)?.state, "queued");
+  await app.close();
+});
+
 test("POST /api/issues matches a live (source, externalId) instead of duplicating it, and reports the queue it did not change", async () => {
   const app = await buildApp();
   const payload = { title: "Linear task", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, source: "linear", externalId: "LIN-1" };

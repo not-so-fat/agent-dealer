@@ -435,8 +435,8 @@ const LINEAR_ISSUE_PAYLOAD = {
   ...BASE_AGENTS,
 };
 
-async function createLinearIssue(app: Awaited<ReturnType<typeof buildApp>>) {
-  const res = await app.inject({ method: "POST", url: "/api/issues", payload: LINEAR_ISSUE_PAYLOAD });
+async function createLinearIssue(app: Awaited<ReturnType<typeof buildApp>>, overrides: object = {}) {
+  const res = await app.inject({ method: "POST", url: "/api/issues", payload: { ...LINEAR_ISSUE_PAYLOAD, ...overrides } });
   assert.equal(res.statusCode, 200, res.body);
   return res.json() as { id: string };
 }
@@ -863,7 +863,8 @@ test("NOT-422: PATCH at a scope pause fails closed on pending/leased work, runni
   assert.match((swapRes.json() as { error: string }).error, /Only title, description and acceptanceCriteria/);
 
   // A final_review pause is a different park — still 409 on an active workflow.
-  const { id: finalId } = await createLinearIssue(app);
+  // NOT-489: auto-merge is the default; opt out so approval parks at final_review.
+  const { id: finalId } = await createLinearIssue(app, { autoMerge: false });
   assert.equal(startWorkflow(finalId).ok, true);
   const finalDev = claimWorkItem("route-test", { leaseMs: 60_000 })!;
   await applyCompletion(finalDev.id, finalDev.leaseToken!, {

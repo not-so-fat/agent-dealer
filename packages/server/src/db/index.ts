@@ -306,8 +306,10 @@ export function migrate(): void {
     db.exec("ALTER TABLE issues ADD COLUMN ci_attempts INTEGER NOT NULL DEFAULT 0");
   }
 
-  // NOT-102: per-issue auto-merge after reviewer approve (kick UI defaults on; existing
-  // rows stay off so in-flight workflows keep the human final_review path).
+  // NOT-102: per-issue auto-merge after reviewer approve. Rows that predate the column
+  // backfill off so in-flight workflows keep the human final_review path. NOT-489: new
+  // creates write the shared `CreateIssueInput` default (true) explicitly, so this
+  // backfill DEFAULT never decides a new issue's policy and stays 0 to preserve old rows.
   const issueColsForAutoMerge = db.prepare("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
   if (!issueColsForAutoMerge.some((c) => c.name === "auto_merge")) {
     db.exec("ALTER TABLE issues ADD COLUMN auto_merge INTEGER NOT NULL DEFAULT 0");

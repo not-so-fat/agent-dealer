@@ -324,6 +324,8 @@ test(
         "Widget renders.",
         "--base-branch",
         "main",
+        // NOT-489: auto-merge is the default; this walk drives the final-review action.
+        "--no-auto-merge",
       ])
     ) as { id: string; status: string };
     const issueId = created.id;

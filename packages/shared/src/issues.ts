@@ -77,8 +77,8 @@ export const Issue = z.object({
   prUrl: z.string().nullable(),
   /**
    * When true, reviewer `approved` merges the PR and marks the issue done (skips
-   * `final_review`). Kick UI defaults this on; API/CLI omit → false so existing
-   * callers keep the human final-review path.
+   * `final_review`). NOT-489: every create surface (web, API, CLI, agents) defaults
+   * this on; `false` is the explicit opt-in to final human review.
    */
   autoMerge: z.boolean(),
   createdAt: z.string(),
@@ -97,8 +97,11 @@ export const CreateIssueInput = z.object({
   reviewerAgentId: z.string().uuid(),
   maxReviewRounds: z.number().int().min(1).default(3),
   maxInfraAttempts: z.number().int().min(0).default(3),
-  /** Kick UI sends true; omit/false preserves final_review after approve. */
-  autoMerge: z.boolean().default(false),
+  /**
+   * NOT-489: omitted means auto-merge (reviewer approval enters the guarded merge path);
+   * only an explicit `false` parks the approved PR at final human review.
+   */
+  autoMerge: z.boolean().default(true),
   source: IssueSource.default("manual"),
   externalId: z.string().optional(),
   externalLabel: z.string().optional(),

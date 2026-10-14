@@ -36,6 +36,11 @@ agent-dealer issue create \
 `--repo` accepts a GitHub URL or `owner/repo` shorthand (stored as `github.com/owner/repo`).
 Dealer clones/fetches under the managed execution root; do not pass a local filesystem path.
 
+New issues **auto-merge by default**: once the reviewer approves (and the CI, operator-verification
+and merge-recovery gates pass), the coordinator merges the PR — the API treats an omitted `autoMerge`
+as `true`. Pass `--no-auto-merge` (API: `"autoMerge": false`) to opt into final human review, where
+approval parks a `final_review` action instead.
+
 Creating **enqueues the issue for admission** — it never starts a workflow directly, so
 creating several in a row is always safe. Pass `--no-enqueue` for a draft that stays out of
 the queue until you add it back (`agent-dealer queue add <issueId>`) or start it.

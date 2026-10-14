@@ -99,6 +99,8 @@ async function makeIssue(): Promise<string> {
     reviewerAgentId: rev.id,
     maxReviewRounds: 3,
     maxInfraAttempts: 3,
+    // NOT-489: omitted now means auto-merge; this suite exercises final human review.
+    autoMerge: false,
     source: "manual"}).id;
 }
 
