@@ -96,6 +96,44 @@ test("issue create sends enqueue:true by default and enqueue:false with --no-enq
   }
 });
 
+test("NOT-489: issue create sends autoMerge:true by default and autoMerge:false only with --no-auto-merge", async () => {
+  const args = ["create", "--title", "T", "--repo", "owner/repo", "--developer-agent", "a1", "--reviewer-agent", "a2"];
+  assert.equal((parseIssueArgs(args) as { autoMerge: boolean }).autoMerge, true);
+  assert.equal((parseIssueArgs([...args, "--no-auto-merge"]) as { autoMerge: boolean }).autoMerge, false);
+
+  const byDefault = stubFetch("/api/issues", "POST", { id: "i1", status: "ready", created: true, queue: "enqueued", priorPasses: 0 });
+  try {
+    assert.equal(await runIssueCommand(args), 0);
+    assert.deepEqual(byDefault.assertCalled(), {
+      title: "T",
+      repo: "owner/repo",
+      developerAgentId: "a1",
+      reviewerAgentId: "a2",
+      source: "agent",
+      enqueue: true,
+      autoMerge: true,
+    });
+  } finally {
+    byDefault.restore();
+  }
+
+  const optedOut = stubFetch("/api/issues", "POST", { id: "i2", status: "ready", created: true, queue: "enqueued", priorPasses: 0 });
+  try {
+    assert.equal(await runIssueCommand([...args, "--no-auto-merge"]), 0);
+    assert.deepEqual(optedOut.assertCalled(), {
+      title: "T",
+      repo: "owner/repo",
+      developerAgentId: "a1",
+      reviewerAgentId: "a2",
+      source: "agent",
+      enqueue: true,
+      autoMerge: false,
+    });
+  } finally {
+    optedOut.restore();
+  }
+});
+
 /** Runs the command with stderr captured — the hints go to stderr, stdout stays JSON. */
 async function captureStderr(args: string[]): Promise<{ code: number; err: string; out: string }> {
   const errs: string[] = [];

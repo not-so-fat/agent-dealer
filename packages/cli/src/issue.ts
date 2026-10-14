@@ -30,7 +30,7 @@ function createOutcomeHint(result: CreateIssueResult): string {
 }
 
 export type ParsedIssueArgs =
-  | { subcommand: "create"; title: string; repo: string; developerAgentId: string; reviewerAgentId: string; description?: string; acceptanceCriteria?: string; baseBranch?: string; enqueue: boolean }
+  | { subcommand: "create"; title: string; repo: string; developerAgentId: string; reviewerAgentId: string; description?: string; acceptanceCriteria?: string; baseBranch?: string; enqueue: boolean; autoMerge: boolean }
   | { subcommand: "import"; externalId: string; externalLabel?: string; title: string; repo: string; developerAgentId: string; reviewerAgentId: string }
   | { subcommand: "list"; status?: string }
   | { subcommand: "show"; id: string; includeEvidence: boolean }
@@ -63,7 +63,8 @@ export function parseIssueArgs(args: string[]): ParsedIssueArgs {
         return { subcommand: "import", externalId, externalLabel: flag(rest, "--external-label"), title, repo, developerAgentId, reviewerAgentId };
       }
       // NOT-118: create enqueues for admission by default; --no-enqueue leaves a draft out.
-      return { subcommand: "create", title, repo, developerAgentId, reviewerAgentId, description: flag(rest, "--description"), acceptanceCriteria: flag(rest, "--acceptance-criteria"), baseBranch: flag(rest, "--base-branch"), enqueue: !rest.includes("--no-enqueue") };
+      // NOT-489: auto-merge by default; --no-auto-merge opts into final human review.
+      return { subcommand: "create", title, repo, developerAgentId, reviewerAgentId, description: flag(rest, "--description"), acceptanceCriteria: flag(rest, "--acceptance-criteria"), baseBranch: flag(rest, "--base-branch"), enqueue: !rest.includes("--no-enqueue"), autoMerge: !rest.includes("--no-auto-merge") };
     }
     case "list": {
       return { subcommand: "list", status: flag(rest, "--status") };
@@ -121,7 +122,7 @@ export async function runIssueCommand(args: string[]): Promise<number> {
   try {
     switch (parsed.subcommand) {
       case "create": {
-        const result = (await apiFetch("/api/issues", { method: "POST", body: { title: parsed.title, repo: parsed.repo, developerAgentId: parsed.developerAgentId, reviewerAgentId: parsed.reviewerAgentId, description: parsed.description, acceptanceCriteria: parsed.acceptanceCriteria, baseBranch: parsed.baseBranch, source: "agent", enqueue: parsed.enqueue } })) as CreateIssueResult;
+        const result = (await apiFetch("/api/issues", { method: "POST", body: { title: parsed.title, repo: parsed.repo, developerAgentId: parsed.developerAgentId, reviewerAgentId: parsed.reviewerAgentId, description: parsed.description, acceptanceCriteria: parsed.acceptanceCriteria, baseBranch: parsed.baseBranch, source: "agent", enqueue: parsed.enqueue, autoMerge: parsed.autoMerge } })) as CreateIssueResult;
         console.log(JSON.stringify(result, null, 2));
         // stdout stays pure JSON for agents that pipe it — the hint goes to stderr.
         console.error(createOutcomeHint(result));
