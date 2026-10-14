@@ -62,6 +62,8 @@ function newIssue(maxReviewRounds = 3): string {
     baseBranch: "main",
     maxReviewRounds,
     maxInfraAttempts: 3,
+    // NOT-489: omitted now means auto-merge; this suite exercises final human review.
+    autoMerge: false,
     source: "manual"}).id;
 }
 

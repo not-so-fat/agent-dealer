@@ -107,6 +107,8 @@ async function makeIssue(opts: { maxInfraAttempts?: number } = {}): Promise<stri
     reviewerAgentId: rev.id,
     maxReviewRounds: 3,
     maxInfraAttempts: opts.maxInfraAttempts ?? 3,
+    // NOT-489: omitted now means auto-merge; this suite exercises final human review.
+    autoMerge: false,
     source: "manual"}).id;
 }
 

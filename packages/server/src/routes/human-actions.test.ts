@@ -41,7 +41,7 @@ async function buildApp() {
 }
 
 function seedIssueAwaitingFinalReview() {
-  const issue = createIssue({ title: "Awaiting review", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
+  const issue = createIssue({ title: "Awaiting review", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, maxReviewRounds: 3, maxInfraAttempts: 3, autoMerge: false, source: "manual" });
   transitionIssue(issue.id, "developing");
   transitionIssue(issue.id, "reviewing");
   transitionIssue(issue.id, "final_review", { currentOwner: "human" });
@@ -54,7 +54,7 @@ function seedIssueAwaitingFinalReview() {
  * (unlike seedIssueAwaitingFinalReview's hand-crafted transitions) — needed to exercise
  * resolveHumanActionAndAdvance's actual transactional path through the route. */
 async function seedRealIssueAwaitingFinalReview(): Promise<{ issueId: string; actionId: string }> {
-  const issue = createIssue({ title: "Real workflow", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
+  const issue = createIssue({ title: "Real workflow", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, autoMerge: false, source: "manual" });
   const start = startWorkflow(issue.id);
   assert.equal(start.ok, true);
 
@@ -310,7 +310,7 @@ test("POST resolve 400s on a choice not valid for reflection_interaction_require
 
 // NOT-272: seeds.
 function seedPreStartScopeDecision() {
-  const issue = createIssue({ title: "Scope gated", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
+  const issue = createIssue({ title: "Scope gated", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, autoMerge: false, source: "manual" });
   const action = createHumanAction({
     issueId: issue.id,
     actionType: "product_scope_decision",
@@ -324,7 +324,7 @@ function seedPreStartScopeDecision() {
 /** Drives a real issue to a mid-workflow product_scope_decision via a reviewer
  * escalate verdict carrying a productScopeQuestion (NOT-150 routing). */
 async function seedMidWorkflowScopeDecision(): Promise<{ issueId: string; actionId: string }> {
-  const issue = createIssue({ title: "Scope escalated", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, source: "manual" });
+  const issue = createIssue({ title: "Scope escalated", repo: "acme/app", baseBranch: "main", developerAgentId: BUILTIN_AGENT_CLAUDE_ID, reviewerAgentId: BUILTIN_AGENT_CURSOR_ID, acceptanceCriteria: "Works", maxReviewRounds: 3, maxInfraAttempts: 3, autoMerge: false, source: "manual" });
   const start = startWorkflow(issue.id);
   assert.equal(start.ok, true);
 
