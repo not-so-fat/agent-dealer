@@ -42,3 +42,18 @@ test("the Issues route is captured newest-first and oldest-first", () => {
     );
   }
 });
+
+test("NOT-490: queued and active pre-decision issue details are captured at both viewports", () => {
+  const byName = new Map(list.routes.map((r) => [r.name, r]));
+  assert.equal(byName.get("issue-detail-queued-auto-merge")?.path, "/issues/{{queuedIssueId}}");
+  assert.equal(byName.get("issue-detail-active-auto-merge")?.path, "/issues/{{activeIssueId}}");
+  // No steps: the selectors would also run against the base build, which has no switch.
+  assert.deepEqual(byName.get("issue-detail-queued-auto-merge")?.steps, []);
+  assert.deepEqual(byName.get("issue-detail-active-auto-merge")?.steps, []);
+  const filenames = plan.map((s) => s.filename);
+  for (const name of ["issue-detail-queued-auto-merge", "issue-detail-active-auto-merge"]) {
+    for (const viewport of ["1440x900", "390x800"]) {
+      assert.ok(filenames.includes(`${name}-${viewport}.png`), `${name} at ${viewport}`);
+    }
+  }
+});

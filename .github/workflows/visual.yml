@@ -108,7 +108,7 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Seed fixtures and write head screenshot plan
-        run: npx tsx scripts/ci-visual/capture.mts --base-url http://127.0.0.1:3221 --config ui-screenshots.json --out-dir ui-screenshots
+        run: npx tsx scripts/ci-visual/capture.mts --base-url http://127.0.0.1:3221 --config ui-screenshots.json --out-dir ui-screenshots --home "${{ runner.temp }}/agent-dealer-home"
 
       - name: Capture head screenshots
         env:
@@ -158,7 +158,7 @@ jobs:
           exit 1
 
       - name: Seed fixtures and write baseline screenshot plan
-        run: npx tsx scripts/ci-visual/capture.mts --base-url http://127.0.0.1:3221 --config ui-screenshots.json --out-dir ui-baseline
+        run: npx tsx scripts/ci-visual/capture.mts --base-url http://127.0.0.1:3221 --config ui-screenshots.json --out-dir ui-baseline --home "${{ runner.temp }}/agent-dealer-home-base"
 
       - name: Capture baseline screenshots
         env:
