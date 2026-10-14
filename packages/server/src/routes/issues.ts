@@ -25,7 +25,7 @@ import {
 } from "../repository/workflow-events.js";
 import { listHumanActionsForIssue, listOpenHumanActions } from "../repository/human-actions.js";
 import { listFindingsForIssue } from "../repository/findings.js";
-import { abortIssueAsync, applyParkedEdit, canEditParkedIssue, capWaitForIssue, checkIssueReadiness, closeReadyIssue, diffTaskSnapshotFromLive, parkCapWait, parkedEditableFields, parkedEditableFieldsLabel } from "../coordinator/commands.js";
+import { abortIssueAsync, applyAutoMergePolicyUpdate, applyParkedEdit, autoMergePolicyEditability, canEditParkedIssue, capWaitForIssue, checkIssueReadiness, closeReadyIssue, diffTaskSnapshotFromLive, parkCapWait, parkedEditableFields, parkedEditableFieldsLabel } from "../coordinator/commands.js";
 import { deleteDealerIssue } from "../coordinator/delete-issue.js";
 import { getAgent } from "../repository/agents.js";
 import {
@@ -210,6 +210,9 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
       // re-freeze into a new task snapshot (empty = in sync, or pre-freeze).
       // Issue Detail renders the pending-snapshot notice off this.
       pendingSnapshotChangedFields: diffTaskSnapshotFromLive(issue),
+      // NOT-490: whether the auto-merge policy may still change (queued or active,
+      // before the reviewer decision commits) — Issue Detail gates its toggle on this.
+      autoMergePolicy: autoMergePolicyEditability(issue),
     };
   });
 
@@ -377,6 +380,18 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     if (!issue) return reply.status(404).send({ error: "Not found" });
     const parsed = UpdateIssueInput.safeParse(req.body);
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.message });
+    // NOT-490: an `autoMerge`-only patch is the policy command — allowed while queued or
+    // active until the reviewer decision commits, race-safe against `applyReviewer`.
+    // Any other key (even alongside autoMerge) falls through to the frozen-input guard
+    // below, so a mixed patch on a live issue still fails closed with no partial write.
+    const patchKeys = Object.keys(parsed.data);
+    if (patchKeys.length === 1 && parsed.data.autoMerge !== undefined) {
+      const body = req.body as { updatedBy?: unknown };
+      const actor = typeof body.updatedBy === "string" && body.updatedBy.trim() ? body.updatedBy.trim() : "human";
+      const result = applyAutoMergePolicyUpdate(id, parsed.data.autoMerge, actor);
+      if (!result.ok) return reply.status(result.code).send({ error: result.error });
+      return result.issue;
+    }
     // Editable only pre-start or parked back on needs_human — the same statuses
     // startWorkflow itself accepts (commands.ts). A running workflow owns the frozen
     // task snapshot (freezeTaskSnapshot), so an edit must never race or diverge from
@@ -456,10 +471,13 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
         // is attributed exactly. Repository changes ride the same `issue.reassigned`
         // event (extended with from/to repo) rather than silently changing where the
         // issue will run.
+        // NOT-490: a pre-start auto-merge change in a mixed edit rides the same event.
+        const autoMergeChanged = fresh.autoMerge !== next.autoMerge;
         if (
           fresh.repo !== next.repo ||
           fresh.developerAgentId !== next.developerAgentId ||
-          fresh.reviewerAgentId !== next.reviewerAgentId
+          fresh.reviewerAgentId !== next.reviewerAgentId ||
+          autoMergeChanged
         ) {
           appendWorkflowEvent({
             issueId: id,
@@ -473,6 +491,7 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
               toDeveloperAgentId: next.developerAgentId,
               fromReviewerAgentId: fresh.reviewerAgentId,
               toReviewerAgentId: next.reviewerAgentId,
+              ...(autoMergeChanged ? { fromAutoMerge: fresh.autoMerge, toAutoMerge: next.autoMerge } : {}),
             },
           });
         }

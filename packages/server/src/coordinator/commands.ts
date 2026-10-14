@@ -417,6 +417,98 @@ export function applyParkedEdit(issueId: string, patch: UpdateIssueInput): Parke
 }
 
 /**
+ * NOT-490: whether the auto-merge policy may still change. It is read exactly once per
+ * approval — inside the reviewer-completion transaction (`applyReviewer`) — so it stays
+ * editable until that routing commits: queued/pre-start `ready`, the live
+ * `developing`/`reviewing`/`repairing` rounds, and a resumable `needs_human` park.
+ * Approval lands the issue in `final_review` (a `final_review` action, or the
+ * system-owned auto-merge park), and a failed auto-merge parks at a merge-failure
+ * escalation — both mean the merge decision is already committed.
+ */
+export interface AutoMergePolicyEditability {
+  editable: boolean;
+  /** Why the policy is read-only; null while editable. */
+  reason: string | null;
+}
+
+export function autoMergePolicyEditability(issue: Issue): AutoMergePolicyEditability {
+  switch (issue.status) {
+    case "ready":
+      return { editable: true, reason: null };
+    case "developing":
+    case "reviewing":
+    case "repairing":
+      return getActiveWorkflowInstance(issue.id)
+        ? { editable: true, reason: null }
+        : { editable: false, reason: "No active workflow is running for this issue." };
+    case "needs_human": {
+      const escalation = findOpenHumanAction(issue.id, "policy_escalation");
+      if (escalation && isMergeFailureAction(escalation)) {
+        return {
+          editable: false,
+          reason: "The reviewer approved and the merge was already attempted — use the merge-failure action instead.",
+        };
+      }
+      return { editable: true, reason: null };
+    }
+    case "final_review":
+      return {
+        editable: false,
+        reason:
+          issue.currentOwner === "system" && issue.currentIntent === AUTO_MERGE_INTENT
+            ? "The reviewer approved and auto-merge is already in flight."
+            : "The reviewer approved and the merge decision is committed — use Merge on the final review action.",
+      };
+    case "done":
+    case "closed":
+      return { editable: false, reason: `The issue is ${issue.status}.` };
+  }
+}
+
+export type AutoMergePolicyResult =
+  | { ok: true; issue: Issue; changed: boolean }
+  | { ok: false; code: number; error: string };
+
+/**
+ * NOT-490: an `autoMerge`-only update — the one input that may change during a live
+ * round, because nothing reads it until approved-review routing. Guard re-check, row
+ * write and audit run in one SQLite transaction, which serializes against the
+ * reviewer-completion transaction: an update committed first is the value
+ * `applyReviewer` routes on; a reviewer decision committed first moves the issue to
+ * `final_review` and this answers 409, so one approval can never yield both an
+ * auto-merge and a `final_review` action. Queue entry, frozen snapshot, agents,
+ * budgets, branch and PR are untouched (`updateIssue` writes only the policy column
+ * here). A real change appends one `issue.reassigned` event with before/after values
+ * and the actor; a no-op appends nothing.
+ */
+export function applyAutoMergePolicyUpdate(
+  issueId: string,
+  autoMerge: boolean,
+  actor: string
+): AutoMergePolicyResult {
+  return getDb().transaction((): AutoMergePolicyResult => {
+    const fresh = getIssue(issueId);
+    if (!fresh) return { ok: false, code: 404, error: "Not found" };
+    const editability = autoMergePolicyEditability(fresh);
+    if (!editability.editable) {
+      return { ok: false, code: 409, error: `Auto-merge can no longer be changed: ${editability.reason}` };
+    }
+    if (fresh.autoMerge === autoMerge) return { ok: true, issue: fresh, changed: false };
+    const next = updateIssue(issueId, { autoMerge });
+    appendWorkflowEvent({
+      issueId,
+      workflowInstanceId: getActiveWorkflowInstance(issueId)?.id ?? null,
+      type: "issue.reassigned",
+      actorType: "human",
+      stage: next.status,
+      round: next.currentRound,
+      payload: { fromAutoMerge: fresh.autoMerge, toAutoMerge: next.autoMerge, actor },
+    });
+    return { ok: true, issue: next, changed: true };
+  })();
+}
+
+/**
  * Stable identity-plus-bytes key for one attachment manifest entry. blobPath is
  * excluded: it is content-addressed from the compared fields under an
  * environment-local root, so it must never count as a task change.
