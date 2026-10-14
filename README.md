@@ -54,11 +54,11 @@ Your calendar is full; your backlog does not care. Small, well-specified issues 
 
 ## How it works
 
-1. **File** — new issue from Linear (lookup or inbox) or by hand: repo, base branch, acceptance criteria, developer + reviewer agents, auto-merge on/off
+1. **File** — new issue from Linear (lookup or inbox) or by hand: repo, base branch, acceptance criteria, developer + reviewer agents, and auto-merge (on by default for every surface — web, API, CLI, agents; opt out with `autoMerge: false` / `--no-auto-merge` to keep final human review)
 2. **Admission** — the issue queues; the coordinator admits the head entry when a slot is free and shows the wait reason when it cannot
 3. **Develop** — a worker session runs the coding CLI in a dedicated worktree, pushes a branch, and opens a draft PR
 4. **Review** — a read-only reviewer session assesses the diff against the acceptance criteria and returns findings; changes route back to the developer
-5. **Finish** — approve → auto-merge, or park a final-review human action for you; blockers become human actions on the Issues home
+5. **Finish** — approve → auto-merge (the default), or, for an issue that opted out, park a final-review human action for you; blockers become human actions on the Issues home
 
 Works without Agent Deck too (no deck = degraded mode; playbooks optional).
 
@@ -108,7 +108,7 @@ When an issue is admitted, agent-dealer spawns the agent profile's coding CLI (`
 
 Per-attempt Agent Deck MCP configuration is minted per session and scrubbed afterwards, so a spawned worker's only route to your deck is that short-lived, scoped server. Session logs go to `~/.agent-dealer/.temporal/logs/`; the issue record, evidence, and usage stay in SQLite.
 
-**You gate what matters:** acceptance criteria before a workflow starts, a final review before done when auto-merge is off, and every human action the workflow raises.
+**You gate what matters:** acceptance criteria before a workflow starts, a final review before done on issues created with auto-merge off (an explicit opt-out — omitting the choice means auto-merge), and every human action the workflow raises.
 
 ---
 
