@@ -155,12 +155,82 @@ type SectionProps = {
   onBeginEdit: () => void;
   onSave: (repo: string, developerAgentId: string, reviewerAgentId: string) => void;
   onCancel: () => void;
+  /** NOT-490: server-reported policy editability; absent (older server) reads as locked. */
+  autoMergePolicy?: { editable: boolean; reason: string | null };
+  /** NOT-490: saves the flipped policy through the autoMerge-only PATCH. */
+  onToggleAutoMerge?: (next: boolean) => void;
 };
+
+/**
+ * NOT-490: "Auto-merge after reviewer approval" — always shown as On/Off. While the
+ * server says the policy is still editable (queued, or active before the reviewer
+ * decision commits) it is a switch that saves immediately; otherwise it is read-only
+ * with the server's explanation.
+ */
+export function AutoMergePolicyControl({
+  autoMerge,
+  policy,
+  busy,
+  onToggle,
+}: {
+  autoMerge: boolean;
+  policy?: { editable: boolean; reason: string | null };
+  busy: boolean;
+  onToggle?: (next: boolean) => void;
+}) {
+  const editable = Boolean(policy?.editable && onToggle);
+  const value = autoMerge ? "On" : "Off";
+  return (
+    <div className="space-y-1" data-testid="auto-merge-policy">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+        <span id="auto-merge-policy-label" className="text-white/45">
+          Auto-merge after reviewer approval
+        </span>
+        {editable ? (
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoMerge}
+            aria-labelledby="auto-merge-policy-label"
+            disabled={busy}
+            title={autoMerge ? "Turn auto-merge off — approval then waits for final human review" : "Turn auto-merge on — approval then merges the PR"}
+            className={`inline-flex items-center gap-2 rounded-full border px-2 py-0.5 text-xs disabled:opacity-50 ${
+              autoMerge
+                ? "border-cyber-teal/50 bg-cyber-teal/15 text-cyber-teal"
+                : "border-white/15 bg-white/5 text-white/70"
+            }`}
+            onClick={() => onToggle?.(!autoMerge)}
+          >
+            <span
+              aria-hidden="true"
+              className={`relative inline-block h-3 w-6 rounded-full ${autoMerge ? "bg-cyber-teal/60" : "bg-white/20"}`}
+            >
+              <span
+                className={`absolute top-0.5 h-2 w-2 rounded-full bg-white transition-all ${autoMerge ? "left-3.5" : "left-0.5"}`}
+              />
+            </span>
+            {value}
+          </button>
+        ) : (
+          <span className="text-white/85">{value}</span>
+        )}
+      </div>
+      {editable ? (
+        <p className="text-xs text-white/45">
+          Read when the reviewer approves. Changing it keeps the queue position, task, agents and branch.
+        </p>
+      ) : (
+        policy?.reason && <p className="text-xs text-white/45">Locked — {policy.reason}</p>
+      )}
+    </div>
+  );
+}
 
 /**
  * NOT-240: the execution configuration — repository, developer, reviewer — shown for
  * every issue status without requiring an expansion or the execution-analysis view.
- * After workflow start the frozen inputs stay visible but read-only.
+ * After workflow start the frozen inputs stay visible but read-only; the auto-merge
+ * policy (NOT-490) stays switchable until the reviewer decision commits.
  */
 export default function IssueConfigurationSection({
   issue,
@@ -171,6 +241,8 @@ export default function IssueConfigurationSection({
   onBeginEdit,
   onSave,
   onCancel,
+  autoMergePolicy,
+  onToggleAutoMerge,
 }: SectionProps) {
   return (
     <div className="mb-4 p-3 rounded border border-white/10 bg-white/[0.03] space-y-1.5">
@@ -187,6 +259,12 @@ export default function IssueConfigurationSection({
         <span className="text-white/45">Reviewer </span>
         {agentValue(issue.reviewerAgentId, agents)}
       </p>
+      <AutoMergePolicyControl
+        autoMerge={issue.autoMerge}
+        policy={autoMergePolicy}
+        busy={busy}
+        onToggle={onToggleAutoMerge}
+      />
       {canEdit && !editing && (
         <button
           type="button"

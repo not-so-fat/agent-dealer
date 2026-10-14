@@ -272,6 +272,32 @@ export function buildDeleteSuccessNotice(args: {
 }
 
 /**
+ * NOT-490: the auto-merge policy save — `saveAutoMerge` delegates here. Success and
+ * failure (a 409 when the reviewer decision committed first) both refresh, so the
+ * control always re-renders the server's committed policy, never a stale optimistic one.
+ */
+export interface AutoMergePolicyFlowDeps {
+  patchAutoMerge: (autoMerge: boolean) => Promise<unknown>;
+  reportError: (error: unknown) => void;
+  refresh: () => void;
+}
+
+export async function executeAutoMergePolicyFlow(
+  next: boolean,
+  deps: AutoMergePolicyFlowDeps
+): Promise<"saved" | "refused"> {
+  try {
+    await deps.patchAutoMerge(next);
+    deps.refresh();
+    return "saved";
+  } catch (e) {
+    deps.reportError(e);
+    deps.refresh();
+    return "refused";
+  }
+}
+
+/**
  * NOT-365: the Dealer-local delete side-effect sequence — `doDelete` delegates
  * here, so this is the real path and not a test double. On success the detail
  * route is gone (a refresh would 404), so it closes the confirmation, refreshes
@@ -576,6 +602,20 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
     }
   };
 
+  const saveAutoMerge = async (next: boolean) => {
+    setBusy(true);
+    onError(null);
+    try {
+      await executeAutoMergePolicyFlow(next, {
+        patchAutoMerge: (autoMerge) => patchIssue(issueId, { autoMerge }),
+        reportError: fail,
+        refresh,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const saveAgentSwap = async (developerAgentId: string, reviewerAgentId: string) => {
     setBusy(true);
     onError(null);
@@ -749,7 +789,8 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
 
         {/* NOT-240: execution configuration — repository, developer, reviewer — always
             visible near the top. Editable only while `ready` with no active workflow;
-            after workflow start the frozen inputs stay read-only. */}
+            after workflow start the frozen inputs stay read-only. NOT-490: the
+            auto-merge policy follows the server's `autoMergePolicy.editable`. */}
         <IssueConfigurationSection
           issue={issue}
           agents={agents}
@@ -759,6 +800,8 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
           onBeginEdit={() => setConfigEditing(true)}
           onSave={(repo, dev, rev) => void saveConfig(repo, dev, rev)}
           onCancel={() => setConfigEditing(false)}
+          autoMergePolicy={detail.autoMergePolicy}
+          onToggleAutoMerge={(next) => void saveAutoMerge(next)}
         />
 
         {/* NOT-306: frozen execution contract, read-only — the ticket

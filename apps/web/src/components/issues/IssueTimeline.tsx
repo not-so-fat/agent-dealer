@@ -10,7 +10,14 @@ const LABELS: Record<string, (e: WorkflowEvent) => string> = {
   "issue.created": () => "Issue created",
   // NOT-240: pre-execution configuration change (repository and/or agents) with
   // before/after values in the payload — the durable evidence for the edit.
-  "issue.reassigned": () => "Configuration updated",
+  // NOT-490: a policy-only change names the new auto-merge value.
+  "issue.reassigned": (e) => {
+    const p = parseJson<{ toAutoMerge?: boolean; toRepo?: string }>(e.payloadJson);
+    if (p && typeof p.toAutoMerge === "boolean" && p.toRepo === undefined) {
+      return `Auto-merge turned ${p.toAutoMerge ? "on" : "off"}`;
+    }
+    return "Configuration updated";
+  },
   // NOT-363: operator reloaded the task text from the linked Linear ticket.
   "issue.source_reloaded": () => "Task text reloaded from Linear",
   "workflow.started": () => "Workflow started",
