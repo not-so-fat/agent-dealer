@@ -301,6 +301,12 @@ export interface IssueDetail {
    * Absent on older servers; treat as in sync.
    */
   pendingSnapshotChangedFields?: string[];
+  /**
+   * NOT-490: whether the auto-merge policy may still change — queued or active
+   * before the reviewer decision commits. `reason` explains a read-only policy.
+   * Absent on older servers; treat as read-only.
+   */
+  autoMergePolicy?: { editable: boolean; reason: string | null };
 }
 
 export interface IssueEvidence {

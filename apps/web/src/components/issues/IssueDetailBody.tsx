@@ -36,8 +36,9 @@ type Props = {
   agents: AgentWithHealth[];
   /** Lets the shell's open-action badge/list catch up after a resolution here. */
   onHumanActionsChanged: () => void;
-  /** Reload the detail after a mutation. */
-  refresh: () => void;
+  /** Reload the detail after a mutation. Settles once the reloaded (or a newer)
+   * detail is applied, so a caller can stay busy until it is on screen. */
+  refresh: () => void | Promise<void>;
   /** Surface an action failure (or clear it with null) on the page-level error banner. */
   onError: (message: string | null) => void;
 };
@@ -269,6 +270,33 @@ export function buildDeleteSuccessNotice(args: {
   return args.externalLabel
     ? `Issue ${label} deleted from Dealer. The Linear ticket was not deleted.${residual}`
     : `Issue ${label} permanently deleted from Dealer.${residual}`;
+}
+
+/**
+ * NOT-490: the auto-merge policy save — `saveAutoMerge` delegates here. Success and
+ * failure (a 409 when the reviewer decision committed first) both refresh, and the
+ * flow settles only after that refresh does — the caller keeps the switch busy until
+ * then, so the control never presents the pre-save policy as an enabled, accepted value.
+ */
+export interface AutoMergePolicyFlowDeps {
+  patchAutoMerge: (autoMerge: boolean) => Promise<unknown>;
+  reportError: (error: unknown) => void;
+  refresh: () => void | Promise<void>;
+}
+
+export async function executeAutoMergePolicyFlow(
+  next: boolean,
+  deps: AutoMergePolicyFlowDeps
+): Promise<"saved" | "refused"> {
+  try {
+    await deps.patchAutoMerge(next);
+  } catch (e) {
+    deps.reportError(e);
+    await deps.refresh();
+    return "refused";
+  }
+  await deps.refresh();
+  return "saved";
 }
 
 /**
@@ -576,6 +604,20 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
     }
   };
 
+  const saveAutoMerge = async (next: boolean) => {
+    setBusy(true);
+    onError(null);
+    try {
+      await executeAutoMergePolicyFlow(next, {
+        patchAutoMerge: (autoMerge) => patchIssue(issueId, { autoMerge }),
+        reportError: fail,
+        refresh,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const saveAgentSwap = async (developerAgentId: string, reviewerAgentId: string) => {
     setBusy(true);
     onError(null);
@@ -749,7 +791,8 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
 
         {/* NOT-240: execution configuration — repository, developer, reviewer — always
             visible near the top. Editable only while `ready` with no active workflow;
-            after workflow start the frozen inputs stay read-only. */}
+            after workflow start the frozen inputs stay read-only. NOT-490: the
+            auto-merge policy follows the server's `autoMergePolicy.editable`. */}
         <IssueConfigurationSection
           issue={issue}
           agents={agents}
@@ -759,6 +802,8 @@ export default function IssueDetailBody({ issueId, detail, agents, onHumanAction
           onBeginEdit={() => setConfigEditing(true)}
           onSave={(repo, dev, rev) => void saveConfig(repo, dev, rev)}
           onCancel={() => setConfigEditing(false)}
+          autoMergePolicy={detail.autoMergePolicy}
+          onToggleAutoMerge={(next) => void saveAutoMerge(next)}
         />
 
         {/* NOT-306: frozen execution contract, read-only — the ticket

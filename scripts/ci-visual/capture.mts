@@ -4,7 +4,9 @@
 // only: loads ui-screenshots.json, seeds deterministic fixture issues (two
 // drafts since NOT-385, so list order is visible) plus a guidance timeline
 // event through the public API, resolves `{{issueId}}`, and writes plan.json
-// for visual.spec.mjs.
+// for visual.spec.mjs. NOT-490 adds an auto-merge-off issue in an active
+// pre-decision `reviewing` state (`{{activeIssueId}}`, written to the server's
+// SQLite under --home) and a queued auto-merge-off issue (`{{queuedIssueId}}`).
 // The browser capture itself happens in the Playwright spec, which asserts
 // every listed route actually renders (failing the job otherwise).
 //
@@ -12,10 +14,14 @@
 //   npx tsx scripts/ci-visual/capture.mts \
 //     --base-url http://127.0.0.1:3221 \
 //     --config ui-screenshots.json \
-//     --out-dir ui-screenshots
+//     --out-dir ui-screenshots \
+//     --home "$AGENT_DEALER_HOME"
 
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { activeReviewingFixture } from "./fixtures.js";
 import { loadRouteList } from "./route-list.js";
 import { buildScreenshotPlan, resolveSeededPath } from "./plan.js";
 
@@ -122,7 +128,59 @@ async function main(): Promise<void> {
     throw new Error(`seed issue ${seed.id} timeline is missing the guidance event`);
   }
 
-  const seeds: Record<string, string> = { issueId: seed.id };
+  // NOT-490: an auto-merge-off issue in an active pre-decision state. No agent can
+  // run in CI, so the draft is moved to `reviewing` directly in the server's own
+  // database (see activeReviewingFixture for why nothing ever touches it again).
+  const home = flagValue("--home", process.env.AGENT_DEALER_HOME ?? "");
+  if (!home) throw new Error("--home (the server's AGENT_DEALER_HOME) is required for the active fixture");
+  const active = (await postJson(`${baseUrl}/api/issues`, {
+    title: "CI visual fixture (active review)",
+    description: "Active pre-decision issue whose auto-merge policy is still switchable (NOT-490).",
+    acceptanceCriteria: "Screenshots render for the configured routes.",
+    repo: "not-so-fat/agent-dealer",
+    developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+    reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    enqueue: false,
+    source: "manual",
+    autoMerge: false,
+  })) as { id?: unknown };
+  if (typeof active.id !== "string" || active.id === "") {
+    throw new Error("active seed issue response is missing an id");
+  }
+  const db = new DatabaseSync(path.join(home, "dealer.db"));
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec("BEGIN IMMEDIATE");
+    for (const { sql, params } of activeReviewingFixture(active.id, randomUUID(), new Date().toISOString())) {
+      db.prepare(sql).run(...params);
+    }
+    db.exec("COMMIT");
+  } finally {
+    db.close();
+  }
+  const activeDetail = (await readJson(`${baseUrl}/api/issues/${active.id}`)) as { issue?: { status?: unknown } };
+  if (activeDetail.issue?.status !== "reviewing") {
+    throw new Error(`active seed issue ${active.id} did not read back as reviewing`);
+  }
+
+  // NOT-490: a queued auto-merge-off issue. The active fixture holds the only
+  // admission slot, so it keeps waiting in the queue for the capture.
+  const queued = (await postJson(`${baseUrl}/api/issues`, {
+    title: "CI visual fixture (queued)",
+    description: "Queued issue whose auto-merge policy is switchable before start (NOT-490).",
+    acceptanceCriteria: "Screenshots render for the configured routes.",
+    repo: "not-so-fat/agent-dealer",
+    developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+    reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    enqueue: true,
+    source: "manual",
+    autoMerge: false,
+  })) as { id?: unknown };
+  if (typeof queued.id !== "string" || queued.id === "") {
+    throw new Error("queued seed issue response is missing an id");
+  }
+
+  const seeds: Record<string, string> = { issueId: seed.id, activeIssueId: active.id, queuedIssueId: queued.id };
   const resolvedRoutes = list.routes.map((route) => ({
     ...route,
     path: resolveSeededPath(route.path, seeds),

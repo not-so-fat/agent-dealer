@@ -352,13 +352,15 @@ test("NOT-185: PATCH /api/issues/:id succeeds while parked at attempts_exhausted
 
   // Non-task, non-agent fields stay frozen at the park — notably the review budget
   // (a non-goal). Agent profiles are swappable at the park (NOT-358, covered below),
-  // so they are no longer in this blocked list.
+  // so they are no longer in this blocked list. NOT-490: an autoMerge-only patch is the
+  // policy command (allowed until the review decision), but mixed into a parked edit it
+  // is still refused.
   for (const payload of [
     { maxReviewRounds: 5 },
     { maxInfraAttempts: 3 },
     { repo: "acme/other" },
     { baseBranch: "develop" },
-    { autoMerge: true },
+    { autoMerge: true, title: "Mixed" },
     { title: "Mixed", maxReviewRounds: 5 },
   ]) {
     assert.equal((await patch(payload)).statusCode, 409, JSON.stringify(payload));

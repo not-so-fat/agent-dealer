@@ -23,11 +23,12 @@ import IssueDetailBody, {
   CloseIssueConfirmation,
   DeleteIssueConfirmation,
   deleteConfirmationToken,
+  executeAutoMergePolicyFlow,
   executeDeleteIssueFlow,
   isDeleteConfirmationSatisfied,
   type DeleteIssueFlowDeps,
 } from "./IssueDetailBody.js";
-import IssueConfigurationSection, { IssueConfigurationEditor } from "./IssueConfiguration.js";
+import IssueConfigurationSection, { AutoMergePolicyControl, IssueConfigurationEditor } from "./IssueConfiguration.js";
 
 function event(extra: Partial<WorkflowEvent>): WorkflowEvent {
   return {
@@ -1080,4 +1081,186 @@ test("NOT-365: list-page deletion notice reads the navigation state and nothing 
   assert.equal(deletedNoticeFromLocationState({}), null);
   assert.equal(deletedNoticeFromLocationState({ deletedNotice: "" }), null);
   assert.equal(deletedNoticeFromLocationState({ deletedNotice: 42 }), null);
+});
+
+// NOT-490: the auto-merge policy is always visible; it is a switch exactly while the
+// server says it is editable, and a save refreshes on success and on conflict.
+const ACTIVE_INSTANCE: WorkflowInstance = {
+  id: "33333333-3333-4333-8333-333333333333",
+  issueId: "11111111-1111-4111-8111-111111111111",
+  workflowVersion: "v1",
+  startedAt: "2026-09-20T09:30:00.000Z",
+  completedAt: null,
+  outcome: null,
+};
+
+const SWITCH = /<button[^>]*role="switch"[^>]*aria-checked="(true|false)"[^>]*aria-labelledby="auto-merge-policy-label"/;
+
+test("NOT-490: queued ready issue shows Auto-merge Off with an accessible switch", () => {
+  const html = renderBody(
+    detailFixture({
+      issue: configuredIssue({ status: "ready", autoMerge: false }),
+      queued: true,
+      queueEntry: { position: 2, waitReason: "waiting for slot" },
+      autoMergePolicy: { editable: true, reason: null },
+    }),
+    [DEV, REV],
+  );
+  assert.match(html, /Auto-merge after reviewer approval/);
+  const m = html.match(SWITCH);
+  assert.ok(m, "switch rendered");
+  assert.equal(m![1], "false");
+  assert.match(html, /role="switch"[^>]*>[\s\S]*?Off<\/button>/);
+  assert.match(html, /keeps the queue position/);
+  assert.doesNotMatch(html, /Locked —/);
+});
+
+test("NOT-490: active pre-decision issue keeps the switch while frozen inputs stay read-only", () => {
+  const html = renderBody(
+    detailFixture({
+      issue: configuredIssue({ status: "reviewing", autoMerge: true }),
+      latestWorkflowInstance: ACTIVE_INSTANCE,
+      autoMergePolicy: { editable: true, reason: null },
+    }),
+    [DEV, REV],
+  );
+  const m = html.match(SWITCH);
+  assert.ok(m, "switch rendered while reviewing");
+  assert.equal(m![1], "true");
+  assert.match(html, /role="switch"[^>]*>[\s\S]*?On<\/button>/);
+  assert.doesNotMatch(html, /Edit configuration/, "repository/agents stay frozen");
+});
+
+test("NOT-490: after the merge decision the policy is read-only with the server's explanation", () => {
+  const html = renderBody(
+    detailFixture({
+      issue: configuredIssue({ status: "final_review", autoMerge: false }),
+      latestWorkflowInstance: ACTIVE_INSTANCE,
+      autoMergePolicy: {
+        editable: false,
+        reason: "The reviewer approved and the merge decision is committed — use Merge on the final review action.",
+      },
+    }),
+    [DEV, REV],
+  );
+  assert.match(html, /Auto-merge after reviewer approval/);
+  assert.doesNotMatch(html, /role="switch"/);
+  assert.match(html, /<span class="text-white\/85">Off<\/span>/);
+  assert.match(html, /Locked — The reviewer approved and the merge decision is committed/);
+});
+
+test("NOT-490: terminal issues and older servers render the policy read-only", () => {
+  const done = renderBody(
+    detailFixture({
+      issue: configuredIssue({ status: "done", autoMerge: true }),
+      autoMergePolicy: { editable: false, reason: "The issue is done." },
+    }),
+    [DEV, REV],
+  );
+  assert.doesNotMatch(done, /role="switch"/);
+  assert.match(done, /<span class="text-white\/85">On<\/span>/);
+  assert.match(done, /Locked — The issue is done\./);
+
+  // No `autoMergePolicy` in the payload: never offer a control the server may refuse.
+  const legacy = renderBody(detailFixture({ issue: configuredIssue({ status: "ready", autoMerge: false }) }), [DEV, REV]);
+  assert.match(legacy, /Auto-merge after reviewer approval/);
+  assert.doesNotMatch(legacy, /role="switch"/);
+});
+
+test("NOT-490: a successful policy save sends the flipped value and refreshes", async () => {
+  const calls: string[] = [];
+  const result = await executeAutoMergePolicyFlow(true, {
+    patchAutoMerge: async (v) => {
+      calls.push(`patch:${v}`);
+      return {};
+    },
+    reportError: () => calls.push("error"),
+    refresh: () => void calls.push("refresh"),
+  });
+  assert.equal(result, "saved");
+  assert.deepEqual(calls, ["patch:true", "refresh"]);
+});
+
+test("NOT-490: a conflicting policy save reports the 409 and refreshes to the committed policy", async () => {
+  const calls: string[] = [];
+  const conflict = new Error("Auto-merge can no longer be changed: The reviewer approved and the merge decision is committed");
+  let reported: unknown = null;
+  const result = await executeAutoMergePolicyFlow(true, {
+    patchAutoMerge: async () => {
+      calls.push("patch");
+      throw conflict;
+    },
+    reportError: (e) => {
+      reported = e;
+      calls.push("error");
+    },
+    refresh: () => void calls.push("refresh"),
+  });
+  assert.equal(result, "refused");
+  assert.deepEqual(calls, ["patch", "error", "refresh"]);
+  assert.equal(reported, conflict);
+});
+
+test("NOT-490: the policy flow settles only after the committed-policy refresh does (save and conflict)", async () => {
+  for (const outcome of ["saved", "refused"] as const) {
+    let releasePatch!: () => void;
+    let releaseRefresh!: () => void;
+    const patchGate = new Promise<void>((r) => (releasePatch = r));
+    const refreshGate = new Promise<void>((r) => (releaseRefresh = r));
+    const calls: string[] = [];
+    let settled = false;
+    const flow = executeAutoMergePolicyFlow(true, {
+      patchAutoMerge: async () => {
+        await patchGate;
+        if (outcome === "refused") throw new Error("409");
+        return {};
+      },
+      reportError: () => calls.push("error"),
+      refresh: async () => {
+        calls.push("refresh:start");
+        await refreshGate;
+        calls.push("refresh:done");
+      },
+    }).then((r) => {
+      settled = true;
+      return r;
+    });
+    releasePatch();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(settled, false, `${outcome}: still busy while the refresh is in flight`);
+    assert.deepEqual(calls, outcome === "refused" ? ["error", "refresh:start"] : ["refresh:start"]);
+    releaseRefresh();
+    assert.equal(await flow, outcome);
+    assert.equal(calls.at(-1), "refresh:done");
+  }
+});
+
+test("NOT-490: the switch is disabled and aria-busy while a save is in flight", () => {
+  const html = renderToStaticMarkup(
+    <AutoMergePolicyControl autoMerge={false} policy={{ editable: true, reason: null }} busy onToggle={() => {}} />
+  );
+  assert.match(html, /role="switch"[^>]*aria-busy="true"[^>]*disabled=""/);
+});
+
+test("NOT-490: timeline names a policy-only change and keeps the generic configuration label", () => {
+  const html = renderToStaticMarkup(
+    <IssueTimeline
+      events={[
+        event({
+          id: "p1",
+          type: "issue.reassigned",
+          actorType: "human",
+          payloadJson: JSON.stringify({ fromAutoMerge: false, toAutoMerge: true, actor: "human" }),
+        }),
+        event({
+          id: "p2",
+          type: "issue.reassigned",
+          actorType: "human",
+          payloadJson: JSON.stringify({ fromRepo: "a", toRepo: "b", fromAutoMerge: true, toAutoMerge: false }),
+        }),
+      ]}
+    />,
+  );
+  assert.match(html, /Auto-merge turned on/);
+  assert.match(html, /Configuration updated/);
 });

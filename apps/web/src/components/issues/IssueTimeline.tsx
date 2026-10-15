@@ -10,7 +10,14 @@ const LABELS: Record<string, (e: WorkflowEvent) => string> = {
   "issue.created": () => "Issue created",
   // NOT-240: pre-execution configuration change (repository and/or agents) with
   // before/after values in the payload — the durable evidence for the edit.
-  "issue.reassigned": () => "Configuration updated",
+  // NOT-490: a policy-only change names the new auto-merge value.
+  "issue.reassigned": (e) => {
+    const p = parseJson<{ toAutoMerge?: boolean; toRepo?: string }>(e.payloadJson);
+    if (p && typeof p.toAutoMerge === "boolean" && p.toRepo === undefined) {
+      return `Auto-merge turned ${p.toAutoMerge ? "on" : "off"}`;
+    }
+    return "Configuration updated";
+  },
   // NOT-363: operator reloaded the task text from the linked Linear ticket.
   "issue.source_reloaded": () => "Task text reloaded from Linear",
   "workflow.started": () => "Workflow started",
@@ -174,7 +181,7 @@ export default function IssueTimeline({ events }: { events: WorkflowEvent[] }) {
         <div key={e.id} className="flex items-baseline gap-3 py-1.5 border-b border-white/5 last:border-0">
           <span className="text-xs text-white/35 w-20 shrink-0 tabular-nums">{new Date(e.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
           <span className={`text-[11px] leading-none px-1.5 py-0.5 rounded shrink-0 ${ACTOR_CLASS[e.actorType]}`}>{actorText(e)}</span>
-          <span className="text-sm text-white/80">{describe(e)}</span>
+          <span className="text-sm text-white/80 min-w-0 break-words [overflow-wrap:anywhere]">{describe(e)}</span>
           <EventBody e={e} />
         </div>
       ))}
