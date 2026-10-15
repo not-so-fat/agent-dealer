@@ -114,7 +114,7 @@ import {
   remediationFromProbe,
   type AuthFailureRouting,
 } from "./runtime-auth-park.js";
-import { AUTO_MERGE_INTENT, finalizeAutoMerge } from "./auto-merge.js";
+import { AUTO_MERGE_INTENT, OPERATOR_VERIFICATION_INTENT, finalizeAutoMerge } from "./auto-merge.js";
 import { triggerLinearPostMerge } from "./linear-merge-verify.js";
 import { conflictRepairSpent, queueConflictRepairRound } from "./merge-conflict-sync.js";
 import {
@@ -422,8 +422,8 @@ export function applyParkedEdit(issueId: string, patch: UpdateIssueInput): Parke
  * editable until that routing commits: queued/pre-start `ready`, the live
  * `developing`/`reviewing`/`repairing` rounds, and a resumable `needs_human` park.
  * Approval lands the issue in `final_review` (a `final_review` action, or the
- * system-owned auto-merge park), and a failed auto-merge parks at a merge-failure
- * escalation — both mean the merge decision is already committed.
+ * system-owned auto-merge park); the finalizer may then park at an operator-verification
+ * gate or a merge-failure escalation — all mean the merge decision is already committed.
  */
 export interface AutoMergePolicyEditability {
   editable: boolean;
@@ -442,8 +442,21 @@ export function autoMergePolicyEditability(issue: Issue): AutoMergePolicyEditabi
         ? { editable: true, reason: null }
         : { editable: false, reason: "No active workflow is running for this issue." };
     case "needs_human": {
-      const escalation = findOpenHumanAction(issue.id, "policy_escalation");
-      if (escalation && isMergeFailureAction(escalation)) {
+      const open = listHumanActionsForIssue(issue.id).filter((a) => a.status === "open");
+      // The operator-verification gate runs after approval routing: resolving it continues
+      // the already-committed merge path, so the policy is locked while it is open.
+      if (
+        issue.currentIntent === OPERATOR_VERIFICATION_INTENT ||
+        open.some((a) => a.actionType === "operator_verification")
+      ) {
+        return {
+          editable: false,
+          reason:
+            "The reviewer approved and the merge decision is committed — it waits only on operator verification.",
+        };
+      }
+      // Merge-failure parks, including the no-head operator-verification escalation.
+      if (open.some((a) => a.actionType === "policy_escalation" && isMergeFailureAction(a))) {
         return {
           editable: false,
           reason: "The reviewer approved and the merge was already attempted — use the merge-failure action instead.",

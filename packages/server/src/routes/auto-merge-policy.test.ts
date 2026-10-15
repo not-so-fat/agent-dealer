@@ -72,11 +72,16 @@ async function buildApp() {
   return app;
 }
 
-function newIssue(opts: { autoMerge: boolean; maxReviewRounds?: number; title?: string }): string {
+function newIssue(opts: {
+  autoMerge: boolean;
+  maxReviewRounds?: number;
+  title?: string;
+  acceptanceCriteria?: string;
+}): string {
   return createIssue({
     title: opts.title ?? "Policy target",
     description: "d",
-    acceptanceCriteria: "It works",
+    acceptanceCriteria: opts.acceptanceCriteria ?? "It works",
     repo: fixtureRepo,
     developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
     reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
@@ -350,6 +355,36 @@ test("NOT-490: while auto-merge finalization is in flight the policy is locked; 
   assert.equal(getIssue(id)!.status, "done");
   assert.equal(mergeCalls, 1);
   assert.equal(listHumanActionsForIssue(id).length, 0, "no human action created");
+  assert.equal(policyEvents(id).length, 0);
+  await app.close();
+});
+
+test("NOT-490: an operator-verification park after approval keeps the committed policy locked", async () => {
+  const app = await buildApp();
+  const id = newIssue({
+    autoMerge: true,
+    acceptanceCriteria: "- [ ] Operator signs in with SSO [operator]",
+  });
+  startWorkflow(id);
+  await complete(id, cleanHandoff);
+  await complete(id, { kind: "verdict", result: review("approved") });
+  assert.equal(getIssue(id)!.status, "needs_human");
+  const gate = listHumanActionsForIssue(id).filter((a) => a.status === "open");
+  assert.deepEqual(gate.map((a) => a.actionType), ["operator_verification"], "precondition: parked at the gate");
+  assert.equal(mergeCalls, 0);
+  const eventsBefore = listWorkflowEventsForIssue(id).length;
+
+  const detail = (await app.inject({ method: "GET", url: `/api/issues/${id}` })).json() as {
+    autoMergePolicy: { editable: boolean; reason: string | null };
+  };
+  assert.equal(detail.autoMergePolicy.editable, false);
+  assert.match(detail.autoMergePolicy.reason ?? "", /operator verification/);
+
+  const res = await app.inject({ method: "PATCH", url: `/api/issues/${id}`, payload: { autoMerge: false } });
+  assert.equal(res.statusCode, 409);
+  assert.match((res.json() as { error: string }).error, /no longer be changed/);
+  assert.equal(getIssue(id)!.autoMerge, true, "committed policy is unchanged");
+  assert.equal(listWorkflowEventsForIssue(id).length, eventsBefore, "no audit event for the refused update");
   assert.equal(policyEvents(id).length, 0);
   await app.close();
 });
