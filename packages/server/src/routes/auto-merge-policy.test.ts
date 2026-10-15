@@ -204,6 +204,15 @@ test("NOT-490: a queued ready issue accepts an autoMerge-only update with queue 
   assert.equal(events[0]!.actorType, "human");
   assert.deepEqual(JSON.parse(events[0]!.payloadJson!), { fromAutoMerge: false, toAutoMerge: true, actor: "operator-1" });
 
+  // A queued issue also refuses coordinator-owned fields smuggled beside the policy.
+  for (const mixed of [{ autoMerge: false, branch: "x" }, { autoMerge: false, status: "done" }, { autoMerge: false, headSha: "s" }]) {
+    const refused = await app.inject({ method: "PATCH", url: `/api/issues/${id}`, payload: mixed });
+    assert.equal(refused.statusCode, 409, `mixed ${JSON.stringify(mixed)} must be refused`);
+    assert.equal(getIssue(id)!.autoMerge, true, "no partial write");
+    assert.equal(policyEvents(id).length, 1);
+    assert.deepEqual(listQueuedEntries(), queueBefore);
+  }
+
   // Idempotent no-op: 200, no event.
   const again = await app.inject({ method: "PATCH", url: `/api/issues/${id}`, payload: { autoMerge: true } });
   assert.equal(again.statusCode, 200);
@@ -238,6 +247,14 @@ for (const { status, setup } of ELIGIBLE) {
       { autoMerge: true, repo: "acme/other" },
       { autoMerge: true, developerAgentId: BUILTIN_AGENT_CODEX_ID },
       { autoMerge: true, maxReviewRounds: 9 },
+      // Coordinator-owned fields the schema does not declare: a non-strict parse would
+      // strip them, so the route must refuse on the raw body keys.
+      { autoMerge: true, branch: "other" },
+      { autoMerge: true, status: "done" },
+      { autoMerge: true, headSha: "deadbeef" },
+      { autoMerge: true, prNumber: 7 },
+      { autoMerge: true, prUrl: "https://gh/pr/7" },
+      { autoMerge: true, queuePosition: 0 },
     ]) {
       const res = await app.inject({ method: "PATCH", url: `/api/issues/${id}`, payload: mixed });
       assert.equal(res.statusCode, 409, `mixed ${JSON.stringify(mixed)} must be refused`);

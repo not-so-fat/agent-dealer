@@ -47,15 +47,23 @@ jobs:
 
     steps:
       # Full history so the base commit is available for the baseline worktree.
+      # NOT-490: on pull_request, check out the exact PR head commit instead of
+      # GitHub's synthetic merge ref, so the captured screenshots and the SHA
+      # recorded in SUMMARY.md are the PR head itself (exact-head evidence).
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Resolve head and base SHAs
         run: |
           echo "HEAD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           if [ "${{ github.event_name }}" = "pull_request" ]; then
+            if [ "$(git rev-parse HEAD)" != "${{ github.event.pull_request.head.sha }}" ]; then
+              echo "Checked-out HEAD $(git rev-parse HEAD) is not PR head ${{ github.event.pull_request.head.sha }}"
+              exit 1
+            fi
             echo "BASE_SHA=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_ENV"
           else
             echo "BASE_SHA=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"

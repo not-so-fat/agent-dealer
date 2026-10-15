@@ -384,9 +384,19 @@ export async function registerIssueRoutes(app: FastifyInstance): Promise<void> {
     // active until the reviewer decision commits, race-safe against `applyReviewer`.
     // Any other key (even alongside autoMerge) falls through to the frozen-input guard
     // below, so a mixed patch on a live issue still fails closed with no partial write.
-    const patchKeys = Object.keys(parsed.data);
-    if (patchKeys.length === 1 && parsed.data.autoMerge !== undefined) {
-      const body = req.body as { updatedBy?: unknown };
+    //
+    // The discriminator reads the RAW body keys, not `parsed.data`: the schema is
+    // non-strict and strips unknown properties, so `{autoMerge, branch}` would otherwise
+    // parse to `{autoMerge}` and slip into the policy path. Any key outside the editable
+    // schema (branch, status, SHA, PR, queue fields, …) — other than the `updatedBy`
+    // actor metadata — names a coordinator-owned field and fails closed before any write.
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const rawKeys = Object.keys(body).filter((k) => k !== "updatedBy");
+    const ownedKeys = rawKeys.filter((k) => !Object.prototype.hasOwnProperty.call(UpdateIssueInput.shape, k));
+    if (ownedKeys.length > 0) {
+      return reply.status(409).send({ error: `Cannot edit coordinator-owned field(s): ${ownedKeys.join(", ")}` });
+    }
+    if (rawKeys.length === 1 && rawKeys[0] === "autoMerge" && parsed.data.autoMerge !== undefined) {
       const actor = typeof body.updatedBy === "string" && body.updatedBy.trim() ? body.updatedBy.trim() : "human";
       const result = applyAutoMergePolicyUpdate(id, parsed.data.autoMerge, actor);
       if (!result.ok) return reply.status(result.code).send({ error: result.error });
