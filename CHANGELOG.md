@@ -4,6 +4,15 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.3.4 — 2026-10-15
+
+Make auto-merge the default for new issues and let operators enable it on queued and in-flight issues
+
+### Changes
+
+- NOT-490: Let operators turn on auto-merge for queued and in-flight Dealer issues (#236)
+- NOT-489: Make auto-merge the default for every new Dealer issue, including agent/API/CLI creation (#235)
+
 ## 1.3.3 — 2026-10-13
 
 Preserve provider reset timestamps across every hard usage-cap path and reconcile active runtime caps into compact capacity displays
