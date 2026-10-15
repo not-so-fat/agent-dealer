@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type { AgentWithHealth } from "@agent-dealer/shared";
 import { fetchIssueDetail, type IssueDetail } from "../api";
 import IssueDetailBody from "../components/issues/IssueDetailBody";
+import { createLatestRequestGate } from "../lib/latestRequest";
 
 type Props = {
   issueId: string;
@@ -16,14 +17,20 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
 
-  const refresh = () =>
-    fetchIssueDetail(issueId)
-      .then((d) => {
+  // NOT-490: the poll and post-mutation refreshes overlap — the gate applies only
+  // responses newer than the last applied one, and the returned promise settles once
+  // this call's response is applied (or superseded), so a save can stay busy until the
+  // committed state is on screen.
+  const gate = useRef(createLatestRequestGate()).current;
+  const refresh = (): Promise<void> =>
+    gate.run(
+      () => fetchIssueDetail(issueId),
+      (d) => {
         setDetail(d);
         setError(null);
         setNotFound(false);
-      })
-      .catch((e) => {
+      },
+      (e) => {
         const msg = String(e).replace(/^Error:\s*/i, "").trim();
         if (/^not found$/i.test(msg)) {
           setNotFound(true);
@@ -33,7 +40,8 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
           setError(msg);
           setNotFound(false);
         }
-      });
+      }
+    );
 
   useEffect(() => {
     // Route reuse no longer unmounts this page when only :issueId changes — clear
@@ -42,8 +50,9 @@ export default function IssueDetailPage({ issueId, agents, onHumanActionsChanged
     setDetail(null);
     setError(null);
     setNotFound(false);
-    refresh();
-    const poll = setInterval(refresh, 4000);
+    gate.invalidate();
+    void refresh();
+    const poll = setInterval(() => void refresh(), 4000);
     return () => clearInterval(poll);
   }, [issueId]);
 

@@ -36,8 +36,9 @@ type Props = {
   agents: AgentWithHealth[];
   /** Lets the shell's open-action badge/list catch up after a resolution here. */
   onHumanActionsChanged: () => void;
-  /** Reload the detail after a mutation. */
-  refresh: () => void;
+  /** Reload the detail after a mutation. Settles once the reloaded (or a newer)
+   * detail is applied, so a caller can stay busy until it is on screen. */
+  refresh: () => void | Promise<void>;
   /** Surface an action failure (or clear it with null) on the page-level error banner. */
   onError: (message: string | null) => void;
 };
@@ -273,13 +274,14 @@ export function buildDeleteSuccessNotice(args: {
 
 /**
  * NOT-490: the auto-merge policy save — `saveAutoMerge` delegates here. Success and
- * failure (a 409 when the reviewer decision committed first) both refresh, so the
- * control always re-renders the server's committed policy, never a stale optimistic one.
+ * failure (a 409 when the reviewer decision committed first) both refresh, and the
+ * flow settles only after that refresh does — the caller keeps the switch busy until
+ * then, so the control never presents the pre-save policy as an enabled, accepted value.
  */
 export interface AutoMergePolicyFlowDeps {
   patchAutoMerge: (autoMerge: boolean) => Promise<unknown>;
   reportError: (error: unknown) => void;
-  refresh: () => void;
+  refresh: () => void | Promise<void>;
 }
 
 export async function executeAutoMergePolicyFlow(
@@ -288,13 +290,13 @@ export async function executeAutoMergePolicyFlow(
 ): Promise<"saved" | "refused"> {
   try {
     await deps.patchAutoMerge(next);
-    deps.refresh();
-    return "saved";
   } catch (e) {
     deps.reportError(e);
-    deps.refresh();
+    await deps.refresh();
     return "refused";
   }
+  await deps.refresh();
+  return "saved";
 }
 
 /**

@@ -192,6 +192,7 @@ export function AutoMergePolicyControl({
             role="switch"
             aria-checked={autoMerge}
             aria-labelledby="auto-merge-policy-label"
+            aria-busy={busy}
             disabled={busy}
             title={autoMerge ? "Turn auto-merge off — approval then waits for final human review" : "Turn auto-merge on — approval then merges the PR"}
             className={`inline-flex items-center gap-2 rounded-full border px-2 py-0.5 text-xs disabled:opacity-50 ${

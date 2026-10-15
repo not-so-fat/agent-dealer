@@ -28,7 +28,7 @@ import IssueDetailBody, {
   isDeleteConfirmationSatisfied,
   type DeleteIssueFlowDeps,
 } from "./IssueDetailBody.js";
-import IssueConfigurationSection, { IssueConfigurationEditor } from "./IssueConfiguration.js";
+import IssueConfigurationSection, { AutoMergePolicyControl, IssueConfigurationEditor } from "./IssueConfiguration.js";
 
 function event(extra: Partial<WorkflowEvent>): WorkflowEvent {
   return {
@@ -1175,7 +1175,7 @@ test("NOT-490: a successful policy save sends the flipped value and refreshes", 
       return {};
     },
     reportError: () => calls.push("error"),
-    refresh: () => calls.push("refresh"),
+    refresh: () => void calls.push("refresh"),
   });
   assert.equal(result, "saved");
   assert.deepEqual(calls, ["patch:true", "refresh"]);
@@ -1194,11 +1194,52 @@ test("NOT-490: a conflicting policy save reports the 409 and refreshes to the co
       reported = e;
       calls.push("error");
     },
-    refresh: () => calls.push("refresh"),
+    refresh: () => void calls.push("refresh"),
   });
   assert.equal(result, "refused");
   assert.deepEqual(calls, ["patch", "error", "refresh"]);
   assert.equal(reported, conflict);
+});
+
+test("NOT-490: the policy flow settles only after the committed-policy refresh does (save and conflict)", async () => {
+  for (const outcome of ["saved", "refused"] as const) {
+    let releasePatch!: () => void;
+    let releaseRefresh!: () => void;
+    const patchGate = new Promise<void>((r) => (releasePatch = r));
+    const refreshGate = new Promise<void>((r) => (releaseRefresh = r));
+    const calls: string[] = [];
+    let settled = false;
+    const flow = executeAutoMergePolicyFlow(true, {
+      patchAutoMerge: async () => {
+        await patchGate;
+        if (outcome === "refused") throw new Error("409");
+        return {};
+      },
+      reportError: () => calls.push("error"),
+      refresh: async () => {
+        calls.push("refresh:start");
+        await refreshGate;
+        calls.push("refresh:done");
+      },
+    }).then((r) => {
+      settled = true;
+      return r;
+    });
+    releasePatch();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(settled, false, `${outcome}: still busy while the refresh is in flight`);
+    assert.deepEqual(calls, outcome === "refused" ? ["error", "refresh:start"] : ["refresh:start"]);
+    releaseRefresh();
+    assert.equal(await flow, outcome);
+    assert.equal(calls.at(-1), "refresh:done");
+  }
+});
+
+test("NOT-490: the switch is disabled and aria-busy while a save is in flight", () => {
+  const html = renderToStaticMarkup(
+    <AutoMergePolicyControl autoMerge={false} policy={{ editable: true, reason: null }} busy onToggle={() => {}} />
+  );
+  assert.match(html, /role="switch"[^>]*aria-busy="true"[^>]*disabled=""/);
 });
 
 test("NOT-490: timeline names a policy-only change and keeps the generic configuration label", () => {
