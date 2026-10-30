@@ -4,6 +4,14 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.3.5 — 2026-10-30
+
+Skip the visual-evidence merge gate for repos without visual.yml
+
+### Changes
+
+- NOT-538: repos without visual.yml skip the visual-evidence merge gate (#238)
+
 ## 1.3.4 — 2026-10-15
 
 Make auto-merge the default for new issues and let operators enable it on queued and in-flight issues
