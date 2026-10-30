@@ -26,6 +26,7 @@ const {
   VISUAL_WORKFLOW_PATHS,
   VISUAL_ARTIFACT_NAMES,
   VISUAL_EVIDENCE_ARTIFACT_KIND,
+  VISUAL_WORKFLOW_ABSENT_REASON,
   isUiAffectingChange,
   classifyVisualEvidence,
   githubVisualEvidenceFetcher,
@@ -354,11 +355,14 @@ function fixtureFetcher(opts: {
   run?: { databaseId: number; headSha: string; conclusion: string | null; status: string | null } | null;
   failDownload?: string[];
   failLookup?: boolean;
+  /** NOT-538: fail the lookup with this exact error message. */
+  failLookupError?: string;
 }): VisualEvidenceFetcher & { calls: { downloads: string[] } } {
   const calls = { downloads: [] as string[] };
   return {
     calls,
     async findRunForHead() {
+      if (opts.failLookupError !== undefined) throw new Error(opts.failLookupError);
       if (opts.failLookup) throw new Error("gh exploded");
       return opts.run === undefined
         ? { databaseId: 42, headSha: HEAD, conclusion: "success", status: "completed" }
@@ -565,4 +569,136 @@ test("NOT-384: gate reader holds only UI heads with missing/failed evidence at t
     author: "system",
   });
   assert.equal(readVisualEvidenceHold(nonUiIssue, HEAD), null);
+});
+
+// NOT-538: a repository whose default branch has no visual.yml has nothing to
+// capture — the lookup's "workflow not found" 404 resolves to not_applicable
+// (the head still matches the UI paths) instead of holding the PR.
+test("NOT-538: workflow-not-found 404 records not_applicable, never missing", async () => {
+  const issueId = makeIssue();
+  const worktree = initRepo();
+  try {
+    const resolved = await resolveReviewerVisualEvidence({
+      issueId,
+      worktreePath: worktree,
+      baseSha: "c".repeat(40),
+      headSha: HEAD,
+      changedFiles: ["packages/shared/src/types.ts"],
+      github: {} as never,
+      fetcher: fixtureFetcher({
+        failLookupError:
+          "gh run list failed: HTTP 404: workflow visual.yml not found on the default branch",
+      }),
+    });
+    assert.equal(resolved.state, "not_applicable");
+    assert.equal(resolved.uiAffecting, true);
+    assert.equal(resolved.runId, null);
+    assert.equal(resolved.staged, null);
+    assert.equal(resolved.reason, VISUAL_WORKFLOW_ABSENT_REASON);
+    assert.match(resolved.reason!, /repository has no Visual workflow/);
+    assert.equal(toReviewerVisualEvidenceInput(resolved), undefined);
+    const rows = listArtifactsForIssueByKind(issueId, VISUAL_EVIDENCE_ARTIFACT_KIND);
+    assert.equal(rows.length, 1);
+    const content = JSON.parse(rows[0]!.contentJson!);
+    assert.equal(content.state, "not_applicable");
+    assert.equal(content.uiAffecting, true);
+    // The recorded workflow-absent record releases the merge gate.
+    assert.equal(readVisualEvidenceHold(issueId, HEAD), null);
+  } finally {
+    fs.rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+// NOT-538: every other lookup failure still fails closed to missing with the
+// existing reason — only the workflow-not-found 404 skips the gate.
+test("NOT-538: auth, network, 5xx, and rate-limit lookup failures still record missing", async () => {
+  const worktree = initRepo();
+  try {
+    const failures: Record<string, string> = {
+      auth: "gh run list failed: HTTP 401: Bad credentials",
+      network: "gh run list failed: Could not resolve host: api.github.com",
+      server: "gh run list failed: HTTP 502: Bad Gateway",
+      rateLimit: "gh run list failed: HTTP 403: API rate limit exceeded for user ID 123",
+    };
+    for (const [kind, message] of Object.entries(failures)) {
+      const resolved = await resolveReviewerVisualEvidence({
+        issueId: makeIssue(),
+        worktreePath: worktree,
+        baseSha: "c".repeat(40),
+        headSha: HEAD,
+        changedFiles: ["packages/shared/src/types.ts"],
+        github: {} as never,
+        fetcher: fixtureFetcher({ failLookupError: message }),
+      });
+      assert.equal(resolved.state, "missing", `${kind} failure must stay missing`);
+      assert.equal(resolved.uiAffecting, true);
+      assert.match(
+        resolved.reason!,
+        /^Visual run lookup failed: /,
+        `${kind} failure keeps the lookup-failed reason`
+      );
+    }
+    // Near-miss 404s that do not name the missing workflow also stay missing.
+    for (const message of [
+      "gh run list failed: HTTP 404: Not Found",
+      "gh run list failed: HTTP 404: repository not found",
+    ]) {
+      const resolved = await resolveReviewerVisualEvidence({
+        issueId: makeIssue(),
+        worktreePath: worktree,
+        baseSha: "c".repeat(40),
+        headSha: HEAD,
+        changedFiles: ["packages/shared/src/types.ts"],
+        github: {} as never,
+        fetcher: fixtureFetcher({ failLookupError: message }),
+      });
+      assert.equal(resolved.state, "missing", `${message} must stay missing`);
+    }
+  } finally {
+    fs.rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+// NOT-538: the gate reader releases a UI-affecting head whose record is
+// not_applicable because the repository has no Visual workflow, and still
+// holds missing and failed.
+test("NOT-538: gate reader releases workflow-absent not_applicable, holds missing and failed", () => {
+  const absentIssue = makeIssue();
+  createIssueArtifact({
+    issueId: absentIssue,
+    kind: VISUAL_EVIDENCE_ARTIFACT_KIND,
+    content: {
+      headSha: HEAD,
+      uiAffecting: true,
+      state: "not_applicable",
+      reason: VISUAL_WORKFLOW_ABSENT_REASON,
+      runId: null,
+      artifactNames: [],
+    },
+    author: "system",
+  });
+  assert.equal(readVisualEvidenceHold(absentIssue, HEAD), null);
+  const missingIssue = makeIssue();
+  createIssueArtifact({
+    issueId: missingIssue,
+    kind: VISUAL_EVIDENCE_ARTIFACT_KIND,
+    content: {
+      headSha: HEAD,
+      uiAffecting: true,
+      state: "missing",
+      reason: "Visual run lookup failed: HTTP 502: Bad Gateway",
+      runId: null,
+      artifactNames: [],
+    },
+    author: "system",
+  });
+  assert.equal(readVisualEvidenceHold(missingIssue, HEAD)!.state, "missing");
+  const failedIssue = makeIssue();
+  createIssueArtifact({
+    issueId: failedIssue,
+    kind: VISUAL_EVIDENCE_ARTIFACT_KIND,
+    content: { headSha: HEAD, uiAffecting: true, state: "failed", reason: "boom", runId: 9, artifactNames: [] },
+    author: "system",
+  });
+  assert.equal(readVisualEvidenceHold(failedIssue, HEAD)!.state, "failed");
 });

@@ -40,6 +40,14 @@ The workflow only triggers when a PR touches `apps/web/**` or
 `scripts/ci-visual/**`, the workflow file itself) via the `paths` filter — a
 PR changing neither tree skips the job instead of failing it.
 
+Repositories whose default branch has no `visual.yml` skip the
+visual-evidence merge gate entirely: when the Visual run lookup answers HTTP
+404 "workflow visual.yml not found on the default branch", the head is
+recorded as `not_applicable` and the PR is never held for operator
+verification on visual grounds. Any other lookup failure (auth, network, 5xx,
+rate limit) still records `missing` and holds, so the gate keeps failing
+closed in repositories that do have the workflow.
+
 ### Tagging a visual AC `[ci]`
 
 Write the AC so the route and viewport are explicit, e.g.
