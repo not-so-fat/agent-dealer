@@ -452,7 +452,7 @@ test("responseOptionsFor(operator_verification) matches the gate's stored option
 // SHA and the missing artifacts, no merge, and crucially no repair round.
 function recordVisualEvidence(
   issueId: string,
-  opts: { headSha: string; state: "available" | "missing" | "failed" }
+  opts: { headSha: string; state: "available" | "missing" | "failed" | "not_applicable" }
 ): void {
   createIssueArtifact({
     issueId,
@@ -462,14 +462,16 @@ function recordVisualEvidence(
       baseSha: "base1",
       uiAffecting: true,
       state: opts.state,
-      runId: opts.state === "missing" ? null : 42,
+      runId: opts.state === "available" || opts.state === "failed" ? 42 : null,
       artifactNames: opts.state === "available" ? ["ui-screenshots", "ui-baseline", "ui-diff"] : [],
       reason:
         opts.state === "available"
           ? null
           : opts.state === "failed"
             ? "Visual run 42 for this head concluded failure — its captures are unusable"
-            : "no Visual workflow run found for head abc123",
+            : opts.state === "not_applicable"
+              ? "repository has no Visual workflow (workflow visual.yml not found on the default branch) — nothing to capture"
+              : "no Visual workflow run found for head abc123",
     },
     author: "system",
   });
@@ -539,6 +541,24 @@ test("NOT-384: available visual evidence on a UI head merges normally", async ()
   const issueId = newIssue("It works");
   startWorkflow(issueId);
   recordVisualEvidence(issueId, { headSha: "abc123", state: "available" });
+  const result = await approve(issueId);
+
+  assert.equal(result.applied, true);
+  if (result.applied) assert.equal(result.issueStatus, "done");
+  assert.deepEqual(calls, [{ cwd: managedCwd, number: 42 }]);
+  assert.equal(getIssue(issueId)!.status, "done");
+});
+
+test("NOT-538: not_applicable visual evidence (no Visual workflow) on a UI head merges normally", async () => {
+  const calls: Array<{ cwd: string; number: number }> = [];
+  setMergePrForTests(async (opts) => {
+    calls.push(opts);
+    return { ok: true };
+  });
+
+  const issueId = newIssue("It works");
+  startWorkflow(issueId);
+  recordVisualEvidence(issueId, { headSha: "abc123", state: "not_applicable" });
   const result = await approve(issueId);
 
   assert.equal(result.applied, true);

@@ -22,8 +22,10 @@
 //     Dealer's issue-artifact storage, stage a read-only copy inside the
 //     reviewer's worktree (outside tracked paths, ignored by `isWorktreeClean`),
 //     and record one `visual_evidence` artifact row. It never throws: every
-//     failure mode resolves to `missing` with a reason, and a missing or
-//     failed capture never counts as a visual pass.
+//     failure mode resolves to `missing` with a reason — except a lookup 404
+//     proving the repository has no `visual.yml`, which resolves to
+//     `not_applicable` (nothing to capture) — and a missing or failed capture
+//     never counts as a visual pass.
 //  4. `readVisualEvidenceHold` — the merge-gate reader (auto-merge.ts): a
 //     UI-affecting head whose recorded evidence is `missing` or `failed` holds
 //     for `operator_verification` instead of merging or queuing a repair round.
@@ -388,6 +390,27 @@ function truncateReason(text: string, maxChars = 300): string {
   return oneLine.length > maxChars ? `${oneLine.slice(0, maxChars).trimEnd()}…` : oneLine;
 }
 
+/**
+ * NOT-538: true when a Visual run lookup failure means the repository's
+ * default branch has no `visual.yml` (`gh run list --workflow visual.yml`
+ * answers HTTP 404: "workflow visual.yml not found on the default branch"),
+ * rather than a transient or auth failure. Deliberately narrow — all three
+ * markers must be present — so auth, network, 5xx, and rate-limit failures
+ * keep failing closed to `missing`.
+ */
+export function isVisualWorkflowNotFoundError(message: string): boolean {
+  const text = message.toLowerCase();
+  return text.includes("404") && text.includes("visual.yml") && text.includes("not found");
+}
+
+/**
+ * NOT-538: the recorded reason when the lookup proves the repository has no
+ * Visual workflow. The head still matches the UI paths (`uiAffecting: true`),
+ * but there is nothing to capture, so the merge gate must not hold.
+ */
+export const VISUAL_WORKFLOW_ABSENT_REASON =
+  "repository has no Visual workflow (workflow visual.yml not found on the default branch) — nothing to capture";
+
 function noEvidence(uiAffecting: boolean, base: Omit<VisualEvidenceRecord, "uiAffecting" | "state" | "runId" | "artifactNames" | "stagedDir" | "summaryChars" | "reason">, reason: string): ResolvedReviewerVisualEvidence {
   return {
     ...base,
@@ -412,7 +435,9 @@ function noEvidence(uiAffecting: boolean, base: Omit<VisualEvidenceRecord, "uiAf
  *
  * Never throws and never returns usable evidence it does not have: unknown
  * changed files fail closed to UI-affecting + `missing`, and every lookup,
- * download, stage, or record failure degrades to `missing` with a reason.
+ * download, stage, or record failure degrades to `missing` with a reason —
+ * except a lookup 404 proving the repository has no Visual workflow, which
+ * records `not_applicable` instead (NOT-538).
  */
 export async function resolveReviewerVisualEvidence(opts: {
   issueId: string;
@@ -484,10 +509,28 @@ export async function resolveReviewerVisualEvidence(opts: {
     try {
       run = await fetcher.findRunForHead({ cwd: opts.worktreePath, headSha: opts.headSha });
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isVisualWorkflowNotFoundError(message)) {
+        const resolved: ResolvedReviewerVisualEvidence = {
+          ...base,
+          uiAffecting: true,
+          state: "not_applicable",
+          runId: null,
+          artifactNames: [],
+          stagedDir: null,
+          summaryChars: null,
+          reason: VISUAL_WORKFLOW_ABSENT_REASON,
+          staged: null,
+          summary: null,
+          files: null,
+        };
+        record(resolved, null);
+        return resolved;
+      }
       const resolved = noEvidence(
         true,
         base,
-        `Visual run lookup failed: ${truncateReason(err instanceof Error ? err.message : String(err))}`
+        `Visual run lookup failed: ${truncateReason(message)}`
       );
       record(resolved, null);
       return resolved;
