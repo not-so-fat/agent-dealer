@@ -78,6 +78,9 @@ test("NOT-381: capable section requires one bounded probe, the real app, default
   assert.match(text, /do not install browsers or packages/);
   assert.match(text, /do not retry the failed capability/);
   assert.match(text, /do not weaken any sandbox flag/);
+  // A failed probe must never end the session: the worker keeps implementing.
+  assert.match(text, /never a gate on the ticket/);
+  assert.match(text, /continue the implementation as normal/);
   assert.match(text, /REAL backend and frontend/);
   assert.match(text, /Use mocks only when an acceptance criterion explicitly permits them/);
   assert.match(text, /1440x900/);
