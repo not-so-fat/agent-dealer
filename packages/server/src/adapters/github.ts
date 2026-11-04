@@ -559,9 +559,17 @@ export interface GithubAdapter {
 }
 
 /** The `gh` shell-out, as a seam: production uses `run("gh", ...)`, tests inject a fake that records exact args. */
-export type GhExec = (args: string[], opts: { cwd: string; maxBuffer?: number }) => Promise<{ stdout: string }>;
+export type GhExec = (
+  args: string[],
+  opts: { cwd: string; maxBuffer?: number; env?: Record<string, string> }
+) => Promise<{ stdout: string }>;
 
-const defaultExec: GhExec = (args, opts) => run("gh", args, { cwd: opts.cwd, maxBuffer: opts.maxBuffer });
+const defaultExec: GhExec = (args, opts) =>
+  run("gh", args, {
+    cwd: opts.cwd,
+    maxBuffer: opts.maxBuffer,
+    ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+  });
 
 async function ghPrView(exec: GhExec, cwd: string, fields: string, selector?: string): Promise<Record<string, unknown> | null> {
   const args = ["pr", "view", ...(selector != null ? [selector] : []), "--json", fields];
@@ -849,6 +857,17 @@ const REVIEW_FLAG: Record<ReviewEvent, string> = {
 /** GitHub's self-review rejection, worded per event ("approve" / "request changes"). */
 const OWN_PR_REVIEW_PATTERN = /own pull request/i;
 
+/**
+ * Optional separate GitHub identity for review submission only. Repos that require an
+ * approval from someone other than the PR author reject the operator's own `--approve`;
+ * a second account's token lets the approval count. Read per call so an `.env` change
+ * needs no rebuild; unset keeps every `gh` call on the operator's ambient login.
+ */
+function reviewerExecOpts(cwd: string): { cwd: string; env?: Record<string, string> } {
+  const token = process.env.AGENT_DEALER_REVIEWER_GH_TOKEN;
+  return token ? { cwd, env: { GH_TOKEN: token } } : { cwd };
+}
+
 async function runReview(
   exec: GhExec,
   cwd: string,
@@ -859,7 +878,7 @@ async function runReview(
   try {
     // The PR is targeted explicitly by number — the reviewer's worktree is a detached-HEAD
     // checkout with no current branch for a bare `gh pr review` to resolve against.
-    await exec(["pr", "review", String(number), REVIEW_FLAG[event], "--body-file", bodyFilePath], { cwd });
+    await exec(["pr", "review", String(number), REVIEW_FLAG[event], "--body-file", bodyFilePath], reviewerExecOpts(cwd));
     return { ok: true };
   } catch (err) {
     const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;

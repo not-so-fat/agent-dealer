@@ -65,10 +65,10 @@ test("summarizeChecks accepts neutral/skipped as success but fails closed on an 
 function queuedExec(responses: Array<{ stdout?: string; error?: string }>): {
   exec: GhExec;
   calls: string[][];
-  execOpts: Array<{ cwd: string; maxBuffer?: number }>;
+  execOpts: Array<{ cwd: string; maxBuffer?: number; env?: Record<string, string> }>;
 } {
   const calls: string[][] = [];
-  const execOpts: Array<{ cwd: string; maxBuffer?: number }> = [];
+  const execOpts: Array<{ cwd: string; maxBuffer?: number; env?: Record<string, string> }> = [];
   const queue = [...responses];
   const exec: GhExec = async (args, opts) => {
     calls.push(args);
@@ -1041,4 +1041,50 @@ test("NOT-384: downloadRunArtifact downloads one named artifact into the dest di
     }),
     /gh run download failed/
   );
+});
+
+async function withReviewerToken<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.AGENT_DEALER_REVIEWER_GH_TOKEN;
+  if (value === undefined) delete process.env.AGENT_DEALER_REVIEWER_GH_TOKEN;
+  else process.env.AGENT_DEALER_REVIEWER_GH_TOKEN = value;
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_DEALER_REVIEWER_GH_TOKEN;
+    else process.env.AGENT_DEALER_REVIEWER_GH_TOKEN = prev;
+  }
+}
+
+test("AGENT_DEALER_REVIEWER_GH_TOKEN: publishReview runs `gh pr review` as that identity via GH_TOKEN", async () => {
+  const { exec, calls, execOpts } = queuedExec([{ stdout: "" }]);
+  const result = await withReviewerToken("tok-123", () =>
+    createGithubAdapter(exec).publishReview({ cwd: "/repo", number: 7, event: "APPROVE", bodyFilePath: "/tmp/body.md" })
+  );
+  assert.deepEqual(result, { ok: true, event: "APPROVE", usedCommentFallback: false });
+  assert.deepEqual(calls, [["pr", "review", "7", "--approve", "--body-file", "/tmp/body.md"]]);
+  assert.deepEqual(execOpts, [{ cwd: "/repo", env: { GH_TOKEN: "tok-123" } }]);
+});
+
+test("AGENT_DEALER_REVIEWER_GH_TOKEN: unset or empty keeps the ambient login and the own-PR comment fallback", async () => {
+  for (const value of [undefined, ""]) {
+    const { exec, calls, execOpts } = queuedExec([
+      { error: "failed to create review: Can not approve your own pull request" },
+      { stdout: "" },
+    ]);
+    const result = await withReviewerToken(value, () =>
+      createGithubAdapter(exec).publishReview({ cwd: "/repo", number: 7, event: "APPROVE", bodyFilePath: "/tmp/body.md" })
+    );
+    assert.deepEqual(result, { ok: true, event: "COMMENT", usedCommentFallback: true });
+    assert.deepEqual(calls.map((c) => c[3]), ["--approve", "--comment"]);
+    assert.deepEqual(execOpts, [{ cwd: "/repo" }, { cwd: "/repo" }]);
+  }
+});
+
+test("AGENT_DEALER_REVIEWER_GH_TOKEN: non-review gh calls never receive the reviewer token", async () => {
+  const { exec, execOpts } = queuedExec([
+    { stdout: JSON.stringify({ number: 5, url: "u", baseRefName: "main", headRefName: "issue-x", headRefOid: "abc", isDraft: true }) },
+  ]);
+  await withReviewerToken("tok-123", () => createGithubAdapter(exec).viewPr({ cwd: "/repo", branch: "issue-x" }));
+  assert.equal(execOpts.length, 1);
+  assert.equal(execOpts[0]!.env, undefined);
 });
