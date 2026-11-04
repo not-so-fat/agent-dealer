@@ -4,6 +4,14 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.4.0 — 2026-11-04
+
+Let a separate GitHub identity submit Dealer's PR review (AGENT_DEALER_REVIEWER_GH_TOKEN)
+
+### Changes
+
+- Let a separate GitHub identity submit Dealer's PR review (AGENT_DEALER_REVIEWER_GH_TOKEN) (#240)
+
 ## 1.3.5 — 2026-10-30
 
 Skip the visual-evidence merge gate for repos without visual.yml
