@@ -860,8 +860,9 @@ const OWN_PR_REVIEW_PATTERN = /own pull request/i;
 /**
  * Optional separate GitHub identity for review submission only. Repos that require an
  * approval from someone other than the PR author reject the operator's own `--approve`;
- * a second account's token lets the approval count. Read per call so an `.env` change
- * needs no rebuild; unset keeps every `gh` call on the operator's ambient login.
+ * a second account's token lets the approval count. Set it in `~/.agent-dealer/.env`
+ * (loaded at startup, so a change needs a restart); unset keeps every `gh` call on the
+ * operator's ambient login.
  */
 function reviewerExecOpts(cwd: string): { cwd: string; env?: Record<string, string> } {
   const token = process.env.AGENT_DEALER_REVIEWER_GH_TOKEN;
