@@ -368,7 +368,8 @@ test("usage events record muse_code, the confirmed model, duration and tokens; c
   assert.equal(usage!.runtime, "muse_code");
   assert.equal(usage!.model, MUSE_CODE_CONTRIBUTOR_MODEL);
   assert.ok(usage!.durationMs! > 0);
-  assert.equal(usage!.tokensIn, 1000);
+  // fake-muse success USAGE: input 1000 + cache_read 50 + cache_write 0 (disjoint, like Claude).
+  assert.equal(usage!.tokensIn, 1050);
   assert.equal(usage!.tokensOut, 200);
   assert.equal(usage!.costUsd, null);
 });

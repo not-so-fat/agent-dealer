@@ -4,7 +4,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { extractResultTranscript, extractSpawnUsage } from "./usage.js";
+import {
+  extractResultTranscript,
+  extractSpawnUsage,
+  totalTokensInFromMuseUsage,
+  totalTokensInFromUsage,
+} from "./usage.js";
 
 function writeLog(lines: unknown[]): string {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dealer-usage-")), "session.ndjson");
@@ -24,14 +29,78 @@ test("extractSpawnUsage reads claude-shaped stream-json usage/cost", () => {
   assert.equal(usage.costUsd, 0.0421);
 });
 
+test("extractSpawnUsage sums Claude cache read/creation into tokensIn", () => {
+  // Real Claude Code result shape: input_tokens is uncached-only; almost all volume is cache.
+  const logPath = writeLog([
+    {
+      type: "result",
+      total_cost_usd: 0.700155,
+      usage: {
+        input_tokens: 22,
+        cache_creation_input_tokens: 55468,
+        cache_read_input_tokens: 629415,
+        output_tokens: 6522,
+      },
+    },
+  ]);
+  const usage = extractSpawnUsage(logPath, "claude_code");
+  assert.equal(usage.tokensIn, 22 + 55468 + 629415);
+  assert.equal(usage.tokensOut, 6522);
+  assert.equal(usage.costUsd, 0.700155);
+});
+
+test("extractSpawnUsage sums Cursor camelCase cache fields into tokensIn", () => {
+  const logPath = writeLog([
+    {
+      type: "result",
+      usage: {
+        inputTokens: 86839,
+        cacheReadTokens: 1314304,
+        cacheWriteTokens: 0,
+        outputTokens: 14718,
+      },
+    },
+  ]);
+  const usage = extractSpawnUsage(logPath, "cursor_local");
+  assert.equal(usage.tokensIn, 86839 + 1314304);
+  assert.equal(usage.tokensOut, 14718);
+});
+
 test("extractSpawnUsage reads codex-shaped jsonl usage (no cost field)", () => {
   const logPath = writeLog([
     { type: "turn.completed", usage: { input_tokens: 500, cached_input_tokens: 100, output_tokens: 50 } },
   ]);
   const usage = extractSpawnUsage(logPath, "codex_local");
+  // Codex input_tokens already includes cached_input_tokens — do not double-count.
   assert.equal(usage.tokensIn, 500);
   assert.equal(usage.tokensOut, 50);
   assert.equal(usage.costUsd, null);
+});
+
+test("totalTokensInFromUsage does not double-count Codex cache after normalize", () => {
+  // After normalizeCodexEvents, cached_input_tokens becomes cache_read_input_tokens on the result.
+  assert.equal(
+    totalTokensInFromUsage(
+      { input_tokens: 24763, cache_read_input_tokens: 24448, output_tokens: 122 },
+      "codex_local"
+    ),
+    24763
+  );
+});
+
+test("totalTokensInFromMuseUsage sums disjoint cache fields", () => {
+  assert.equal(
+    totalTokensInFromMuseUsage({
+      inputTokens: 17770,
+      cacheReadTokens: 5105,
+      cacheWriteTokens: 100,
+    }),
+    17770 + 5105 + 100
+  );
+  assert.equal(
+    totalTokensInFromMuseUsage({ inputTokens: null, cacheReadTokens: null, cacheWriteTokens: null }),
+    null
+  );
 });
 
 test("extractSpawnUsage returns nulls for a missing log file", () => {

@@ -18,6 +18,50 @@ export interface SpawnUsage {
 
 const EMPTY: SpawnUsage = { tokensIn: null, tokensOut: null, costUsd: null };
 
+function asFiniteNumber(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Total input tokens for `usage_events.tokens_in` / execution reports.
+ *
+ * Providers disagree on whether cache is inside `input_tokens`:
+ * - Codex: `input_tokens` already includes `cached_input_tokens` (subset) — use input alone.
+ * - Claude / Cursor / Muse: uncached `input_tokens` plus cache read/write are disjoint — sum them.
+ *
+ * Without the sum, Claude sessions store ~tens of input tokens while cost/`tokens_out`
+ * look normal, so the report's TOKENS IN column reads as nonsense (e.g. 16.9K vs 7.7M out).
+ */
+export function totalTokensInFromUsage(
+  usage: Record<string, unknown>,
+  runtime: Runtime
+): number | null {
+  const input = asFiniteNumber(usage.input_tokens ?? usage.inputTokens);
+  if (input === null) return null;
+  if (runtime === "codex_local") return input;
+  const cacheRead =
+    asFiniteNumber(usage.cache_read_input_tokens ?? usage.cacheReadTokens) ?? 0;
+  const cacheWrite =
+    asFiniteNumber(
+      usage.cache_creation_input_tokens ??
+        usage.cache_write_input_tokens ??
+        usage.cacheWriteTokens ??
+        usage.cacheCreationInputTokens
+    ) ?? 0;
+  return input + cacheRead + cacheWrite;
+}
+
+/** Muse's parsed usage: same additive cache rule as Claude (input excludes cache). */
+export function totalTokensInFromMuseUsage(usage: {
+  inputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+}): number | null {
+  const parts = [usage.inputTokens, usage.cacheReadTokens, usage.cacheWriteTokens];
+  if (parts.every((p) => p === null)) return null;
+  return parts.reduce<number>((sum, p) => sum + (p ?? 0), 0);
+}
+
 /** Best-effort: a missing/unparseable log never blocks recording the session's duration. */
 export function extractSpawnUsage(logPath: string, runtime: Runtime): SpawnUsage {
   if (!fs.existsSync(logPath)) return EMPTY;
@@ -26,12 +70,12 @@ export function extractSpawnUsage(logPath: string, runtime: Runtime): SpawnUsage
       ? normalizeCodexEvents(parseCodexJsonl(fs.readFileSync(logPath, "utf8")))
       : parseNdjsonFile(logPath);
   const result = events.find((e) => (e as { type?: string }).type === "result") as
-    | { usage?: Record<string, number>; total_cost_usd?: number }
+    | { usage?: Record<string, unknown>; total_cost_usd?: number }
     | undefined;
   const usage = result?.usage ?? {};
   return {
-    tokensIn: usage.input_tokens ?? usage.inputTokens ?? null,
-    tokensOut: usage.output_tokens ?? usage.outputTokens ?? null,
+    tokensIn: totalTokensInFromUsage(usage, runtime),
+    tokensOut: asFiniteNumber(usage.output_tokens ?? usage.outputTokens),
     costUsd: typeof result?.total_cost_usd === "number" ? result.total_cost_usd : null,
   };
 }
