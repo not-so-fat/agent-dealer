@@ -88,7 +88,7 @@ import { getWorkItem } from "../repository/work-items.js";
 import { listFindingsForIssue } from "../repository/findings.js";
 import { createIssueArtifact, latestIssueArtifact } from "../repository/artifacts.js";
 import { recordUsageEvent } from "../repository/usage-events.js";
-import { extractSpawnUsage } from "./usage.js";
+import { extractSpawnUsage, totalTokensInFromMuseUsage } from "./usage.js";
 import { emitCheckpointObserved, emitRetryReuse } from "./checkpoint.js";
 import { syncIssueBaseBranch } from "./sync-issue-base-branch.js";
 import { emitAgentCompleted, emitAgentStarted } from "./agent-boundaries.js";
@@ -1752,7 +1752,8 @@ export async function runDeveloperEffect(
     // null when it did not report them and cost is always null (Muse has no cost figure, NOT-177).
     const usage = spawned.muse
       ? {
-          tokensIn: spawned.muse.usage.inputTokens,
+          // Muse input excludes cache (same as Claude); sum so TOKENS IN matches volume.
+          tokensIn: totalTokensInFromMuseUsage(spawned.muse.usage),
           tokensOut: spawned.muse.usage.outputTokens,
           costUsd: spawned.muse.usage.costUsd,
         }
