@@ -222,6 +222,75 @@ test("NOT-575: the snapshot union dedupes AC text and contract by exact criterio
   assert.deepEqual(merged[1]!.commands, ["Evidence: checkout evidence"]);
 });
 
+test("NOT-575 repair 2: a Linear-escaped trailing \\[operator\\] gates with its Evidence line", () => {
+  // Linear markdown escapes the tag brackets; intake and the contract
+  // compiler keep the raw `\[operator\]` text, so the gate must accept it —
+  // the NOT-567/569-572 tickets merged with no operator action because it did not.
+  const criteria = extractOperatorCriteria(
+    [
+      "- [ ] Agent can list sessions from the registry \\[agent\\]",
+      "  Evidence: unit tests | run the registry suite | green",
+      "- [ ] Operator can sign in with SSO and see the org dashboard \\[operator\\]",
+      "  Evidence: operator run | `npm run probe:sso -- --env staging` | dashboard lists orgs",
+    ].join("\n")
+  );
+  assert.equal(criteria.length, 1);
+  assert.equal(
+    criteria[0]!.text,
+    "Operator can sign in with SSO and see the org dashboard \\[operator\\]"
+  );
+  assert.deepEqual(criteria[0]!.commands, [
+    "Evidence: operator run | `npm run probe:sso -- --env staging` | dashboard lists orgs",
+  ]);
+});
+
+test("NOT-575 repair 2: an escaped \\[agent\\] line mentioning [operator] is not flagged", () => {
+  // The NOT-568 mis-flag shape under Linear escaping: the [agent]
+  // criterion's prose contains the string [operator] (backticked, unescaped)
+  // but its trailing tag is `\[agent\]` — never a gate. The genuine escaped
+  // `\[operator\]` criterion alongside it still gates.
+  const criteria = extractOperatorCriteria(
+    [
+      "- [ ] Verify the `[operator]` handoff renders for the agent review \\[agent\\]",
+      "  Evidence: agent run | run the render test | green",
+      "- [ ] Operator can sign in with SSO \\[operator\\]",
+      "  Evidence: operator run | `npm run probe:sso` | dashboard shown",
+    ].join("\n")
+  );
+  assert.equal(criteria.length, 1);
+  assert.equal(criteria[0]!.text, "Operator can sign in with SSO \\[operator\\]");
+});
+
+test("NOT-575 repair 2: hasTrailingOperatorTag accepts the escaped tag, still rejects escaped non-tags", () => {
+  assert.equal(hasTrailingOperatorTag("Proves login \\[operator\\]"), true);
+  assert.equal(hasTrailingOperatorTag("Proves login \\[OPERATOR\\]"), true);
+  assert.equal(hasTrailingOperatorTag("Proves login \\[operator\\]   "), true);
+  assert.equal(hasTrailingOperatorTag("\\[operator\\]"), true);
+  assert.equal(hasTrailingOperatorTag("Mentions [operator] then ends \\[agent\\]"), false);
+  assert.equal(hasTrailingOperatorTag("Proves login \\[agent\\]"), false);
+  assert.equal(hasTrailingOperatorTag("Proves login \\[operators\\]"), false);
+  assert.equal(hasTrailingOperatorTag("Proves login \\[operator\\]."), false);
+  assert.equal(hasTrailingOperatorTag("Two tags \\[agent\\] \\[operator\\]"), true);
+  assert.equal(hasTrailingOperatorTag("Two tags [operator] \\[agent\\]"), false);
+});
+
+test("NOT-575 repair 2: contract criteria gate on the escaped trailing tag", () => {
+  const criteria = extractOperatorCriteriaFromContract({
+    version: "v1",
+    executionMode: "bug fix",
+    nonGoals: ["x"],
+    exitPredicate: "done",
+    onePrStoppingPoint: "stop",
+    acceptanceCriteria: [
+      { text: "Verify the `[operator]` handoff renders \\[agent\\]", evidence: "agent run" },
+      { text: "Operator signs in with SSO \\[operator\\]", evidence: "operator run | paste the output" },
+    ],
+  });
+  assert.equal(criteria.length, 1);
+  assert.equal(criteria[0]!.text, "Operator signs in with SSO \\[operator\\]");
+  assert.deepEqual(criteria[0]!.commands, ["Evidence: operator run | paste the output"]);
+});
+
 test("NOT-575: criteriaTextsFromActionEvidence reads the gated list, null when unreadable", () => {
   assert.deepEqual(
     criteriaTextsFromActionEvidence({

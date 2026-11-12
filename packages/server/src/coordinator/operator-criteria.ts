@@ -57,8 +57,14 @@ export function operatorVerificationRequestId(headSha: string): string {
  * `[agent]` is an agent criterion, never a gate. Case-insensitive; trailing
  * whitespace (including a CR from CRLF ticket text) is ignored. Strictly the
  * last token: `[operator].` with trailing punctuation is NOT a tag.
+ *
+ * Repair round 2: Linear markdown escapes the brackets (`\[operator\]`), and
+ * neither intake nor the contract compiler unescapes them — the raw text ends
+ * in `\]`, so a plain `]`-anchored match never fires and genuine operator
+ * criteria sail through the gate (the NOT-567/569-572 missed-gate shape).
+ * Each bracket therefore accepts one optional backslash.
  */
-const TRAILING_OPERATOR_TAG_RE = /\[operator\]\s*$/i;
+const TRAILING_OPERATOR_TAG_RE = /\\?\[operator\\?\]\s*$/i;
 
 /** True when the criterion text carries a trailing `[operator]` tag (NOT-575). */
 export function hasTrailingOperatorTag(criterionText: string): boolean {

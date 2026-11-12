@@ -762,6 +762,51 @@ test("NOT-575: a trailing-[operator] contract criterion gates even when the AC s
   assert.equal(merges, 1);
 });
 
+test("NOT-575 repair 2: a Linear-escaped trailing \\[operator\\] gates and merges after verify", async () => {
+  const calls: Array<{ cwd: string; number: number }> = [];
+  setMergePrForTests(async (opts) => {
+    calls.push(opts);
+    return { ok: true };
+  });
+
+  // The NOT-567/569-572 shape: Linear escapes the tag brackets, so the
+  // frozen text ends in `\]` — the gate must still flag the genuine
+  // operator criterion, while the escaped `\[agent\]` criterion whose prose
+  // mentions [operator] (the NOT-568 shape) must not appear in the action.
+  const issueId = newIssue(
+    [
+      "- [ ] Verify the `[operator]` handoff renders for the agent review \\[agent\\]",
+      "  Evidence: agent run | run the render test | green",
+      "- [ ] Operator can sign in with SSO and see the org dashboard \\[operator\\]",
+      "  Evidence: operator run | `npm run probe:sso -- --env staging` | dashboard lists orgs",
+    ].join("\n")
+  );
+  startWorkflow(issueId);
+  await approve(issueId);
+
+  assert.equal(calls.length, 0, "the merge adapter must not run behind the gate");
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  const action = openOperatorAction(issueId);
+  assert.match(action.question, /sign in with SSO and see the org dashboard/);
+  assert.doesNotMatch(action.question, /handoff renders for the agent review/);
+  const evidence = JSON.parse(action.evidenceJson!) as {
+    operatorVerification: { headSha: string; criteria: Array<{ text: string; commands: string[] }> };
+  };
+  assert.equal(evidence.operatorVerification.headSha, "abc123");
+  assert.equal(evidence.operatorVerification.criteria.length, 1);
+  assert.deepEqual(evidence.operatorVerification.criteria[0]!.commands, [
+    "Evidence: operator run | `npm run probe:sso -- --env staging` | dashboard lists orgs",
+  ]);
+
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "op", "verified", {
+    note: "SSO login OK — org dashboard listed 3 orgs.",
+  });
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) assert.equal(resolved.issueStatus, "done");
+  assert.equal(calls.length, 1);
+  assert.equal(getIssue(issueId)!.status, "done");
+});
+
 test("NOT-384: [operator] criteria plus a visual hold raise one action naming both", async () => {
   let merges = 0;
   setMergePrForTests(async () => {
