@@ -30,6 +30,7 @@ const { createAgent } = await import("../repository/agents.js");
 const { createIssue, getIssue } = await import("../repository/issues.js");
 const { listWorkerSessionsForIssue } = await import("../repository/worker-sessions.js");
 const { listWorkItemsForIssue, cancelWorkItem } = await import("../repository/work-items.js");
+const { createIssueArtifact } = await import("../repository/artifacts.js");
 const { listArtifactsForIssue } = await import("../repository/artifacts-for-issue.js");
 const { listHumanActionsForIssue } = await import("../repository/human-actions.js");
 const { listFindingsForIssue } = await import("../repository/findings.js");
@@ -320,6 +321,57 @@ test("approved: the coordinator verifies the pinned SHA, publishes the review, a
   const usage = listUsageEventsForIssue(issueId).filter((u) => u.role === "reviewer");
   assert.equal(usage.length, 1);
   assert.equal(usage[0].workerSessionId, revSession.id);
+});
+
+test("NOT-575: the reviewer prompt carries the PR's live body as evidence", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  github.prBody = async () => "Implementation conclusion.\n\nProbe output:\n```\nSSO login OK\n```";
+  await advanceToReviewing(issueId, github);
+  let captured = "";
+  const capturing: ReviewerSpawnFn = async (input) => {
+    captured = input.prompt;
+    return verdictSpawn({ verdict: "approved" })(input);
+  };
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: capturing, github }));
+  await pump(1);
+
+  assert.match(captured, /## PR body \(live — evidence pasted there counts\)/);
+  assert.match(captured, /SSO login OK/);
+  assert.match(captured, /never escalate only because it lives here instead of in the diff/);
+  assert.equal(getIssue(issueId)!.status, "final_review");
+});
+
+test("NOT-575: the reviewer prompt carries recorded operator attestations as evidence", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  await advanceToReviewing(issueId, github);
+  const headSha = getIssue(issueId)!.headSha!;
+  createIssueArtifact({
+    issueId,
+    kind: "operator_verification",
+    author: "human",
+    content: {
+      headSha,
+      note: "SSO login OK — dashboard shown.",
+      verifiedBy: "op",
+      verifiedAt: new Date().toISOString(),
+      criteria: ["Operator signs in with SSO [operator]"],
+    },
+  });
+  let captured = "";
+  const capturing: ReviewerSpawnFn = async (input) => {
+    captured = input.prompt;
+    return verdictSpawn({ verdict: "approved" })(input);
+  };
+  registerEffectHandler("reviewer", (ctx) => runReviewerEffect(ctx, { deckCallTool: okDeckCallTool, spawn: capturing, github }));
+  await pump(1);
+
+  assert.match(captured, /## Operator attestations \(recorded results count as evidence\)/);
+  assert.match(captured, /SSO login OK — dashboard shown/);
+  assert.match(captured, /never escalate for evidence an attestation below already provides/);
+  assert.match(captured, /this head/);
+  assert.equal(getIssue(issueId)!.status, "final_review");
 });
 
 test("same-identity fallback: GitHub rejecting APPROVE as a self-review still records the internal verdict and moves to final_review", async () => {

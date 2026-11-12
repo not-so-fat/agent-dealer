@@ -32,6 +32,7 @@ import {
 } from "./verification-receipt.js";
 import {
   formatOperatorCriteria,
+  type OperatorAttestation,
   type OperatorCriterion,
 } from "./operator-criteria.js";
 import type { ReviewerVisualEvidenceInput } from "./reviewer-visual-evidence.js";
@@ -483,6 +484,13 @@ export interface ReviewerPromptInput {
    * the section. Absent renders nothing so receipt-free reviews stay
    * byte-for-byte. */
   visualQa?: { record: VisualQaRecord; pinnedHeadSha: string } | null;
+  /** NOT-575: the PR's live body, fetched by the coordinator at review time
+   * (the sandbox cannot read it). Blank/absent renders nothing so
+   * body-free prompts stay byte-for-byte. */
+  prBody?: string | null;
+  /** NOT-575: recorded operator attestations (verified results and waivers)
+   * for the issue, oldest first. Empty/absent renders nothing. */
+  operatorAttestations?: OperatorAttestation[];
 }
 
 const REVIEWER_RESULT_SHAPE =
@@ -627,6 +635,83 @@ function visualEvidenceSection(evidence: ReviewerVisualEvidenceInput | undefined
   ];
 }
 
+/** NOT-575: cap for the live PR body embedded as reviewer evidence — a body
+ * can carry a full ticket description plus pasted output. */
+export const PR_BODY_EVIDENCE_MAX_CHARS = 8000;
+
+/** NOT-575: at most this many attestations render (the most recent win). */
+export const OPERATOR_ATTESTATIONS_MAX_COUNT = 5;
+
+/** NOT-575: per-attestation note cap — pasted probe output can be long. */
+export const OPERATOR_ATTESTATION_NOTE_MAX_CHARS = 2000;
+
+function capText(text: string, maxChars: number, what: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, maxChars).trimEnd()}\n\n... [${what} truncated to ${maxChars} characters]`;
+}
+
+/**
+ * NOT-575: the PR's live body as reviewer evidence. The reviewer's sandbox
+ * has no network and no `gh`, so ticket evidence that says to paste output,
+ * commands, or verification notes in the PR body is invisible to it unless
+ * the coordinator embeds the body here. Pasted output that matches the
+ * criterion IS the evidence — never escalate only because it lives in the PR
+ * body instead of the diff. Blank/absent renders nothing.
+ */
+export function prBodyEvidenceSection(prBody: string | null | undefined): string[] {
+  if (!prBody?.trim()) return [];
+  return [
+    `## PR body (live — evidence pasted there counts)`,
+    `Your sandbox cannot read the PR body, so the coordinator fetched it live for this review. When a criterion's stated evidence says to paste output, a command, or verification notes in the PR body, that pasted text IS the evidence — judge it like any other evidence and never escalate only because it lives here instead of in the diff.`,
+    ``,
+    capText(prBody, PR_BODY_EVIDENCE_MAX_CHARS, "PR body"),
+    ``,
+  ];
+}
+
+/**
+ * NOT-575: recorded operator attestations as reviewer evidence. A `verified`
+ * result's note carries the operator's pasted output; a `waive` carries the
+ * waiver reason. Either counts as the evidence for the criteria it names —
+ * never escalate for evidence an attestation already provides. A result
+ * pinned to a different head does not release this head's gate (Dealer
+ * handles that itself), but its pasted output is still evidence you can
+ * judge. Empty/absent renders nothing.
+ */
+export function operatorAttestationsSection(
+  attestations: OperatorAttestation[] | undefined,
+  pinnedHeadSha: string
+): string[] {
+  if (!attestations?.length) return [];
+  const shown = attestations.slice(-OPERATOR_ATTESTATIONS_MAX_COUNT);
+  const lines = [
+    `## Operator attestations (recorded results count as evidence)`,
+    `A human operator already recorded these results on this issue. A recorded result counts as the evidence for the criteria it names — never escalate for evidence an attestation below already provides. Only a result pinned to this exact head (\`${pinnedHeadSha.slice(0, 8)}\`) releases this head's merge gate; other heads' output below is still evidence you can judge.`,
+    ``,
+  ];
+  for (const attestation of shown) {
+    const head8 = attestation.headSha.slice(0, 8);
+    const pinned = attestation.headSha === pinnedHeadSha ? "this head" : `head \`${head8}\``;
+    const by = attestation.by ? ` by ${attestation.by}` : "";
+    const at = attestation.at ? ` at ${attestation.at}` : "";
+    lines.push(`### ${attestation.kind === "verified" ? "Verified" : "Waived"} (${pinned}${by}${at})`);
+    if (attestation.criteria.length > 0) {
+      for (const criterion of attestation.criteria) lines.push(`- Criterion: ${criterion}`);
+    }
+    lines.push(
+      attestation.note.trim()
+        ? capText(attestation.note, OPERATOR_ATTESTATION_NOTE_MAX_CHARS, "attestation note")
+        : "(no note recorded)",
+      ``
+    );
+  }
+  if (attestations.length > shown.length) {
+    lines.push(`... [${attestations.length - shown.length} older attestation(s) omitted]`, ``);
+  }
+  return lines;
+}
+
 export function buildReviewerPrompt(input: ReviewerPromptInput): string {
   const parts = [
     input.round === 1
@@ -669,6 +754,10 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
   // NOT-381: the coordinator-validated visual receipt (or loud rejection),
   // SHA-bound to the pinned head — the raw conclusion line above is unverified.
   parts.push(...visualQaReviewerSection(input.visualQa?.record ?? null, input.visualQa?.pinnedHeadSha ?? input.headSha));
+  // NOT-575: the live PR body and recorded operator attestations — evidence
+  // the sandbox cannot fetch itself. Absent renders nothing.
+  parts.push(...prBodyEvidenceSection(input.prBody));
+  parts.push(...operatorAttestationsSection(input.operatorAttestations, input.headSha));
 
   if (input.findings?.length) {
     parts.push(`## Findings from prior rounds (verify each is actually resolved)`);

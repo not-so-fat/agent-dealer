@@ -28,7 +28,7 @@ import { parseProfileSnapshot, roleCeiling } from "@agent-dealer/shared";
 import type { EffectContext } from "./effect-registry.js";
 import type { ReviewerOutcome } from "./routing.js";
 import { getTaskSnapshot } from "./commands.js";
-import { extractOperatorCriteria } from "./operator-criteria.js";
+import { listOperatorAttestations, operatorCriteriaForSnapshot } from "./operator-criteria.js";
 import { buildReviewerPrompt, formatDiffForPrompt, TOTAL_DIFF_LIMIT } from "./prompts.js";
 import {
   cleanupStagedVisualArtifacts,
@@ -246,6 +246,24 @@ function readChecksSummary(issueId: string): string | null {
 }
 
 /**
+ * NOT-575: the PR's live body for the reviewer prompt. Null without a PR
+ * number, without the adapter read, or on any lookup failure — every one of
+ * those renders no section rather than failing the review.
+ */
+export async function readPrBodyForReview(
+  github: GithubAdapter,
+  cwd: string,
+  prNumber: number | null
+): Promise<string | null> {
+  if (prNumber == null || !github.prBody) return null;
+  try {
+    return await github.prBody({ cwd, number: prNumber });
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Unique per queued reviewer work item — embedded in the published review body purely
  * as a human-readable audit trail back to the exact work item that produced it.
  * Duplicate-publication prevention itself is the `review_publications` DB claim
@@ -439,10 +457,17 @@ export async function runReviewerEffect(
     // NOT-314: the frozen snapshot's operator criteria — the reviewer must not
     // treat missing operator evidence as a defect (Dealer gates the merge), but
     // the probe and doc must exist. Rendered only when non-empty.
-    const operatorCriteria = extractOperatorCriteria(taskSnapshot.acceptanceCriteria);
+    // NOT-575: the same union the gate uses (AC text + structured contract).
+    const operatorCriteria = operatorCriteriaForSnapshot(taskSnapshot);
     // NOT-381: the latest coordinator-validated visual receipt (or loud
     // rejection), SHA-checked against the pinned head inside the prompt section.
     const visualQaRecord = readLatestVisualQa(issue.id);
+    // NOT-575: the PR's live body and recorded operator attestations — best
+    // effort, never failing the review. A lookup failure (or an adapter
+    // without the read) yields no section, and the reviewer judges without
+    // it; a missing body is never evidence of anything.
+    const prBody = await readPrBodyForReview(deps.github, worktreePath, issue.prNumber);
+    const operatorAttestations = listOperatorAttestations(issue.id);
     const prompt = buildReviewerPrompt({
       taskSnapshot,
       round: workItem.round,
@@ -458,6 +483,8 @@ export async function runReviewerEffect(
       operatorCriteria: operatorCriteria.length > 0 ? operatorCriteria : undefined,
       visualEvidence,
       visualQa: visualQaRecord ? { record: visualQaRecord, pinnedHeadSha: headSha } : undefined,
+      prBody: prBody ?? undefined,
+      operatorAttestations: operatorAttestations.length > 0 ? operatorAttestations : undefined,
     });
 
     // NOT-83 review finding — see developer-effect.ts's identical check for the full
