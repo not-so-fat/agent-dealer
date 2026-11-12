@@ -567,6 +567,201 @@ test("NOT-538: not_applicable visual evidence (no Visual workflow) on a UI head 
   assert.equal(getIssue(issueId)!.status, "done");
 });
 
+test("NOT-575: an [agent] criterion that merely mentions [operator] never opens the gate", async () => {
+  const calls: Array<{ cwd: string; number: number }> = [];
+  setMergePrForTests(async (opts) => {
+    calls.push(opts);
+    return { ok: true };
+  });
+
+  // The NOT-568 shape: the [agent] criterion's prose contains the string
+  // [operator], but its trailing tag is [agent] — not a gate.
+  const issueId = newIssue(
+    [
+      "- [ ] Verify the [operator] handoff renders for the agent review [agent]",
+      "  Evidence: agent run | run the render test | green",
+      "- [ ] Docs describe the probe [agent]",
+      "  Evidence: doc review | read the probe doc | command documented",
+    ].join("\n")
+  );
+  startWorkflow(issueId);
+  const result = await approve(issueId);
+
+  assert.equal(result.applied, true);
+  if (result.applied) {
+    assert.equal(result.issueStatus, "done");
+    assert.equal(result.instanceCompleted, true);
+  }
+  assert.deepEqual(calls, [{ cwd: managedCwd, number: 42 }]);
+  assert.equal(getIssue(issueId)!.status, "done");
+  assert.equal(
+    listHumanActionsForIssue(issueId).filter((a) => a.status === "open").length,
+    0
+  );
+});
+
+test("NOT-575: a trailing-[operator] criterion with an Evidence line gates with the evidence in the action", async () => {
+  const calls: Array<{ cwd: string; number: number }> = [];
+  setMergePrForTests(async (opts) => {
+    calls.push(opts);
+    return { ok: true };
+  });
+
+  const issueId = newIssue(
+    [
+      "- [ ] Agent can list sessions from the registry [agent]",
+      "  Evidence: unit tests | run the registry suite | green",
+      "- [ ] Operator can sign in with SSO and see the org dashboard [operator]",
+      "  Evidence: operator run | `npm run probe:sso -- --env staging` | dashboard lists orgs",
+    ].join("\n")
+  );
+  startWorkflow(issueId);
+  await approve(issueId);
+
+  assert.equal(calls.length, 0, "the merge adapter must not run behind the gate");
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  const action = openOperatorAction(issueId);
+  assert.match(action.question, /sign in with SSO and see the org dashboard \[operator\]/);
+  assert.match(action.question, /Evidence: operator run \| `npm run probe:sso -- --env staging`/);
+  assert.doesNotMatch(action.question, /list sessions from the registry/);
+  const evidence = JSON.parse(action.evidenceJson!) as {
+    operatorVerification: { headSha: string; criteria: Array<{ text: string; commands: string[] }> };
+  };
+  assert.equal(evidence.operatorVerification.headSha, "abc123");
+  assert.equal(evidence.operatorVerification.criteria.length, 1);
+  assert.deepEqual(evidence.operatorVerification.criteria[0]!.commands, [
+    "Evidence: operator run | `npm run probe:sso -- --env staging` | dashboard lists orgs",
+  ]);
+
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "op", "verified", {
+    note: "SSO login OK — org dashboard listed 3 orgs.",
+  });
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) assert.equal(resolved.issueStatus, "done");
+  assert.equal(calls.length, 1);
+  assert.equal(getIssue(issueId)!.status, "done");
+});
+
+test("NOT-575: a result recorded for only one of two [operator] criteria still blocks the merge", async () => {
+  let merges = 0;
+  setMergePrForTests(async () => {
+    merges += 1;
+    return { ok: true };
+  });
+
+  const issueId = newIssue(
+    [
+      "- [ ] Operator can sign in with SSO [operator]",
+      "  Evidence: operator run | `npm run probe:sso` | dashboard shown",
+      "- [ ] Operator can complete a paid checkout [operator]",
+      "  Evidence: operator run | `npm run probe:checkout` | receipt shown",
+    ].join("\n")
+  );
+  startWorkflow(issueId);
+  await approve(issueId);
+  assert.equal(merges, 0);
+  const action = openOperatorAction(issueId);
+  const evidence = JSON.parse(action.evidenceJson!) as {
+    operatorVerification: { criteria: Array<{ text: string }> };
+  };
+  assert.equal(evidence.operatorVerification.criteria.length, 2);
+
+  // A result covering only the first criterion (same head) must not release
+  // the second — the gate still holds and reuses the open action.
+  createIssueArtifact({
+    issueId,
+    kind: "operator_verification",
+    author: "human",
+    content: {
+      headSha: "abc123",
+      note: "SSO login OK.",
+      verifiedBy: "op",
+      verifiedAt: new Date().toISOString(),
+      criteria: ["Operator can sign in with SSO [operator]"],
+    },
+  });
+  const stillBlocked = await finalizeAutoMerge(issueId);
+  assert.equal(stillBlocked.issueStatus, "needs_human");
+  assert.equal(stillBlocked.humanActionId, action.id, "the same head reuses the open action");
+  assert.equal(merges, 0);
+
+  // Resolving the gated action covers both listed criteria and merges.
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "op", "verified", {
+    note: "SSO login OK; paid checkout receipt shown.",
+  });
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) assert.equal(resolved.issueStatus, "done");
+  assert.equal(merges, 1);
+  const stored = listArtifactsForIssueByKind(issueId, "operator_verification");
+  // Newest first: [0] is the resolve-recorded result covering both criteria.
+  const recorded = JSON.parse(stored[0]!.contentJson!) as { criteria: string[] };
+  assert.deepEqual(recorded.criteria, [
+    "Operator can sign in with SSO [operator]",
+    "Operator can complete a paid checkout [operator]",
+  ]);
+});
+
+test("NOT-575: a trailing-[operator] contract criterion gates even when the AC string diverges", async () => {
+  let merges = 0;
+  setMergePrForTests(async () => {
+    merges += 1;
+    return { ok: true };
+  });
+
+  // The contract carries the genuine trailing-[operator] tag while an
+  // explicitly-provided AC string has no tags at all — the gate must still
+  // flag the contract criterion (the Agent Deck program's missed-gate shape).
+  const description = [
+    "Ship the SSO probe.",
+    "",
+    "## Builder execution mode",
+    "bug fix",
+    "",
+    "## Non-goals",
+    "- Rewriting the installer",
+    "",
+    "## Exit predicate",
+    "SSO sign-in works with operator proof.",
+    "",
+    "## One-PR stopping point",
+    "Stop after the probe lands.",
+    "",
+    "## Acceptance criteria",
+    "- [ ] Agent lists sessions [agent]",
+    "  Evidence: unit tests | run the registry suite | green",
+    "- [ ] Operator signs in with SSO [operator]",
+    "  Evidence: operator run | paste the output | dashboard shown",
+    "",
+  ].join("\n");
+  const issueId = createIssue({
+    title: "SSO probe",
+    description,
+    acceptanceCriteria: "- [ ] Agent lists sessions\n- [ ] Operator signs in with SSO",
+    repo: "acme/app",
+    developerAgentId: BUILTIN_AGENT_CLAUDE_ID,
+    reviewerAgentId: BUILTIN_AGENT_CURSOR_ID,
+    baseBranch: "main",
+    maxReviewRounds: 3,
+    maxInfraAttempts: 3,
+    source: "manual",
+    autoMerge: true,
+  }).id;
+  startWorkflow(issueId);
+  await approve(issueId);
+
+  assert.equal(merges, 0, "the contract-tagged criterion must gate");
+  assert.equal(getIssue(issueId)!.status, "needs_human");
+  const action = openOperatorAction(issueId);
+  assert.match(action.question, /Operator signs in with SSO \[operator\]/);
+
+  const resolved = await resolveHumanActionAndAdvanceAsync(action.id, "op", "verified", {
+    note: "SSO login OK — dashboard shown.",
+  });
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) assert.equal(resolved.issueStatus, "done");
+  assert.equal(merges, 1);
+});
+
 test("NOT-384: [operator] criteria plus a visual hold raise one action naming both", async () => {
   let merges = 0;
   setMergePrForTests(async () => {

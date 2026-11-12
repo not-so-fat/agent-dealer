@@ -25,7 +25,7 @@ import {
   materializeSourceAttachments,
   SourceAttachmentError,
 } from "./source-attachments.js";
-import { extractOperatorCriteria } from "./operator-criteria.js";
+import { operatorCriteriaForSnapshot } from "./operator-criteria.js";
 import { buildDeveloperPrompt } from "./prompts.js";
 import { VISUAL_QA_EXCLUDE_LINE, collectDeveloperVisualQa } from "./visual-qa.js";
 import { ensureWorktreeExcluded } from "../adapters/worktree-exclude.js";
@@ -1405,7 +1405,8 @@ export async function runDeveloperEffect(
         : undefined;
     // NOT-314: the frozen snapshot's operator criteria, parsed here so the
     // worker never re-derives them — the section renders only when non-empty.
-    const operatorCriteria = extractOperatorCriteria(taskSnapshot.acceptanceCriteria);
+    // NOT-575: the same union the gate uses (AC text + structured contract).
+    const operatorCriteria = operatorCriteriaForSnapshot(taskSnapshot);
     const hasOperatorCriteria = operatorCriteria.length > 0 ? operatorCriteria : undefined;
     // NOT-310: the conflict directive rides only the work item queued by the merge
     // path — exactly this round reads it; nothing is re-read from the DB. Shaped

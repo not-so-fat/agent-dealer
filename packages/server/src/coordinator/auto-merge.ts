@@ -48,6 +48,7 @@ import {
   formatOperatorCriteria,
   getOperatorCriteriaForIssue,
   hasOperatorVerificationForHead,
+  missingOperatorCriteriaForHead,
   operatorVerificationRequestId,
 } from "./operator-criteria.js";
 import { readVisualEvidenceHold, type VisualEvidenceHold } from "./reviewer-visual-evidence.js";
@@ -420,10 +421,17 @@ function formatVisualHold(hold: VisualEvidenceHold): string {
  * (criteria and visual items together), so one recorded result releases it;
  * no repair round is ever queued for missing evidence alone.
  *
+ * NOT-575: each trailing-`[operator]` criterion needs a recorded result for
+ * that exact criterion on the exact head SHA — a result recorded for one
+ * criterion never releases another. The visual hold (no criterion list) still
+ * releases on any recorded result for the head, so a combined action's one
+ * resolve — which covers the gated criteria and counts as a head result —
+ * still releases the whole head.
+ *
  * Returns null when the merge may proceed (no operator criteria, no visual
- * hold, a recorded result for this head, or no workflow to gate). Idempotent:
- * a second finalize for the same head reuses the open action instead of
- * raising another.
+ * hold, a recorded result for this head covering every criterion, or no
+ * workflow to gate). Idempotent: a second finalize for the same head reuses
+ * the open action instead of raising another.
  *
  * Fail-closed: when operator criteria exist, every non-proceed path returns a
  * result (never null), so a missing head SHA or an unexpected status blocks the
@@ -439,7 +447,11 @@ export function gateOperatorVerification(issueId: string): AutoMergeFinalizeResu
     const head = current.headSha;
     const visualHold = head ? readVisualEvidenceHold(issueId, head) : null;
     if (criteria.length === 0 && !visualHold) return null;
-    if (head && hasOperatorVerificationForHead(issueId, head)) return null;
+    if (head) {
+      const criteriaCovered = missingOperatorCriteriaForHead(issueId, head, criteria).length === 0;
+      const visualCovered = !visualHold || hasOperatorVerificationForHead(issueId, head);
+      if (criteriaCovered && visualCovered) return null;
+    }
     if (current.status === "done") return null;
     // Only the auto-merge park (or an already-gated issue) is gated — any other
     // status is a racer or a non-parked issue; do not invent an action there,

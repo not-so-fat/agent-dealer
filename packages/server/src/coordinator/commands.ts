@@ -120,6 +120,8 @@ import { conflictRepairSpent, queueConflictRepairRound } from "./merge-conflict-
 import {
   OPERATOR_VERIFICATION_ARTIFACT_KIND,
   OPERATOR_VERIFICATION_RESPONSE_OPTIONS,
+  criteriaTextsFromActionEvidence,
+  getOperatorCriteriaForIssue,
 } from "./operator-criteria.js";
 import { externalMergeStateForIssue, type ExternalMergeState } from "./external-merge.js";
 import {
@@ -2379,6 +2381,15 @@ export function resolveHumanActionAndAdvance(
       // re-checks the record against the then-current head, so new commits
       // re-block the gate.
       if (resolution.actionType === "operator_verification" && operatorNote) {
+        // NOT-575: the result covers exactly the criteria the gated action
+        // listed (read off the action's own stored evidence — never
+        // re-derived, so the coverage is provably the gated set). A result
+        // for one criterion never releases another; the fallback recomputes
+        // from the frozen snapshot for actions raised before that evidence
+        // shape existed.
+        const coveredCriteria =
+          criteriaTextsFromActionEvidence(action) ??
+          getOperatorCriteriaForIssue(issue).map((c) => c.text);
         if (resolution.choice === "verified") {
           createIssueArtifact({
             issueId: issue.id,
@@ -2389,6 +2400,7 @@ export function resolveHumanActionAndAdvance(
               note: operatorNote,
               verifiedBy: resolvedBy,
               verifiedAt: new Date().toISOString(),
+              criteria: coveredCriteria,
             },
           });
         } else {
@@ -2406,6 +2418,7 @@ export function resolveHumanActionAndAdvance(
               headSha: issue.headSha,
               waivedBy: resolvedBy,
               note: operatorNote,
+              criteria: coveredCriteria,
             },
           });
         }
