@@ -76,6 +76,17 @@ export function parsePrMergeableState(raw: unknown): PrMergeableState {
   return raw === "CONFLICTING" || raw === "MERGEABLE" ? raw : "UNKNOWN";
 }
 
+/**
+ * NOT-575: normalizes `gh pr view --json body` output — the body text, or
+ * null when absent, non-string, or blank. Callers treat null as "unavailable",
+ * never as evidence of anything.
+ */
+export function parsePrBody(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  return trimmed ? raw : null;
+}
+
 const FAILURE_STATES = new Set([
   "failure",
   "error",
@@ -514,6 +525,16 @@ export interface GithubAdapter {
    */
   prMergeableState?(opts: { cwd: string; number: number }): Promise<PrMergeableState>;
   /**
+   * NOT-575: the PR's live body markdown (what the developer's conclusion and
+   * any operator paste wrote there), or null when the PR cannot be read or
+   * its body is empty. The reviewer's sandbox has no network/`gh`, so
+   * evidence the ticket says to paste in the PR body is invisible to it
+   * unless the coordinator reads it here and embeds it in the prompt.
+   * Optional so existing fakes keep compiling — a missing implementation
+   * means the body is unavailable, never "empty".
+   */
+  prBody?(opts: { cwd: string; number: number }): Promise<string | null>;
+  /**
    * NOT-384: workflow runs of `workflow` (file name, e.g. `visual.yml`) for
    * exactly `commitSha`, newest first (`gh run list --workflow --commit`).
    * Empty when the workflow never ran for that commit — the common "Visual did
@@ -643,6 +664,11 @@ export function createGithubAdapter(exec: GhExec = defaultExec): GithubAdapter {
       } catch {
         return "UNKNOWN";
       }
+    },
+
+    async prBody({ cwd, number }) {
+      const raw = await ghPrView(exec, cwd, "body", String(number));
+      return parsePrBody(raw?.body);
     },
 
     async listWorkflowRunsForCommit({ cwd, workflow, commitSha }) {
