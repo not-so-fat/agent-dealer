@@ -1689,8 +1689,14 @@ function applyReviewer(
   }
   const hasVerdict = outcome.kind === "verdict";
   // Normalize before emit/finding reconcile so remapped blocking findings (NOT-150) persist.
+  // A truncated review routed directly to an operator preserves the reviewer's own result;
+  // in particular, a bare escalate must not acquire normalizeReviewer's synthetic repair finding.
   const verdictResult =
-    outcome.kind === "verdict" ? normalizeReviewerResult(outcome.result) : null;
+    outcome.kind === "verdict"
+      ? outcome.finalReviewReason
+        ? outcome.result
+        : normalizeReviewerResult(outcome.result)
+      : null;
   const { projection, effect, advance } = projectReviewerRoute(route, issue.currentRound, hasVerdict);
 
   const ev = eventEmitter(issue, instance, item.workerSessionId, projection.issueStatus, issue.currentRound);

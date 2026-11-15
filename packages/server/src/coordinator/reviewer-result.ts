@@ -89,14 +89,19 @@ export function normalizeReviewerResult(raw: ReviewerResult): ReviewerResult {
 }
 
 /** Mirrors the plan-triage/reflect JSON-fence parsing pattern already used elsewhere. */
-export function parseReviewerResult(text: string): ReviewerResult | null {
+export function parseReviewerResult(
+  text: string,
+  options: { normalize?: boolean } = {}
+): ReviewerResult | null {
   const trimmed = text.trim();
   const fenceMatch = trimmed.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
   const candidates = [fenceMatch?.[1] ?? trimmed, trimmed];
   for (const candidate of candidates) {
     try {
       const parsed = ReviewerResult.safeParse(JSON.parse(candidate));
-      if (parsed.success) return normalizeReviewerResult(parsed.data);
+      if (parsed.success) {
+        return options.normalize === false ? parsed.data : normalizeReviewerResult(parsed.data);
+      }
     } catch {
       // try next candidate
     }

@@ -52,6 +52,13 @@ test("NOT-150: escalated without productScopeQuestion remaps to changes_requeste
   assert.ok(result?.findings.some((f) => f.fingerprint === "escalated-without-product-scope-question"));
 });
 
+test("NOT-630: parsing can preserve a bare escalated verdict for truncated-diff policy", () => {
+  const bare = { ...valid, verdict: "escalated" };
+  const result = parseReviewerResult(`\`\`\`json\n${JSON.stringify(bare)}\n\`\`\``, { normalize: false });
+  assert.equal(result?.verdict, "escalated");
+  assert.deepEqual(result?.findings, []);
+});
+
 test("NOT-150: bare escalate with existing blocking findings keeps those findings", () => {
   const bare = {
     ...valid,

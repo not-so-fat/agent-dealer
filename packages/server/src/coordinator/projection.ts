@@ -175,7 +175,11 @@ export function projectReviewerRoute(
           currentIntent: "Awaiting final human review",
           events: ["worker.completed", ...verdictEvents],
         },
-        effect: { kind: "human_action", actionType: "final_review", reason: "Reviewer approved the PR" },
+        effect: {
+          kind: "human_action",
+          actionType: "final_review",
+          reason: route.reason ?? "Reviewer approved the PR",
+        },
         advance: "none",
         hasVerdict,
       };

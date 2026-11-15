@@ -42,7 +42,6 @@ import { realReviewerSpawn, reviewerSessionLogPath, type ReviewerSpawn } from ".
 import {
   parseReviewerResult,
   normalizeReviewerResult,
-  INCOMPLETE_REVIEW_FINGERPRINT,
   ReviewerResult as ReviewerResultSchema,
   type ReviewerResult,
   type ReviewerVerdict,
@@ -177,50 +176,30 @@ async function bestEffortRemove(repo: string, worktreePath: string): Promise<voi
   }
 }
 
-/** Inject a stable blocking incomplete-review finding listing omitted paths (NOT-150). */
-function withIncompleteReviewFinding(result: ReviewerResult, omittedPaths: string[]): ReviewerResult {
-  if (result.findings.some((f) => f.fingerprint === INCOMPLETE_REVIEW_FINGERPRINT)) {
-    const { productScopeQuestion: _drop, ...rest } = result;
-    return { ...rest, verdict: "changes_requested" };
-  }
-  const paths = omittedPaths.length > 0 ? omittedPaths.join(", ") : "(unlisted omitted files)";
-  const { productScopeQuestion: _drop, ...rest } = result;
-  return {
-    ...rest,
-    verdict: "changes_requested",
-    findings: [
-      ...result.findings,
-      {
-        fingerprint: INCOMPLETE_REVIEW_FINGERPRINT,
-        severity: "blocking",
-        title: "Diff truncated — incomplete review",
-        rationale: `Reviewer prompt omitted path(s): ${paths}. Cannot fully certify acceptance criteria without them; shrink the change set or split the PR so the next review sees the full AC-critical surface.`,
-      },
-    ],
-  };
-}
-
 /**
- * Truncation remap (PRD §6.4 / design NOT-150): never blind escalate → Resume|Close.
- * Shippable approved (no blocking) stays approved; otherwise ensure changes_requested with
- * the incomplete-review finding listing omitted paths (in addition to any other blocking).
+ * NOT-630 truncation policy: shippable approved stays approved; a reviewer's own blocking
+ * findings take the normal repair path; every other incomplete review goes to the operator.
  */
-function applyTruncationVerdictPolicy(result: ReviewerResult, omittedPaths: string[]): ReviewerResult {
-  const normalized = normalizeReviewerResult(result);
-  const hasProductQ = !!normalized.productScopeQuestion?.trim();
-  const hasBlocking = normalized.findings.some((f) => f.severity === "blocking");
+function applyTruncationVerdictPolicy(
+  result: ReviewerResult,
+  omittedPaths: string[]
+): { result: ReviewerResult; finalReviewReason?: string } {
+  const hasBlocking = result.findings.some((f) => f.severity === "blocking");
 
-  if (normalized.verdict === "escalated" && hasProductQ) {
-    return normalized;
+  if (result.verdict === "approved" && !hasBlocking) {
+    return { result };
   }
 
-  if (normalized.verdict === "approved" && !hasBlocking) {
-    return normalized;
+  if (hasBlocking) {
+    const { productScopeQuestion: _drop, ...rest } = result;
+    return { result: { ...rest, verdict: "changes_requested" } };
   }
 
-  // Truncated + not shippable-approved → changes_requested with incomplete-review (omitted paths).
-  const { productScopeQuestion: _drop, ...rest } = normalized;
-  return withIncompleteReviewFinding({ ...rest, verdict: "changes_requested" }, omittedPaths);
+  const paths = omittedPaths.length > 0 ? omittedPaths.join(", ") : "(unlisted omitted files)";
+  return {
+    result,
+    finalReviewReason: `Diff exceeds the reviewer limit (${TOTAL_DIFF_LIMIT.toLocaleString("en-US")} characters); not reviewed: ${paths}`,
+  };
 }
 
 function readImplementationConclusion(issueId: string): string | null {
@@ -356,6 +335,8 @@ export async function runReviewerEffect(
 
   let worktreePath: string;
   let result: ReviewerResult;
+  let truncationFinalReviewReason: string | undefined;
+  let truncationOmittedPaths: string[] | undefined;
   let workerAuthority: { mcpConfigPath: string; mcpEnv?: Record<string, string> } | null = null;
   let repoPath: string;
   let baseBranch: string;
@@ -663,7 +644,9 @@ export async function runReviewerEffect(
       blobPath: spawned.logPath,
     });
 
-    const parsed = parseReviewerResult(spawned.transcript);
+    // Preserve the reviewer's own findings on a truncated diff so NOT-630 can distinguish
+    // them from normalizeReviewer's synthetic bare-escalate repair finding.
+    const parsed = parseReviewerResult(spawned.transcript, { normalize: !diffTruncated });
     if (!parsed) {
       await bestEffortRemove(repoPath, worktreePath);
       return { kind: "session_failed" };
@@ -679,11 +662,14 @@ export async function runReviewerEffect(
     }
     result = parsed;
 
-    // Truncation policy (PRD §6.4 / design NOT-150): never blind-escalate to Resume|Close.
-    // Persist evidence; remap bare escalate / approved+blocking; keep shippable approved.
+    // NOT-630: persist truncation evidence; keep shippable approved and genuine blockers,
+    // but send every other incomplete review to a final_review operator action.
     if (diffTruncated) {
       const reportedVerdict = result.verdict;
-      result = applyTruncationVerdictPolicy(result, omittedPaths);
+      const policy = applyTruncationVerdictPolicy(result, omittedPaths);
+      result = policy.result;
+      truncationFinalReviewReason = policy.finalReviewReason;
+      truncationOmittedPaths = omittedPaths;
       createIssueArtifact({
         issueId: issue.id,
         workerSessionId: sessionId,
@@ -749,8 +735,14 @@ export async function runReviewerEffect(
       // attempt, or the winner itself failed) has nothing safe to report — escalate.
       if (claim.row?.state === "published" && claim.row.resultJson) {
         const winnerParsed = ReviewerResultSchema.parse(JSON.parse(claim.row.resultJson));
-        const winnerResult = normalizeReviewerResult(winnerParsed);
-        return { kind: "verdict", result: winnerResult };
+        const winnerPolicy: { result: ReviewerResult; finalReviewReason?: string } = truncationOmittedPaths
+          ? applyTruncationVerdictPolicy(winnerParsed, truncationOmittedPaths)
+          : { result: normalizeReviewerResult(winnerParsed) };
+        return {
+          kind: "verdict",
+          result: winnerPolicy.result,
+          ...(winnerPolicy.finalReviewReason ? { finalReviewReason: winnerPolicy.finalReviewReason } : {}),
+        };
       }
       return { kind: "publish_failed" };
     }
@@ -786,7 +778,11 @@ export async function runReviewerEffect(
     });
 
     await bestEffortRemove(repoPath, worktreePath);
-    return { kind: "verdict", result };
+    return {
+      kind: "verdict",
+      result,
+      ...(truncationFinalReviewReason ? { finalReviewReason: truncationFinalReviewReason } : {}),
+    };
   } catch {
     await bestEffortRemove(repoPath, worktreePath);
     return { kind: "publish_failed" };

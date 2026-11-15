@@ -142,7 +142,12 @@ export type ChecksConflictSync =
   | { result: "escalate"; reason: string; evidence: Record<string, unknown> };
 
 export type ReviewerOutcome =
-  | { kind: "verdict"; result: ReviewerResult }
+  | {
+      kind: "verdict";
+      result: ReviewerResult;
+      /** Force operator review even when auto-merge is enabled (for an incomplete large-diff review). */
+      finalReviewReason?: string;
+    }
   | { kind: "stale"; currentHeadSha: string }
   | { kind: "session_failed"; reason?: string }
   | { kind: "deck_failure"; reason: string }
@@ -550,7 +555,7 @@ function emptyTipNoProgressGate(
 }
 
 export type ReviewerRouteResult =
-  | { next: "final_review" }
+  | { next: "final_review"; reason?: string }
   /** Reviewer approved and the issue opted into per-issue auto-merge (NOT-102). */
   | { next: "auto_merge" }
   | { next: "retry_developer_with_findings" }
@@ -631,6 +636,9 @@ export function routeReviewerOutcome(
       // See routeDeveloperOutcome — the reviewer never spawned either (NOT-136).
       return { next: "defer_work", reason: outcome.reason };
     case "verdict":
+      if (outcome.finalReviewReason) {
+        return { next: "final_review", reason: outcome.finalReviewReason };
+      }
       return routeVerdict(outcome.result, limits);
   }
 }
