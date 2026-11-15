@@ -103,6 +103,7 @@ const okDeckCallTool = async (name: string, _args: Record<string, unknown>) => (
 async function makeIssue(opts: {
   maxInfraAttempts?: number;
   reviewerDeck?: { deckId: string; playbookIds?: string[] };
+  autoMerge?: boolean;
 } = {}): Promise<string> {
   const dev = createAgent({ name: `dev-${Math.random()}`, runtime: "claude_code", deckId: "00000000-0000-4000-a000-000000000099" });
   const rev = createAgent({
@@ -126,7 +127,7 @@ async function makeIssue(opts: {
     maxReviewRounds: 3,
     maxInfraAttempts: opts.maxInfraAttempts ?? 3,
     // NOT-489: omitted now means auto-merge; this suite exercises final human review.
-    autoMerge: false,
+    autoMerge: opts.autoMerge ?? false,
     source: "manual"}).id;
 }
 
@@ -581,7 +582,7 @@ test("diff truncated: AC-met approved (no blocking) stays on the approve path â€
   const issueId = await makeIssue();
   const github = fakeGithub();
 
-  // A single file whose diff alone exceeds prompts.ts's TOTAL_DIFF_LIMIT (300,000 chars).
+  // A single file whose diff alone exceeds prompts.ts's TOTAL_DIFF_LIMIT (600,000 chars).
   const bigFileSpawn: SpawnFn = async (input) => {
     const lines = Array.from({ length: 20_000 }, (_, i) => `line ${i} of a very large generated file`);
     fs.writeFileSync(path.join(input.cwd, "big.txt"), `${lines.join("\n")}\n`);
@@ -607,7 +608,7 @@ test("diff truncated: AC-met approved (no blocking) stays on the approve path â€
   assert.equal(JSON.parse(published!.contentJson!).event, "APPROVE");
 });
 
-test("diff truncated: blocking incomplete-review finding remaps to changes_requested repair, not escalate", async () => {
+test("diff truncated: the reviewer's own blocking finding becomes changes_requested without an incomplete-review finding", async () => {
   const issueId = await makeIssue();
   const github = fakeGithub();
 
@@ -644,11 +645,17 @@ test("diff truncated: blocking incomplete-review finding remaps to changes_reque
   const truncateEvidence = listArtifactsForIssue(issueId).find((a) => a.kind === "diff_truncated_evidence");
   assert.ok(truncateEvidence);
   assert.equal(JSON.parse(truncateEvidence!.contentJson!).overriddenTo, "changes_requested");
+  const findings = listFindingsForIssue(issueId);
+  assert.deepEqual(
+    findings.map(({ fingerprint, severity, title, rationale }) => ({ fingerprint, severity, title, rationale })),
+    [finding]
+  );
+  assert.ok(!findings.some((f) => f.fingerprint === "diff-truncated-incomplete-review"));
   assert.ok(!listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
 });
 
-test("diff truncated: bare escalated remaps to changes_requested with incomplete-review finding", async () => {
-  const issueId = await makeIssue();
+test("diff truncated: bare escalated opens final_review with omitted paths even when auto-merge is on", async () => {
+  const issueId = await makeIssue({ autoMerge: true });
   const github = fakeGithub();
 
   const bigFileSpawn: SpawnFn = async (input) => {
@@ -668,15 +675,21 @@ test("diff truncated: bare escalated remaps to changes_requested with incomplete
   await pump(1);
 
   const issue = getIssue(issueId)!;
-  assert.equal(issue.status, "repairing");
+  assert.equal(issue.status, "final_review");
   const truncateEvidence = listArtifactsForIssue(issueId).find((a) => a.kind === "diff_truncated_evidence");
-  assert.equal(JSON.parse(truncateEvidence!.contentJson!).overriddenTo, "changes_requested");
-  assert.ok(!listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation"));
-  const findings = listFindingsForIssue(issueId);
-  assert.ok(
-    findings.some((f) => f.fingerprint === "diff-truncated-incomplete-review"),
-    "truncated bare escalate must keep incomplete-review with omitted paths"
+  assert.equal(JSON.parse(truncateEvidence!.contentJson!).overriddenTo, "escalated");
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "final_review");
+  assert.ok(action);
+  assert.equal(
+    action.reason,
+    "Diff exceeds the reviewer limit (600,000 characters); not reviewed: big.txt"
   );
+  assert.equal(
+    listWorkItemsForIssue(issueId).filter((item) => item.kind === "developer" && item.round === 2).length,
+    0,
+    "operator escalation must not queue a repair round"
+  );
+  assert.deepEqual(listFindingsForIssue(issueId), []);
 });
 
 test("changes_requested: findings thread onto the issue and a fresh developer repair round is queued", async () => {

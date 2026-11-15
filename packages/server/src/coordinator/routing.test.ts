@@ -446,6 +446,29 @@ test("approved verdict with autoMerge routes to auto_merge instead of final_revi
   );
 });
 
+test("NOT-630: an incomplete truncated review forces final_review even with autoMerge", () => {
+  const outcome: ReviewerOutcome = {
+    kind: "verdict",
+    result: {
+      verdict: "escalated",
+      baseSha: "b",
+      headSha: "h",
+      acceptanceCriteriaAssessment: "incomplete",
+      evidenceAssessment: "visible diff reviewed",
+      findings: [],
+      risks: [],
+    },
+    finalReviewReason: "Diff exceeds the reviewer limit (600,000 characters); not reviewed: big.txt",
+  };
+  assert.deepStrictEqual(
+    routeReviewerOutcome(outcome, { ...REVIEW_ROUNDS_LEFT, autoMerge: true }, PINNED_HEAD),
+    {
+      next: "final_review",
+      reason: "Diff exceeds the reviewer limit (600,000 characters); not reviewed: big.txt",
+    }
+  );
+});
+
 test("changes_requested with rounds remaining retries the developer with findings", () => {
   const outcome: ReviewerOutcome = {
     kind: "verdict",

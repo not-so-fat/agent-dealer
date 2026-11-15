@@ -512,7 +512,7 @@ function reviewerContractSection(baseSha: string, headSha: string): string[] {
     `- "acceptanceCriteriaAssessment" judges the acceptance criteria; "evidenceAssessment" must judge EACH criterion's stated evidence (where to look, action/command, expected result) one by one — never a blanket "evidence looks good".`,
     `- When the task carries an execution contract, set "exitPredicateAssessment" to whether the frozen exit predicate observably holds at this tip, and "approved" additionally requires the exit predicate to hold (AC met alone is not enough). Tasks without a contract omit "exitPredicateAssessment".`,
     `- "approved": AC met for this tip and no finding is "blocking" (non_blocking nits allowed).`,
-    `- "changes_requested": any "blocking" finding a coding pass can address — including incomplete review because AC-critical files were omitted/truncated from the diff. List omitted paths in a blocking finding.`,
+    `- "changes_requested": any "blocking" finding a coding pass can address. Do not add a finding solely because the coordinator omitted files from an oversized diff; the coordinator routes an otherwise incomplete truncated review to the operator.`,
     `- "escalated": only when acceptance criteria / product scope are ambiguous, contradictory, or need a human product call — not ordinary code defects, not "diff too large". You MUST set non-empty "productScopeQuestion"; omit the field otherwise.`,
     // NOT-303: a missing screenshot is never a pass. Some runtimes (Muse Code: the
     // Chrome.app headless abort) cannot do visual QA in-session and say so in the
@@ -530,7 +530,7 @@ function reviewerContractSection(baseSha: string, headSha: string): string[] {
  * omitted and listed in `omittedPaths`. Truncation policy (PRD §6.4 / NOT-150): coordinator
  * remaps illegal escalate / approved+blocking; never blind escalate → Resume|Close.
  */
-export const TOTAL_DIFF_LIMIT = 300_000;
+export const TOTAL_DIFF_LIMIT = 600_000;
 
 export interface FormattedDiff {
   text: string;
@@ -569,7 +569,7 @@ export function formatDiffForPrompt(diff: string): FormattedDiff {
 
   const truncated = omittedPaths.length > 0;
   const footer = truncated
-    ? `\n... [${omittedPaths.length} changed file(s) omitted — diff exceeds ${TOTAL_DIFF_LIMIT} characters. Omitted: ${omittedPaths.join(", ")}. If any omitted path is AC-critical, verdict MUST be "changes_requested" with a blocking finding listing those paths. If AC is still certifiable from the visible tip with only non_blocking findings, "approved" is allowed. Do NOT use "escalated" for truncation — escalate only with productScopeQuestion for a true product gap.]`
+    ? `\n... [${omittedPaths.length} changed file(s) omitted — diff exceeds ${TOTAL_DIFF_LIMIT} characters. Omitted: ${omittedPaths.join(", ")}. Review the visible diff normally. Do not add a blocking finding or use "escalated" solely because files were omitted; the coordinator sends an otherwise incomplete truncated review to the operator. If AC is still certifiable from the visible tip with only non_blocking findings, "approved" is allowed.]`
     : "";
   return {
     text: `Changed files (${blocks.length}):\n${manifest}\n\n${pieces.join("\n")}${footer}`,

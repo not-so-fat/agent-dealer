@@ -204,16 +204,26 @@ test("NOT-150: reviewer verdict rules match the design table (blocking ⇒ chang
   assert.match(prompt, /not "diff too large"/);
 });
 
-test("NOT-150: truncated-diff footer does not reject approved/changes_requested; forbids escalate-for-truncation", async () => {
+test("NOT-630: truncated-diff footer names omissions and leaves non-truncation findings to the reviewer", async () => {
   const { formatDiffForPrompt, TOTAL_DIFF_LIMIT } = await import("./prompts.js");
   const big = "x".repeat(TOTAL_DIFF_LIMIT + 1);
   const diff = `diff --git a/small.ts b/small.ts\n+ok\n\ndiff --git a/huge.ts b/huge.ts\n+${big}\n`;
   const formatted = formatDiffForPrompt(diff);
   assert.equal(formatted.truncated, true);
   assert.ok(formatted.omittedPaths.some((p) => p.includes("huge.ts")));
-  assert.match(formatted.text, /changes_requested/);
-  assert.match(formatted.text, /Do NOT use "escalated" for truncation/);
-  assert.doesNotMatch(formatted.text, /will not accept "approved" or "changes_requested"/);
+  assert.match(formatted.text, /Omitted: huge\.ts/);
+  assert.match(formatted.text, /Do not add a blocking finding or use "escalated" solely because files were omitted/);
+  assert.match(formatted.text, /coordinator sends an otherwise incomplete truncated review to the operator/);
+});
+
+test("NOT-630: a 450,000-character file reaches the reviewer without truncation", async () => {
+  const { formatDiffForPrompt, TOTAL_DIFF_LIMIT } = await import("./prompts.js");
+  assert.equal(TOTAL_DIFF_LIMIT, 600_000);
+  const body = "x".repeat(450_000);
+  const formatted = formatDiffForPrompt(`diff --git a/large.ts b/large.ts\n+${body}\n`);
+  assert.equal(formatted.truncated, false);
+  assert.deepEqual(formatted.omittedPaths, []);
+  assert.match(formatted.text, new RegExp(`${body.slice(0, 100)}$`));
 });
 
 test("reviewer prompt includes the developer's conclusion, checks summary, and prior findings when given", () => {
