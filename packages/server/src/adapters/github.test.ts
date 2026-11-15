@@ -61,6 +61,80 @@ test("summarizeChecks accepts neutral/skipped as success but fails closed on an 
   assert.equal(summarizeChecks([{ conclusion: "some_new_gh_conclusion_this_code_does_not_know" }]), "failure");
 });
 
+test("summarizeChecks uses the newest run of the same workflow check", () => {
+  const failedRun = {
+    name: "PR body",
+    workflowName: "CI",
+    status: "COMPLETED",
+    conclusion: "FAILURE",
+    startedAt: "2026-11-15T18:00:00Z",
+    completedAt: "2026-11-15T18:01:00Z",
+  };
+  const successfulRerun = {
+    name: "PR body",
+    workflowName: "CI",
+    status: "COMPLETED",
+    conclusion: "SUCCESS",
+    startedAt: "2026-11-15T18:02:00Z",
+    completedAt: "2026-11-15T18:03:00Z",
+  };
+
+  assert.equal(summarizeChecks([failedRun, successfulRerun]), "success");
+  assert.equal(summarizeChecks([successfulRerun, { ...failedRun, startedAt: "2026-11-15T18:04:00Z" }]), "failure");
+});
+
+test("summarizeChecks keeps checks from different workflows and jobs separate", () => {
+  assert.equal(
+    summarizeChecks([
+      {
+        name: "build",
+        workflowName: "CI",
+        status: "COMPLETED",
+        conclusion: "FAILURE",
+        startedAt: "2026-11-15T18:00:00Z",
+        completedAt: "2026-11-15T18:01:00Z",
+      },
+      {
+        name: "build",
+        workflowName: "Release",
+        status: "COMPLETED",
+        conclusion: "SUCCESS",
+        startedAt: "2026-11-15T18:02:00Z",
+        completedAt: "2026-11-15T18:03:00Z",
+      },
+      {
+        name: "lint",
+        workflowName: "CI",
+        status: "COMPLETED",
+        conclusion: "SUCCESS",
+        startedAt: "2026-11-15T18:02:00Z",
+        completedAt: "2026-11-15T18:03:00Z",
+      },
+    ]),
+    "failure"
+  );
+});
+
+test("summarizeChecks uses the newest status context", () => {
+  assert.equal(
+    summarizeChecks([
+      { context: "ci/external", state: "FAILURE", startedAt: "2026-11-15T18:00:00Z" },
+      { context: "ci/external", state: "SUCCESS", createdAt: "2026-11-15T18:02:00Z" },
+    ]),
+    "success"
+  );
+});
+
+test("summarizeChecks preserves same-identity entries when their run times are unavailable", () => {
+  assert.equal(
+    summarizeChecks([
+      { name: "build", workflowName: "CI", status: "COMPLETED", conclusion: "FAILURE" },
+      { name: "build", workflowName: "CI", status: "COMPLETED", conclusion: "SUCCESS" },
+    ]),
+    "failure"
+  );
+});
+
 /** Records every `gh` invocation and returns responses off a queue — never calls real `gh`. */
 function queuedExec(responses: Array<{ stdout?: string; error?: string }>): {
   exec: GhExec;
@@ -476,6 +550,39 @@ test("NOT-252: no failed checks yields no enrichment", async () => {
   ]);
   assert.equal(await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA }), null);
   assert.ok(calls.every((c) => c[0] === "pr"), "no log fetch without a failure");
+});
+
+test("NOT-629: failure evidence excludes a stale failed run after a successful rerun", async () => {
+  const { exec, calls } = queuedExec([
+    {
+      stdout: prViewWithRollup([
+        actionsCheck("build", "FAILURE", "111", {
+          startedAt: "2026-11-15T18:00:00Z",
+          completedAt: "2026-11-15T18:01:00Z",
+        }),
+        actionsCheck("build", "SUCCESS", "222", {
+          startedAt: "2026-11-15T18:02:00Z",
+          completedAt: "2026-11-15T18:03:00Z",
+        }),
+        actionsCheck("lint", "FAILURE", "333", {
+          startedAt: "2026-11-15T18:02:00Z",
+          completedAt: "2026-11-15T18:03:00Z",
+        }),
+      ]),
+    },
+    { stdout: "lint failed\nError: nit\n" },
+  ]);
+
+  const evidence = await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 42, expectedHeadSha: HEAD_SHA });
+  assert.ok(evidence);
+  assert.deepEqual(
+    evidence.failedChecks.map((check) => check.name),
+    ["lint"]
+  );
+  assert.deepEqual(
+    calls.filter((call) => call[0] === "run"),
+    [["run", "view", "333", "--log-failed"]]
+  );
 });
 
 test("NOT-252: noisy log focuses the excerpt on the actionable E404 lines", async () => {

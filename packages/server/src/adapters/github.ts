@@ -61,6 +61,11 @@ export interface RawCheck {
   detailsUrl?: string;
   targetUrl?: string;
   url?: string;
+  /** CheckRun timestamps included by `gh pr view --json statusCheckRollup`. */
+  startedAt?: string;
+  completedAt?: string;
+  /** StatusContext timestamp; older `gh` versions may report this instead of `startedAt`. */
+  createdAt?: string;
 }
 
 export type ChecksSnapshot = "success" | "failure" | "pending" | "none";
@@ -100,9 +105,54 @@ const PENDING_STATES = new Set(["pending", "queued", "in_progress", "expected", 
 /** Every terminal-and-genuinely-ok conclusion `gh` can report — anything else fails closed. */
 const SUCCESS_STATES = new Set(["success", "neutral", "skipped"]);
 
+function checkIdentity(check: RawCheck): string | null {
+  if (typeof check.context === "string" && check.context) {
+    return JSON.stringify(["status", check.context]);
+  }
+  if (typeof check.name === "string" && check.name) {
+    return JSON.stringify(["check", check.workflowName ?? "", check.name]);
+  }
+  return null;
+}
+
+function checkTime(check: RawCheck): number | null {
+  const candidates = check.context
+    ? [check.startedAt, check.createdAt]
+    : [check.startedAt, check.completedAt];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !candidate) continue;
+    const time = Date.parse(candidate);
+    if (Number.isFinite(time)) return time;
+  }
+  return null;
+}
+
+/**
+ * GitHub keeps earlier attempts in the rollup when a check runs again on the same
+ * commit. Drop superseded timed entries by the provider's check identity. Untimed
+ * entries remain untouched because their relative age cannot be established safely.
+ */
+function newestChecks(rollup: RawCheck[]): RawCheck[] {
+  const newestIndexByIdentity = new Map<string, { index: number; time: number }>();
+  for (const [index, check] of rollup.entries()) {
+    const identity = checkIdentity(check);
+    const time = checkTime(check);
+    if (identity == null || time == null) continue;
+    const current = newestIndexByIdentity.get(identity);
+    if (current == null || time >= current.time) newestIndexByIdentity.set(identity, { index, time });
+  }
+
+  return rollup.filter((check, index) => {
+    const identity = checkIdentity(check);
+    const time = checkTime(check);
+    return identity == null || time == null || newestIndexByIdentity.get(identity)?.index === index;
+  });
+}
+
 export function summarizeChecks(rollup: RawCheck[]): ChecksSnapshot {
-  if (rollup.length === 0) return "none";
-  const states = rollup.map((c) => (c.conclusion || c.state || c.status || "").toLowerCase());
+  const currentChecks = newestChecks(rollup);
+  if (currentChecks.length === 0) return "none";
+  const states = currentChecks.map((c) => (c.conclusion || c.state || c.status || "").toLowerCase());
   if (states.some((s) => FAILURE_STATES.has(s))) return "failure";
   if (states.some((s) => PENDING_STATES.has(s))) return "pending";
   if (states.every((s) => SUCCESS_STATES.has(s))) return "success";
@@ -748,7 +798,7 @@ export async function fetchChecksFailureEvidence(
   const headSha = typeof raw.headRefOid === "string" ? raw.headRefOid : "";
   // Never attach another commit's failure: the head must still be the verified one.
   if (!headSha || headSha !== opts.expectedHeadSha) return null;
-  const rollup = (raw.statusCheckRollup as RawCheck[] | undefined) ?? [];
+  const rollup = newestChecks((raw.statusCheckRollup as RawCheck[] | undefined) ?? []);
   const failed = rollup.filter((c) => isFailedCheckState(rawCheckState(c)));
   if (failed.length === 0) return null;
 
