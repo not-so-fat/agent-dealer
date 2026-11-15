@@ -4,6 +4,17 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.4.3 — 2026-11-15
+
+Dealer PR descriptions follow the repo template, checks use the newest run, reviewer diff limit 600k
+
+### Changes
+
+- NOT-628: Dealer: let the developer write the PR description and refresh it every round (#249)
+- NOT-630: Dealer reviewer: raise the diff limit to 600,000 characters and send larger PRs to the operator (#248)
+- NOT-629: Dealer: judge PR checks by the newest run of each check on the same commit (#247)
+- NOT-575: Dealer: operator-verification gate misses real [operator] criteria and reviewer cannot read PR-body evidence (#246)
+
 ## 1.4.2 — 2026-11-05
 
 Include cache tokens in usage_events tokens_in
