@@ -37,7 +37,7 @@ const { getActiveWorkflowInstance, listWorkflowEventsForIssue } = await import("
 const { startWorkflow, resolveHumanActionAndAdvance } = await import("./commands.js");
 const { registerEffectHandler, resetEffectHandlers } = await import("./effect-registry.js");
 const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
-const { runDeveloperEffect } = await import("./developer-effect.js");
+const { runDeveloperEffect, extractPrDescription } = await import("./developer-effect.js");
 const { realDeveloperSpawn } = await import("./spawn.js");
 const { realGithubAdapter } = await import("../adapters/github.js");
 const { branchExists, roleWorktreePath, withRepoLock, observeGitCommands } = await import("../adapters/git-worktree.js");
@@ -134,6 +134,28 @@ const noopSpawn: SpawnFn = async () => ({ exitCode: 0, transcript: "", logPath: 
 const crashingSpawn: SpawnFn = async () => ({ exitCode: 1, transcript: "boom", logPath: "/dev/null", timedOut: false });
 const timedOutSpawn: SpawnFn = async () => ({ exitCode: 1, transcript: "", logPath: "/dev/null", timedOut: true });
 
+test("extractPrDescription returns one block's contents", () => {
+  assert.equal(extractPrDescription("done\n````pr-description\n## Summary\nBuilt it.\n````"), "## Summary\nBuilt it.");
+});
+
+test("extractPrDescription uses the last block", () => {
+  const transcript = "````pr-description\nold\n````\nnotes\n````pr-description\nnew\n````";
+  assert.equal(extractPrDescription(transcript), "new");
+});
+
+test("extractPrDescription preserves template headings and nested triple-backtick fences", () => {
+  const body = "## Record\n\n```ts\nconst answer = 42;\n```";
+  assert.equal(extractPrDescription(`conclusion\n\`\`\`\`pr-description\n${body}\n\`\`\`\``), body);
+});
+
+test("extractPrDescription returns null without a block", () => {
+  assert.equal(extractPrDescription("Implementation conclusion only."), null);
+});
+
+test("extractPrDescription returns null for a blank block", () => {
+  assert.equal(extractPrDescription("````pr-description\n  \n````"), null);
+});
+
 /**
  * In-memory PR store keyed by branch — real git tells it the head SHA, nothing hits real
  * GitHub. `viewPr`/`createDraftPr` deliberately require an explicit `branch`/`head` and
@@ -144,6 +166,9 @@ const timedOutSpawn: SpawnFn = async () => ({ exitCode: 1, transcript: "", logPa
 function fakeGithub(opts: {
   checks?: "success" | "failure" | "pending" | "none" | (() => "success" | "failure" | "pending" | "none");
   createFails?: boolean | (() => boolean);
+  createdBodies?: string[];
+  updatedBodies?: string[];
+  updateFails?: boolean;
   /** NOT-311: base-branch `pull_request` workflow answer; null (default) = unknown. */
   pullRequestWorkflow?: boolean | null;
   /** NOT-354: PR mergeable state; absent = no adapter method (reads as UNKNOWN). */
@@ -165,13 +190,18 @@ function fakeGithub(opts: {
       if (number != null && number !== pr.number) return null;
       return { number: pr.number, url: pr.url, baseRefName: pr.base, headRefName: branch, headRefOid: remoteHead(branch), isDraft: true };
     },
-    async createDraftPr({ base, head }) {
+    async createDraftPr({ base, head, bodyFilePath }) {
       if (shouldFailCreate()) return { ok: false, reason: "gh: simulated failure", noCommits: false };
       if (!head) throw new Error("fakeGithub.createDraftPr requires an explicit --head — bare create is the NOT-82 bug");
+      opts.createdBodies?.push(fs.readFileSync(bodyFilePath, "utf8"));
       const number = nextNumber++;
       const url = `https://github.com/o/r/pull/${number}`;
       prs.set(head, { number, url, base });
       return { ok: true, number, url };
+    },
+    async updatePrBody({ bodyFilePath }) {
+      opts.updatedBodies?.push(fs.readFileSync(bodyFilePath, "utf8"));
+      if (opts.updateFails) throw new Error("gh: simulated body edit failure");
     },
     async checksSnapshot({ number, branch }) {
       if (number == null && !branch) {
@@ -656,6 +686,108 @@ test("checks_failed: CI failure after a clean push/PR retries without a human ac
   // session — they must survive a checks failure too, not just a clean handoff.
   assert.ok(kinds.includes("implementation_conclusion"), "conclusion must survive a post-session verification failure");
   assert.ok(kinds.includes("developer_transcript"), "raw trace must survive a post-session verification failure");
+});
+
+test("PR creation uses the developer's full pr-description block", async () => {
+  const issueId = await makeIssue();
+  const createdBodies: string[] = [];
+  const body = "## Summary\nBuilt the widget.\n\n## Record\nDealer-owned.";
+  const spawn: SpawnFn = async (input) => {
+    const result = await commitingSpawn(input);
+    return { ...result, transcript: `Implementation conclusion: done.\n\n\`\`\`\`pr-description\n${body}\n\`\`\`\`` };
+  };
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github: fakeGithub({ createdBodies }) })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.deepEqual(createdBodies, [body]);
+});
+
+test("PR creation falls back to the implementation conclusion when there is no block", async () => {
+  const issueId = await makeIssue();
+  const createdBodies: string[] = [];
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github: fakeGithub({ createdBodies }) })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.deepEqual(createdBodies, ["Implementation conclusion: added the widget."]);
+});
+
+test("PR creation falls back to the ticket description when the transcript is blank", async () => {
+  const issueId = await makeIssue();
+  const createdBodies: string[] = [];
+  const spawn: SpawnFn = async (input) => {
+    const result = await commitingSpawn(input);
+    return { ...result, transcript: "" };
+  };
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github: fakeGithub({ createdBodies }) })
+  );
+  startWorkflow(issueId);
+  await pump(1);
+
+  assert.deepEqual(createdBodies, ["Build the widget."]);
+});
+
+async function runBodyRefreshScenario(opts: { secondBody: string | null; updateFails?: boolean }) {
+  const issueId = await makeIssue();
+  const updatedBodies: string[] = [];
+  let calls = 0;
+  const spawn: SpawnFn = async (input) => {
+    calls++;
+    const file = calls === 1 ? "feature.txt" : "followup.txt";
+    fs.writeFileSync(path.join(input.cwd, file), `${calls}\n`);
+    git(input.cwd, "add", ".");
+    git(input.cwd, "-c", "user.email=agent@test", "-c", "user.name=Agent", "commit", "-q", "-m", `round ${calls}`);
+    const description = calls === 1 ? "initial body" : opts.secondBody;
+    const transcript = description
+      ? `Implementation conclusion: round ${calls}.\n\n\`\`\`\`pr-description\n${description}\n\`\`\`\``
+      : `Implementation conclusion: round ${calls}.`;
+    return { exitCode: 0, transcript, logPath: "/dev/null", timedOut: false };
+  };
+  const github = fakeGithub({
+    checks: () => (calls === 1 ? "failure" : "success"),
+    updatedBodies,
+    updateFails: opts.updateFails,
+  });
+  registerEffectHandler("developer", (ctx) =>
+    runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn, github })
+  );
+  startWorkflow(issueId);
+  await pump(2);
+  return { issueId, calls, updatedBodies };
+}
+
+test("an existing PR is replaced with the later round's pr-description", async () => {
+  const result = await runBodyRefreshScenario({ secondBody: "current full body" });
+  assert.equal(result.calls, 2);
+  assert.deepEqual(result.updatedBodies, ["current full body"]);
+  assert.equal(getIssue(result.issueId)!.status, "reviewing");
+});
+
+test("an existing PR is left unchanged when the later round has no pr-description", async () => {
+  const result = await runBodyRefreshScenario({ secondBody: null });
+  assert.equal(result.calls, 2);
+  assert.deepEqual(result.updatedBodies, []);
+  assert.equal(getIssue(result.issueId)!.status, "reviewing");
+});
+
+test("a failed existing-PR body update is logged and does not fail the round", async () => {
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+  try {
+    const result = await runBodyRefreshScenario({ secondBody: "current full body", updateFails: true });
+    assert.deepEqual(result.updatedBodies, ["current full body"]);
+    assert.equal(getIssue(result.issueId)!.status, "reviewing");
+    assert.ok(warnings.some((warning) => /PR body update failed/.test(warning)));
+  } finally {
+    console.warn = originalWarn;
+  }
 });
 
 test("NOT-311: checks_pending — checks still pending at the poll deadline defers, spending no attempt", async () => {
@@ -1297,10 +1429,16 @@ test("publish-only retry: post-push gh create failure reopens the PR without res
   const issueId = await makeIssue();
   let createAttempt = 0;
   let spawnCalls = 0;
-  const github = fakeGithub({ createFails: () => ++createAttempt === 1 });
+  const createdBodies: string[] = [];
+  const github = fakeGithub({ createFails: () => ++createAttempt === 1, createdBodies });
   const countingSpawn: SpawnFn = async (input) => {
     spawnCalls++;
-    return commitingSpawn(input);
+    const result = await commitingSpawn(input);
+    return {
+      ...result,
+      transcript:
+        "Implementation conclusion: added the widget.\n\n````pr-description\n## Summary\nFull retry body.\n````",
+    };
   };
   registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: countingSpawn, github }));
   startWorkflow(issueId);
@@ -1312,6 +1450,7 @@ test("publish-only retry: post-push gh create failure reopens the PR without res
   assert.equal(issue.status, "reviewing");
   assert.ok(issue.prNumber, "draft PR must exist after the publish-only retry");
   assert.equal(issue.currentRound, 1, "publish-only infra retry does not spend a review round");
+  assert.deepEqual(createdBodies, ["## Summary\nFull retry body."], "publish retry must reuse the stored description");
 });
 
 test("unpushed_commit: the coordinator's own push is rejected by a diverged remote branch — escalates, work preserved", async () => {

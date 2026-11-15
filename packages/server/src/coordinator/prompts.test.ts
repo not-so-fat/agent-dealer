@@ -30,6 +30,16 @@ test("developer prompt asks for incremental commits at slice boundaries and keep
   assert.match(prompt, /do NOT push and do NOT open a pull request/);
 });
 
+test("developer prompt requires a full template-preserving pr-description every round", () => {
+  const prompt = buildDeveloperPrompt({ taskSnapshot, round: 1 });
+  assert.match(prompt, /Every round/);
+  assert.match(prompt, /````pr-description/);
+  assert.match(prompt, /full PR description for the branch as it now stands/);
+  assert.match(prompt, /\.github\/pull_request_template\.md/);
+  assert.match(prompt, /keep every heading/);
+  assert.doesNotMatch(prompt, /distinct from the PR description/);
+});
+
 // NOT-146: timed developer spawn covers implement + targeted tests; full suite / Lens
 // live on a separate budget (NOT-74), not inside the same wall clock.
 test("NOT-146: developer prompt handoff bar is commits + targeted tests, not full suite/Lens in-spawn", () => {

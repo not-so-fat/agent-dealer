@@ -188,6 +188,12 @@ test("createDraftPr passes --head explicitly and re-verifies by that same branch
   assert.deepEqual(result, { ok: true, number: 9, url: "https://github.com/o/r/pull/9" });
 });
 
+test("updatePrBody replaces the PR body from the provided file", async () => {
+  const { exec, calls } = queuedExec([{ stdout: "" }]);
+  await createGithubAdapter(exec).updatePrBody!({ cwd: "/repo", number: 17, bodyFilePath: "/tmp/body.md" });
+  assert.deepEqual(calls[0], ["pr", "edit", "17", "--body-file", "/tmp/body.md"]);
+});
+
 // NOT-82 dogfood repro: a real Dev-review run pushed its generated branch to origin, but
 // the local worktree had no configured upstream — `gh pr create` (bare, no `--head`)
 // refused with exactly this error, and the coordinator must never hit it.

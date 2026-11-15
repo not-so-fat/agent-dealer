@@ -251,6 +251,35 @@ function extractConclusion(transcript: string): string {
   return trimmed.length > 4000 ? trimmed.slice(-4000) : trimmed;
 }
 
+/** Full contents of the last valid four-backtick `pr-description` block. */
+export function extractPrDescription(transcript: string): string | null {
+  const blocks = transcript.matchAll(/^````pr-description[ \t]*\r?\n([\s\S]*?)^````[ \t]*(?:\r?\n|$)/gm);
+  let last: string | null = null;
+  for (const block of blocks) last = (block[1] ?? "").replace(/\r?\n$/, "");
+  return last?.trim() ? last : null;
+}
+
+/** A body refresh must never turn completed developer work into a failed round. */
+async function bestEffortUpdatePrBody(opts: {
+  github: GithubAdapter;
+  cwd: string;
+  number: number;
+  body: string;
+  issueId: string;
+}): Promise<void> {
+  if (!opts.github.updatePrBody) return;
+  const bodyDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-pr-body-"));
+  const bodyFilePath = path.join(bodyDir, "body.md");
+  try {
+    fs.writeFileSync(bodyFilePath, opts.body);
+    await opts.github.updatePrBody({ cwd: opts.cwd, number: opts.number, bodyFilePath });
+  } catch (err) {
+    console.warn(`[dealer] PR body update failed for ${opts.issueId} (#${opts.number}): ${String(err)}`);
+  } finally {
+    fs.rmSync(bodyDir, { recursive: true, force: true });
+  }
+}
+
 /** NOT-130: mine + persist a SHA-scoped suite receipt while the worktree still exists.
  * Tip-tree equivalence: only vouch for HEAD when the tree is clean — a green suite on a
  * dirty checkout must not be reloaded as tip evidence after a later clean/revert.
@@ -869,8 +898,12 @@ async function runPublishOnlyHandoff(
       let body = taskSnapshot.description;
       if (prior?.contentJson) {
         try {
-          const parsed = JSON.parse(prior.contentJson) as { text?: string };
-          if (typeof parsed.text === "string" && parsed.text.trim()) body = parsed.text.trim();
+          const parsed = JSON.parse(prior.contentJson) as { text?: string; prDescription?: string };
+          if (typeof parsed.prDescription === "string" && parsed.prDescription.trim()) {
+            body = parsed.prDescription;
+          } else if (typeof parsed.text === "string" && parsed.text.trim()) {
+            body = parsed.text.trim();
+          }
         } catch {
           // keep description
         }
@@ -1965,12 +1998,13 @@ export async function runDeveloperEffect(
     // dropped on any later verification failure (checks failing, a gh error), even though
     // NOT-61 requires the conclusion/raw trace to stay available through the evidence API
     // regardless of how the handoff subsequently resolves.
+    const prDescription = extractPrDescription(spawned.transcript);
     createIssueArtifact({
       issueId: issue.id,
       workerSessionId: sessionId,
       kind: "implementation_conclusion",
       author: "agent",
-      content: { text: extractConclusion(spawned.transcript) },
+      content: { text: extractConclusion(spawned.transcript), prDescription },
     });
     createIssueArtifact({
       issueId: issue.id,
@@ -2103,11 +2137,12 @@ export async function runDeveloperEffect(
     // rather than asking `gh` to infer "the current branch" from upstream tracking, which
     // pushBranch's push does not reliably leave configured (NOT-82).
     let prView = await deps.github.viewPr({ cwd: worktreePath, branch: branchName });
+    const prAlreadyExisted = prView !== null;
     if (!prView) {
       setLiveIntent(issue.id, `Developer · opening draft PR (round ${round})`);
       const bodyDir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-pr-body-"));
       const bodyFilePath = path.join(bodyDir, "body.md");
-      fs.writeFileSync(bodyFilePath, extractConclusion(spawned.transcript) || taskSnapshot.description);
+      fs.writeFileSync(bodyFilePath, (prDescription ?? extractConclusion(spawned.transcript)) || taskSnapshot.description);
       const created = await deps.github.createDraftPr({
         cwd: worktreePath,
         base: baseBranch,
@@ -2158,6 +2193,16 @@ export async function runDeveloperEffect(
         reason: `Branch already pushed (${branchName}); ${identity.reason}`,
         publishable: { branch: branchName },
       };
+    }
+
+    if (prAlreadyExisted && prDescription) {
+      await bestEffortUpdatePrBody({
+        github: deps.github,
+        cwd: worktreePath,
+        number: prView.number,
+        body: prDescription,
+        issueId: issue.id,
+      });
     }
 
     // NOT-381: collect the structured Visual QA receipt against the just-pushed

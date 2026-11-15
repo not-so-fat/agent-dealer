@@ -530,6 +530,8 @@ export interface GithubAdapter {
    * configured upstream, even though it was just pushed (NOT-82).
    */
   createDraftPr(opts: { cwd: string; base: string; head: string; title: string; bodyFilePath: string }): Promise<CreatePrResult>;
+  /** Replaces the complete coordinator-owned PR body from a file. */
+  updatePrBody?(opts: { cwd: string; number: number; bodyFilePath: string }): Promise<void>;
   /**
    * One-shot read of the current check rollup for the PR's head, selected the same way as
    * `viewPr` — `pollPrChecks` forwards whichever selector its caller already pinned once
@@ -681,6 +683,10 @@ export function createGithubAdapter(exec: GhExec = defaultExec): GithubAdapter {
         const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
         return { ok: false, reason: message, noCommits: NO_COMMITS_PATTERN.test(message) };
       }
+    },
+
+    async updatePrBody({ cwd, number, bodyFilePath }) {
+      await exec(["pr", "edit", String(number), "--body-file", bodyFilePath], { cwd });
     },
 
     async checksSnapshot({ cwd, number, branch }) {
