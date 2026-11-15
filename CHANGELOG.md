@@ -4,6 +4,17 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.4.3 — 2026-11-15
+
+Dealer PR descriptions follow the repo template, checks use the newest run, reviewer diff limit 600k
+
+### Changes
+
+- wip: crash salvage (#249)
+- wip: crash salvage (#248)
+- wip: crash salvage (#247)
+- NOT-575: Dealer: operator-verification gate misses real [operator] criteria and reviewer cannot read PR-body evidence (#246)
+
 ## 1.4.2 — 2026-11-05
 
 Include cache tokens in usage_events tokens_in
