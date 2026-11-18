@@ -92,6 +92,8 @@ Run `agent-dealer doctor` to verify Node, Claude CLI, GitHub CLI auth, Cursor au
 
 Host and runtime recovery (Cursor macOS keychain, etc.): [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
+**Agent Deck:** Add Dealer as an [MCP service card](docs/API.md#dealer-mcp) to queue and monitor issues from an agent session.
+
 **Linear (optional):** edit `~/.agent-dealer/.env` — set `LINEAR_API_KEY` and `LINEAR_TEAM_ID`. See [LINEAR_INTEGRATION.md](docs/LINEAR_INTEGRATION.md) for candidate lookup, write-back sync, and REST automation.
 
 **Separate reviewer identity (optional):** for repos that require approval from someone other than the PR author, set `AGENT_DEALER_REVIEWER_GH_TOKEN` in `~/.agent-dealer/.env` to a GitHub token for a second account with write access to the repo. Only `gh pr review` uses it; every other `gh` call stays on your login.

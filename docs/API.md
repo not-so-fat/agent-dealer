@@ -93,3 +93,37 @@ Notes on the table:
   telling the caller to use it.
 - A `close` on an issue whose PR is merged on GitHub lands as `done` (the
   code is on the base branch), not `closed`.
+
+## Dealer MCP
+
+Dealer exposes stateless Streamable HTTP at `POST /mcp` on its API port
+(`http://127.0.0.1:2222/mcp` for the bundled server). It returns JSON
+responses and accepts loopback Host and Origin headers. Each tool returns
+the REST JSON as text. If REST returns a non-2xx response, the tool reports
+an error with the HTTP status and response body.
+
+| Tool | Arguments | REST equivalent |
+|------|-----------|-----------------|
+| `list_agents` | None | `GET /api/agents` |
+| `lookup_linear_issue` | `ref` (identifier or URL) | `GET /api/intake/linear/lookup?q=<ref>` |
+| `list_issues` | Optional `q`, `status`, `page`, `limit` | `GET /api/issues` with those query parameters |
+| `get_issue` | `issueId` | `GET /api/issues/:id` |
+| `get_queue` | None | `GET /api/queue` and `GET /api/queue/status`, returned as `{ queue, status }` |
+| `list_human_actions` | None | `GET /api/human-actions` |
+| `create_issue` | Issue creation body, including optional `enqueue` | `POST /api/issues` |
+| `add_guidance` | `issueId`, `markdown` | `POST /api/issues/:id/guidance` |
+| `resolve_human_action` | `actionId`, `choice`, optional `note` | `POST /api/human-actions/:id/resolve` with `resolvedBy: "agent"` |
+
+In Agent Deck, add a service card named **Dealer** of type **MCP** with URL
+`http://127.0.0.1:2222/mcp`, then link it to the planner deck. Use the
+configured Dealer API port if it differs from 2222. Agent Deck and Dealer
+run on the same host. Agents discover the tools with `list_service_tools`
+and invoke them with `call_service_tool`.
+
+To verify connectivity from Claude Code against a running bundled build, run
+the following on the Dealer host and confirm that `dealer` shows **Connected**.
+
+```sh
+claude mcp add --transport http dealer http://127.0.0.1:2222/mcp
+claude mcp list
+```

@@ -8,6 +8,7 @@ import { enrichPathForCliTools } from "./cli-env.js";
 import { migrate } from "./db/index.js";
 import { writeServerPidFile, removeServerPidFile } from "./server-liveness.js";
 import { registerRoutes } from "./routes/index.js";
+import { registerMcpRoutes } from "./routes/mcp.js";
 import { registerIssueRoutes } from "./routes/issues.js";
 import { registerQueueRoutes } from "./routes/queue.js";
 import { registerHumanActionRoutes } from "./routes/human-actions.js";
@@ -104,6 +105,7 @@ async function main(): Promise<void> {
   await registerExecutionAnalysisRoutes(app);
   await registerExecutionReportRoutes(app);
   await registerRepositoryMappingsRoutes(app);
+  await registerMcpRoutes(app, port);
 
   const uiDist = await registerStaticUi(app);
 
