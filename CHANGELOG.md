@@ -10,7 +10,7 @@ Worker prompts go over stdin, so large reviews no longer fail with spawn E2BIG o
 
 ### Changes
 
-- wip: crash salvage (#252)
+- Developer and reviewer prompts no longer go in a command-line argument: Claude Code and Codex read them from stdin, Cursor from a private temp file. Linux caps one argument at 128 KiB, so a large review (diff plus findings) failed every attempt with `spawn E2BIG` and stopped the issue in `needs_human`. An argument that is still too large now fails early with `prompt_too_large_for_argv`. (NOT-635, #252)
 
 ## 1.4.3 — 2026-11-15
 
