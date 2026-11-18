@@ -453,3 +453,33 @@ test("spawnCli does not linger-kill a child that exits inside the terminal grace
   assert.equal(result.idleTimedOut, false);
   assert.equal(result.exitCode, 0);
 });
+
+test("spawnCli delivers all 200 KiB of a UTF-8 prompt on stdin", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-stdin-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const prompt = "é".repeat(100 * 1024);
+  const result = await spawnCli(
+    "large-stdin",
+    process.execPath,
+    ["-e", "const fs = require('node:fs'); fs.writeFileSync('received-bytes', String(fs.readFileSync(0).length))"],
+    dir,
+    { logPath: path.join(dir, "stdout.log"), timeoutMs: 5000, stdin: prompt }
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(Number(fs.readFileSync(path.join(dir, "received-bytes"), "utf8")), Buffer.byteLength(prompt));
+});
+
+test("spawnCli rejects an oversized worker argument before spawning", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dealer-argv-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const logPath = path.join(dir, "stdout.log");
+  await assert.rejects(
+    spawnCli("large-argv", "nonexistent-binary", ["é".repeat(65_537)], dir, {
+      logPath,
+      runtime: "codex_local",
+      timeoutMs: 5000,
+    }),
+    { code: "prompt_too_large_for_argv", message: /prompt_too_large_for_argv: codex_local/ }
+  );
+  assert.equal(fs.existsSync(logPath), false);
+});

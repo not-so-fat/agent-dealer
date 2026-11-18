@@ -11,9 +11,10 @@
 // `realDeveloperSpawn`/`realReviewerSpawn`, tests inject a fake so no paid CLI is ever
 // spawned in CI (the confirmed NOT-61/62 scope call: fake the agent session, keep
 // worktree/push/PR/review verification real).
+import fs from "node:fs";
 import path from "node:path";
 import type { PermissionPolicy, ReasoningEffort, Runtime } from "@agent-dealer/shared";
-import { getTemporalLogsDir } from "../paths.js";
+import { getTemporalLogsDir, getWorkerMcpConfigDir } from "../paths.js";
 import { resolveClaudeBin, resolveCodexBin, resolveCursorBin, resolveMuseBin } from "../cli-env.js";
 import { spawnCli } from "../runners/spawn-cli.js";
 import { buildDeveloperArgs, buildReviewerArgs } from "./args.js";
@@ -148,14 +149,7 @@ export const realDeveloperSpawn: DeveloperSpawn = async (input) => {
     input.effort
   );
   const logPath = input.logPath ?? developerSessionLogPath(input.sessionId);
-  const { exitCode, transcript, timedOut } = await spawnCli(
-    input.sessionId,
-    BIN_FOR[input.runtime](),
-    args,
-    input.cwd,
-    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv, signal: input.signal, onSpawn: input.onSpawn }
-  );
-  return { exitCode, transcript: extractResultTranscript(logPath, input.runtime, transcript), logPath, timedOut };
+  return spawnWorker(input, args, logPath);
 };
 
 /**
@@ -177,12 +171,35 @@ export const realReviewerSpawn: ReviewerSpawn = async (input) => {
   );
   assertReviewerReadOnly(args, { mcpConfigPath: input.mcpConfigPath, mcpEnv: input.mcpEnv });
   const logPath = input.logPath ?? reviewerSessionLogPath(input.sessionId);
-  const { exitCode, transcript, timedOut } = await spawnCli(
-    input.sessionId,
-    BIN_FOR[input.runtime](),
-    args,
-    input.cwd,
-    { logPath, timeoutMs: input.timeoutMs, env: input.mcpEnv, signal: input.signal, onSpawn: input.onSpawn }
-  );
-  return { exitCode, transcript: extractResultTranscript(logPath, input.runtime, transcript), logPath, timedOut };
+  return spawnWorker(input, args, logPath);
 };
+
+async function spawnWorker(
+  input: DeveloperSpawnInput,
+  args: string[],
+  logPath: string
+): Promise<DeveloperSpawnResult> {
+  const { runtime, sessionId, cwd, prompt, timeoutMs, mcpEnv, signal, onSpawn } = input;
+  // Cursor's headless interface takes a positional instruction. Keep the full
+  // prompt in a private attempt directory outside the checkout and retained logs.
+  const attemptDir = runtime === "cursor_local"
+    ? fs.mkdtempSync(path.resolve(getWorkerMcpConfigDir(), "cursor-prompt-"))
+    : undefined;
+  try {
+    if (attemptDir) {
+      const promptPath = path.join(attemptDir, "prompt.txt");
+      fs.writeFileSync(promptPath, prompt, { mode: 0o600, flag: "wx" });
+      args.push(`Read the complete task prompt from ${JSON.stringify(promptPath)} and follow its instructions.`);
+    }
+    const { exitCode, transcript, timedOut } = await spawnCli(
+      sessionId,
+      BIN_FOR[runtime](),
+      args,
+      cwd,
+      { logPath, timeoutMs, env: mcpEnv, signal, onSpawn, runtime, stdin: attemptDir ? undefined : prompt }
+    );
+    return { exitCode, transcript: extractResultTranscript(logPath, runtime, transcript), logPath, timedOut };
+  } finally {
+    if (attemptDir) fs.rmSync(attemptDir, { recursive: true, force: true });
+  }
+}

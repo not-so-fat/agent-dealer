@@ -98,6 +98,8 @@ export async function spawnCli(
   opts: {
     logPath: string;
     timeoutMs: number;
+    /** Worker runtime name for the pre-spawn argument size diagnostic. */
+    runtime?: string;
     env?: Record<string, string>;
     /**
      * NOT-278: when true, the child receives exactly `opts.env` — `process.env` is not
@@ -108,7 +110,7 @@ export async function spawnCli(
     exactEnv?: boolean;
     /**
      * NOT-278: payload written once to the child's stdin, then closed. Carries the Muse
-     * API key (`--api-key-stdin`) without touching argv, environment, settings, or logs.
+     * API key (`--api-key-stdin`) or a worker prompt without putting it in argv.
      * Never logged or echoed; defaults to no stdin payload (`stdio: ["ignore", ...]`).
      */
     stdin?: string;
@@ -166,6 +168,19 @@ export async function spawnCli(
     };
   }
 ): Promise<SpawnCliResult> {
+  // NOT-225: Node rejects a raw NUL in argv before a process exists.
+  const argv = sanitizeArgv(args);
+  if (opts.runtime) {
+    // Linux MAX_ARG_STRLEN includes the terminating NUL. Measure UTF-8 bytes.
+    const oversized = argv.findIndex((arg) => Buffer.byteLength(arg) >= 128 * 1024);
+    if (oversized !== -1) {
+      const code = "prompt_too_large_for_argv";
+      throw Object.assign(
+        new Error(`${code}: ${opts.runtime} argument ${oversized} exceeds the 128 KiB limit (including its terminator)`),
+        { code }
+      );
+    }
+  }
   await acquireSpawnSlot();
   try {
     return await new Promise<SpawnCliResult>((resolve, reject) => {
@@ -295,9 +310,7 @@ export async function spawnCli(
         console.error(`[spawn-cli] log stream error for ${opts.logPath}`, err);
       });
 
-      // NOT-225: sanitize before spawn — a raw NUL in any arg throws
-      // ERR_INVALID_ARG_VALUE synchronously (no process, no pid, no log).
-      const child = spawn(cmd, sanitizeArgv(args), {
+      const child = spawn(cmd, argv, {
         cwd,
         // Extra vars (e.g. codex's bearer-token env var for its per-attempt CODEX_HOME
         // MCP config, agent-deck-bind.ts) are added on top of, never in place of, the
@@ -306,7 +319,7 @@ export async function spawnCli(
         env: opts.exactEnv ? { ...opts.env } : { ...process.env, ...opts.env },
         stdio: opts.stdin === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
       });
-      // NOT-278: the stdin payload (Muse API key) is written once and closed right after
+      // The stdin payload is written once and closed right after
       // spawn. It never reaches the log stream, the transcript, or any error below.
       if (opts.stdin !== undefined) {
         const payload = opts.stdin;

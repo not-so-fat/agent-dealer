@@ -284,7 +284,7 @@ export function buildMuseArgv(input: {
   role: MuseRole;
   sessionId: string;
   maxModelSteps: number;
-  prompt: string;
+  promptFile: string;
   apiKeyStdin?: boolean;
 }): string[] {
   const argv = [
@@ -307,14 +307,17 @@ export function buildMuseArgv(input: {
     String(input.maxModelSteps),
   ];
   if (input.role === "reviewer") argv.push("--disable-write", "--disable-shell");
-  argv.push(input.prompt);
+  argv.push("--prompt-file", input.promptFile);
   assertMuseArgv(argv, input.role);
   return argv;
 }
 
 /** Refuses argv that widens trust/sandbox/orchestration or drops a required restriction. */
 export function assertMuseArgv(argv: readonly string[], role: MuseRole): void {
-  // The prompt is the last positional; flags inside it would be parsed by Muse.
+  // The last argument is the path consumed by --prompt-file.
+  if (argv.at(-2) !== "--prompt-file" || !path.isAbsolute(argv.at(-1) ?? "")) {
+    throw new MuseIsolationError("invalid_argv", "Muse argv must end with --prompt-file and an absolute path");
+  }
   const flags = argv.slice(0, -1);
   for (const arg of flags) {
     const name = arg.split("=")[0]!;
@@ -552,14 +555,6 @@ function prepareWithEvidence(rawInput: MuseAttemptInput, evidence: MuseEnforceme
   const settings = deepFreeze(buildMuseSettings(agentDeck, input.role, evidence));
   assertMuseSettings(settings, agentDeck, input.role, evidence);
   const apiKey = input.credential.kind === "api-key" ? input.credential.apiKey : undefined;
-  const argv = buildMuseArgv({
-    role: input.role,
-    sessionId: input.sessionId,
-    maxModelSteps: input.maxModelSteps,
-    prompt: input.prompt,
-    apiKeyStdin: apiKey !== undefined,
-  });
-
   const root = fs.mkdtempSync(path.join(baseDir, ATTEMPT_PREFIX));
   // Terminal only once the dir is confirmed gone, so a failed rmSync can be retried.
   let cleaned = false;
@@ -599,6 +594,20 @@ function prepareWithEvidence(rawInput: MuseAttemptInput, evidence: MuseEnforceme
   };
 
   const settingsPath = path.join(root, "config", "muse", "settings.json");
+  // stdin may carry the API key, so Muse loads the prompt through its native file option.
+  const promptFile = path.join(root, "prompt.txt");
+  let argv: string[];
+  try {
+    argv = buildMuseArgv({
+      role: input.role,
+      sessionId: input.sessionId,
+      maxModelSteps: input.maxModelSteps,
+      promptFile,
+      apiKeyStdin: apiKey !== undefined,
+    });
+  } catch (err) {
+    return abortConstruction(err);
+  }
   const approved = deepFreeze({
     cwd: worktree,
     argv: [...argv],
@@ -635,6 +644,17 @@ function prepareWithEvidence(rawInput: MuseAttemptInput, evidence: MuseEnforceme
       if (err instanceof MuseIsolationError) throw err;
       throw new MuseIsolationError("invalid_settings", "Muse settings.json is missing or unreadable");
     }
+    let promptMatches = false;
+    try {
+      const stat = fs.lstatSync(promptFile);
+      promptMatches = stat.isFile() && (stat.mode & 0o777) === 0o600
+        && fs.readFileSync(promptFile).equals(Buffer.from(input.prompt));
+    } catch {
+      // A missing or unreadable prompt also violates the launch contract.
+    }
+    if (!promptMatches) {
+      throw new MuseIsolationError("invalid_argv", "Muse prompt file differs from the approved launch prompt");
+    }
     assertMuseSettings(onDisk, agentDeck, input.role, evidence);
     const entries = fs.readdirSync(path.dirname(settingsPath)).sort();
     const allowed = credentialKind === "auth-file" ? ["auth.json", "settings.json"] : ["settings.json"];
@@ -649,6 +669,7 @@ function prepareWithEvidence(rawInput: MuseAttemptInput, evidence: MuseEnforceme
     writePrivate(path.join(root, SENTINEL), "");
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true, mode: 0o700 });
     fs.mkdirSync(path.join(root, "data"), { recursive: true, mode: 0o700 });
+    writePrivate(promptFile, input.prompt);
     writePrivate(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
     if (input.credential.kind === "auth-file") {
       fs.symlinkSync(input.credential.path, path.join(path.dirname(settingsPath), "auth.json"));

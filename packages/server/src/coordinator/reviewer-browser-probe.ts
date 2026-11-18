@@ -250,9 +250,8 @@ export function resolveProbeBin(runtime: ReviewerBrowserProbeRuntime): string {
 }
 
 /**
- * Exact argv the real reviewer path would spawn for this probe prompt. Same
- * builder (`buildReviewerArgs`) and same ceiling (`roleCeiling("reviewer")`) as
- * production — the probe records it and `realReviewerSpawn` re-derives it.
+ * Reviewer argv from the same builder and role ceiling as production.
+ * Cursor's per-attempt prompt file is allocated later by realReviewerSpawn.
  */
 export function resolveProbeArgv(opts: {
   runtime: Runtime;
