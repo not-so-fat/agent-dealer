@@ -47,7 +47,6 @@ function claudeDisallowedTools(policy: PermissionPolicy): string[] {
 function buildArgs(
   runtime: Runtime,
   policy: PermissionPolicy,
-  prompt: string,
   model?: string,
   mcpConfigPath?: string,
   effort?: ReasoningEffort | null
@@ -78,7 +77,7 @@ function buildArgs(
     // accepted under `--strict-config` and surfaces as `reasoning effort: <tier>` in the
     // exec session banner. Cursor has no equivalent separate flag.
     if (effort) args.push("-c", `model_reasoning_effort=${effort}`);
-    args.push(prompt);
+    args.push("-");
     return args;
   }
   if (runtime === "cursor_local") {
@@ -102,7 +101,6 @@ function buildArgs(
       "--stream-partial-output",
       ...(policy.worktreeWrite ? [] : ["--mode", "ask"]),
       ...(model ? ["--model", model] : []),
-      prompt,
     ];
   }
   const { builtins, allowed } = claudeToolSets(policy);
@@ -112,7 +110,6 @@ function buildArgs(
     ...(model ? ["--model", model] : []),
     ...(effort ? ["--effort", effort] : []),
     "-p",
-    prompt,
     "--output-format",
     "stream-json",
     "--verbose",
@@ -144,7 +141,7 @@ function buildArgs(
 export function buildWorkerArgs(opts: {
   runtime: Runtime;
   role: WorkerSessionRole;
-  prompt: string;
+  prompt: string; // Accepted for existing callers; prompt transport is handled at spawn.
   model?: string;
   effort?: ReasoningEffort | null;
   policy?: PermissionPolicy;
@@ -153,7 +150,6 @@ export function buildWorkerArgs(opts: {
   return buildArgs(
     opts.runtime,
     opts.policy ?? roleCeiling(opts.role),
-    opts.prompt,
     opts.model,
     opts.mcpConfigPath,
     opts.effort
@@ -162,22 +158,22 @@ export function buildWorkerArgs(opts: {
 
 export function buildDeveloperArgs(
   runtime: Runtime,
-  prompt: string,
+  _prompt: string,
   model?: string,
   policy?: PermissionPolicy,
   mcpConfigPath?: string,
   effort?: ReasoningEffort | null
 ): string[] {
-  return buildArgs(runtime, policy ?? roleCeiling("developer"), prompt, model, mcpConfigPath, effort);
+  return buildArgs(runtime, policy ?? roleCeiling("developer"), model, mcpConfigPath, effort);
 }
 
 export function buildReviewerArgs(
   runtime: Runtime,
-  prompt: string,
+  _prompt: string,
   model?: string,
   policy?: PermissionPolicy,
   mcpConfigPath?: string,
   effort?: ReasoningEffort | null
 ): string[] {
-  return buildArgs(runtime, policy ?? roleCeiling("reviewer"), prompt, model, mcpConfigPath, effort);
+  return buildArgs(runtime, policy ?? roleCeiling("reviewer"), model, mcpConfigPath, effort);
 }

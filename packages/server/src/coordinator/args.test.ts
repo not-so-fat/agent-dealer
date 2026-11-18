@@ -5,7 +5,6 @@ import { buildDeveloperArgs, buildReviewerArgs } from "./args.js";
 test("buildDeveloperArgs for claude_code allows Bash and Write/Edit", () => {
   const args = buildDeveloperArgs("claude_code", "do the task");
   assert.ok(args.includes("-p"));
-  assert.ok(args.includes("do the task"));
   const toolsIdx = args.indexOf("--allowedTools");
   assert.ok(toolsIdx >= 0);
   assert.ok(args[toolsIdx + 1].includes("Bash"));
@@ -30,6 +29,7 @@ test("buildDeveloperArgs passes model through when given", () => {
 test("buildDeveloperArgs for codex_local uses exec subcommand shape", () => {
   const args = buildDeveloperArgs("codex_local", "do the task");
   assert.equal(args[0], "exec");
+  assert.equal(args.at(-1), "-");
   assert.ok(args.includes("workspace-write"));
 });
 
@@ -162,7 +162,10 @@ test("every runtime either builds developer args or is the not-yet-wired muse_co
       assert.throws(() => buildDeveloperArgs(runtime, "prompt"), /not wired/);
       assert.throws(() => buildReviewerArgs(runtime, "prompt"), /not wired/);
     } else {
-      assert.ok(buildDeveloperArgs(runtime, "prompt").includes("prompt"), runtime);
+      const prompt = "sentinel worker prompt";
+      for (const buildArgs of [buildDeveloperArgs, buildReviewerArgs]) {
+        assert.ok(buildArgs(runtime, prompt).every((arg) => !arg.includes(prompt)), `${runtime} ${buildArgs.name}`);
+      }
     }
   }
 });

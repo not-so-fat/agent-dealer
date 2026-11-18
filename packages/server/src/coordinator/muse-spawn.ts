@@ -330,6 +330,7 @@ export async function runMuseDeveloperSession(
       timeoutMs: input.timeoutMs,
       env: { ...attempt.env },
       exactEnv: true,
+      runtime: "muse_code",
       stdin: attempt.stdin,
       signal: input.signal,
       onSpawn: input.onSpawn,

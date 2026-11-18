@@ -17,8 +17,8 @@ import {
 } from "./muse-config.js";
 import { pathToFileURL } from "node:url";
 
-// The Muse sandbox leaves temp dirs writable, so the module refuses them: fixtures live under $HOME.
-const SCRATCH = fs.mkdtempSync(path.join(os.homedir(), ".dealer-muse-config-test-"));
+// The Muse sandbox leaves temp dirs writable, so the module refuses them: fixtures live outside system temp directories.
+const SCRATCH = fs.mkdtempSync(path.resolve(import.meta.dirname, "../../../../.dealer-muse-config-test-"));
 after(() => fs.rmSync(SCRATCH, { recursive: true, force: true }));
 
 const ENFORCED: MuseEnforcementEvidence = { mcp_tool_allowlist_enforcement: true, cron_tool_disable: true };
@@ -169,7 +169,10 @@ test("developer: the full assigned Agent Deck surface, sandbox on, no unrestrict
     assert.equal(flag("--sandbox-network"), "restricted");
     assert.equal(flag("--model"), "muse-spark-1.3-contributor");
     assert.equal(flag("--session-id"), SESSION);
-    assert.equal(attempt.argv.at(-1), "Implement the ticket");
+    const promptFile = path.join(attempt.root, "prompt.txt");
+    assert.deepEqual(attempt.argv.slice(-2), ["--prompt-file", promptFile]);
+    assert.equal(fs.statSync(promptFile).mode & 0o777, 0o600);
+    assert.equal(fs.readFileSync(promptFile, "utf8"), "Implement the ticket");
     for (const bad of ["--yolo", "--disable-sandbox", "--disable-approval", "--trust-workspace", "-w", "--worktree", "--disable-write", "--disable-shell"]) {
       assert.equal(attempt.argv.includes(bad), false, bad);
     }
@@ -208,14 +211,14 @@ test("reviewer: read-only flags and the allowlisted deck reads, mutation denied"
     attempt.cleanup();
   }
   // A reviewer argv without the read-only flags is refused, as is a developer with them.
-  assert.equal(code(() => assertMuseArgv(buildMuseArgv({ role: "developer", sessionId: SESSION, maxModelSteps: 5, prompt: "x" }), "reviewer")), "invalid_argv");
-  assert.equal(code(() => assertMuseArgv(buildMuseArgv({ role: "reviewer", sessionId: SESSION, maxModelSteps: 5, prompt: "x" }), "developer")), "invalid_argv");
+  assert.equal(code(() => assertMuseArgv(buildMuseArgv({ role: "developer", sessionId: SESSION, maxModelSteps: 5, promptFile: "/prompt.txt" }), "reviewer")), "invalid_argv");
+  assert.equal(code(() => assertMuseArgv(buildMuseArgv({ role: "reviewer", sessionId: SESSION, maxModelSteps: 5, promptFile: "/prompt.txt" }), "developer")), "invalid_argv");
 });
 
 test("argv guard refuses every trust/sandbox/orchestration widening flag", () => {
-  const base = buildMuseArgv({ role: "developer", sessionId: SESSION, maxModelSteps: 5, prompt: "x" });
+  const base = buildMuseArgv({ role: "developer", sessionId: SESSION, maxModelSteps: 5, promptFile: "/prompt.txt" });
   for (const bad of ["--yolo", "--disable-sandbox", "--disable-approval", "--trust-workspace", "-w", "--worktree=nested", "--preset", "--agents", "--permission-profile"]) {
-    const argv = [...base.slice(0, -1), bad, "x"];
+    const argv = [...base.slice(0, -2), bad, ...base.slice(-2)];
     assert.equal(code(() => assertMuseArgv(argv, "developer")), "invalid_argv", bad);
   }
   const relaxed = base.map((a) => (a === "restricted" ? "proxy-only" : a));
@@ -596,7 +599,7 @@ test("launch contract: cwd is the real worktree and argv/env/cwd/stdin must matc
       "drop --approval-judge off": { ...launch, argv: without("--approval-judge", 2) },
       "add --base-url": { ...launch, argv: [...launch.argv.slice(0, -1), "--base-url", "http://evil.invalid", launch.argv.at(-1)!] },
       "duplicate flag": { ...launch, argv: [...launch.argv.slice(0, -1), "--json", launch.argv.at(-1)!] },
-      "change prompt": { ...launch, argv: [...launch.argv.slice(0, -1), "other prompt"] },
+      "change prompt path": { ...launch, argv: [...launch.argv.slice(0, -1), "other prompt"] },
       "ambient XDG_CONFIG_HOME": { ...launch, env: { ...launch.env, XDG_CONFIG_HOME: fx.operatorConfigHome } },
       "ambient XDG_DATA_HOME": { ...launch, env: { ...launch.env, XDG_DATA_HOME: "/operator/data" } },
       "extra env": { ...launch, env: { ...launch.env, META_API_KEY: API_KEY } },
@@ -606,6 +609,8 @@ test("launch contract: cwd is the real worktree and argv/env/cwd/stdin must matc
     for (const [name, bad] of Object.entries(widened)) {
       assert.equal(code(() => attempt.verify(bad)), "invalid_argv", name);
     }
+    fs.writeFileSync(attempt.argv.at(-1)!, "changed prompt");
+    assert.equal(code(() => attempt.verify()), "invalid_argv");
   } finally {
     attempt.cleanup();
   }
