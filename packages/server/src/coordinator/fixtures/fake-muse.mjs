@@ -174,6 +174,35 @@ switch (scenario) {
     completed("DONE");
     break;
   }
+  case "capability-sandbox-failure": {
+    // NOT-641: the host cannot start Muse's sandbox (e.g. AppArmor blocking unprivileged
+    // user namespaces). The model attempts the shell, the sandbox fails, result.txt is
+    // never written, and the session still completes cleanly. The bwrap error lives in
+    // the tool output only (stdout envelope text) — never stderr — so the probe must
+    // read the raw session log to classify it as a host problem, not `missing`.
+    emit("task.lifecycle.side_effect_intent", {
+      event: { operation: "tool:bash", idempotency_key: "tool:call-1", task_id: "task-call-1" },
+    });
+    emit("tool.result", {
+      call_id: "call-1",
+      text: JSON.stringify({
+        chunk_id: "exec-1-1",
+        command: "sh probe.sh",
+        description: "Run probe shell command",
+        exit_code: 1,
+        terminal_status: "failed",
+        terminal_reason: "process exited with status 1",
+        output: "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n",
+        original_output_bytes: 62,
+        original_output_tokens: 16,
+        truncated: false,
+      }),
+      correlation_facts: { outcome: "failure", tool_name: "bash" },
+    });
+    writeSessionLog({ usage: USAGE });
+    completed("DONE");
+    break;
+  }
   case "cron": {
     tool("cron_create", "call-1");
     commitFeature();

@@ -37,6 +37,7 @@ const {
   recordMuseCapabilityOverride,
   museCapabilitySafetyNetAfterSession,
   countMuseShellToolCalls,
+  extractHostSandboxError,
   museCapabilityRequestId,
   defaultMuseCapabilityProbe,
 } = await import("./muse-capability.js");
@@ -220,6 +221,29 @@ describe("muse-capability", { concurrency: false }, () => {
       new RegExp(`^Muse Code updated ${OLD} → ${NEW}: developer sessions no longer get shell/write access`)
     );
     assert.match(settled[0]!.message, /developer admission blocked/);
+    // Stays blocked on this version without re-probing; the baseline is still the old version.
+    assert.deepEqual(museCapabilityIssues(NEW), settled);
+    assert.equal(calls.get(NEW), 1);
+    assert.equal(JSON.parse(fs.readFileSync(STATE, "utf8")).confirmedVersion, OLD);
+  });
+
+  // NOT-641: a host sandbox start failure blocks with the host cause and fix — never
+  // the version-regression text ("no longer get shell/write access").
+  test("a host sandbox failure blocks with the sandbox error and fix, not a version regression", async () => {
+    const calls = stubProbe({
+      [OLD]: { status: "capable" },
+      [NEW]: { status: "host-sandbox", detail: "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted" },
+    });
+    await check(OLD);
+    const { settled } = await check(NEW);
+    assert.deepEqual(settled.map((i) => i.code), ["runtime_capability"]);
+    assert.match(settled[0]!.message, /Muse's shell sandbox failed to start on this host/);
+    assert.match(settled[0]!.message, /bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted/);
+    assert.match(settled[0]!.message, /AppArmor profile permitting unprivileged user namespaces/);
+    assert.match(settled[0]!.message, /host problem, not a Muse Code version regression/);
+    assert.match(settled[0]!.message, /developer admission blocked/);
+    assert.doesNotMatch(settled[0]!.message, /no longer get shell\/write access/);
+    assert.doesNotMatch(settled[0]!.message, /Muse Code updated/);
     // Stays blocked on this version without re-probing; the baseline is still the old version.
     assert.deepEqual(museCapabilityIssues(NEW), settled);
     assert.equal(calls.get(NEW), 1);
@@ -435,6 +459,47 @@ describe("muse-capability", { concurrency: false }, () => {
     assert.equal(ensureMuseCapabilityEscalation(issueId), null, "no re-raise after acknowledge");
   });
 
+  // NOT-641: a host sandbox failure escalates with the host cause and fix — never the
+  // version-regression text — and acknowledge lifts the block (the operator fixed the host).
+  test("a host-sandbox version escalates with the host fix; acknowledge lifts the block", async () => {
+    const calls = stubProbe({
+      [OLD]: { status: "capable" },
+      [NEW]: { status: "host-sandbox", detail: "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted" },
+    });
+    await check(OLD);
+    await check(NEW);
+
+    const issueId = makeIssue();
+    const action = ensureMuseCapabilityEscalation(issueId);
+    assert.ok(action, "a host-sandbox verdict raises an action");
+    assert.equal(action.actionType, "muse_capability");
+    assert.equal(action.requestId, museCapabilityRequestId(NEW, "host-sandbox"));
+    assert.match(action.reason, /Muse's shell sandbox failed to start on this host/);
+    assert.match(action.reason, /bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted/);
+    assert.match(action.reason, /host problem, not a Muse Code version regression/);
+    assert.match(action.reason, new RegExp(`admission is blocked for ${NEW}`));
+    assert.doesNotMatch(action.reason, /no longer get shell\/write access/);
+    assert.doesNotMatch(action.reason, /Muse Code updated/);
+    assert.match(action.question, /Allow Muse's sandbox on the host/);
+    assert.match(action.question, /AppArmor profile permitting unprivileged user namespaces/);
+    assert.doesNotMatch(action.question, /lost developer/);
+    assert.doesNotMatch(action.question, /pin\/roll back/);
+    assert.deepEqual(JSON.parse(action.responseOptionsJson!), [
+      { choice: "acknowledge", label: `Acknowledge — admit on ${NEW}` },
+    ]);
+    const evidence = JSON.parse(action.evidenceJson!);
+    assert.equal(evidence.kind, "host-sandbox");
+    assert.equal(evidence.version, NEW);
+    // Deduped per version, not per poll.
+    assert.equal(ensureMuseCapabilityEscalation(issueId)?.id, action.id);
+    assert.equal(calls.get(NEW), 1, "a host-sandbox verdict is conclusive: never re-probed");
+
+    assert.deepEqual(museCapabilityIssues(NEW).map((i) => i.code), ["runtime_capability"]);
+    recordMuseCapabilityOverride(NEW);
+    assert.deepEqual(museCapabilityIssues(NEW), [], "acknowledge lifts the block");
+    assert.equal(ensureMuseCapabilityEscalation(issueId), null, "no re-raise after acknowledge");
+  });
+
   // NOT-308 repair round 3: aborting or closing the issue that holds a `missing`
   // escalation resolves its open action with a lifecycle reason (never a choice) —
   // that is not the operator's capability decision, so the next poll must re-raise
@@ -642,6 +707,28 @@ describe("muse-capability", { concurrency: false }, () => {
     assert.equal(countMuseShellToolCalls(writeLog([{ type: "tool_call", name: "write_file" }])), 0);
     assert.equal(countMuseShellToolCalls(writeLog(["not json", ""])), null);
     assert.equal(countMuseShellToolCalls(path.join(os.tmpdir(), `dealer-muse-nope-${randomUUID()}`)), null);
+  });
+
+  // NOT-641: sandbox start failures are extracted from plain text (stderr trailer) and
+  // JSON-encoded tool output (raw stdout envelopes); a bare EPERM denial never matches.
+  test("extractHostSandboxError finds bwrap failures in plain and JSON-encoded logs", () => {
+    const BWRAP = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted";
+    assert.equal(extractHostSandboxError(`${BWRAP}\n`), BWRAP);
+    assert.equal(extractHostSandboxError(`prefix ${BWRAP} suffix`), `${BWRAP} suffix`);
+    // Raw stdout envelope with double-encoded tool output, as the probe's raw log holds it.
+    const envelope = JSON.stringify({
+      payload_type: "tool.result",
+      payload: {
+        call_id: "call-1",
+        text: JSON.stringify({ output: `${BWRAP}\n` }),
+        correlation_facts: { tool_name: "bash", outcome: "failure" },
+      },
+    });
+    assert.equal(extractHostSandboxError(envelope), BWRAP);
+    // Bare EPERM denials (normal sandbox policy) are not start failures.
+    assert.equal(extractHostSandboxError("/bin/sh: /outside.txt: Operation not permitted\n"), null);
+    assert.equal(extractHostSandboxError("all good, shell ran\n"), null);
+    assert.equal(extractHostSandboxError(""), null);
   });
 
   // NOT-308 safety net: a dirty, shell-less session ending on an unconfirmed version
@@ -922,6 +1009,17 @@ describe("defaultMuseCapabilityProbe (fake muse)", { concurrency: false }, () =>
   test("a session that completes without a shell call is missing shell/write", async () => {
     const result = await probeWith("capability-no-shell");
     assert.equal(result.status, "missing");
+  });
+
+  // NOT-641: the session completes cleanly but its tool output holds a bwrap sandbox
+  // start failure — a host problem with that error text, never `missing` for the version.
+  test("a session whose sandbox fails to start is host-sandbox with the bwrap line", async () => {
+    const result = await probeWith("capability-sandbox-failure");
+    assert.equal(result.status, "host-sandbox");
+    assert.match(
+      (result as { detail: string }).detail,
+      /bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted/
+    );
   });
 
   test("a session that fails to run at all is an error (could not verify), not missing", async () => {

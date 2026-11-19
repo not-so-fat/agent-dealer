@@ -2277,7 +2277,8 @@ export function resolveHumanActionAndAdvance(
     // File first, then the row: if the resolve below fails the action stays open and
     // the operator retries idempotently; the reverse order could leave a resolved
     // action whose version still blocks with no way to re-acknowledge.
-    if (evidence?.kind === "missing" && typeof evidence.version === "string" && evidence.version) {
+    // NOT-641: a host-sandbox acknowledge also lifts the block (the operator fixed the host).
+    if ((evidence?.kind === "missing" || evidence?.kind === "host-sandbox") && typeof evidence.version === "string" && evidence.version) {
       recordMuseCapabilityOverride(evidence.version);
     }
     // The lifted block must be visible on the next health read, not after the cache TTL.

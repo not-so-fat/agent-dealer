@@ -40,6 +40,7 @@ import { createHumanAction, listHumanActionsByRequestId } from "../repository/hu
 export type MuseCapabilityProbeResult =
   | { status: "capable" }
   | { status: "missing"; detail: string }
+  | { status: "host-sandbox"; detail: string }
   | { status: "error"; detail: string };
 
 export type MuseCapabilityProbe = (version: string) => Promise<MuseCapabilityProbeResult>;
@@ -104,7 +105,7 @@ function normalizeChecked(raw: unknown, currentVersion: string | null): CheckedV
   if (!raw || typeof raw !== "object") return null;
   const c = raw as Record<string, unknown>;
   if (typeof c.version !== "string" || c.version !== currentVersion) return null;
-  if (c.status !== "capable" && c.status !== "missing" && c.status !== "error") return null;
+  if (c.status !== "capable" && c.status !== "missing" && c.status !== "host-sandbox" && c.status !== "error") return null;
   if (typeof c.checkedAt !== "number") return null;
   const status = c.status as MuseCapabilityProbeResult["status"];
   const base = {
@@ -204,6 +205,21 @@ function formatDuration(ms: number | null): string {
 
 function issueFor(checked: CheckedVersion, from: string | null, exhausted = false): AgentHealthIssue[] {
   if (checked.status === "capable") return [];
+  // NOT-641: the host cannot start Muse's sandbox (e.g. AppArmor blocking unprivileged
+  // user namespaces) — a host problem, never a version regression. Names the sandbox
+  // error and the host fix; deliberately not the "update removed access" text.
+  if (checked.status === "host-sandbox") {
+    return [
+      {
+        code: "runtime_capability",
+        message:
+          `Muse's shell sandbox failed to start on this host (${checked.detail}) — ` +
+          `developer admission blocked until the host allows Muse's sandbox ` +
+          `(e.g. an AppArmor profile permitting unprivileged user namespaces). ` +
+          `This is a host problem, not a Muse Code version regression (probed ${checked.version}).`,
+      },
+    ];
+  }
   const head = transition(from, checked.version);
   if (checked.status === "missing") {
     return [
@@ -306,7 +322,7 @@ function startCheck(version: string): void {
     if (result.status === "capable") {
       console.log(`[muse-capability] ${transition(from, version)}: developer ${CAPABILITY} confirmed`);
       dropMissWatchersExcept(null);
-    } else if (result.status === "missing") {
+    } else if (result.status === "missing" || result.status === "host-sandbox") {
       console.warn(`[muse-capability] ${issueFor(checked, from)[0]!.message}`);
       escalateWatchedVersion(version);
     } else if (isExhausted(checked)) {
@@ -365,7 +381,9 @@ export function museCapabilityIssues(version: string, onSettled: () => void = ()
   // background, keep working"; without one the unknown blocks.
   if (!checked) return s.confirmedVersion ? [] : verifyingIssue(version, from);
   if (checked.status === "capable") return [];
-  if (checked.status === "missing") {
+  // NOT-641: a host sandbox failure blocks like a confirmed loss (the host cannot run
+  // shell sessions on any version), with the host message — never the version text.
+  if (checked.status === "missing" || checked.status === "host-sandbox") {
     return s.overriddenVersions.includes(checked.version) ? [] : issueFor(checked, from);
   }
   // Inconclusive: never a block while any baseline exists to work on. With none, the
@@ -386,24 +404,27 @@ export function museCapabilityIssues(version: string, onSettled: () => void = ()
  * would record an override for a verdict the operator never saw). The unkinded form is
  * only for reading actions written before the key carried a kind.
  */
-export function museCapabilityRequestId(version: string, kind?: "missing" | "unverified"): string {
+export function museCapabilityRequestId(version: string, kind?: "missing" | "unverified" | "host-sandbox"): string {
   return kind ? `muse-capability:${kind}:${version}` : `muse-capability:${version}`;
 }
 
 /** Which verdict kind a prior escalation action belongs to. Legacy rows (unkinded
  * request_id) are classified by their evidence; a row with no parseable evidence is
  * conservatively treated as the kind being raised (dedupe, never spam). */
-function actionKindOf(action: HumanAction, fallback: "missing" | "unverified"): "missing" | "unverified" {
+function actionKindOf(
+  action: HumanAction,
+  fallback: "missing" | "unverified" | "host-sandbox"
+): "missing" | "unverified" | "host-sandbox" {
   try {
     const evidence = action.evidenceJson
       ? (JSON.parse(action.evidenceJson) as Partial<MuseCapabilityEvidence>)
       : null;
-    if (evidence?.kind === "missing" || evidence?.kind === "unverified") return evidence.kind;
+    if (evidence?.kind === "missing" || evidence?.kind === "unverified" || evidence?.kind === "host-sandbox") return evidence.kind;
   } catch {
     // Fall through to the request_id prefix below.
   }
-  const prefixed = /^muse-capability:(missing|unverified):/.exec(action.requestId ?? "");
-  if (prefixed) return prefixed[1] as "missing" | "unverified";
+  const prefixed = /^muse-capability:(missing|unverified|host-sandbox):/.exec(action.requestId ?? "");
+  if (prefixed) return prefixed[1] as "missing" | "unverified" | "host-sandbox";
   return fallback;
 }
 
@@ -423,7 +444,7 @@ function resolutionChoiceOf(action: HumanAction): string | null {
 }
 
 export interface MuseCapabilityEvidence {
-  kind: "missing" | "unverified";
+  kind: "missing" | "unverified" | "host-sandbox";
   version: string;
   from: string | null;
   detail: string;
@@ -434,7 +455,7 @@ export interface MuseCapabilityEvidence {
 function escalationFor(
   checked: CheckedVersion,
   s: PersistedState
-): { kind: "missing" | "unverified"; reason: string; question: string } | null {
+): { kind: "missing" | "unverified" | "host-sandbox"; reason: string; question: string } | null {
   const from = s.current?.version === checked.version ? s.current.from : s.confirmedVersion;
   const baseline = s.confirmedVersion ?? "none";
   if (checked.status === "missing" && !s.overriddenVersions.includes(checked.version)) {
@@ -451,6 +472,23 @@ function escalationFor(
       question:
         `Muse Code ${checked.version} lost developer ${CAPABILITY}. Acknowledge to admit developers ` +
         `on ${checked.version} anyway${rollback}`,
+    };
+  }
+  // NOT-641: host sandbox start failure — names the host cause and the host fix, never
+  // the version-regression text. Acknowledging records an override like `missing` (the
+  // operator fixed the host and wants this version admitted).
+  if (checked.status === "host-sandbox" && !s.overriddenVersions.includes(checked.version)) {
+    return {
+      kind: "host-sandbox",
+      reason:
+        `Muse's shell sandbox failed to start on this host (${checked.detail}). Last probe ran ` +
+        `${formatDuration(checked.durationMs)} (probe timeout ${formatDuration(PROBE_TIMEOUT_MS)}). ` +
+        `Developer admission is blocked for ${checked.version}; last confirmed baseline is ${baseline}. ` +
+        `This is a host problem, not a Muse Code version regression — no pin/roll back will fix it.`,
+      question:
+        `Muse's sandbox cannot start on this host (${checked.detail}). Allow Muse's sandbox on the ` +
+        `host (e.g. an AppArmor profile permitting unprivileged user namespaces), then acknowledge ` +
+        `to admit developers on ${checked.version} anyway?`,
     };
   }
   if (isExhausted(checked) && checked.status === "error") {
@@ -525,7 +563,7 @@ export function ensureMuseCapabilityEscalation(issueId: string): HumanAction | n
     (a) => a.status === "resolved" && resolutionChoiceOf(a) === "acknowledge"
   );
   if (acknowledged) {
-    if (escalation.kind === "missing") recordMuseCapabilityOverride(checked.version);
+    if (escalation.kind === "missing" || escalation.kind === "host-sandbox") recordMuseCapabilityOverride(checked.version);
     return null;
   }
   return createHumanAction({
@@ -541,7 +579,7 @@ export function ensureMuseCapabilityEscalation(issueId: string): HumanAction | n
       durationMs: checked.durationMs,
       capability: CAPABILITY,
     } satisfies MuseCapabilityEvidence,
-    responseOptions: [{ choice: "acknowledge", label: `Acknowledge — ${escalation.kind === "missing" ? `admit on ${checked.version}` : "keep working on baseline"}` }],
+    responseOptions: [{ choice: "acknowledge", label: `Acknowledge — ${escalation.kind === "unverified" ? "keep working on baseline" : `admit on ${checked.version}`}` }],
     requestId,
   });
 }
@@ -621,6 +659,27 @@ export function countMuseShellToolCalls(logPath: string): number | null {
   return parsed === 0 ? null : shells;
 }
 
+/**
+ * NOT-641: extract a host sandbox start failure from probe session log text (the
+ * normalized `probe.ndjson` plus the raw stdout envelopes, whichever holds it).
+ * Matches bubblewrap/`bwrap` start errors (e.g. AppArmor's unprivileged user-namespace
+ * restriction: `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`).
+ *
+ * The log may be JSON envelopes (raw stdout, tool output double-encoded) or plain
+ * text (stderr trailer), so the error itself is matched — stopping at JSON escapes,
+ * quotes, or newlines — rather than whole lines. Returns the error text, or null.
+ *
+ * Deliberately narrow: a bare `Operation not permitted` is a normal sandbox denial
+ * (e.g. writing outside the workspace) and never counts — only sandbox-startup
+ * signatures (`bwrap:`, `bubblewrap`, `RTM_NEWADDR`) do.
+ */
+export function extractHostSandboxError(logText: string): string | null {
+  const m = /bwrap:[^\n\\"]{0,300}|bubblewrap[^\n\\"]{0,300}|Failed RTM_NEWADDR[^\n\\"]{0,200}/i.exec(logText);
+  if (!m) return null;
+  const line = m[0].trim();
+  return line === "" ? null : line;
+}
+
 export type MuseSafetyNetResult = "probed" | "watching" | "escalated" | "skipped";
 
 /**
@@ -646,7 +705,7 @@ export function museCapabilitySafetyNetAfterSession(input: {
     const s = observe(version);
     if (s.confirmedVersion === version) return "skipped";
     const checked = s.lastChecked;
-    if (checked && checked.version === version && checked.status === "missing") {
+    if (checked && checked.version === version && (checked.status === "missing" || checked.status === "host-sandbox")) {
       ensureMuseCapabilityEscalation(input.issueId);
       return "escalated";
     }
@@ -847,6 +906,24 @@ export async function defaultMuseCapabilityProbe(
       written = fs.readFileSync(path.join(dir, "result.txt"), "utf8").trim();
     } catch {
       written = null;
+    }
+    // NOT-641: when the shell did not produce its output, a sandbox start failure in
+    // the session logs (bwrap/AppArmor userns) is a host problem, not a version
+    // regression — report it as such whatever the exit/failure said. A bare
+    // `Operation not permitted` without sandbox-startup context is a normal denial
+    // and never takes this path (see extractHostSandboxError).
+    if (written !== gitBlobSha1(nonce)) {
+      const logTexts: string[] = [];
+      for (const logFile of [run.logPath, run.muse?.rawLogPath]) {
+        if (!logFile) continue;
+        try {
+          logTexts.push(fs.readFileSync(logFile, "utf8"));
+        } catch {
+          // An unreadable log is not a sandbox failure — ignore it.
+        }
+      }
+      const sandboxError = logTexts.length > 0 ? extractHostSandboxError(logTexts.join("\n")) : null;
+      if (sandboxError) return { status: "host-sandbox", detail: sandboxError };
     }
     // A session that did not complete cleanly is never a verdict, even if the shell ran first.
     if (run.timedOut) return { status: "error", detail: `probe session on ${version} timed out` };
