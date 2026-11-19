@@ -347,6 +347,11 @@ export default function IssuesListPage({
     fetchQueue()
       .then(setQueue)
       .catch(() => undefined);
+    // NOT-643: admission status loads on fresh mount so the header limit
+    // control renders with server options even with zero waiting entries.
+    fetchQueueStatus()
+      .then(setAdmission)
+      .catch(() => undefined);
     // NOT-287: history stays fresh on mount and navigation so creating the
     // first issue (here or elsewhere) retires the strip without a reload.
     fetchIssuesHistoryTotal([...ISSUE_STATUS_OPTIONS])
@@ -356,6 +361,11 @@ export default function IssuesListPage({
       refreshIssues(appliedRef.current);
       fetchQueue()
         .then(setQueue)
+        .catch(() => undefined);
+      // NOT-643: poll admission on the existing 5s cadence so the displayed
+      // active/waiting/limit counts stay fresh.
+      fetchQueueStatus()
+        .then(setAdmission)
         .catch(() => undefined);
     }, 5000);
     return () => clearInterval(poll);
@@ -753,12 +763,11 @@ export default function IssuesListPage({
         </div>
       )}
 
-      {/* NOT-287: the full admission panel renders only when entries wait —
-          an empty queue collapses to one muted status line so empty chrome
-          never dominates the first screen. Real entries, errors, and human
-          actions always keep their full presentation. */}
-      {queue.length > 0 ? (
-        <div className="mb-4 rounded border border-cyber-teal/25 bg-cyber-teal/5">
+      {/* NOT-643: the Admission queue header always renders so the
+          active-issue limit control stays visible with zero or more waiting
+          entries; only the queue rows below stay conditional on queue.length.
+          (Supersedes the NOT-287 collapse to a muted idle line.) */}
+      <div className="mb-4 rounded border border-cyber-teal/25 bg-cyber-teal/5">
           <div className="px-4 py-2 border-b border-cyber-teal/20 flex items-center justify-between gap-3">
             <span className="font-ui-display text-sm font-medium text-cyber-teal">Admission queue</span>
             <span className="flex items-center gap-2 text-xs text-white/40">
@@ -773,6 +782,7 @@ export default function IssuesListPage({
                     <label className="flex items-center gap-1">
                       <span className="text-white/35">limit</span>
                       <select
+                        aria-label="Active issue limit"
                         className="bg-black/30 border border-white/10 rounded px-1.5 py-0.5 text-xs text-white/80 disabled:opacity-50"
                         value={admission.options.includes(admission.maxActiveIssues) ? admission.maxActiveIssues : admission.limit}
                         disabled={limitBusy}
@@ -796,13 +806,16 @@ export default function IssuesListPage({
                     </span>
                   )}
                 </>
-              ) : (
+              ) : queue.length > 0 ? (
                 <span>
                   {queue.length} waiting · sequential
                 </span>
+              ) : (
+                <span>Loading admission status…</span>
               )}
             </span>
           </div>
+          {queue.length > 0 && (
           <div className="divide-y divide-white/5">
             {queue.map((entry, index) => (
               <div key={entry.id}>
@@ -935,36 +948,8 @@ export default function IssuesListPage({
               </div>
             ))}
           </div>
-        </div>
-      ) : admission ? (
-        <p data-testid="admission-idle-status" className="mb-4 text-xs text-white/35 tabular-nums">
-          Admission: {admission.active} active · {admission.waiting} waiting · limit{" "}
-          {admission.limit}
-          {admission.overCap ? " · over capacity" : ""}
-          {admission.options.length > 0 && (
-            <label className="ml-2 inline-flex items-center gap-1">
-              <span>limit</span>
-              <select
-                className="bg-black/30 border border-white/10 rounded px-1.5 py-0.5 text-xs text-white/60 disabled:opacity-50"
-                value={admission.options.includes(admission.maxActiveIssues) ? admission.maxActiveIssues : admission.limit}
-                disabled={limitBusy}
-                title={
-                  admission.ceiling < MAX_ACTIVE_ISSUES_HARD_MAX
-                    ? `Capped by the worker/spawn ceiling (${admission.ceiling})`
-                    : "How many issues may execute in parallel (same-repository issues may run together)"
-                }
-                onChange={(e) => void changeLimit(Number(e.target.value))}
-              >
-                {admission.options.map((o) => (
-                  <option key={o} value={o}>
-                    {o}
-                  </option>
-                ))}
-              </select>
-            </label>
           )}
-        </p>
-      ) : null}
+        </div>
 
       <NeedsAttentionPanel
         actions={humanActions}

@@ -188,6 +188,66 @@ test("sort controls read the URL and toggle through the direction view-model", (
   }
 });
 
+// NOT-643: the fresh Issues page lost its admission status load when NOT-228
+// replaced refresh() with inline fetches (mount and 5s poll fetch issues and
+// queue rows but never fetchQueueStatus), and NOT-287 gated the Admission
+// queue panel on queue.length > 0 — so an empty queue renders no header and
+// no limit control at all. Both regressions fail these tests: a fresh page
+// never requests admission status and renders no selector.
+test("NOT-643 fresh mount and 5s poll both request admission status", () => {
+  // The [search] effect owns mount + poll; refresh() is the action path.
+  const searchEffects = [
+    ...pageSource.matchAll(/useEffect\(\(\) => \{[\s\S]*?\}, \[search\]\);/g),
+  ].map((m) => m[0]);
+  const mountEffect = searchEffects.find((b) => b.includes("setInterval"));
+  assert.ok(mountEffect, "mount/poll effect with setInterval exists");
+  const calls = mountEffect.match(/fetchQueueStatus\(\)/g) ?? [];
+  assert.equal(
+    calls.length,
+    2,
+    `fresh mount requests admission once and the poll refreshes it (got ${calls.length})`
+  );
+  const pollBody = mountEffect.match(/setInterval\(\(\) => \{([\s\S]*?)\}, 5000\)/);
+  assert.ok(
+    pollBody && pollBody[1].includes("fetchQueueStatus()"),
+    "the 5-second poll refreshes admission status"
+  );
+  assert.ok(
+    pollBody && pollBody[1].includes(".then(setAdmission)"),
+    "polled status updates the displayed admission state"
+  );
+});
+
+test("NOT-643 Admission queue header keeps one limit selector for empty and populated queues", () => {
+  assert.ok(
+    !pageSource.includes('data-testid="admission-idle-status"'),
+    "no separate idle-line branch — the header serves both queue states"
+  );
+  assert.ok(
+    !pageSource.includes("{queue.length > 0 ? ("),
+    "the Admission queue header is not gated on waiting entries"
+  );
+  assert.ok(pageSource.includes(">Admission queue<"), "Admission queue header renders");
+  assert.ok(
+    pageSource.includes('aria-label="Active issue limit"'),
+    "the limit selector is accessibly labeled"
+  );
+  assert.ok(
+    pageSource.includes("{queue.length > 0 && ("),
+    "only the queue rows stay conditional on waiting entries"
+  );
+  const selectors = pageSource.match(/admission\.options\.map\(\(o\) => \(/g) ?? [];
+  assert.equal(
+    selectors.length,
+    1,
+    `exactly one limit selector renders from server options (got ${selectors.length})`
+  );
+  assert.ok(
+    pageSource.includes("Loading admission status…"),
+    "empty queue shows a loading fallback until admission arrives"
+  );
+});
+
 test("cap tooltip compares the ceiling against the shared hard maximum", async () => {
   const { MAX_ACTIVE_ISSUES_HARD_MAX } = await import("@agent-dealer/shared");
   assert.equal(MAX_ACTIVE_ISSUES_HARD_MAX, 5, "shared hard maximum is 5");

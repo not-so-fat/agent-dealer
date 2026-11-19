@@ -1,10 +1,11 @@
 // NOT-287: the Issues home shows one compact first-issue strip only for a
 // truly fresh, unfiltered, undismissed history — never for a filtered-empty
-// list — and collapses empty admission chrome to a quiet status line while
-// real entries keep the full panel. Effects never run under
+// list. NOT-643 supersedes the NOT-287 admission collapse (empty queue hid
+// the panel and its limit control): the Admission queue header now always
+// renders and only the queue rows stay conditional. Effects never run under
 // renderToStaticMarkup, so the state matrix itself lives in
 // lib/firstIssue.test.ts; these tests pin the initial markup (no onboarding
-// flash, no idle chrome) plus the source wiring that drives it.
+// flash, header shell with no rows) plus the source wiring that drives it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -145,13 +146,19 @@ test("filtered-empty list never renders onboarding", () => {
   );
 });
 
-test("no idle admission chrome on the first screen", () => {
+test("NOT-643 empty queue renders the Admission header shell with no rows", () => {
   const html = renderPage("/issues");
   assert.ok(
     !html.includes('data-testid="admission-idle-status"'),
-    "no admission status line before admission loads"
+    "no separate idle line — the header serves the empty state"
   );
-  assert.ok(!html.includes("Admission queue"), "no queue panel with no entries");
+  assert.ok(html.includes("Admission queue"), "header renders with zero waiting entries");
+  assert.ok(
+    html.includes("Loading admission status…"),
+    "loading fallback shows until admission arrives"
+  );
+  assert.ok(!html.includes("Active issue limit"), "no limit selector before admission loads");
+  assert.ok(!html.includes("Queued #"), "no queue rows with no entries");
 });
 
 test("strip gate trusts only unfiltered history, never the filtered list", () => {
@@ -235,14 +242,17 @@ test("history helper counts the full cohort, closed included", () => {
   );
 });
 
-test("empty admission collapses to a status line; real entries keep the panel", () => {
-  assert.ok(pageSource.includes("queue.length > 0 ? ("), "full panel requires entries");
-  assert.ok(pageSource.includes('data-testid="admission-idle-status"'), "idle state is one muted line");
-  assert.ok(pageSource.includes(">Admission queue<"), "full panel title kept for real entries");
+test("NOT-643 Admission header serves empty and populated queues; only rows stay conditional", () => {
+  assert.ok(
+    !pageSource.includes("{queue.length > 0 ? ("),
+    "the Admission queue header is not gated on waiting entries"
+  );
+  assert.ok(
+    !pageSource.includes('data-testid="admission-idle-status"'),
+    "no separate idle line — one header serves both queue states"
+  );
+  assert.ok(pageSource.includes(">Admission queue<"), "single header for both queue states");
+  assert.ok(pageSource.includes("{queue.length > 0 && ("), "only the rows stay conditional");
   assert.ok(pageSource.includes("changeLimit"), "limit control stays functional");
   assert.ok(pageSource.includes("<NeedsAttentionPanel"), "attention panel untouched");
-  assert.ok(
-    !/admission-idle-status[\s\S]{0,400}border-red/.test(pageSource),
-    "idle line carries no error styling that could read as a failure"
-  );
 });
