@@ -27,6 +27,10 @@ const { default: FirstIssueStrip } = await import("../components/issues/FirstIss
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const pageSource = readFileSync(join(dir, "IssuesListPage.tsx"), "utf8");
+const headerSource = readFileSync(
+  join(dir, "..", "components", "issues", "AdmissionQueueHeader.tsx"),
+  "utf8"
+);
 const stripSource = readFileSync(
   join(dir, "..", "components", "issues", "FirstIssueStrip.tsx"),
   "utf8"
@@ -251,7 +255,8 @@ test("NOT-643 Admission header serves empty and populated queues; only rows stay
     !pageSource.includes('data-testid="admission-idle-status"'),
     "no separate idle line — one header serves both queue states"
   );
-  assert.ok(pageSource.includes(">Admission queue<"), "single header for both queue states");
+  assert.ok(pageSource.includes("<AdmissionQueueHeader"), "page renders the single shared header");
+  assert.ok(headerSource.includes(">Admission queue<"), "single header for both queue states");
   assert.ok(pageSource.includes("{queue.length > 0 && ("), "only the rows stay conditional");
   assert.ok(pageSource.includes("changeLimit"), "limit control stays functional");
   assert.ok(pageSource.includes("<NeedsAttentionPanel"), "attention panel untouched");

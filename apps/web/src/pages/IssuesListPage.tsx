@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import type { AgentWithHealth, HumanAction, LinearCandidate } from "@agent-dealer/shared";
-import { MAX_ACTIVE_ISSUES_HARD_MAX } from "@agent-dealer/shared";
 import {
   canSubmitNewIssue,
   insertLookedUpLinearCandidate,
@@ -57,6 +56,8 @@ import RepositoryMappingsEditor from "../components/issues/RepositoryMappingsEdi
 import LinearIntakeFiltersEditor from "../components/issues/LinearIntakeFiltersEditor";
 import AgentAssignmentEditor from "../components/issues/AgentAssignmentEditor";
 import NeedsAttentionPanel from "../components/issues/NeedsAttentionPanel";
+import AdmissionQueueHeader from "../components/issues/AdmissionQueueHeader";
+import { ISSUES_POLL_INTERVAL_MS, startPolling } from "../lib/polling";
 import AlertIcon from "../components/ui/AlertIcon";
 
 type Props = {
@@ -343,32 +344,26 @@ export default function IssuesListPage({
   }, [search]);
 
   useEffect(() => {
-    refreshIssues(appliedRef.current);
-    fetchQueue()
-      .then(setQueue)
-      .catch(() => undefined);
-    // NOT-643: admission status loads on fresh mount so the header limit
-    // control renders with server options even with zero waiting entries.
-    fetchQueueStatus()
-      .then(setAdmission)
-      .catch(() => undefined);
+    // NOT-643: one loader owns the live panels — mount and the 5s poll run
+    // the same refresh, so the admission status (and its limit control) can
+    // never drop out of either path again the way NOT-228 dropped it.
+    const loadLive = () => {
+      refreshIssues(appliedRef.current);
+      fetchQueue()
+        .then(setQueue)
+        .catch(() => undefined);
+      fetchQueueStatus()
+        .then(setAdmission)
+        .catch(() => undefined);
+    };
+    loadLive();
     // NOT-287: history stays fresh on mount and navigation so creating the
     // first issue (here or elsewhere) retires the strip without a reload.
     fetchIssuesHistoryTotal([...ISSUE_STATUS_OPTIONS])
       .then(setHistoryTotal)
       .catch(() => undefined);
-    const poll = setInterval(() => {
-      refreshIssues(appliedRef.current);
-      fetchQueue()
-        .then(setQueue)
-        .catch(() => undefined);
-      // NOT-643: poll admission on the existing 5s cadence so the displayed
-      // active/waiting/limit counts stay fresh.
-      fetchQueueStatus()
-        .then(setAdmission)
-        .catch(() => undefined);
-    }, 5000);
-    return () => clearInterval(poll);
+    const stopPoll = startPolling(loadLive, ISSUES_POLL_INTERVAL_MS);
+    return () => stopPoll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
@@ -768,53 +763,12 @@ export default function IssuesListPage({
           entries; only the queue rows below stay conditional on queue.length.
           (Supersedes the NOT-287 collapse to a muted idle line.) */}
       <div className="mb-4 rounded border border-cyber-teal/25 bg-cyber-teal/5">
-          <div className="px-4 py-2 border-b border-cyber-teal/20 flex items-center justify-between gap-3">
-            <span className="font-ui-display text-sm font-medium text-cyber-teal">Admission queue</span>
-            <span className="flex items-center gap-2 text-xs text-white/40">
-              {admission ? (
-                <>
-                  <span>
-                    {admission.active} active · {admission.waiting} waiting · limit{" "}
-                    {admission.limit}
-                    {admission.overCap ? " · over capacity" : ""}
-                  </span>
-                  {admission.options.length > 0 ? (
-                    <label className="flex items-center gap-1">
-                      <span className="text-white/35">limit</span>
-                      <select
-                        aria-label="Active issue limit"
-                        className="bg-black/30 border border-white/10 rounded px-1.5 py-0.5 text-xs text-white/80 disabled:opacity-50"
-                        value={admission.options.includes(admission.maxActiveIssues) ? admission.maxActiveIssues : admission.limit}
-                        disabled={limitBusy}
-                        title={
-                          admission.ceiling < MAX_ACTIVE_ISSUES_HARD_MAX
-                            ? `Capped by the worker/spawn ceiling (${admission.ceiling})`
-                            : "How many issues may execute in parallel (same-repository issues may run together)"
-                        }
-                        onChange={(e) => void changeLimit(Number(e.target.value))}
-                      >
-                        {admission.options.map((o) => (
-                          <option key={o} value={o}>
-                            {o}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : (
-                    <span title={`Capped by the worker/spawn ceiling (${admission.ceiling})`}>
-                      max {admission.ceiling}
-                    </span>
-                  )}
-                </>
-              ) : queue.length > 0 ? (
-                <span>
-                  {queue.length} waiting · sequential
-                </span>
-              ) : (
-                <span>Loading admission status…</span>
-              )}
-            </span>
-          </div>
+          <AdmissionQueueHeader
+            admission={admission}
+            queueLength={queue.length}
+            limitBusy={limitBusy}
+            onLimitChange={(value) => void changeLimit(value)}
+          />
           {queue.length > 0 && (
           <div className="divide-y divide-white/5">
             {queue.map((entry, index) => (

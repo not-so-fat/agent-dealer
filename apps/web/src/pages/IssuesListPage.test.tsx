@@ -6,11 +6,61 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import React from "react";
+// node --import tsx compiles JSX in classic mode: components reference the
+// React global at render time. (Under automatic JSX runtimes this is inert.)
+(globalThis as { React?: unknown }).React ??= React;
+import { renderToStaticMarkup } from "react-dom/server";
+import type { AdmissionStatus } from "@agent-dealer/shared";
+import AdmissionQueueHeader from "../components/issues/AdmissionQueueHeader.js";
+import { ISSUES_POLL_INTERVAL_MS, startPolling } from "../lib/polling.js";
+import { fetchQueueStatus } from "../api.js";
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const pageSource = readFileSync(join(dir, "IssuesListPage.tsx"), "utf8");
+const headerSource = readFileSync(
+  join(dir, "..", "components", "issues", "AdmissionQueueHeader.tsx"),
+  "utf8"
+);
 const appSource = readFileSync(join(dir, "..", "App.tsx"), "utf8");
 const apiSource = readFileSync(join(dir, "..", "api.ts"), "utf8");
+
+// NOT-643 behavioral helpers: feed the extracted Admission header controlled
+// admission payloads and read the rendered selector back out.
+function admissionStatus(overrides: Partial<AdmissionStatus> = {}): AdmissionStatus {
+  return {
+    active: 0,
+    waiting: 0,
+    limit: 1,
+    maxActiveIssues: 1,
+    ceiling: 5,
+    options: [1, 2, 3, 4, 5],
+    overCap: false,
+    ...overrides,
+  };
+}
+
+function renderHeader(admission: AdmissionStatus | null, queueLength: number): string {
+  return renderToStaticMarkup(
+    React.createElement(AdmissionQueueHeader, {
+      admission,
+      queueLength,
+      limitBusy: false,
+      onLimitChange: () => {},
+    })
+  );
+}
+
+/** Every rendered option value, in order. */
+function optionValues(html: string): string[] {
+  return [...html.matchAll(/<option[^>]*value="(\d+)"[^>]*>/g)].map((m) => m[1]);
+}
+
+/** The rendered selected option, or null when no selector rendered. */
+function selectedOption(html: string): string | null {
+  const m = html.match(/<option[^>]*\bselected\b[^>]*>([^<]*)</);
+  return m ? m[1] : null;
+}
 
 test("primary Issues label remains in the navigation/header", () => {
   assert.ok(appSource.includes('to="/issues"'), "nav still routes to /issues");
@@ -112,11 +162,13 @@ test("routing, counts, list controls, and list behavior are unchanged", () => {
     "issuesPageText",
     'aria-label="Issues filters"',
     'aria-label="Issues pages"',
-    "Admission queue",
     "NeedsAttentionPanel",
   ]) {
     assert.ok(pageSource.includes(token), `list control kept: ${token}`);
   }
+  // NOT-643: the Admission queue bar lives in the shared header unit now.
+  assert.ok(pageSource.includes("<AdmissionQueueHeader"), "page renders the shared admission header");
+  assert.ok(headerSource.includes("Admission queue"), "shared header keeps the Admission queue label");
   // The range/page count stays above the issue rows, right-aligned.
   assert.ok(pageSource.includes("issuesRangeText(issuePage)"), "range text retained");
   assert.ok(pageSource.includes("issuesPageText(issuePage)"), "page text retained");
@@ -135,11 +187,12 @@ test("routing, counts, list controls, and list behavior are unchanged", () => {
 // limit — the capacity control must not promise "max one per repository".
 test("capacity control no longer promises max one per repository", () => {
   assert.ok(
-    !pageSource.includes("max one per repository"),
+    !pageSource.includes("max one per repository") &&
+      !headerSource.includes("max one per repository"),
     "no max-one-per-repository copy remains"
   );
   assert.ok(
-    pageSource.includes("How many issues may execute in parallel"),
+    headerSource.includes("How many issues may execute in parallel"),
     "capacity tooltip still explains the limit"
   );
 });
@@ -149,16 +202,20 @@ test("capacity control no longer promises max one per repository", () => {
 // PUT /api/queue/settings — no new settings page, no per-repository control.
 test("admission limit dropdown renders server options and saves through the settings route", () => {
   assert.ok(
-    pageSource.includes("admission.options.map((o) => ("),
+    headerSource.includes("admission.options.map((o) => ("),
     "dropdown options render from AdmissionStatus.options"
   );
   assert.ok(
-    pageSource.includes("admission.options.includes(admission.maxActiveIssues)"),
+    headerSource.includes("admission.options.includes(admission.maxActiveIssues)"),
     "dropdown value binds to the persisted setting"
   );
   assert.ok(
-    pageSource.includes("onChange={(e) => void changeLimit(Number(e.target.value))}"),
+    headerSource.includes("onChange={(e) => onLimitChange(Number(e.target.value))}"),
     "changing the dropdown calls the limit saver"
+  );
+  assert.ok(
+    pageSource.includes("onLimitChange={(value) => void changeLimit(value)}"),
+    "the page wires the header selector to the limit saver"
   );
   assert.ok(
     pageSource.includes("await updateAdmissionSettings(value)"),
@@ -192,33 +249,13 @@ test("sort controls read the URL and toggle through the direction view-model", (
 // replaced refresh() with inline fetches (mount and 5s poll fetch issues and
 // queue rows but never fetchQueueStatus), and NOT-287 gated the Admission
 // queue panel on queue.length > 0 — so an empty queue renders no header and
-// no limit control at all. Both regressions fail these tests: a fresh page
-// never requests admission status and renders no selector.
-test("NOT-643 fresh mount and 5s poll both request admission status", () => {
-  // The [search] effect owns mount + poll; refresh() is the action path.
-  const searchEffects = [
-    ...pageSource.matchAll(/useEffect\(\(\) => \{[\s\S]*?\}, \[search\]\);/g),
-  ].map((m) => m[0]);
-  const mountEffect = searchEffects.find((b) => b.includes("setInterval"));
-  assert.ok(mountEffect, "mount/poll effect with setInterval exists");
-  const calls = mountEffect.match(/fetchQueueStatus\(\)/g) ?? [];
-  assert.equal(
-    calls.length,
-    2,
-    `fresh mount requests admission once and the poll refreshes it (got ${calls.length})`
-  );
-  const pollBody = mountEffect.match(/setInterval\(\(\) => \{([\s\S]*?)\}, 5000\)/);
-  assert.ok(
-    pollBody && pollBody[1].includes("fetchQueueStatus()"),
-    "the 5-second poll refreshes admission status"
-  );
-  assert.ok(
-    pollBody && pollBody[1].includes(".then(setAdmission)"),
-    "polled status updates the displayed admission state"
-  );
-});
-
-test("NOT-643 Admission queue header keeps one limit selector for empty and populated queues", () => {
+// no limit control at all. The page now renders the shared AdmissionQueueHeader
+// unconditionally and refreshes one live loader through startPolling; the two
+// wiring tests below pin those seams, and the behavioral tests after them
+// execute the units — effects never run under renderToStaticMarkup, so a
+// full-page mount cannot observe the selector here and the header renders in
+// its place with controlled admission payloads.
+test("NOT-643 page renders the shared admission header with live queue and admission props", () => {
   assert.ok(
     !pageSource.includes('data-testid="admission-idle-status"'),
     "no separate idle-line branch — the header serves both queue states"
@@ -227,36 +264,209 @@ test("NOT-643 Admission queue header keeps one limit selector for empty and popu
     !pageSource.includes("{queue.length > 0 ? ("),
     "the Admission queue header is not gated on waiting entries"
   );
-  assert.ok(pageSource.includes(">Admission queue<"), "Admission queue header renders");
-  assert.ok(
-    pageSource.includes('aria-label="Active issue limit"'),
-    "the limit selector is accessibly labeled"
-  );
+  assert.ok(pageSource.includes("<AdmissionQueueHeader"), "page renders the shared header");
+  for (const token of [
+    "admission={admission}",
+    "queueLength={queue.length}",
+    "limitBusy={limitBusy}",
+    "onLimitChange={(value) => void changeLimit(value)}",
+  ]) {
+    assert.ok(pageSource.includes(token), `header wiring kept: ${token}`);
+  }
   assert.ok(
     pageSource.includes("{queue.length > 0 && ("),
     "only the queue rows stay conditional on waiting entries"
   );
-  const selectors = pageSource.match(/admission\.options\.map\(\(o\) => \(/g) ?? [];
-  assert.equal(
-    selectors.length,
-    1,
-    `exactly one limit selector renders from server options (got ${selectors.length})`
-  );
+});
+
+test("NOT-643 mount and 5s poll run one live loader that requests admission status", () => {
   assert.ok(
-    pageSource.includes("Loading admission status…"),
+    pageSource.includes("startPolling(loadLive, ISSUES_POLL_INTERVAL_MS)"),
+    "the poll schedules the shared live loader on the 5s cadence"
+  );
+  const loader = pageSource.match(/const loadLive = \(\) => \{([\s\S]*?)\n    \};/);
+  assert.ok(loader, "one live loader owns mount + poll refresh");
+  assert.ok(loader[1].includes("refreshIssues(appliedRef.current)"), "loader refreshes the issue list");
+  assert.ok(loader[1].includes("fetchQueue()"), "loader refreshes queue rows");
+  assert.ok(loader[1].includes("fetchQueueStatus()"), "loader requests admission status");
+  assert.ok(
+    loader[1].includes(".then(setAdmission)"),
+    "loaded status updates the displayed admission state"
+  );
+});
+
+test("NOT-643 empty queue renders the labeled selector at the server value with server options", () => {
+  const html = renderHeader(
+    admissionStatus({ active: 0, waiting: 0, limit: 1, maxActiveIssues: 1 }),
+    0
+  );
+  assert.ok(html.includes("Admission queue"), "header renders with zero waiting entries");
+  assert.ok(
+    html.includes('aria-label="Active issue limit"'),
+    "the limit selector is accessibly labeled"
+  );
+  assert.deepEqual(
+    optionValues(html),
+    ["1", "2", "3", "4", "5"],
+    "options come from the server payload"
+  );
+  assert.equal(selectedOption(html), "1", "selector shows the current valid value");
+  assert.ok(
+    /0 active\s*·\s*0 waiting\s*·\s*limit\s*1/.test(html),
+    "status counts render for the empty queue"
+  );
+  assert.equal(html.match(/<select/g)?.length ?? 0, 1, "exactly one limit selector");
+});
+
+test("NOT-643 populated queue renders the same selector with the same server options", () => {
+  const html = renderHeader(
+    admissionStatus({ active: 1, waiting: 2, limit: 2, maxActiveIssues: 2 }),
+    2
+  );
+  assert.ok(html.includes("Admission queue"), "same header renders with waiting entries");
+  assert.ok(
+    html.includes('aria-label="Active issue limit"'),
+    "the same labeled selector renders for the populated queue"
+  );
+  assert.deepEqual(
+    optionValues(html),
+    ["1", "2", "3", "4", "5"],
+    "options come from the server payload"
+  );
+  assert.equal(selectedOption(html), "2", "selector shows the current valid value");
+  assert.ok(
+    /1 active\s*·\s*2 waiting\s*·\s*limit\s*2/.test(html),
+    "status counts render for the populated queue"
+  );
+  assert.equal(html.match(/<select/g)?.length ?? 0, 1, "exactly one limit selector");
+});
+
+test("NOT-643 narrowed server options render verbatim instead of a hardcoded 1–5", () => {
+  const html = renderHeader(
+    admissionStatus({ limit: 2, maxActiveIssues: 2, ceiling: 2, options: [1, 2] }),
+    0
+  );
+  assert.deepEqual(optionValues(html), ["1", "2"], "a capped ceiling narrows the offered options");
+  assert.equal(selectedOption(html), "2", "selector still shows the current valid value");
+});
+
+test("NOT-643 empty queue without admission yet shows the loading fallback and no selector", () => {
+  const html = renderHeader(null, 0);
+  assert.ok(html.includes("Admission queue"), "header shell renders before admission loads");
+  assert.ok(
+    html.includes("Loading admission status…"),
     "empty queue shows a loading fallback until admission arrives"
   );
+  assert.ok(!html.includes("<select"), "no selector before admission loads");
+});
+
+test("NOT-643 populated queue without admission yet shows the sequential fallback and no selector", () => {
+  const html = renderHeader(null, 3);
+  assert.ok(
+    /3 waiting\s*·\s*sequential/.test(html),
+    "waiting entries fall back to the sequential line until admission arrives"
+  );
+  assert.ok(!html.includes("<select"), "no selector before admission loads");
+});
+
+test("NOT-643 refreshed admission changes the displayed value and status", () => {
+  const before = renderHeader(admissionStatus({ limit: 1, maxActiveIssues: 1 }), 0);
+  const after = renderHeader(
+    admissionStatus({ active: 1, waiting: 1, limit: 2, maxActiveIssues: 2 }),
+    0
+  );
+  assert.equal(selectedOption(before), "1", "mount value displays first");
+  assert.equal(selectedOption(after), "2", "refreshed value displays after");
+  assert.ok(
+    /1 active\s*·\s*1 waiting\s*·\s*limit\s*2/.test(after),
+    "refreshed status counts display after"
+  );
+});
+
+test("NOT-643 a 5s poll tick re-requests admission status and the header shows the new value", async () => {
+  assert.equal(ISSUES_POLL_INTERVAL_MS, 5000, "the live cadence stays five seconds");
+  // Controlled /api/queue/status responses: the mount sees limit 1, the tick
+  // sees limit 2 — the header must display each in turn, for both queue states.
+  const payloads = [
+    admissionStatus({ active: 0, waiting: 0, limit: 1, maxActiveIssues: 1 }),
+    admissionStatus({ active: 1, waiting: 1, limit: 2, maxActiveIssues: 2 }),
+  ];
+  const requested: string[] = [];
+  const cleared: unknown[] = [];
+  const ticks: Array<() => void> = [];
+  const realFetch = globalThis.fetch;
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  try {
+    globalThis.fetch = (async (input: string) => {
+      requested.push(String(input));
+      const next = payloads.shift() ?? admissionStatus({});
+      return { ok: true, json: async () => next } as Response;
+    }) as unknown as typeof fetch;
+    globalThis.setInterval = ((fn: () => void, ms: number) => {
+      assert.equal(ms, ISSUES_POLL_INTERVAL_MS, "the poll schedules on the 5s cadence");
+      ticks.push(fn);
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    }) as unknown as typeof setInterval;
+    globalThis.clearInterval = ((timer: unknown) => {
+      cleared.push(timer);
+    }) as unknown as typeof clearInterval;
+    // The loader shape the page hands to startPolling: fetch, then publish.
+    const seen: AdmissionStatus[] = [];
+    const load = () => {
+      fetchQueueStatus()
+        .then((s) => {
+          seen.push(s);
+        })
+        .catch(() => undefined);
+    };
+    load(); // fresh mount
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(requested.length, 1, "fresh mount requests admission status");
+    assert.ok(requested[0].endsWith("/api/queue/status"), "mount requests the status route");
+    assert.equal(seen.length, 1, "mount delivers the admission payload");
+    assert.equal(
+      selectedOption(renderHeader(seen[0], 0)),
+      "1",
+      "empty queue shows the mounted value"
+    );
+    const stop = startPolling(load, ISSUES_POLL_INTERVAL_MS);
+    assert.equal(ticks.length, 1, "the poll scheduled its tick");
+    ticks[0](); // advance the 5s cadence
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(requested.length, 2, "the poll tick re-requests admission status");
+    assert.equal(seen.length, 2, "the tick delivers the refreshed payload");
+    for (const queueLength of [0, 2]) {
+      const html = renderHeader(seen[1], queueLength);
+      assert.ok(
+        html.includes('aria-label="Active issue limit"'),
+        `labeled selector renders with queueLength=${queueLength}`
+      );
+      assert.equal(
+        selectedOption(html),
+        "2",
+        `refreshed value displays with queueLength=${queueLength}`
+      );
+    }
+    stop();
+    assert.equal(cleared.length, 1, "unmount clears the poll");
+  } finally {
+    globalThis.fetch = realFetch;
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearInterval = realClearInterval;
+  }
 });
 
 test("cap tooltip compares the ceiling against the shared hard maximum", async () => {
   const { MAX_ACTIVE_ISSUES_HARD_MAX } = await import("@agent-dealer/shared");
   assert.equal(MAX_ACTIVE_ISSUES_HARD_MAX, 5, "shared hard maximum is 5");
   assert.ok(
-    pageSource.includes("admission.ceiling < MAX_ACTIVE_ISSUES_HARD_MAX"),
+    headerSource.includes("admission.ceiling < MAX_ACTIVE_ISSUES_HARD_MAX"),
     "capped tooltip shows whenever the ceiling is below the hard maximum"
   );
   assert.ok(
-    !pageSource.includes("admission.ceiling < 2"),
+    !pageSource.includes("admission.ceiling < 2") &&
+      !headerSource.includes("admission.ceiling < 2"),
     "no stale ceiling-of-2 comparison remains"
   );
   assert.ok(
