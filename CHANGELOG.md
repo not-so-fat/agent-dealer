@@ -4,6 +4,16 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.4.5 — 2026-11-20
+
+Restore the simultaneous-run limit control, report host sandbox start failures as host problems, and publish from GitHub Actions
+
+### Changes
+
+- NOT-644: Release: publish agent-dealer to npm from GitHub Actions (trusted publishing) so an agent runs the whole release (#256)
+- NOT-643: Restore the simultaneous-run limit control on Dealer’s Issues page (#255)
+- NOT-641: report host sandbox start failure as host problem, not version regression (#254)
+
 ## 1.4.4 — 2026-11-18
 
 Worker prompts go over stdin, so large reviews no longer fail with spawn E2BIG on Linux
