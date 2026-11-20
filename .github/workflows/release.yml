@@ -1,0 +1,74 @@
+name: Release
+
+# Publishes agent-dealer to npm with npm trusted publishing (OIDC, no token)
+# and then creates the GitHub Release. Triggered only by a pushed v* tag.
+# No npm credential anywhere in this file: publishing authenticates via OIDC only.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write # OIDC for npm trusted publishing / provenance
+  contents: write # create the GitHub Release
+
+jobs:
+  publish:
+    name: Publish to npm and release
+    runs-on: ubuntu-latest
+    environment: npm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Upgrade npm (trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@11
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Version consistency
+        run: npm run release:check
+
+      - name: Pre-publish guard
+        run: node scripts/release-publish.mjs guard "${{ github.ref_name }}"
+
+      - name: Build release
+        run: npm run build:release
+
+      - name: Stage npm package
+        run: node scripts/stage-npm-package.mjs
+
+      - name: Check if already on npm
+        id: npmcheck
+        run: echo "decision=$(node scripts/release-publish.mjs should-publish agent-dealer "${GITHUB_REF_NAME#v}")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to npm (OIDC, no token)
+        if: steps.npmcheck.outputs.decision == 'publish'
+        working-directory: .temporal/npm-stage/agent-dealer
+        run: npm publish --provenance --access public --loglevel verbose
+
+      - name: Wait for npm to show the version
+        run: node scripts/release-publish.mjs wait-published agent-dealer "${GITHUB_REF_NAME#v}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub Release $TAG already exists; skipping."
+            exit 0
+          fi
+          node scripts/release-publish.mjs notes "${TAG#v}" --out "$RUNNER_TEMP/release-notes.md"
+          gh release create "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
