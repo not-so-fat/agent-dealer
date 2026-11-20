@@ -14,9 +14,10 @@ alwaysApply: false
 |------|--------|
 | Registry name | **`agent-dealer`** (unscoped) — one `npm install -g agent-dealer` |
 | Monorepo root | Stays `"private": true` — **never** `npm publish` from repo root |
+| Publish path | GitHub Actions `release.yml` on `v*` tag push — trusted publishing (OIDC), **no `npm login`, no OTP** |
 | Publish target | Staged dir `.temporal/npm-stage/agent-dealer` (CLI + `bundle/` server/UI) |
-| Command | `npm run publish:packages` → `scripts/publish-npm.sh` (**must `cd` into stage** — `--prefix` from root hits root `private` → `EPRIVATE`) |
-| 2FA | `npm run publish:packages -- --otp=CODE` |
+| Staged repo URL | `repository.url` pinned to `git+https://github.com/not-so-fat/agent-dealer.git` (provenance) |
+| Manual fallback | `npm run publish:packages` → `scripts/publish-npm.sh` (**must `cd` into stage** — `--prefix` from root hits root `private` → `EPRIVATE`); fallback only, needs login + `--otp=CODE` |
 | No scoped org | Do not publish `@agent-dealer/*` to npm (no org required) |
 
 **Friend path:** `npm install -g agent-dealer` → `agent-dealer setup` → `agent-dealer start --daemon` → http://localhost:2222
@@ -46,19 +47,23 @@ Recurring gates live in **`scripts/`** (not gitignored `.temporal/`):
 
 Runtime logs only: `.temporal/logs/`.
 
-## Release order (agent completes; human OTP only)
+## Release order (agent runs end to end; owner's request is the only human step)
 
-1. Agree version · sync workspaces · `CHANGELOG.md`.
-2. `npm run build:release` · `npm run install:smoke` (must pass).
-3. `npm run flow:verify` when API changed (server up on dev port).
-4. Commit `Ship X.Y.Z:` · push `main`.
-5. **Human:** `npm run publish:packages -- --otp=CODE` (only human step).
-6. **Agent:** tag `vX.Y.Z` · `git push` tag · `gh release create` from CHANGELOG (after `npm view agent-dealer version` matches).
+1. `npm run release:prepare -- <patch|minor|major|X.Y.Z> --summary "<why>"` from clean `main` (bumps, CHANGELOG stub, `build:release` + `install:smoke`, opens PR).
+2. Reword the CHANGELOG stub in the PR if needed.
+3. `npm run release:finish` from `release/X.Y.Z` (waits CI, squash-merges, pushes `vX.Y.Z` tag — no `gh release create`).
+4. Watch `release.yml` to green; confirm `npm view agent-dealer@X.Y.Z version` and the GitHub Release.
+
+## Release rules
+
+- **Keep the version:** while `agent-dealer@X.Y.Z` is not on npm and no GitHub Release exists, a failed release keeps its version — fix, then delete and re-push the same tag on the fixed commit. Never bump to dodge a failed publish.
+- **Trusted publisher is owner-only:** an OIDC `package not found` (`OIDC token exchange error`, then `ENEEDAUTH`) means the [npmjs.com](https://npmjs.com) trusted publisher (GitHub Actions, `not-so-fat` / `agent-dealer`, workflow `release.yml`, environment `npm`). Only the owner changes it; no repo change fixes it.
 
 ## Agent behavior
 
-- **Never** run `npm publish` / `publish:packages` — human’s only step (OTP).
-- **Do** version bump, CHANGELOG, `build:release`, `install:smoke`, commit, push, tag `vX.Y.Z`, `gh release create` after npm shows the version.
+- **Never** `npm login` or OTP for a normal release — Actions publishes via OIDC. Local `publish:packages` is a manual fallback only.
+- **Do** `release:prepare`, `release:finish` (tag push), then watch `release.yml` and check `npm view agent-dealer@X.Y.Z version`.
+- **Do not** run `gh release create` — the workflow creates the GitHub Release after npm shows the version.
 - **Do not** `npm publish` from monorepo root (`EPRIVATE`).
 - **Do not** empty-publish or leave Ship commits without tags/GitHub Releases.
 - **Never** wipe `~/.agent-dealer-dev/dealer.db` as release prep.

@@ -43,6 +43,9 @@ delete stagedPkg.dependencies["@agent-dealer/shared"];
 delete stagedPkg.dependencies["@agent-dealer/server"];
 delete stagedPkg.private;
 delete stagedPkg.devDependencies;
+// Provenance requires the canonical repo URL (NOT-644); pin it explicitly so the
+// staged manifest never inherits a drifted or directory-scoped repository field.
+stagedPkg.repository = { type: "git", url: "git+https://github.com/not-so-fat/agent-dealer.git" };
 stagedPkg.files = ["dist", "templates", "bundle"];
 stagedPkg.scripts = { ...stagedPkg.scripts, postinstall: "node ./dist/postinstall.js" };
 

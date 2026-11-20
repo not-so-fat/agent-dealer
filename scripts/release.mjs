@@ -7,8 +7,10 @@
  *   node scripts/release.mjs finish
  *
  * `prepare` bumps every manifest + internal pin + lockfile, stubs the CHANGELOG from git log,
- * runs build:release + install:smoke and opens the release PR. `finish` waits for CI, squash-merges,
- * tags and creates the GitHub release. npm publish stays with the human (npm run publish:packages).
+ * runs build:release + install:smoke and opens the release PR. `finish` waits for CI, squash-merges
+ * and pushes the tag; .github/workflows/release.yml then publishes to npm (trusted
+ * publishing, no token) and creates the GitHub Release. Local `publish:packages`
+ * stays as a documented manual fallback only.
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -160,11 +162,11 @@ function finish() {
   run("git", ["checkout", "-q", "main"]);
   run("git", ["pull", "-q", "origin", "main"]);
   if (readJson("package.json").version !== version) die(`main is not at ${version} after merge`);
-  const notes = changelogSection(version) ?? die(`no CHANGELOG section for ${version}`);
+  if (!changelogSection(version)) die(`no CHANGELOG section for ${version}`);
   run("git", ["tag", `v${version}`]);
   run("git", ["push", "-q", "origin", `v${version}`]);
-  run("gh", ["release", "create", `v${version}`, "--title", `v${version}`, "--notes", notes]);
-  console.log(`[release] v${version} released. Publish (human): npm run publish:packages -- --otp=CODE`);
+  console.log(`[release] tag v${version} pushed. GitHub Actions (release.yml) now publishes agent-dealer@${version} to npm and creates the GitHub Release.`);
+  console.log(`[release] Watch it: gh run list --workflow release.yml --limit 1 && npm view agent-dealer@${version} version`);
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
