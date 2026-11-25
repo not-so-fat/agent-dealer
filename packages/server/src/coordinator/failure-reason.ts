@@ -256,6 +256,8 @@ function fallbackReasonForKind(outcome: DeveloperOutcome | ReviewerOutcome): str
       return "muse_cron_used: the Muse session called a cron_* tool, which Muse cannot disable.";
     case "adapter_failure":
       return "Git/GitHub verification failed.";
+    case "checks_unreadable":
+      return "PR checks cannot be read with the current GitHub token."
     case "deck_failure":
       return "Agent Deck preflight failed.";
     case "deck_unavailable":
@@ -318,6 +320,7 @@ export function outcomeShouldRecordError(outcome: DeveloperOutcome | ReviewerOut
     outcome.kind === "no_pr" ||
     outcome.kind === "checks_failed" ||
     outcome.kind === "adapter_failure" ||
+    outcome.kind === "checks_unreadable" ||
     outcome.kind === "deck_failure" ||
     outcome.kind === "unpushed_commit" ||
     outcome.kind === "worktree_conflict" ||
