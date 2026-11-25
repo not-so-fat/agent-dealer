@@ -4,6 +4,14 @@ Releases ship as **git tags** (`vX.Y.Z`) and **`npm install -g agent-dealer`** /
 
 ## Unreleased
 
+## 1.4.6 — 2026-11-25
+
+Derive the CI gate from Actions runs and commit statuses when check-run reads are denied (NOT-670)
+
+### Changes
+
+- NOT-670: read PR checks from Actions runs and commit statuses when a fine-grained token cannot read check runs (#258)
+
 ## 1.4.5 — 2026-11-20
 
 Restore the simultaneous-run limit control, report host sandbox start failures as host problems, and publish from GitHub Actions
