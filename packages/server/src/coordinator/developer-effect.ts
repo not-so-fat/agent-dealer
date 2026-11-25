@@ -68,6 +68,7 @@ import {
 import { baseRefCandidates, inspectBranchProgress } from "./branch-progress.js";
 import { prepareWorkerDeckConnection, releaseWorkerDeckConnection, verifyWorkerDeckConnection, type DeckToolCaller } from "../adapters/agent-deck-bind.js";
 import {
+  ChecksUnreadableError,
   realGithubAdapter,
   pollPrChecksDetailed,
   type GithubAdapter,
@@ -1066,6 +1067,12 @@ async function runPublishOnlyHandoff(
       prUrl: prView.url,
     };
   } catch (err) {
+    // NOT-670: unreadable checks (token lacks Checks read and the fallback is
+    // denied too) is a permission problem, not infra — escalate once without
+    // spending an attempt instead of entering the adapter_failure retry loop.
+    if (err instanceof ChecksUnreadableError) {
+      return { kind: "checks_unreadable", reason: err.message };
+    }
     return {
       kind: "adapter_failure",
       reason: String(err),
@@ -2364,6 +2371,10 @@ export async function runDeveloperEffect(
       const reason = `Developer session could not start: ${message.slice(0, 300)}`;
       console.error("[coordinator] developer session could not start", { issueId: issue.id, sessionId, round, err });
       return { kind: "session_failed", reason };
+    }
+    // NOT-670: same permission short-circuit as the publish-only path above.
+    if (err instanceof ChecksUnreadableError) {
+      return { kind: "checks_unreadable", reason: err.message };
     }
     return { kind: "adapter_failure", reason: String(err) };
   } finally {

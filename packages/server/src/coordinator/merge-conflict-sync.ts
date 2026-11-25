@@ -92,6 +92,7 @@ import {
   worktreesRootForResolution,
 } from "../adapters/managed-repo.js";
 import {
+  ChecksUnreadableError,
   pollPrChecks,
   realGithubAdapter,
   type GithubAdapter,
@@ -1000,6 +1001,9 @@ export async function runMergeConflictSync(opts: {
     });
   } catch (err) {
     await cleanupSyncCheckout(repoPath, syncPath);
+    // NOT-670: surface the missing-permission message as-is so the operator
+    // sees what to grant, not a generic poll error.
+    if (err instanceof ChecksUnreadableError) return failed(err.message);
     const detail = err instanceof Error ? err.message : String(err);
     return failed(`checks poll errored: ${detail}`);
   }

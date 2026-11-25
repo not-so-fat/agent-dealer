@@ -104,6 +104,11 @@ export type DeveloperOutcome =
    * agent to redo committed work is the expensive mistake, and a failed push does not undo
    * the commits that made the branch publishable in the first place. */
   | { kind: "adapter_failure"; reason: string; publishable?: { branch: string } }
+  /** NOT-670: the token cannot read check runs and the Actions/commit-statuses
+   * fallback is denied too — a permission problem no retry can fix. Routes
+   * straight to one human policy_escalation with the missing-permission
+   * message; never spends an infra attempt. */
+  | { kind: "checks_unreadable"; reason: string }
   /** Agent Deck config, connection, bound-deck, or required-playbook preflight failed. */
   | { kind: "deck_failure"; reason: string }
   /** NOT-136: Agent Deck was unreachable at preflight — nothing spawned, nothing attempted.
@@ -342,6 +347,11 @@ export function routeDeveloperOutcome(outcome: DeveloperOutcome, limits: RouteLi
         ? { next: "retry_developer", reason }
         : { next: "human_action", actionType: "policy_escalation", reason: `${reason} (infra-attempt limit reached).` };
     }
+    case "checks_unreadable":
+      // NOT-670: a missing GitHub permission — retrying the developer (or the
+      // poll) cannot grant it, so escalate once with the exact message: no
+      // infra attempt spent, no retry, no limit-reached suffix.
+      return { next: "human_action", actionType: "policy_escalation", reason: outcome.reason };
     case "no_pr":
     case "deck_failure": {
       // Unified infra-failure policy: the session/environment failed to produce a

@@ -71,6 +71,61 @@ export interface RawCheck {
 export type ChecksSnapshot = "success" | "failure" | "pending" | "none";
 
 /**
+ * NOT-670: fine-grained PATs have no "Checks" permission, so check-run data on
+ * private repos is unreadable — the rollup read fails with "Resource not
+ * accessible by personal access token" (or "by integration" for app tokens /
+ * HTTP 403 on the REST check-runs endpoint). That denial is a *permission*
+ * error, distinct from transient `gh` failures (network, 5xx): the former
+ * triggers the Actions-runs + commit-statuses fallback below, the latter keeps
+ * today's throw-and-retry behavior.
+ */
+export type ChecksReadSource = "checks" | "actions" | "statuses";
+
+/** A `gh` checks read denied for permissions — never a transient failure. */
+export class ChecksPermissionError extends Error {
+  readonly source: ChecksReadSource;
+  constructor(source: ChecksReadSource, detail: string) {
+    super(detail);
+    this.name = "ChecksPermissionError";
+    this.source = source;
+  }
+}
+
+/**
+ * Neither the check rollup nor the fallback sources could be read — the token
+ * lacks Checks read and at least one of actions:read / commit statuses:read.
+ * Callers route this straight to a human with the message; no retry can help.
+ */
+export class ChecksUnreadableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChecksUnreadableError";
+  }
+}
+
+/** GitHub's permission-denial wording across GraphQL (`gh pr view`) and REST (`gh api`) reads. */
+export function isChecksPermissionMessage(text: string): boolean {
+  return /resource not accessible by/i.test(text) || /http 403\b/i.test(text);
+}
+
+function ghErrorText(err: unknown): string {
+  const holder = err as { stderr?: unknown; message?: unknown };
+  if (typeof holder?.stderr === "string" && holder.stderr) return holder.stderr;
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Re-raises a `gh` throw as `ChecksPermissionError` when it is a permission
+ * denial; anything else (network, 5xx, malformed output) is rethrown as-is so
+ * callers keep today's infra-retry path for it.
+ */
+function throwAsChecksPermissionError(err: unknown, source: ChecksReadSource): never {
+  const text = ghErrorText(err);
+  if (isChecksPermissionMessage(text)) throw new ChecksPermissionError(source, text);
+  throw err;
+}
+
+/**
  * NOT-354: GitHub's `mergeable` for a PR. `UNKNOWN` means GitHub has not computed it
  * yet (or the read failed) — callers retry, never read it as a conflict.
  */
@@ -656,6 +711,218 @@ async function ghPrView(exec: GhExec, cwd: string, fields: string, selector?: st
   }
 }
 
+/**
+ * NOT-670: one workflow run as `gh api repos/{owner}/{repo}/actions/runs`
+ * reports it. `conclusion` is null until the run completes.
+ */
+interface ActionsWorkflowRun {
+  id?: unknown;
+  name?: unknown;
+  workflow_id?: unknown;
+  status?: unknown;
+  conclusion?: unknown;
+  created_at?: unknown;
+  run_started_at?: unknown;
+  updated_at?: unknown;
+  html_url?: unknown;
+}
+
+/** One entry of `gh api repos/{owner}/{repo}/commits/<sha>/status`'s `statuses`. */
+interface CommitStatusEntry {
+  context?: unknown;
+  state?: unknown;
+  target_url?: unknown;
+  created_at?: unknown;
+  updated_at?: unknown;
+}
+
+function actionsRunTime(run: ActionsWorkflowRun): number | null {
+  for (const candidate of [run.run_started_at, run.created_at]) {
+    if (typeof candidate !== "string" || !candidate) continue;
+    const time = Date.parse(candidate);
+    if (Number.isFinite(time)) return time;
+  }
+  return null;
+}
+
+/**
+ * NOT-670, consistent with NOT-629's newest-run-wins rule: re-runs share the
+ * commit SHA, so keep only the newest run per workflow (`workflow_id`, by
+ * `run_started_at`/`created_at`) — an older failure must not shadow a newer
+ * success. Runs whose age cannot be established are kept, like `newestChecks`'
+ * untimed entries.
+ */
+function newestRunsPerWorkflow(runs: ActionsWorkflowRun[]): ActionsWorkflowRun[] {
+  const bestByWorkflow = new Map<number, { run: ActionsWorkflowRun; time: number }>();
+  const unkeyed: ActionsWorkflowRun[] = [];
+  for (const run of runs) {
+    const workflowId = run.workflow_id;
+    const time = actionsRunTime(run);
+    if (typeof workflowId !== "number" || time == null) {
+      unkeyed.push(run);
+      continue;
+    }
+    const current = bestByWorkflow.get(workflowId);
+    if (current == null || time >= current.time) bestByWorkflow.set(workflowId, { run, time });
+  }
+  return [...bestByWorkflow.values()].map((v) => v.run).concat(unkeyed);
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+/**
+ * An Actions run as a `RawCheck` for the shared `summarizeChecks` verdict:
+ * scheduling/running `status` reads pending, completed runs are judged by
+ * `conclusion`. `workflowName` carries the workflow id (not the display name)
+ * so two workflows that share a display name can never merge in `newestChecks`.
+ */
+function actionsRunToRawCheck(run: ActionsWorkflowRun): RawCheck {
+  const name = asNonEmptyString(run.name)?.trim().slice(0, 200) ?? `actions run ${typeof run.id === "number" ? run.id : "unknown"}`;
+  return {
+    name,
+    workflowName: typeof run.workflow_id === "number" ? `actions-workflow-${run.workflow_id}` : name,
+    status: asNonEmptyString(run.status),
+    conclusion: asNonEmptyString(run.conclusion),
+    detailsUrl: asNonEmptyString(run.html_url),
+    startedAt: asNonEmptyString(run.run_started_at) ?? asNonEmptyString(run.created_at),
+    completedAt: asNonEmptyString(run.updated_at),
+  };
+}
+
+/** A commit status as a `RawCheck` — judged by its `state` under its `context`. */
+function commitStatusToRawCheck(status: CommitStatusEntry): RawCheck {
+  return {
+    context: asNonEmptyString(status.context),
+    state: asNonEmptyString(status.state),
+    targetUrl: asNonEmptyString(status.target_url),
+    startedAt: asNonEmptyString(status.updated_at),
+    createdAt: asNonEmptyString(status.created_at),
+  };
+}
+
+/** `owner`/`repo` from a PR URL (`https://<host>/<owner>/<repo>/pull/<n>`). */
+function parseRepoSlugFromPrUrl(url: unknown): { owner: string; repo: string } | null {
+  if (typeof url !== "string") return null;
+  const match = url.match(/^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/\d+/i);
+  if (!match) return null;
+  return { owner: match[1], repo: match[2].replace(/\.git$/, "") };
+}
+
+function formatChecksUnreadableMessage(
+  slug: { owner: string; repo: string } | null,
+  denied: Array<"actions" | "statuses">
+): string {
+  const where = slug ? `${slug.owner}/${slug.repo}` : "this repository";
+  const names = denied.map((d) => (d === "actions" ? "Actions: read" : "Commit statuses: read")).join(" / ");
+  const grants = denied.map((d) => (d === "actions" ? "actions:read" : "commit statuses:read")).join(" and ");
+  return (
+    `Cannot read PR checks for ${where}: the GitHub token lacks Checks read, ` +
+    `and the fallback also failed (${names}). ` +
+    `Grant ${grants} to the fine-grained token, or use a token with Checks access.`
+  );
+}
+
+async function readStatusCheckRollup(
+  exec: GhExec,
+  cwd: string,
+  selector?: string
+): Promise<Record<string, unknown> | null> {
+  try {
+    return await ghPrView(exec, cwd, "statusCheckRollup", selector);
+  } catch (err) {
+    throwAsChecksPermissionError(err, "checks");
+  }
+}
+
+async function readActionsRunsForHead(exec: GhExec, cwd: string, path: string): Promise<ActionsWorkflowRun[]> {
+  let stdout: string;
+  try {
+    ({ stdout } = await exec(["api", path], { cwd }));
+  } catch (err) {
+    throwAsChecksPermissionError(err, "actions");
+  }
+  const parsed = JSON.parse(stdout) as { workflow_runs?: unknown };
+  const runs = Array.isArray(parsed?.workflow_runs) ? (parsed.workflow_runs as ActionsWorkflowRun[]) : [];
+  return newestRunsPerWorkflow(runs);
+}
+
+async function readCommitStatuses(exec: GhExec, cwd: string, path: string): Promise<CommitStatusEntry[]> {
+  let stdout: string;
+  try {
+    ({ stdout } = await exec(["api", path], { cwd }));
+  } catch (err) {
+    throwAsChecksPermissionError(err, "statuses");
+  }
+  const parsed = JSON.parse(stdout) as { statuses?: unknown };
+  // Only the individual entries are judged — GitHub reports combined `pending`
+  // when NO statuses exist, so an empty array contributes nothing.
+  return Array.isArray(parsed?.statuses) ? (parsed.statuses as CommitStatusEntry[]) : [];
+}
+
+/**
+ * NOT-670 fallback when the check rollup is denied for permissions: read the PR
+ * head SHA (readable without Checks), then judge the same verdict from the
+ * Actions runs plus commit statuses on that SHA through the shared
+ * `summarizeChecks`. No runs and no statuses is `none`, so the NOT-311 none
+ * streak and `hasPullRequestWorkflow` wait logic still applies.
+ *
+ * A permission denial on either fallback source raises `ChecksUnreadableError`
+ * naming the missing permission(s) — judging on a partial read could wave a
+ * handoff through past an invisible failure. Non-permission errors propagate
+ * exactly as the rollup read's would.
+ */
+async function checksSnapshotFallback(exec: GhExec, opts: { cwd: string; selector?: string }): Promise<ChecksSnapshot> {
+  let head: Record<string, unknown> | null;
+  try {
+    head = await ghPrView(exec, opts.cwd, "headRefOid,url", opts.selector);
+  } catch (err) {
+    // The head SHA bootstraps the fallback, so its denial cannot fall through
+    // to another source — it is already the end of the road.
+    if (isChecksPermissionMessage(ghErrorText(err))) {
+      throw new ChecksUnreadableError(
+        "Cannot read PR checks: the GitHub token lacks Checks read, and the PR head SHA " +
+          "needed for the Actions/commit-statuses fallback is also unreadable. Grant the " +
+          "fine-grained token PR read plus actions:read and commit statuses:read, or use a token with Checks access."
+      );
+    }
+    throw err;
+  }
+  // The PR vanished between the rollup read and this read — no PR, no checks,
+  // exactly like the rollup path's null read.
+  if (!head) return "none";
+  const headSha = typeof head.headRefOid === "string" && head.headRefOid ? head.headRefOid : "";
+  if (!headSha) throw new Error("gh pr view returned no headRefOid for the checks fallback");
+  const slug = parseRepoSlugFromPrUrl(head.url);
+  const runsPath = slug
+    ? `repos/${slug.owner}/${slug.repo}/actions/runs?head_sha=${headSha}&per_page=100`
+    : `repos/{owner}/{repo}/actions/runs?head_sha=${headSha}&per_page=100`;
+  const statusPath = slug
+    ? `repos/${slug.owner}/${slug.repo}/commits/${headSha}/status`
+    : `repos/{owner}/{repo}/commits/${headSha}/status`;
+
+  // Both sources are always attempted so the unreadable error names every
+  // missing permission, not just the first denial.
+  const denied: Array<"actions" | "statuses"> = [];
+  let runs: ActionsWorkflowRun[] = [];
+  let statuses: CommitStatusEntry[] = [];
+  try {
+    runs = await readActionsRunsForHead(exec, opts.cwd, runsPath);
+  } catch (err) {
+    if (!(err instanceof ChecksPermissionError)) throw err;
+    denied.push("actions");
+  }
+  try {
+    statuses = await readCommitStatuses(exec, opts.cwd, statusPath);
+  } catch (err) {
+    if (!(err instanceof ChecksPermissionError)) throw err;
+    denied.push("statuses");
+  }
+  if (denied.length > 0) throw new ChecksUnreadableError(formatChecksUnreadableMessage(slug, denied));
+  return summarizeChecks([...runs.map(actionsRunToRawCheck), ...statuses.map(commitStatusToRawCheck)]);
+}
+
 /** Real `gh` adapter, parameterized over the shell-out so tests can assert exact CLI args without a real `gh`. */
 export function createGithubAdapter(exec: GhExec = defaultExec): GithubAdapter {
   return {
@@ -691,9 +958,16 @@ export function createGithubAdapter(exec: GhExec = defaultExec): GithubAdapter {
 
     async checksSnapshot({ cwd, number, branch }) {
       const selector = number != null ? String(number) : branch;
-      const raw = await ghPrView(exec, cwd, "statusCheckRollup", selector);
-      const rollup = (raw?.statusCheckRollup as RawCheck[] | undefined) ?? [];
-      return summarizeChecks(rollup);
+      try {
+        const raw = await readStatusCheckRollup(exec, cwd, selector);
+        const rollup = (raw?.statusCheckRollup as RawCheck[] | undefined) ?? [];
+        return summarizeChecks(rollup);
+      } catch (err) {
+        // NOT-670: only a permission denial takes the Actions/statuses fallback —
+        // every other `gh` failure (network, 5xx) throws exactly as before.
+        if (!(err instanceof ChecksPermissionError)) throw err;
+        return checksSnapshotFallback(exec, { cwd, selector });
+      }
     },
 
     async fetchChecksFailureEvidence({ cwd, number, branch, expectedHeadSha, prNumber }) {

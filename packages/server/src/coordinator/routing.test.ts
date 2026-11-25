@@ -310,6 +310,41 @@ test("adapter failure escalates once the infra-attempt limit is reached", () => 
   assert.equal((result as { actionType: string }).actionType, "policy_escalation");
 });
 
+test("NOT-670: unreadable checks escalate once with the missing-permission message, spending no infra attempt", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "checks_unreadable",
+    reason:
+      "Cannot read PR checks for not-so-fat/agent-box: the GitHub token lacks Checks read, " +
+      "and the fallback also failed (Actions: read / Commit statuses: read). Grant actions:read " +
+      "and commit statuses:read to the fine-grained token, or use a token with Checks access.",
+  };
+  // Fresh budget and exhausted budget route identically — a permission problem is
+  // never retried, so the infra-attempt count is untouched either way.
+  for (const limits of [INFRA_ATTEMPTS_LEFT, INFRA_AT_LIMIT]) {
+    assert.deepStrictEqual(routeDeveloperOutcome(outcome, limits), {
+      next: "human_action",
+      actionType: "policy_escalation",
+      reason: outcome.reason,
+    });
+  }
+  const result = routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT) as { reason: string };
+  assert.match(result.reason, /Actions: read/);
+  assert.match(result.reason, /Commit statuses: read/);
+  assert.match(result.reason, /Checks/);
+  assert.doesNotMatch(result.reason, /infra-attempt limit reached/);
+});
+
+test("NOT-670: a non-permission gh failure keeps the adapter_failure infra-retry path", () => {
+  const outcome: DeveloperOutcome = {
+    kind: "adapter_failure",
+    reason: "Error: gh pr view failed: failed to connect: dial tcp: lookup api.github.com: no such host",
+  };
+  assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {
+    next: "retry_developer",
+    reason: `Git/GitHub verification failed: ${outcome.reason}`,
+  });
+});
+
 test("timed_out with infra attempts remaining retries (same bucket as session_failed/no_pr)", () => {
   const outcome: DeveloperOutcome = { kind: "timed_out" };
   assert.deepStrictEqual(routeDeveloperOutcome(outcome, INFRA_ATTEMPTS_LEFT), {

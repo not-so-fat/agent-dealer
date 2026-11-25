@@ -39,7 +39,7 @@ const { registerEffectHandler, resetEffectHandlers } = await import("./effect-re
 const { runCoordinatorTick, drainCoordinator } = await import("./worker-loop.js");
 const { runDeveloperEffect, extractPrDescription } = await import("./developer-effect.js");
 const { realDeveloperSpawn } = await import("./spawn.js");
-const { realGithubAdapter } = await import("../adapters/github.js");
+const { realGithubAdapter, ChecksUnreadableError } = await import("../adapters/github.js");
 const { branchExists, roleWorktreePath, withRepoLock, observeGitCommands } = await import("../adapters/git-worktree.js");
 type SpawnFn = typeof realDeveloperSpawn;
 type GithubFn = typeof realGithubAdapter;
@@ -283,6 +283,39 @@ test("clean handoff: real worktree, real push, fake GitHub — issue moves to re
   const finished = events.find((e) => e.type === "worker.completed");
   assert.ok(finished);
   assert.equal(finished!.actorType, "developer");
+});
+
+test("NOT-670: unreadable checks land in needs_human once with the permission message and no infra attempt spent", async () => {
+  const issueId = await makeIssue();
+  const github = fakeGithub();
+  github.checksSnapshot = async () => {
+    throw new ChecksUnreadableError(
+      "Cannot read PR checks for not-so-fat/agent-box: the GitHub token lacks Checks read, " +
+        "and the fallback also failed (Actions: read / Commit statuses: read). Grant actions:read " +
+        "and commit statuses:read to the fine-grained token, or use a token with Checks access."
+    );
+  };
+  registerEffectHandler("developer", (ctx) => runDeveloperEffect(ctx, { deckCallTool: okDeckCallTool, spawn: commitingSpawn, github }));
+  startWorkflow(issueId);
+  await pump(1);
+
+  const issue = getIssue(issueId)!;
+  assert.equal(issue.status, "needs_human");
+  assert.equal(issue.infraAttempts, 0, "a permission problem never spends an infra attempt");
+  assert.equal(issue.currentRound, 1);
+  assert.equal(listWorkItemsForIssue(issueId).filter((i) => i.kind === "reviewer").length, 0);
+  assert.equal(
+    listWorkItemsForIssue(issueId).filter((i) => i.kind === "developer" && i.status === "pending").length,
+    0,
+    "no developer retry is queued"
+  );
+  const action = listHumanActionsForIssue(issueId).find((a) => a.actionType === "policy_escalation");
+  assert.ok(action, "expected a single policy_escalation human action");
+  assert.match(action!.reason, /Cannot read PR checks for not-so-fat\/agent-box/);
+  assert.match(action!.reason, /Actions: read/);
+  assert.match(action!.reason, /Commit statuses: read/);
+  assert.match(action!.reason, /Checks/);
+  assert.doesNotMatch(action!.reason, /infra-attempt limit reached/);
 });
 
 test("no_pr: the agent makes no commits — retried, no reviewer work item", async () => {

@@ -2,6 +2,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  ChecksPermissionError,
+  ChecksUnreadableError,
+  isChecksPermissionMessage,
   parsePrView,
   summarizeChecks,
   pollPrChecks,
@@ -1200,4 +1203,210 @@ test("AGENT_DEALER_REVIEWER_GH_TOKEN: non-review gh calls never receive the revi
   await withReviewerToken("tok-123", () => createGithubAdapter(exec).viewPr({ cwd: "/repo", branch: "issue-x" }));
   assert.equal(execOpts.length, 1);
   assert.equal(execOpts[0]!.env, undefined);
+});
+
+// --- NOT-670: Actions-runs + commit-statuses fallback for fine-grained PATs ---
+
+const NOT670_SHA = "29ddecffa76869075eb0dbd03779f422ec5cac69";
+const NOT670_PR_URL = "https://github.com/not-so-fat/agent-box/pull/4";
+/** The exact denial the box token hits on private repos (agent-box PR #4). */
+const NOT670_ROLLUP_DENIAL =
+  "GraphQL: Resource not accessible by personal access token (repository.pullRequest.statusCheckRollup.nodes.0.commit.statusCheckRollup.contexts.nodes.0)";
+
+function not670ActionsRuns(runs: unknown[]): string {
+  return JSON.stringify({ total_count: runs.length, workflow_runs: runs });
+}
+
+function not670Run(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 45683890522,
+    name: "ci",
+    workflow_id: 11,
+    head_sha: NOT670_SHA,
+    status: "completed",
+    conclusion: "success",
+    created_at: "2026-11-25T10:00:00Z",
+    run_started_at: "2026-11-25T10:00:05Z",
+    updated_at: "2026-11-25T10:05:00Z",
+    html_url: "https://github.com/not-so-fat/agent-box/actions/runs/45683890522",
+    ...overrides,
+  };
+}
+
+/** Rollup denial, then the readable head SHA + PR URL that bootstraps the fallback. */
+function not670DeniedRollup(): Array<{ stdout?: string; error?: string }> {
+  return [
+    { error: NOT670_ROLLUP_DENIAL },
+    { stdout: JSON.stringify({ headRefOid: NOT670_SHA, url: NOT670_PR_URL }) },
+  ];
+}
+
+test("NOT-670: readable checks take the unchanged path — no actions/runs or status call", async () => {
+  const { exec, calls } = queuedExec([
+    { stdout: JSON.stringify({ statusCheckRollup: [{ conclusion: "success" }] }) },
+  ]);
+  const snapshot = await createGithubAdapter(exec).checksSnapshot({ cwd: "/repo", number: 42 });
+  assert.equal(snapshot, "success");
+  assert.deepEqual(calls, [["pr", "view", "42", "--json", "statusCheckRollup"]]);
+  assert.ok(
+    calls.every((args) => !args.some((a) => a.includes("actions/runs") || a.includes("/status"))),
+    "no fallback call on the readable path"
+  );
+});
+
+test("NOT-670: rollup permission error with Actions completed/success (statuses empty, combined pending) returns success", async () => {
+  const { exec, calls } = queuedExec([
+    ...not670DeniedRollup(),
+    { stdout: not670ActionsRuns([not670Run({ conclusion: "success" })]) },
+    { stdout: JSON.stringify({ state: "pending", statuses: [] }) },
+  ]);
+  const snapshot = await createGithubAdapter(exec).checksSnapshot({ cwd: "/repo", number: 4 });
+  assert.equal(snapshot, "success");
+  assert.deepEqual(calls[0], ["pr", "view", "4", "--json", "statusCheckRollup"]);
+  assert.deepEqual(calls[1], ["pr", "view", "4", "--json", "headRefOid,url"]);
+  assert.deepEqual(calls[2], ["api", `repos/not-so-fat/agent-box/actions/runs?head_sha=${NOT670_SHA}&per_page=100`]);
+  assert.deepEqual(calls[3], ["api", `repos/not-so-fat/agent-box/commits/${NOT670_SHA}/status`]);
+});
+
+test("NOT-670: fallback pending — an in_progress Actions run returns pending", async () => {
+  const { exec } = queuedExec([
+    ...not670DeniedRollup(),
+    { stdout: not670ActionsRuns([not670Run({ status: "in_progress", conclusion: null })]) },
+    { stdout: JSON.stringify({ state: "pending", statuses: [] }) },
+  ]);
+  assert.equal(await createGithubAdapter(exec).checksSnapshot({ cwd: "/repo", number: 4 }), "pending");
+});
+
+test("NOT-670: fallback pending — a queued run and a pending commit status return pending", async () => {
+  const queued = queuedExec([
+    ...not670DeniedRollup(),
+    { stdout: not670ActionsRuns([not670Run({ status: "queued", conclusion: null })]) },
+    { stdout: JSON.stringify({ state: "pending", statuses: [] }) },
+  ]);
+  assert.equal(await createGithubAdapter(queued.exec).checksSnapshot({ cwd: "/repo", number: 4 }), "pending");
+
+  const statusPending = queuedExec([
+    ...not670DeniedRollup(),
+    { stdout: not670ActionsRuns([]) },
+    {
+      stdout: JSON.stringify({
+        state: "pending",
+        statuses: [{ context: "ci/external", state: "pending", target_url: "https://ci.example/r/1" }],
+      }),
+    },
+  ]);
+  assert.equal(await createGithubAdapter(statusPending.exec).checksSnapshot({ cwd: "/repo", number: 4 }), "pending");
+});
+
+test("NOT-670: fallback failure — a completed run with conclusion failure returns failure", async () => {
+  const { exec } = queuedExec([
+    ...not670DeniedRollup(),
+    { stdout: not670ActionsRuns([not670Run({ conclusion: "failure" })]) },
+    { stdout: JSON.stringify({ state: "pending", statuses: [] }) },
+  ]);
+  assert.equal(await createGithubAdapter(exec).checksSnapshot({ cwd: "/repo", number: 4 }), "failure");
+});
+
+test("NOT-670: a newer successful re-run of the same workflow_id supersedes an older failure", async () => {
+  const { exec } = queuedExec([
+    ...not670DeniedRollup(),
+    {
+      stdout: not670ActionsRuns([
+        not670Run({ id: 1, conclusion: "failure", run_started_at: "2026-11-25T10:00:05Z", created_at: "2026-11-25T10:00:00Z" }),
+        not670Run({ id: 2, conclusion: "success", run_started_at: "2026-11-25T11:00:05Z", created_at: "2026-11-25T11:00:00Z" }),
+      ]),
+    },
+    { stdout: JSON.stringify({ state: "pending", statuses: [] }) },
+  ]);
+  assert.equal(await createGithubAdapter(exec).checksSnapshot({ cwd: "/repo", number: 4 }), "success");
+});
+
+test("NOT-670: no runs and no statuses gives none, so the NOT-311 wait logic still applies", async () => {
+  const { exec } = queuedExec([
+    ...not670DeniedRollup(),
+    { stdout: not670ActionsRuns([]) },
+    { stdout: JSON.stringify({ state: "pending", statuses: [] }) },
+  ]);
+  assert.equal(await createGithubAdapter(exec).checksSnapshot({ cwd: "/repo", number: 4 }), "none");
+});
+
+test("NOT-670: both unreadable raises the typed checks-unreadable error naming the missing permissions", async () => {
+  const { exec } = queuedExec([
+    ...not670DeniedRollup(),
+    { error: "HTTP 403: Resource not accessible by integration" },
+    { error: "HTTP 403: Resource not accessible by integration" },
+  ]);
+  await assert.rejects(createGithubAdapter(exec).checksSnapshot({ cwd: "/repo", number: 4 }), (err: unknown) => {
+    assert.ok(err instanceof ChecksUnreadableError);
+    assert.match(err.message, /Cannot read PR checks for not-so-fat\/agent-box/);
+    assert.match(err.message, /lacks Checks read/);
+    assert.match(err.message, /Actions: read/);
+    assert.match(err.message, /Commit statuses: read/);
+    assert.match(err.message, /actions:read and commit statuses:read/);
+    return true;
+  });
+});
+
+test("NOT-670: a denial on either fallback source alone also raises checks-unreadable (no partial verdicts)", async () => {
+  const actionsDenied = queuedExec([
+    ...not670DeniedRollup(),
+    { error: "HTTP 403: Resource not accessible by integration" },
+    { stdout: JSON.stringify({ state: "success", statuses: [{ context: "ci/external", state: "success" }] }) },
+  ]);
+  await assert.rejects(createGithubAdapter(actionsDenied.exec).checksSnapshot({ cwd: "/repo", number: 4 }), (err: unknown) => {
+    assert.ok(err instanceof ChecksUnreadableError);
+    assert.match(err.message, /Actions: read/);
+    assert.doesNotMatch(err.message, /Commit statuses: read/);
+    return true;
+  });
+
+  const statusesDenied = queuedExec([
+    ...not670DeniedRollup(),
+    { stdout: not670ActionsRuns([not670Run({ conclusion: "success" })]) },
+    { error: "HTTP 403: Resource not accessible by integration" },
+  ]);
+  await assert.rejects(
+    createGithubAdapter(statusesDenied.exec).checksSnapshot({ cwd: "/repo", number: 4 }),
+    (err: unknown) => {
+      assert.ok(err instanceof ChecksUnreadableError);
+      assert.match(err.message, /Commit statuses: read/);
+      assert.doesNotMatch(err.message, /Actions: read/);
+      return true;
+    }
+  );
+});
+
+test("NOT-670: permission detection recognizes PAT/integration denials and HTTP 403, not transient failures", () => {
+  assert.equal(isChecksPermissionMessage(NOT670_ROLLUP_DENIAL), true);
+  assert.equal(isChecksPermissionMessage("HTTP 403: Resource not accessible by integration (https://api.github.com/...)"), true);
+  assert.equal(isChecksPermissionMessage("gh pr view failed: GraphQL: Resource not accessible by personal access token (x)"), true);
+  assert.equal(isChecksPermissionMessage("failed to connect: dial tcp: lookup api.github.com: no such host"), false);
+  assert.equal(isChecksPermissionMessage("HTTP 502 Bad Gateway"), false);
+  assert.ok(new ChecksPermissionError("checks", "denied") instanceof Error);
+});
+
+test("NOT-670: a non-permission gh failure still throws without touching the fallback", async () => {
+  const { exec, calls } = queuedExec([{ error: "failed to connect: dial tcp: lookup api.github.com: no such host" }]);
+  await assert.rejects(createGithubAdapter(exec).checksSnapshot({ cwd: "/repo", number: 4 }), /gh pr view failed/);
+  assert.equal(calls.length, 1, "no fallback call after a transient rollup failure");
+});
+
+test("NOT-670: a non-permission fallback failure propagates as-is instead of checks-unreadable", async () => {
+  const { exec } = queuedExec([
+    ...not670DeniedRollup(),
+    { error: "HTTP 502 Bad Gateway" },
+  ]);
+  await assert.rejects(createGithubAdapter(exec).checksSnapshot({ cwd: "/repo", number: 4 }), (err: unknown) => {
+    assert.ok(!(err instanceof ChecksUnreadableError));
+    assert.match(String(err), /502/);
+    return true;
+  });
+});
+
+test("NOT-670: fetchChecksFailureEvidence still degrades to null when the rollup is unreadable", async () => {
+  const { exec } = queuedExec([{ error: NOT670_ROLLUP_DENIAL }]);
+  assert.equal(
+    await fetchChecksFailureEvidence(exec, { cwd: "/repo", number: 4, expectedHeadSha: NOT670_SHA, prNumber: 4 }),
+    null
+  );
 });
